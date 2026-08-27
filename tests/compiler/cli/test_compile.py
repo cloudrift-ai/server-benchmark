@@ -5,7 +5,7 @@ def test_compile_code_torch_ir(run_cli):
     rc, stdout, stderr = run_cli("compile", "--code", "torch.nn.RMSNorm(2048)(torch.randn(1,32,2048))", "--ir", "torch")
     assert rc == 0, f"stderr: {stderr}"
     assert "rms_norm" in stdout
-    assert "(1, 32, 2048)" in stdout
+    assert "f32[1,32,2048]" in stdout
 
 
 def test_compile_code_tensor_ir(run_cli):
@@ -60,7 +60,7 @@ def test_compile_code_functional_softmax_bakes_kwargs(run_cli):
     rc, stdout, stderr = run_cli("compile", "--code", "F.softmax(torch.randn(1,32,128), dim=-1)", "--ir", "tensor")
     assert rc == 0, f"stderr: {stderr}"
     assert "1 inputs" in stdout
-    assert "maximum(" in stdout and "sum(" in stdout
+    assert "amax(" in stdout and "sum(" in stdout
 
 
 def test_compile_passes_shorthand(run_cli, tmp_path):
@@ -98,8 +98,11 @@ def test_compile_dump_dir_writes_rule_application_files(run_cli, tmp_path):
 
     # Inspect one of the merge_loop_ops snapshots — that rule reliably
     # fires on RMSNorm decomposition.
-    fusion_txt = dump / "04_loop_fusion__010_merge_loop_ops.rules.txt"
-    fusion_json = dump / "04_loop_fusion__010_merge_loop_ops.rules.json"
+    # Globbed, not hardcoded: the leading number is the PASS INDEX, so inserting a pass anywhere
+    # earlier in the list renumbers this file and the assertion becomes about the pass list rather
+    # than about the dump.
+    (fusion_txt,) = dump.glob("*_loop_fusion__010_merge_loop_ops.rules.txt")
+    (fusion_json,) = dump.glob("*_loop_fusion__010_merge_loop_ops.rules.json")
     assert fusion_txt.exists() and fusion_json.exists()
     text = fusion_txt.read_text()
     # Diff-style rendering with bracketing markers (see pipeline/rule_diff.py);

@@ -1,10 +1,10 @@
 """The lowering-side view of a fold's algebra — every cross-partition / cross-thread program the
-materializers derive from a :class:`~emmy.compiler.ir.tile.ir.Fold`'s stored ``(combine, lift,
+materializers derive from a :class:`~emmy.compiler.ir.pure.fold.Fold`'s stored ``(combine, lift,
 dtypes)``. This is a LOWERING helper, not IR vocabulary: the stored term keeps exactly one ⊕
 program (the flat ``combine``), and everything here — the state⊕state re-emission, the one-shot
-:class:`~emmy.compiler.ir.stmt.algebra.StateMerge`, the per-component seeds, the twist facts —
-is derived on demand at the two consumers, the kernel materializer (``lowering/kernel/_factor``
-and friends) and the cross-CTA split (``lowering/tile/030_split_reduce``). Nothing else reads it.
+statement realization of the cross-thread combine, and the twist facts — is derived on demand by
+the kernel materializer (``lowering/kernel/_factor`` and friends). Tile split-reduce preserves the
+Fold directly and does not use this lowering view.
 
 Leading ``_`` so the pass loader skips this module."""
 
@@ -13,8 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 
-from emmy.compiler.ir.stmt import Accum, Assign, StateMerge, component_ops
-from emmy.compiler.ir.stmt.carrier import exp_combine_states, exp_merge
+from emmy.compiler.dtype import F32
+from emmy.compiler.ir.pure import component_ops, merge_stmts
+from emmy.compiler.ir.stmt import Accum, Assign, Stmt
 
 
 def loop_state_head(loop) -> str:
@@ -77,21 +78,12 @@ class Reduction:
             return tuple(self.fold.combine.body)
         return tuple(Assign(name=n, op=op, args=(n, o)) for n, op, o in zip(self.names, self.ops, self.state_b, strict=True))
 
-    def state_merge(self, other: tuple[str, ...]) -> StateMerge:
-        """A one-shot :class:`StateMerge` stmt folding this state with a second fully-reduced
-        state named ``other`` (the cross-partition combine's right operand). The merge program IS
-        :attr:`combine_states` with ``state_b`` renamed to ``other`` (a twisted program
-        regenerates keyed on ``other[0]`` so distinct folds' temps never collide), so the
-        cooperative-tree / cross-CTA reduce renders it through the same machinery as a streaming
-        step."""
-        if self.ops is None:
-            merged: tuple = exp_combine_states(self.names, other, key=other[0])
-        else:
-            sub = dict(zip(self.state_b, other, strict=True))
-            merged = tuple(
-                Assign(name=a.name, op=a.op, args=tuple(sub.get(x, x) for x in a.args), dtype=a.dtype) for a in self.combine_states
-            )
-        return StateMerge(state=self.names, merge=merged, state_b=other)
+    def merge_stmts(self, other: tuple[str, ...], *, dtype=F32) -> tuple[Stmt, ...]:
+        """This fold's cross-partition combine against a second fully-reduced state named
+        ``other``, as loop-IR statements (:func:`~emmy.compiler.ir.pure.algebra.merge_stmts` — the
+        stored ``combine`` rendered to ``Assign`` temps plus one ``Accum`` per component, whose
+        ``op.identity`` is the seed the ONE identity placement emits)."""
+        return merge_stmts(self.fold.combine, other, dtype=dtype)
 
     @classmethod
     def of_cone_stat(cls, cone) -> Reduction | None:
@@ -99,17 +91,8 @@ class Reduction:
         of the cone's prologue node (``Fold.projection(body=cell, operands=(prologue,))``; the prologue itself
         a zero-axis ``Fold`` over the stat ``Fold``, or the bare fold). ``None`` when the cone carries no
         prologue (a gmem-``Load`` A) — the caller's serial fallback."""
-        from emmy.compiler.ir.tile.ir import Fold  # noqa: PLC0415 — avoid an import cycle
+        from emmy.compiler.ir.pure.fold import Fold  # noqa: PLC0415 — avoid an import cycle
 
         pro = cone.operands[0] if (isinstance(cone, Fold) and cone.axis is None) and cone.operands else None
         head = pro.operands[0] if (isinstance(pro, Fold) and pro.axis is None) and pro.operands else pro
         return cls(head) if isinstance(head, Fold) else None
-
-    def identities(self) -> dict[str, float]:
-        """The per-state-component neutral element (a finalize seeds the state with it before
-        folding partitions). A degenerate fold reads its channel ops' identities; a twisted fold
-        the ``Accum`` folds of its generated streaming merge (``l``/``O`` → add → 0, ``m`` →
-        maximum → −1e30 — the merge generator's spelling, NOT the stored ``init``'s −inf)."""
-        if self.ops is not None:
-            return {n: op.identity for n, op in zip(self.names, self.ops, strict=True)}
-        return {s.name: s.op.identity for s in exp_merge(self.names, self.terms, key=self.names[0]) if isinstance(s, Accum)}

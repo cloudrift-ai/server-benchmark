@@ -19,9 +19,10 @@ its only users.
 
 from __future__ import annotations
 
+import heapq
 import itertools
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from emmy.compiler.ir.base import ConstantOp, InputOp, Op
@@ -164,6 +165,8 @@ def _serialize_field(v):
     Special cases:
 
     - ``ir.elementwise.ElementwiseImpl`` → its ``name`` string.
+    - ``Dim`` → the stable Torch-wire dimension mapping, tagged so atomic and
+      composite expressions round-trip through op fields.
     - ``ir.stmt.Body`` → the underlying ``stmts`` tuple. Body is an
       in-memory wrapper; on disk we keep the tuple-of-stmts form so
       ``_deserialize_field``'s list-of-Stmt-reprs path keeps working
@@ -197,7 +200,9 @@ def _serialize_field(v):
     if isinstance(v, ElementwiseImpl):
         return v.name
     if isinstance(v, Dim):
-        return v.value
+        from emmy.compiler.torch_wire import dim_to_wire
+
+        return {"__dim__": dim_to_wire(v)}
     if isinstance(v, Body):
         # Body is a ``tuple`` subclass; downcast to plain tuple so
         # JSON encodes element-by-element rather than via ``__repr__``
@@ -224,6 +229,11 @@ def _deserialize_field(k, v):
     the IR's ``__all__`` exports — same classes the Stmt reprs reference."""
     from emmy.compiler.ir.elementwise import ElementwiseImpl
 
+    if isinstance(v, dict) and set(v) == {"__dim__"}:
+        from emmy.compiler.torch_wire import dim_from_wire
+
+        return dim_from_wire(v["__dim__"])
+
     if k == "op" and isinstance(v, str):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
         # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
@@ -248,6 +258,8 @@ def _deserialize_field(k, v):
         fields = {fk: _deserialize_field(fk, fv) for fk, fv in v.get("fields", {}).items()}
         return op_cls(**fields) if fields else op_cls()
     if isinstance(v, list) and v and all(isinstance(e, dict) and "__op__" in e for e in v):
+        return tuple(_deserialize_field(k, e) for e in v)
+    if isinstance(v, list) and v and any(isinstance(e, dict) and "__dim__" in e for e in v):
         return tuple(_deserialize_field(k, e) for e in v)
     if isinstance(v, list):
         # Constructor-repr string *elements* rehydrate under the same known-class guard —
@@ -285,14 +297,12 @@ def _eval_stmt(s: str):
 _STMT_EVAL_SCOPE: dict | None = None
 
 
-def _loop_ir_lambda(params=(), body=(), results=()):
-    """Rehydrate a dumped ``Lambda`` repr — strict formation for a pure body, the raw-loop-IR
-    arm for the kernels that legitimately dump impure fn bodies (the un-recognized escape cells,
-    ``030_split_reduce``'s finalize kernels — see ``tile.ir._loop_ir_fn``)."""
+def _pure_lambda(params=(), body=(), results=()):
+    """Rehydrate a dumped ``Lambda`` repr through its normal formation checks."""
+    from emmy.compiler.ir.pure import Lambda  # noqa: PLC0415
     from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import _loop_ir_fn  # noqa: PLC0415
 
-    return _loop_ir_fn(params, Body.coerce(body), results)
+    return Lambda(params=tuple(params), body=Body.coerce(body), results=tuple(results))
 
 
 def _stmt_eval_scope() -> dict:
@@ -328,7 +338,6 @@ def _stmt_eval_scope() -> dict:
         Pack,
         Select,
         SelectBranch,
-        StateMerge,
         StridedLoop,
         Unpack,
         Write,
@@ -361,7 +370,6 @@ def _stmt_eval_scope() -> dict:
         # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
         # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
         "Window": Window,
-        "StateMerge": StateMerge,
         "Smem": Smem,
         "Sync": Sync,
         "TreeHalve": TreeHalve,
@@ -376,13 +384,11 @@ def _stmt_eval_scope() -> dict:
         # any other non-finite literal, needs the bare names in scope to round-trip.
         "inf": _math.inf,
         "nan": _math.nan,
-        # A dumped ``lift`` lambda is strict for every recognized term (the root stores left
-        # for ``TileOp.stores`` at 1q); the raw-loop-IR kernels (escape cells, 030 finalizes)
-        # rebuild through the same ``_loop_ir_fn`` arm ``Fold.projection`` uses.
-        "Lambda": _loop_ir_lambda,
+        # Rehydrate through normal Lambda formation so a dump cannot bypass purity or normalization.
+        "Lambda": _pure_lambda,
         "__builtins__": {},
     }
-    # The tile-IR structural nodes (``Fold`` node) and the
+    # The stored term (the ``Fold`` node, in ``ir/pure/fold``) and the
     # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
     # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
     # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /
@@ -394,10 +400,11 @@ def _stmt_eval_scope() -> dict:
     import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
+    import emmy.compiler.ir.pure.fold as _fold_mod  # noqa: PLC0415
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_axis_mod, _sched_mod, _tile_mod, _kernel_mod, _cuda_mod):
+    for _mod in (_axis_mod, _sched_mod, _fold_mod, _tile_mod, _kernel_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):
@@ -416,6 +423,26 @@ _STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta"})
 # ``outputs`` snapped by the matcher) — none of it belongs in the persisted
 # IR.
 _SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs", "meta"})
+
+
+@dataclass(frozen=True)
+class SpliceReceipt:
+    """What one :meth:`Graph.splice` did — pure graph-surgery bookkeeping handed to whoever
+    cares about what the splice MEANT (the engine emits it as ``SplicedEvent``; the provenance
+    strategy threads op provenance from it). The graph itself carries no such knowledge.
+
+    * ``redirected`` — ``{old buffer: final (post-promotion) buffer}`` per redirection.
+    * ``output_owners`` — the old producing node for every redirected buffer.
+    * ``new_compute_ids`` — post-promotion graph ids of the freshly added non-boundary fragment
+      nodes. Orphan removal may since have dropped some; check membership before dereferencing.
+    * ``consumed_hints`` — each consumed node's hints object, snapshotted before removal (hint
+      merges mutate the surviving outputs' hints, never these).
+    """
+
+    redirected: dict[str, str]
+    output_owners: dict[str, str]
+    new_compute_ids: tuple[str, ...]
+    consumed_hints: dict[str, Hints]
 
 
 class Graph:
@@ -561,6 +588,36 @@ class Graph:
         self.outputs = [new_id if o == old_id else o for o in self.outputs]
         node.op = _rename_buf_in_op(node.op, old_id, new_id)
 
+    def rename_buffer(self, old_buf: str, new_buf: str) -> None:
+        """Rename one non-primary output buffer and every reference to it."""
+        if old_buf == new_buf:
+            return
+        entry = self._producers.get(old_buf)
+        if entry is None:
+            raise KeyError(f"Buffer {old_buf!r} not found")
+        if new_buf in self._producers or new_buf in self.nodes:
+            raise ValueError(f"Buffer name {new_buf!r} already has a producer")
+        nid, slot = entry
+        if slot == 0:
+            self.rename_node(old_buf, new_buf)
+            return
+        node = self.nodes[nid]
+        outs = list(node.outputs)
+        tensor = outs[slot]
+        outs[slot] = replace(tensor, name=new_buf)
+        node.outputs = tuple(outs)
+        users = self._users.pop(old_buf, set())
+        self._users[new_buf] = users
+        self._producers.pop(old_buf)
+        self._producers[new_buf] = (nid, slot)
+        for consumer_id in users:
+            consumer = self.nodes[consumer_id]
+            consumer.inputs = [new_buf if inp == old_buf else inp for inp in consumer.inputs]
+            consumer.op = _rename_buf_in_op(consumer.op, old_buf, new_buf)
+        self.inputs = [new_buf if buf == old_buf else buf for buf in self.inputs]
+        self.outputs = [new_buf if buf == old_buf else buf for buf in self.outputs]
+        node.op = _rename_buf_in_op(node.op, old_buf, new_buf)
+
     def replace_node(self, old_id: str, new_id: str) -> None:
         """Rewire all references from buffer ``old_id`` to buffer ``new_id``.
 
@@ -610,41 +667,54 @@ class Graph:
         *,
         consumed: Iterable[str],
         output: str | dict[str, str],
-        mint_pieces: bool = False,
-    ) -> str | dict[str, str]:
-        """Splice ``fragment`` into this graph in place of ``consumed``.
+    ) -> SpliceReceipt:
+        """Splice ``fragment`` into this graph in place of ``consumed``. Pure graph surgery —
+        what a splice MEANS (provenance threading, identity, attribution) is strategy business,
+        served by the returned :class:`SpliceReceipt` (the engine emits it as ``SplicedEvent``).
 
         Fragment ``InputOp`` nodes alias existing graph nodes by id (no
         copy); every other fragment node is added with its original id
         when it doesn't collide, otherwise a fresh id.
 
         ``consumed`` is the set of node ids the rewriter declares the match
-        owns. ``output`` selects which graph node(s) get their consumers
-        redirected onto fragment output(s):
+        owns. ``output`` selects which graph buffer(s) get their consumers
+        redirected onto fragment output buffers:
 
         - **single** (``str``) — the one node whose consumers redirect to
-          the fragment's sole output (``fragment.outputs[0]``). Returns the
-          new output's id (post-rename). Hints from every consumed node
-          merge onto that output.
-        - **multi** (``dict[str, str]``) — a ``{graph_node_id:
-          fragment_output_id}`` map redirecting several graph nodes to
-          distinct fragment outputs in one splice. Used to inline one
-          producer into *all* its consumers at once (``005_split_shared_indexmap``):
-          each consumer is replaced by its own fused fragment node. Returns
-          ``{old_id: new_id}`` (post-rename). Each redirected node's hints
-          merge onto its own new output; other consumed nodes' hints (e.g.
-          the dissolved shared producer) are dropped.
+          the fragment's sole output (``fragment.outputs[0]``). The receipt's
+          ``output`` is the new output's id (post-rename). Hints from every
+          consumed node merge onto that output.
+        - **multi** (``dict[str, str]``) — a ``{graph_buffer:
+          fragment_output_buffer}`` map redirecting several values at once.
+          Keys may name primary or secondary outputs. Each old output's hints
+          merge onto its replacement; if all replacements belong to one MIMO
+          node, dissolved nodes' hints merge there as well.
 
-        ``mint_pieces`` selects how op provenance threads through (see
-        :mod:`emmy.compiler.provenance`): ``True`` for decomposition (each
-        new fragment node is a fresh piece of the consumed origins), ``False``
-        for fusion / lifting / folds (fragment outputs aggregate the consumed
-        pieces). The prov hint is overwritten after the generic hint merge so
-        union semantics win over last-writer."""
-        from emmy.compiler import provenance  # noqa: PLC0415
-
+        Buffer TRANSIENCE is decided here and nowhere else: a fragment buffer no redirect
+        and no ``fragment.outputs`` entry names is private to the fragment, so it is marked
+        ``Tensor.transient``; a public one inherits the answer from the buffer it replaces.
+        That is the fact fusion reads to know whether deleting a buffer also deletes a
+        rounding the source program performed."""
         consumed = list(consumed)
-        consumed_prov = {nid: provenance.get(self.nodes[nid]) for nid in consumed if nid in self.nodes}
+        consumed_hints = {nid: self.nodes[nid].hints for nid in consumed if nid in self.nodes}
+        single = isinstance(output, str)
+        output_map = {output: fragment.outputs[0]} if single else dict(output)
+        output_owners: dict[str, str] = {}
+        old_transient: dict[str, bool] = {}
+        for old_buf in output_map:
+            owner = self.producer(old_buf)
+            if owner is None:
+                raise KeyError(f"Redirected buffer {old_buf!r} has no producer")
+            output_owners[old_buf] = owner.id
+            replaced = self.buffer(old_buf)
+            old_transient[old_buf] = replaced is not None and replaced.transient
+        # A fragment buffer nothing outside the fragment names is TRANSIENT: it exists only
+        # between these nodes, so its dtype carries shape rather than a rounding boundary
+        # (:class:`~emmy.compiler.tensor.Tensor`). Public fragment buffers inherit the answer
+        # from the buffer they replace below, which is what keeps a decomposition of a
+        # decomposition transient without any rule restating it.
+        public_bufs = set(fragment.outputs) | set(output_map.values())
+        new_compute: list[str] = []
         id_map: dict[str, str] = {}
         buf_map: dict[str, str] = {}  # fragment buffer name → post-add buffer name
         for frag_id in fragment.topological_order():
@@ -663,18 +733,20 @@ class Graph:
             new_id = self.add_node(
                 op=frag_node.op,
                 inputs=mapped_inputs,
-                outputs=tuple(Tensor(t.name, t.shape, t.dtype) for t in frag_node.outputs),
+                outputs=tuple(
+                    Tensor(t.name, t.shape, t.dtype, transient=(frag_id if slot == 0 else t.name) not in public_bufs)
+                    for slot, t in enumerate(frag_node.outputs)
+                ),
                 node_id=preferred_id,
             )
             if frag_node.hints:
                 self.nodes[new_id].hints = frag_node.hints
+            if not isinstance(frag_node.op, ConstantOp):
+                new_compute.append(new_id)
             id_map[frag_id] = new_id
             buf_map[frag_id] = new_id
             for t in frag_node.outputs[1:]:
                 buf_map[t.name] = t.name  # non-primary buffers keep their names on add
-
-        single = isinstance(output, str)
-        output_map = {output: fragment.outputs[0]} if single else dict(output)
 
         # Redirect each old buffer's consumers onto its fragment buffer.
         new_by_old: dict[str, str] = {}
@@ -683,10 +755,9 @@ class Graph:
             self.replace_node(old_id, new_out)
             new_by_old[old_id] = new_out
 
-        # Merge consumed-node hints, then remove consumed. Single-output keeps
-        # the legacy behavior (every consumed node's hints land on the one
-        # output); multi-output routes each redirected node's hints to its own
-        # new output and drops the rest (the shared producer is dissolved).
+        # Merge consumed-node hints, then remove consumed nodes. A MIMO
+        # fragment is one compute owner, so every consumed hint belongs there.
+        target_nodes = {self.producer(buf).id for buf in new_by_old.values()}
         for nid in consumed:
             orig = self.nodes.get(nid)
             if orig is None:
@@ -694,45 +765,43 @@ class Graph:
             if orig.hints:
                 if single:
                     self.producer(new_by_old[output]).hints.merge(orig.hints)
-                elif nid in new_by_old:
-                    self.producer(new_by_old[nid]).hints.merge(orig.hints)
-            if nid not in output_map:
-                self.remove_node(nid)
-        for old_id in output_map:
-            if old_id in self.nodes:
-                self.remove_node(old_id)
+                else:
+                    owners = {self.producer(new_by_old[old_buf]).id for old_buf, owner_id in output_owners.items() if owner_id == nid}
+                    if not owners and len(target_nodes) == 1:
+                        owners = target_nodes
+                    for owner_id in owners:
+                        self.nodes[owner_id].hints.merge(orig.hints)
+            self.remove_node(nid)
 
-        # Thread op provenance onto the new fragment nodes (mint fresh pieces
-        # for decomposition, aggregate consumed pieces otherwise). Runs after
-        # the generic hint merge so its union semantics win for the prov key.
-        new_compute_ids = [id_map[fid] for fid, fn in fragment.nodes.items() if not provenance.is_boundary(fn.op)]
-        provenance.propagate(
-            self,
-            consumed_prov=consumed_prov,
-            new_compute_ids=new_compute_ids,
-            # Prov hints live on nodes — resolve each redirected buffer to its
-            # producing node id (identity for primary outputs).
-            new_by_old={old: self._producers[new][0] for old, new in new_by_old.items()},
-            output_map=output_map,
-            mint_pieces=mint_pieces,
-        )
-
-        # Promote each new node's id to its friendly output.name once consumed
-        # nodes are gone — keeps kernel buf names (which embed the node id)
-        # readable. Falls back silently if the friendly name is taken. A
-        # non-primary redirected buffer keeps its own name — nothing to promote.
+        # Restore every redirected buffer's old identity once its consumed
+        # producer is gone. Primary buffers rename their node; secondary ports
+        # rename only that port.
         result: dict[str, str] = {}
-        for old_id, new_out in new_by_old.items():
-            node = self.nodes.get(new_out)
-            if node is not None:
-                desired = node.output.name
-                if desired and desired != new_out and desired not in self.nodes and desired not in self._producers:
-                    self.rename_node(new_out, desired)
-                    new_out = desired
-            result[old_id] = new_out
+        renamed: dict[str, str] = {}
+        for old_buf, new_out in new_by_old.items():
+            if old_buf not in self.nodes and old_buf not in self._producers:
+                producer_entry = self._producers.get(new_out)
+                if producer_entry is not None:
+                    producer_id, slot = producer_entry
+                    if slot == 0:
+                        self.rename_node(producer_id, old_buf)
+                        renamed[producer_id] = old_buf
+                    else:
+                        self.rename_buffer(new_out, old_buf)
+                    new_out = old_buf
+            if old_transient[old_buf]:
+                replacement = self.buffer(new_out)
+                if replacement is not None:
+                    replacement.transient = True
+            result[old_buf] = new_out
 
         self.remove_orphans()
-        return result[output] if single else result
+        return SpliceReceipt(
+            redirected=result,
+            output_owners=output_owners,
+            new_compute_ids=tuple(renamed.get(nid, nid) for nid in new_compute),
+            consumed_hints=consumed_hints,
+        )
 
     def remove_orphans(self) -> None:
         """Remove nodes with zero consumers that aren't graph inputs/outputs."""
@@ -809,12 +878,13 @@ class Graph:
         return self._users.get(buf, set())
 
     def validate(self) -> None:
-        """Check the graph's structural invariants; raise ``ValueError`` on the
-        first violation. Covers: non-empty ``node.outputs``; SSA per buffer
+        """Check the graph's structural and per-op invariants; raise ``ValueError``
+        on the first violation. Covers: non-empty ``node.outputs``; SSA per buffer
         (``_producers`` maps every buffer to exactly its producing node/slot,
         no orphan or missing entries); ``_users`` consistency with every
         ``node.inputs`` edge; ``graph.inputs`` / ``graph.outputs`` naming known
-        buffers. Runs in tests always and behind ``EMMY_VALIDATE_GRAPH`` at
+        buffers; a ``copy`` reading its output's shape; an index map whose sources
+        agree on element type. Runs in tests always and behind ``EMMY_VALIDATE_GRAPH`` at
         pass boundaries — never in production compile paths."""
         expected_producers: dict[str, tuple[str, int]] = {}
         for nid, node in self.nodes.items():
@@ -844,6 +914,31 @@ class Graph:
             for buf in refs:
                 if buf not in expected_producers:
                     raise ValueError(f"graph.{label} names unknown buffer {buf!r}")
+        # noqa: PLC0415 below — a module-level import of the dialect would cycle.
+        from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp  # noqa: PLC0415
+
+        # An index map moves values, it does not convert them, so several sources
+        # feeding one result must agree on the element type. A source that differed
+        # would be a conversion, which is what a dtype-changing copy is for.
+        for nid, node in self.nodes.items():
+            if not isinstance(node.op, IndexMapOp) or len(node.inputs) < 2:
+                continue
+            dtypes = {str(t.dtype) for inp in node.inputs if (t := self.buffer(inp)) is not None}
+            if len(dtypes) > 1:
+                raise ValueError(f"index map {nid!r} reads sources of differing dtypes: {sorted(dtypes)}")
+
+        # ``copy`` is the identity, so its declared output dtype is the whole
+        # operation and its shape must be its input's. ``ElementwiseOp.infer_output_shape``
+        # states the rule for every elementwise op, but no compile path calls it on one,
+        # and a shape-changing copy would reach the loop stage as a silent broadcast.
+        for nid, node in self.nodes.items():
+            if not (isinstance(node.op, ElementwiseOp) and node.op.name == "copy"):
+                continue
+            out_shape = tuple(node.output.shape)
+            for inp in node.inputs:
+                t = self.buffer(inp)
+                if t is not None and tuple(t.shape) != out_shape:
+                    raise ValueError(f"copy node {nid!r} reads {inp!r} with shape {tuple(t.shape)} but declares {out_shape}")
 
     # ------------------------------------------------------------------
     # Boundary / symbolic-dim queries
@@ -1064,7 +1159,9 @@ class Graph:
     def topological_order(self) -> list[str]:
         """Return node ids in topological order (inputs before consumers).
 
-        Kahn's algorithm in O(N+E) using the maintained ``_users`` index.
+        Kahn's algorithm using the maintained ``_users`` index. The ready queue is ordered by node
+        id: ``_users`` stores sets and graph slices may be assembled from sets, so insertion order
+        cannot keep persisted Torch/Loop programs independent of Python's per-process hash seed.
         """
         in_degree: dict[str, int] = {nid: 0 for nid in self.nodes}
         for node in self.nodes.values():
@@ -1072,14 +1169,15 @@ class Graph:
             in_degree[node.id] += len(deps - {node.id})
 
         queue = [nid for nid, deg in in_degree.items() if deg == 0]
+        heapq.heapify(queue)
         result: list[str] = []
         while queue:
-            nid = queue.pop(0)
+            nid = heapq.heappop(queue)
             result.append(nid)
             for consumer_id in self.users(nid):
                 in_degree[consumer_id] -= 1
                 if in_degree[consumer_id] == 0:
-                    queue.append(consumer_id)
+                    heapq.heappush(queue, consumer_id)
 
         if len(result) != len(self.nodes):
             raise ValueError("Graph has a cycle")
@@ -1095,7 +1193,7 @@ class Graph:
                 id=node.id,
                 op=node.op,
                 inputs=list(node.inputs),
-                outputs=tuple(Tensor(name=t.name, shape=t.shape, dtype=t.dtype) for t in node.outputs),
+                outputs=tuple(replace(t) for t in node.outputs),
                 hints=Hints.from_dict(node.hints.to_dict()),
             )
         g._users = {buf: set(users) for buf, users in self._users.items()}
@@ -1141,48 +1239,10 @@ class Graph:
         return g
 
     def pretty_print(self) -> str:
-        """Render the graph as readable text (topological order + sections)."""
-        from emmy.compiler.ir.base import ConstantOp, InputOp
+        """Render the graph as Rust-like pseudocode (see :mod:`emmy.compiler.pretty`)."""
+        from emmy.compiler.pretty import render_graph
 
-        order = self.topological_order()
-        lines: list[str] = [
-            f"# Graph: {len(self.nodes)} nodes, {len(self.inputs)} inputs, {len(self.outputs)} outputs",
-            "",
-        ]
-
-        if self.inputs:
-            lines.append("inputs:")
-            for nid in self.inputs:
-                lines.append(f"  {_fmt_tensor(self.buffer(nid))}")
-            lines.append("")
-
-        const_ids = [nid for nid in order if isinstance(self.nodes[nid].op, ConstantOp)]
-        if const_ids:
-            lines.append("constants:")
-            for nid in const_ids:
-                n = self.nodes[nid]
-                val = getattr(n.op, "value", None)
-                suffix = f" = {val}" if val is not None else ""
-                lines.append(f"  {_fmt_tensor(n.output)}{suffix}")
-            lines.append("")
-
-        compute_ids = [nid for nid in order if not isinstance(self.nodes[nid].op, (InputOp, ConstantOp))]
-        if compute_ids:
-            name_w = max(len(self.nodes[nid].output.name) for nid in compute_ids)
-            op_w = max(len(_fmt_op(self.nodes[nid], self)) for nid in compute_ids)
-            for nid in compute_ids:
-                n = self.nodes[nid]
-                op_str = _fmt_op(n, self)
-                shape_str = _fmt_shape(n.output.shape)
-                lines.append(f"{n.output.name:<{name_w}}  =  {op_str:<{op_w}}  -> {shape_str} {n.output.dtype}")
-            lines.append("")
-
-        if self.outputs:
-            lines.append("outputs:")
-            for nid in self.outputs:
-                lines.append(f"  {_fmt_tensor(self.buffer(nid))}")
-
-        return "\n".join(lines)
+        return render_graph(self)
 
     def to_dict(self) -> dict:
         """Serialize graph to a JSON-compatible dict."""
@@ -1248,29 +1308,76 @@ def _dim_to_json(d):
 
 
 def _rename_buf_in_op(op, old: str, new: str):
-    """Rewrite ``Load.source`` / ``Write.output`` references inside a
-    ``LoopOp`` body from ``old`` to ``new`` (recursively into nested Loops).
-    Pass-through for op types without internal buf refs. Preserves the op's
+    """Rewrite ``Load.source`` / ``Write.output`` references inside a kernel op.
+    Pass-through for op types without internal buffer references. Preserves the op's
     ``name`` / ``knobs`` / ``source`` identity — a rename after
-    ``991_stamp_loop_names`` / ``992_stamp_structural_features`` (e.g. the
+    the name stamp / the IdentityStrategy's ``S_*`` row (e.g. the
     splice id-promotion of a lowering-phase fragment like the demoted-matmul
     split) must not strip the stamped kernel name, the ``S_*`` features, or
     the decomposition attribution link (``Candidate.apply`` stamps the
     pre-split op as each fragment kernel's ``source``; the two-level tuner's
     composed Σ rows group by it)."""
     from emmy.compiler.ir.loop import Load, LoopOp, Write
+    from emmy.compiler.ir.pure.fold import Fold
+    from emmy.compiler.ir.stmt import Body
+    from emmy.compiler.ir.tile import TileOp
 
-    if not isinstance(op, LoopOp):
+    if not isinstance(op, (LoopOp, TileOp)):
         return op
 
     def fn(s):
         if isinstance(s, Load) and s.input == old:
-            return Load(name=s.name, input=new, index=s.index)
+            return Load(names=s.names, input=new, index=s.index, dtype=s.dtype)
         if isinstance(s, Write) and s.output == old:
-            return Write(output=new, index=s.index, value=s.value)
+            return Write(
+                output=new,
+                index=s.index,
+                values=s.values,
+                value_dtype=s.value_dtype,
+                atomic=s.atomic,
+                swizzle=s.swizzle,
+            )
         return s
 
-    renamed = LoopOp(body=op.body.map(fn))
+    def renamed_io(io: dict[str, Tensor]) -> dict[str, Tensor]:
+        return {
+            (new if buf == old else buf): (replace(tensor, name=new) if tensor.name == old else replace(tensor))
+            for buf, tensor in io.items()
+        }
+
+    if isinstance(op, LoopOp):
+        renamed = op.rename_buffers({old: new})
+    else:
+
+        def rename_body(body):
+            return Body(rename_member(member) for member in body)
+
+        def rename_member(member):
+            if isinstance(member, Fold):
+                return rename_term(member)
+            nested = member.nested()
+            if nested:
+                member = member.with_bodies(tuple(rename_body(body) for body in nested))
+            return fn(member)
+
+        def rename_term(term):
+            if isinstance(term, Load):
+                return fn(term)
+            if not isinstance(term, Fold):
+                return term
+            return replace(
+                term,
+                operands=tuple(rename_term(edge) for edge in term.operands),
+                lift=replace(term.lift, body=rename_body(term.lift.body)),
+            )
+
+        renamed = replace(
+            op,
+            op=rename_term(op.op),
+            output_specs=tuple(replace(store, write=fn(store.write)) for store in op.output_specs),
+        )
+    renamed.inputs = renamed_io(op.inputs)
+    renamed.outputs = renamed_io(op.outputs)
     renamed.name = op.name
     renamed.knobs = dict(op.knobs)
     renamed.source = op.source
@@ -1278,19 +1385,9 @@ def _rename_buf_in_op(op, old: str, new: str):
 
 
 # ---------------------------------------------------------------------------
-# Pretty-print helpers (used by Graph.pretty_print)
+# Node-rendering helpers (used by pipeline/search/candidate.py; the graph
+# dump itself lives in compiler/pretty.py)
 # ---------------------------------------------------------------------------
-
-
-def _fmt_shape(shape: tuple) -> str:
-    inside = ", ".join(str(d) for d in shape)
-    if len(shape) == 1:
-        inside += ","
-    return f"({inside})"
-
-
-def _fmt_tensor(t: Tensor) -> str:
-    return f"{t.name}: {_fmt_shape(t.shape)} {t.dtype}"
 
 
 _DIM_NAMES = ("i", "j", "k", "l", "m", "n")

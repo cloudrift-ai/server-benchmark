@@ -4,7 +4,7 @@ import pytest
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, ReduceOp
 
 # ---- helpers ----
 
@@ -71,6 +71,22 @@ def test_topological_order():
     assert order.index("A") < order.index("ew")
     assert order.index("B") < order.index("ew")
     assert order.index("ew") < order.index("red")
+
+
+def test_topological_order_stabilizes_sibling_users(monkeypatch):
+    """Persisted program order must not inherit the hash order of the user index."""
+    g = Graph()
+    x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,)), node_id="x")
+    g.add_node(op=ElementwiseOp(op="exp"), inputs=[x], output=Tensor("z", (4,)), node_id="z")
+    g.add_node(op=ElementwiseOp(op="negative"), inputs=[x], output=Tensor("a", (4,)), node_id="a")
+
+    original_users = g.users
+
+    def reverse_users(node_id):
+        return list(reversed(sorted(original_users(node_id))))
+
+    monkeypatch.setattr(g, "users", reverse_users)
+    assert g.topological_order() == ["x", "a", "z"]
 
 
 def test_consumers():
@@ -234,6 +250,25 @@ def test_to_dict_serializes_composite_shape_dim():
     )
 
 
+def test_to_dict_roundtrips_composite_op_field_dim():
+    from emmy.compiler.dim import Dim
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (48,)), node_id="x")
+    groups = Dim(48) // Dim("num_tokens")
+    g.add_node(
+        op=IndexMapOp(out_shape=(groups,), sources=()),
+        inputs=["x"],
+        output=Tensor("y", (groups,)),
+        node_id="y",
+    )
+    g.inputs, g.outputs = ["x"], ["y"]
+
+    restored = Graph.from_dict(g.to_dict())
+
+    assert restored.nodes["y"].op.out_shape == (groups,)
+
+
 # ---- multi-output (MIMO) foundation ----
 
 
@@ -315,6 +350,83 @@ def test_mimo_rename_node_keeps_aux_buffer():
     assert g.producer("Y__sq").id == "Y2"  # aux buffer follows the renamed producer
     assert g.nodes["c"].inputs == ["Y2", "Y__sq"]
     g.validate()
+
+
+def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.pure import Fold, Lambda
+    from emmy.compiler.ir.stmt import Assign, Body, Load
+    from emmy.compiler.ir.tile import Placement, TileOp
+
+    def addition(name: str) -> Lambda:
+        other = f"{name}__o"
+        return Lambda(
+            params=(name, other),
+            body=Body((Assign(name=name, op="add", args=(name, other)),)),
+            results=(name,),
+        )
+
+    inner = Fold(
+        axis=Axis("k", 4),
+        lift=Lambda(
+            params=("k",),
+            body=Body((Load(name="value", input="x", index=(Var("m"), Var("k"))),)),
+            results=("value",),
+        ),
+        init=(0.0,),
+        combine=addition("inner_acc"),
+    )
+    outer = Fold(
+        axis=Axis("m", 4),
+        lift=Lambda(params=("m",), body=Body((inner,)), results=(inner.out,)),
+        init=(0.0,),
+        combine=addition("outer_acc"),
+    )
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4, 4)), node_id="x")
+    graph.add_node(TileOp(op=outer, place=Placement()), ["x"], Tensor("out", ()), node_id="out")
+    graph.inputs, graph.outputs = ["x"], ["out"]
+
+    graph.rename_node("x", "renamed_x")
+
+    nested = graph.nodes["out"].op.op.lift.body[0]
+    assert isinstance(nested, Fold)
+    assert nested.lift.body.loads[0].input == "renamed_x"
+
+
+def test_rename_node_does_not_renormalize_a_loop_body(monkeypatch) -> None:
+    import emmy.compiler.ir.stmt as stmt
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.loop import Load, Loop, LoopOp, Write
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4,)), node_id="x")
+    loop = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("a", 4),
+                body=(
+                    Load(name="value", input="x", index=(Var("a"),)),
+                    Write(output="out", index=(Var("a"),), value="value"),
+                ),
+            ),
+        )
+    )
+    graph.add_node(loop, ["x"], Tensor("out", (4,)), node_id="out")
+    graph.inputs, graph.outputs = ["x"], ["out"]
+
+    def reject_renormalization(*_args, **_kwargs):
+        raise AssertionError("buffer renaming must preserve the normalized Loop body")
+
+    monkeypatch.setattr(stmt, "normalize_body", reject_renormalization)
+    graph.rename_node("x", "renamed_x")
+
+    renamed = graph.nodes["out"].op
+    assert renamed.body.loads[0].input == "renamed_x"
+    assert tuple(renamed.inputs) == ("renamed_x",)
 
 
 def test_mimo_remove_orphans_keeps_producer_alive_via_aux_edge():

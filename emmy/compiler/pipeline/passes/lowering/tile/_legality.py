@@ -15,11 +15,13 @@ through a constructed ``Bound`` shares the currency in name only and costs a sec
 read ``k % step == 0``. If a legality rule ever does become a generated bound, constructing one is
 a line.
 
-What does NOT live here: anything that CHOOSES rather than checks. The conservative cooperative
-pick, the atom ladder and the stage catalog are the schedule's.
+What does NOT live here: anything that CHOOSES rather than checks. The coop / ILP partition catalog,
+the atom ladder and the stage catalog are the schedule's. Nothing here ranks either — a predicate
+answers "can this node realize the candidate", never "is it a good idea", which is why legality is
+the only thing allowed to narrow an enumeration at all.
 
 **With ONE stated exception: the stage RESOLVERS** (``resolve_warp_stage`` / ``resolve_scalar_stage``
-/ ``resolve_sync_stage`` / ``resolve_twisted_stage``). They return a SIZED :class:`Stage` rather
+/ ``resolve_fill_stage``). They return a SIZED :class:`Stage` rather
 than a reason, because for the smem budget the legal answer is a size and not a yes/no — the
 largest depth and slab chunk that fit. Handing back the largest legal stage is what keeps an
 over-budget row out of the fork instead of failing at materialization, and splitting "how big may
@@ -31,15 +33,21 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import BinaryExpr
+from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, WarpSpec
-from emmy.compiler.ir.stmt import Body, Load, Loop
-from emmy.compiler.ir.stmt.passes import has_contraction_tail
-from emmy.compiler.ir.tile import Fold
-from emmy.compiler.ir.tile.ir import is_contraction, operand_name
+from emmy.compiler.ir.stmt import Body, Load, Loop, Write
+from emmy.compiler.ir.stmt.passes import has_contraction_tail, projection_distributes
 from emmy.compiler.ir.tile.ops import cone_seam
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step
-from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS, WARP_LANES
+from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD, gmem_axis_step, split_pair
+from emmy.compiler.pipeline.search.space import (
+    MAX_BLOCK_THREADS,
+    MAX_REGISTERS_PER_CTA,
+    MAX_REGISTERS_PER_THREAD,
+    WARP_LANES,
+)
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
 # at 4 so it stays within the 5-dim limit.
@@ -49,12 +57,11 @@ _TMA_ALIGN = 16  # the NONE-swizzle box-copy rule: 16 B-aligned inner dim and in
 # cp.async needs a >= 4 B contiguous chunk, so a 2 B/elem slab's inner dim must be even.
 _CP_ASYNC_MIN_ELEMS = 2
 
-# The cp.async streaming slabs' padded rows, in elements — two slabs at ``2 * _twist._PAD`` each,
-# the bank-conflict break the hardware swizzle replaces on the TMA path.
-_STREAM_PAD_ELEMS = 16
 
-# The staged QUERY slab's row pad, in elements (the ``split`` arm stages Q through smem too).
-_STREAM_Q_PAD_ELEMS = 8
+def decline(why: list[str] | None, reason: str) -> None:
+    """Record a tier's refusal reason for a caller that will report it (a pinned candidate)."""
+    if why is not None:
+        why.append(reason)
 
 
 def enforce(reason: str | None, *, pinned: bool) -> bool:
@@ -66,6 +73,59 @@ def enforce(reason: str | None, *, pinned: bool) -> bool:
     if pinned:
         raise ValueError(reason)
     return False
+
+
+def _direct_atomic_output(outputs) -> str | None:
+    """Whether direct cross-CTA partials avoid another low-precision rounding step.
+
+    F16/BF16 destinations round once per CTA; the deferred finalize instead combines f32
+    carrier state and rounds once at the output boundary.
+    """
+    lowp = sorted({str(t.dtype) for t in outputs.values() if t.dtype in (F16, BF16)})
+    if not lowp:
+        return None
+    return (
+        f"direct atomic REDUCE writes each partial into {'/'.join(lowp)} output storage; "
+        "use the deferred f32 workspace finalize (REDUCE=g<n>k) so the output rounds once"
+    )
+
+
+def atomic_finalize(states: tuple[str, ...], tail, outputs) -> str | None:
+    """Whether the cross-CTA split may take its DIRECT ``atomicAdd`` arm — every condition, once.
+
+    The deferred workspace finalize (``REDUCE=g<n>k``) carries any carrier and any projection, so
+    each refusal here names it as the alternative. Three things must hold, and they are stated
+    together because the enumeration, the pin, and ``030_split_reduce``'s realization all have to
+    agree: a pin that reaches the rewrite past a gate the enumeration applied would crash the
+    emitter instead of refusing.
+
+    - ONE additive state component. ``atomicAdd`` folds a scalar; a twisted carrier's
+      ``(maximum, denominator, …)`` tuple has no atomic instruction at all.
+    - An output the partials can round into once per CTA (:func:`_direct_atomic_output`).
+    - A projection that DISTRIBUTES over the add. The atomic arm applies the epilogue per
+      partition, before the combine, so anything but a linear-homogeneous map mis-scales each
+      CTA's contribution.
+
+    Storage is asked BEFORE the projection: a narrowing store spells its rounding as a conversion
+    in that same epilogue (``loop/lifting/090_spell_store_rounding``), which no linear-homogeneous
+    reading admits — so both refuse a low-precision output and the storage reason is the one that
+    names why.
+    """
+    if len(states) != 1:
+        return (
+            f"atomic REDUCE folds ONE additive state component; this carrier has {len(states)} "
+            f"({', '.join(states)}) — use the deferred f32 workspace finalize (REDUCE=g<n>k)"
+        )
+    storage = _direct_atomic_output(outputs)
+    if storage is not None:
+        return storage
+    if tail and not projection_distributes(tuple(tail), states):
+        return (
+            "atomic REDUCE applies the projection epilogue per partition, so it must distribute "
+            "over the add; this one does not (a fused bias / activation) — use the deferred "
+            "workspace finalize (REDUCE=g<n>k), which projects once after the combine"
+        )
+    return None
 
 
 # ---- thread budgets ---------------------------------------------------------------------------- #
@@ -97,34 +157,17 @@ def producer_band(spec: WarpSpec, block_threads: int) -> str | None:
     return None
 
 
-def producer_transport(stage: Stage | None, reduce: ReducePlan) -> str | None:
+def producer_transport(stage: Stage | None) -> str | None:
     """What a producer band can actually drive: a RESOLVED TMA stage (the band arms the box-copy
-    mbarrier ring — cp.async's wait-group is issuing-thread-scoped and a sync compute-fill has no
-    async load half) on a kernel that is not split across CTAs."""
-    if stage is None or stage.transport != "tma":
+    mbarrier ring — cp.async's wait-group is issuing-thread-scoped and a smem compute fill has no
+    async load half).
+
+    It used to also refuse a cross-CTA split as "not co-representable", and took the row's
+    ``ReducePlan`` for that alone. A split now mints brand-new kernels that schedule themselves, so
+    a split row's band never reaches a kernel at all, and a partial that wants one asks for it at
+    its own fork like any other kernel."""
+    if stage is None or stage.transport != "smem-tma":
         return "a producer band drives a resolved TMA stage; this row has none"
-    if stage.split:
-        return "a producer band arms ONE mbarrier ring; the per-edge transport split arms one per edge"
-    if reduce.needs_split:
-        return "a producer band and a cross-CTA split-K are not co-representable"
-    return None
-
-
-def coop_band_layout(plan: ReducePlan, k_contiguous: bool | None) -> str | None:
-    """Whether a cooperative band's lane mapping is COALESCED on B's layout. The plain band
-    interleaves lanes along K, so it needs K contiguous in B (the serving ``F.linear`` N×K layout);
-    the transposed band sweeps lanes along the output axis, so it needs the canonical k-major
-    ``B[k, n]``. ``k_contiguous is None`` (no B to classify) gates neither.
-
-    Measurement cannot decide this: ``ShapeKey`` is layout-blind, so cross-orientation golden /
-    evidence rows tie, and a cold or tied pick landed the band on the wrong operand three times in
-    one day — 10-100x regressions (the WS5 cold-poison hardening). An env pin bypasses the gate."""
-    if k_contiguous is None or plan.coop <= 1:
-        return None
-    if plan.coop_transposed and k_contiguous:
-        return "the transposed coop band lane-sweeps the output axis — uncoalesced on a K-contiguous B"
-    if not plan.coop_transposed and not k_contiguous:
-        return "the plain coop band interleaves lanes along K — uncoalesced on a k-major B[k, n]"
     return None
 
 
@@ -132,20 +175,21 @@ def coop_band_geometry(plan: ReducePlan, k: int | None, inner: Axis | None) -> s
     """The TRANSPOSED coop band's structural requirements — the same fact for every tier that
     offers it. The band swaps the lane mapping so 32 lanes sweep the innermost FREE axis while
     each lane walks K serially, which fixes three things about the term: the coop width must be a
-    whole number of warps, the swept axis must be static and 32-divisible (there is no partial-warp
-    sweep), and a split composite must divide K.
+    whole number of warps, there must BE an innermost free axis to sweep, and a split composite
+    must divide K. The swept extent itself is free — the grid is ``ceil(E/32)`` blocks and the
+    emitter clamp-reads + store-guards an overhanging last block.
 
     One home because it had two: the reduce tier and the contraction tier each spelled a version of
     this inline, with different conditions and neither of them here — exactly the raise-vs-drop
     defect class this module exists to remove. The reduce tier's EXTRA requirement, on the shape of
-    the epilogue, is :func:`coop_band_epilogue`; ``coop_band_layout`` still owns the B-orientation
-    half. A plain (non-transposed) band answers ``None`` — it has no such geometry."""
+    the epilogue, is :func:`coop_band_epilogue`. A plain (non-transposed) band answers ``None`` —
+    it has no such geometry."""
     if not plan.coop_transposed:
         return None
     if plan.coop % WARP_LANES:
         return f"the transposed coop band sweeps whole warps — coop={plan.coop} is not a multiple of {WARP_LANES}"
-    if inner is None or not inner.extent.is_static or inner.extent.as_static() % WARP_LANES:
-        return f"the transposed coop band needs a static {WARP_LANES}-divisible innermost free axis to sweep"
+    if inner is None:
+        return "the transposed coop band needs an innermost free axis to sweep; this term has none"
     if plan.needs_split and (k is None or k % plan.cta):
         return f"the transposed split composite g{plan.cta} must divide a static K"
     return None
@@ -181,15 +225,6 @@ def warp_atom_target(atom, ctx) -> str | None:
     )
 
 
-def warp_atom_edges(node: Fold, atom) -> str | None:
-    """Whether the atom can consume this contraction's materialized/computed operand edges."""
-    if not atom.materialized_edges_only:
-        return None
-    if not isinstance(node.a, Load) or any(not isinstance(ch.b, Load) for ch in node.channels):
-        return f"warp TILE: atom {atom.name} accepts only materialized A and B edges"
-    return None
-
-
 def warp_a_columns(node: Fold, tile: TilePlan, inputs) -> str | None:
     """Whether a materialized A edge has the contiguous K columns an mma fragment loader reads.
 
@@ -213,70 +248,110 @@ def warp_a_columns(node: Fold, tile: TilePlan, inputs) -> str | None:
 
 def stage_target(stage: Stage, ctx) -> str | None:
     """Whether ``stage`` names a copy instruction family present on ``ctx``."""
-    if stage.transport == "cp.async" and not ctx.has_cp_async:
+    if stage.transport == "smem-async" and not ctx.has_cp_async:
         return f"STAGE {stage.spell()}: cp.async requires sm_80 or newer"
-    if stage.transport == "tma" and not ctx.has_tma:
+    if stage.transport == "smem-tma" and not ctx.has_tma:
         return f"STAGE {stage.spell()}: TMA requires sm_90 or newer"
     return None
 
 
-def warp_atom_stage(atom, stage: Stage) -> str | None:
-    """Whether ``atom`` has a shared-memory fragment drain for ``stage``."""
-    if atom.materialized_edges_only and not (stage.transport == "sync" and atom.sync_copy_staging):
-        return f"STAGE {stage.spell()}: atom {atom.name} supports only synchronous-copy staging"
-    return None
-
-
 def warp_k_step(node: Fold, plan: TilePlan) -> str | None:
-    """The inner mma K-step ``atom_k·bk`` must tile a STATIC contraction K: the warp K-loop has no
-    static-K tail masking, so a partial final step reads past the operand and silently corrupts the
-    result. A SYMBOLIC K reaches the masked tier and is fine — except on the fp8 atoms, whose
-    byte-gather fragment loaders have no masked-K zero-fill family."""
+    """Whether this atom's fragment loaders can reach the contraction K.
+
+    The warp K-loop steps by ``atom_k`` and zero-fills the overhanging half of its final fragment
+    (``_atom`` passes the loop's ``k_zero`` bound whenever the step does not tile K), so a K the
+    step does not divide — static or symbolic — is masked and correct. The masked tail is the
+    gmem-direct tier's; a STAGED row's K-chunk divisibility is the stage resolvers' own rule
+    (``_warp_vector_copy`` / ``_warp_tma`` / :func:`resolve_fill_stage`), stated where the chunk
+    width is.
+
+    The fp8 atoms are the exception on both counts: their byte-gather fragment loaders have no
+    masked-K zero-fill family, so they take an exact K — static, and tiled by the full K-step."""
+    if not (plan.is_warp and plan.atom.operand_dtype("a").nbytes == 1):
+        return None
     ext = node.axis.extent
     if not ext.is_static:
-        if plan.is_warp and plan.atom.operand_dtype("a").nbytes == 1:
-            return f"atom {plan.atom.name}: the fp8 byte-gather loaders have no masked-K zero-fill — a symbolic K stays off the fp8 tier"
-        return None
+        return f"atom {plan.atom.name}: the fp8 byte-gather loaders have no masked-K zero-fill — a symbolic K stays off the fp8 tier"
     k, step = ext.as_static(), plan.atom.atom_k * plan.bk
     if k % step == 0:
         return None
     return (
         f"warp TILE K-step {step} (atom_k={plan.atom.atom_k}*bk={plan.bk}) does not divide the static "
-        f"contraction K={k}; the warp K-loop has no static-K tail masking yet, so a partial final step "
-        f"corrupts the result. Pin a K that is a multiple of {step}, or drop the atom token to use the "
-        f"scalar tier."
+        f"contraction K={k}, and atom {plan.atom.name}'s byte-gather loaders have no masked-K zero-fill; "
+        f"pin a K that is a multiple of {step}, or drop the fp8 atom token."
     )
 
 
-def splitk_slice_k_step(node: Fold, plan: TilePlan, width: int) -> str | None:
-    """After a cross-CTA split the inner contraction sees ``K/width``, which must still be a
-    multiple of the mma K-step."""
-    if not plan.is_warp:
+def _fragment_registers(atom, role: str) -> int:
+    """The exact per-lane register count of one emitted mma fragment."""
+    explicit = atom.fragment_nregs(role)
+    if explicit is not None:
+        return explicit
+    m, n, k = atom.ptx_shape
+    dtype = atom.operand_dtype(role)
+    if role == "a":
+        return m * k * dtype.nbytes // 128
+    if role == "b":
+        return n * k * dtype.nbytes // 128
+    return m * n // (64 if dtype.nbytes == 2 else 32)
+
+
+def paired_fragment_registers(node: Fold, producer: Fold | None, tile: TilePlan, stage: Stage | None) -> tuple[int, int] | None:
+    """Return ``(required, available)`` peak registers/lane for two composed contractions.
+
+    A computed fill keeps the consuming fragments live while it builds one scheduled producer
+    block through the same mma atom. Count the exact ``RegFragment`` families emitted by
+    ``_MmaOps.state`` for both contractions. This is a lower bound: scalar carrier state and
+    address temporaries are intentionally absent, so the check rejects only rows whose fragments
+    alone cannot fit the CTA register file.
+    """
+    if not (tile.is_warp and stage is not None and producer is not None):
         return None
-    step = plan.atom.atom_k * plan.bk
-    ks = node.axis.extent.as_static() // width
-    if ks % step == 0:
+    atom = tile.atom
+    if stage.bk_elems % atom.atom_n:
+        return None  # the producer fragment block does not realize this geometry
+    a_regs = _fragment_registers(atom, "a")
+    b_regs = _fragment_registers(atom, "b")
+    c_regs = _fragment_registers(atom, "c")
+    # The f16-accumulate atom keeps an additional f32 shadow C family.
+    if atom.operand_dtype("c").nbytes == 2:
+        c_regs += atom.atom_m * atom.atom_n // 32
+    depth = max(1, stage.reg_depth)
+    channels = len(node.channels)
+    outer_c = channels * tile.reg_m * tile.reg_n * c_regs
+    outer = tile.reg_m * depth * a_regs + channels * (tile.reg_n * depth * b_regs + tile.reg_m * tile.reg_n * c_regs)
+    producer_n = stage.bk_elems // atom.atom_n
+    producer_channels = len(producer.channels)
+    producer_regs = tile.reg_m * a_regs + producer_channels * (producer_n * b_regs + tile.reg_m * producer_n * c_regs)
+    available = min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // tile.block_threads)
+    # Consumer A/B are first loaded in the drain after the producer block. Only the initialized consumer C
+    # fragments span both regions; the two A/B families may reuse registers.
+    return max(outer, outer_c + producer_regs), available
+
+
+def paired_fragment_register_budget(node: Fold, producer: Fold | None, tile: TilePlan, stage: Stage | None) -> str | None:
+    """Whether coexisting producer/consumer mma fragments fit the CTA register-file envelope."""
+    counts = paired_fragment_registers(node, producer, tile, stage)
+    if counts is None or counts[0] <= counts[1]:
         return None
+    required, available = counts
     return (
-        f"split-K slice K={ks} (K/{width}) is not a multiple of the mma K-step {step} "
-        f"(atom_k={plan.atom.atom_k}*bk={plan.bk}); pick a split width whose slice is divisible."
+        f"paired contractions require at least {required} live fragment registers/thread, over the "
+        f"{available}-register envelope at {tile.block_threads} threads/CTA"
     )
 
 
 def splitk_width(k_axis: Axis, width: int) -> str | None:
-    """A cross-CTA split must divide the contraction axis evenly — the σ-reindex reconstructs an
-    absolute k from ``ksplit·(K/w) + kslice``, which is only a bijection when ``w`` divides K."""
+    """A cross-CTA split needs a STATIC reduce axis its width divides evenly — the σ-reindex
+    reconstructs an absolute k from ``ksplit·(K/w) + kslice``, which is a bijection only when the
+    extent is known and ``w`` divides it. Total over a symbolic axis rather than raising out of
+    ``as_static``, so the enumeration drops the row and a pin reports the reason."""
+    if not k_axis.extent.is_static:
+        return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is not built"
     big_k = k_axis.extent.as_static()
     if big_k % width == 0:
         return None
     return f"split-K width {width} does not divide K={big_k}; pick a dividing split width."
-
-
-def splitk_materialized_b(node: Fold) -> str | None:
-    """Every channel's B must be a gmem ``Load`` — a computed B has no index to σ-reindex."""
-    if all(isinstance(ch.b, Load) for ch in node.channels):
-        return None
-    return "split-K needs a materialized B on every channel — a computed B has no gmem index to σ-reindex"
 
 
 # ---- the register strip ------------------------------------------------------------------------ #
@@ -284,7 +359,15 @@ def splitk_materialized_b(node: Fold) -> str | None:
 
 def strip_width(extent: int, width: int) -> str | None:
     """The pointwise strip hands each thread ``width`` CONTIGUOUS inner-axis elements, so the width
-    must tile the inner free extent."""
+    must tile the inner free extent.
+
+    Not an unimplemented mask — MEASURED. The one form that masks the overhang without breaking the
+    strip's flat shape slides the last cell back onto the final full run (``min(cell·width,
+    extent − width)``, idempotent because the cell is a pure map), and that slid base is no longer a
+    provably aligned affine form, so ``050_vectorize_loads`` / ``080_vectorize_stores`` decline —
+    which is the only thing the strip exists to buy. On a V100, gelu over 65536×255 (no width tiles
+    255): the flat per-cell map runs 158.5 µs while the slid ``f2`` / ``f4`` / ``f8`` strips run
+    199.5 / 220.2 / 390.8 µs. The refused rows are strictly worse than the row that remains."""
     if width <= 1 or (extent and extent % width == 0):
         return None
     return f"register strip width {width} does not divide the inner free extent {extent}"
@@ -309,6 +392,55 @@ def fragment_epilogue(epilogue: Body) -> str | None:
                 "token to use the scalar tier."
             )
         defs.update(s.defines())
+    return None
+
+
+def _split_addressable(index: tuple, shape, name: str, atom_ext: int, trailing: bool) -> str | None:
+    """Whether the fragment store's per-cell addressing — the cell base evaluated once at the atom
+    origin, then ``+ col`` / ``+ row · ldm`` across the atom — is exact for an axis that reaches the
+    buffer as a split dim pair. It is when the row-major flatten recomposes the pair to an affine
+    address (the strides match the split), or when the ``%`` dim is the innermost carrier and its
+    modulus is a multiple of the atom extent, so an aligned atom never straddles a ``Q`` boundary."""
+    dims = [d for d, e in enumerate(index) if name in e.free_vars()]
+    if len(dims) < 2:
+        return None
+    q = split_pair(index, name)
+    if q is None:
+        return "not a bare f/Q, f%Q pair"
+    inner = index[dims[1]]
+    if not (isinstance(inner, BinaryExpr) and inner.op == "%"):
+        return "the quotient dim is the inner one"
+    if trailing and dims[1] != len(index) - 1:
+        return "the remainder dim is not the contiguous one"
+    if shape is not None and len(shape) == len(index) and all(getattr(d, "is_static", False) for d in shape):
+        stride, strides = 1, [1] * len(index)
+        for d in reversed(range(len(index))):
+            strides[d] = stride
+            stride *= shape[d].as_static()
+        if strides[dims[0]] == q * strides[dims[1]]:
+            return None  # row-major recomposition — the address is affine in the axis
+    if q % atom_ext:
+        return f"Q={q} is not a multiple of the {atom_ext}-wide atom cell"
+    return None
+
+
+def warp_split_store(tail: list, free: tuple, atom_shape: tuple, shapes: dict) -> str | None:
+    """The fragment epilogue addresses the output (and each epilogue load) per ATOM: the cell base
+    is evaluated once at the atom origin and the lanes add ``col`` / ``row · ldm``. A re-fused
+    split axis spells its coordinate across two buffer dims (``[…, f/Q, …, f%Q]``), and that is
+    addressable only under :func:`_split_addressable`; otherwise the scalar tiers, which evaluate
+    every element's index, are the kernel's tiers."""
+    roles = [(free[-1].name, atom_shape[1], "n", True)]
+    if len(free) >= 2:
+        roles.append((free[-2].name, atom_shape[0], "m", False))
+    for s in tail:
+        if not isinstance(s, (Write, Load)):
+            continue
+        buf = s.output if isinstance(s, Write) else s.input
+        for name, ext, role, trailing in roles:
+            why = _split_addressable(s.index, getattr(shapes.get(buf), "shape", None), name, ext, trailing)
+            if why is not None:
+                return f"warp TILE: the {role} axis reaches {buf} as a split dim pair the fragment store cannot address ({why})"
     return None
 
 
@@ -366,12 +498,8 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     per element (the same rule flash's ``stageable`` flag states). A byte slab's fill runs 16 B
     chunks and its cp.async row pad is 16 B (``_addr.BYTE_SLAB_PAD``), so its inner span — and,
     canonical-B, the gmem row stride N — must be 16-divisible."""
-    if stage.split and stage_split_groups(c) is not None:
-        return None  # one multiply consumes both edges — there is one transport group, nothing to cut
     atom = tile.atom
-    sync_copy = stage.transport == "sync" and atom.sync_copy_staging
-    if atom.materialized_edges_only and not sync_copy:
-        return None
+    sync_copy = stage.transport == "smem" and atom.sync_copy_staging
     bk_elems = tile.bk * atom.atom_k
     m, n = tile.m, tile.n
     a_nbytes, b_nbytes = atom.operand_dtype("a").nbytes, atom.operand_dtype("b").nbytes
@@ -404,13 +532,13 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     )
     box_ok = max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
     tma_ok = (
-        stage.transport == "tma"
+        stage.transport == "smem-tma"
         and rank_ok
         and box_ok
         and _warp_tma(c.axis, n.axis, n.tile, bk_elems, a_nbytes, b_nbytes, n.mask, c.b_trans)
     )
     vector_copy_ok = _warp_vector_copy(c.axis, n.tile, bk_elems, n.mask, c.b_trans)
-    cp_ok = stage.transport == "cp.async" and vector_copy_ok
+    cp_ok = stage.transport == "smem-async" and vector_copy_ok
     sync_ok = sync_copy and vector_copy_ok
     if not (tma_ok or cp_ok or sync_ok):
         return None
@@ -433,7 +561,7 @@ def clamp_depth(stage: Stage, slot_bytes: int, budget: int) -> int:
 def warp_operand_dtype(c: Fold, tile: TilePlan, a_dtype) -> str | None:
     """A MATERIALIZED ``a`` edge must already carry the atom's own operand dtype: the transports that
     fill its fragment — gmem-direct ``ldmatrix``, cp.async, TMA — move raw BYTES and cannot convert.
-    Only the sync compute-fill converts (on the slab store), which is why a mixed pair reaches the
+    Only the smem compute fill converts (on the slab store), which is why a mixed pair reaches the
     warp tier through the mixed-A promotion's cone instead. A COMPUTED edge is exempt for exactly
     that reason."""
     if not isinstance(c.a, Load) or a_dtype == tile.atom.operand_dtype("a"):
@@ -441,44 +569,61 @@ def warp_operand_dtype(c: Fold, tile: TilePlan, a_dtype) -> str | None:
     return (
         f"warp TILE: atom {tile.atom.name} takes a {tile.atom.operand_dtype('a')} A operand but this "
         f"contraction's A is {a_dtype} — a copy transport cannot convert it. The mma tier is reachable "
-        f"through the converting sync compute-fill (the mixed-A cone), or drop the atom for the scalar tier."
+        f"through the converting smem compute fill, or drop the atom for the scalar tier."
     )
 
 
-def computed_operand_cover(c: Fold, tile: TilePlan) -> str | None:
-    """Geometry required by a sync compute-filled contraction operand.
+def computed_operand_cover(c: Fold, tile: TilePlan, *, converting_a: bool = False) -> str | None:
+    """Geometry required by a smem compute-filled contraction operand.
 
-    Every compute-filled edge needs static K because the staged driver unrolls fixed K chunks. A
-    computed A leaves B on the async-copy path, whose contiguous N-vector copy cannot clamp a
+    A computed A leaves B on the async-copy path, whose contiguous N-vector copy cannot clamp a
     partial inner row element-by-element, so N must be exact. A computed B leaves materialized A
     as the async operand; M is its *outer* slab row and can be safely clamped as a whole. Computed
     B's own per-cell fill clamps N before evaluating the generic producer cone.
+
+    A SYMBOLIC K rides the fill's own K mask: the cone's reads clamp in-bounds and every slab lane
+    whose k index reaches past the runtime extent stores the fold identity 0 (the bilinear reading
+    pins ⊕ = add, so a zero A contributes nothing and the drain may read the whole chunk
+    unconditionally). What that mask cannot cover is a BYTE-COPIED peer whose slab row is K-MAJOR —
+    a materialized A, and a transposed B, both stage K as the slab's contiguous inner dim, so their
+    cp.async chunk runs ALONG K and a clamped chunk START still copies past the extent. Those keep
+    the refusal; a converting materialized A does not, since it rides the fill as a cone.
     """
     if not c.axis.extent.is_static:
-        return "a computed contraction operand needs a static K — the sync compute-fill has no K mask"
+        if isinstance(c.a, Load) and not converting_a:
+            return (
+                "a materialized A stages K-major (K is the slab's contiguous row), so its cp.async "
+                "chunk runs along K and cannot clamp a symbolic K's partial tail; the masked fill "
+                "covers a COMPUTED (or converting) A only"
+            )
+        if c.b_trans:
+            return (
+                "a transposed B stages N-major (K contiguous), so its cp.async chunk runs along K "
+                "and cannot clamp a symbolic K's partial tail; pin a canonical B layout"
+            )
     materialized_b = [isinstance(ch.b, Load) for ch in c.channels]
     if any(materialized_b) and not all(materialized_b):
-        return "sync compute-fill requires homogeneous B channels; mixed computed/materialized B layouts stay on the demoted reading"
+        return "the smem compute fill requires homogeneous B channels; mixed computed/materialized B layouts stay on the demoted reading"
     if tile.n.mask and any(isinstance(ch.b, Load) for ch in c.channels):
         return (
-            f"a sync compute-fill with a materialized B needs a TILE whose N width exactly covers "
+            f"a smem compute fill with a materialized B needs a TILE whose N width exactly covers "
             f"the static output columns (N={tile.n.axis.extent}; copied inner-row chunks cannot "
             f"clamp individual N cells); pick a dividing tile."
         )
     return None
 
 
-def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs) -> str | None:
-    """A materialized edge beside a compute-filled operand must already have the atom dtype.
+def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs, *, converting_a: bool = False) -> str | None:
+    """Every BYTE-COPIED edge of a compute-filled contraction must already have the atom dtype.
 
-    The ``sync`` stage evaluates computed cones into their typed shared-memory slabs, but it
-    *copies* every materialized peer byte-for-byte.  A copied f32 edge therefore cannot feed an
-    f16 ``ldmatrix`` fragment merely because another edge is computed; it must take the demoted
-    scalar reading (or an explicitly converting producer cone).  Computed edges are exempt because
-    their slab store performs the normal typed conversion.
+    The ``smem`` stage evaluates computed (and converting) operands into their typed shared-memory
+    slabs, but it *copies* every materialized peer byte-for-byte.  A copied f32 edge therefore
+    cannot feed an f16 ``ldmatrix`` fragment merely because another edge is filled. Filled edges
+    are exempt because their slab store performs the normal typed conversion — ``converting_a``
+    marks a materialized ``a`` that rides the converting fill rather than the copy.
     """
     for edge, role in ((c.a, "a"), *((ch.b, "b") for ch in c.channels)):
-        if not isinstance(edge, Load):
+        if not isinstance(edge, Load) or (role == "a" and converting_a):
             continue
         tensor = inputs.get(edge.input) if inputs else None
         # Structural scheduler fixtures (and a few pre-stamp inventory callers) intentionally do
@@ -491,23 +636,28 @@ def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs) -> str | None:
             continue
         got = tensor.dtype
         return (
-            f"sync compute-fill: materialized {role.upper()} edge {edge.input!r} is {got}, but "
-            f"atom {tile.atom.name} copies it into a {want} slab without conversion; use the "
-            "demoted scalar reading or an explicitly converting producer cone"
+            f"smem compute fill: materialized {role.upper()} edge {edge.input!r} is {got}, but "
+            f"atom {tile.atom.name} copies it into a {want} slab without conversion; only the "
+            "``a`` role has a converting fill"
         )
     return None
 
 
-def computed_a_cover(c: Fold, tile: TilePlan) -> str | None:
-    """Compatibility alias for callers/tests phrased around the original computed-A lane."""
-    return computed_operand_cover(c, tile)
-
-
-def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1) -> Stage | None:
-    """The ``sync`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
-    — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and cp.async / TMA are
-    copy transports that cannot evaluate a producer cone), so it has no gmem-direct ``""`` sibling
-    and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed ``budget``: one A
+def resolve_fill_stage(
+    c: Fold,
+    tile: TilePlan,
+    budget: int,
+    want_depth: int = 1,
+    inputs=None,
+    why: list[str] | None = None,
+    seam: tuple | None = None,
+    k_axis: Axis | None = None,
+    producer: Fold | None = None,
+) -> Stage | None:
+    """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile``
+    — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the byte-copy /
+    cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it has no
+    gmem-direct ``""`` sibling and a ``STAGE`` pin can only choose its DEPTH. ``None`` when the slabs exceed ``budget``: one A
     slab, one B slab per channel, and one fp32 row per bridged statistic (``ops.cone_seam``'s
     ``stats`` — the same node boundary the materializer fills through).
 
@@ -517,21 +667,39 @@ def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
     overlap, it runs on the drain's own threads. Measured on the gemma gate_up edge at M=512 (5090)
     the ring LOSES (897 vs 665 µs) — the extra B slot alone crosses the smem occupancy quantization
     — but at decode M (``tile_m ≤ 32``) the A slab and stat rows are tiny and the tradeoff inverts,
-    so both depths are enumerated as fork siblings and measured per shape."""
+    so both depths are enumerated as fork siblings and measured per shape.
+
+    ``k_axis`` overrides the stored contraction axis when the contraction is a derived singleton
+    marker whose enclosing Fold owns the actual K sweep. ``why`` collects the decline reason when
+    the tier refuses, so a PINNED caller reports the gate it actually hit instead of one catch-all
+    sentence."""
     atom = tile.atom
-    if atom.materialized_edges_only:
-        return None
+    k_axis = k_axis or c.axis
     if atom.operand_dtype("a").nbytes < 2:
-        return None  # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
+        # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
+        decline(why, f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte")
+        return None
     bk_elems = tile.bk * atom.atom_k
+    if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
+        # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
+        decline(
+            why,
+            f"the smem compute fill unrolls whole K chunks, but its {bk_elems}-element chunk "
+            f"does not divide the contraction K={k_axis.extent.as_static()}",
+        )
+        return None
     a_nbytes = atom.operand_dtype("a").nbytes
     b_nbytes = atom.operand_dtype("b").nbytes
-    _, _, stats = cone_seam(c.a) if not isinstance(c.a, Load) else ((), (), ())
+    _, _, stats = seam if seam is not None else cone_seam(c.a, c.axis.name) if not isinstance(c.a, Load) else ((), (), ())
     a_bytes = tile.m.tile * bk_elems * a_nbytes
     stat_bytes = len(stats) * tile.m.tile * 4
     sync_bytes = stat_bytes
     async_bytes = 0
-    if isinstance(c.a, Load):
+    # A materialized A whose dtype the atom cannot bind rides the CONVERTING synchronous fill —
+    # per-cell load + typed slab store — never the byte copy (which cannot convert).
+    a_tensor = inputs.get(c.a.input) if inputs and isinstance(c.a, Load) else None
+    a_converts = a_tensor is not None and a_tensor.dtype != atom.operand_dtype("a")
+    if isinstance(c.a, Load) and not a_converts:
         async_bytes += a_bytes
     else:
         sync_bytes += a_bytes
@@ -540,185 +708,19 @@ def resolve_sync_stage(c: Fold, tile: TilePlan, budget: int, want_depth: int = 1
             async_bytes += tile.n.tile * bk_elems * b_nbytes
         else:
             sync_bytes += tile.n.tile * bk_elems * b_nbytes
-    if sync_bytes + async_bytes > budget:
+    # A scheduled contraction producer contributes its own streamed and invariant operand slabs.
+    # They do not ring: the streamed slab dies inside the block and the invariant slab does not
+    # advance. Reserve both from the producer interface supplied by the scheduler.
+    producer_k = producer.axis.extent.as_static() if producer is not None and producer.axis.extent.is_static else 0
+    producer_bytes = producer_k * (bk_elems * b_nbytes + tile.m.tile * a_nbytes)
+    if sync_bytes + async_bytes + producer_bytes > budget:
+        decline(why, f"the smem compute fill's slabs need {sync_bytes + async_bytes + producer_bytes} B, over the {budget} B smem budget")
         return None
-    depth = want_depth if want_depth >= 2 and async_bytes and sync_bytes + want_depth * async_bytes <= budget else 1
-    computed = [] if isinstance(c.a, Load) else [operand_name(c.a)]
+    fixed = sync_bytes + producer_bytes
+    depth = want_depth if want_depth >= 2 and async_bytes and fixed + want_depth * async_bytes <= budget else 1
+    computed = [operand_name(c.a)] if a_converts or not isinstance(c.a, Load) else []
     computed.extend(operand_name(ch.b) for ch in c.channels if not isinstance(ch.b, Load))
-    return Stage(depth=depth, transport="sync", smem=tuple(computed), bk_elems=bk_elems)
-
-
-# ---- the twisted streaming pair ---------------------------------------------------------------- #
-
-
-def _reaches(stmt, edge) -> bool:
-    """Whether ``edge`` occurs anywhere under ``stmt``. The walk crosses operand EDGES as well as
-    nested bodies: an edge is not a body dependency (``Fold.nested`` withholds a contraction's
-    edges by design), and where an edge is consumed is exactly the question here."""
-    if stmt is edge:
-        return True
-    if isinstance(stmt, Fold) and any(_reaches(e, edge) for e in stmt.operands):
-        return True
-    return any(_reaches(s, edge) for b in stmt.nested() for s in b)
-
-
-def stage_split_groups(node: Fold) -> str | None:
-    """Whether ``split`` — the transport GROUP GRANULARITY — is structurally available on ``node``.
-    It cuts the fold's staged edges into one transport group EACH, which needs ≥ 2 staged operand
-    edges consumed at DISTINCT positions of the derived evaluation: the streaming pair's score edge
-    reads K at the head of the step, its synthesized PV reads V further down, so each group refills
-    in the phase that no longer reads it. A contraction consumes both edges in ONE multiply, so
-    there is a single group and nothing to cut — which is why the matmul resolvers decline the
-    value, now for a stated reason rather than by name.
-
-    STRUCTURAL, not geometric: the answer is a property of how the term is BUILT, so a refused pin
-    is a user error rather than a budget."""
-    if is_contraction(node):
-        return "STAGE split: a contraction's one multiply consumes both operand edges — one transport group, nothing to cut"
-    steps = list(node.step_stmts())
-    at = {i for e in node.operands if (i := next((n for n, s in enumerate(steps) if _reaches(s, e)), None)) is not None}
-    if len(at) >= 2:
-        return None
-    return (
-        f"STAGE split cuts a fold's staged edges into one transport group each; this fold consumes its "
-        f"{len(node.operands)} operand edge(s) at {len(at)} position(s) of its derived evaluation."
-    )
-
-
-def twisted_warp_columns(work) -> str | None:
-    """Constraint 15 — a TWISTED site is m-ONLY. The materializer has no cross-warp merge of the
-    twisted ``(m, l, O)`` carrier (both flash sites are realized at ``units=(um, 1)``), so a warp
-    inventory spending a second warp COLUMN names a stream that cannot be materialized at all."""
-    if work is None or work.kind != "warp" or work.units[1] == 1:
-        return None
-    return (
-        f"the twisted streaming pair is m-only (WN = 1) — there is no cross-warp merge of the (m, l, O) "
-        f"carrier; WORK {work.spell()} spends {work.units[1]} warp columns."
-    )
-
-
-def twisted_atom(atom, d_v: int) -> str | None:
-    """The mma atom's own demands on a streaming pair: the C→A register repack that feeds the P@V
-    fragments from the score's accumulator (constraint 11), and a value dim the PV fragment tiles
-    exactly (``WN·FN·atom_n = d`` at ``WN = 1`` — constraint 2)."""
-    if not atom.c_to_a_repack:
-        return f"atom {atom.name} has no C→A register repack — the P@V fragment feed has no tier without it"
-    if d_v % atom.atom_n:
-        return f"the value dim {d_v} is not a multiple of the P@V atom's n width {atom.atom_n}"
-    return None
-
-
-def twisted_block(stream: Fold, qk_tile: TilePlan) -> str | None:
-    """The streaming key block and the query-row block must COVER their extents exactly when those
-    are STATIC: a static ragged tail has no fragment mask (the symbolic path masks at the fragment
-    and guards the gmem reads, so a symbolic extent is fine). ``qk_tile`` is the PLACED score
-    slice, so its ``m`` side is the query axis and its ``n`` tile is the streamed key block."""
-    kv, m = stream.axis.extent, qk_tile.m.axis.extent
-    if kv.is_static and kv.as_static() % qk_tile.tile_n:
-        return f"the {qk_tile.tile_n}-key streaming block does not divide the static KV extent {kv.as_static()}"
-    if m.is_static and m.as_static() % qk_tile.tile_m:
-        return f"the {qk_tile.tile_m} query rows per CTA do not divide the static M extent {m.as_static()}"
-    return None
-
-
-def twisted_sites_agree(qk_tile: TilePlan, pv_tile: TilePlan) -> str | None:
-    """The QK / PV SIBLING EQUALITY — constraints 3 and 8. The two sites are enumerated
-    independently (they are two sites, and making them agree is what the recursion is for), so the
-    pair reconciles here: both schedule the mma tier or neither, the PV rows ARE the score's rows
-    (one register query chain each), and the PV K-chunk is the streamed key block the score just
-    produced. The block must also be a whole number of P@V atom-K steps — the C→A repack pairs
-    k-adjacent score fragments, so an odd one leaves a partial expect fold."""
-    if qk_tile.is_warp != pv_tile.is_warp:
-        return "the twisted pair schedules both sites on the mma tier or neither"
-    if not qk_tile.is_warp:
-        return None
-    if pv_tile.reg_m != qk_tile.reg_m:
-        return f"the P@V register query tiles ({pv_tile.reg_m}) must match the score's ({qk_tile.reg_m}) — one chain each"
-    atom_k = pv_tile.atom.atom_k
-    if qk_tile.tile_n % atom_k:
-        return f"the {qk_tile.tile_n}-key streaming block is not a multiple of the P@V atom K-step {atom_k}"
-    if pv_tile.bk != max(1, qk_tile.tile_n // atom_k):
-        return (
-            f"the P@V K-chunk k{pv_tile.bk} does not cover the {qk_tile.tile_n}-key streaming block "
-            f"(k{max(1, qk_tile.tile_n // atom_k)} at atom_k={atom_k})"
-        )
-    return None
-
-
-def splitkv_slice(stream: Fold, qk_tile: TilePlan, plan: ReducePlan) -> str | None:
-    """What a flash split-KV partition (``REDUCE=g<n>k``) demands. The FINALIZE is the first half
-    and it is categorical: the twisted ``(m, l, O)`` state folds across partitions through an
-    exp-family LSE combine, which no atomic spells — ``030_split_reduce``'s deferred-kernel arm is
-    the only realization. The second is geometric: the slices must be BLOCK-WHOLE, since the staged
-    chunking and the fragment column masks assume a whole number of streaming key blocks. A SYMBOLIC
-    kv always splits — ``030_split_reduce`` builds the bn-aligned runtime slice width and the
-    absolute bound the realizer stops and masks against."""
-    if plan.finalize != "kernel":
-        return "the twisted (m, l, O) state cannot finalize atomically — its e^{Δm} rescale is not an atomic; pin REDUCE=g<n>k"
-    ext = stream.axis.extent
-    if not ext.is_static:
-        return None
-    n = ext.as_static()
-    if n % plan.cta:
-        return f"split-KV width {plan.cta} does not divide the KV extent {n}"
-    if (n // plan.cta) % qk_tile.tile_n:
-        return f"the split-KV slice {n // plan.cta} is not a whole number of {qk_tile.tile_n}-key streaming blocks"
-    return None
-
-
-def resolve_twisted_stage(stream: Fold, qk: Fold, qk_tile: TilePlan, pv_tile: TilePlan, stage: Stage, budget: int) -> Stage | None:
-    """Resolve an operand ``Stage`` against a warp-flash streaming pair — the K/V slabs of ONE
-    ``bn``-key streaming step (K ``bn × head_dim`` in its native N-major layout, V ``bn × d_v``
-    K-major; both verbatim row copies, so staging stays bit-identical to gmem-direct). ``None`` when
-    the transport declines or the slabs exceed ``budget``.
-
-    Two transports resolve: **cp.async** (cooperative fills, +16 elem padded rows for the
-    bank-conflict break) and **TMA** (the batched K/V encode as rank-N boxes with leading extent-1
-    dims, so the slabs stay dense and take the hardware swizzle instead of padding; box dims cap at
-    the 256 hardware limit). ``sync`` has nothing to overlap. A SYMBOLIC kv stages under both — TMA
-    zero-fills the box overhang, cp.async clamp-reads the tail's key rows to the last valid key, and
-    the drain's tail masks zero their P columns either way; a STATIC, non-block-divisible kv has no
-    tail mask, so it stays gmem-direct.
-
-    ``split`` is the ALTERNATING single-slab pipeline: one K slab + one V slab, each on its own
-    mbarrier, refilled in the phase that no longer reads it (K under softmax + P·V, V under the next
-    step's Q·K) — the FA-2 choreography that overlaps a WIDE streaming block's copies in HALF the
-    paired ring's smem. It stages the QUERY tile through smem too (a padded row-major slab filled
-    once, its A fragments ldmatrix'd per atom-K chunk), which frees the resident Q registers that
-    made the wide block spill. Its structural eligibility is :func:`stage_split_groups`; the sizing
-    is here.
-
-    A resolver rather than a predicate, for the same reason the matmul ones are: the legal answer is
-    a SIZE (the ring depth the budget affords), and the row carries the RESOLVED spelling."""
-    if stage.transport not in ("cp.async", "tma"):
-        return None  # sync has nothing to overlap on a stream — there is no compute fill here
-    kv, bn = stream.axis.extent, qk_tile.tile_n
-    if kv.is_static and kv.as_static() % bn:
-        return None  # a static ragged tail has no mask on either transport — stay gmem-direct
-    head_dim, d_v = qk.axis.extent.as_static(), pv_tile.tile_n
-    elem_bytes = qk_tile.atom.operand_dtype("b").nbytes
-    if stage.transport == "tma":
-        if max(bn, head_dim, d_v) > _TMA_MAX_BOX:
-            return None
-        if (head_dim * elem_bytes) % _TMA_ALIGN or (d_v * elem_bytes) % _TMA_ALIGN:
-            return None
-        pad = 0  # TMA deposits dense — the hardware swizzle replaces the row pad
-    else:
-        pad = _STREAM_PAD_ELEMS
-    slot_bytes = bn * (head_dim + d_v + pad) * elem_bytes
-    if stage.split:
-        q_bytes = qk_tile.tile_m * (head_dim + _STREAM_Q_PAD_ELEMS) * elem_bytes
-        if q_bytes + slot_bytes > budget:
-            return None
-        # Single-slab by construction (``Stage`` rejects a deeper split) — the overlap comes from
-        # the phase split, and the ldmatrix ping-pong has no slot to alternate over.
-        return replace(stage, reg_depth=1, bk_elems=bn)
-    if slot_bytes > budget:
-        return None
-    # ``reg_depth`` <= 2: the streaming drains support the two-slot ldmatrix ping-pong (the next
-    # atom-K step's B fragments load while the current step's mmas consume, breaking the WAR hazard
-    # on the fragment registers); deeper ping-pongs cost registers the fm chains do not have.
-    return replace(stage, depth=clamp_depth(stage, slot_bytes, budget), reg_depth=min(stage.reg_depth, 2), bk_elems=bn)
+    return Stage(depth=depth, transport="smem", smem=tuple(computed), bk_elems=bk_elems)
 
 
 def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: int) -> Stage | None:
@@ -726,9 +728,7 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
     when no chunk fits at the requested depth the depth steps down, single-buffer last."""
-    if stage.transport not in ("tma", "cp.async") or not c.axis.extent.is_static:
-        return None
-    if stage.split and stage_split_groups(c) is not None:
+    if stage.transport not in ("smem-tma", "smem-async") or not c.axis.extent.is_static:
         return None
     # A masked-N B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
     # hang on the misaligned copy; a transposed B has no scalar drain variant (the warp tier stages
@@ -742,7 +742,7 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
     # gmem-direct (correct, converts per element) instead of risking a mis-sized slab.
     if any(t is not None and t.dtype.nbytes < 2 for t in (inputs.get(c.a.input), inputs.get(c.b.input))):
         return None
-    if stage.transport == "tma" and not (
+    if stage.transport == "smem-tma" and not (
         _tma_operand_rank(c.a.index, tile.m.axis.name, c.axis.name) and _tma_operand_rank(c.b.index, tile.n.axis.name, c.axis.name)
     ):
         return None
@@ -750,7 +750,7 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
     # contract). A register-only tile launches the scalar default block over unrelated cells.
     if tile.launch_threads is None:
         return None
-    if stage.transport == "tma" and max(tile.m.tile, tile.n.tile) > _TMA_MAX_BOX:
+    if stage.transport == "smem-tma" and max(tile.m.tile, tile.n.tile) > _TMA_MAX_BOX:
         return None
     k = c.axis.extent.as_static()
     elem_bytes = inputs[c.a.input].dtype.nbytes
@@ -772,33 +772,21 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
 
 
 __all__ = [
-    "computed_a_cover",
     "computed_operand_cover",
     "computed_operand_copy_dtype",
     "enforce",
     "fragment_epilogue",
-    "coop_band_layout",
     "producer_band",
     "producer_transport",
     "resolve_scalar_stage",
-    "resolve_sync_stage",
-    "resolve_twisted_stage",
+    "decline",
+    "resolve_fill_stage",
     "resolve_warp_stage",
     "scalar_block_threads",
-    "splitk_materialized_b",
-    "splitk_slice_k_step",
     "splitk_width",
-    "splitkv_slice",
-    "stage_split_groups",
     "stage_target",
     "strip_width",
-    "twisted_atom",
-    "twisted_block",
-    "twisted_sites_agree",
-    "twisted_warp_columns",
     "warp_k_step",
-    "warp_atom_edges",
-    "warp_atom_stage",
     "warp_atom_target",
     "warp_a_columns",
     "warp_operand_dtype",

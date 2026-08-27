@@ -18,15 +18,19 @@ Protocol (length-prefixed pickle on stdin/stdout):
   and ``want_ref`` (return that run's ``(input_data, outputs)`` as ``run_io`` — the reference
   the parent feeds each pinned row's wrong-answer check).
 - Response: ``{"ok": True, "result": BenchmarkResult, "results": dict|None, "torch_available": bool,
-  "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None}``
-  or ``{"ok": False, "error": str, "traceback": str}`` on exception.
+  "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None,
+  "greedy_error": str|None, "reference_run_us": float|None}``
+  or ``{"ok": False, "error": str, "traceback": str, "cache_miss": bool, "compile_budget": bool}``
+  on exception — the two flags rebuild parent-side the exception kinds a pickled string loses.
 - Worker imports cupy / torch lazily on first request, writes ``<8-byte length><pickled response>``.
 - A ``worker_warmup`` request initializes CuPy and the CUDA context without consuming a candidate's wall budget.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
 
 Errors raised inside ``benchmark_program`` (bench_compile_timeout_s,
 bench_run_timeout_s, per-launch ``_KERNEL_TIMEOUT_MS``) propagate back
-as ``ok: False`` and the parent surfaces them as ``RuntimeError``.
+as ``ok: False`` and the parent surfaces them as ``RuntimeError``. A
+``bench_compile_timeout_s`` overrun is the one kind the caller must tell apart — it measured
+no latency — so it rides back as ``compile_budget: True`` and the parent re-raises it as such.
 
 A failing bench may have left the CUDA context in a sticky-error state: an
 illegal / misaligned memory access corrupts the context so that *every*
@@ -136,26 +140,46 @@ async def _run_job(req: dict) -> dict:
         # In-process within this child — the parent's SIGKILL is the wall-timeout backstop.
         backend = CudaBackend(bench_compile_timeout_s=60.0, bench_run_timeout_s=60.0)
         kind, payload = spec
-        accuracy_error = run_io = correctness = None
+        accuracy_error = run_io = correctness = greedy_error = reference_run_us = stats_sym_env = None
+        retire_worker = False
         if kind == "frontend_graph":
             from emmy.commands.run import bench_lowered_vs_torch
 
             want_reference = req.get("want_ref", False) or req.get("strict_accuracy", False)
-            response = await bench_lowered_vs_torch(
-                payload,
-                req["graph"],
-                backend,
-                seed=req["seed"],
-                do_bench=True,
-                warmup=req["warmup"],
-                iters=req["iters"],
-                bench_backends=req["bench_backends"],
-                strict_accuracy=req.get("strict_accuracy", False),
-                return_reference=want_reference,
-            )
-            results, bench, avail, captured, accuracy_error = response[:5]
-            if want_reference:
-                correctness, run_io = response[5:]
+            refs, ref_times, sym_envs = [], [], []
+            try:
+                response = await bench_lowered_vs_torch(
+                    payload,
+                    req["graph"],
+                    backend,
+                    seed=req["seed"],
+                    do_bench=True,
+                    warmup=req["warmup"],
+                    iters=req["iters"],
+                    bench_backends=req["bench_backends"],
+                    ref_out=refs if want_reference else None,
+                    ref_us_out=ref_times if want_reference else None,
+                    sym_env_out=sym_envs,
+                    strict_accuracy=req.get("strict_accuracy", False),
+                    return_reference=want_reference,
+                )
+                results, bench, avail, captured, accuracy_error = response[:5]
+                if want_reference:
+                    correctness, run_io = response[5:]
+            except RuntimeError as exc:
+                # An embedded Loop golden has no Torch twin. Its first greedy execution can
+                # finish and produce the candidates' same-input reference before a later
+                # repeated timing crosses the watchdog. Preserve only that completed
+                # reference; the parent marks greedy timing failed and never selects it.
+                if payload is not None or not refs:
+                    raise
+                results, bench, avail, captured, accuracy_error = None, None, False, False, None
+                greedy_error = f"{type(exc).__name__}: {exc}"
+                retire_worker = _hung(exc)
+            if run_io is None:
+                run_io = refs[0] if refs else None
+            reference_run_us = ref_times[0] if ref_times else None
+            stats_sym_env = sym_envs[0] if sym_envs else None
         elif kind == "trace_args":
             import types
 
@@ -166,19 +190,31 @@ async def _run_job(req: dict) -> dict:
             if bundle is None:
                 raise RuntimeError("trace_args produced no runnable module (embedded or debug IR has none)")
             module, args_t, kwargs = bundle
-            if req.get("accuracy"):
+            if req.get("accuracy") or req.get("strict_accuracy"):
                 # The run path's correctness gate, in-child: bind the rebuilt module's real
                 # inputs, run the emmy program on them, compare vs the eager forward. A
                 # numeric failure skips the bench — the parent aborts on the verdict, so
                 # benching a miscompiling program would be wasted GPU time. ``want_ref``
                 # ships this run's (inputs, outputs) back as the pinned rows' wrong-answer
                 # reference (bounded: pinned rows only exist for --code inputs).
-                from emmy.commands.run import _bind_inputs, _check_accuracy, _eager_output
+                from emmy.commands.run import (
+                    _bind_inputs,
+                    _check_accuracy,
+                    _comparison_outputs,
+                    _eager_output,
+                    _strict_correctness_proof,
+                )
 
                 input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
+                run_outputs = _comparison_outputs(run_result.outputs, req["graph"])
                 eager_out = _eager_output(module, args_t, kwargs)
-                accuracy_error = _check_accuracy(run_result.outputs, eager_out)
+                if req.get("strict_accuracy"):
+                    correctness = _strict_correctness_proof(run_outputs, eager_out)
+                    if correctness["status"] != "pass":
+                        accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
+                else:
+                    accuracy_error = _check_accuracy(run_outputs, eager_out)
                 if accuracy_error is not None:
                     return {
                         "result": None,
@@ -189,7 +225,7 @@ async def _run_job(req: dict) -> dict:
                         "run_io": None,
                     }
                 if req.get("want_ref"):
-                    run_io = (input_data, run_result.outputs)
+                    run_io = (input_data, run_outputs)
             results, bench, captured = await bench_full_model_real(
                 module,
                 args_t,
@@ -210,6 +246,10 @@ async def _run_job(req: dict) -> dict:
             "captured": captured,
             "accuracy_error": accuracy_error,
             "run_io": run_io,
+            "greedy_error": greedy_error,
+            "reference_run_us": reference_run_us,
+            "sym_env": stats_sym_env,
+            "_retire_worker": retire_worker,
             "correctness": correctness,
         }
 
@@ -253,8 +293,12 @@ def main() -> None:
             return
         dirty = False
         try:
-            resp = {"ok": True, **asyncio.run(_run_job(pickle.loads(body)))}
+            result = asyncio.run(_run_job(pickle.loads(body)))
+            dirty = bool(result.get("_retire_worker", False))
+            resp = {"ok": True, **result}
         except BaseException as exc:  # noqa: BLE001 — surface every failure mode to the parent
+            from emmy.compiler.backend.cuda.program import CompileBudgetExceeded
+
             # A bare ``SystemExit`` repr hides the cause (a CLI-style ``sys.exit`` after a
             # logged error) — point the parent at the traceback + stderr, where it lives.
             error = (
@@ -267,6 +311,7 @@ def main() -> None:
                 "error": error,
                 "traceback": traceback.format_exc(),
                 "cache_miss": isinstance(exc, InputsCacheMissError),
+                "compile_budget": isinstance(exc, CompileBudgetExceeded),
             }
             dirty = _hung(exc) or _context_dirty()
         payload = pickle.dumps(resp, protocol=pickle.HIGHEST_PROTOCOL)

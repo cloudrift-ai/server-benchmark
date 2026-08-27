@@ -1,0 +1,301 @@
+compute_cap:
+- 8
+- 0
+programs:
+- inputs: [q, k, v]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: k
+    op: input
+    outputs: [[k, f16, [1, 32, 1024, 128]]]
+  - id: q
+    op: input
+    outputs: [[q, f16, [1, 32, 1, 128]]]
+  - id: v
+    op: input
+    outputs: [[v, f16, [1, 32, 1024, 128]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [q, k, v]
+    outputs: [[scaled_dot_product_attention, f16, [1, 32, 1, 128]]]
+configs:
+- program: 0
+  target:
+    loop: 0
+  realizations:
+  - name: k_sdpa_reduce_5d9078.86f7ec81a812
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop/r2
+      STAGE: ''
+      TILE: ''
+      WORK: t128
+    measurements:
+      emmy_us: 24.3512
+      reference_us: 130.048
+      reference_backend: emmy-reference
+- program: 0
+  target:
+    loop: 1
+  realizations:
+  - name: k_sdpa_reduce_13dc30.f55ec127ee29
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      LOOPIFY: '0'
+      RASTER: ''
+      REDUCE: coop
+      STAGE: ''
+      TILE: ''
+      WORK: t1024
+    measurements:
+      emmy_us: 54.2151
+      reference_us: 173.056
+      reference_backend: emmy-reference
+loops:
+- inputs: [k, q]
+  outputs: [scaled_dot_product_attention_scaled]
+  nodes:
+  - id: k
+    op: input
+    outputs: [[k, f16, [1, 32, 1024, 128]]]
+  - id: q
+    op: input
+    outputs: [[q, f16, [1, 32, 1, 128]]]
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_scale
+      value: 0.08838834764831843
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: scaled_dot_product_attention_scaled
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: scaled_dot_product_attention_scale
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: k
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in2]}
+                              input: q
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in0]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: scaled_dot_product_attention_scaled
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a1}}
+                        values: {tuple: [v1]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_5d9078
+    inputs: [scaled_dot_product_attention_scale, k, q]
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 32, 1, 1024]]]
+- inputs: [scaled_dot_product_attention_scaled, v]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_scaled
+    op: input
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 32, 1, 1024]]]
+  - id: v
+    op: input
+    outputs: [[v, f16, [1, 32, 1024, 128]]]
+  - id: scaled_dot_product_attention
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: scaled_dot_product_attention_scaled
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a1}}
+                        dtype: null
+                    - class: Accum
+                      fields:
+                        name: acc0
+                        value: in0
+                        op: {elementwise: maximum}
+                        dtype: null
+                        axes: {tuple: [a1]}
+                        base: null
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in1]}
+                        input: scaled_dot_product_attention_scaled
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a1}}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
+                    - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
+                    - class: Accum
+                      fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+              - class: Assign
+                fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 1024}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in2]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a3}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                          - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                          - class: Assign
+                            fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in3]}
+                              input: v
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a3}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: scaled_dot_product_attention
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a2}}
+                        values: {tuple: [acc2]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_13dc30
+    inputs: [scaled_dot_product_attention_scaled, v]
+    outputs: [[scaled_dot_product_attention, f16, [1, 32, 1, 128]]]
+gpu_name: NVIDIA A100 80GB

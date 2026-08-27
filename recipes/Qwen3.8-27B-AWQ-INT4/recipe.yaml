@@ -1,0 +1,45 @@
+# Qwen3.8-27B W4A16 — the recommended serving configuration: stock vLLM, text-only, one RTX 4090.
+#
+#   emmy deploy local --recipe recipes/Qwen3.8-27B-AWQ-INT4
+#   emmy deploy ssh   --recipe recipes/Qwen3.8-27B-AWQ-INT4 --ssh user@host
+#
+# This is a DEPLOYMENT config, not an experiment: one variant, no workload grid, no `benchmark:` block. The workload
+# grid that justifies these values lives in experiments/Qwen3.8-27B-AWQ-INT4/serving/.
+#
+# There is no Emmy lane here. Exact compiler coverage is complete, but strict correctness and attention performance
+# still block a canonical golden file; see RESULTS.md for the measured qualification gates.
+tags:
+  - maintained
+
+model:
+  huggingface: "philbert440/Qwen3.8-27B-W4A16-AWQ"
+  rationale: "Dominant Qwen3.8 wave with high OR heat and Reddit engagement."
+  heat: 95
+  revision: 7908d42a71077a5e4dc458f273682b12dfe384a0
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    # 20.7 GiB of the 24 GiB card is weights: the W4A16 body plus embed_tokens and lm_head, which this checkpoint
+    # leaves unquantized at 248,320 x 5,120 each (~5.1 GiB together, and untied).
+    gpu_memory_utilization: 0.95
+    # Native context is 262,144 and does not fit. The measured KV pool at this utilization is 32,182 tokens, so 8,192
+    # leaves room for roughly 3.9 concurrent full-length sequences. Validated by retrieving a planted marker from a
+    # 7,768-token prompt, not by startup alone.
+    context_length: 8192
+    max_concurrent_requests: 4
+    vllm:
+      # A nightly, deliberately. The purpose-built `qwen38` release tag predates this checkpoint revision and fails
+      # inside EngineCore while building the tokenizer backend; this digest is the first verified working image.
+      image: "vllm/vllm-openai@sha256:dae7af23ea9b66b4f15de3d5e4ddebfdafa7be636be91d400184c1666f1b1462"
+      # --language-model-only drops the vision tower, which both W4A16 builds leave unquantized (~0.8 GiB). The 24 GB
+      # card has no room for it, so this recipe qualifies the text path only.
+      extra_args: >-
+        --language-model-only --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
+        --no-enable-prefix-caching
+
+matrices:
+  - deploy.gpu: "NVIDIA GeForce RTX 4090"
+    deploy.gpu_count: 1

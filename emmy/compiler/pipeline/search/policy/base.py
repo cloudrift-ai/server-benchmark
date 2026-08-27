@@ -28,6 +28,7 @@ from abc import ABC, abstractmethod
 
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
 from emmy.compiler.pipeline.search.db import PerfStats
+from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async
 
 
 class Search(ABC):
@@ -57,7 +58,9 @@ class Search(ABC):
         token back verbatim into :meth:`push` (as ``parent``) and
         :meth:`observe`."""
 
-    def observe(self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None) -> None:  # noqa: B027
+    def observe(  # noqa: B027
+        self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None, kernels: list | None = None
+    ) -> None:
         """Hook for the policy to consume a terminal's measurement.
         ``token`` is the one the terminal was popped with; ``stats``
         aggregates its per-iter latencies in microseconds (median /
@@ -65,7 +68,11 @@ class Search(ABC):
         ``"bench_fail"``. ``candidate`` is the *resolved* terminal Candidate —
         its ``graph`` carries the realized op ``knobs`` (the full config,
         including knobs stamped at deterministic lowering steps that never
-        appear as forks). Default no-op; :class:`TuningSearch` overrides it."""
+        appear as forks). ``kernels`` is the same terminal decomposed into its
+        PER-KERNEL ``(knobs, median_us, status)`` rows: a terminal is a Σ over
+        the kernels it lowered to, and one a structural fork made several of holds
+        several rows, so the row that earned a latency is a kernel's and never the
+        terminal's. Default no-op; :class:`TuningSearch` overrides it."""
 
     def note_bench(self, *, measured: bool) -> None:  # noqa: B027
         """Tell the policy whether the terminal required a live benchmark.
@@ -74,3 +81,13 @@ class Search(ABC):
         measured-candidate budget. Policies without such a budget ignore this
         hook.
         """
+
+    async def evaluate(self, token: object | None, cand, *, backend, db) -> None:
+        """Value one terminal the engine's loop yielded — WHOLLY policy: what a terminal is
+        worth (benching, caching, persistence, the training feed) is a search decision, and the
+        engine only awaits it. The default benches the terminal's kernels (cache/stub-aware) and
+        feeds :meth:`observe`; :class:`~.mcts.TuningSearch` extends it with the deployable -O3
+        re-bench and the prior's row protocol."""
+        stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
+        self.note_bench(measured=measured)
+        self.observe(token, stats, status, candidate=cand, kernels=per_kernel)

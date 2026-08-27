@@ -8,8 +8,7 @@ Submodules:
   ``ir/stmt.py`` and is re-exported here. Construction runs structural
   normalization (``normalize_body`` in ``ir/stmt.py``) then validation via
   ``__post_init__``.
-- :mod:`.splicer` — ``splice_*`` helpers used by ``loop/fusion`` to merge
-  adjacent ``LoopOp`` pairs.
+- :mod:`.splicer` — the DAG splicer used by ``loop/fusion``.
 
 The public surface below re-exports the common types so callers use
 ``from emmy.compiler.ir.loop import LoopOp, ...``.
@@ -31,7 +30,7 @@ from emmy.compiler.ir.loop.ir import (
     Stmt,
     Write,
 )
-from emmy.compiler.ir.loop.splicer import splice_graph, splice_loop_ops, splice_loops
+from emmy.compiler.ir.loop.splicer import splice_graph, splice_loops
 from emmy.compiler.ir.sigma import Sigma
 
 __all__ = [
@@ -53,6 +52,5 @@ __all__ = [
     "iter_body",
     "map_body",
     "splice_graph",
-    "splice_loop_ops",
     "splice_loops",
 ]

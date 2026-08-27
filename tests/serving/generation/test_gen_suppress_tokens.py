@@ -13,8 +13,10 @@ torch = pytest.importorskip("torch")
 def _model_with(suppress_ids):
     vllm_model_gen = pytest.importorskip("emmy.serving.vllm_model_gen")
     m = vllm_model_gen.EmmyGenModel.__new__(vllm_model_gen.EmmyGenModel)
-    # compute_logits touches only these three attributes; the identity processor makes the
-    # hidden-states argument stand in for the logits tensor.
+    # The surface compute_logits reads; the identity processor makes the hidden-states argument
+    # stand in for the logits tensor. Only the last pipeline stage owns the head, so the double
+    # is that stage — the single-rank case every non-pipelined deployment runs.
+    m._is_last_rank = True
     m.logits_processor = lambda lm_head, hidden: hidden
     m.lm_head = None
     m._suppress_token_ids = suppress_ids
@@ -31,3 +33,19 @@ def test_suppressed_ids_are_neg_inf_others_untouched():
 def test_no_suppress_list_is_noop():
     out = _model_with(None).compute_logits(torch.zeros((2, 8)))
     assert (out == 0).all()
+
+
+def test_coded_head_supplies_logits_before_the_processor():
+    model = _model_with(None)
+    model._coded_head_spec = object()
+    model._coded_head = lambda hidden: hidden + 7
+    out = model.compute_logits(torch.zeros((2, 8)))
+    assert (out == 7).all()
+
+
+def test_earlier_pipeline_stage_refuses_to_compute_logits():
+    """The head lives on the last stage only — the mirror of ``embed_input_ids``' first-stage guard."""
+    model = _model_with(None)
+    model._is_last_rank = False
+    with pytest.raises(RuntimeError, match="last pipeline stage"):
+        model.compute_logits(torch.zeros((2, 8)))

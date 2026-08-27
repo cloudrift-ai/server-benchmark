@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from typing import TYPE_CHECKING
 
-from emmy.compiler.dim import Dim
+from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.sigma import Sigma
+from emmy.compiler.structural import Structural
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.stmt.body import Body
@@ -145,7 +147,7 @@ def _canonical_dtype_name(dtype) -> str:
     return dtype.name
 
 
-_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u16", "u32", "u64"})
+_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u8", "u16", "u32", "u64"})
 _INTEGER_ELEMENTWISE_OPS = frozenset(
     {
         "add",
@@ -184,7 +186,7 @@ def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
         # extraction.  Use the usual C-style rank/sign rule instead: the widest unsigned type
         # wins a tie, while a strictly wider signed type can represent the narrower unsigned
         # range.  This gives u16+u32 -> u32, u64+i32 -> u64, and i64+u32 -> i64.
-        widths = {"i16": 16, "u16": 16, "i32": 32, "u32": 32, "i64": 64, "u64": 64}
+        widths = {"u8": 8, "i16": 16, "u16": 16, "i32": 32, "u32": 32, "i64": 64, "u64": 64}
         signed_width = max((widths[d] for d in arg_dtypes if d.startswith("i")), default=0)
         unsigned_width = max((widths[d] for d in arg_dtypes if d.startswith("u")), default=0)
         if unsigned_width >= signed_width:
@@ -216,12 +218,11 @@ _BINARY_OP: dict[str, str] = {
     "multiply": "*",
     "divide": "/",
     "mod": "%",
-    # Comparisons + bool combines — the whole-model explicit-mask subgraph.
-    # Operands reach ``op_to_expr`` promoted to f32; C's implicit nonzero→bool
-    # conversion makes the comparison/logical spellings valid on them. The
-    # ``bitwise_*`` names carry bool-mask semantics in traced graphs (no op
-    # computes on integer tensors today), so they spell as logical ops — a
-    # float ``|`` would not compile.
+    # Comparisons + legacy bool combines — the whole-model explicit-mask subgraph.
+    # Non-integer operands reach ``op_to_expr`` promoted to f32; C's implicit
+    # nonzero→bool conversion makes these logical spellings valid on them. Typed
+    # integer operands use ``_INTEGER_BINARY_OP`` instead, including packed
+    # bitwise decode operations.
     "equal": "==",
     "not_equal": "!=",
     "greater": ">",
@@ -268,7 +269,7 @@ def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr
         return FuncCallExpr("pow", tuple(inputs))
     if fn == "negative":
         return BinaryExpr("-", Literal(0.0, "float"), inputs[0])
-    if fn == "copy":
+    if fn in ("copy", "pad"):
         return inputs[0]
     if fn in ("from_f8e4m3", "from_f8e5m2"):
         # fp8 decode cast: the value semantics live in the dtype conversion the
@@ -323,11 +324,11 @@ def render_merge_program(program, state_names, ctx: RenderCtx, pad: str | None =
     (``<ty> t = …;``). Statement order is load-bearing — a state update must follow
     every read of that state's old value (the carrier builder guarantees it).
 
-    Shared by ``StateMerge.render`` (the streaming step, fp32) and the kernel-IR
-    cross-thread combine primitives ``WarpShuffle`` / ``TreeHalve`` (the
-    state-merges-state step, at the carrier's dtype — fp32 for monoids, the
-    accumulator dtype for a degenerate scalar reduce), so all spell the carrier's
-    algebra identically."""
+    The program is the PURE form a stored ``combine`` holds — ``Assign`` only, its
+    final writes reassigning the carried state. Used by the kernel-IR cross-thread
+    combine primitives ``WarpShuffle`` / ``TreeHalve``, which render it at the
+    carrier's dtype (fp32 for monoids, the accumulator dtype for a degenerate scalar
+    reduce) inside a loop they emit themselves."""
     if pad is None:
         pad = _pad(ctx.indent)
     dt = "f32" if dtype is None else dtype.name
@@ -335,15 +336,6 @@ def render_merge_program(program, state_names, ctx: RenderCtx, pad: str | None =
     sset = set(state_names)
     out: list[str] = []
     for a in program:
-        # A twisted streaming merge interleaves ``Assign`` temps/rescales with ``Accum``
-        # state folds (the ``base``-``Accum`` form). An ``Accum`` renders its own
-        # reassignment (``name = op(base, value)``) — the carried state is already declared
-        # (an enclosing ``Init`` or ``Loop.render`` seed), so it never declares. Duck-typed
-        # (``base.py`` can't import ``Accum`` — leaves.py imports base): an ``Assign`` has
-        # ``args``, an ``Accum`` does not.
-        if not hasattr(a, "args"):
-            out += a.render(ctx)
-            continue
         # The merge runs at ``dt`` — cast any arg with a different dtype (e.g. a raw
         # ``__half`` value loaded into the partial, as in fp16 flash's ``p · v``) so
         # the operator isn't ambiguous. The cast is a no-op for matching args.
@@ -374,6 +366,10 @@ def select_to_ternary(s: Select) -> Expr:
     return result
 
 
+#: Largest value C ``int`` addressing can represent; past it a flat address wraps negative.
+_INT_MAX = 2**31 - 1
+
+
 def render_index(buf: str, indices: tuple, ctx: RenderCtx) -> str:
     """Row-major flatten ``buf[i0][i1]...`` to a single C/CUDA expression.
 
@@ -392,16 +388,55 @@ def render_index(buf: str, indices: tuple, ctx: RenderCtx) -> str:
         for i in indices[1:]:
             flat = BinaryExpr("+", flat, i)
         return flat.simplify(SimplifyCtx.empty()).render(ctx)
+    wide = _exceeds_int_range(shape)
     flat = None
+    parts: list[str] = []
     for d, idx in enumerate(indices):
         stride: Expr = Literal(1, "int")
         for k in range(d + 1, len(shape)):
             stride = BinaryExpr("*", stride, _to_expr(shape[k]))
         stride = stride.simplify(SimplifyCtx.empty())
+        if wide:
+            # Widen the TERM, not the finished sum: `(long long)(a*b + c*d)` computes the whole
+            # sum in `int` and widens an already-wrapped result. Casting the index makes each
+            # multiply 64-bit, and the accumulating `+` chain stays 64-bit by promotion.
+            i_src = idx.simplify(SimplifyCtx.empty()).render(ctx)
+            parts.append(f"(long long)({i_src})" if _is_one(stride) else f"(long long)({i_src}) * ({stride.render(ctx)})")
+            continue
         term: Expr = idx if _is_one(stride) else BinaryExpr("*", idx, stride)
         flat = term if flat is None else BinaryExpr("+", flat, term)
+    if wide:
+        return "(" + " + ".join(parts) + ")"
     assert flat is not None
     return flat.simplify(SimplifyCtx.empty()).render(ctx)
+
+
+def _exceeds_int_range(shape) -> bool:
+    """Whether this buffer's element count can pass ``INT_MAX``, so its addresses need 64-bit
+    arithmetic.
+
+    A flat address is a sum of ``index * stride`` terms, and C evaluates it in ``int`` unless an
+    operand is wider. Past ``INT_MAX`` the sum wraps NEGATIVE and the access lands outside the
+    allocation — an illegal access that poisons the whole CUDA context, not a wrong answer. It is
+    not hypothetical: a 4x512-token Qwen3 trunk plans a 2^32-element activation buffer.
+
+    A symbolic dim is taken at ``DYNAMIC_DIM_MAX``, the exported bound on every ``--dynamic`` axis,
+    so the answer is an upper bound over every shape the program can legally be resolved at rather
+    than a guess about the one in front of us. (``Dim.hint`` is NOT usable here: it is advisory and
+    a run may exceed it.) Buffers that stay inside the range keep their existing 32-bit
+    addressing byte for byte, which is most of them — 64-bit index math is not free."""
+    numel = 1
+    for dim in shape:
+        expr = getattr(dim, "expr", None)
+        if isinstance(dim, int):
+            numel *= dim
+        elif isinstance(expr, Literal) and isinstance(expr.value, int):
+            numel *= expr.value
+        else:
+            numel *= DYNAMIC_DIM_MAX
+        if numel > _INT_MAX:
+            return True
+    return False
 
 
 def _to_expr(d) -> Expr:
@@ -425,7 +460,7 @@ def _is_one(e: Expr) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class Stmt:
+class Stmt(Structural):
     """Base class for IR body statements.
 
     Every concrete Stmt implements:
@@ -540,6 +575,7 @@ class Stmt:
         """
         return ()
 
+    @cached_property
     def has_side_effects(self) -> bool:
         """True iff executing this stmt produces an externally observable
         effect (a buffer write). For compound stmts (Loop / StridedLoop /
@@ -556,7 +592,7 @@ class Stmt:
         safe. Hoisting passes that want to move a Loop containing an
         Accum need a separate scope-bound check on the leaf, not
         ``has_side_effects`` on the wrapper."""
-        return any(c.has_side_effects() for sub in self.nested() for c in sub.iter())
+        return any(c.has_side_effects for sub in self.nested() for c in sub)
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         """Write-side counterpart to :meth:`nested`. Return a copy of this
@@ -714,6 +750,12 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
             )
             rendered = expr.render(replace(ctx, inline_exprs=inline))
             inline[s.name] = f"({rendered})" if isinstance(expr, (BinaryExpr, TernaryExpr)) else rendered
+            if s.dtype is not None:
+                # The defining Assign is omitted below, so its normal render path cannot
+                # register the SSA dtype. Preserve it for the consumer: otherwise an inlined
+                # integer shift feeding a bitwise mask is mistaken for f32 and rendered with
+                # logical ``&&``/``||`` instead of integer ``&``/``|``.
+                ctx.ssa_dtypes[s.name] = s.dtype.name
             bases[s.name] = names
             inlined.add(s.name)
         if inlined:

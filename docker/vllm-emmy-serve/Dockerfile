@@ -28,6 +28,7 @@ ARG TARGET_GPU
 ENV HF_HOME=/opt/emmy/hf \
     EMMY_CUBIN_CACHE=/opt/emmy/cubin \
     EMMY_PACK_DIR=/opt/emmy/pack \
+    TRITON_CACHE_DIR=/opt/emmy/triton \
     HF_HUB_OFFLINE=1
 
 # Weights + tokenizer + config (the HF snapshot — per-tensor identical, but resharded by
@@ -41,6 +42,7 @@ COPY warm/hf_parts/p1 /opt/emmy/hf
 COPY warm/hf_parts/p2 /opt/emmy/hf
 COPY warm/hf_parts/p3 /opt/emmy/hf
 COPY warm/cubin /opt/emmy/cubin
+COPY warm/triton /opt/emmy/triton
 # The execution-plan pack (compiler/backend/pack.py) — written by the warm run's first
 # boot. A pack-hit boot skips the whole compiler frontend (trace / pipeline / fork
 # resolution / codegen), collapsing the ~25 min gemma-4 cold start to ~weight-load time;
@@ -73,6 +75,7 @@ ARG EMBED_HOST=
 ARG PREFILL_CAPACITY=
 ARG PREFILL_BUCKET=
 ARG M1_TIER=
+ARG V2_MODEL_RUNNER=
 ENV SERVE_REVISION="${REVISION}" \
     SERVE_QUANT="${QUANT}" \
     SERVE_CAPTURE_SIZES="${CAPTURE_SIZES}" \
@@ -80,7 +83,8 @@ ENV SERVE_REVISION="${REVISION}" \
     EMMY_GEN_EMBED_HOST="${EMBED_HOST}" \
     EMMY_GEN_PREFILL_CAPACITY="${PREFILL_CAPACITY}" \
     EMMY_GEN_PREFILL_BUCKET="${PREFILL_BUCKET}" \
-    EMMY_GEN_M1_TIER="${M1_TIER}"
+    EMMY_GEN_M1_TIER="${M1_TIER}" \
+    SERVE_V2_MODEL_RUNNER="${V2_MODEL_RUNNER}"
 
 LABEL ai.emmy.publish.family="${PUBLISH_FAMILY}" \
       ai.emmy.model.id="${MODEL}" \

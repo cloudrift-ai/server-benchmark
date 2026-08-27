@@ -4,7 +4,7 @@ Used by recipes whose `command` block declares a `run` template and a list of
 `result_files` to pull back. The harness flattens variant params to leaf names,
 substitutes them into the template via `string.Template`, runs the rendered
 command on the provisioned VM, then scp's matching result files back to the
-local run directory.
+experiment results directory.
 """
 
 import logging
@@ -17,13 +17,13 @@ from emmy.planner.variant import Variant
 logger = logging.getLogger(__name__)
 
 
-def _local_result_name(variant: str, rel: str) -> str:
+def _local_result_name(file_stem: str, rel: str) -> str:
     """Local filename for a pulled result file, from its task_dir-relative path.
 
     Two patterns pulling same-named files from different subdirs (std/*, fm/*)
     must not collide, so subdir separators join the name with underscores.
     """
-    return f"{variant}_{rel.replace('/', '_')}"
+    return f"{file_stem}_{rel.replace('/', '_')}"
 
 
 def _leaf_name(key: str) -> str:
@@ -108,8 +108,7 @@ async def run_command_workload(
 ) -> tuple[bool, dict]:
     """Run one command-recipe task on the remote VM.
 
-    Returns (success, info) where info contains the rendered command and a
-    list of locally-pulled result paths.
+    Returns the execution status and locally pulled result paths or transfer errors.
     """
     from emmy.provisioning.ssh_transport import scp_from_remote
 
@@ -138,7 +137,7 @@ async def run_command_workload(
     logger.info(f"Running command for {task.variant}:\n{rendered}")
     rc, _, _ = await run_cmd(rendered_with_env, log_output=True, timeout=cmd_cfg.timeout)
     success = rc == 0
-    info: dict = {"rendered_command": rendered, "exit_code": rc, "result_paths": [], "result_errors": []}
+    info: dict = {"result_paths": [], "result_errors": []}
 
     if not success:
         logger.error(f"Command failed (rc={rc}) for {task.variant}")
@@ -163,7 +162,7 @@ async def run_command_workload(
             rel_paths = [pattern]
 
         for rel in rel_paths:
-            local_path = task.run_dir / _local_result_name(task.variant, rel)
+            local_path = task.run_dir / _local_result_name(task.file_stem, rel)
             local_path.parent.mkdir(parents=True, exist_ok=True)
             rc_scp, stderr = await scp_from_remote(server, ssh_key, ssh_port, f"{task_dir}/{rel}", str(local_path))
             if rc_scp != 0:

@@ -53,17 +53,25 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   delegates to `config.nvcc_flags()` — `emmy/config.py` is the single owner
   of `os.environ` for `EMMY_*` vars, incl. `EMMY_NO_NVCC` /
   `EMMY_CUBIN_CACHE`). The CLI sets the flags via `config.set_nvcc_flags`
-  (override logic, no longer in the command layer) — `tune` → `-Xcicc -O1`,
-  `compile`/`run` → nvcc default -O3, `--nvcc-flags` overrides. -O1 dodges a cicc/LLVM front-end blowup on big
-  unrolled register-tile kernels (cicc, not ptxas, is the cost: a tall-thin
-  register tile unrolls into a ~5K-instruction basic block → up to 21 s → 0.1 s
-  at -O1) but is **NOT runtime-optimal** (reductions/attention ~1.5–3× slower),
-  so it's a tune-time *ranking* knob only. The flags are folded into both the
-  cubin cache key and `Context.structural_key` (the `perf` context key), so
-  -O1-tuned and -O3 measurements never collide. The bench-worker subprocess
-  inherits the env, so its compiles use the same flags.
+  (override logic, no longer in the command layer) — `tune`, `compile` and `run` all default to nvcc's own -O3, the
+  deployable regime, and `--nvcc-flags` overrides. **Tuning measures in the regime it deploys into**, so a tuned
+  latency is the deployed one.
+
+  `tune` used to rank at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That
+  rationale was measured against the WMMA codegen deleted in #189 four days later; on current codegen (fragment work
+  renders as rolled loops with small `#pragma unroll` trip counts) it does not reproduce — over 4,888 nvcc compiles
+  spanning the tile inventory, -O3 compiled at a **median 0.96×** of -O1, worst case 1.17×, slowest compile 1.39 s.
+  So the lower level bought no compile time while mis-ranking by tile area, and it is no longer a measurement lane.
+  It stays reachable through `--nvcc-flags` for the test suite's compile-speed lane; a sweep pinned to it warns, and
+  its rows key to that regime so no deploy reads them. Note the blowup is a property of unroll size, not of the opt
+  level as such: `EMMY_UNROLL` (below) raised far enough could bring it back.
+
+  The flags are folded into both the cubin cache key (literally) and `Context.structural_key` (split into opt level +
+  the other flags, `context.split_opt_level`), so one regime has one key however it is spelled while measurements
+  from different regimes never collide. The bench-worker subprocess inherits the env, so its compiles use the
+  same flags.
   `EMMY_UNROLL=<n>` caps which static loops emit `#pragma unroll` (the unroll budget — declared in
-  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there and in `_twist.py`). It is a
+  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there). It is a
   pin-only nvcc hint that steers cicc unrolling / register pressure / compile time; it does **not**
   change the emitted-C listing size (the register-tile fragment grid is straight-line regardless).
   Unset → each site's built-in cap; `0` → keep every loop rolled.
@@ -76,10 +84,13 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
    constant overrides come from `input_data`; scalar `ConstantOp`s
    materialize as single-element arrays; scratch buffers zero-init.
    Inputs without supplied data get a deterministic pseudo-random fill
-   (useful for standalone compile-and-benchmark scripts).
+   (useful for standalone compile-and-benchmark scripts). BF16 buffers use NumPy's `uint16` carrier as raw bits:
+   numeric inputs are round-to-nearest-even encoded before upload, while an already-`uint16` source is preserved.
 2. Launch each kernel in topological order; `zero_outputs` fills run
    before the launch.
-3. Copy `graph.outputs` buffers back to numpy.
+3. Copy `graph.outputs` buffers back to numpy in their declared order, independently of buffer allocation order. BF16
+   outputs remain raw `uint16` bits at this backend boundary;
+   command-layer correctness checks decode them.
 
 **Scratch-buffer reuse (`_planner.py`).** Step 1 does *not* give every node its
 own permanently-live buffer — that holds all 28 layers' `[heads, S, S]` attention scratch resident at once (~29 GB for
@@ -211,9 +222,16 @@ flags: `accuracy` (bind the rebuilt module's real inputs, run the emmy program o
 eager — the verdict rides back as `accuracy_error` and a numeric failure skips the bench) and
 `want_ref` (return that run's `(inputs, outputs)` as `run_io`). A frontend-graph job may also request
 `strict_accuracy`; it returns the direct eager proof and same-input eager outputs used to check exact-pinned rows.
-Rebuilding the torch side **in the
-child** (not pickling a live module) is what lets the interleaved comparison — which couldn't cross a
-subprocess boundary before — run isolated. So `tune --bench` (`commands/tune.py` `_run_bench` /
+The frontend-graph response also returns the exact symbolic environment used to specialize its hint-sized inputs, so
+the parent resolves dynamic launch geometry from the execution binding instead of reconstructing it from lowered
+graph inputs that may no longer carry the symbol.
+Embedded Loop replay has no Torch twin, so its Emmy-only greedy execution returns that same-input reference too. If
+this execution completes but later repeated timing crosses the watchdog, the worker returns the reference, single-run
+timing, and exact timing error. The command marks greedy ineligible while still reference-checking pinned rows; the
+parent retires that child before any pinned job, so a still-running kernel cannot share its context. It never raises
+the watchdog or treats the single run as a candidate. Rebuilding the torch side **in the child** (not pickling a live
+module) is what lets the interleaved comparison — which could not cross a subprocess boundary before — run isolated.
+So `tune --bench` (`commands/tune.py` `_run_bench` /
 `_bench_per_kernel`) and every `run --bench` row go through the worker: a hung kernel
 hangs the child, the parent SIGKILLs it at `wall_timeout_s`, the device is freed, and the sweep / A/B
 **continues** to the next reproducer or row (no device-poisoning wedge, no skip). The worker starts by
@@ -229,6 +247,31 @@ entry points (`handle_run`, `_handle_run_ir`, `_run_bench`) bridge with `asyncio
 `tests/compiler/backend/test_bench_worker_compare.py` (compare-in-worker + SIGKILL recovery + the
 run-path job flags), `test_hung_kernel_watchdog.py` (watchdog raises promptly), and
 `tests/compiler/cli/test_tune_bench_hung_kernel.py` (the `_run_bench` control flow).
+
+The three bench budgets (`bench_compile_timeout_s`, `bench_run_timeout_s`, `bench_wall_timeout_s`) are constructor
+policy on the backend, read through live `EMMY_BENCH_COMPILE_TIMEOUT_S` / `EMMY_BENCH_RUN_TIMEOUT_S` /
+`EMMY_BENCH_WALL_TIMEOUT_S` overrides (`emmy/config.py` owns the vars, mirroring `EMMY_KERNEL_TIMEOUT_MS`): one env
+setting reaches every bench path uniformly — the in-child backend inherits the env, and derived wall caps (the
+pinned-row cap, the comparison jobs' workload-scaled cap) recompute from the overridden values. Raising them is how a
+golden row whose recorded latency exceeds the default accumulated-GPU budget gets verified.
+
+The three budgets fail differently, and the differences are load-bearing. A `bench_run_timeout_s` overrun is a fact
+about the **kernel** — it compiled, it ran, it was too slow — and is recorded as a `bench_fail` at the watchdog's
+sentinel latency. A `bench_compile_timeout_s` overrun is a fact about **cicc and the tile's unroll size**: nothing
+about the kernel's speed was measured, so it raises `CompileBudgetExceeded` and callers record *nothing at all*
+(`search/policy/terminal_bench.py`, and `run --bench`'s pinned rows via `_failed_bench_status`). The exception class
+cannot cross the worker pipe (the protocol carries `error` as a string), so the child flags the kind as
+`compile_budget: True` and the parent rebuilds it onto `BenchWorkerJobError` — the same shape the retryable
+`cache_miss` kind already uses.
+
+`bench_wall_timeout_s` is the third, and it **must exceed the other two**, because it cannot tell them apart: on
+overrun the parent SIGKILLs the child and raises a plain `RuntimeError`, so a wall that can fire first collapses both
+honest in-child verdicts into one anonymous failure. The compile budget is checked when the compile *returns* and so
+can only fire for a compile that finished; the sweep's old wall sat ~2 s above compile+run, which meant any compile
+slower than that was killed rather than reported — and the wide register-tile family that motivates the budget is
+exactly the family that overruns it. The sweep therefore derives its wall as `compile + run + 60 s`, the same formula
+the pinned path uses; the 60 s of headroom is what lets the per-launch watchdog's first-iter grace fire in-child,
+which is what actually catches hangs. The wall is a backstop for a wedged worker, not a per-variant budget.
 
 The one-shot comparison result includes the worker's non-fatal `accuracy_error` beside timings, reference
 availability, and capture state. `tune --bench` persists that verdict per provenance reproducer instead of treating a

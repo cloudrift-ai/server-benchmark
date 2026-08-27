@@ -6,7 +6,7 @@ from importlib import import_module
 
 import pytest
 
-from emmy.compiler.dtype import U32
+from emmy.compiler.dtype import F32, U32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
@@ -68,3 +68,32 @@ def test_stamp_types_preserves_integer_assign_and_write(op):
     write = next(stmt for stmt in stamped.body if isinstance(stmt, Write))
     assert assign.dtype == U32
     assert write.value_dtype == U32
+
+
+def test_stamp_types_repairs_a_stale_float_stamp_on_integer_algebra():
+    idx = (Literal(0, "int"),)
+    body = Body(
+        (
+            Load(name="a", input="lhs", index=idx),
+            Load(name="b", input="rhs", index=idx),
+            Assign(name="result", op="left_shift", args=("a", "b"), dtype=F32),
+            Write(output="out", index=idx, value="result"),
+        )
+    )
+    tensor = Tensor("lhs", (1,), U32)
+    out = Tensor("out", (1,), U32)
+    root = Node(
+        id="out",
+        op=KernelOp(
+            body=body,
+            name="integer_elementwise",
+            inputs={"lhs": tensor, "rhs": Tensor("rhs", (1,), U32)},
+            outputs={"out": out},
+        ),
+        inputs=["lhs", "rhs"],
+        outputs=(out,),
+    )
+
+    stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(root)
+    assign = next(stmt for stmt in stamped.body if isinstance(stmt, Assign))
+    assert assign.dtype == U32

@@ -1,4 +1,4 @@
-"""Controlled-workload bench flags: seed / temperature / ignore_eos emission."""
+"""Controlled-workload bench flag emission."""
 
 from emmy.benchmark.workload import build_bench_command
 from emmy.recipe.types import Recipe
@@ -19,17 +19,20 @@ def test_hygiene_flags_absent_by_default():
     assert "--seed" not in cmd
     assert "--temperature" not in cmd
     assert "--ignore-eos" not in cmd
+    assert "--num-warmups" not in cmd
 
 
 def test_hygiene_flags_emitted_when_set():
-    cmd = build_bench_command(_recipe("generate", seed=0, temperature=0, ignore_eos=True))
+    cmd = build_bench_command(_recipe("generate", seed=0, temperature=0, ignore_eos=True, num_warmups=8))
     assert "--seed 0" in cmd
     assert "--temperature 0" in cmd
     assert "--ignore-eos" in cmd
+    assert "--num-warmups 8" in cmd
 
 
 def test_embedding_recipes_skip_generation_only_flags():
-    cmd = build_bench_command(_recipe("embed", seed=7, temperature=0, ignore_eos=True))
+    cmd = build_bench_command(_recipe("embed", seed=7, temperature=0, ignore_eos=True, num_warmups=8))
     assert "--seed 7" in cmd
+    assert "--num-warmups 8" in cmd
     assert "--temperature" not in cmd
     assert "--ignore-eos" not in cmd

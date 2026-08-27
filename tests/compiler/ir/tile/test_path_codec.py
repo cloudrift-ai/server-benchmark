@@ -12,10 +12,9 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import Channel
-from emmy.compiler.ir.tile.ir import Fold
-from emmy.compiler.ir.tile.path import Site, canonical, family_sites, parse_key, primary, resolve, sites, spell
+from emmy.compiler.ir.pure.fold import Channel, Fold
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.tile.path import Site, _spellings, canonical, family_sites, parse_key, primary, resolve, sites, spell
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
@@ -61,7 +60,7 @@ def _norm_linear_tree() -> tuple[Fold, Fold, Fold]:
     prologue wraps the stat fold; the stat reduces the SAME ``k`` name the product contracts."""
     stat = _planar_fold("k")
     product = _contraction_fold("k", a=_cone(stat))
-    root = Fold.projection(body=Body((Write(output="y", value=product.out, index=(Var("m"), Var("n"))),)), operands=(product,))
+    root = Fold.projection(operands=(product,))
     return root, product, stat
 
 
@@ -69,9 +68,13 @@ def _flash_tree() -> tuple[Fold, Fold, Fold, Fold]:
     """The flash shape, λ-spelled (step 7 — mirroring ``_flash._flash_op``): the stream fold
     reduces ``kv`` with the QK (axis ``dd``) score fold hoisted as ``operands[0]`` and the value
     ``Load`` as ``operands[1]``; the PV (axis ``pj``) contraction is DERIVED — synthesized into
-    the blocked evaluation, found among ``stream.step_stmts()``."""
-    from emmy.compiler.ir.stmt import Lambda
-    from emmy.compiler.ir.stmt.carrier import exp_combine_states
+    the blocked evaluation, found among ``stream.step_stmts()``.
+
+    Both are read by AXIS, not by position: the derived step PLACES an inline-node edge at the
+    first read of its bound name, so the score sits after any lift stmt that precedes it (here the
+    ``scale`` ``Load``)."""
+    from emmy.compiler.ir.pure import Lambda
+    from emmy.compiler.ir.pure.carrier import exp_combine_states
 
     qk = _contraction_fold("dd", acc="sacc", w="K")
     names = ("m_i", "l_i", "O_i")
@@ -88,8 +91,8 @@ def _flash_tree() -> tuple[Fold, Fold, Fold, Fold]:
         init=(float("-inf"), 0.0, 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
-    pv = next(s for s in stream.step_stmts()[1:] if isinstance(s, Fold) and s.role is AxisRole.CONTRACTION)  # the derived PV site
-    root = Fold.projection(body=Body((Write(output="y", value="O_i", index=(Var("m"), Var("d"))),)), operands=(stream,))
+    pv = next(s for s in stream.step_stmts() if isinstance(s, Fold) and s.axis.name == "pj")  # the derived PV site
+    root = Fold.projection(operands=(stream,))
     return root, stream, qk, pv
 
 
@@ -108,26 +111,25 @@ def test_bare_is_canonical_on_a_single_fold_kernel() -> None:
 
 def test_projected_fold_keeps_bare_canonical() -> None:
     fold = _contraction_fold()
-    root = Fold.projection(body=Body((Write(output="y", value=fold.out, index=(Var("m"), Var("n"))),)), operands=(fold,))
+    root = Fold.projection(operands=(fold,))
     assert spell(root, "REDUCE", fold) == "REDUCE"
     assert resolve(root, "REDUCE").node is fold
 
 
 def test_reduce_kernel_has_no_tile_site() -> None:
     stat = _planar_fold()
-    root = Fold.projection(body=Body((Write(output="y", value=stat.out, index=(Var("m"),)),)), operands=(stat,))
+    root = Fold.projection(operands=(stat,))
     assert resolve(root, "TILE") is None  # the family doesn't apply — decided-empty stamps stay bare
     assert canonical(root, "TILE") is None
     assert resolve(root, "REDUCE").node is stat
 
 
-def test_pointwise_root_map_is_the_tile_site() -> None:
+def test_pointwise_root_projection_is_the_tile_site() -> None:
     root = Fold.projection(
         body=Body(
             (
                 Load(name="xc", input="x", index=(Var("m"),)),
                 Assign(name="r", op="relu", args=("xc",)),
-                Write(output="y", value="r", index=(Var("m"),)),
             )
         ),
         operands=(),
@@ -210,10 +212,28 @@ def test_true_same_path_collision_emits_ordinals() -> None:
         resolve(root, "REDUCE@map.fold.k")
 
 
+def test_deep_identical_paths_take_the_ordinal_without_subsequence_search() -> None:
+    path = ("map", *("fold" for _ in range(1000)))
+    first = Site(node=object(), axis="k", segments=path, ordinal=1)
+    second = Site(node=object(), axis="k", segments=path, ordinal=2)
+
+    assert _spellings("REDUCE", second, (first, second)) == f"REDUCE@{'.'.join(path)}.k2"
+
+
 def test_literal_axis_name_wins_over_an_ordinal_reading() -> None:
     # An axis literally named ``k2`` must never lose to the ``k`` + ordinal-2 reading.
     root = _contraction_fold("k2")
     assert resolve(root, "REDUCE@k2").node is root
+
+
+def test_digit_suffixed_axis_round_trips_with_an_ordinal() -> None:
+    f1 = _planar_fold("a2", acc="s0", val="v1", load="x")
+    f2 = _planar_fold("a2", acc="t0", val="w1", load="z")
+    root = Fold.projection(body=Body((Assign(name="o", op="add", args=(f1.out, f2.out)),)), operands=(f1, f2))
+    assert spell(root, "REDUCE", f1) == "REDUCE@map.fold.a21"
+    assert spell(root, "REDUCE", f2) == "REDUCE@map.fold.a22"
+    assert resolve(root, "REDUCE@map.fold.a21").node is f1
+    assert resolve(root, "REDUCE@map.fold.a22").node is f2
 
 
 # ---- reserved grammar ---------------------------------------------------------------------------- #

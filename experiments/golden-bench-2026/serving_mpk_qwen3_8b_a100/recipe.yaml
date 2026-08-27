@@ -1,0 +1,90 @@
+# Megakernel comparison lane: MPK and stock vLLM on one A100 80GB box, one task, five
+# fresh-process repeats per path. MPK (Mirage Persistent Kernel) compiles a tensor program into one
+# persistent kernel that schedules all operators inside a single launch.
+#
+# Paths (all on the same box, same checkpoint Qwen/Qwen3-8B):
+#   mpk_base  — MPK's own kernel-per-operator harness: demo/qwen3/demo.py (Triton/FlashInfer)
+#   mpk_mega  — the same harness compiled to a megakernel: demo/qwen3/demo.py --use-mirage
+#   stock     — vLLM serve (pip vllm==0.23.0) driven by `vllm bench serve`, 128 in / 512 out, c=1
+#
+# Repro on a pre-allocated A100 (no cloud provisioning):
+#   emmy bench experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100 --local
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+  run: |
+    set -e
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    [ -d venv ] || make setup
+    ./venv/bin/pip install -q vllm==0.23.0
+
+    MODEL=Qwen/Qwen3-8B
+    REV=b968826d9c46dd6066d109eabc6255188de91218
+    MIRAGE_REV=5c28cc68dc621cc9448c5c9882ef9e21fdc85884
+    export CUDA_VISIBLE_DEVICES=$gpu_device_ids
+
+    # --- MPK paths: the pinned mpk-branch demo pair in its own environment ---
+    MPK=$task_dir/mirage
+    if [ ! -d "$$MPK" ]; then
+      git clone --recursive https://github.com/mirage-project/mirage $$MPK
+      git -C $$MPK checkout --recurse-submodules $$MIRAGE_REV
+    fi
+    [ -d $task_dir/venv-mpk ] || python3 -m venv $task_dir/venv-mpk
+    $task_dir/venv-mpk/bin/pip install -q -e $$MPK > $task_dir/mpk_install.log 2>&1
+    for repeat in 0 1 2 3 4; do
+      (cd $$MPK && $task_dir/venv-mpk/bin/python demo/qwen3/demo.py) \
+        > $task_dir/mpk_base_r$$repeat.txt 2>&1
+      (cd $$MPK && $task_dir/venv-mpk/bin/python demo/qwen3/demo.py --use-mirage) \
+        > $task_dir/mpk_mega_r$$repeat.txt 2>&1
+    done
+
+    # --- Stock vLLM: fresh server per repeat ---
+    server_pid=
+    stop() {
+      if [ -n "$$server_pid" ]; then
+        kill -- "-$$server_pid" 2>/dev/null || true
+        wait "$$server_pid" 2>/dev/null || true
+        server_pid=
+        sleep 5
+      fi
+    }
+    trap stop EXIT
+    wait_health() { # log
+      for i in $$(seq 1 360); do curl -sf localhost:8010/health >/dev/null && return 0; sleep 15; done
+      echo "server never became healthy"; tail -30 $$1; return 1
+    }
+    bench() { # out_file
+      ./venv/bin/vllm bench serve --model $$MODEL --tokenizer $$MODEL --dataset-name random \
+        --random-input-len 128 --random-output-len 512 --max-concurrency 1 --num-prompts 8 \
+        --ignore-eos --temperature 0 --seed 0 --percentile-metrics ttft,tpot,itl,e2el \
+        --base-url http://localhost:8010 > $task_dir/$$1 2>&1
+      grep -E "Median TPOT|Median TTFT|Output token throughput|Successful" $task_dir/$$1
+    }
+    for repeat in 0 1 2 3 4; do
+      stop
+      setsid ./venv/bin/vllm serve $$MODEL --revision $$REV --dtype bfloat16 --max-model-len 4096 \
+        --no-enable-prefix-caching --port 8010 > $task_dir/stock_serve_r$$repeat.log 2>&1 &
+      server_pid=$$!
+      wait_health $task_dir/stock_serve_r$$repeat.log
+      bench stock_r$$repeat.txt
+      stop
+    done
+    stop
+    trap - EXIT
+
+    ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt
+    $task_dir/venv-mpk/bin/pip freeze --all > $task_dir/mpk.freeze.txt
+    ls ~/.cache/huggingface/hub > $task_dir/hf_snapshots.txt 2>/dev/null || true
+    echo MPK_LANE_DONE
+  result_files:
+    - "*.txt"
+    - "*.log"
+  timeout: 86400
+
+matrices:
+  - deploy.gpu: "NVIDIA A100 80GB"
+    deploy.gpu_count: 1

@@ -1,0 +1,13 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: THUDM/glm-5-3
+  rationale: "Strong Reddit mindshare and family momentum driving current interest."
+  heat: 70
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 8

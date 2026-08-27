@@ -4,6 +4,11 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel in-flight test runs when a new commit lands on the same pull request.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -24,9 +29,23 @@ jobs:
         run: ./venv/bin/ruff format --check
 
   test:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: ubuntu-runners
+    # A hung suite must fail rather than occupy a runner indefinitely. The healthy run is
+    # single-digit minutes, so 20 leaves ample headroom while still failing fast on a regression.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      # The suite READS one LFS-tracked file — the checked-in measurement freeze
+      # (``search/freezes/``), which is what the prior is evaluated against; a plain checkout
+      # leaves a 3-line pointer in its place. Fetched by PATH rather than with checkout's
+      # ``lfs: true``, which pulls EVERY object: the repo holds ~1 GB of them (the experiment
+      # result tarballs), and materializing all of it both slows the checkout and makes
+      # ``git status`` slow enough that ``experiment_record``'s 10s provenance timeout fires.
+      # This pulls ~4 MB and leaves the rest as pointers, which is what the suite wants anyway.
+      - name: Fetch the measurement freeze from LFS
+        run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
 
       - uses: actions/setup-python@v5
         with:
@@ -49,3 +68,21 @@ jobs:
 
       - name: Run tests
         run: make test
+
+  package:
+    name: PyPI package dry run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build with the release path without publishing
+        run: make pypi-dist
+
+      - name: Verify both distribution artifacts exist
+        run: |
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1

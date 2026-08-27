@@ -26,13 +26,15 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from emmy import config
 from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
 from emmy.compiler.backend.cuda import _tma, nvcc
 from emmy.compiler.backend.cuda._planner import compute_live_intervals, plan_offsets
 from emmy.compiler.backend.cuda.dtype import cupy_dtype
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
-from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, plan_from_graph
+from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, apply_weight_loads, plan_from_graph
 from emmy.compiler.backend.plan import LaunchSpec as _Launch
+from emmy.compiler.dtype import encode_bf16
 from emmy.compiler.graph import Graph
 
 if TYPE_CHECKING:
@@ -84,6 +86,7 @@ class _Compiled:
     constants: dict[str, float]
     kernels: dict[str, cp.RawKernel]  # kernel_name → RawKernel
     launches: list[_Launch]
+    outputs: list[str]
     # Symbolic axis name → (input_buf_name, dim_index). Resolved from input
     # array shapes at run-time; empty when the graph has no symbolic dims.
     symbolic_bindings: dict[str, tuple[str, int]] = field(default_factory=dict)
@@ -140,6 +143,7 @@ def _load_plan(plan: ExecutionPlan) -> _Compiled:
         constants=dict(plan.constants),
         kernels=kernels,
         launches=list(plan.launches),
+        outputs=list(plan.outputs),
         symbolic_bindings=dict(plan.symbolic_bindings),
         symbolic_hints=dict(plan.symbolic_hints),
         symbolic_caps=dict(plan.symbolic_caps),
@@ -165,6 +169,14 @@ def _nvrtc_options(*, uses_tma: bool) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
+def _numpy_storage(src, dtype) -> np.ndarray:
+    """Return a contiguous host array in one buffer's physical storage dtype."""
+    arr = np.asarray(src)
+    if getattr(dtype, "name", dtype) == "bf16":
+        return np.ascontiguousarray(arr) if arr.dtype == np.uint16 else encode_bf16(arr)
+    return np.ascontiguousarray(arr, dtype=dtype.np)
+
+
 def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndarray | None, constants: dict[str, float]) -> cp.ndarray:
     """Build one device array for ``buf`` at ``shape`` — the single fill
     policy shared by :func:`_allocate` and :meth:`CompiledProgram.rebind`.
@@ -176,15 +188,20 @@ def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndar
 
     cp_dtype = cupy_dtype(buf.dtype)
     np_dtype = buf.dtype.np
+    is_bf16 = getattr(buf.dtype, "name", buf.dtype) == "bf16"
     if src is not None:
         if isinstance(src, cp.ndarray):
+            if is_bf16 and src.dtype != np.dtype(np.uint16):
+                values = src.astype(cp.float32, copy=False).view(cp.uint32)
+                values = values + cp.uint32(0x7FFF) + ((values >> cp.uint32(16)) & cp.uint32(1))
+                src = (values >> cp.uint32(16)).astype(cp.uint16)
             if src.dtype != np.dtype(np_dtype):
                 src = src.astype(np_dtype)
             return src.reshape(shape) if tuple(src.shape) != tuple(shape) else src
-        return cp.asarray(np.ascontiguousarray(src, dtype=np_dtype).reshape(shape))
+        return cp.asarray(_numpy_storage(src, buf.dtype).reshape(shape))
     if buf.role == "constant" and buf.name in constants:
         v = float(constants[buf.name])
-        if getattr(buf.dtype, "name", buf.dtype) == "bf16":
+        if is_bf16:
             # bf16 buffers ride as uint16 BITS (``BF16.np``) — casting the float would zero it;
             # encode the value to bf16 bits (round-to-nearest-even on the dropped mantissa half).
             bits = int(np.float32(v).view(np.uint32))
@@ -200,9 +217,31 @@ def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndar
         # → ``nan``). Compute in fp32 and cast the final values — always in
         # ``[-0.5, 0.5]``, so fp16-safe.
         idx = np.arange(n, dtype=np.int64)
-        vals = (0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)).astype(np_dtype)
+        vals = 0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)
+        vals = encode_bf16(vals) if is_bf16 else vals.astype(np_dtype)
         return cp.asarray(vals.reshape(shape))
     return cp.zeros(shape, dtype=cp_dtype)
+
+
+def _with_generated_constants(plan: ExecutionPlan, input_data: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Add the plan's SELF-CONTAINED constants that ``input_data`` does not already carry.
+
+    A deterministic source-free bind record is evaluated once while the graph is projected and
+    its bytes ride the plan (``PLAN_FORMAT_GENERATED``) — a coded linear's Hadamard factor and
+    its coordinate tables are exactly that. Nothing outside the plan can supply them, and an
+    unsupplied constant buffer materializes as ZEROS, so the runtime must read them here.
+    Caller-supplied arrays win: serving binds the same specs through ``assemble_source`` and
+    shares one device copy across its twins.
+    """
+    from emmy.compiler.loader.binder import assemble_source  # noqa: PLC0415
+
+    feed = dict(input_data)
+    for nid, w in plan.weights.items():
+        # ``load_ops is None`` marks a weight the plan cannot rebind at all (see ``WeightSpec``).
+        if w.generated is None or w.load_ops is None or nid in feed:
+            continue
+        feed[nid] = apply_weight_loads(assemble_source(w, {}), w.load_ops)
+    return feed
 
 
 @dataclass
@@ -552,8 +591,8 @@ def _prebuild_descriptors(
 # threshold (measured at 2/4/15/600 s). The deadline-correlation below the driver line is
 # unexplained (suspected interaction between the 1 ms cudaEventQuery poll loop's abort path and
 # in-flight graph-exec work on this 9-kernel / 96 KB-smem program); empirically 2 s is past the
-# cliff, and a real hung kernel is still evicted in 2 s. ``EMMY_KERNEL_TIMEOUT_MS`` overrides.
-_KERNEL_TIMEOUT_MS = float(_os.environ.get("EMMY_KERNEL_TIMEOUT_MS", "2000"))
+# cliff, and a real hung kernel is still evicted in 2 s. ``EMMY_KERNEL_TIMEOUT_MS`` overrides —
+# read live through ``config.kernel_timeout_ms()`` (the env owner), never cached at import.
 
 # First-launch grace multiplier: a program's FIRST uncaptured iteration may stall well past the
 # steady-state watchdog without any kernel being hung — lazy module loading (CUDA_MODULE_LOADING=
@@ -574,6 +613,26 @@ class HungKernelError(RuntimeError):
     torch peer-bench) will block behind the still-running kernel. Subclasses ``RuntimeError``
     so existing ``except RuntimeError`` handlers (the autotune sweep) keep marking the variant
     ``bench_fail`` unchanged."""
+
+
+class CompileBudgetExceeded(RuntimeError):
+    """The compile stage ran past ``compile_timeout_s``, before any launch happened.
+
+    Distinct from a plain ``RuntimeError`` because **nothing about the kernel's speed was
+    measured**: cicc was slow, which is a fact about the compiler and the tile's unroll size, not
+    about the kernel. Callers must record no latency for it — inventing one mislabels the config,
+    and a persisted row is worse than mislabelled, because it is then served as a cache hit and
+    the config is never re-benched. Subclasses ``RuntimeError`` so existing handlers still catch
+    it. The budget is checked when the compile RETURNS, so it can only fire for a compile that
+    finished: any wall cap over it must exceed it, or the SIGKILL pre-empts this distinction."""
+
+
+def compile_budget_overrun(exc: BaseException) -> bool:
+    """``True`` iff ``exc`` is :class:`CompileBudgetExceeded`, from either bench path — the class
+    itself in-process, or the flag :class:`BenchWorkerJobError` carries when the exception was
+    raised in the worker subprocess (the protocol pickles ``error`` as a string, losing the
+    class). Lives here, beside the two classes it bridges."""
+    return isinstance(exc, CompileBudgetExceeded) or bool(getattr(exc, "compile_budget", False))
 
 
 class GraphCaptureError(RuntimeError):
@@ -753,7 +812,8 @@ class CompiledProgram:
         arena: BufferArena | None = None,
     ) -> CompiledProgram:
         """Load every kernel (cubin-by-key or source-via-cache), allocate every
-        buffer, pre-build TMA descriptors. ``compile_timeout_s`` bounds the
+        buffer (the plan's generated constants fill themselves — see
+        :func:`_with_generated_constants`), pre-build TMA descriptors. ``compile_timeout_s`` bounds the
         setup phase at a C-call boundary: if compile + alloc + descriptor work
         overruns, raise ``RuntimeError`` before the caller proceeds to launches
         so no in-flight kernels are left queued. ``arena`` pools the
@@ -764,12 +824,13 @@ class CompiledProgram:
         every subsequent method on the returned program."""
         t0 = _time_module.monotonic()
         compiled = _load_plan(plan)
-        sym_values = _resolve_symbolic(compiled, input_data or {})
+        input_data = _with_generated_constants(plan, input_data or {})
+        sym_values = _resolve_symbolic(compiled, input_data)
         arrays, slab_plan = _allocate(compiled, input_data, arena)
         descs = _prebuild_descriptors(compiled, arrays)
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
-            raise RuntimeError(f"compile stage exceeded {compile_timeout_s:.1f}s budget ({elapsed:.2f}s) — variant marked bench_fail")
+            raise CompileBudgetExceeded(f"compile stage exceeded {compile_timeout_s:.1f}s budget ({elapsed:.2f}s) — nothing measured")
         logger.info(
             "[cuda] CompiledProgram.build: %d launch(es) compile+alloc=%.2fs kernels=[%s]",
             len(compiled.launches),
@@ -1063,7 +1124,7 @@ class CompiledProgram:
             self._e2e_graph.launch()
         self._e2e_stop.record()
         n = max(1, len(self.compiled.launches))
-        _wait_for_event(self._e2e_stop, _KERNEL_TIMEOUT_MS * n * replays, "<whole-program e2e window>")
+        _wait_for_event(self._e2e_stop, config.kernel_timeout_ms() * n * replays, "<whole-program e2e window>")
         return cp.cuda.get_elapsed_time(self._e2e_start, self._e2e_stop) / replays
 
     def iter_once(
@@ -1125,7 +1186,7 @@ class CompiledProgram:
                     _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
             stops[i].record()
             grace = _FIRST_ITER_GRACE if self._iters_done == 0 else 1.0
-            _wait_for_event(stops[i], _KERNEL_TIMEOUT_MS * b * grace, f"{launch.kernel_name} (iter {self._iters_done})")
+            _wait_for_event(stops[i], config.kernel_timeout_ms() * b * grace, f"{launch.kernel_name} (iter {self._iters_done})")
             elapsed_ms = cp.cuda.get_elapsed_time(starts[i], stops[i])
             # CUDA event timing has sub-µs resolution and a real launch must
             # consume at least one device cycle — a 0.0 reading means the
@@ -1159,16 +1220,15 @@ class CompiledProgram:
         default) the whole buffer is returned (the uncaptured rebind path already
         sizes buffers to the request)."""
         out: dict[str, np.ndarray] = {}
-        for b in self.compiled.bufs:
-            if b.role != "output":
-                continue
-            arr = self.arrays[b.name]
+        for name in self.compiled.outputs:
+            b = self.compiled.buf_by_name[name]
+            arr = self.arrays[name]
             if sym_values is not None:
                 shape = b.resolve_shape({**self.sym_values, **sym_values})
                 n = math.prod(shape) if shape else 1
-                out[b.name] = arr.ravel()[:n].get().reshape(shape)
+                out[name] = arr.ravel()[:n].get().reshape(shape)
             else:
-                out[b.name] = arr.get()
+                out[name] = arr.get()
         return out
 
     def output_prefix_device(self, sym_values: dict[str, int] | None = None) -> dict[str, cp.ndarray]:
@@ -1181,16 +1241,15 @@ class CompiledProgram:
         is returned. Caller must hold ``gpu_lock()`` (and read on the replay
         stream — see :meth:`upload_prefix_device`)."""
         out: dict[str, cp.ndarray] = {}
-        for b in self.compiled.bufs:
-            if b.role != "output":
-                continue
-            arr = self.arrays[b.name]
+        for name in self.compiled.outputs:
+            b = self.compiled.buf_by_name[name]
+            arr = self.arrays[name]
             if sym_values is not None:
                 shape = b.resolve_shape({**self.sym_values, **sym_values})
                 n = math.prod(shape) if shape else 1
-                out[b.name] = arr.ravel()[:n].reshape(shape)
+                out[name] = arr.ravel()[:n].reshape(shape)
             else:
-                out[b.name] = arr
+                out[name] = arr
         return out
 
     def snapshot(self) -> dict[str, np.ndarray]:
@@ -1275,7 +1334,7 @@ def benchmark_program(
 
     Single loop covers warmup + measurement: the first ``warmup`` iters
     are discarded, the rest are counted toward the result. The
-    per-launch ``_KERNEL_TIMEOUT_MS`` watchdog (inside
+    per-launch ``config.kernel_timeout_ms()`` watchdog (inside
     :meth:`CompiledProgram.iter_once`) runs every iter — warmup or
     measured — so a single hung kernel raises cleanly instead of
     stalling the whole sweep.
@@ -1304,7 +1363,7 @@ def benchmark_program(
     ``run_timeout_s`` bounds the iter loop on **accumulated GPU time**
     (sum of per-launch CUDA-event measurements), not wall-clock — so
     Python/cupy framing overhead doesn't shrink the budget for tiny
-    ops. Catches the gap left by the per-launch ``_KERNEL_TIMEOUT_MS``
+    ops. Catches the gap left by the per-launch ``config.kernel_timeout_ms()``
     watchdog: a variant where every launch fits under the watchdog but
     summed across iters exceeds the budget (e.g. 999 ms × N iters).
     Checked between iters so no in-flight launch is mid-kernel when
@@ -1494,11 +1553,15 @@ def _samples_to_result(
 class BenchWorkerJobError(RuntimeError):
     """A worker job that ran and failed (``ok: False`` response — the child is alive).
     ``cache_miss`` marks the one retryable kind: a job referenced a ``run_inputs_key``
-    a freshly-respawned child no longer holds."""
+    a freshly-respawned child no longer holds. ``compile_budget`` marks a
+    :class:`CompileBudgetExceeded` raised in the child — the exception CLASS cannot cross the
+    process boundary (the protocol carries ``error`` as a string), so the child flags the kind
+    and the parent rebuilds the distinction here."""
 
-    def __init__(self, message: str, *, cache_miss: bool = False) -> None:
+    def __init__(self, message: str, *, cache_miss: bool = False, compile_budget: bool = False) -> None:
         super().__init__(message)
         self.cache_miss = cache_miss
+        self.compile_budget = compile_budget
 
 
 class _AsyncBenchWorker:
@@ -1515,7 +1578,7 @@ class _AsyncBenchWorker:
     Drives the ``_bench_worker`` protocol (``<8-byte LE length><pickle>``, both
     directions) over asyncio streams, so one event loop can keep N device-pinned
     workers benching concurrently — the per-kernel multi-GPU autotune path
-    (``two_level._inner_reward_async``). The deployable ``--bench`` comparison awaits
+    (``two_level.TwoLevelStrategy``). The deployable ``--bench`` comparison awaits
     ``benchmark_compare_isolated_async`` over a one-shot instance (via
     ``_run_job_oneshot``); the autotune sweep awaits a persistent instance per GPU
     directly via ``benchmark_program_isolated_async``.
@@ -1625,6 +1688,32 @@ class _AsyncBenchWorker:
                 await asyncio.wait_for(self._stderr_task, timeout=2.0)
             self._stderr_task = None
 
+    @staticmethod
+    async def _death_reason(proc) -> str:
+        """How the child died, for the EOF diagnostics.
+
+        A worker that raises returns the exception to the parent (the request loop catches
+        ``BaseException`` and answers with a traceback), so an EOF means the process went down
+        WITHOUT answering — a signal, or a silent ``return`` out of the request loop. Those write
+        nothing to stderr, which is why the tail is routinely empty and the exit status is the only
+        evidence there is. Reap briefly rather than reading ``returncode`` directly: at the moment
+        the pipe breaks the child is usually dead but not yet awaited, so the attribute is still
+        ``None``."""
+        try:
+            rc = await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except (TimeoutError, ProcessLookupError):
+            return "child still unreaped"
+        if rc is None:
+            return "no exit status"
+        if rc < 0:
+            import signal as _signal  # noqa: PLC0415 — only needed on this failure path
+
+            try:
+                return f"killed by {_signal.Signals(-rc).name}"
+            except ValueError:
+                return f"killed by signal {-rc}"
+        return f"child exited rc={rc}"
+
     async def _stderr_snapshot(self) -> str:
         """The drained stderr tail, letting the drain task flush briefly first (after a
         kill it ends at EOF almost immediately)."""
@@ -1683,9 +1772,10 @@ class _AsyncBenchWorker:
                 ) from exc
             except asyncio.IncompleteReadError as exc:
                 stderr_tail = await self._stderr_snapshot()
+                death = await self._death_reason(proc)
                 await self.aclose()
                 if attempt == 1:
-                    raise RuntimeError(f"bench worker EOF before response; stderr tail: {stderr_tail}") from exc
+                    raise RuntimeError(f"bench worker EOF before response ({death}); stderr tail: {stderr_tail}") from exc
                 # The child self-destructs (``os._exit``) on a hung kernel to dodge the cupy
                 # atexit deadlock, so a mid-job EOF usually means THIS config hangs — the retry
                 # will EOF again and fail loudly, costing one extra watchdog interval. But right
@@ -1695,7 +1785,7 @@ class _AsyncBenchWorker:
                 # sweeps kept hitting on the row right after a hang. One respawn + retry after a
                 # short drain grace tells the two apart (the same row replays clean once the
                 # zombie context is gone).
-                logger.info("[bench-worker] child EOF'd mid-job — draining the device and retrying once%s", self._tail_suffix())
+                logger.info("[bench-worker] child EOF'd mid-job (%s) — draining the device and retrying once%s", death, self._tail_suffix())
                 await asyncio.sleep(min(2.0, max(0.0, deadline - _time_module.perf_counter() - 1.0)))
                 continue
 
@@ -1705,7 +1795,16 @@ class _AsyncBenchWorker:
                 # their cause before exiting) would otherwise be silently discarded.
                 if resp.get("traceback"):
                     logger.error("[bench-worker] job failed in the child; traceback:\n%s%s", resp["traceback"], self._tail_suffix())
-                raise BenchWorkerJobError(f"bench worker error: {resp.get('error', '?')}", cache_miss=bool(resp.get("cache_miss")))
+                raise BenchWorkerJobError(
+                    f"bench worker error: {resp.get('error', '?')}",
+                    cache_miss=bool(resp.get("cache_miss")),
+                    compile_budget=bool(resp.get("compile_budget")),
+                )
+            if resp.pop("_retire_worker", False):
+                # The child returned a completed same-input reference after its later greedy
+                # timing hit the hung-kernel watchdog. Retire it before returning the reference:
+                # a queued/nonterminating kernel must never share a context with pinned rows.
+                await self.aclose()
             return resp
         raise RuntimeError("bench worker unreachable")  # both attempts exhausted (defensive)
 
@@ -1827,7 +1926,9 @@ async def benchmark_compare_worker_async(
     run path's extras: ``accuracy`` (the in-child real-input emmy-vs-eager verdict) and
     ``want_ref`` (that run's ``(inputs, outputs)`` for the pinned rows' wrong-answer gate).
     Returns the normalized response dict — keys ``results`` / ``result`` /
-    ``torch_available`` / ``captured`` / ``accuracy_error`` / ``run_io``."""
+    ``torch_available`` / ``captured`` / ``accuracy_error`` / ``run_io`` plus the optional
+    ``greedy_error`` / ``reference_run_us`` when an embedded Loop reference completed before
+    its repeated greedy timing failed."""
     resp = await worker.run_job(
         {
             "graph": lowered,
@@ -1849,6 +1950,9 @@ async def benchmark_compare_worker_async(
         "captured": resp.get("captured", False),
         "accuracy_error": resp.get("accuracy_error"),
         "run_io": resp.get("run_io"),
+        "greedy_error": resp.get("greedy_error"),
+        "reference_run_us": resp.get("reference_run_us"),
+        "sym_env": resp.get("sym_env"),
         "correctness": resp.get("correctness"),
     }
 

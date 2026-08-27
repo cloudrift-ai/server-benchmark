@@ -42,9 +42,11 @@ def _resolve_option0(graph, ctx):
 
 
 def test_materialized_op_carries_warp_eligibility_stamp():
-    """An fp16 matmul on a tensor-core-capable target offers warp rows, so EVERY materialized
-    variant of the kernel — whichever row option-0 lands on — must carry ``S_warp_eligible=1.0``
-    in its op knobs, matching the fork rows' stamp (one op = one ``S_*`` signature)."""
+    """An fp16 matmul on a tensor-core-capable target retains the stamp on its materialized piece.
+
+    A split row may also mint a distinct f32 finalize reduction; that kernel has its own structural
+    signature and is not itself warp-eligible.
+    """
     ctx = Context.from_target((12, 0))
     resolved = _resolve_option0(_matmul_graph(512, 512, 512, "fp16"), ctx)
     stamps = [
@@ -53,4 +55,5 @@ def test_materialized_op_carries_warp_eligibility_stamp():
         if getattr(node.op, "knobs", None) and any(k.split("@")[0] == "TILE" for k in node.op.knobs)
     ]
     assert stamps, "no tile-scheduled op in the resolved graph"
-    assert all(v == 1.0 for v in stamps), f"materialized op lost the S_warp_eligible stamp: {stamps}"
+    assert 1.0 in stamps, f"materialized op lost the S_warp_eligible stamp: {stamps}"
+    assert all(v in (None, 1.0) for v in stamps)

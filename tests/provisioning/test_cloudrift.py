@@ -6,6 +6,7 @@ Response fixtures are captured from real CloudRift API calls.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
 from emmy.provisioning.cloudrift import (
     API_VERSION,
@@ -16,6 +17,7 @@ from emmy.provisioning.cloudrift import (
     _add_ssh_key,
     _api_request,
     _ensure_ssh_key,
+    _extract_connection_info,
     _get_instance_info,
     _instance_fully_ready,
     _list_ssh_keys,
@@ -23,7 +25,14 @@ from emmy.provisioning.cloudrift import (
     _rent_instance,
     _terminate_instance,
     create_instance,
+    instance_is_active,
+    list_available_instance_types,
+    list_instances_by_tags,
+    resolve_node_id,
+    resolve_team_id,
     select_image_url,
+    terminate_instances_by_tags,
+    validate_team_id_access,
     wait_for_status,
 )
 from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
@@ -136,6 +145,173 @@ async def test_api_request_dry_run(caplog):
     assert '"foo": "bar"' in caplog.text
 
 
+# ── availability and tag ownership ────────────────────────────────
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_list_available_instance_types_uses_vm_capacity(mock_api):
+    mock_api.return_value = {
+        "instance_types": [
+            {
+                "name": "rtx49",
+                "variants": [
+                    {"name": "rtx49.1", "available_nodes": 2},
+                    {"name": "rtx49.4", "available_nodes": 0},
+                ],
+            },
+            {"name": "h200", "variants": [{"name": "h200.8", "available_nodes": 1}]},
+        ]
+    }
+
+    result = await list_available_instance_types(API_KEY, API_URL)
+
+    assert result == {"rtx49.1", "h200.8"}
+    mock_api.assert_awaited_once_with(
+        "POST",
+        "/api/v1/instance-types/list",
+        {"selector": {"ByServiceAndLocation": {"services": ["vm"]}}},
+        API_KEY,
+        API_URL,
+    )
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_team_id_requires_one_exact_visible_team(mock_api):
+    mock_api.return_value = {
+        "teams": [
+            {"id": "team-robots", "name": "Robots"},
+            {"id": "team-research", "name": "Research"},
+        ]
+    }
+
+    result = await resolve_team_id(API_KEY, "Robots", API_URL)
+
+    assert result == "team-robots"
+    mock_api.assert_awaited_once_with(
+        "POST",
+        "/api/v1/teams/list",
+        {"selector": "Mine", "with_members": False, "with_account_info": False},
+        API_KEY,
+        API_URL,
+    )
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_team_id_rejects_missing_team(mock_api):
+    mock_api.return_value = {"teams": [{"id": "team-research", "name": "Research"}]}
+
+    with pytest.raises(TerminalProvisionError, match="cannot access team 'Robots'"):
+        await resolve_team_id(API_KEY, "Robots", API_URL)
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_validate_team_id_access_uses_team_scoped_account_request(mock_api):
+    team_id = "f7b1d7c4-4b3b-4b3b-8b3b-4b3b4b3b4b3b"
+    mock_api.return_value = {"balance": 100.0}
+
+    result = await validate_team_id_access(API_KEY, team_id, API_URL)
+
+    assert result == team_id
+    mock_api.assert_awaited_once_with(
+        "POST",
+        "/api/v2/account/info",
+        {"selector": {"ByTeam": team_id}, "with_auto_top_up": False},
+        API_KEY,
+        API_URL,
+    )
+
+
+@pytest.mark.parametrize("team_id", [None, "", "Robots", "not-a-uuid"])
+async def test_validate_team_id_access_rejects_missing_or_invalid_uuid(team_id):
+    with pytest.raises(TerminalProvisionError, match="team ID must be a UUID"):
+        await validate_team_id_access(API_KEY, team_id, API_URL)
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_list_instances_by_tags_requires_all_tags(mock_api):
+    mock_api.return_value = {"instances": [{"id": "inst-1", "status": "Active"}]}
+
+    result = await list_instances_by_tags(API_KEY, ["emmy", "gh-job:7", "emmy"], API_URL)
+
+    assert result == [{"id": "inst-1", "status": "Active"}]
+    data = mock_api.await_args.args[2]
+    assert data["selector"] == {"ByTags": {"all": ["emmy", "gh-job:7"], "any": []}}
+    assert data["mask"] == {
+        "with_connection_info": False,
+        "with_hardware_info": False,
+        "with_usage_info": False,
+    }
+
+
+@pytest.mark.parametrize("tags", [[], [""], ["emmy", "  "]])
+async def test_list_instances_by_tags_rejects_unsafe_selection(tags):
+    with pytest.raises(ValueError, match="at least one non-empty tag"):
+        await list_instances_by_tags(API_KEY, tags, API_URL)
+
+
+@patch("emmy.provisioning.cloudrift.asyncio.sleep", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.list_instances_by_tags", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_terminate_instances_by_tags_terminates_every_active_match(mock_api, mock_list, mock_sleep):
+    mock_list.side_effect = [
+        [
+            {"id": "inst-1", "status": "Active"},
+            {"id": "inst-2", "status": "Initializing"},
+            {"id": "inst-old", "status": "Terminated"},
+        ],
+        [{"id": "inst-1", "status": "Deactivating"}],
+    ]
+
+    result = await terminate_instances_by_tags(API_KEY, ["emmy", "gh-job:7"], API_URL, audit_delay=0)
+
+    assert result == ["inst-1", "inst-2"]
+    mock_api.assert_awaited_once_with(
+        "POST",
+        "/api/v1/instances/terminate",
+        {"selector": {"ById": ["inst-1", "inst-2"]}},
+        API_KEY,
+        API_URL,
+    )
+    mock_sleep.assert_not_awaited()
+
+
+@patch("emmy.provisioning.cloudrift.asyncio.sleep", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.list_instances_by_tags", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_terminate_instances_by_tags_fails_when_audit_stays_active(mock_api, mock_list, mock_sleep):
+    mock_list.return_value = [{"id": "inst-1", "status": "Active"}]
+
+    with pytest.raises(RuntimeError, match="inst-1"):
+        await terminate_instances_by_tags(API_KEY, ["gh-job:7"], API_URL, audit_attempts=2, audit_delay=0)
+
+    assert mock_sleep.await_count == 2
+    mock_api.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("Active", True),
+        ("Initializing", True),
+        ("Deactivating", False),
+        ("Inactive", False),
+        ("Terminated", False),
+    ],
+)
+@patch("emmy.provisioning.cloudrift._get_instance_info", new_callable=AsyncMock)
+async def test_instance_is_active_accepts_scheduled_cleanup(mock_get, status, expected):
+    mock_get.return_value = {"id": "inst-1", "status": status}
+
+    assert await instance_is_active(API_KEY, "inst-1", API_URL) is expected
+
+
+@patch("emmy.provisioning.cloudrift._get_instance_info", new_callable=AsyncMock)
+async def test_instance_is_active_returns_false_when_instance_is_absent(mock_get):
+    mock_get.return_value = None
+
+    assert not await instance_is_active(API_KEY, "inst-1", API_URL)
+
+
 # ── _rent_instance ────────────────────────────────────────────────
 
 
@@ -164,6 +340,38 @@ async def test_rent_instance_payload(mock_api):
     }
     assert call_data["with_public_ip"] is True
     assert result["instance_ids"] == ["c4bf5e16-1063-11f1-9096-5f6ae8f8983f"]
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_rent_instance_payload_includes_team(mock_api):
+    mock_api.return_value = RENT_RESPONSE
+
+    await _rent_instance(
+        API_KEY,
+        "rtx49-7c-kn.1",
+        ["ssh-ed25519 AAAA user@host"],
+        DEFAULT_IMAGE_URL_NVIDIA,
+        api_url=API_URL,
+        team_id="team-robots",
+    )
+
+    assert mock_api.await_args.args[2]["team_id"] == "team-robots"
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_rent_instance_can_disable_public_ip(mock_api):
+    mock_api.return_value = RENT_RESPONSE
+
+    await _rent_instance(
+        API_KEY,
+        "rtx49-7c-kn.1",
+        ["ssh-ed25519 AAAA user@host"],
+        DEFAULT_IMAGE_URL_NVIDIA,
+        api_url=API_URL,
+        with_public_ip=False,
+    )
+
+    assert mock_api.await_args.args[2]["with_public_ip"] is False
 
 
 @patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
@@ -202,6 +410,168 @@ async def test_rent_instance_no_billing_exempt_by_default(mock_api):
 
     call_data = mock_api.call_args[0][2]
     assert "billing_exempt" not in call_data
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_rent_instance_node_id_selector(mock_api):
+    mock_api.return_value = RENT_RESPONSE
+
+    await _rent_instance(
+        API_KEY,
+        "rtx49-7c-kn.1",
+        ["ssh-ed25519 AAAA user@host"],
+        DEFAULT_IMAGE_URL_NVIDIA,
+        api_url=API_URL,
+        node_id="2cb28df8-86fe-11f0-b32f-3b150b0bc471",
+    )
+
+    call_data = mock_api.call_args[0][2]
+    assert call_data["selector"] == {"ByNodeId": {"node_id": "2cb28df8-86fe-11f0-b32f-3b150b0bc471", "instance_type": "rtx49-7c-kn.1"}}
+
+
+# ── resolve_node_id ───────────────────────────────────────────────
+
+NODES_LIST_RESPONSE = {
+    "nodes": [
+        {"id": "2cb28df8-86fe-11f0-b32f-3b150b0bc471", "hostname": "cato-ubuntu-66-172-10-7"},
+        {"id": "f8c403e6-7101-11ee-b00d-63f746883a19", "hostname": "atlas-ubuntu-1"},
+    ]
+}
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_node_id_uuid_passthrough(mock_api):
+    node_id = await resolve_node_id(API_KEY, "2cb28df8-86fe-11f0-b32f-3b150b0bc471", api_url=API_URL)
+
+    assert node_id == "2cb28df8-86fe-11f0-b32f-3b150b0bc471"
+    mock_api.assert_not_called()
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_node_id_hostname(mock_api):
+    mock_api.return_value = NODES_LIST_RESPONSE
+
+    node_id = await resolve_node_id(API_KEY, "cato-ubuntu-66-172-10-7", api_url=API_URL)
+
+    assert node_id == "2cb28df8-86fe-11f0-b32f-3b150b0bc471"
+    assert mock_api.call_args[0][1] == "/api/v1/nodes/list"
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_node_id_unknown_hostname(mock_api):
+    mock_api.return_value = NODES_LIST_RESPONSE
+
+    with pytest.raises(TerminalProvisionError, match="no-such-host"):
+        await resolve_node_id(API_KEY, "no-such-host", api_url=API_URL)
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_resolve_node_id_forbidden_is_terminal(mock_api):
+    response = MagicMock(status_code=403, text="forbidden")
+    mock_api.side_effect = httpx.HTTPStatusError("forbidden", request=MagicMock(), response=response)
+
+    with pytest.raises(TerminalProvisionError, match="operator"):
+        await resolve_node_id(API_KEY, "cato-ubuntu-66-172-10-7", api_url=API_URL)
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.resolve_node_id", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.wait_for_status", new_callable=AsyncMock)
+async def test_create_instance_pins_resolved_node(mock_wait, mock_resolve, mock_rent, tmp_path):
+    key_path = tmp_path / "id_ed25519.pub"
+    key_path.write_text("ssh-ed25519 AAAA user@host")
+    mock_resolve.return_value = "2cb28df8-86fe-11f0-b32f-3b150b0bc471"
+    mock_rent.return_value = RENT_RESPONSE
+    mock_wait.return_value = INSTANCE_ACTIVE_RESPONSE["instances"][0]
+
+    conn = await create_instance(API_KEY, "rtx49-7c-kn.1", str(key_path), api_url=API_URL, node="cato-ubuntu-66-172-10-7")
+
+    assert conn is not None
+    mock_resolve.assert_awaited_once_with(API_KEY, "cato-ubuntu-66-172-10-7", api_url=API_URL, dry_run=False)
+    assert mock_rent.call_args.kwargs["node_id"] == "2cb28df8-86fe-11f0-b32f-3b150b0bc471"
+
+
+def test_extract_connection_info_hidden_password_username():
+    """v062 HiddenPassword login_info still names the user; don't fall back to "user"."""
+    instance = dict(INSTANCE_ACTIVE_RESPONSE["instances"][0])
+    instance["virtual_machines"] = [{"login_info": {"HiddenPassword": {"username": "riftuser"}}, "ready": True}]
+
+    assert _extract_connection_info(instance).username == "riftuser"
+
+
+# ── rental tags ───────────────────────────────────────────────────
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_rent_instance_tags_payload(mock_api):
+    mock_api.return_value = RENT_RESPONSE
+
+    await _rent_instance(
+        API_KEY,
+        "rtx49-7c-kn.1",
+        ["ssh-ed25519 AAAA user@host"],
+        DEFAULT_IMAGE_URL_NVIDIA,
+        api_url=API_URL,
+        tags=["emmy", "experiment:mpk"],
+    )
+
+    call_data = mock_api.call_args[0][2]
+    assert call_data["tags"] == ["emmy", "experiment:mpk"]
+
+
+@patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)
+async def test_rent_instance_no_tags_field_when_untagged(mock_api):
+    mock_api.return_value = RENT_RESPONSE
+
+    await _rent_instance(API_KEY, "rtx49-7c-kn.1", ["ssh-ed25519 AAAA user@host"], DEFAULT_IMAGE_URL_NVIDIA, api_url=API_URL)
+
+    assert "tags" not in mock_api.call_args[0][2]
+
+
+def _tagged_create(tmp_path, mock_rent, mock_wait, **kwargs):
+    key_path = tmp_path / "id_ed25519.pub"
+    key_path.write_text("ssh-ed25519 AAAA user@host")
+    mock_rent.return_value = RENT_RESPONSE
+    mock_wait.return_value = INSTANCE_ACTIVE_RESPONSE["instances"][0]
+    return create_instance(API_KEY, "rtx49-7c-kn.1", str(key_path), api_url=API_URL, **kwargs)
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.wait_for_status", new_callable=AsyncMock)
+async def test_create_instance_tags_default_to_emmy(mock_wait, mock_rent, tmp_path, monkeypatch):
+    monkeypatch.delenv("EMMY_RENTAL_TAGS", raising=False)
+
+    await _tagged_create(tmp_path, mock_rent, mock_wait)
+
+    assert mock_rent.call_args.kwargs["tags"] == ["emmy"]
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.wait_for_status", new_callable=AsyncMock)
+async def test_create_instance_forwards_public_ip_choice(mock_wait, mock_rent, tmp_path):
+    await _tagged_create(tmp_path, mock_rent, mock_wait, with_public_ip=False)
+
+    assert mock_rent.call_args.kwargs["with_public_ip"] is False
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.wait_for_status", new_callable=AsyncMock)
+async def test_create_instance_tags_env_override(mock_wait, mock_rent, tmp_path, monkeypatch):
+    monkeypatch.setenv("EMMY_RENTAL_TAGS", "experiment:mpk, gh:job-7")
+
+    await _tagged_create(tmp_path, mock_rent, mock_wait)
+
+    assert mock_rent.call_args.kwargs["tags"] == ["experiment:mpk", "gh:job-7"]
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+@patch("emmy.provisioning.cloudrift.wait_for_status", new_callable=AsyncMock)
+async def test_create_instance_explicit_tags_win(mock_wait, mock_rent, tmp_path, monkeypatch):
+    monkeypatch.setenv("EMMY_RENTAL_TAGS", "ignored")
+
+    await _tagged_create(tmp_path, mock_rent, mock_wait, tags=["experiment:mpk"])
+
+    assert mock_rent.call_args.kwargs["tags"] == ["experiment:mpk"]
 
 
 @patch("emmy.provisioning.cloudrift._api_request", new_callable=AsyncMock)

@@ -1,9 +1,7 @@
-# Volta qualification for the exact public FP8 checkpoint on 8x V100 SXM3 32GB. The native
-# SM70 FP8 MoE route faults after loading, so this measures the documented FP16 expert fallback.
-# The tag was validated locally; Docker Hub publication is pending cloudriftai namespace access.
+# Volta qualification for the exact public FP8 checkpoint on 8x V100 SXM3 32GB.
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  revision: 9e0b8ba630080b0e6f20a7b43294a9f2232fd247
+  revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate
 
 engine:
@@ -11,10 +9,10 @@ engine:
     tensor_parallel_size: 8
     pipeline_parallel_size: 1
     gpu_memory_utilization: 0.90
-    context_length: 4096
+    context_length: 1048576
     max_concurrent_requests: 1
     vllm:
-      image: "cloudriftai/1cat-vllm-sm70:1.2.2-cloudrift"
+      image: "emmy-round2-laguna-fp8-sm70:96f26179bf28"
       extra_args: >-
         --dtype half
         --attention-backend FLASH_ATTN_V100
@@ -27,17 +25,19 @@ engine:
         --default-chat-template-kwargs '{"enable_thinking": true}'
       extra_env:
         VLLM_SM70_FLASH_ATTN_V100: "1"
-        VLLM_SM70_FP8_TURBOMIND: "0"
-        VLLM_SM70_FP8_MOE_DEQUANT_FALLBACK: "1"
-        VLLM_SM70_FP8_MOE_BATCHED_GEMM: "0"
+        VLLM_SM70_FP8_TURBOMIND: "1"
+        VLLM_SM70_FP8_MOE_DEQUANT_FALLBACK: "0"
+        VLLM_SM70_FP8_MOE_BATCHED_GEMM: "1"
 
 benchmark:
   max_concurrency: 1
-  num_prompts: 1
+  num_prompts: 5
   random_input_len: 32
-  random_output_len: 16
+  random_output_len: 64
   seed: 0
   temperature: 0.0
+  ignore_eos: true
+  repeats: 6
 
 matrices:
   deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"

@@ -10,8 +10,6 @@ Four companion documents cover what this one doesn't:
 
 - The rewrite rules themselves and their authoring invariants → [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md).
 - What each IR dialect looks like → `ir/ARCHITECTURE.md`.
-- The shipped bugs and retired designs behind the stricter rules below → [`HISTORY.md`](HISTORY.md). This file states
-  each rule and its reason briefly; where the reason was a production incident, the full story lives there.
 - A gentler, worked-example introduction to the same material, written for someone who has not read the code → the
   Tutorials section of the course site (`docs/docs/tutorials/`). It covers forks, the deploy evidence hierarchy, the
   prior and the goldens in nine short pages; this file remains the reference the tutorials defer to.
@@ -27,7 +25,7 @@ After that the Parts are largely independent:
 | 4 | The two drivers (`tune`'s search loop, the greedy compile) | you are tracing control flow through a compile |
 | 5 | The tuning workflow (`emmy tune`) | you are running or extending autotune |
 | 6 | Persistence: the two identities, the tables, the freeze | you are adding a cache, a table, or a column |
-| 7 | Golden configs and the A/B integrity gates | you are recording or auditing goldens |
+| 7 | Golden configs and the A/B integrity gates | you are recording or replaying goldens |
 | 8 | Evaluating the prior (`emmy eval`) | the prior is picking badly and you want to know where |
 | 9 | Tile lowering, at the pipeline level | you want the pipeline-side view of `lowering/tile/` |
 
@@ -52,20 +50,25 @@ predicts kernel latency from a variant's features (Part 5).
 **`emmy compile` / `emmy run` (a "greedy" compile) benchmarks nothing.** Every fork is decided on the spot from
 knowledge recorded earlier, in a fixed order — best evidence first:
 
-1. **Golden configurations** recorded for the GPU being compiled for — reviewed measurements that ship with the repo
-   (Part 7).
-2. **Measured evidence** — first the measurements stored inside the online prior's checkpoint (its **reservoir**) that
-   were taken at deployable flags, then rows from the tune database (Part 3).
+1. **The verified goldens** recorded for this GPU — reviewed measurements that ship with the repository, joined by
+   STRICT structural identity (the recognized term's algebra digest + dtype fingerprint + axis-extent fingerprint,
+   derived record-side from the record's own persisted program) and decoded by EXACT spelled-row equality (Part 7).
+   Fail-closed: a record that matches the identity but equals no enumerated row is drift — a loud warning, never a
+   fuzzy acceptance.
+2. **Measured evidence** — first the measurements stored inside the online prior's checkpoint (its **reservoir**)
+   that were taken at deployable flags, then rows from the tune database (Part 3).
 3. **The prior** — the online model when trained and calibrated, the offline model otherwise (Part 3).
-4. **Option-0** — the first option in the order the rule emitted them. Rule authors order options so this is always
-   safe.
+4. **Option-0** — the first option in the order the rule emitted them. This is only the no-evidence fallback;
+   enumeration order carries no performance meaning.
 
 That order has a name — the **deploy evidence hierarchy** — and each numbered step in it is called a **tier**. The
 list above is only a summary. **Part 3's "The deploy evidence hierarchy" is the authoritative statement** of the exact
-order, of what each tier holds, and of the rule that tiers 1 and 2 apply only to a compile at deployable `-O3` flags.
+order, of what each tier holds, and of the rule that the reservoir tier applies only to a compile at deployable `-O3`
+flags.
 
 Structural forks — the ones that change which kernels exist — are stricter. The prior never ranks their options
-directly, and without a trusted online prior the kernel set stays at its default (Part 4).
+directly; the compiler compares whole-kernel-set costs, priced by measurements first and any loaded prior — the
+offline model on a cold machine — for the remainder (Part 4).
 
 ### The four stores
 
@@ -74,9 +77,9 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 
 | Store | Where it lives | Written by | Consulted by |
 |-------|----------------|------------|--------------|
-| **Golden configs** | per-GPU YAML files under `search/goldens/`, checked into the repo | promoted by hand from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1); `emmy fit` trains the offline prior on them; `emmy eval golden` |
-| **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every training row, including the `-O3` re-benches | greedy compile (tier 2, its `H_opt=3` rows); the online prior's own refits |
-| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — one row per benched kernel, at whatever flags the sweep ran | greedy compile (tier 3); the per-variant replay cache |
+| **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/goldens/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1, the verified tier); pinned replay (`run --golden NAME`); `emmy fit` trains the offline prior on them; `emmy eval` datasets |
+| **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every deployable-regime training row | greedy compile (tier 2); the online prior's own refits |
+| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — terminal kernel measurements plus validated whole-slice structural routes, at the sweep's flags | greedy compile (tier 3); the per-variant replay cache |
 | **`node` table** | the same tune DB | `emmy tune` (every search-tree node) and `run --bench` (rows benched with hand-forced knob values) | `emmy eval` diagnostics — **never** consulted at deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The
@@ -88,17 +91,16 @@ WRITERS                                STORES                                REA
 
 emmy tune ─┬─ sweep benches ─────────▶ perf table   (autotune.db) ─────────▶ greedy compile, tier 3
            ├─ every training row ────▶ reservoir    (online.json) ─────────▶ greedy compile, tier 2 (H_opt=3 rows)
-           ├─ -O3 re-benches ────────▶ reservoir + node table                online prior refits
            └─ every tree node ───────▶ node table   (autotune.db) ─────────▶ emmy eval only (never a deploy)
 run --bench pinned/golden/--ab rows ─▶ node table   (autotune.db)
-recorded by hand from those rows ────▶ search/goldens/*.yaml (repo) ───────▶ greedy compile, tier 1
+recorded from those rows ────────────▶ recipe-local / hardware golden YAML ─▶ greedy compile, tier 1 + pinned replay
                                                                   └─ emmy fit ─▶ offline_weights.json (repo)
                                        offline_weights.json ──────────────▶ greedy compile, tier 4 (cold)
                                        online prior model (online.json) ──▶ greedy compile, tier 4 (trusted)
 ```
 
-One asymmetry trips people up: the `-O3` re-benches a tune runs never reach the `perf` table. On a machine tuned at
-the default `-Xcicc -O1` flags, the only measurements taken at deployable `-O3` flags live in the reservoir (Part 3).
+Everything above is measured in ONE regime: the deployable one a compile runs in. A sweep benches at the flags a
+deploy compiles with, so a tuned latency is the deployed latency and no store needs a per-regime lane (Part 3).
 
 ### How one fork gets decided, end to end
 
@@ -106,24 +108,21 @@ A worked example, to fix the vocabulary. Take `emmy compile` on a machine with a
 rule matches a `LoopOp` and returns several tile options.
 
 1. The engine turns the option list into a lazy fork tree and hands the fork point to `greedy_decide` (Parts 2, 4).
-2. `greedy_decide` **flattens** the fork to its complete leaves — knob dicts only; no kernel is built yet (Part 4).
-3. Each leaf becomes one row: the compile context's `H_*` features (which GPU, which nvcc flags), the `S_*` features
-   an earlier pass wrote onto the op (a summary of its body and loop extents), and the leaf's complete knob values
-   (Part 6).
-4. **Tier 1, goldens.** The op is joined by `ShapeKey` against the goldens recorded for this GPU. The winner is the
-   first leaf that agrees with the fastest recorded entry on every knob the leaf has decided. Deployable `-O3` flags
-   only.
-5. **Tier 2, reservoir.** Otherwise: the leaf that agrees the same way with the fastest reservoir row of the same op
-   that was itself measured at `-O3` (`H_opt=3`). Deployable flags only.
-6. **Tier 3, `perf` rows.** Otherwise: measured rows for this exact op — a row measured at deployable flags decides
-   ahead of a row measured at the `-Xcicc -O1` flags a tune sweep uses.
-7. **Tier 4, the prior.** Otherwise: the `mean_scores` argmin over all leaves, in one batched predict.
-8. Ties at every tier break by `knob.canonical_row_key`, never by the order the rule emitted its options in.
-9. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's
+2. `greedy_decide` first tries to descend directly to a verified or measured complete row. Without direct evidence,
+   it ranks the complete offered rows; no kernel is built until the choice is made (Part 4).
+3. Each compared row contains the compile context's `H_*` features (which GPU, which nvcc flags), the `S_*` features
+   an earlier pass wrote onto the op (a summary of its body and loop extents), and complete knob values (Part 6).
+4. **The reservoir tier.** The leaf that agrees with the fastest reservoir row of the same op — agreement means
+   every knob the leaf has decided has the same value in the row. (The example starts here because this card records
+   no golden for the op; the **verified** tier would otherwise decide first. Part 3 numbers the full list.)
+5. **The `perf` tier.** Otherwise: measured rows for this exact op, under this compile's own context key.
+6. **The prior.** Otherwise: the `mean_scores` argmin over complete offered rows.
+7. Ties at every tier break by `knob.canonical_row_key`, never by the order the rule emitted its options in.
+8. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's
    `Decision.score`, and the resolve moves to the next fork.
 
-With no evidence and no prior at all, step 4 still runs — the golden tier needs no prior — and every fork it does not
-answer falls to option-0.
+With no evidence and no prior at all, every fork falls to the first emitted leaf — not a chosen default, just what
+is left when there is nothing to rank with (env pins still apply — a pinned family never reaches a decide).
 
 ### Terms used throughout
 
@@ -136,10 +135,10 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **candidate** | One in-flight compilation state (a graph snapshot part-way through the pipeline). |
 | **fork** | A rule returning multiple alternatives; the engine turns each option into a child candidate. |
 | **knob** | A named tuning dimension (e.g. `TILE`, `STAGE`). Every fork option is identified by the knob values it fixes. |
-| **to pin a knob** | To force a knob's value by hand instead of letting the compiler choose — from the environment (`EMMY_STAGE=d2/cp`), or by reproducing a golden entry's recorded values. A *pinned row* is a benchmark of such a forced configuration. |
+| **to pin a knob** | To force a knob's value by hand instead of letting the compiler choose — from the environment (`EMMY_STAGE=d2/smem-async`), or by reproducing a golden entry's recorded values. A *pinned row* is a benchmark of such a forced configuration. |
 | **to stamp a value** | To write a value onto an op as metadata, where later passes and the prior can read it: the `S_*` shape/body features, knob values, scheduler facts. "The op's stamped `S_*` features" means the ones an earlier pass wrote onto it. |
 | **to realize** | A recorded configuration *realizes* at a fork when the options the compiler actually offers there include one that matches it. A recording that realizes nowhere cannot be deployed, no matter how good its recorded µs. |
-| **regime** | The compile settings a measurement was taken under, or that a compile is running under: mainly the nvcc optimization level (`H_opt`) — `-O3` is the **deployable** regime, `-Xcicc -O1` the fast-compiling one a tune sweep uses — plus whether fast math is on. |
+| **regime** | The compile settings a measurement was taken under, or that a compile is running under: mainly the nvcc optimization level (`H_opt`) — `-O3` is the **deployable** one, and the only one anything is measured in — plus whether fast math is on. |
 | **prior** | The ranking model — the fit-offline **offline prior** when cold, the CatBoost **online prior** trained from local measurements once data exists. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
 | **golden record** | A reviewed program-backed schedule measurement, selected by frontend provenance and used as deploy evidence and an A/B reference. |
@@ -150,7 +149,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | Module | What lives there |
 |--------|------------------|
 | `pipeline.py` | Engine core: `Pattern` / `Match` / `Rule` / `Pass` / `Pipeline` (the frozen pass layout) plus `Run` — the per-run state and engine loop. |
-| `fork.py` | The `Fork` interface (`OptionFork`, `ThunkFork`) and the reusable `Level` + `build_fork_tree`, which builds a tree of knob-value combinations lazily. |
+| `fork.py` | The `Fork` interface (`OptionFork`) and the reusable `Level` + `build_fork_tree`, which builds a tree of knob-value combinations lazily. |
 | `knob.py` | The `Knob` descriptor system and the `EMMY_<KNOB>` env namespace (borrowing `config.knob_var` / `config.knob_raw`; `format_tuning_knobs` renders the real tuning knobs for `tune` output). Holds NO concrete knob declarations. |
 | `search/space.py` | **The single home of the search space.** Every `Knob` instance is declared here and nowhere else — the schedule codecs (`WORK` / `TILE` / `REDUCE` / `STAGE` / `RASTER`), the kernel-lowering policy knobs (`VECTORIZE_LOADS` / `INTERLEAVE_LOADS`), and the enumeration value grids (`scalar_tile_moves` & co). A rule that decides a knob imports it from here; registration is construction (`Knob.__post_init__`), and `knob.registry()` imports `space.py` before answering, so the registry is complete in any process. |
 | `search/domain.py` | The candidate domain as a **constrained integer set** — `Dimension` (a name + its finite integer values), `Bound` (`coeff · ∏ dims` `<=` / `==` / `divides` a limit) and `Space` (enumerate the legal points, or ask whether a recorded one is still a member). The constraints that bound a schedule family are products of the unknowns, so the feasible set is not convex and no coordinate change makes both the products and the budgets affine at once; the answer is to keep integer coordinates and enumerate, pruning each prefix the moment a running product overruns its bound. Generation machinery only — it holds no schedule family today (`space.py`'s grids are still curated), and categorical legality stays with the scheduler. |
@@ -158,11 +157,12 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/db.py` | `SearchDB`, the persistent SQLite store (Part 6). |
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
 | `search/policy/greedy.py` | `greedy_decide` — the no-tree fork resolver used by `compile` / `run`. |
-| `search/two_level.py` | The two-level tuner: outer structural MCTS, inner per-op reward. |
-| `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `diagnostics.py` here backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `group.py` data representation, `linear.py` trainer+model, `rank.py` rank metrics, `cv.py` fold harness, `run.py` the pure `emmy fit` run harness. |
-| `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, and the derived `ShapeKey` index. |
+| `search/strategy/` | The search shapes: `base.SearchStrategy`, `greedy.GreedyStrategy`, `two_level.TwoLevelStrategy`. |
+| `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `diagnostics.py` backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `linear.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/data/group.Group`, one layer down: a pool is data, not a fitter detail. |
+| `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — the rank metrics, the three calibration paths and the reachability ratio all resolve here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
+| `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, the derived `ShapeKey` index, and `group.py`'s `Group` — one candidate pool packed as a matrix plus one label per row. The base says nothing about what the labels mean, which is all a ranking metric needs; `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and only it can be asked which rows are the answer. `group_measured` builds base groups from benched node rows, labelled with measured µs. Nothing here imports `search/prior/`: a group carries every column it was given, and each model class narrows to the ones it wants when it asks for the matrix — `TREE_FEATURES`, the view argued entirely from what a tree can re-derive, lives with the CatBoost trainer for the same reason. |
 | `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
-| `search/audit.py` | The golden drift audit: compile graphs with the golden tier as the only evidence, one MATCH / DRIFT / GAP verdict per consulted fork (via `greedy.golden_audit`, the supported sink; records also carry `unrealized`, the per-realization pin-only signal). Backs the file-scoped `emmy eval golden` release audit (see Part 7). |
+| `search/audit.py` | The verified-tier drift audit: one MATCH / DRIFT / GAP verdict per consultation, collected off a whole card's graphs under isolated evidence. Backs the `emmy eval golden --serving-config` release gate. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
 | `passes/{frontend,loop,lowering}/` | The rules themselves — documented in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); a per-pass overview table is near the end of this file. |
@@ -181,7 +181,7 @@ Multi-node patterns only fire when each intermediate node has exactly one consum
 `match_pattern(graph, pattern) → list[Match]` walks every topo-ordered seed. Overlapping matches are allowed — the
 rewriter exits after the first successful rewrite per iteration, so overlap is just candidate enumeration.
 `Match.nodes` maps each pattern entry's name to the matched `Node`. `Match.consumed` and `Match.output` are
-overridable by the rewrite function, to control which nodes the splicer removes and which node's edges get rewired.
+overridable by the rewrite function, to control which nodes the splicer removes and which buffer edges get rewired.
 Matches retain the watched node objects themselves, so `Match.is_alive()` rejects removal followed by a different
 node at the same graph id even when the Python allocator would otherwise recycle an integer object address.
 
@@ -202,19 +202,75 @@ def rewrite(ctx: Context, graph: Graph, match: Match) -> Graph | Op | list[Graph
 - Files starting with `_` (e.g. `_broadcast.py`) are **not** loaded as rules — they're shared helpers.
 - Raise `RuleSkipped(reason)` to decline a match; the engine logs the reason at DEBUG and moves on.
 
+### Strategies — engine events for cross-cutting concerns
+
+The engine is IR-dialect-agnostic: it emits a small fixed set of EVENTS — frozen records of an engine moment
+(handlers act on the compilation state an event references, never on the event) — and never branches on pass
+names, dialects, or per-concern flags. Three prefixed protocols share the "strategy" vocabulary, each with its own
+ABC, told apart by what the loop is doing when they act:
+
+- **`PipelineStrategy`** (`pipeline/strategy.py`) — reacts to what the loop DID (events below): the cross-cutting
+  concerns (provenance, identity, the kernel inventory). Never steers the search; the loop's trajectory is
+  identical without them.
+- **`Search`** (`search/policy/base.py`) — answers what ONE loop ASKS during exploration: frontier ranking
+  (`push`/`pop`) and terminal valuation (`evaluate`); `TuningSearch` is the realization, and `greedy_decide`'s
+  decide callback is the deterministic sibling for `Run.resolve`.
+- **`SearchStrategy`** (`search/strategy/base.py`) — the search SHAPES above the loop: how many loops, over which pass
+  lists, with which policy inside, and what the results mean together (`GreedyStrategy`, `TwoLevelStrategy`; each
+  implements `run(graph, ctx)`).
+
+The composition chain for a tune: a `SearchStrategy` constructs runs with a `Search` policy inside; the loop emits
+events that `PipelineStrategy` instances act on. Each layer only knows the one below it. Every cross-cutting
+concern is a `PipelineStrategy` implementing the event methods it cares about; extension is a new strategy over
+the existing events (or a new event field), never a new engine parameter. The events, each a payload object: `RunStartEvent` (a loop starts driving a graph),
+`SpliceEvent` (before a `Graph` fragment splices in — op identities stable; strategies may mutate fragment OPS,
+never the graph or cursor), `SplicedEvent` (after the splice, carrying its `SpliceReceipt` — `Graph.splice` is pure
+surgery and hands back what it did), and `PassEndEvent` (a named pass completed a quiescent scan).
+
+Two binding scopes share the protocol:
+
+- **Discovered** (build-scoped): strategy modules are plain `.py` files at the top level of `passes/`
+  (`passes/provenance.py`, `passes/identity.py`); `Pipeline.build` collects every `PipelineStrategy` subclass they
+  define into shared instances (`strategy.discovered_strategies`), class-name-sorted. Dispatch order MUST NOT be
+  load-bearing — no strategy may depend on another having handled an event first — which is why identity is a
+  computed function, not a stamp others wait on. Build-scoped instances are shared across runs and candidates:
+  immutable config plus content-keyed caches only, never trajectory state.
+- **Composed per run** (`Pipeline.with_strategies`): instances with per-run state — e.g. the two-level tuner's
+  minted-kernel watcher — composed into the run's own pipeline instance after the discovered set. A pipeline
+  composed with stateful strategies serves one run; sharing across runs is only safe when every strategy is
+  stateless.
+
+The two discovered strategies: **`ProvenanceStrategy`** owns op provenance end to end (`seed` at run start,
+`propagate` from the splice receipt, mint for `frontend/decomposition`'s fragments, aggregate for everything else)
+and keeps the replaced result's ultimate `Op.source` object on its rewrite fragments. The pattern root may be an
+upstream producer while `Match.output` names the consumer result that the fragment replaces. A fragment may consume
+inputs from other origins without losing that result identity; those producer edges retain their own sources. The
+source identity lets semantic rewrites distinguish a frontend operation's private decomposition edges from tensor
+boundaries between operations. A pipeline built without the strategy has no provenance anywhere, and `graph.py`
+imports none of it.
+**`IdentityStrategy`** owns the `S_*` structural identity: computed (`structure_features`) and materialized into
+`op.knobs` exactly once per kernel, at birth — fusion-born kernels at the loop dialect's end (`PassEndEvent` of
+`loop/stamp`), minted split pieces at the splice event, before the fragment even
+enters the graph, so no rule at any cursor position can observe an unstamped kernel. The stamped row rides the
+engine's rebind knob-merge into every later dialect (which is what keeps a terminal `CudaOp`'s cache key, DB rows,
+and prior feature columns carrying the kernel-birth identity). It serves the read API (`signature` / `op_sig` —
+knobs-first, compute-fallback) every identity consumer goes through. The search shapes (`SearchStrategy` subclasses)
+are the same idea one level up — they own
+loop composition and terminal aggregation — but are constructed by their entry points, not discovered.
+
 A rule always sees **graph-true operand Tensors**: op `inputs` / `outputs` are refreshed from the graph at match build
 AND again at apply time (`Candidate.try_rewrite`). This matters because an earlier apply in the same batch may have
 swapped a consumed node's op for a rebuilt instance still carrying its `(f32, ())` seeding placeholders — a change
 `Match.is_alive`'s node-identity check cannot see. (This was the gemma o_proj misdeploy: a scalar tile shipped at 16x
-the kernel's measured mma rows because the warp atom gate read placeholder dtypes off an all-f16 graph — HISTORY.md:
-"Placeholder dtypes read off a rebuilt op".)
+the kernel's measured mma rows because the warp atom gate read placeholder dtypes off an all-f16 graph.)
 
 ### The three kinds of rewrite result
 
 The return type discriminates the rewrite flavor:
 
 - **Functional** — returns a `Graph` fragment, spliced in place of `match.output` (defaults to `match.root_node_id`).
-  Fragment `InputOp` nodes reference existing graph nodes by id; non-Input nodes get fresh ids.
+  A dictionary maps several old buffers, including secondary outputs, to fragment output buffers in one splice.
+  Fragment `InputOp` nodes reference existing graph buffers by id; non-Input nodes get fresh ids.
 - **In-place** — returns an `Op`. The engine assigns it to `root.op` directly, preserving the node id, inputs list,
   output Tensor and hints. The lowering rules use this because `KernelOp.arg_order` / `CudaOp.arg_order` embed the
   original node id as the output buffer name — a fresh id would break the generated kernel's buffer binding.
@@ -232,12 +288,12 @@ Most rules satisfy this implicitly via op-type changes (`LoopOp` → `TileOp`); 
 
 ### How fragments are spliced in (`engine._apply_replacement`)
 
-1. Walk the fragment in topo order. `InputOp` nodes forward their id to the existing graph node (external reference);
-   non-Input nodes are added with fresh ids.
-2. `replace_node(match.output or match.root_node_id, new_output)` rewires all consumers (and `graph.outputs` slots)
-   from the old output to the fragment's output id.
-3. Merge hints from every consumed node into the new output.
-4. Remove consumed nodes and run `_remove_orphans` to drop any now-dangling constants / inputs.
+1. Walk the fragment in topo order. `InputOp` nodes forward their id to the existing graph buffer (external
+   reference); non-Input nodes are added with fresh ids.
+2. Rewire each requested old buffer's consumers and `graph.outputs` slots to its fragment output buffer.
+3. Merge redirected owners' hints onto their new producers; when all ports belong to one multi-output node, merge
+   the dissolved internal nodes there too.
+4. Remove consumed nodes, restore each redirected primary or secondary buffer's old identity, and drop orphans.
 
 ## Part 2: Forks — how choices are represented
 
@@ -256,15 +312,14 @@ trees. `Fork` (`fork.py`) is an interface with three members:
 - `expand()` — builds the next level of options.
 
 The search loop pops a `LazyCandidate` waiting on a fork, calls `expand()` to build the children, pushes them back and
-continues, so only the subtrees the search actually walks into ever get built. `OptionFork` is a concrete `Op` /
-`Graph` leaf. `ThunkFork` is a generic flat fork: `expand_fn(knobs)` is a function of the fork's own knob values, so
-all its siblings share one function.
+continues, so only the subtrees the search actually walks into ever get built. `OptionFork` wraps a concrete `Op` or
+`Graph`; `DeferredFork` is a leaf whose selected rewrite is materialized only when expanded. Structural leaves mark
+themselves directly, so graph-building can remain lazy without policy inspecting their implementation.
 
 A fork whose levels form a cartesian product of knob values reuses **`build_fork_tree`**. A rule supplies one `Level`
 per level plus a `materialize=` callable, and gets back a lazy root `_Branch` whose `expand()` builds children on
 demand, in grouping order. The algorithm — group the parameters by each level's knob keys, collapse a level with one
-key, skip a level with no keys, and defer building a leaf until `expand()` — lives once in `fork.py`. A one-shot flat
-fork stays inline as a `ThunkFork`.
+key, skip a level with no keys, and defer building a leaf until `expand()` — lives once in `fork.py`.
 
 ### Every finished option carries a value for every knob
 
@@ -311,7 +366,7 @@ explain the machinery that order leans on; the two after it are the guards that 
 Ranking always happens in one place: the search policy asks a single `Prior`. Forks carry no score of their own, and
 nothing builds or scores a `TileOp` merely to rank it — the `Prior` turns the row's knob values straight into features
 (`features.knob_features`). Several older per-variant scoring mechanisms were removed in favor of this single path
-(HISTORY.md: "Retired designs").
+and the design it retired.
 
 That one path has two halves: the `OfflinePrior` that ships with the repo, and the `OnlinePrior` that a local tune
 trains. `FallbackPrior` composes them, and `load_prior` builds the composite. The offline half is called the *cold*
@@ -335,28 +390,58 @@ the shipped weights outside the slice it was fit on.
 
 What a newcomer needs to know about the fit:
 
-- **The fit optimizes the deployed score itself, not a linear stand-in for it.** `OfflinePrior.quality` and the
-  fitter's `quality_rows` are the same function over one shared definition of the non-linear term, and that term's
-  weight and threshold are fitted alongside the feature weights — the optimizer is derivative-free, so a threshold
-  costs it nothing. A scoring constant the fit cannot see is a constant the fit optimizes *around*: while two hand-set
-  gates sat outside the objective, the reported golden ranks were not the deployed ones (on the RTX 5090 matmul
-  goldens, median rank 228 reported against 367 deployed).
+- **The fit optimizes the deployed score itself, not a linear stand-in for it.** Both sides go through one
+  `LinearModel`, which offers the same arithmetic in two access shapes: a per-dict entry for scoring a live
+  candidate, and a matrix entry for scoring a whole candidate pool (one fp16 golden enumerates ~78k rows, so the
+  fitter cannot use the dict path). The non-linear term's weight and threshold are fitted alongside the feature
+  weights — the optimizer is derivative-free, so a threshold costs it nothing. A scoring constant the fit cannot see
+  is a constant the fit optimizes *around*: while two hand-set gates sat outside the objective, the reported golden
+  ranks were not the deployed ones (on the RTX 5090 matmul goldens, median rank 228 reported against 367 deployed).
+- **The trainer is an object, and fitting is pure.** `LinearTrainer` carries the hyperparameters — feature names, the
+  incumbent to chain from, sample count, L2 strength, seed, warm start, and the ranking loss — and `fit(groups)`
+  returns a `LinearFit` without touching the trainer. One instance therefore serves every cross-validation fold with
+  no copying, and a fit is a function of its inputs alone. The two seeding policies are data rather than code: the
+  full-train fit warm-starts from the incumbent, and the fold trainer is the same object under
+  `replace(trainer, warm_start=False)`, because the incumbent's weights were fit on every golden and warm-starting a
+  fold from them would leak each held-out golden into the model meant never to have seen it. Both are recorded in
+  the metrics header, along with the loss — two fits are only comparable under the same one.
+- **A group is a candidate pool, and it may have more than one right answer.** `GoldenGroup.golden_ids` is the
+  set of rows in that pool a golden verified: usually one, several when the builder matched
+  several goldens onto one pool (the same shape recorded under two names, or one name recorded twice). Which
+  goldens share a pool is settled before any group is built, so a group's labels are final at construction.
+  The per-group term is then the BEST rank over that set (`search/metrics.best_rank`), because deploy ships one
+  config: any acceptable one ranked first is the win, and a mean would spend weights pushing up the runner-up.
+  At one positive it is the single-golden rank exactly, so the
+  supervision generalized without moving any fitted artifact. The sibling positives also stop being drawn as the
+  tree fit's negatives, which had been teaching it that a measured-good config was bad.
+- **A pool may be a SAMPLE of itself.** `emmy fit --pool-sample N` draws its candidates during enumeration
+  (`search/pool.py`), so `Group` carries both the drawn rows and `total`, the true pool size. The linear
+  trainer's z-scoring is over the FULL pools' moments, now estimated rather than counted: each group's rows
+  carry weight `total / len(feats)` in the two streaming passes, so a 5-row pool and a 325k one do not weigh
+  the same under fixed-size sampling — which would otherwise change the standardization and with it the
+  raw-space L2 the artifact ships. Unsampled every weight is exactly 1.0 and the arithmetic is bit-identical,
+  so a full-pool refit reproduces byte for byte.
 - **The loss has two parts**: an objective that pushes each recorded golden's rank up inside its own candidate set —
-  each case counting once — plus an L2 penalty in
+  each group counting once — plus an L2 penalty in
   raw feature units (`DEFAULT_L2`, CLI `--l2`). The penalty exists to make the fit **well-determined, not to shrink
   the weights**. The rank objective barely moves when you scale a feature that hardly varies across the golden
   candidate sets, so an unpenalized fit is free to pick an arbitrarily large weight there. That is invisible in
   golden-rank metrics and catastrophic when scoring a fork, where a not-yet-decided knob scores such a feature 0.0.
   The penalty must be in raw units (`w_z/sd`), because after de-standardizing, the inflated weight looks like an
-  ordinary O(1) weight (HISTORY.md: "The `D_pow2_threads` cold-deploy pick").
+  ordinary O(1) weight.
 - **Loading is strict.** A missing artifact, or one whose `feat_ver` does not match, is a hard error — refit it, never
   a silent fallback. The error comes from the artifact loader, and it surfaces in `tune` / `eval`, which load the
   prior directly. A greedy compile wraps `load_prior` best-effort, so there a bad artifact does not abort the compile:
-  it produces the no-prior resolve described under the hierarchy below (goldens + option-0, with the DB tier lost
-  along with the prior object). A weight key that is no longer used, inside an artifact of the current version, is
+  it produces the no-prior resolve described under the hierarchy below (first leaf, with the DB tier lost along with
+  the prior object). A weight key that is no longer used, inside an artifact of the current version, is
   simply ignored. `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate fit for an A/B.
 - A separate `weights_dynamic` set ranks kernels whose tiles are masked because an axis is symbolic; it is selected on
-  the stamped `S_ext_n_symbolic_axis`.
+  the stamped `S_ext_n_symbolic_axis`. That stamp **routes and never carries a weight**: the dataset packs it like
+  any other column, and the linear fit narrows it out of its own descent coordinates (`descent_cols`) while a tree
+  splits on it to price both regimes in one model. The reason is identifiability: the stamp is constant
+  across a candidate pool, so a linear term on it shifts every candidate equally and cancels out of the within-pool
+  ranking. The rank objective cannot see such a term at all, which makes whatever value a descent lands on there
+  noise rather than a fitted quantity.
 - One feature interaction sits outside the linear weights, because it cannot be written as one: the atomic-free
   split-K term, which rewards the deferred combine kernel above a split-count threshold and penalizes it below.
   Its weight and its threshold are both fitted. `D_scalar_on_warp_eligible` and `D_splitk_roundtrip` — which express
@@ -367,7 +452,7 @@ What a newcomer needs to know about the fit:
   (`exp(-scale·quality)`), whose argument is clipped only at the point where floats stop being safe (~±700). **That
   exponential must never flatten out over the range of quality scores that actually occur.** A clip inside the live
   range collapses good candidates onto one identical value, and the argmin then falls back on the order the options
-  were emitted in (HISTORY.md: "The saturated-score plateau"). The one consumer that needs a bounded value —
+  were emitted in. The one consumer that needs a bounded value —
   `FallbackPrior`'s offline multiplier — clamps to `e**±8` on its own side; the consumers that rank get the
   strictly-ordered version.
 
@@ -390,65 +475,95 @@ The names below recur throughout this document; together they are the whole publ
 
 | Member | Caller | What it is |
 |--------|--------|------------|
-| `score(knobs)` | MCTS selection (PUCT) only | Predicted latency, used to steer exploration. On the composite prior this is the one call that blends the two halves (see the calibration-gate section below). |
+| `policy(knobs_list)` | MCTS selection (PUCT) only | How much the model prefers each sibling in ONE fork's set, normalized within it. The one call that may combine the two halves (see the calibration-gate section below). |
 | `mean_score` / `mean_scores` | deploy + eval ranking | The model's latency prediction for one row / for a batch of candidates. `FallbackPrior` routes these to the online half when it is `trustworthy`, else to the offline half — no blending. |
 | `evidence_pick(rows)` | deploy tier 2 | The pick made from measured reservoir rows (defined below). Returns `(index, measured_µs)` or `None`. Consulted whatever the calibration verdict says, because measured evidence needs no trusted model: a quarantined model — or a checkpoint whose reservoir has rows but no fitted model yet — still supplies this tier. |
-| `pick(rows)` | deploy + eval | `evidence_pick` first; when no candidate has evidence, the `mean_scores` argmin with the canonical tie-break. Returns `(index, µs)` — a measured µs when evidence decided, a predicted one otherwise. This covers tiers 2 and 4 only: `greedy_decide` puts the golden tier above it and the DB tier between the two, so the `Prior` never owns the whole hierarchy. |
+| `pick(rows)` | deploy + eval | `evidence_pick` first; when no candidate has evidence, the `mean_scores` argmin with the canonical tie-break. Returns `(index, µs)` — a measured µs when evidence decided, a predicted one otherwise. This covers tiers 2 and 4 only: `greedy_decide` puts the verified tier above it and the DB tier between the two, so the `Prior` never owns the whole hierarchy. |
 | `sig_groups` | both measured-evidence tiers | How a candidate is matched to measured rows by its `S_*` features. It still matches when the feature set has changed since those rows were written (Part 4) — one rule shared by the reservoir tier and the DB tier. |
 | `trustworthy` | the check that lets the online model decide | `fitted` AND passing the calibration gate. |
-| `mean_score_features` / `explain_features` | diagnostics only | Scoring / decomposing a row that is ALREADY in feature form (Part 8) — which is what lets the attribution views hide individual features that no knob value corresponds to. |
+| `mean_score_features` / `mean_scores_features` | the model classes' own seam | Scoring a row that is ALREADY in feature form. `mean_score` / `mean_scores` featurize and delegate here, so a model class implements the featurized half only. Not a pool-scoring surface — that is `score_rows`, which projects a packed matrix and is what the fitter and the evaluation report use. |
 
 ### The deploy evidence hierarchy
 
-`TuningSearch` (`tune`) ranks the PUCT frontier with the prior's `score`. `greedy_decide` (`compile` / `run`, via
+`TuningSearch` (`tune`) ranks the PUCT frontier with the prior's `policy`. `greedy_decide` (`compile` / `run`, via
 `Run.resolve`) never explores: at each fork it picks once, working down the list below from the top. **This list is
 the authoritative order** — the summaries elsewhere in this file defer to it.
 
-1. the **goldens** recorded for the GPU being compiled for (the verified-evidence tier — see below): the first
-   candidate that agrees with the fastest recorded golden for the op's shape;
+**These four tiers are the whole ranking mechanism.** Three of them are recordings of something that ran and the
+fourth is a model fitted to such recordings; there is no fifth, hand-written tier anywhere below them. The passes
+that produced the candidates ordered nothing, defaulted to nothing and withheld nothing (see
+[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md)), so when all four tiers are silent the pick falls out of the
+enumeration's emission order, which carries no meaning. Such a pick can be far off the best kernel in the space,
+and that is an accepted outcome of the design — the fix is a measurement, a recorded golden, or a better-fitted
+prior, never a preference written into a pass or into this policy.
+
+1. the **verified goldens** recorded for this GPU (`greedy._verified_index` / `_verified_pick`): the record whose
+   `deploy_identity` — the lifted term's α/buffer-invariant algebra digest folded with the operand/output dtype
+   fingerprint and the axis-extent fingerprint (static sizes and symbolic markers, never hints — the α-invariant
+   digest canonicalizes sizes away, and without extents every same-algebra cone on a card would share one key),
+   derived record-side through the shared total lift (`_fromloop.lift_loop_op`) — equals the
+   fork's, and whose spelled row (`knob.schedule_row_key`, the recording canonicalizer restricted to the schedule
+   families) equals EXACTLY one enumerated leaf. Fastest matching record first; a record that matches the identity
+   but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). A standalone `PLACE` routing record
+   instead decodes against the legal closed Fold seams of the same lifted tree.
+   The tier needs no prior, applies only at deployable
+   `-O3` flags, and scopes records to the live card and the exact live pin regime;
 2. measured **reservoir** evidence (`Prior.evidence_pick`): the candidate that agrees with the fastest reservoir row
    of the same op that was measured at `-O3` (`H_opt=3`);
-3. the tune DB's measured `perf` rows, with a preference order inside the tier: a row measured at **deployable flags**
-   decides outright, and a row measured at the `-Xcicc -O1` flags a tune sweep uses decides only when no candidate has
-   a deployable-flag measurement. An `-O1` median is a ranking signal that is known to invert against `-O3`, so it
-   must never override a deployable-flag row — but it is still a real measurement of this exact op, so it beats the
-   model's extrapolation;
+3. the tune DB's measured `perf` rows for this compile's own context key — one lane, because a sweep measures in the
+   regime a deploy compiles in. A real measurement of this exact op beats the model's extrapolation. Rows from a
+   deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted;
 4. the prior's `mean_scores` argmin — only when no candidate has any evidence at all. Score ties break by
    `knob.canonical_row_key`, never by the order options were emitted in.
 
+Pins sit ABOVE the whole list: replaying a record's pins + knobs (`run --golden NAME`, `--ab`, `EMMY_KNOBS`)
+settles the pinned families before any fork reaches a decide.
+
+**Auditing tier 1.** Whether the recorded goldens still decide is a question about the tier itself, so `_verified_pick`
+carries one supported seam for it: `greedy.golden_audit(records)` installs a verdict sink that every SCHEDULE
+consultation appends to — `MATCH` (a record carrying the fork's identity had a row equal to exactly one enumerated
+leaf), `DRIFT` (records carry the identity, no offered leaf equals any of their rows — the fail-closed branch), `GAP`
+(no record carries it). Unset, the sink is one identity test per consulted fork and nothing else. `search/audit.py`
+drives it over a whole card's graphs with the machine-local evidence removed (`config.online_file_override` at a
+nonexistent path, `nvcc_flags_override("")` for the deployable regime, `golden.records_override` scoping the corpus to
+one file or precision lane), so the verdicts are the same on a GPU-less box and the recording host. `eval golden
+--serving-config` is the consumer, and it also ratchets `consultation_counts` — the count is the one thing the
+verdicts cannot report, because a kernel whose lowering stops enumerating candidates deploys single-option, consults
+nothing, and loses its recorded MATCHes with zero DRIFT.
+
 Three definitions the list leans on:
 
-- **What "agrees with" means** (`evidence_row_vouches` in the code; the same rule serves the golden, reservoir and DB
+- **What "agrees with" means** (`evidence_row_vouches` in the code; the same rule serves the reservoir and DB
   tiers): a measured row counts as evidence for a candidate when every tuning knob the candidate has decided so far
   has the same value in that row. Knobs the candidate has not decided yet are free — a later pass will decide them.
   That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
-  (`online.json`, Part 5). Its `H_opt=3` rows — the deployable re-benches of Part 5 — double as deploy evidence, so
-  tier 2 is not a separate store. A tune writes its `-O3` re-benches to the reservoir and the `node` table ONLY, never
-  to `perf`. So on a machine tuned at the default `-Xcicc -O1` flags, the measurements taken at deployable flags live
-  in the reservoir, and the `perf` table gets deployable-flag rows only when a sweep itself ran at those flags. That
-  asymmetry in who writes where is why the reservoir sits above the DB tier. One consequence: anything that discards
-  the checkpoint — a `FEATURIZER_VERSION` bump discards it WHOLE, see "Featurizer versioning" — deletes this evidence
-  tier along with the model, and the machine's deploys silently drop to goldens → DB rows (usually `-O1` ones) →
-  offline prior. The SQLite `perf` rows (tier 3) survive such a bump: the DB is keyed by content, and the join that
-  matches rows to candidates tolerates feature-set changes, so old rows stay usable.
-- **Which compile flags each tier applies under**: the golden and reservoir tiers apply only to a compile at
-  deployable `-O3` flags (`H_opt=3`). A golden's µs and the `-O3` evidence are true of the deployable settings only,
-  and must never settle an `-Xcicc -O1` compile, so `make test`, which compiles at `-O1`, never consults goldens.
-  `H_opt` is read from the `-O<n>` in the compile flags; flags with no `-O<n>` at all — the `compile` / `run`
-  default — count as 3, so a default deploy is always deployable. The DB tier applies under any flags: its
-  "deployable" half means any context key that is not the `-O1` one, so an `-O3` row decides outright even under an
-  `-O1` compile. The two tests are deliberately not mirror images: only `-Xcicc -O1` counts as the ranking flags,
-  while anything else counts as deployable for the DB tier. An explicit `-O2` pin therefore gets DB evidence but
-  neither goldens nor reservoir — an accepted edge case.
+  (`online.json`, Part 5). Its rows are all `H_opt=3` — `Prior.add_rows` admits no other regime — and they double as
+  deploy evidence, so tier 2 is not a separate store. The reservoir sits above the DB tier because it is the online
+  prior's own view of what it has seen, and because it carries the value-of-position labels the DB's per-kernel rows
+  do not. One consequence: anything that discards the checkpoint — a `FEATURIZER_VERSION` bump discards it WHOLE, see
+  "Featurizer versioning" — deletes this evidence tier along with the model, and the machine's deploys drop to DB
+  rows → the offline prior. The SQLite `perf` rows (tier 3) survive such a bump: the DB is keyed by content, and
+  the join that matches rows to candidates tolerates feature-set changes, so old rows stay usable.
+- **Which compile flags each tier applies under**: all of them apply to the deployable regime, and that is the only
+  regime anything is measured in. `H_opt` is read from the `-O<n>` in the compile flags; flags with no `-O<n>` at all
+  — the default everywhere — count as 3, so an ordinary compile is always deployable. The identity a measurement is
+  *stored* under agrees with that reading: `Context.structural_key` folds the flags **split** into an opt level plus
+  the other flags (`context.split_opt_level`), never the raw string, so `""` and an explicit `-Xcicc -O3` are one key
+  for the one regime they physically are. Keyed on the raw string they were two, and a row written under an explicit
+  `-O3` pin was declared deployable by `H_opt` and then unreadable at a default deploy. A compile deliberately pinned
+  to another opt level reads no measured tier at all: the reservoir gate rejects it on `H_opt`, and its own context
+  key holds only whatever was measured under that same pin. That is the intended outcome — a non-deployable
+  measurement is not evidence about a deploy.
 
-**With no prior object at all, tiers 2–4 are ALL gone.** That happens when `load_prior` failed (a corrupt online
+**With no prior object at all, every tier is gone.** That happens when `load_prior` failed (a corrupt online
 checkpoint, or the strict offline-artifact load raising; the loader is best-effort and swallows any failure), and on
 `Pipeline.run`'s last-resort resolve that deliberately takes the rule's first option. The reservoir is carried by the
 prior object, and the DB tier is only consulted on the path where a prior exists, so a corrupt checkpoint costs the
-resolve its DB evidence too. The goldens still decide the forks they match — that tier needs no prior — and only the
-rest falls to option-0.
+resolve its DB evidence too — every fork falls to the first emitted leaf. That leaf is not a chosen default and
+nothing arranges the enumeration to make it a good one; it is simply what is left when there is nothing to rank
+with. Env pins still apply (they never reach a decide).
 
 **What is deliberately NOT in this hierarchy: the tune DB's `node` table** (Part 6). Node rows are never consulted at
 deploy. They feed the `emmy eval` diagnostics (Part 8), and they are what the offline fitter would train on if it
@@ -456,31 +571,18 @@ trained on a frozen snapshot of that table — a planned path, not a current one
 yet supported; today `emmy fit` trains on goldens only).
 
 **Whichever tier decides, the µs of the winning row is written onto the fork's trace entry** (`Decision.score`): a
-measured µs when a golden or an evidence row decided, the model's predicted µs otherwise. That number is what the
+measured µs when an evidence row decided, the model's predicted µs otherwise. That number is what the
 structural cost estimate reads off the partition fork (Part 4), so the Σ compared there mixes measured and predicted
 µs — measured wherever the tune benched that kernel, predicted only where nothing was.
 
 **How to see which tier answered.** There is no flag that reports, per fork, which tier decided it; a live compile
-does not print that. What exists today is: the loud warnings (a golden shape none of whose entries matches anything on
-offer, measured evidence that overlaps none of the offered candidates, and the message logged when a golden overrides
-option-0 on a resolve with no prior), the resolve trace (`Decision.score` carries the deciding row's µs), and the
-audits — `emmy eval golden` re-runs the golden-tier consultations and prints a verdict per fork (MATCH / DRIFT / GAP,
-Part 7). Answering "which tier decided this fork, and did I expect that one?" means correlating those three, not
-flipping one switch.
+does not print that. What exists today is: the loud warning for measured evidence that overlaps none of the offered
+candidates, and the resolve trace (`Decision.score` carries the deciding row's µs). Answering "which tier decided
+this fork, and did I expect that one?" means correlating those, not flipping one switch.
 
-**Where the kernel gets cut is settled before any of this.** Ahead of the schedule pick, a separate decision splits —
-or does not split — the recognized work into kernels. A **routing** golden entry is how that decision is recorded: an
-entry whose knobs are only `PLACE@<label>` values, where the label names an edge inside the recognized kernel.
-`PLACE@cone = cut`, for instance, says "split at the edge labelled `cone`, so that sub-computation becomes its own
-kernel". The loader rejects an entry that mixes `PLACE` with schedule knobs, and `_golden_evidence_index` skips
-routing entries. They are consulted during recognition (`lowering/tile/_cut.py`, joined by `ShapeKey.joins` against
-the live GPU, and restricted to `-O3` like the golden tier itself). Each resulting piece is then recognized afresh and
-resolves its OWN `(kind, shape)` through the same hierarchy above; see the tile-lowering ARCHITECTURE's
-placement-routing section. Keeping the work in one kernel is the default and is what an absent entry means; cutting
-happens only from recorded evidence or a hand-forced pin. That makes routing one of exactly two ways a greedy compile
-can change which kernels exist: a routing golden (or pin) cuts with no prior involved, while a structural fork
-(Part 4) needs the trusted online prior to estimate its cost. Everything else — offline prior and option-0
-included — keeps the default kernel set.
+**Placement does not weaken maximal fusion.** Maximal Loop IR fusion produces the canonical combined kernel. Tile IR
+then offers that kernel beside legal `PLACE` cuts of closed stored Fold edges and `REDUCE` cross-CTA splits. These are
+structural forks; the tuner chooses a kernel set, and no greedy or enumeration rule removes a legal sibling.
 
 **Both file-backed inputs to that pick are built once per process.** The parsed online prior and the DB perf index are
 memoized on the source file's `(path, mtime)` — the online file, and the DB file plus its `-wal` sidecar. A generative
@@ -489,84 +591,30 @@ are identical across every program; without the memo each compile re-parsed the 
 whole perf table. The mtime key invalidates on any on-disk change, so a rewritten checkpoint or a fresh perf commit is
 still picked up.
 
-### Goldens are the first evidence tier of a greedy compile
+### The verified tier: strict structural identity, exact row decode
 
-**The per-GPU golden files are the only *measured* data that ships with a clone.** The reservoir and tune DB are
-machine-local caches written by local tunes, so a fresh machine — every rented box — used to deploy on pure model
-extrapolation, with misdeploys up to 29× (HISTORY.md: "The saturated-score plateau").
+**The per-GPU golden files are the only *measured* data that ships with a clone.** A golden record is a named,
+reviewed, pinned measurement: the input-pin regime it was measured under, the knob row that was selected inside
+that regime, and the paired Emmy/reference timings. Its uses are the verified deploy tier (tier 1 above), exact
+replay (`run --golden NAME`, `--ab`), training data for the offline prior (`emmy fit`), the `emmy eval` datasets,
+and regression reference points.
 
-The repository index is materialized on first evidence access, not when the module is imported. Commands that never
-consult the golden tier therefore do not parse the corpus; when it is needed, the loader uses PyYAML's safe C loader
-when available and falls back to the safe Python loader.
-
-At a fork, `greedy_decide` joins the op by `ShapeKey` against the goldens recorded for the GPU being compiled for, and
-picks the offered candidate that agrees with the fastest recorded entry. Every **kind** of golden takes part — an
-entry's kind is which standard shape it describes: matmul, attention (flash), rms_norm, softmax, reduce, pointwise,
-and norm_linear, the kernel that fuses an RMSNorm with the linear layer that follows it. That kernel computes its own
-A operand instead of loading one, which is what "**computed-A**" means wherever this document says it. Keys and values
-are compared with the same canonical matching the A/B pin check uses.
-
-The join has some deliberately non-obvious mechanics:
-
-- Static and dynamic entries never match each other. Which kind an op is gets decided from the counts an earlier pass
-  stamped onto it, through the test `S_loop_depth < n_free + n_reduce + n_symbolic`. That test is what keeps a flash
-  or norm op apart from a contraction that merely happens to have the same extents.
-- Among the rsqrt-based kinds, a SECOND reduce axis (`S_ext_n_reduce_axis >= 2` — the contraction sitting beside the
-  statistic's own reduce) marks the `"fused"` computed-A form, and `is_warp` is forced True for it. A computed-A
-  contraction is a tensor-core (warp) kernel whose f32 statistic constants would otherwise make it look like a scalar
-  one.
-- At the deploy fork, a flash op is recognized differently: from the pair of tile keys its options carry, `TILE@dd`
-  and `TILE@pj`. (A schedule key names the step inside the kernel that it applies to, by that step's reduce axis —
-  `dd` is the query×key product, `pj` the probability×value product. "Naming a schedule choice inside a kernel", near
-  the end of this file, is the full reference.) The tile pass restructures the flash op and gives it re-derived
-  extents but no stamped counts, so the classifier above cannot fire there.
-- The computed-A norm→linear kernel is likewise recognized at the deploy fork from what its options offer: a `STAGE`
-  value of the form `d*/sync`. That is the *compute-fill* staging — the shared-memory block for A is filled by
-  evaluating the producer per cell instead of copying values in — and only a computed-A contraction ever offers it.
-  The detour is needed
-  because before the split, this fork carries only one reduce axis, with the rsqrt still buried inside the sub-body
-  that produces A, so the stamped counts read it as a plain scalar matmul. It is rebuilt under the fused key, which is
-  what lets the norm→qkv kernels find their goldens on a cold deploy. A fused golden is required by the schema to
-  record a `d*/sync` STAGE. `GoldenRecord.shape_key` replays that stored schedule prefix through the same fork-key
-  classifier, so a Loop fallback persists the fused join without serializing a derived ShapeKey; its config can never
-  be used for a plain matmul that loads A from global memory and happens to have the same extents.
-- A golden key that names its axes (a static attention golden's `TILE@dd` plus `TILE@pj`) is all-or-nothing: both must
-  match. A golden key written with no axis, for a kind that has several, behaves like a hand pin instead — one plan,
-  satisfied by ANY option of the same knob family. That is how a dynamic attention golden's single unsuffixed `TILE`
-  matches the axis-named leaves of the masked fork. A fast-math entry excludes itself when the mma instruction it
-  names is not among the offered options — for instance whenever the fast-math gate is off.
-- Picking the fastest entry first is what makes the **"fast math never loses" rule** work (checked statically in
-  `test_golden_configs.py`): within one GPU's rows for a given name, a fast-math entry recorded SLOWER than the best
-  standard sibling could never be used anyway, because the standard row matches first whether fast math is on or off.
-  Such rows are therefore dropped, and a missing fast-math row simply means a fast-math deploy uses the standard
-  config there.
+The tier's join is exact by construction. The record side lowers the record's OWN persisted program through the
+loop passes, selects its one target kernel, and lifts it through the SAME core the live pass uses
+(`_fromloop.lift_loop_op`) — so record-side and fork-side identity cannot drift, and there is no classified shape
+anywhere (the old `ShapeKey.kind` classifier and its offer-signal special cases are gone for good). The row decode
+is exact equality of the schedule-family view after the one recording canonicalizer; a record that stops equaling
+any enumerated row warns and decides nothing at deploy. The nightly `onboard-model` workflow strictly decodes and
+replays the selected recipe's golden on its exact GPU. Per-commit tests do not load checked-in goldens because proving
+a row enumerates its whole fork and costs record count times fork size. A target that lowers to more than one kernel
+cannot carry a
+row (a row decorates exactly one kernel) and must be re-seeded as a per-kernel Loop IR target.
 
 **Whether goldens are training data differs between the two halves of the prior.** The **online** prior never trains
-on them: a recorded golden row enters no reservoir and no checkpoint, so for the online model the goldens are an
-untouched acceptance set — data it is judged against but never learns from. (Benchmarks of a golden *shape* during a
-tune are ordinary measurements and do train it; it is the recorded configs and their µs that never become labels.)
-The **offline** prior IS fitted on them: `emmy fit` reconstructs the set of candidates each golden competed against
-and trains the weights to rank the recorded config well inside that set (the fit description above). An offline
-golden-rank number is therefore measured on the very data the fit saw; the fit harness's cross-validation folds are
-the view on data it did not. A golden's µs is true of the deployable flags only, and never settles a compile at other
-flags.
-
-**A golden entry the compiler can no longer produce is worse than no entry at all.** When a shape matches but none of
-its entries matches any candidate on offer, the compile logs a loud warning that the option set has moved since the
-recording, and falls through to the tiers below. That fall-through is a hazard, not graceful degradation: the tiers
-below can land on a config hundreds of times slower than the entry claims (HISTORY.md: "The unrealizable-golden
-fallthrough"). Two consequences when recording a fused row:
-
-- Recording `PLACE@cone` **together with** a `TILE` can never match, because no single offered candidate carries both
-  — so record one or the other. The schema check accepts a combination that the offered options then reject.
-- A row must be verified to **deploy**, not merely to reproduce under a hand-forced pin. `--ab` reproduces configs the
-  compiler would never offer on its own, so a row that only works when pinned still looks healthy in the isolated
-  golden-reproduction check. Only the serving-matrix audit catches it.
-
-**The golden tier needs no prior.** A resolve with no prior at all — `load_prior` failed (a corrupt online checkpoint
-or an erroring offline artifact; see the hierarchy section above), or `Pipeline.run` fell back to taking each rule's
-first option — still consults the goldens and deploys one that matches, logging loudly when it overrides option-0. So
-a broken checkpoint can never silently cost a fork its verified golden.
+on them: a recorded golden row enters no reservoir and no checkpoint. (Benchmarks of a golden *shape* during a tune
+are ordinary measurements and do train it; it is the recorded configs and their µs that never become labels.) The
+**offline** prior IS fitted on them: `emmy fit` reconstructs the set of candidates each golden competed against and
+trains the weights to rank the recorded config well inside that set.
 
 ### `FallbackPrior` and the calibration gate
 
@@ -578,17 +626,17 @@ of the Spearman correlation between its predictions and its own reservoir labels
 grouped by their `S_*` signature, groups of fewer than 8 rows skipped, the verdict stored in the checkpoint). Below
 `CALIBRATION_MIN` (0.5 — a genuinely trained model scores ~+0.85, while the collapse where the model and its rows no
 longer share feature names scores ~0) the model is **quarantined**: it keeps training and checkpointing, but the
-deploy ranking calls, PUCT, and the structural cost estimate (`greedy._pick_structural`) all fall back to the offline
+deploy ranking calls, PUCT, and the structural cost estimate (`greedy._priced_pick`) all fall back to the offline
 half, and the verdict is logged. The reservoir evidence tier stays live under quarantine, because measured evidence
 needs no trusted model.
 
 A calibration that could not be measured at all (`None` — e.g. scipy is missing, or no op group is big enough) passes.
 The gate is an alarm for measured failure, not a demand for proof of quality. It is known to be lenient in one case: a
 small tune (the fit needs only `min_rows` = 50 dataset rows) whose op groups all stay under 8 rows ends up fitted with
-calibration `None` — trustworthy, and therefore owning deploys AND the structural cost estimate, on very little data.
+calibration `None` — trustworthy, and therefore owning deploys, on very little data.
 
-Why the gate exists: `fitted` alone once let a mis-calibrated model own deploys silently (HISTORY.md: "The
-mis-calibrated online model"). Correlating predictions against the training rows catches one failure specifically: the
+Why the gate exists: `fitted` alone once let a mis-calibrated model own deploys silently. Correlating predictions
+against the training rows catches one failure specifically: the
 collapse where model and rows no longer share feature names (constant predictions, worse-than-random ranking). It
 deliberately does NOT catch subtler failures — overfitting to the op families that were tuned, or being wrong about
 absolute µs on ops that were not. Those are what the Part 8 diagnostics exist to surface.
@@ -610,12 +658,12 @@ touches the µs scale a deploy sees.
 - **The prior checkpoint** (`to_json`): `from_json` discards a checkpoint from another version WHOLE — model and
   reservoir rows alike. Rows recorded under a retired version's feature names produce meaningless feature vectors, and
   a refit on them collapses to constant predictions. Note how far that reaches: discarding the checkpoint also deletes
-  the reservoir evidence tier (Part 3) and disables the structural cost estimate (there is no trusted online prior any
+  the reservoir evidence tier (Part 3) and hands the structural cost estimate to the offline half (there is no trusted online prior any
   more) until the machine re-tunes. A version bump therefore changes deploy behavior — the machine drops to
   goldens → DB `perf` rows → offline prior, with no warning at deploy time.
 - **The autotune DB's `node` rows** (a `feat_ver` column, added without rewriting old rows):
-  `diagnostics.node_report` excludes rows from another version and prints how many it dropped. Rows written before the
-  column existed default to version 1 (the retired feature names) and are excluded, which errs on the safe side.
+  `data/group.group_measured` excludes rows from another version and counts how many it dropped. Rows written before
+  the column existed default to version 1 (the retired feature names) and are excluded, which errs on the safe side.
 
 Bump the constant on any incompatible change to knob naming or feature encoding; artifacts from the old version then
 age out instead of poisoning the model.
@@ -667,26 +715,20 @@ tune winner is an automatic exact pin; verified rows remain automatic pins as be
 only captured whole-forward timing with direct eager correctness at `rtol=atol=1e-3`. Process isolation and repeated
 observations come from independent command invocations, not a second orchestration layer inside `run`.
 
-**Greedy flattens forks before ranking.** The lazy fork tree is an MCTS structure — it stages knob choices across
-levels (`BR` → `BM/BN` → `FM/FN`) so MCTS pays one node per pop. Greedy must NOT walk it level-by-level: a branch
-carries only a *partial* tile, and `features.knob_features` can't compute its area / occupancy until `FM/FN` are
-pinned, so the prior would be blind at the `BM/BN` choice. Instead `greedy_decide` flattens each fork point to its
-complete leaves (`fork.flatten_leaves` expands branches depth-first; only knob dicts — materialization stays deferred
-to the chosen leaf) and picks the lowest `Prior.mean_scores` over the full `{H_*, S_*, complete-knob-row}` vector in
-one batched `predict`, invariant to the tree's level order. Cold, the `OfflinePrior` ranks (including a positive
-`MMA_tier` warp preference); if `load_prior` returns nothing entirely the recorded goldens still decide the forks
-they match and only the golden-less forks fall to option-0 (first leaf, emission order).
+**Greedy compares complete rows.** A branch carries only a partial schedule and is not a valid prior input. Verified
+and measured rows descend directly to their exact offered row; otherwise the prior ranks the complete offered rows
+and selects the global argmin. This preserves the fitted model's semantics, at the cost of traversing the row space
+until schedule composition and scoring are factorized end to end. With no online prior the `OfflinePrior` ranks
+(including a positive `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns
+nothing entirely every fork falls to the first leaf in emission order, which is meaningless and may be slow.
 Greedy benches nothing, so it can only *use* a prior, never train one.
 
-**And it flattens each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
+**And it scores each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
 factory call — one compile attempt; never the shared `SessionCache`, which would hand MCTS cached picks): the memo
 keys on the schedule `pool_key` (the dtype / hint / pin discriminators op identity excludes) plus the node's
-blocklist content, so N same-shape kernels flatten-and-score once and the rest replay by descending the lazy tree's
+blocklist content, so N same-shape kernels score once and the rest replay by descending the lazy tree's
 level keys to the one matching leaf (`_find_decided_leaf` — the O(path) descent `build_fork_tree` was built for),
-while a validate-retry with a blocked tile is a different key and re-decides. A GOLDEN-covered schedule fork never
-flattens at all: the pool's rows already sit on the tree's root branch, so the golden tier probes them raw
-(`_pool_group` → `_golden_pick`) and a MATCH descends straight to its leaf — DRIFT and GAP record their verdicts
-there once and fall through to the scored path unchanged.
+while a validate-retry with a blocked tile is a different key and re-decides.
 
 **Every deploy pick breaks ties by candidate content, never enumeration order.** The model can score many
 same-featurized siblings identically (the offline `D_*` geometry doesn't separate an `f2x4` from an `f4x2` fragment or
@@ -695,59 +737,67 @@ can match several offered candidates. Every tier therefore resolves its ties thr
 sorted tuning-knob rendering): the model argmin (`Prior.pick` and the greedy fallback), the reservoir and DB
 measured-evidence argmins, and the golden realization pick. An order-broken tie is a per-boot coin flip — leaf order
 can shift across processes — and shipped the 2026-07 RTX 5090 gemma-4 image with a bimodal boot-time cubin set
-(HISTORY.md: "The bimodal boot-time kernel set").
+across boots.
 Pinned by `tests/compiler/pipeline/search/policy/test_deploy_pick_determinism.py` at every evidence tier; rendered
 bytes are independently pinned across fresh interpreters by `test_source_determinism.py`.
 
-**Structural options are priced, never raw-scored.** With the trained prior loaded, `greedy_decide`'s
-`_pick_structural` prices each side of a structural fork: a nested `resolve` per kernel over a `lowering/tile`-only
-pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per `Op.cache_key`.
-The cheaper kernel set wins, so an unpinned compile deploys the splits `tune` measured best. The nested resolve carries
-the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a knob pick (reservoir -O3, then the
-tune DB's -O1 ranking rows, model prediction only where unmeasured) — a pure sum-of-predictions comparison would be
-exposed to the model's absolute-µs error, which doesn't cancel across different kernel families. Cold, or when a side is
-unpriceable, the structural leaf is filtered — a cold compile never changes kernel sets.
+**Structural options are priced, never raw-scored.** A `Graph` leaf carries no knob row, so the per-op prior cannot
+score it; `greedy_decide`'s `_priced_pick` asks the same evidence a different way instead. It prices EVERY leaf of a
+structural fork — the cut fragments and the keep-fused side alike — by a nested `resolve` per kernel over a
+`lowering/tile`-only pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized
+per `Op.cache_key`, and takes the argmin. So an unpinned compile deploys the splits `tune` measured best. The nested
+resolve carries the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a knob pick
+(the reservoir, then the tune DB's measured rows, model prediction only where unmeasured) — a pure
+sum-of-predictions comparison would be exposed to the model's absolute-µs error, which doesn't cancel across
+different kernel families, and that is a fitting requirement on the prior. When some leaf cannot be priced at all,
+the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking. **No leaf is
+withheld to keep a kernel set unchanged.** The one thing that does withdraw the splices is `price_structural=False`,
+which is not about speed: it is how `GreedyStrategy` retires a structural pick whose fragment kernel failed to LOWER
+(the splice minted fresh node ids, so it cannot be blocklisted at the fork site), and how a nested price probe
+avoids re-splitting the slice it is pricing.
 
 **Evidence joins are drift-tolerant.** `Prior.sig_groups` is one contract for both the reservoir -O3 tier and the DB
 tier: a candidate's fork-time `S_*` base may carry scheduler stamps the persisted perf rows predate (#311's
 `S_warp_eligible` is on no row recorded before it), and a strict-equality signature join would let one added feature
 silently disable the whole evidence tier against every existing DB — the ninth-4090-sweep `mlp_gate_up` misdeploy (the
-model's `g2k` pick beating the measured-faster fused config it was never allowed to see; HISTORY.md: "The evidence
-tier silently disabled by one new feature"). The index spans three
-context keys (the deploy's own flags, and the same key with `-Xcicc -O1` and with `-Xcicc -O3` — where the tune's
-deployable re-benches land), and the pick is two-tier: a row measured at deployable flags decides outright; `-O1`
-rows decide only when no candidate has deployable evidence, because an -O1 median is a ranking signal with -O3
-inversions and must not override a well-trained model on its own.
+model's `g2k` pick beating the measured-faster fused config it was never allowed to see). The index spans three
+the deploy's own context key — one regime, one key, one lane — and the pick is the plain argmin over the
+matching measured rows.
 
 **Retries are decide-wrappers over a deterministic re-resolve** — every other choice replays identically (cheap
 non-chronological backtracking, no snapshots). A structural pick that leaves a fragment kernel un-lowered retires
 structural picks wholesale and re-resolves the keep-fused branch before falling back to tile blocklisting.
 
-**Greedy validity fallback.** The prior ranks by predicted latency, which can rank a tile that fails `validate(ctx)`
-(smem / thread budget) first — `tune` benches-and-skips it, but greedy benches nothing. So when a deterministic compile
-leaves a node un-lowered, `Pipeline.run` blocklists that tile's `tile_identity` (its planner knobs) and re-resolves:
-`greedy_decide(blocked=…)` drops the matching leaf and picks the next-best. This is bounded by `_MAX_GREEDY_RETRIES`.
+**Greedy validity fallback.** The whole greedy retry orchestration is search policy, owned by
+`policy/greedy.GreedyStrategy` — `Pipeline.run` is a thin entry point delegating to it. The prior ranks by
+predicted latency, which can rank a tile that fails `validate(ctx)` (smem / thread budget) first — `tune`
+benches-and-skips it, but greedy benches nothing. So when a deterministic compile leaves a node un-lowered, the
+strategy blocklists that tile's `tile_identity` (its planner knobs) and re-resolves: `greedy_decide(blocked=…)`
+drops the matching leaf and picks the next-best. This is bounded by `_MAX_GREEDY_RETRIES`.
 When the retry budget exhausts with the node still un-lowered (an *online* prior can rank many over-budget tiles above
-the first in-budget one), `Pipeline.run` takes one last **option-0 (emission-order) resolve**
-(`greedy_decide(blocked=…, prior=None)`): the planner emits a budget-safe tile first, so it lowers whenever any
-in-budget tile exists. The goldens still decide the forks they match on this resolve — one over-budget node must not
-cost every *other* kernel its verified golden — and the blocklist rides along so this last resolve can never re-pick
-a tile that already failed `validate(ctx)`. Only when even option-0 overflows does `_raise_on_unlowered` fire the
-loud `LoweringError`.
+the first in-budget one), the strategy takes one last **emission-order resolve**
+(`greedy_decide(blocked=…, prior=None)`): its point is that it ignores the prior whose extrapolation caused the
+overflow, and the blocklist rides along so this last resolve can never re-pick a tile that already
+failed `validate(ctx)`. It is a validity fallback, not a quality one — it makes no claim about the speed of what it
+lands on, and the enumeration promises it no particular leaf. When that leaf overflows too, `_raise_on_unlowered`
+fires the loud `LoweringError`.
 
 ### `Pipeline.tune_async` — the autotune sweep
 
-`async Pipeline.tune_async(graph, *, search, backend=None, db=None)` is the (async-only) autotune sweep. Pass a
-`TuningSearch(patience=, ucb_c=)`; the async generator yields one terminal `Candidate` per fully-explored rollout, and
-`tune_async` benches each via `await _bench_terminal_async` (writes per-kernel `perf` / `lowering` / inventory rows,
-returns the aggregate `PerfStats`), then calls `search.observe(stats, status)`.
+`async Pipeline.tune_async(graph, *, search, backend=None, db=None)` is the (async-only) autotune
+sweep. Pass a `TuningSearch(patience=, ucb_c=)`; the async generator yields one terminal `Candidate` per
+fully-explored rollout and awaits `search.evaluate(token, cand, backend=, db=)` — terminal VALUATION is search
+policy, not engine mechanics: the bench (or cache/stub short-circuit), the per-kernel `perf` / `lowering` /
+inventory rows and the observe protocol live on the policy
+(`search/policy/terminal_bench.py` + `TuningSearch.evaluate`). Per-run engine-event strategies are composed into
+the pipeline itself (`Pipeline.with_strategies` — see the strategies section of the rule contract above).
 
 - With `backend=None` the bench is stubbed to `latency_us=1.0` and nothing is persisted, so a backend-less sweep never
   overwrites tuned rows.
 - A terminal that still holds an un-lowered kernel-bearing node (because its rewrite was dropped by validation) is
   marked `bench_fail` **before** any bench or cache lookup happens. The bench only sums `CudaOp`s, so without this
   guard the un-lowered kernel would count as zero and the µs of whatever cached kernels remained could stand in for
-  the whole graph as an `ok` measurement (HISTORY.md: "The zero-priced un-lowered kernel").
+  the whole graph as an `ok` measurement.
 
 ## Part 5: The tuning workflow (`emmy tune`)
 
@@ -765,10 +815,13 @@ forks, which change which kernels exist — how ops are grouped into kernels, an
 opposite structure, `two_level.py` separates them by the fork's *effect*, reusing the `Op`-rebind vs `Graph`-splice
 classification made where the children are pushed.
 
-**Outer search** (`run_two_level_tune`) drives the graph-changing passes: `frontend` + `loop`, plus the part of
-`lowering/tile` that runs before `partition_loops`. A **terminal** here is the state in which the cursor reaches
-`partition_loops` with every structural fork resolved. Each terminal is one candidate grouping of ops into kernels;
-its **reward** is `1 / Σ best-per-op time` from the inner search, backpropagated by the reused `TuningSearch`.
+The whole design is ONE class — `TwoLevelStrategy` — composing the engine's loop; the engine knows nothing
+two-level-shaped. **Outer**: drive the graph-changing passes (`TwoLevelStrategy.OUTER_PASSES` = `frontend` +
+`loop`, the strategy's OWN boundary config, never an engine parameter). The outer never ventures into Tile IR; a
+**terminal** is the fused graph of finalized `LoopOp`s. Each terminal is one candidate grouping of ops into
+kernels; its **reward** is `1 / Σ best-per-op time` from the strategy's separable scoring, backpropagated by the
+reused `TuningSearch`. The Tile-dialect cross-CTA split stays INNER — it is part of a kernel's independent
+measurement, and a slice whose kernel set changed benches as the Σ over the pieces it minted.
 
 Within one trajectory, structurally identical fork points all take the same side: `Run.drive` replays the first
 decision, read off the trajectory's own graph (`_replay_structural_decision`), so the outer tree grows with the number
@@ -779,20 +832,28 @@ one combined Σ row per structural decision it took (features `{ctx, op knobs be
 delta}`, label = the Σ of that side's per-kernel bests), so a re-tune on a warm machine descends into the kernel set
 predicted to be cheaper first.
 
-**Inner search** (`_inner_reward_async`) tunes each finalized kernel **independently** in its own single-node slice
-(`single_node_graph`, `slice.py`) with a plain `TuningSearch` over the lowering passes only (`tile → kernel → cuda`):
+**Separable scoring** (`TwoLevelStrategy._evaluate_terminal`) tunes each finalized kernel **independently** in
+its own single-node slice (`single_node_graph`, `slice.py`) with a plain `TuningSearch` over the lowering passes
+only (`tile → kernel → cuda`), and returns the Σ once ALL Loop kernels are measured:
 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
   The root op is shared **by reference**, so its body — and thus `Op.cache_key` — is byte-for-byte the full-graph op's.
-- One fold-aware exception: a flash fold offer site's slice CARRIES the score producer its fusion consumes
-  (`_flash.fused_producer_ids` → `single_node_graph(absorb=…)`), and the absorbed producer loses its own slice. A
-  synthetic-input boundary would make `try_flash` unfusable in-slice, silently degrading every tune trajectory to the
-  cut (benching fragment kernels greedy deploy never picks) and leaving the fused flash fork unreachable under tune.
+  It filters the graph's canonical topological order rather than iterating its set-backed ancestor closure, so slice
+  inputs and persisted Loop programs stay byte-identical across fresh Python processes. Every retained `InputOp` is
+  registered as a slice input even when a minting fragment did not list the boundary in its own `Graph.inputs`.
 - Because the inner tree holds one op, MCTS explores only that op's forks with `patience` as the op's own budget —
   `Σ_k n_k` benches total, never the product.
 - **Leaves are deduped by `Op.cache_key`**: 24 RMSNorm LoopOps across 24 layers collapse to one work unit, and the
   outer `total_us` accumulates `best * multiplicity` so the reward stays multiplicity-weighted. The progress
   denominator is the deduped count, so Qwen3-Embedding-0.6B's ~14 unique kernels show as 14/14, not 14/337.
+- **Minted kernels are enrolled as first-class targets.** The strategy's private splice watcher (`_KernelInventory`, in `two_level.py`)
+  rides every inner run and reports each genuinely NEW kernel a splice mints (a cut's fragments, a split's
+  pieces), deduped by structural identity across the whole session, outer kernels included. Each reported kernel
+  is enrolled in a wave after the current wave completes: tuned in its own slice cut from the minting fragment,
+  its `perf` rows keyed under its own `cache_key`, its node rows under its own `op_sig` — and its own inner run
+  may mint further pieces, which the same inventory catches for the next wave (waves terminate: cut/split trees
+  strictly shrink and the seen-set dedups). Enrolled kernels are evidence, never reward terms — the parent
+  slice's Σ already priced them, so they stay out of `per_op` / `total_us` and out of `searched_winner()`.
 
 **Separability + the structural handoff.** Op-variant forks are separable: every multi-option fork is an in-place `Op`
 rebind that leaves the graph unchanged, so whole-graph time is `Σ_k t_k`. Results key structurally (`Op.cache_key` =
@@ -808,13 +869,12 @@ already-measured variant is served from the DB with no GPU bench. An identical r
 deterministic trajectory → every terminal is a cache hit → zero benches and the same total. But the global online
 prior keeps changing (it refits across ops and runs), so the same patience can steer the MCTS down a *different*
 trajectory; re-running lets it reach and bench the genuinely-new variants the improved prior surfaces, replaying the
-rest for free. (An earlier "skip already-tuned ops" gate suppressed exactly that re-exploration and was removed —
-HISTORY.md: "Retired designs".)
+rest for free. (An earlier "skip already-tuned ops" gate suppressed exactly that re-exploration and was removed.)
 
 ### Per-kernel and working-target GPU parallelism (`--gpus N` / `--devices 0,1,2`)
 
 Because the inner search tunes each unique kernel independently, the per-op loop fans out across GPUs. The whole tuner
-is async-only: `run_two_level_tune` `await`s `_inner_reward_async` per outer terminal, which runs one coroutine per
+is async-only: `TwoLevelStrategy.run` `await`s its separable scoring per outer terminal, which runs one coroutine per
 unique kernel over an `asyncio.Queue` of `len(pool)` device-pinned `CudaBackend`s — each pops a backend, drives its
 op's whole inner search via `Pipeline.tune_async`, then returns the backend. So `len(pool)` benches run at once, one
 per GPU.
@@ -852,18 +912,42 @@ for a forkless anchor) is compiled with scoped authoritative pins and measured t
 the normal isolated benchmark and DB persistence path before MCTS continues in the same input pin regime. A
 realized-vs-requested check marks an
 unoffered proposal `pin_unmatched` instead of attributing the planner's fallback to the proposed row. Successful seed
-rows feed the shared prior immediately, so the following MCTS can use their evidence. Ranking feedback is flushed to
-the working file as soon as proposal measurement finishes, before MCTS. A multi-CudaOp result records realized knobs
-only when their union is conflict-free; otherwise the ranking is explicitly ambiguous.
+rows feed the shared prior immediately, so the following MCTS can use their evidence. The measured pipeline captures
+the exact finalized single Loop's stamped structural identity, even when the working file starts from stable Torch IR.
+At the kernel-set-changing splice it also captures the consumed parent carrying the complete scheduler feature row and
+exact structural route. The proposal's measured whole-slice latency persists under that route-specific parent cache
+key and context. This captured perf row is deploy evidence: the measured DB index can select the route again after a
+cold reload while the unpinned Loop key remains the two-level search's cost bookkeeping and the split kernels retain
+their independent terminal measurements. Parent-linked node rows preserve the same proposal for diagnostics and
+training; they do not drive deploy selection. The direct row is written only when the authoritative pins pass
+realized-pin validation, search retains the exact structural route, one consumed parent realizes it, and the terminal
+measurement succeeds. Ranking feedback is flushed to the working file as soon as proposal measurement finishes,
+before MCTS. A multi-CudaOp result records realized knobs only when their union is conflict-free, or when search
+retained that exact structural replay row; otherwise the ranking is explicitly ambiguous.
+
+Each of those per-target persists rewrites the whole file, so its cost is the size of the inventory rather than of
+the entry that changed, and a whole-model sweep pays it once per target. They are written **incrementally**: the
+program and loop pools are nearly all of such a file by size and no persist mutates them, so an incremental write
+keeps the text they were already serialized to and reserializes only the configurations. The document is still
+validated in full and the bytes written are the ones a full dump writes; canonical and promotion dumps simply
+reserialize everything. On the 279-target DeepSeek V4 Flash V100 inventory a persist is 2.5 s before and 0.24 s
+after — the sweep's write path was most of its wall time.
 
 `--max-candidates N` is a hard per-kernel budget. Each supplied proposal reserves one slot even if its measurement is
 already cached, which makes hybrid-vs-MCTS comparisons charge LLM proposals consistently. MCTS receives the remaining
 slots and counts only terminals that reached a live backend; cached replay observations update the tree without
 spending the live-measurement budget. Ranking feedback is written under the entry's working-only `ranking` mapping,
 and the final tune winner is annotated or appended as another proposal only when one directly searched observation
-provides both its knob row and cost. A later greedy deploy replay can select different golden/DB evidence and is never
-paired with that search reward. These `-O1` ranking numbers never populate
-`emmy_us` / `cublas_us`; promotion still requires the separate repeated, correct, deployable `-O3` A/B gate.
+provides both its knob row and cost. When the fastest searched terminal changes the kernel set, the winner is its
+first exact structural replay row: a `PLACE`-only routing row for a placement cut, or the complete pre-split schedule
+row for a cross-CTA reduction. The pieces remain independent tuning targets; promotion never fabricates their
+heterogeneous schedules into one row or falls back to a slower monolithic sibling. A cross-CTA parent becomes a tune
+winner only when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a
+parent whose pins
+name a different independently tuned child is left unpromoted. `PLACE`-only rows remain routing receipts and do not
+claim the child schedules. A later greedy deploy replay can select different golden/DB evidence and is never paired
+with that search reward. A search number never populates `emmy_us` / `cublas_us`; promotion still requires the
+separate repeated, correct, deployable A/B gate.
 
 Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either
 proposal set. Canonical repository goldens remain the common implicit deploy context for both runs.
@@ -885,22 +969,18 @@ with max-Q normalized UCB1:
 - **Patience** counts terminals since the last new global best; when it exceeds `--patience N` (default 50), the level
   exits.
 
-### Re-benching the near-best configs at deployable `-O3` flags
+### One measurement regime
 
-The sweep compiles at `-Xcicc -O1`. That is fast, but it is only good enough to *rank*: it gives equal times to
-configs that would differ at `-O3` — an ILP fold in `REDUCE`, say, or a warp tile's dedicated group of producer warps.
-So whenever a bench lands **within `EMMY_O3_TOL` (default 15%, `config.o3_tol`) of the best `-O1` result so far** — a
-wider band than "strictly better", so near-tied contenders qualify too — the engine re-benches that config at
-`-Xcicc -O3` (`_rebench_o3`). `observe_o3` then records an extra row, carrying the same knob values the config
-actually ended up with and tagged `H_opt=3` (the deployable regime), into the reservoir AND the `node` table — never
-the `perf` table (Part 3's reservoir definition explains what that means at deploy time). In the `node` table it lands
-as a leaf row with no parent, under its own `-O3` `context_key`. Each config is re-benched at most once.
+The sweep benches in the **deployable regime** — the same nvcc flags `compile` / `run` use — so a terminal earns
+exactly one measurement and a tuned latency is the deployed latency. Nothing is re-benched, nothing is translated
+between lanes, and no store carries a per-regime column.
 
-The `H_*` features are what let the broad `-O1` rows and the near-best `-O3` rows live in one dataset. `compile` /
-`run` run at `-O3` (`H_opt=3`), so a greedy compile ranks by the deployable rows and reaches the true optimum — for as
-long as the checkpoint holding them survives (see the consequence spelled out under "Featurizer versioning" in
-Part 3). The `nvcc_flags` override travels with the bench request to the worker, so only the winners pay for the `-O3`
-recompile, and the compiled cubin is cached under those flags.
+It was not always so: the sweep used to rank at `-Xcicc -O1` and re-bench near-best configs at `-O3`, which put a
+proxy in charge of the search and the confirmation in charge of nothing but training rows. Two measurements retired
+it. The proxy's error is *biased along tile area* — the axis being tuned — so it systematically priced wide tiles as
+slow (paired over 1,818 configs: p90 regret 1.68×, and the `-O1` argmin was the `-O3` argmin on only 44.5% of pools).
+And the compile time it was buying no longer exists: over 4,888 nvcc compiles, `-O3` compiled at a median 0.96× of
+`-O1`. The rationale had been measured against WMMA codegen deleted days later.
 
 All tune/bench timings are **CUDA-graph-captured** by default (pure GPU time); each `perf` row records its mode in the
 `captured` column, and on write a captured measurement supersedes a wall-semantics one for the same key (never the
@@ -927,7 +1007,7 @@ every node with a benched descendant:
 
 **Why CatBoost** (chosen by `scripts/prior_bakeoff.py`): the model's greedy pick must not run off to a degenerate
 extreme. A linear model is monotone in every knob, so its optimum always sits at a corner of the box of candidate
-values — which shipped real blow-ups before the switch (HISTORY.md: "The linear prior's corner pick"). Any tree
+values — which shipped real blow-ups before the switch. Any tree
 ensemble is **bounded**, so it stays sane outside the region the data covers: an un-benched extreme simply inherits
 the value of the nearest leaf. Among the bounded models, CatBoost also generalizes to an op that was never tuned
 almost perfectly (leave-one-op-out pick ratio ~1.0, against 1.18 for xgb/lgbm and 1.31 for rf). One global CatBoost
@@ -946,12 +1026,20 @@ checkpoint carries deploy evidence, not just model state.
 ### Driving the loop
 
 `emmy tune <model_or_ir | --code EXPR>` probes a `Context`, opens the tuning database (`EMMY_TUNE_DB` or
-`~/.cache/emmy/autotune.db`), and calls `run_two_level_tune(...)`. The DB accumulates rows across runs; re-running
+`~/.cache/emmy/autotune.db`), and drives `TwoLevelStrategy(...).run(graph, ctx)`. The DB accumulates rows across runs; re-running
 resumes from the cached state. On default verbosity (and a tty) a `TuneProgress` draws a live single-line bar
 (completed/total tuned op leaves plus a `<kernel> <current us> (best <best us>) <knobs>` tail), threaded as an optional
-`progress=` through `run_two_level_tune` (duck-typed, so the search package keeps no `commands/` dependency); `-v`
-shows the per-`[tune]` INFO lines instead, `-q` is quiet. `--bench` re-benches the tuned winner at -O3 (deployable,
-not the -O1 ranking pass): the full model against the real torch module and each kernel via its in-memory frontend
+`progress=` through `TwoLevelStrategy` (duck-typed, so the search package keeps no `commands/` dependency); `-v`
+shows the per-`[tune]` INFO lines instead, `-q` is quiet.
+
+The final greedy assembly (`result.assembled`, what `--output` writes and `--bench` measures) is the one greedy
+compile that **holds the verified-golden tier out** (`golden.records_override([])`). That tier is a deploy
+statement — "this config is known good on this card" — and a tune must assemble what it measured: the recorded
+winner (`persist_tune_winner`) names the searched config, so letting a golden win the replay would report a benched
+number for a config the tune did not choose. Every other tier still applies.
+
+`--bench` benches the tuned winner end to end:
+the full model against the real torch module and each kernel via its in-memory frontend
 provenance slice, vs eager / `torch.compile` / Emmy.
 
 ## Part 6: Persistence and keys
@@ -1000,7 +1088,10 @@ Each `node` row also carries **label-quality columns** (additive migration; old 
 - `is_leaf` — whether this is a real measurement or a minimum over explored descendants.
 - `variance` / `n_samples` — the leaf's own bench statistics.
 - `status` — `ok` / `bench_fail`. Failed leaves ARE recorded, with the watchdog's placeholder value as `value_us`;
-  they are the negative examples a search prior needs. An `ok` row is never downgraded by a later failure.
+  they are the negative examples a search prior needs. An `ok` row is never downgraded by a later failure. A config
+  whose **compile** ran past its budget is not one of these and is not recorded at all: nothing about its speed was
+  measured, and a stored row would make it a permanent cache hit that is never re-benched (see the two bench budgets
+  in `backend/cuda/ARCHITECTURE.md`).
 - `run_id` / `measured_at` — the tune session (one id per CLI invocation) and the time that produced the CURRENT
   `value_us`; both are replaced only when that value is.
 - `feat_ver` — the `features.FEATURIZER_VERSION` the row's feature dict was written under (Part 3). Rows written
@@ -1025,32 +1116,33 @@ paths and stable DB operation identity.
 
 **Measurement freeze** (`data/freeze.py`, driven by `scripts/freeze_node_store.py`). The node DB is a live store —
 tunes and merges keep writing into it — so a model fit read straight from it is not reproducible. A *freeze* (v3) is a
-snapshot of it, written into a local DIRECTORY laid out like `goldens/`: one YAML file per `(gpu, compute_cap)`
-(a `gpu_name`/`compute_cap` header plus a `configs` list), beside a `manifest.json` holding the provenance header and
-the content digests.
+snapshot written into a local directory: one YAML file per `(gpu, compute_cap)` (a `gpu_name`/`compute_cap` header plus
+a `configs` list), beside a `manifest.json` holding the provenance header and the content digests.
 
 - **Each row records DB `op_sig`, its measured `S_*` structural row, tunable knobs, and measurement metadata.** This
   is a regenerable measurement snapshot, not the stable golden format. Device `H_*` facts are derived faithfully from
   the GPU header and `opt` at load time.
-- **Only current-vocabulary leaves freeze**, as filtered by `freeze_reason`: `feat_ver` must have been current when
-  the row was written, and the row must pass the two physical-plausibility checks the DB shares
-  (`implausible_value_reason` / `impossible_kernel_reason`). `bench_fail` leaves are kept, as negative examples.
+- **Only current-vocabulary, deployable-regime leaves freeze**, as filtered by `freeze_reason`: `feat_ver` must have
+  been current when the row was written, `H_opt` must be the deployable level, and the row must pass the two
+  physical-plausibility checks the DB shares (`implausible_value_reason` / `impossible_kernel_reason`). `bench_fail`
+  leaves are kept, as negative examples. The regime gate is what keeps a freeze a fair yardstick: a freeze is the
+  corpus a reported prior number is computed over, so rows from a regime nothing deploys in would put half a card's
+  pools in a lane no one runs. `group_measured` inherits the same filter, so an analysis over a live DB agrees with
+  one over a freeze.
   Branch rows are never frozen and no tree structure is stored — the partly-decided rows are rebuilt at fit time under
   whatever fork structure is current then.
 - **Freezing the same DB twice yields the same digests.** Every row serializes to one canonical JSON line, rows sort
   by that line, the per-file sha256 covers exactly those lines (content-level — immune to YAML style), the manifest's
   top sha256 folds the sorted per-file digests, and `created_at` enters none of them.
-- A loaded row retains the DB's canonical `op_sig`, so the `-O1` and `-O3` measurements of one operation group
+- A loaded row retains the DB's canonical `op_sig`, so a store's older cross-regime measurements of one operation group
   together without a second shape schema.
 - **Loading is strict.** `load_freeze` hard-errors on a missing/foreign/corrupt manifest, a `freeze_ver` mismatch, a
   listed file missing, a per-file digest mismatch, or an un-instantiable row — never a silent fallback.
   `load_node_rows` sniffs a path (directory = freeze, sqlite file = DB, a v1 JSONL freeze is refused with a re-freeze
   pointer) and yields `NodeRow`s from either, which is what lets every nodes consumer
-  (`eval online --dataset nodes --db`, `Dataset.from_node_rows` / `fold_node_rows`) take a freeze interchangeably
-  with the live DB.
-- Rows loaded from a freeze have no parent and `depth=0`, which is how the diagnostics recognize that no tree
-  structure is available. The fork-regret view skips them, and the golden-anchored descent prints its loud "no
-  fork-tree data" row, so a freeze is evaluated through the leaf-level metrics without inventing fork groups.
+  (`eval prior --dataset nodes --db`, `Dataset.fold_node_rows`) take a freeze interchangeably with the live DB.
+- Rows loaded from a freeze have no parent and `depth=0`. That costs the consumers nothing: they read benched
+  leaves, and a freeze is leaf-only by construction.
 - Handing a freeze to something that expects the perf table (the `--dataset db` paths) fails at `open_readonly`, with
   a message that spells out the difference between a freeze and the nodes DB.
 
@@ -1062,18 +1154,12 @@ label is (`SearchNode.visits`, the leaf's `bench_stats` / `bench_status` that `o
 
 - **`bench_fail` leaves** — leaves only. Their value never contributes to any branch's minimum, so a branch's value
   comes from its working descendants instead, and a branch all of whose leaves failed is not recorded at all.
-- **`-O3` rows** for any leaf the tune re-benched at the deployable `-Xcicc -O3` (`observe_o3` stashes
-  `SearchNode.o3_us`). They are keyed under the tune's context with `O3_NVCC_FLAGS` substituted, so they can never
-  collide with the `-O1` row of the same config, their features carry `H_opt=3.0` (the same convention the reservoir
-  uses), and they have no parent: this is a re-measurement under different flags, not part of the tree, and never one
-  of a fork's siblings.
 
 **Recording benches as node rows** (`search/bench_record.py`) is the node table's second writer. A `run --bench` that
 benched rows with hand-forced knob values (golden or `--ab` rows) records each clean measurement — plus the greedy
 pick, through its comparable `greedy (isolated)` re-bench — as leaf rows with no parent and `depth=0`. This is on by
 default, behind the same quality bar the tuner applies to its own pinned benches; `--no-record-nodes` turns it off. It
-is what stops measurements from a manual sweep evaporating (HISTORY.md: "Hand-found optima that never reached the
-store").
+is what stops measurements from a manual sweep evaporating.
 
 - **The row must be keyed to the same set of candidates the tuner used.** That means recovering, for each kernel, the
   fork point it descended from, via `source_chain`: descent writes further `S_*` values onto the op, so keying off the
@@ -1093,8 +1179,8 @@ store").
 Within one batch, a deterministic step that changes no knob can give a child exactly its parent's knob set, and hence
 the same `node_key`. Such duplicates collapse into one row (keeping the leaf's stats, and the max — not the sum — of
 their visits), so the SUM accumulation in `record_nodes` never double-counts a single run. The store is ready to be
-split into held-out groups for cross-validation (`Dataset.fold_node_rows`, by `op_sig` / `gpu`): an op's `-O1` tree,
-its `-O3` rows and its failed leaves all move to the same side together, and no parent edge ever crosses a fold
+split into held-out groups for cross-validation (`Dataset.fold_node_rows`, by `op_sig` / `gpu`): an op's tree and
+its failed leaves all move to the same side together, and no parent edge ever crosses a fold
 boundary. (`run_id` records where the surviving deduplicated value came from and is deliberately NOT used to split
 folds.)
 
@@ -1107,17 +1193,20 @@ tree stays correct however the engine interleaves pops, pushes and observes. It 
 cached `perf` rows ensure no re-bench on warm starts. Greedy compiles build no tree at all — they never go through a
 `Search`.
 
-**`_bench_terminal_async`** is the only path that knows about all four parts (graph, DB, tree-through-`search.observe`,
+**`terminal_bench.bench_terminal_async`** is the only path that knows about all four parts (graph, DB, tree-through-`search.observe`,
 backend). It short-circuits when every `CudaOp` in the graph already has a `perf` row for the current `(context_key,
 backend)`. Otherwise it does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory +
 lowering edges + the `perf` row per kernel, and returns the aggregate `PerfStats` for the search to score.
+Tune terminals request one nominal warmup; the CUDA benchmark's existing clock-ramp floor extends that warmup until
+it covers 10 ms of GPU time. A slow candidate therefore spends one iteration warming instead of exhausting the
+run-stage budget on discarded repeats. Pinned and deployable comparisons retain their caller-selected warmup count.
 
 ## Part 7: Golden records and the A/B integrity gates
 
-A golden record is a reviewed, per-GPU measurement of a frontend program target. It serves three purposes: deploy evidence
-(Part 3, tier 1), training data for the offline prior, and a regression reference. This Part covers what the kinds
-are, how a golden's layout has to match the fork it is meant to decide, the two audits that catch a golden that no
-longer deploys, and the checks that keep the A/B honest.
+A golden record is a reviewed, per-GPU measurement of a frontend program target. It serves three purposes: exact
+pinned replay (`run --golden NAME`, `--ab` — never consulted by an unpinned compile; see Part 3), training data for
+the offline prior, and a regression reference. This Part covers the record format, its layout obligations, and the
+checks that keep the A/B honest.
 
 `golden.py` holds one generic `GoldenRecord` per realization. A structural config references a stable frontend Torch
 IR program by its document-local list index. The preferred target selector is a non-empty, unique set of frontend
@@ -1130,8 +1219,9 @@ directly. There are no kernel-kind classes or snippet generators.
 
 **Repository goldens are the entire compatibility boundary.** The embedded Torch IR has no independent version field.
 The golden document has no format version either. When the YAML schema or its Torch IR encoding changes, regenerate
-every golden under `search/goldens/` in the same change. The loader does not carry migrations or legacy decoders for
-working files outside the repository; keeping the checked-in corpus loadable is the compatibility gate. Programs are
+every recipe-local and model-agnostic repository golden in the same change. The loader does not carry migrations or
+legacy decoders for working files outside the repository; keeping the checked-in corpus loadable is the compatibility
+gate. Programs are
 a plain list and structural configs refer to them by integer index; no program digest or persistent identifier is
 stored. Loop IR
 fallbacks are implementation-level rather than a compatibility promise and follow the same regenerate-the-corpus
@@ -1148,14 +1238,17 @@ explicit knob mapping (possibly empty for a forkless anchor) and paired positive
 every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before
 they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
 the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
-An axis-scoped schedule family (`REDUCE@a1`, for example) and its bare spelling must not coexist in one promoted
-entry. Bare pins fan out across eligible axes, so storing both spellings can make an otherwise offered row
-self-contradictory during the all-of offer check. Promotion rejects that ambiguity before the offer audit.
+An axis-scoped schedule family (`REDUCE@a1`, for example) may coexist with a non-OFF bare spelling of the same
+family in one promoted entry — that IS the canonical stamped spelling (the bare key is the primary node's decision,
+the scoped keys are the other tree sites' decisions, a `''` scoped value recording a site that declined). The one
+rejected shape is a bare OFF beside scoped keys of the same family: a bare OFF pin fans out across eligible axes on
+replay and contradicts the scoped decisions, so `stamp_schedule_families` drops it when stamping and promotion
+rejects any that remain.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
 post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately
-compiled, repeated O3 `emmy-greedy` row as its positive reference only when the candidate and reference execute on
+compiled, repeated O3 `same-input-greedy` row as its positive reference only when the candidate and reference execute on
 identical deterministic inputs, their outputs pass the normal accuracy policy, and the model report discloses that
 this checks compiler-configuration parity rather than independent framework correctness. The original frontend
 program remains embedded for provenance, while the selected standalone target is what both configurations execute.
@@ -1163,46 +1256,21 @@ program remains embedded for provenance, while the selected standalone target is
 The three historical RTX 4080 rows without measurements were dropped during migration; repository validation has no
 provisional exception.
 
-**A matmul golden's layout must match the fork it is meant to decide.** The embedded Torch IR spells the
-serving Linear layout — B given `(N, K)`, contracted as `x @ w.T`. The traced contraction
-carries `b_trans`. The warp tier stages it like any canonical matmul (cp.async and TMA fill an N-MAJOR B slab —
-`tile_n × bk`, K stride-1 in gmem and smem alike — drained by the plain no-`.trans` ldmatrix; historically the
-transports declined transposed B and the `.lin` forks ran gmem-direct only — HISTORY.md: "The transposed-B staging
-gap"), so the
-same STAGE spellings realize on both layouts — but the measured µs still differ per layout (different slab geometry
-and gmem walk), which is why a golden meant to decide a served model's linear fork must still be TUNED on the
-`F.linear` snippet. The two layouts share one ShapeKey on purpose: at a fork the shared bucket sorts by µs, so a
-canonical entry (the harness/eval truth) and a `trans_b` entry (the serving truth) coexist under one shape — keep
-BOTH current, since with staging realizable on either layout a stale twin's config now deploys cross-layout with its
-foreign µs (the layout signal in the stamped `S_*` features / ShapeKey still does not exist). The same rule applies
-to fused computed-A programs: their stored `torch.linear` edge is the served layout, and the sync compute-fill stages
-every B fold channel via cp.async on either layout.
+**A matmul golden's layout is part of what it measures.** The embedded Torch IR spells the serving Linear layout — B
+given `(N, K)`, contracted as `x @ w.T`; the traced contraction carries `b_trans`. The warp tier stages it like any
+canonical matmul (cp.async and TMA fill an N-MAJOR B slab — `tile_n × bk`, K stride-1 in gmem and smem alike —
+drained by the plain no-`.trans` ldmatrix), so the same STAGE spellings realize on both layouts — but the measured µs
+still differ per layout (different slab geometry and gmem walk), which is why a record meant for a served model's
+linear fork must be TUNED on the `F.linear` snippet, and why a canonical entry (the harness/eval truth) and a
+`trans_b` entry (the serving truth) both stay current. The same rule applies to fused computed-A programs: their
+stored `torch.linear` edge is the served layout, and the smem compute fill stages every B fold channel via cp.async
+on either layout.
 
-**Provenance and the serving-matrix audit.** `emmy eval golden GOLDEN_YAML --serving-config PATH` derives model,
-revision, GPU, canonical file, precision regimes, and reachable static/symbolic widths from one pinned env. The
-command requires that exact file and live GPU, validates that every structural target contains every expected
-realization, and re-traces the model's twins weight-free. It compiles each precision lane with only that file's
-records as golden evidence. Each consultation yields MATCH, DRIFT, or GAP; any DRIFT, GAP, or compile failure blocks
-release. The same command also runs the own-program reproduction and offer audit, closing both the pin-only and fused
-in-model blind spots in one operation. The default correctness suite tests the reusable audit mechanism with
-synthetic verdicts rather than retracing and compiling a model/card matrix. The twins track the installed
-`transformers` modeling code by design: a change to the model forward changes the twins exactly as it changes serving,
-and release qualification goes loudly red. `scripts/diagnostics/audit_golden_match.py` is the lower-level audit over
-explicit graph JSONs on a live box.
-
-**The pin-only offer audit** (`emmy eval golden`, same `search/audit` seam) is the record-time complement: for every
-forking realization it re-compiles the target's own program under the realization's input pins, without pinning its
-recorded winner (deployable regime, the golden file's own card — the enumeration is static given shape+context, so no
-GPU bench), and checks the recorded knobs against the offered candidates. An entry only an additional winner pin can
-realize (`EMMY_KNOBS` / working-file proposal measurement benches it, the input-regime enumeration never offers
-it) reports **PIN-ONLY** — legal as a documented lever while an OFFERED sibling floors the shape (the 4090
-`attention.hd512.s4096` split-KV row beside its serial deploy-floor sibling); a shape whose entries are ALL pin-only
-reports **FALL-THROUGH** and exits 1: a deploy logs "no offered candidate realizes any of them" and falls past the
-golden tier — the missing-floor pathology that deployed a 111 ms 0.03x `mlp_down.m4096` kernel and NaN-poisoned the
-downstream accuracy check before the floor-sibling discipline. Every realization audits under its explicit input
-pins. The own-program and serving-twin views genuinely differ: the 5090 `mlp_down.m4096`
-split-K row realizes standalone but not on the serving twin's epilogue-fused down, while the s4096 split-KV row fails
-even standalone. The unified release command runs both views.
+**Provenance validation.** `emmy eval golden GOLDEN_YAML --serving-config PATH` derives model, revision, GPU,
+canonical file, precision regimes, and reachable static/symbolic widths from one pinned env, requires that exact file
+and live GPU, and validates that every structural target contains every expected realization. It is a corpus/schema
+validation only — with no consulting deploy tier there is nothing to audit at deploy time; a recorded row's health is
+its exact pinned replay (`--ab` / `run --golden NAME`, gated by the A/B integrity checks below).
 
 **Live-GPU scoping.** `run` / `compile --golden NAME` prefer the **live** card's goldens
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union can
@@ -1214,7 +1282,7 @@ explicit working file whose GPU header is checked against the selected tune devi
 
 1. **Realized-vs-pinned knob check — a miss FAILS the row before it benches.** A structurally invalid pin silently
    falls back to the planner's own pick, so benching it would compare greedy against itself and report a fake 1.00×
-   under the pin's name (HISTORY.md: "The pin that benched greedy against itself"). The check runs right after the
+   under the pin's name. The check runs right after the
    pinned compile. A pin that matches none of the knob values the compile actually produced marks the row
    `pin_unmatched` / `unreproducible pin … NOT benched` (a loud error log; the row is kept in the table and in
    `--json`, and no GPU time is spent), and the remaining rows still run. Matching is aware of knob families — a
@@ -1222,7 +1290,12 @@ explicit working file whose GPU header is checked against the selected tune devi
    registered knob's canonical `Knob.parse`, so alternative ways of writing the same value, like `FAST_EXP=1`, do not
    raise a false alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
-   match it.
+   match it. The `g<n>` cross-CTA stage of a `REDUCE` value is structural and cannot be read off a knob stamp, so the
+   check skips it. A split replaces the kernel it splits, and
+   `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
+   from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
+   value (`coop` / `r<n>`) is decided by the piece on its own body and stays gated. The cost of the exemption is that a
+   `g<n>` pin which genuinely never split cannot be told apart from one that did.
 2. **Arithmetic-intensity check.** A row whose FLOP/s, implied by its shape, exceeds the peak recorded in the live
    GPU's `GpuSpec` is flagged as a bad measurement rather than a fast kernel.
 3. **Wrong-answer check.** Each pinned config is executed once on the greedy run's inputs and its outputs are
@@ -1254,7 +1327,8 @@ fresh child — no escalation modes, no `os._exit`.
   child's profiled launches), so with `--bench` those two want a separate plain `run`.
 
 Plus `--json PATH` — a machine-readable record of the whole comparison (backends / greedy kernels / pinned rows with
-their flags and a `status` field: `ok` / `pin_unmatched` / `bench_fail`; a failed greedy block carries
+their flags and a `status` field: `ok` / `pin_unmatched` / `bench_fail` / `compile_timeout` (the config's compile ran
+past its budget, so nothing about it was measured and the row is reported but never recorded); a failed greedy block carries
 `status: bench_fail` and an `error`, with null timings), so a sweep's judgments can be traced to flagged fields
 instead of to parsed terminal text. Each kernel row also carries **`record_knobs`**: the tuning knobs the compile
 actually produced, with every schedule knob family (`knob.SCHEDULE_FAMILIES`: WORK / TILE / REDUCE / STAGE / RASTER)
@@ -1265,111 +1339,122 @@ come from an unpinned `REDUCE`. Golden rows attach to the run's SHAPE rather tha
 whose shape matches no greedy kernel — because greedy deployed a split partial+finalize pair — still prints and still
 lands in the record.
 
-## Part 8: Evaluating the prior (`emmy eval`)
+## Part 8: Evaluating the prior (`emmy eval prior`)
 
-`emmy eval` is how you find out whether the prior is any good and, when it isn't, where it goes wrong. The views
-below run over the goldens, the tune DB's `node` table, or a measurement freeze.
+`emmy eval prior` is how you find out whether the prior is any good and, when it isn't, where it goes wrong. It runs
+over the goldens, the tune DB's `node` table, or a measurement freeze, and it reports BOTH halves of the composite
+prior, each labelled — they fail for different reasons, so an unlabelled "prior" number destroys the diagnostic.
 
-**A golden's rank counts ties against it** (`eval offline` / `eval online`, via `golden_eval.evaluate_record`). The
+**Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
+(`--json`), so comparing two models is a `diff`. `emmy fit` writes the same summaries into its `metrics.json`, through
+the same `report.rank_metrics`. The report computes nothing itself:
+`search/metrics.py` owns every metric's definition, and `Prior.score_rows(group)` — the pool-shaped scoring surface
+both halves answer, projecting the packed matrix onto each model's own columns with its own absent-value fill — is
+where a score comes from.
+
+- A MEASURED pool (`--dataset nodes`: freeze or `node`-table rows, every candidate benched, grouped by
+  `(gpu, kernel signature, H_opt)`) can answer what a wrong pick COST — Spearman over the pool, and regret at k=1
+  (the deploy question: the pick ships, so its latency IS the cost) and k=10 (the tuning question: bench the top ten,
+  keep the measured best). This is the half that tracks deployed speed.
+- A GOLDEN pool (`--dataset golden`: an enumeration with the verified-optimum row marked) can only answer WHERE the
+  known-good row landed, and is reported as a SCREEN. A rank is blind to the latency gap behind it, and the corpus
+  aggregate is dominated by pools small enough to rank by accident, so golden summaries are stratified by pool size.
+
+**Every summary publishes what it covered.** Summaries carry the axes they were keyed on as a dict — measured: `gpu` ×
+`H_opt`; golden: `gpu` × `tier` × pool-size bucket; both plus `half` — along with how many pools keyed into them, how
+many the model could not score at all, and — where a metric has a size minimum and so covers fewer pools than the
+summary holds — that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven),
+so on the v3 freeze's 336 pools those counts are 297, 216 and 90. An aggregate that averaged the excluded pools in
+would be reporting mostly arithmetic.
+
+**A measured pool is keyed on the KERNEL, not on the site that offered it.** The key digests the row's own `S_*`
+stamps — the same digest `Identity.op_sig` computes for an op, asked of the kernel that ran. Two kernels of one
+structure on one card are ONE tuning problem whatever produced them, which is already how the deploy path joins
+evidence: `Prior.evidence_pick` and `policy/greedy._db_measured_pick` both index on the `S_*` signature. It is safe
+because the identity strategy stamps a kernel **at birth**, at the fusion boundary or lowering splice, before
+`020_schedule` offers the first fork — so nothing a schedule fork decides can move an `S_*` value, and sibling
+schedules cannot be split apart.
+
+Keying on the recorded `op_sig` column gets it wrong in both directions, and the RTX 5090 freeze shows both. It
+**over-merges**, because `op_sig` digests the *pre-descent offer op*: nine pools paired a fused `rms_norm`→linear
+megakernel with a row for just one kernel of the same op's unfused realization — a 5.9 µs norm kernel filed as a
+rival of a 131 ms whole-op row, where the unfused pair actually costs 24–191 µs. And it **fragments**: 73 structures
+were searched in two separate pools, the losing pool's best landing a median 1.46× behind the winning pool's (p90
+3.89×, worst 14×) — the same kernel appeared in two structural contexts. Against `op_sig` the
+kernel key gives 336 pools rather than 401, but more rows sitting beside a rival (3778 of 3817 against 3760) and a
+median pool of 7 rather than 5; the pool count falls because merging is the point.
+
+**`--dataset golden` also runs the deploy-faithful check the rank is only a screen for**: the greedy tile-pipeline
+pick vs the recorded golden, per shape, with the deployable `-O3` latency of the prior's pick beside it
+(`golden_deploy_perf`, read from the reservoir with no re-bench).
+
+**`--dataset db` is rejected.** Those rows are fully-decided leaves with no op identity or compile regime to group a
+comparison set by; the same DB read as `--dataset nodes` has both.
+
+**A golden's rank counts ties against it** (via `search/metrics.dual_rank`). The
 golden's rank counts every candidate scoring strictly better PLUS every candidate that ties with it and was emitted
 earlier. A tie is counted as a loss because greedy's argmin, faced with equal scores, takes whichever came first.
 Counting only strictly-better candidates would report rank 0 for every row inside a plateau of equal scores, which
-once let a saturated prior score "top-1" on goldens that real cold deploys missed by 12–29× (HISTORY.md: "The
-saturated-score plateau"). Both counts come from ONE computation (`prior/fit/rank.dual_rank`): the pessimistic rank is
+once let a saturated prior score "top-1" on goldens that real cold deploys missed by 12–29×. Both counts come from
+ONE computation (`search/metrics.dual_rank`): the pessimistic rank is
 the one that gates, and the strictly-better **optimistic** rank is reported beside it in `emmy fit`'s metrics file.
 The gap between them is the width of the tie plateau at the golden's score, and thus an early warning that the scores
 are saturating.
 
-**Golden evaluations build their features for the golden's own GPU.** `eval offline` / `eval online` rebuild each
-golden's compile context as `Context.from_target(compute_cap, gpu_name=…)`, using the GPU recorded in the golden file
-along with its known SM count and smem specs — never the host's. Building them for the host's context makes golden
-ranks machine-dependent, because the occupancy features then describe tiles for a GPU that is not the one the row came
-from (HISTORY.md: "Machine-dependent golden evals"). The offline fitter's case builder always did this correctly; the
-eval now matches it.
+**Golden evaluations build their features for the golden's own GPU.** They go through ONE golden group builder —
+`emmy fit`'s `build_golden_groups`, which `eval prior --dataset golden` calls — so the eval and the fit see the
+same corpus, the same sampling draw and the same rows. Each golden's compile context is rebuilt as
+`Context.from_target(compute_cap, gpu_name=…)`, using the GPU recorded in the golden file along with its known SM
+count and smem specs — never the host's. Building them for the host's context makes golden ranks machine-dependent,
+because the occupancy features then describe tiles for a GPU that is not the one the row came from.
 
-**Fork-sibling regret** (`eval online --dataset nodes`, via `iter_nodes` → `diagnostics.node_report`) measures, **per
-GPU**, what following the prior's choice at each fork costs. It groups nodes by `parent_key` and computes
-`value_us(the child the prior predicted best) / value_us(the truly best child)`; 1.00x means the prior steers into the
-best subtree reachable from there, and ties in predicted score count against the prior, since greedy breaks them by
-the order the options were emitted in. This is the search-faithful evaluation that no view of leaves alone can give.
-Each fork is bucketed by which knob FAMILY its children decide (`TILE` / `REDUCE` / `STAGE` / …, read off the
-difference between child and parent knobs). That is the stable way to name a level of the tree, because the raw
-`depth` counts rule steps and renumbers whenever passes change. The result is rendered as a per-kernel × per-family
-regret table, with an aggregate line per family. `node_report` drops `bench_fail` rows up front — their `value_us` is
-the watchdog's placeholder, not a measurement — and splits each GPU's block by `H_opt`, so `-O1` and `-O3` latencies
-are never pooled. The per-GPU
-grouping matters for a cross-hardware dataset: two SKUs off the same die (H100/H200) share an `S_*` op signature but
-not their latencies, so mixing them would corrupt both metrics; the `gpu` key keeps their rows apart. `--db` also
-accepts a measurement freeze (Part 6) in place of the live DB — its rows are leaves with no parents, so the report
-falls back to the leaf-level metrics.
+The eval builds its pools over the FULL featurization while a fit trains under its trainer's feature view. The view is
+a property of the model being fitted, and the eval scores two model classes: the linear half reads only its own weight
+names, so its ranks are identical either way, while the online half regresses on the `S_*` / `H_*` columns a narrow
+view drops and would otherwise be asked about a kernel with no shape.
 
-That block is rendered once per **half** of the prior, offline and online, each labeled. The composite would answer
-with whichever half is currently active, and the two halves' regrets point at different fixes — the cold-start weights
-versus the training data — so an unlabeled "prior" number would destroy the diagnostic.
+**The per-fork view is retired.** Until 2026-08 this part also documented three node-tree diagnostics: fork-sibling
+regret (what following the prior's pick at each fork cost, bucketed by knob family), a golden-anchored descent (how
+far a golden's path was covered by the explored tree), and per-feature blame / ablation Δ. They are gone, with
+`Dataset.from_node_rows` and the `Prior.masking_exact` chain that existed only to caveat the ablation numbers.
 
-**The report section labeled "golden-anchored descent"** covers what the regret view structurally cannot see. Regret
-only speaks about forks the search actually measured, so a golden sitting in a subtree the search never built — or a
-shape with no node data at all — was silence that read as health. That is how a past saturation bug hid from regret
-while the then-broken golden rank claimed top-1. Each GPU's block therefore ends with one row per golden recorded FOR
-that GPU (a golden is only ever matched against rows measured on its own GPU), reporting: how far its path is covered
-by the explored tree (branches are matched with the same family-aware, registry-canonical rule the A/B pin check
-uses), whether the prior's tie-pessimistic pick stays inside the golden's subtree at each fork (with the measured gap,
-at matching flags, where it does not), and the loud absences — `NO TREE DATA` for a golden whose path is nowhere in
-the tree, a count per GPU, and a closing line for GPUs that have recorded goldens but no node rows at all.
+Two reasons, and the second is why nothing replaced them in kind. They answered questions about a SEARCH TREE, and
+the stores no longer hold one: every row in the current node table and in the v3 freeze is a parentless `depth=0`
+bench leaf, so the fork metrics had nothing to group by `parent_key` and degraded to leaf-level numbers that
+`eval prior`'s summaries now compute directly. And the ablation half rested on hiding one feature at a time, which
+attributes an effect among correlated features with no unique answer — hiding any one of a redundant block of
+geometry features costs the same Δ.
 
-Coverage is always printed with a denominator. A fully followed path is exact (`followed 6/6 fork levels to a measured
-leaf`), while a partial match's total is an ESTIMATE, marked `~` (`followed 2 of ~7 fork levels`), taken from the
-deepest chain of siblings below the fork where the paths diverged — the golden's own branch was never built, so those
-siblings' depth is the only evidence of how much tree is left. Keeping the flags straight is essential: the golden's
-recorded µs is a deployable `-O3` number and never enters the `-O1` walk or its gaps, because the two systematically
-invert. It appears only in the `-O3 pick/golden` endpoint, computed over the op's `H_opt=3` rows with the fast-math
-setting matched (the `golden_deploy_perf` convention). This is a diagnostic, not a gate: losing a fork whose measured
-sibling is near-equal is fine, and the gap column is what tells you so.
+What a tree could tell you that a pool of benched leaves cannot is real and unaddressed: a search is a sequence of
+partial decisions, most of whose subtrees are never explored, and a golden sitting in an unexplored one is silence
+that reads as health. The writer for such a store is not hypothetical — `policy/mcts.py`'s `_collect_node_records`
+walks the finished tree and emits parent-linked rows, and `working_golden.py` calls it into the same `node` table.
+What changed is the collection path: the budgeted leaf sweep the `collect-node-data` skill drives records benched
+leaves through `bench_record`, bypassing the tree writer. Per-fork evaluation returning is a question about which
+collection flow runs, not about building a new store.
 
-Both halves accept a candidate artifact for A/Bs: `--online-file` (legacy `--prior`) swaps the online checkpoint
-(`EMMY_ONLINE_FILE`), and `--offline-file` (on `eval offline` / `eval online`; env `EMMY_OFFLINE_FILE`) swaps the
-offline weights artifact — comparing two fits is running the same eval against two files and diffing the reports.
-
-**Which feature is to blame** (`eval online --dataset nodes --blame / --ablate`). Both views consume one shared
-per-fork record (`diagnostics.fork_records`: the siblings, their rows in feature form, their scores, the
-tie-pessimistic pick and the measured best), so all three views agree on what "the pick" means by construction. They
-score through the `Prior`'s feature-level entry points — `mean_score_features` / `mean_scores_features` take a row
-that is already in feature form, and are contractually identical to `mean_score` on the raw knob dict. That is what
-lets the diagnostics hide individual `D_*` features that no knob value corresponds to.
-
-- **Blame** diffs `Prior.explain_features` — a signed breakdown of the quality score into one term per feature, exact
-  for the linear offline prior, with its hard-coded interactions included as `gate:*` pseudo-terms, and unit-tested to
-  sum back to the scored quality — between the pick and the sibling that measured best, weighted by regret and grouped
-  by fork family. A fork the prior missed where no term separates the two is reported **BLIND**: a gap in the
-  featurizer, not a problem with the weights.
-- **Ablation Δ** re-picks every fork with one feature hidden, using each model's own notion of an absent feature (a
-  `0.0` term for the linear prior, which removes it exactly; `NaN` routing for CatBoost, which is flagged as
-  out-of-distribution until a model trained with feature dropout exists) and reports the change in median regret per
-  family, along with how many forks that feature had any say in.
-
-Both are **diagnostics, never gate metrics**: attributing an effect among correlated features has no unique answer
-(hiding any one of a redundant block of geometry features costs the same Δ). Unlike the per-GPU regret tables,
-attribution POOLS GPUs and flag settings, which is safe because regret is a ratio computed within one fork.
+Both prior halves accept a candidate artifact for A/Bs: `--online-file` (legacy `--prior`) swaps the online
+checkpoint (`EMMY_ONLINE_FILE`), and `--offline-file` (env `EMMY_OFFLINE_FILE`) swaps the offline weights artifact —
+comparing two fits is running the same eval against two files and diffing the reports.
 
 ## Part 9: Tile lowering at the pipeline level
 
-`lowering/tile/` lowers each fused `LoopOp` to a kernel-ready `TileOp` over the block-DAG Tile IR (`ir/tile/ir.py`):
-`010_recognize` (lift `LoopOp` → `TileOp`, recognize the flash / softmax streaming forms, annotate each reduce
-`Loop` with its `AxisRole` — the only loop annotation; the algebra is the body — and **atomize**: resolve the
-algebra→hardware-atom binding structurally onto the node, so an unbindable atom never becomes one; `_atomize.py`) →
-`030_split_reduce` (cross-CTA split-K as a graph rewrite). It **never dispatches on a named
-shape** — every decision is gated on the derived role of the stored fold (`PLANAR` / `CONTRACTION` / `TWISTED`; flash
-attention is the `TWISTED` fold on the streaming schedule, a twisted monoid is a monoid, selected structurally), not
-on a matmul / pointwise / attention archetype. The full design lives in
-[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md).
+`lowering/tile/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer parallel
+axes and mechanically lifts every inner reduction as a nested `Fold`; `TileOp` construction then canonicalizes the
+complete tree, including maximal pure operand-cone factoring for semiring contractions, canonical shared-argument
+orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. Pure projection regions remain
+in the term, while their writes live as `OutputSpec`s at the `TileOp` boundary.
 
-The step BETWEEN those two — schedule enumeration: mapping the free axes onto the grid and forking the per-node
-`TILE` / `REDUCE` / `STAGE` / `WORK` / `RASTER` families — is ONE recursive row enumerator over the term's own site
-tree (the `020_schedule` rule). It covers every single-site term, the COMPUTED `a` edge (the fused norm→linear /
-gate⊗up cone) and the flash streaming pair — the two-site families are why it recurses. A term it cannot schedule
-enumerates NO rows and stays unmapped rather than being guessed at — the guardrail contract, with any coverage gap
-riding `tests/xfail_registry.py`. See the leading section of [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for
-the design.
+`015_twisted` rewrites the exp-family composition over that canonical tree. `018_cut` offers the maximal tree and
+every semantically closed stored child-Fold seam through `PLACE`; a selected cut writes the complete child state to
+workspaces and returns fresh unmapped producer and consumer TileOps. `020_schedule` then enumerates schedules over
+each stored Fold tree only. Independent roots stay fused and combine only schedules with matching physical
+output-axis tile widths and unit counts. `030_split_reduce` realizes a selected cross-CTA reduction partition by
+slicing the same Fold and folding partial state tuples with its stored combine.
+
+The complete structural invariant is documented in
+[`ir/tile/ARCHITECTURE.md`](../ir/tile/ARCHITECTURE.md), and pass behavior in
+[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md).
 
 ## Tunable knobs
 
@@ -1387,10 +1472,10 @@ also owns the `EMMY_<KNOB>` env namespace (decode per `Knob` type; `config.py` r
 
 Two equivalent forms:
 
-- **Per-knob:** `EMMY_<NAME>=<value>` (e.g. `EMMY_STAGE=d2/cp`). Read by the rule that owns the knob via
+- **Per-knob:** `EMMY_<NAME>=<value>` (e.g. `EMMY_STAGE=d2/smem-async`). Read by the rule that owns the knob via
   `Knob.narrow`. The env-var key is built by `config.knob_var` and read via `config.knob_raw` / `config.int_env`.
 - **Aggregate:** `EMMY_KNOBS="K1=V1,K2=V2,..."` (e.g.
-  `EMMY_KNOBS="WORK=w2x2,TILE=mma_m16n8k16_f16_f32/f2x2/k2,STAGE=d2/cp"` — the worker widths ride `WORK`, so a
+  `EMMY_KNOBS="WORK=w2x2,TILE=mma_m16n8k16_f16_f32/f2x2/k2,STAGE=d2/smem-async"` — the worker widths ride `WORK`, so a
   `TILE` / `REDUCE` pin that embeds its own raises). Parsed once at `knob.py` import via
   `apply_knobs_env()`, which splats each entry into the corresponding `EMMY_<K>` var
   (`config.set_knob(..., overwrite=False)`). An explicit per-knob var wins over the aggregate.
@@ -1408,10 +1493,11 @@ A few pins are rejected outright (a clear `ValueError`) rather than silently deg
 a wrong or un-launchable kernel:
 
 - A codec width must be `≥ 1` (a degenerate `b0` / `f0` / `n0` no longer parses to a silently-dropped level).
-- A warp `TILE` pin needs its **static** contraction K to be a multiple of the inner mma K-step (`atom_k·bk`), since
-  the warp K-loop has no static-K tail masking (a **symbolic** K is fine — it reaches the masked zero-filled tier).
+- A warp `TILE` pin on an **fp8** atom needs a static contraction K that the inner mma K-step (`atom_k·bk`) tiles —
+  the byte-gather fragment loaders have no masked-K zero-fill family. Every other atom takes any K: the warp K-loop
+  zero-fills the fragment halves past K on its final partial step, static and symbolic alike.
 - A warp `TILE` atom must belong to the target's selected MMA family. On SM70, newer `m16n8k16` atoms and `cp.async`
-  or TMA `STAGE` pins fail explicitly; the Volta m8n8k4 atom accepts global-memory-direct or `d<n>/sync` staging.
+  or TMA `STAGE` pins fail explicitly; the Volta m8n8k4 atom accepts global-memory-direct or `d<n>/smem` staging.
 - A scalar `TILE` parallel block (`par_n·par_m`) is capped at the 1024-thread/CTA hardware limit.
 - A `BOOL` knob rejects an unrecognized value instead of coercing a typo (`ture`) to `False`.
 
@@ -1420,6 +1506,11 @@ a wrong or un-launchable kernel:
 All declared in `search/space.py`; see [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the per-rule mechanics.
 The "owning rule" for the schedule codecs is the tile scheduler (the `020_schedule` rule), whose recursive row
 enumerator spells each family exactly once, site-local, where a row becomes stored state.
+
+**`PLACE`** (STR structural fork, `fuse` or `cut`) — a stored Fold edge's kernel placement, addressed by the same
+tree-path codec as schedule sites. The maximal fused kernel and every semantically closed cut are siblings. A cut is
+consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
+the structural decision trace. Bare `PLACE=cut` selects the primary cut seam, while a scoped key pins one seam.
 
 **`WORK`** (STR codec, stamped by `seal_workers` at option assembly) — the kernel-global **worker inventory**,
 spelled exactly once per row (step 7): `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer
@@ -1443,10 +1534,16 @@ stored).
 per-thread remainder is derived, never spelled); the retired `b<n>` coop-width spelling raises. The
 cross-CTA split is the `g<n>` field (GRID stage), and the
 **finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive single-fold
-carriers only; both tiers — an mma partial's C fragment rides `RegStore.atomic`, the packed f16x2/bf16x2 red, at the
-cost of one output-dtype rounding per partition), `g<n>k` = deferred `__partial` workspace + a sibling combine kernel
-(any carrier; the only legal arm for the twisted flash `(m, l, O)` split-KV and for a multi-channel ⊗-combine). Pin
-via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is consumed by `lowering/tile/030_split_reduce` as a graph rewrite (partial + finalize); the
+carriers only, with no f16/bf16 destination; both tiers — an mma partial's C fragment rides `RegStore.atomic`),
+`g<n>k` = deferred f32 `__partial` workspace + a sibling combine kernel (any carrier; the only legal arm for a
+low-precision output, a multi-component twisted carrier, and a multi-channel ⊗-combine). A direct atomic low-precision
+destination would round once per partition and can cross the strict correctness boundary; the deferred arm combines
+carrier state in f32 and rounds once. Pin
+via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is realized by
+`lowering/tile/030_split_reduce` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
+re-stamped, each scheduled at its own fork; a split node is priced as the Σ of its pieces' bests, and the split is
+CONSUMED by the kernel that realizes it (the sliced axis is a `Window` of its parent, so nothing partitions it
+twice). See [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the invariant. The
 letter round-trips through `ReducePlan.parse`/`spell` and reads back as `ReducePlan.finalize`. The atomic finalize
 applies the kernel's projection epilogue **per partition** before the `atomicAdd`, so it is only correct when that
 projection *distributes* over the add (`Σ φ(xₛ) = φ(Σ xₛ)`): a constant scale like `mean`'s `×1/N` distributes and
@@ -1461,34 +1558,22 @@ dominance rule is generic (any card, any coalesced wide-K matvec), which is why 
 
 The SKU-exact `facebook/DiT-XL-2-256` deploy overrides that used to sit beside it are GONE — a hardcoded contraction
 table, a flash-winner matcher and a `b128` LayerNorm `REDUCE` narrowing, all string-matched on `NVIDIA GeForce RTX
-4080`. A recorded winner belongs in the golden corpus, which the deploy evidence tier already consults ahead of the
-prior, and which is versioned, auditable through `emmy eval golden`, and covered by the drift gate. What could be
-expressed as a golden moved to `goldens/rtx4080_sm89.yaml` (`dit_xl_2.*`, the three exact provisional entries
-described in Part 7): the two plain-A projections as `matmul` entries and the block's SDPA as an `attention` entry.
+4080`. A recorded winner belongs in the golden corpus as a versioned, exactly-replayable pinned row — never in code.
 
-What could NOT be expressed was deleted rather than mis-filed, both times for the same reason: **no golden kind
-describes a LayerNorm**. The DiT prologue is AdaLayerNorm-Zero, while every fused kind (`norm_linear` / `mlp_geglu`)
-is RMSNorm by construction — its `snippet()` builds `F.rms_norm` — and the reduce kinds are `torch.sum` /
-`torch.nn.RMSNorm`. An entry filed under those would join correctly at deploy (the ShapeKey matches numerically) and
-hand every re-tune / `eval golden` / drift-gate consumer the wrong kernel to rebuild. So the two LayerNorm→linear
+What could NOT be expressed was deleted rather than mis-filed, for one reason: **no recorded program in the corpus
+describes a LayerNorm**. The DiT prologue is AdaLayerNorm-Zero, while every fused recorded program (`norm_linear` /
+`mlp_geglu`) is RMSNorm by construction, and the reduce entries are `torch.sum` / `torch.nn.RMSNorm`. An entry filed
+under those would hand every re-tune consumer the wrong kernel to rebuild. So the two LayerNorm→linear
 contractions and the LayerNorm statistic reduce now deploy off the prior; adding a LayerNorm-cone kind is what would
 let them be recorded.
 
 **`STAGE`** (STR codec, the tile schedule → `lowering/kernel/010_materialize`) — the operand-staging codec
-`d<depth>/sync|cp|tma[/split][/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
+`d<depth>/sync|cp|tma[/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
 of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the
 smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. A `STAGE` value names only what the
 schedule CHOOSES — rotation and refill discipline derive at materialization from the depth alone (which is why the
 retired `ring` flag compiled byte-identically with and without it), and `smem` / `bk_elems` are resolver outputs,
-never spelled. `split` is the transport GROUP GRANULARITY: off = ONE transport over all the fold's staged edges
-(a contraction's single multiply consumes both, so there is one group to cut), on = one transport PER edge. It
-therefore rides the warp-flash TWISTED stream (`STAGE@<kv>` — the K/V slabs of one streaming block; `reg_depth`
-clamps to 1), where `d1/tma/split` / `d1/cp/split` gives each operand its own slab (TMA: its own mbarrier;
-cp.async: its own commit group, a uniform `wait_group(1)` completing the older sibling) and each refill lands at
-its operand's kill point by the liveness-scheduled skeleton (derived from the segment live ranges, not
-hand-assembled), Q staged through smem — the wide (64-key) streaming block's staging. Eligibility is structural:
-≥ 2 staged operand edges consumed at DISTINCT positions of the derived evaluation, which is why the matmul
-resolvers decline it. See `lowering/kernel/ARCHITECTURE.md`.
+never spelled. See `lowering/kernel/ARCHITECTURE.md`.
 
 **`WSPEC`** (STR codec, RETIRED) — the warp-specialization producer band `p<np>` is INVENTORY: realized rows spell
 it as `WORK`'s `+p<np>` suffix, `SCHEDULE_FAMILIES` no longer lists it, no shipped golden carries the key, and the
@@ -1506,14 +1591,15 @@ producer/compute band split (`_stage._producer_band_kloop`).
 codec (bare/root-global; the fifth schedule-fork level): `gm<G>` iterates `G` M block-tiles fastest per
 launch stripe so consecutive CTAs share the streamed B slab (L2 reuse — the flat order streams B from DRAM once per
 M-row: `A + C + B×2` measured on the 4090's `mlp_gate_up`, 503.6 vs cuBLAS's 365.8 MB); `gn<G>` is the transpose
-(A streamed); empty = the flat N-fastest row-major order (option-0, byte-identical to historical codegen). Changes
+(A streamed); empty = the flat N-fastest row-major order. Changes
 no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `Tile.render`, `Tile.raster_axes` the
 `grid_tile` eligibility). Enumerated `('', 'gm8')` on 2-D contraction rows; wall-time effect is small and
-shape-dependent (±2–4% measured), so the search/goldens arbitrate per shape.
+shape-dependent (±2–4% measured), so golden evidence arbitrates per shape.
 
-**`S_*`** (FLOAT, `loop/stamp/020_stamp_structural_features`) — the LoopOp's structural features (stmt/op histogram +
-loop extents + operand dtypes). Not tunable — identity facts that make a knob dict a complete variant identity (the
-online prior's feature vector). Skipped by `format_tuning_knobs`.
+**`S_*`** (FLOAT, the `IdentityStrategy` — `passes/identity.py`) — a kernel's structural features (statement/op
+histogram + loop extents + operand dtypes). A fresh Tile fragment is temporarily lowered only for this feature read.
+Not tunable — identity facts that make a knob dict a complete variant identity (the online prior's feature vector).
+Skipped by `format_tuning_knobs`.
 
 **`FAST_MATH` / `F16_MMA_F32_ACC` / `FAST_EXP`** (BOOL, pin-only, the f16-accumulate enumeration gate /
 `lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own
@@ -1529,8 +1615,8 @@ A per-node schedule key addresses the node it decorates by POSITION in the recog
 `FAMILY@<node-path>[.<axis>][<n>]`, resolved by the ONE walker/resolver in `ir/tile/path.py` (`sites` / `resolve` /
 `spell` — total over the sugar levels, idempotent, loud on ambiguity and on a stored short key a structural change
 broke). **Short paths are canonical**: the stampers spell the SHORTEST key unique for the kernel's tree, which is
-exactly the stored golden/DB spelling — bare `TILE`/`REDUCE`/`STAGE` on today's single-primary trees, `TILE@dd` /
-`TILE@pj` on flash (the axis is the real discriminator), `REDUCE@<stat axis>` for the fused kernel's cone statistic
+exactly the stored golden/DB spelling — bare `TILE`/`REDUCE`/`STAGE` on today's single-primary trees,
+`REDUCE@<stat axis>` for the fused kernel's cone statistic
 (the path form — `REDUCE@a.fold.k` — when the axis name collides; edge labels `a`/`b` are view-role sugar off the
 bilinear parse). Bare-family sugar resolves to the PRIMARY (root-most schedule-bearing) node, so bare `REDUCE` on
 norm_linear/geglu still means the contraction's K fold; `WORK` / `RASTER` stay root-global (bare). Since step 7 the
@@ -1540,17 +1626,14 @@ VALUES are site-local too: the worker inventory is spelled once in `WORK` (`w<M>
 finalize letter kept: a MODE, not an axis token); the retired embedded-token spellings raise, and the
 golden corpus itself was re-spelled mechanically (715 rows, replay digest-identical; the one-shot script is gone
 with the grammar it read).
-The reserved
-graph-level placement grammar (`in.<operand>` path prefix, leading-`=` value pins) is rejected, never reused. The
+The retired placement grammar (`in.<operand>` path prefix, leading-`=` value pins) is rejected, never reused. Current
+`PLACE` uses the Fold tree-path grammar above. The
 golden-spelling tripwire (`tests/.../test_golden_spelling_canonical.py`) resolves every stored knob dict against its
-kind's tree and proves every spelling canonical; the
-one documented exception is
-the dynamic-attention bare `TILE` (its PV plan, matched any-of by the golden layer — a symbolic trace resolves no
-stable axis key, so the bare spelling is LIVE corpus semantics, not legacy debt). The tune DB / reservoir /
+kind's tree and proves every spelling canonical. The tune DB / reservoir /
 online prior are REGENERATED after a re-key, never migrated — no reader special-cases pre-phase-3 axis-suffixed
 spellings, and `tuning_knob_items` renders keys AS STORED (the old `@<axis>`→bare display collapse is gone). What
 remains is the live bare-golden contract: `family_value(knobs, family)` / `pin_key_matches`' bare↔explicit any-of
-(how a dynamic attention golden's bare `TILE` matches the masked fork's axis-keyed leaves); it survives the step-7
+(a bare golden key matches an axis-keyed realization of the same family); it survives the step-7
 re-spell deliberately and retires only when symbolic-trace keyed resolution exists.
 
 ### Odds and ends
@@ -1568,20 +1651,24 @@ re-spell deliberately and retires only when symbolic-trace keyed resolution exis
 
 Pass files are numerically prefixed so `sorted()` picks them up deterministically. Pick a fresh prefix when adding a
 rule; the loader ignores the prefix itself — it only makes the ordering readable. Per-pass authoring invariants are in
-[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); the tile passes (`010_recognize` → `030_split_reduce`) and the set
+[`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); the tile passes (`010_lift` → `030_split_reduce`) and the set
 of algebraic rewrites they may apply are documented there too.
 
 | Pass                      | What rules do                                                                                |
 |---------------------------|----------------------------------------------------------------------------------------------|
-| `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. Before `LinearOp` decomposes, `merge_sibling_linears` folds ALL sibling linears sharing one activation (q/k/v, gate/up) into ONE linear over load-time N-concat weights and optional biases (`ConstantOp.source_parts` — the loader concatenates before the `load_ops` chain, zero runtime cost) with `SliceOp` views re-deriving each original output; one launch (one split-K partial+finalize) replaces the per-projection set, and the merged result is a plain matmul that every downstream code path already handles. Guards: pristine exclusively-owned parameters with uniform bias presence, and no sibling whose output reaches a graph output through layout ops alone (the view would demote to a copy kernel at the capture ABI). The concat order is graph-insertion order — canonical regardless of match enumeration, because the buffer layout is ABI for goldens and packs. |
+| `frontend/decomposition/` | Rewrite frontend ops (`LinearOp`, `MatmulOp`, `SdpaOp`, layout ops, fused `rms_norm` / `layer_norm` / `softmax`) into tensor-IR primitives + layout-only `IndexMapOp`s, broadcast-explicit via `_broadcast.broadcast_to`. |
 | `frontend/optimization/`  | `compose_indexmaps`: collapse chains of single-source / single-consumer `IndexMapOp` into one coord_map, so trivial layout kernels don't block fusion. |
-| `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`.            |
-| `loop/fusion/`            | `split_shared_indexmap` dissolves a fan-out pure-indexmap into separate consumers when its branches do not reconverge; `merge_loop_ops` uses the same N-way splicer for adjacent pairs and closed reconvergent producer DAGs, preserving shared SSA definitions instead of treeifying them; `dedup_loads` drops identical `(input, index)` Loads; `fold_output_reshape` retargets a producer's `Write` through a graph-output memcpy-identity flatten (verified exactly over the finite domain; clean affine re-decomposition onto the output strides) — the copy kernel the splicer cannot take (a producer that carries a reduce, read through a div/mod index map). Folding scalar-constant broadcasts into consumers cuts Qwen3-Embedding-0.6B from 394 → 337 kernels. |
-| `loop/recognize/`         | Empty (retired) — flash / online-softmax recognition moved into `lowering/tile/010_recognize` (the `_flash` / `_softmax` helpers), so the loop dialect carries no pattern recognizers. |
-| `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect — after fusion and recognition — so every kernel is named / stamped against its final body. |
-| `lowering/tile/`          | `LoopOp → TileOp` over the block-DAG Tile IR: `010_recognize` (structural — reads the algebra off the `LoopOp` body and emits an UNMAPPED `TileOp`) → the schedule step (REMOVED — see Part 9) → `030_split_reduce`. Dispatch is on the fold's derived role (`Fold.role` — `FREE` / `PLANAR` / `CONTRACTION` / `TWISTED`), never a named shape. |
-| `lowering/kernel/`        | `010_materialize` is a `TileOp → KernelOp` tier dispatcher (scalar / `_reduce`). A tiled `CONTRACTION` arrives as a `Fold` already **built recognize-side** in the bilinear shape (`is_contraction` is the reading, not a kind) (`lowering/tile/010_recognize._nodify_contraction` — one flat node splitting the algebra params (axes / operands / acc / epilogue) from the schedule, which the fork places onto the grid), so materialize only synthesizes its bare grid-`Write` and **expands** it through the one atom-generic `_factor.factorize` over the shared tiling layer (in `_factor.py`) (the geometry is derived on the PLACED `TilePlan` slice, the algebra on the node; `_atom.reduce_codegen` emits the shared K-loop and a swappable `store` sink, dispatched off the atom). Then the Kernel-IR peepholes: `030_stamp_types` (+ `040_demote_to_write_dtype`) resolve dtypes, `050_vectorize_loads` / `080_vectorize_stores` / `095_interleave_loads` pack/reorder memory ops, `110_drop_redundant_syncs`. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
-| `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch, symbolic-shaped accumulators, and accumulators past the one-CTA break-even cap (`_MAX_DELEGATED_WORDS`, 64 KB — CTA 0 zeroes serially, so a large buffer costs more than the MEMSET node it replaces) keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
+| `loop/lifting/`           | `lift_*` rules wrap each surviving tensor primitive in a trivial one-op `LoopOp`; an additive scan writes its accumulator after every ordered scan-axis update. |
+| `loop/fusion/`            | `merge_loop_ops` maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
+| `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
+| `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect, after maximal fusion. |
+| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `015_twisted` rewrites the exp family; `018_cut` offers fused and closed Fold-edge kernel placements; `020_schedule` schedules each stored tree; `030_split_reduce` realizes cross-CTA partitions. |
+| `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
+| `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
+
+SiLU decomposition follows PyTorch opmath precision: f16 and bf16 inputs widen once to f32, the primitive
+negative/exp/denominator/reciprocal chain and final product compute in f32, and the result converts once to the
+declared output dtype. F32 and f64 inputs retain their dtype, so decomposition never demotes a wider input.
 
 ## Dump hooks (`dump.py`)
 

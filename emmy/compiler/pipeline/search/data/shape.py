@@ -10,11 +10,18 @@ then derives both the histogram and this key with the current compiler.
 matmul dimensions. Generic golden records start from ``from_s_features`` and replay
 their stored schedule prefix through the same offer-aware classifier as deployment,
 which supplies the otherwise-unstamped flash and pre-split computed-A kind signal.
+
+:func:`is_matmul` and :func:`op_label` read the same histogram without building a key:
+the first is the op-kind predicate the key's own constructor uses, the second the human
+name a report captions a measured pool with and a ``--kernel`` filter matches against.
+They live here because they are readings of the stamped row, not of any one consumer.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from emmy.compiler.pipeline.search.features import is_dynamic_row
 
 
 @dataclass(frozen=True)
@@ -98,7 +105,7 @@ class ShapeKey:
         (``fp8`` / ``f8e4m3`` / ``f8e5m2``) is warp too and additionally carries
         ``dtype_class="f8"`` (see the field doc). ``dynamic`` marks the M
         axis symbolic (the only symbolic-axis golden form today): the key then
-        MIRRORS what ``992_stamp_structural_features`` puts on the op — symbolic
+        MIRRORS what the ``IdentityStrategy`` stamps on the op — symbolic
         axes are **excluded** from the extent products (``free_prod = N``, not the
         hint-sized ``M*N``) and flagged via ``S_ext_n_symbolic_axis`` — because
         the stamped histogram is the only identity the op side has (it doesn't
@@ -162,7 +169,7 @@ class ShapeKey:
             free_prod=int(s.get("S_ext_free_prod", 0)),
             reduce_max=int(s.get("S_ext_reduce_max", 0)),
             is_warp=kind == "fused" or f8 or not s.get("S_dtype_f32", 0),
-            is_dyn=s.get("S_ext_n_symbolic_axis", 0) > 0,
+            is_dyn=is_dynamic_row(s),
             kind=kind,
             free_max=int(s.get("S_ext_free_max", 0)),
             dtype_class="f8" if f8 else "",
@@ -202,3 +209,26 @@ class ShapeKey:
         if self.is_dyn:
             out["S_ext_n_symbolic_axis"] = 1.0
         return out
+
+
+def is_matmul(s: dict) -> bool:
+    """Histogram heuristic for "these ``S_*`` features describe a matmul": a product feeding a
+    reduce-add over >=2 distinct inputs.
+
+    ``S_n_mma`` is NOT usable as the marker: the stamp pass runs at fusion end, before the tile
+    tier emits ``Mma`` stmts, so it is 0.0 on every stamped row — gating on it made golden
+    coverage permanently empty and dropped every fp16 golden from the rank/deploy joins (the same
+    trap :meth:`ShapeKey.from_s_features` documents)."""
+    return bool(s.get("S_reduce_add", 0) and s.get("S_pw_multiply", 0) and s.get("S_n_distinct_input", 0) >= 2)
+
+
+def op_label(s: dict) -> str:
+    """A human name for the op a stamped ``S_*`` histogram describes — its kind and its extents.
+
+    The one spelling of "what is this measured pool", used to caption a per-op row and to match a
+    ``--kernel`` filter against the node store, whose own op identity is a digest with nothing
+    readable in it. Extra non-``S_*`` keys are ignored, so a full feature dict may be passed
+    directly."""
+    kind = "matmul" if is_matmul(s) else ("reduce" if (s.get("S_reduce_add", 0) or s.get("S_reduce_max", 0)) else "pointwise")
+    free, red = int(s.get("S_ext_free_max", 0)), int(s.get("S_ext_reduce_max", 0))
+    return f"{kind:9} free={free}" + (f" red={red}" if red else "")

@@ -1,0 +1,13 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: zai-org/GLM-5.2
+  rationale: "5K HF likes and 2.7M downloads with strong OR and Reddit signals."
+  heat: 92
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 8

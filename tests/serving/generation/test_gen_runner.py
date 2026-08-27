@@ -4,7 +4,36 @@ correctness are covered on GPU by ``test_gen_runner_gpu.py`` / ``test_vllm_plugi
 import numpy as np
 import pytest
 
-from emmy.serving.gen_runner import EmmyGenRunner, _pad_rows, _static_decode_covers_capacity
+from emmy.serving.gen_runner import EmmyGenRunner, _pad_rows, _program_config_sha, _static_decode_covers_capacity
+
+
+class _Config:
+    def __init__(self, data):
+        self.data = data
+
+    def to_dict(self):
+        import copy
+
+        return copy.deepcopy(self.data)
+
+
+def test_program_config_identity_ignores_only_generation_eos_policy():
+    base = {
+        "model_type": "gemma4_unified_text",
+        "text_config": {"hidden_size": 3840, "intermediate_size": 15360},
+        "eos_token_id": 1,
+    }
+    instruction = {**base, "eos_token_id": [1, 106]}
+    assert _program_config_sha(_Config(base)) == _program_config_sha(_Config(instruction))
+
+    different_architecture = {**instruction, "model_type": "gemma4_other_text"}
+    assert _program_config_sha(_Config(base)) != _program_config_sha(_Config(different_architecture))
+
+    different_geometry = {
+        **instruction,
+        "text_config": {**instruction["text_config"], "hidden_size": 4096},
+    }
+    assert _program_config_sha(_Config(base)) != _program_config_sha(_Config(different_geometry))
 
 
 def test_pad_rows_pads_with_zeros_and_preserves_real_rows():
@@ -51,6 +80,8 @@ def test_static_only_runner_counts_layers_without_symbolic_programs():
         prefill_capacity=1,
     )
     assert runner.num_layers == 2
+    assert runner.global_layer_id(0) == 0
+    assert runner.global_layer_id(1) == 1
     assert runner.prefill_capacity == 1
     assert runner.has_device_decode
     with pytest.raises(RuntimeError, match="token width 2 exceeds static-only capacity 1"):
@@ -63,16 +94,71 @@ def test_static_only_runner_counts_layers_without_symbolic_programs():
         )
 
 
-@pytest.mark.parametrize(("quant_method", "coded_trunk"), [("exl3", True), ("fp8", False)])
-def test_create_keeps_only_exl3_trunk_coded(tmp_path, monkeypatch, quant_method, coded_trunk):
-    """EXL3 stays checkpoint-coded; FP8 preserves its decoded trunk lane."""
+def test_float32_residual_moe_rider_keeps_normalized_activation_in_float16():
+    """The two-output fp32-residual post rider must not allocate ``xn`` in residual dtype."""
+    torch = pytest.importorskip("torch")
+
+    class PostProgram:
+        output_names = ("hidden", "moe_xn")
+
+        def run_device(self, inputs, *, out):
+            _attn_out, residual = inputs
+            out[0].copy_(residual)
+            out[1].copy_(residual.to(out[1].dtype))
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    runner._post_m1 = None
+    runner._post_decode = [PostProgram()]
+    runner._post_prefill = [PostProgram()]
+    runner._post = []
+    runner._pre_decode = [object()]
+    runner._pre_prefill = [object()]
+    runner._decode_bucket = 2
+    runner._prefill_bucket = 4
+    runner._activation_dtype = torch.float16
+
+    residual = torch.randn(6, 8, dtype=torch.float32)
+    hidden, normalized = runner._route_post_device(0, torch.randn(6, 8, dtype=torch.float16), residual)
+
+    assert hidden.dtype == torch.float32
+    assert normalized.dtype == torch.float16
+    assert torch.nn.Linear(8, 2, dtype=torch.float16)(normalized).dtype == torch.float16
+
+
+def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
+    runner = EmmyGenRunner(
+        embed_weight=None,
+        norm=None,
+        hidden_size=8,
+        layer_ids=[7, 8],
+        pre=[],
+        post=[],
+        attn_meta=[(2, 4, 1, 0.5), (2, 4, 1, 0.5)],
+        np_dtype=np.dtype("float16"),
+    )
+
+    assert runner.num_layers == 2
+    assert runner.global_layer_id(0) == 7
+    assert runner.global_layer_id(1) == 8
+    with pytest.raises(RuntimeError, match="does not own the token embedding"):
+        runner.embed([0])
+    with pytest.raises(RuntimeError, match="does not own the final norm"):
+        runner.final_norm(np.zeros((1, 8), dtype=np.float16))
+
+
+@pytest.mark.parametrize(("quant_method", "coded_trunk"), [("exl3", True), ("awq", True), ("fp8", False)])
+def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_method, coded_trunk):
+    """EXL3/AWQ stay checkpoint-coded; FP8 preserves its decoded trunk lane."""
     import json
 
     from emmy.compiler.loader import safetensors
     from emmy.compiler.trace import huggingface
     from emmy.serving.gen_runner import EmmyGenRunner
 
-    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": quant_method}}))
+    quant_config = {"quant_method": quant_method}
+    if quant_method == "awq":
+        quant_config.update(bits=4, version="gemm", zero_point=True)
+    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": quant_config}))
     seen = {}
     fake_model = object()
     fake_store = {"fmt": quant_method}
@@ -80,8 +166,16 @@ def test_create_keeps_only_exl3_trunk_coded(tmp_path, monkeypatch, quant_method,
     monkeypatch.setattr(safetensors, "warn_if_unpinned", lambda _model_id: None)
     monkeypatch.setattr(huggingface, "quantized_checkpoint_dir", lambda _model_id: tmp_path)
 
-    def fake_load(path, dtype, *, compress_trunk=False):
-        seen.update(path=path, dtype=dtype, compress_trunk=compress_trunk)
+    def fake_load(path, dtype, *, compress_trunk=False, layer_range=None, include_embed=True, include_norm=True, expert_range=None):
+        seen.update(
+            path=path,
+            dtype=dtype,
+            compress_trunk=compress_trunk,
+            layer_range=layer_range,
+            include_embed=include_embed,
+            include_norm=include_norm,
+            expert_range=expert_range,
+        )
         return fake_model, fake_store
 
     monkeypatch.setattr(huggingface, "load_quantized_split", fake_load)
@@ -97,3 +191,30 @@ def test_create_keeps_only_exl3_trunk_coded(tmp_path, monkeypatch, quant_method,
     assert seen["compress_trunk"] is coded_trunk
     assert seen["model"] is fake_model
     assert seen["kwargs"]["expert_store"] is fake_store
+
+
+def test_create_passes_the_expert_shard_through_to_the_loader(tmp_path, monkeypatch):
+    """A tensor-parallel rank's expert shard must reach the checkpoint read, not just the routing:
+    holding every expert is what does not fit the card in the first place."""
+    import json
+
+    from emmy.compiler.loader import safetensors
+    from emmy.compiler.trace import huggingface
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "fp8"}}))
+    seen = {}
+    monkeypatch.setattr(safetensors, "warn_if_unpinned", lambda _model_id: None)
+    monkeypatch.setattr(huggingface, "quantized_checkpoint_dir", lambda _model_id: tmp_path)
+
+    def fake_load(path, dtype, **kwargs):
+        seen.update(kwargs)
+        return object(), {"fmt": "mxfp4"}
+
+    monkeypatch.setattr(huggingface, "load_quantized_split", fake_load)
+    monkeypatch.setattr(EmmyGenRunner, "from_model", classmethod(lambda cls, model, **kwargs: kwargs))
+
+    built = EmmyGenRunner.create(model_id=str(tmp_path), expert_range=(64, 96))
+
+    assert seen["expert_range"] == (64, 96), "the shard never reached the checkpoint read"
+    assert built["expert_range"] == (64, 96), "the shard never reached the runner"

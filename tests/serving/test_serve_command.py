@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import types
 
 import pytest
 
@@ -99,6 +100,29 @@ def test_verbatim_passthrough_after_double_dash(capsys):
     assert "http://localhost:8222" in out[1]  # bench targets the passthrough port
 
 
+def test_pinned_revision_splits_off_the_model_id(capsys):
+    """``<repo>@<revision>`` is emmy's pin spelling, not vLLM's.
+
+    Leaving the two joined does more than lose the pin: the id resolves nowhere, so every local
+    config probe returns ``None`` and each checkpoint special case it feeds — the coded-checkpoint
+    unquantized override, the MoE capture cap — silently no-ops. Both the server and the bench
+    client must see the bare repo, and the bench client must match what vLLM serves under."""
+    args = _parse(["serve", f"{MODEL}@abc123", "--bench", "--dry-run"])
+    handle_serve(args)
+    serve_line, bench_line = capsys.readouterr().out.strip().splitlines()
+    assert serve_line.startswith(f"vllm serve {MODEL} ")
+    assert "--revision abc123" in serve_line
+    assert "@abc123 " not in serve_line and not serve_line.endswith("@abc123")
+    assert f"--model {MODEL} " in f"{bench_line} " and "@abc123" not in bench_line
+
+
+def test_explicit_revision_flag_wins_over_the_pin_suffix(capsys):
+    args = _parse(["serve", f"{MODEL}@abc123", "--dry-run", "--revision", "def456"])
+    handle_serve(args)
+    line = capsys.readouterr().out.strip()
+    assert "--revision def456" in line and "abc123" not in line
+
+
 def test_dry_run_serve_only(capsys):
     args = _parse(["serve", MODEL, "--dry-run"])
     handle_serve(args)
@@ -143,6 +167,10 @@ def test_child_env_is_idempotent_when_bin_already_leads(monkeypatch):
     assert _child_env()["PATH"] == f"{bin_dir}:/usr/bin"
 
 
+def _capture_cfg(cmd: list[str]) -> dict:
+    return json.loads(cmd[cmd.index("--compilation-config") + 1])
+
+
 def test_serve_cmd_generate_branch():
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
     assert cmd[cmd.index("--runner") + 1] == "generate"
@@ -151,25 +179,75 @@ def test_serve_cmd_generate_branch():
     # Default = dynamic-dim cap + decode bucket (16): the rider headroom the chunk+decode
     # twin split covers, so full chunk steps keep carrying their decode riders.
     assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4112"
-    # Whole-step decode capture is the DEFAULT: FULL_DECODE_ONLY graphs, capture sizes
-    # following --max-num-seqs (vLLM default 256 when unset); no --enforce-eager.
+    # Whole-step capture is the DEFAULT: FULL graphs (decode AND chunk/mixed steps), capture
+    # sizes following --max-num-seqs plus the chunk rungs; no --enforce-eager.
     assert "--enforce-eager" not in cmd
-    cfg = cmd[cmd.index("--compilation-config") + 1]
-    assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in cfg
-    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256]' in cfg
+    cfg = _capture_cfg(cmd)
+    assert cfg["cudagraph_mode"] == "FULL"
+    sizes = cfg["cudagraph_capture_sizes"]
+    assert {1, 2, 4, 16, 256} <= set(sizes)  # the decode ladder (bucket 16, max_seqs 256)
+    # The chunk width (prefill capacity 4096) and the rider top (chunk + bucket = mnbt).
+    assert {4096, 4112} <= set(sizes)
+    assert max(sizes) == 4112
+    # Mixed-batch full capture needs an ALWAYS-support attention backend; FA2 is
+    # uniform-batch only, so the emmy arm selects TRITON_ATTN.
+    assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
     # The emmy generative arm defaults util to 0.97 — its cupy residents are invisible to
     # vLLM's torch-only profiler, so the 0.90 line can fall below them and fail the min-KV
     # fit at long model lens. Stock (and the embedding plugin) keep 0.90.
     assert "--gpu-memory-utilization=0.97" in cmd
     stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=[], generate=True)
     assert "--gpu-memory-utilization=0.9" in stock_cmd
+    assert "--attention-backend" not in stock_cmd
 
 
 def test_serve_cmd_generate_capture_sizes_follow_max_num_seqs():
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-seqs", "48"], generate=True)
-    cfg = cmd[cmd.index("--compilation-config") + 1]
-    # The decode bucket (16) and the cap itself always ride the list; the ladder fills between.
-    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 48]' in cfg
+    # The decode bucket (16) and the cap itself always ride the list; the dense ladder fills between.
+    assert {1, 2, 4, 8, 16, 32, 48} <= set(_capture_cfg(cmd)["cudagraph_capture_sizes"])
+
+
+def test_serve_cmd_generate_chunk_capture_off_restores_decode_only(monkeypatch):
+    monkeypatch.setenv("EMMY_GEN_CHUNK_CAPTURE", "0")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    cfg = _capture_cfg(cmd)
+    assert cfg["cudagraph_mode"] == "FULL_DECODE_ONLY"
+    assert cfg["cudagraph_capture_sizes"] == [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    assert "--attention-backend" not in cmd
+
+
+def test_serve_cmd_generate_chunk_capture_respects_user_attention_backend():
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--attention-backend", "FLASH_ATTN"], generate=True)
+    assert cmd.count("--attention-backend") == 1  # the user's own flag forwards, nothing added
+    assert _capture_cfg(cmd)["cudagraph_mode"] == "FULL"  # vLLM downgrades it if the backend can't
+
+
+def test_serve_cmd_generate_rider_top_rung_above_model_len_survives(monkeypatch):
+    """The rider-top rung (chunk quantum + decode bucket) may exceed --max-model-len — the
+    plugin's dummy-run seq-lens clamp (``serving/vllm_patches.py``) makes such a capture
+    size safe on vLLM 0.23, so the rung list is NOT capped by head width or model len."""
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "32")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    cfg = _capture_cfg(cmd)
+    assert cfg["cudagraph_mode"] == "FULL"
+    sizes = cfg["cudagraph_capture_sizes"]
+    assert 4128 in sizes  # rider top = 4096 chunk quantum + 32 bucket, past model len 4096
+    assert 4096 in sizes  # the exact chunk width
+    assert 272 in sizes  # the short-prompt rungs stay dense (a 257-token prefill pads to 272)
+    assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
+
+
+def test_serve_cmd_generate_chunk_rungs_follow_prefill_bucket(monkeypatch):
+    # The c4/c8 lane shape: chunk quantum 2048, bucket 8, mnbt = chunk + bucket. The rung
+    # list must carry the exact chunk width and the rider top, drop the rider interior
+    # (2049..2055 would each capture a near-duplicate rider graph), and stop at mnbt.
+    monkeypatch.setenv("EMMY_GEN_PREFILL_BUCKET", "2048")
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "8")
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "2056"], generate=True)
+    sizes = _capture_cfg(cmd)["cudagraph_capture_sizes"]
+    assert {2048, 2056} <= set(sizes)
+    assert max(sizes) == 2056
+    assert not any(2048 < s < 2056 for s in sizes)
 
 
 def _spec(depth: int) -> list[str]:
@@ -207,9 +285,19 @@ def test_serve_cmd_generate_spec_ladder_is_dense_enough_to_avoid_padding():
 
 
 def test_serve_cmd_generate_capture_sizes_ignore_absent_spec_config():
-    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
-    cfg = cmd[cmd.index("--compilation-config") + 1]
-    assert '"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256]' in cfg
+    # An unreadable --speculative-config means "no spec adjustment", not a different ladder.
+    bare = _capture_cfg(build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True))
+    unreadable = _capture_cfg(build_serve_cmd(MODEL, stock=False, vllm_args=["--speculative-config", "not-json"], generate=True))
+    assert unreadable == bare
+    assert bare["cudagraph_mode"] == "FULL"
+
+
+def test_serve_cmd_generate_spec_decode_keeps_decode_only_capture():
+    # Chunk capture is not spec-adjusted; under speculative decoding the config stays on the
+    # floored decode-only ladder (and no attention-backend override rides along).
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=_spec(2), generate=True)
+    assert _capture_cfg(cmd)["cudagraph_mode"] == "FULL_DECODE_ONLY"
+    assert "--attention-backend" not in cmd
 
 
 def test_serve_cmd_generate_enforce_eager_opts_out_of_capture():
@@ -246,6 +334,16 @@ def test_serve_cmd_generate_moe_captures_at_size_one(monkeypatch):
     cfg = cmd[cmd.index("--compilation-config") + 1]
     assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in cfg
     assert '"cudagraph_capture_sizes": [1]' in cfg
+
+
+def test_serve_cmd_generate_hyper_connection_moe_serves_eager(monkeypatch):
+    """A hyper-connection MoE has no fixed-slot tier — its routed combine host-syncs every step —
+    so the serve default is eager, not the capture-size-1 ladder (the boot guard rejects capture)."""
+    _force_moe_probe(monkeypatch)
+    monkeypatch.setattr("emmy.commands.serve._local_config", lambda model, vllm_args: types.SimpleNamespace(hc_mult=2))
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
+    assert "--enforce-eager" in cmd
+    assert "--compilation-config" not in cmd
 
 
 def test_serve_cmd_generate_moe_enforce_eager_forwards(monkeypatch):
@@ -375,3 +473,45 @@ def test_health_timeout_after_model_is_extracted_not_forwarded(capsys):
     assert len(out) == 2
     assert "--health-timeout" not in out[0] and "--health-timeout" not in out[1]
     assert args.health_timeout == 5400
+
+
+def test_moe_probe_recognizes_the_deepseek_published_spelling(tmp_path):
+    """DeepSeek V4 publishes its expert count as ``n_routed_experts`` with per-layer structure
+    derived from ``compress_ratios``; the native config derives ``num_local_experts`` from it, which
+    is what the probe keys on — so an MoE serve of this checkpoint gets the capture-size-1 default."""
+    pytest.importorskip("transformers")
+    from emmy.commands.serve import _is_moe_model
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["DeepseekV4ForCausalLM"],
+                "model_type": "deepseek_v4",
+                "vocab_size": 64,
+                "hidden_size": 64,
+                "moe_intermediate_size": 32,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "head_dim": 512,
+                "qk_rope_head_dim": 64,
+                "q_lora_rank": 16,
+                "n_routed_experts": 4,
+                "num_experts_per_tok": 2,
+                "n_shared_experts": 1,
+                "o_groups": 1,
+                "o_lora_rank": 16,
+                "index_n_heads": 2,
+                "index_head_dim": 128,
+                "index_topk": 2,
+                "hc_mult": 2,
+                "hc_sinkhorn_iters": 2,
+                "compress_ratios": [0, 0],
+                "num_hash_layers": 0,
+                "compress_rates": {"compressed_sparse_attention": 4, "heavily_compressed_attention": 4},
+                "sliding_window": 4,
+                "swiglu_limit": 10.0,
+                "max_position_embeddings": 64,
+            }
+        )
+    )
+    assert _is_moe_model(str(tmp_path), []) is True

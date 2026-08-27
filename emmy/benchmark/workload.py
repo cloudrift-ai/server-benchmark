@@ -1,23 +1,11 @@
 """Benchmark workload execution."""
 
 import logging
-from dataclasses import asdict
 from pathlib import Path
 
-import yaml
-
 from emmy.deploy.compose import calculate_num_instances
-from emmy.planner import BenchmarkTask
 from emmy.recipe.types import Recipe, VllmConfig
 from emmy.redact import redact_secrets
-from emmy.timing import format_timing
-
-SECTION_DELIMITER = "=" * 50
-
-
-def _section(title: str, content: str) -> str:
-    """Wrap content in a section with title delimiters."""
-    return f"============ {title} ============\n{content}\n{SECTION_DELIMITER}"
 
 
 def _bench_args(recipe: Recipe) -> list[str]:
@@ -41,6 +29,8 @@ def _bench_args(recipe: Recipe) -> list[str]:
     ]
     if bench.seed is not None:
         args.append(f"--seed {bench.seed}")
+    if bench.num_warmups:
+        args.append(f"--num-warmups {bench.num_warmups}")
     if not recipe.is_embedding:
         args.append(f"--random-output-len {bench.random_output_len}")
         if bench.temperature is not None:
@@ -57,44 +47,6 @@ def build_bench_command(recipe: Recipe) -> str:
     Returns the bench command as a human-readable multi-line string.
     """
     return "vllm bench serve\n" + "\n".join(f"    {a}" for a in _bench_args(recipe))
-
-
-def format_task_yaml(task: BenchmarkTask) -> str:
-    """Serialize BenchmarkTask metadata to a YAML block.
-
-    Includes recipe_dir, variant, gpu_name, gpu_count, and the full recipe.
-    Excludes run_dir (ephemeral).
-    """
-    data = {
-        "recipe_dir": task.recipe_dir,
-        "variant": str(task.variant),
-        "gpu_name": task.gpu_name,
-        "gpu_count": task.gpu_count,
-        "recipe": asdict(task.recipe),
-    }
-    return yaml.dump(data, default_flow_style=False, sort_keys=False).rstrip()
-
-
-def compose_result(
-    task: BenchmarkTask,
-    benchmark_output: str,
-    compose_content: str,
-    bench_command: str,
-    system_info: str,
-    timing: dict[str, float] | None = None,
-) -> str:
-    """Assemble the full result file from all sections."""
-    sections = [
-        _section("Benchmark Task", format_task_yaml(task)),
-        benchmark_output.rstrip(),
-        _section("Docker Compose Configuration", redact_secrets(compose_content.rstrip())),
-        _section("Benchmark Command", bench_command),
-    ]
-    if timing:
-        sections.append(_section("Timing", format_timing(timing)))
-    if system_info:
-        sections.append(_section("System Information", system_info.rstrip()))
-    return "\n\n".join(sections) + "\n"
 
 
 async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
@@ -127,9 +79,8 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
         f"docker run --rm --network host{device_flags} --entrypoint bash {image} -c 'vllm bench serve {' '.join(_bench_args(recipe))}'"
     )
 
-    # benchmark.repeats reruns the identical client workload against the one deployed
-    # server; the returned output then carries one result stanza per repeat, which the
-    # results parser aggregates into mean/stddev. A failed repeat fails the task.
+    # benchmark.repeats reruns the identical client workload against one deployed
+    # server. The raw output retains one stanza per repeat; a failed repeat fails the task.
     bench_command_str = build_bench_command(recipe)
     outputs = []
     for _ in range(max(1, bench.repeats)):

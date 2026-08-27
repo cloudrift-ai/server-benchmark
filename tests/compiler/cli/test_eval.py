@@ -12,6 +12,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
+
+from tests.compiler.pipeline.search.helpers import GPU_5090 as _GPU
 
 
 def _make_tune_db(path: Path, variants: list[tuple[str, str, dict, float]]) -> None:
@@ -172,7 +175,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     monkeypatch.setattr(audit, "summarize", lambda _results: {"MATCH": 1, "DRIFT": 0, "GAP": 0, audit.COMPILE_FAIL: 0})
     monkeypatch.setattr(audit, "gap_keys", lambda _results: set())
 
-    eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config)))
+    eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config), update_consult_baseline=False))
 
     assert captured["capture"] == ("org/model", {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True})
     _, gpu_name, compute_cap, records = captured["audit"]
@@ -211,8 +214,133 @@ def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path)
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
 
     with pytest.raises(SystemExit) as exc:
-        eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config)))
+        eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config), update_consult_baseline=False))
     assert exc.value.code == 1
+
+
+def test_serving_config_resolves_consult_baseline(tmp_path):
+    from emmy.serving.release import load_serving_config
+
+    golden = tmp_path / "golden.yaml"
+    baseline = tmp_path / "consult.json"
+    config = tmp_path / "release.env"
+    base = (
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={golden}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=8\n"
+    )
+    config.write_text(base)
+    assert load_serving_config(config).consult_baseline is None
+    config.write_text(base + f"SERVE_CONSULT_BASELINE={baseline}\n")
+    assert load_serving_config(config).consult_baseline == baseline
+
+
+def _static_release_audit(monkeypatch, tmp_path, *, records: list[dict], extra_env: str = ""):
+    """The static-release eval-golden harness: one twin (``pre1``) whose audit yields
+    ``records``. Returns ``(eval_cmd, args_namespace)`` ready for ``handle_eval_golden``."""
+    from types import SimpleNamespace
+
+    import emmy.commands.eval as eval_cmd
+    import emmy.compiler.pipeline.search.audit as audit
+    import emmy.serving.twins as twins
+    from emmy.compiler.context import Context
+
+    golden = tmp_path / "golden.yaml"
+    _write_release_golden(
+        golden,
+        [
+            {
+                "name": "relu.m1",
+                "bindings": {"num_tokens": 1},
+                "pins": {"FAST_MATH": False},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+        ],
+    )
+    config = tmp_path / "release.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_STATIC_ONLY=1\nSERVE_MAX_NUM_BATCHED_TOKENS=1\nSERVE_DECODE_BUCKET=1\n"
+        "SERVE_PREFILL_CAPACITY=1\nSERVE_PREFILL_BUCKET=0\nSERVE_M1_TIER=1\nSERVE_CAPTURE_SIZES=[1]\n" + extra_env
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object()})
+    monkeypatch.setattr(audit, "audit_card", lambda graphs, gpu_name, compute_cap, *, goldens: {"pre1": list(records)})
+    return eval_cmd, SimpleNamespace(golden_file=str(golden), serving_config=str(config), update_consult_baseline=False)
+
+
+# Two verified-tier consultations on the audited twin; key=None keeps the GAP out of the
+# gap-ratchet failure set so only the consultation count is under test.
+_TWO_CONSULTATIONS = [{"verdict": "MATCH", "key": None}, {"verdict": "GAP", "key": None}]
+
+
+def test_eval_golden_consultation_drop_fails_naming_the_twin(monkeypatch, tmp_path, caplog):
+    """A twin whose verified-tier consultation count falls below the checked-in baseline — or
+    that vanishes from the audit entirely — is a gate failure naming the twin, even with zero
+    DRIFT: a kernel that stops forking consults nothing, so its MATCHes silently vanish (the
+    regression class the verdicts cannot see)."""
+    import logging
+
+    import pytest
+
+    baseline = tmp_path / "consult.json"
+    baseline.write_text(json.dumps({"FAST_MATH=false": {"pre1": 3, "gone": 1}}))
+    eval_cmd, args = _static_release_audit(
+        monkeypatch, tmp_path, records=_TWO_CONSULTATIONS, extra_env=f"SERVE_CONSULT_BASELINE={baseline}\n"
+    )
+
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
+        eval_cmd.handle_eval_golden(args)
+    assert exc.value.code == 1
+    assert any("pre1" in r.message and "dropped 3 -> 2" in r.message for r in caplog.records)
+    assert any("gone" in r.message and "vanished" in r.message for r in caplog.records)
+
+
+def test_eval_golden_consultation_baseline_holds_and_flags_staleness(monkeypatch, tmp_path, caplog):
+    """Counts at (or above) baseline pass; a grown count only marks the baseline stale."""
+    import logging
+
+    baseline = tmp_path / "consult.json"
+    baseline.write_text(json.dumps({"FAST_MATH=false": {"pre1": 1}}))
+    eval_cmd, args = _static_release_audit(
+        monkeypatch, tmp_path, records=_TWO_CONSULTATIONS, extra_env=f"SERVE_CONSULT_BASELINE={baseline}\n"
+    )
+
+    with caplog.at_level(logging.INFO):
+        eval_cmd.handle_eval_golden(args)
+    assert any("stale" in r.message for r in caplog.records)
+
+
+def test_eval_golden_missing_consult_baseline_fails(monkeypatch, tmp_path, caplog):
+    """SERVE_CONSULT_BASELINE naming a nonexistent file is a misconfigured gate, not a skip."""
+    import logging
+
+    import pytest
+
+    eval_cmd, args = _static_release_audit(
+        monkeypatch, tmp_path, records=_TWO_CONSULTATIONS, extra_env=f"SERVE_CONSULT_BASELINE={tmp_path / 'consult.json'}\n"
+    )
+
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
+        eval_cmd.handle_eval_golden(args)
+    assert exc.value.code == 1
+    assert any("--update-consult-baseline" in r.message for r in caplog.records)
+
+
+def test_eval_golden_update_records_consult_baseline(monkeypatch, tmp_path):
+    """``--update-consult-baseline`` writes the observed per-lane per-twin counts."""
+    baseline = tmp_path / "consult.json"
+    eval_cmd, args = _static_release_audit(
+        monkeypatch, tmp_path, records=_TWO_CONSULTATIONS, extra_env=f"SERVE_CONSULT_BASELINE={baseline}\n"
+    )
+    args.update_consult_baseline = True
+
+    eval_cmd.handle_eval_golden(args)
+
+    assert json.loads(baseline.read_text()) == {"FAST_MATH=false": {"pre1": 2}}
 
 
 def test_knobs_missing_db(run_cli, tmp_path):
@@ -440,79 +568,128 @@ def test_failures_old_db_without_error_column(run_cli, tmp_path):
     assert "(no error recorded)" in stdout
 
 
-# --- eval online --dataset db --------------------------------------------------
+# --- eval prior ----------------------------------------------------------------
 
 
-def test_prior_db_reachability_smoke(run_cli, tmp_path):
-    """``eval online --dataset db`` on a 2-row DB renders the aggregate reachability
-    view — the groups must reach ``diagnostics.reachability`` as ``Sample``s, not
-    ``(knobs, latency)`` tuples (the shape mismatch that crashed it)."""
+def test_prior_rejects_the_leaf_only_db_dataset(run_cli, tmp_path):
+    """``--dataset db`` reads fully-decided leaf rows with no op identity or compile regime on them, so there is
+    nothing to group a comparison set by. The same DB read as ``--dataset nodes`` has both, and the error says
+    so rather than emitting an empty table."""
     db = tmp_path / "r.db"
-    # A realistic stamped matmul histogram (``_matmul_sig``: product → reduce-add
-    # over 2 distinct inputs). Real rows never carry ``S_n_mma > 0`` — the stamp
-    # runs before the tile tier emits ``Mma`` — so the label keys on the histogram.
-    mm = {"S_ext_free_prod": 1024.0, "S_reduce_add": 1.0, "S_pw_multiply": 1.0, "S_n_distinct_input": 2.0}
-    _make_tune_db(
-        db,
-        [
-            ("a", "k_matmul", {"BM": 8, **mm}, 30.0),
-            ("b", "k_matmul", {"BM": 16, **mm}, 10.0),
-        ],
-    )
-    rc, stdout, stderr = run_cli("eval", "online", "--dataset", "db", "--db", str(db), "--online-file", str(tmp_path / "missing.json"))
-    assert rc == 0, f"stderr: {stderr}"
-    assert "pick reachability over DB variants" in stdout
-    assert "matmul" in stdout  # the op-label row rendered
-    assert "traceback" not in (stdout + stderr).lower()
+    _make_tune_db(db, [("a", "k_matmul", {"BM": 8}, 30.0)])
+    rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "db", "--db", str(db))
+    assert rc == 2
+    assert "--dataset nodes" in stdout + stderr
 
 
-def test_pre_rename_cli_aliases(run_cli, tmp_path):
-    """The pre-rename spellings — the ``eval prior`` subcommand and the ``--prior``
-    flag — keep working as aliases for the renamed ``eval online`` / ``--online-file``."""
-    db = tmp_path / "r.db"
-    mm = {"S_ext_free_prod": 1024.0, "S_reduce_add": 1.0, "S_pw_multiply": 1.0, "S_n_distinct_input": 2.0}
-    _make_tune_db(
-        db,
-        [
-            ("a", "k_matmul", {"BM": 8, **mm}, 30.0),
-            ("b", "k_matmul", {"BM": 16, **mm}, 10.0),
-        ],
-    )
-    rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "db", "--db", str(db), "--prior", str(tmp_path / "missing.json"))
-    assert rc == 0, f"stderr: {stderr}"
-    assert "pick reachability over DB variants" in stdout
+def test_prior_defaults_to_the_checked_in_freeze(monkeypatch, tmp_path):
+    """No ``--db`` means the repo's freeze, not the machine's tune DB.
+
+    The default decides what a reported number MEANS. A tune DB is machine-local and rewritten by
+    every tune; the freeze is digest-pinned and the same everywhere. This asserts the resolution
+    and the override, without loading the freeze — that costs seconds and ``test_freeze.py`` owns it."""
+    from emmy import config
+
+    assert config.freeze_path() == Path(config.__file__).resolve().parent / "compiler/pipeline/search/freezes"
+    assert (config.freeze_path() / "manifest.json").is_file()
+    monkeypatch.setenv(config.FREEZE_DIR, str(tmp_path / "elsewhere"))
+    assert config.freeze_path() == tmp_path / "elsewhere"
 
 
-def test_prior_nodes_smoke(run_cli, tmp_path):
-    """``eval online --dataset nodes`` renders the fork sibling-ranking AND the leaf
-    reachability over the search-tree node store (one fork, two leaf children) —
-    ONCE PER PRIOR HALF, explicitly labeled, so a regret number is never ambiguous
-    about which ranker (offline vs online) produced it. With no fitted checkpoint
-    the offline block carries the metrics and the online block says it's unfitted."""
+def test_prior_reports_both_halves_over_benched_pools(run_cli, tmp_path):
+    """``eval prior --dataset nodes`` renders the shared report over the node store: one summary per card and
+    compile regime, labelled by prior half. With no fitted checkpoint the online half is named as absent
+    rather than answered for — a cold model scores every row the same constant, which in a table is
+    indistinguishable from a trained model that collapsed."""
     from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
 
     db_path = tmp_path / "n.db"
     db = SearchDB(db_path)
-    s = {"S_ext_free_prod": 1024.0, "S_reduce_add": 1.0, "S_pw_multiply": 1.0, "S_n_distinct_input": 2.0}
+    s = {"S_ext_free_prod": 1024.0, "S_ext_reduce_max": 512.0, "S_loop_depth": 2.0, "H_cc": 120.0, "H_opt": 3.0}
     db.record_nodes(
         [
-            NodeRow("P", None, "ctx", "mm", s, 1.0, 1),
-            NodeRow("c8", "P", "ctx", "mm", {**s, "BN": 32, "BM": 8}, 1.0, 2),
-            NodeRow("c64", "P", "ctx", "mm", {**s, "BN": 32, "BM": 64}, 3.0, 2),
+            NodeRow("P", None, "ctx", "mm", s, 1.0, 1, gpu=_GPU, is_leaf=False),
+            NodeRow("c8", "P", "ctx", "mm", {**s, "BN": 32, "BM": 8}, 3.0, 2, gpu=_GPU, is_leaf=True),
+            NodeRow("c64", "P", "ctx", "mm", {**s, "BN": 32, "BM": 64}, 1.0, 2, gpu=_GPU, is_leaf=True),
         ]
     )
     db.close()
-    rc, stdout, stderr = run_cli(
-        "eval", "online", "--dataset", "nodes", "--db", str(db_path), "--online-file", str(tmp_path / "missing.json")
+    rc, stdout, stderr = run_cli("eval", "prior", "--dataset", "nodes", "--db", str(db_path), "--online-file", str(tmp_path / "no.json"))
+    assert rc == 0, f"stderr: {stderr}"
+    assert "No fitted online prior" in stdout  # the online half is named absent, not reported as flat
+    assert "ranking quality over benched pools" in stdout
+    assert "offline" in stdout and "O3" in stdout
+    assert "traceback" not in (stdout + stderr).lower()
+
+
+def test_report_renders_both_dataset_kinds_with_their_own_columns():
+    """The renderer picks its columns from the report's dataset, since that is what decided which metrics the
+    summaries carry. Both branches are exercised here rather than through a corpus build, which costs minutes."""
+    import emmy.commands.eval as eval_cmd
+    from emmy.compiler.pipeline.search.data.group import GoldenGroup, MeasuredGroup
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries, measured_summaries
+
+    feats = [{"D_a": float(i)} for i in range(3)]
+    by_d_a = lambda g: g.matrix(["D_a"])[:, 0]  # noqa: E731 — a one-line scorer stub
+    measured = MeasuredGroup.from_measured("g/op@O3", "g", "op", 3.0, [30.0, 20.0, 10.0], feats)
+    golden = GoldenGroup.from_dicts("g/k", "k", "warp", "g", "k", 0, feats, 50_000)
+
+    lines: list[str] = []
+    with patch.object(eval_cmd.logger, "info", lambda fmt, *a: lines.append(str(fmt) % a if a else str(fmt))):
+        eval_cmd._emit_report(EvalReport({"dataset": "nodes", "source": "freeze"}, measured_summaries("offline", [measured], by_d_a)))
+        eval_cmd._emit_report(EvalReport({"dataset": "golden", "source": "corpus"}, golden_summaries("online", [golden], by_d_a)))
+    text = "\n".join(lines)
+
+    assert "rho" in text and "regret@1" in text and "1.00x (1)" in text
+    assert "SCREEN" in text  # the golden block says what a rank is not
+    assert "top1" in text and "0/1" in text  # the golden ranks last under this scorer
+    assert ">=10k" in text  # and its pool bucket, without which the rank is unreadable
+
+
+def test_an_unmeasurable_metric_renders_a_dash_rather_than_a_number():
+    """Nothing in the summary qualified — which must not read as a value of zero."""
+    import emmy.commands.eval as eval_cmd
+    from emmy.compiler.pipeline.search.data.group import MeasuredGroup
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_summaries
+
+    one_row = MeasuredGroup.from_measured("g/op@O3", "g", "op", 3.0, [10.0], [{"D_a": 1.0}])
+    summaries = measured_summaries("offline", [one_row], lambda g: g.matrix(["D_a"])[:, 0])
+
+    lines: list[str] = []
+    with patch.object(eval_cmd.logger, "info", lambda fmt, *a: lines.append(str(fmt) % a if a else str(fmt))):
+        eval_cmd._emit_report(EvalReport({"dataset": "nodes", "source": "freeze"}, summaries))
+
+    assert summaries[0].metrics["regret1"]["median"] is None
+    assert "—" in "\n".join(lines)
+
+
+def test_prior_writes_the_report_as_json(run_cli, tmp_path):
+    """``--json`` writes the summaries, so two runs are compared with ``diff`` instead of by eye.
+
+    Also pins the pre-rename ``--prior`` spelling of ``--online-file``: it lives in shell profiles and scripts."""
+    from emmy.compiler.pipeline.search.db import NodeRow, SearchDB
+
+    db_path = tmp_path / "n.db"
+    db = SearchDB(db_path)
+    s = {"S_ext_free_prod": 1024.0, "S_ext_reduce_max": 512.0, "S_loop_depth": 2.0, "H_cc": 120.0, "H_opt": 3.0}
+    db.record_nodes(
+        [
+            NodeRow("c8", None, "ctx", "mm", {**s, "BM": 8}, 3.0, 2, gpu=_GPU, is_leaf=True),
+            NodeRow("c64", None, "ctx", "mm", {**s, "BM": 64}, 1.0, 2, gpu=_GPU, is_leaf=True),
+        ]
+    )
+    db.close()
+    out = tmp_path / "report.json"
+    rc, _stdout, stderr = run_cli(
+        "eval", "prior", "--dataset", "nodes", "--db", str(db_path), "--json", str(out), "--prior", str(tmp_path / "no.json")
     )
     assert rc == 0, f"stderr: {stderr}"
-    assert "=== offline prior" in stdout
-    assert "=== online prior" in stdout
-    assert "node store: 3 nodes" in stdout  # the offline block's metrics
-    assert "fork sibling regret" in stdout
-    assert "leaf reachability" in stdout
-    assert "not fitted" in stdout  # the online block, with no checkpoint, says so instead of silently answering offline
-    assert "traceback" not in (stdout + stderr).lower()
+    obj = json.loads(out.read_text())
+    assert obj["header"]["dataset"] == "nodes" and obj["header"]["groups"] == 1
+    (summary,) = obj["summaries"]
+    assert summary["axes"] == {"half": "offline", "gpu": _GPU, "H_opt": "O3"}
+    assert set(summary["metrics"]) == {"spearman", "regret1", "regret10"}
+    assert summary["metrics"]["regret1"]["groups"] == 1
 
 
 def test_nodes_dataset_rejected_by_db_only_subcommand(run_cli, tmp_path):
@@ -532,35 +709,13 @@ def test_failures_none_recorded(run_cli, tmp_path):
     assert "No bench_fail rows" in stdout
 
 
-def test_o3_reservoir_index_joins_db_rows_by_sig_and_knobs():
-    """``_o3_reservoir_index`` keeps only ``H_opt=3`` reservoir rows and keys them
-    so a DB sample with the same ``S_*`` signature + tunable knobs joins (the -O3
-    re-bench never writes a ``perf`` row, so the reservoir is the only -O3 source)."""
-    from emmy.commands.eval import _o3_reservoir_index, _variant_key
-    from emmy.compiler.pipeline.search.data import Sample
-    from emmy.compiler.pipeline.search.db import PerfSample
-
-    stamped = {"BM": 8, "BN": 16, "S_ext_free_prod": 1024.0}
-
-    class _P:
-        _dataset = [
-            ({**stamped, "H_opt": 3.0}, 9.0),
-            ({**stamped, "H_opt": 1.0}, 12.0),  # -O1 sweep row — excluded
-            ({"BM": 64, "BN": 16, "S_ext_free_prod": 1024.0, "H_opt": 3.0}, 7.0),
-        ]
-
-    o3 = _o3_reservoir_index(_P())
-    assert len(o3) == 2
-    db_sample = Sample.from_perf_sample(PerfSample(pretty="__global__ void k_m(float*)", knobs=stamped, latency_us=12.5))
-    assert o3[_variant_key(db_sample)] == 9.0
-
-
-def test_emit_variant_table_o3_column_and_deterministic_pick(caplog):
-    """With a fake prior the pick is deterministic; the ``-O3 us`` column shows the
-    reservoir latency for the matching config and ``—`` elsewhere."""
+def test_emit_variant_table_marks_the_deployed_pick(caplog):
+    """With a fake prior the pick is deterministic. Every row is a deployable-regime
+    measurement, so the single ``us`` column IS the deploy latency and the pick's ratio is
+    judged against it directly — there is no second lane to reconcile."""
     import logging
 
-    from emmy.commands.eval import _emit_variant_table, _variant_key
+    from emmy.commands.eval import _emit_variant_table
     from emmy.compiler.pipeline.search.data import Sample
     from emmy.compiler.pipeline.search.db import PerfSample
 
@@ -578,38 +733,36 @@ def test_emit_variant_table_o3_column_and_deterministic_pick(caplog):
             best_i = min(range(len(scores)), key=scores.__getitem__)
             return best_i, scores[best_i]
 
-    o3 = {_variant_key(samples[0]): 9.5}
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
-        _emit_variant_table("k_m", samples, _P(), n_fail=0, o3=o3, top=0)
+        _emit_variant_table("k_m", samples, _P(), n_fail=0, top=0)
     out = "\n".join(caplog.messages)
-    assert "-O3 us" in out
-    assert "9.5" in out and "—" in out
-    assert "pick: rank 2/2, 3.00x of best" in out
+    assert "-O3 us" not in out, "the second lane is gone; one regime, one column"
+    assert "pick: rank 2/2, 3.00x of best (measured latency)" in out
     assert "<-- misses best" in out
 
 
 def test_knob_columns_names_in_header_values_in_cells():
     """``knob_columns`` puts the knob name in the column header (canonical knob_sort_key
-    order) and value-only cells (no ``NAME=`` prefix), blank where a row lacks a knob;
-    ``render_table`` aligns the columns to the widest of header + cells."""
+    order) and value-only summaries (no ``NAME=`` prefix), blank where a row lacks a knob;
+    ``render_table`` aligns the columns to the widest of header + summaries."""
     from emmy.commands.table import knob_columns, render_table
 
-    cols, cells = knob_columns(
+    cols, summaries = knob_columns(
         [
             {"TILE": ("n16", False), "REDUCE": ("b32", False)},
-            {"TILE": ("n32", False), "STAGE": ("d2/cp", False)},
+            {"TILE": ("n32", False), "STAGE": ("d2/smem-async", False)},
         ]
     )
     assert [c.name for c in cols] == ["TILE", "REDUCE", "STAGE"]  # canonical KNOB_ORDER
-    lines = render_table(cols, cells)
+    lines = render_table(cols, summaries)
     assert lines[0].split() == ["TILE", "REDUCE", "STAGE"]  # header row carries the names
     assert lines[1].split() == ["n16", "b32"]  # values only, no "TILE=" prefix; trailing STAGE blank stripped
     assert "TILE=" not in lines[1]
-    assert lines[2].split() == ["n32", "d2/cp"]  # REDUCE column blank between TILE and STAGE
+    assert lines[2].split() == ["n32", "d2/smem-async"]  # REDUCE column blank between TILE and STAGE
 
 
 def test_render_table_ansi_aware_width():
-    """A coloured cell is padded by its *visible* length, so embedded ANSI codes never
+    """A coloured summary is padded by its *visible* length, so embedded ANSI codes never
     throw off column alignment (right- and left-aligned columns both line up)."""
     import re  # noqa: PLC0415
 
@@ -624,117 +777,99 @@ def test_render_table_ansi_aware_width():
 def test_bare_families_canonicalizes_axis_suffixed_knobs():
     """The golden-reproduction table compares the greedy pick against golden YAML rows,
     whose knobs are spelled bare — but resolved ops carry axis-suffixed codec keys
-    (``TILE@a2``). ``_bare_families`` bridges the two; compared raw, every found cell
+    (``TILE@a2``). ``_bare_families`` bridges the two; compared raw, every found summary
     rendered ``-`` over perfectly good picks (the post-rebuild 0/29 table)."""
     from emmy.commands.eval import _bare_families
 
-    got = _bare_families({"TILE@a2": "f2x4", "WORK": "t16x8", "STAGE@a2": "d3/tma", "REDUCE@a2": "g2a"})
-    assert got == {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d3/tma", "REDUCE": "g2a"}
+    got = _bare_families({"TILE@a2": "f2x4", "WORK": "t16x8", "STAGE@a2": "d3/smem-tma", "REDUCE@a2": "g2a"})
+    assert got == {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d3/smem-tma", "REDUCE": "g2a"}
     # bare keys pass through; first key wins a family collision (single-node picks in practice)
     assert _bare_families({"TILE": "a", "TILE@x": "b"}) == {"TILE": "a"}
 
 
-def test_offline_eval_scores_each_golden_under_its_own_card(monkeypatch):
-    """``eval offline`` must featurize a golden under the golden's OWN card
-    (``Context.from_target(cap, gpu_name=...)``), never the live host's. With the
-    ``gpu_name`` dropped, the SM count fell back to the host device (or the GPU-less
-    default), so the occupancy features priced tiles for a card that doesn't exist —
-    the eval said rank 0 on gemma goldens the real 4090 misdeployed 12-29x. The fitter
-    (now ``emmy fit``'s case builder) already passed it; this pins the eval side to match."""
-    from types import SimpleNamespace
-
-    import emmy.commands.eval as eval_cmd
-
-    golden = SimpleNamespace(
-        name="gemma4_12b.q_proj",
-        knobs={"TILE": "mma_m16n8k16_f16_f32/f4x4/k2", "WORK": "w2x2"},
-        gpu_name="NVIDIA GeForce RTX 4090",
-        compute_cap=(8, 9),
-    )
-    seen: list = []
-
-    def fake_evaluate_record(record, ctx):
-        seen.append(ctx)
-        return dict(record.knobs), 0, 1, 0
-
-    monkeypatch.setattr(eval_cmd, "_golden_configs", lambda _f: [golden])
-    monkeypatch.setattr("emmy.compiler.pipeline.search.golden_eval.evaluate_record", fake_evaluate_record)
-    eval_cmd._emit_offline_eval(None)
-
-    assert len(seen) == 1
-    ctx = seen[0]
-    assert ctx.gpu_name == "NVIDIA GeForce RTX 4090"
-    assert ctx.sm_count == 128  # the 4090's registered SM count, regardless of the host GPU
-    assert ctx.compute_capability == (8, 9)
-
-
-def test_offer_audit_flags_pin_only_and_fall_through(monkeypatch, caplog):
-    """``eval golden``'s offer audit: an entry no offered candidate realizes is PIN-ONLY
-    (fine while an offered sibling floors the shape); a shape whose entries are ALL
-    pin-only FALLS THROUGH the deploy's golden floor and the audit returns True (the
-    command exits 1) — the 4090 ``attention.hd512.s4096`` split-KV class, caught at
-    record time instead of in production benches. A warp mma TILE on an fp32 shape is the
-    guaranteed-unrealizable pin here: the f32 enumeration never offers the warp tier, so
-    no offered row carries the entry's TILE/WORK values."""
+def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, caplog):
+    """``eval golden``'s offer audit, over the strict-identity tier: an entry whose spelled row
+    equals no enumerated leaf is UNREALIZED (tolerable while an offered sibling floors the
+    target); a target whose entries are ALL unrealized FALLS THROUGH the verified tier and the
+    audit returns True (the command exits 1) — the 4090 ``attention.hd512.s4096`` class, caught
+    at record time instead of in production benches. The guaranteed-unrealizable row here is a
+    fabricated ``TILE`` fragment: no enumeration offers it, so no leaf can equal the row."""
     import logging
 
     import pytest
 
     pytest.importorskip("torch")
     import emmy.commands.eval as eval_cmd
-    import emmy.compiler.pipeline.search.golden as golden_mod
-    from emmy.compiler.graph import Graph, Tensor
+    from emmy import config
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.context import Context
     from emmy.compiler.ir.base import InputOp
-    from emmy.compiler.ir.frontend.ir import MatmulOp
-    from emmy.compiler.pipeline.search.golden import GoldenRecord
+    from emmy.compiler.pipeline.knob import stamp_schedule_families
+    from emmy.compiler.pipeline.search.golden import load_golden_records
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
     from emmy.compiler.torch_wire import graph_to_wire
 
-    def cfg(name, m, knobs, us):
-        graph = Graph()
-        graph.add_node(InputOp(), [], Tensor("x", (m, 32)), node_id="x")
-        graph.add_node(InputOp(), [], Tensor("w", (32, 32)), node_id="w")
-        graph.add_node(MatmulOp(), ["x", "w"], Tensor("matmul", (m, 32)), node_id="matmul")
-        graph.inputs, graph.outputs = ["x", "w"], ["matmul"]
-        return GoldenRecord(
-            name=name,
-            gpu_name="NVIDIA GeForce RTX 4090",
-            compute_cap=(8, 9),
-            model=None,
-            program_index=0,
-            program_wire=graph_to_wire(graph),
-            origins=("matmul",),
-            bindings=(),
-            pins=(("FAST_MATH", False),),
-            knobs=knobs,
-            measurements={"emmy_us": us, "reference_us": us, "reference_backend": "torch"},
-            ranking=None,
+    gpu, cap = "NVIDIA GeForce RTX 5090", (12, 0)
+    with config.nvcc_flags_override(""):  # the deployable -O3 regime the tier is gated on
+        ctx = Context.from_target(cap, gpu_name=gpu)
+
+    def enumerated_row(graph):
+        rows = enumerate_graph(graph.copy(), ctx).rows
+        return stamp_schedule_families(next(r for r in rows if str(r.get("WORK", "")).startswith("w")))
+
+    def records(graph, name, entries):
+        origins = [nid for nid, node in graph.nodes.items() if not isinstance(node.op, InputOp)]
+        return load_golden_records(
+            {
+                "gpu_name": gpu,
+                "compute_cap": list(cap),
+                "model": "org/model",
+                "programs": [graph_to_wire(graph)],
+                "configs": [
+                    {
+                        "program": 0,
+                        "target": {"origins": origins},
+                        "realizations": [
+                            {
+                                "name": name,
+                                "bindings": {},
+                                "pins": {"FAST_MATH": False},
+                                "knobs": knobs,
+                                "measurements": {"emmy_us": us, "reference_us": 30.0, "reference_backend": "cublas"},
+                            }
+                            for knobs, us in entries
+                        ],
+                    }
+                ],
+            }
         )
 
-    warp_pin = {"WORK": "w2x2", "TILE": "mma_m16n8k16_f16_f32/f2x2/k2"}
-    floored = [
-        cfg("audit.floored", 32, dict(warp_pin), 10.0),  # pin-only; the sibling below floors the shape
-        cfg("audit.floored", 32, {}, 20.0),  # prefix-consistent with any offered row — the deploy floor
-    ]
-    orphan = [cfg("audit.orphan", 48, dict(warp_pin), 10.0)]  # ALL pin-only → falls through
-    # The compile-time golden index reads GOLDEN_RECORDS scoped to the audited card — patch it
-    # so the verdicts are hermetic (no dependence on the repo's real 4090 recordings).
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", floored + orphan)
+    def matmul(m):
+        code = f"torch.matmul(torch.randn({m},128, dtype=torch.float16), torch.randn(128,{m}, dtype=torch.float16))"
+        return trace_inline_code(code)["graph"]
+
+    # Two DIFFERENT extents, so the two targets carry different structural identities and the
+    # floored target's offered row cannot decide the orphan's fork.
+    small, big = matmul(64), matmul(256)
+    drifted = {**enumerated_row(small), "TILE": "mma_m16n8k16_f16_f32/f9x9"}  # a fragment nothing offers
+    floored = records(small, "audit.floored", [(drifted, 10.0), (enumerated_row(small), 20.0)])
+    orphan = records(big, "audit.orphan", [({**enumerated_row(big), "TILE": "mma_m16n8k16_f16_f32/f9x9"}, 10.0)])
 
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
         fell = eval_cmd._emit_offer_audit(floored + orphan)
 
     assert fell is True
     msgs = [r.getMessage() for r in caplog.records]
-    assert any("PIN-ONLY" in m and "audit.floored" in m and "deploy floor" in m for m in msgs)
-    assert any("PIN-ONLY" in m and "audit.orphan" in m and "NO offered sibling" in m for m in msgs)
+    assert any("UNREALIZED" in m and "audit.floored" in m and "deploy floor" in m for m in msgs)
+    assert any("UNREALIZED" in m and "audit.orphan" in m and "NO offered sibling" in m for m in msgs)
     assert any("FALL-THROUGH" in m and "audit.orphan" in m for m in msgs)
     assert not any("FALL-THROUGH" in m and "audit.floored" in m for m in msgs)
 
-    # A set whose every entry realizes without additional winner pins is clean.
+    # A set whose every entry equals an enumerated leaf is clean.
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
         fell = eval_cmd._emit_offer_audit([floored[1]])
     assert fell is False
     msgs = [r.getMessage() for r in caplog.records]
-    assert any("realize in their input regimes" in m for m in msgs)
-    assert not any("PIN-ONLY" in m or "FALL-THROUGH" in m for m in msgs)
+    assert any("equal an enumerated leaf" in m for m in msgs)
+    assert not any("UNREALIZED" in m or "FALL-THROUGH" in m for m in msgs)

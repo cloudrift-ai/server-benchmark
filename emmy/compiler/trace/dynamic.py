@@ -15,8 +15,10 @@ from __future__ import annotations
 
 # Upper bound on every ``--dynamic`` axis (the ``torch.export.Dim`` max below).
 # Also the length the whole-model wrapper precomputes rotary cos/sin out to
-# (``trace.huggingface._SlicedRotary``).
-DYNAMIC_DIM_MAX = 4096
+# (``trace.huggingface._SlicedRotary``). Defined in ``compiler.dim`` — address
+# rendering reads it, and the IR layer cannot import the frontend — re-exported
+# here because this is where the ``--dynamic`` axes are built.
+from emmy.compiler.dim import DYNAMIC_DIM_MAX  # noqa: E402
 
 
 def parse_position_specs(specs: list[str] | None) -> list[tuple[str, str, int]]:

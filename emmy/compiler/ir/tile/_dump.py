@@ -6,9 +6,10 @@ reads made ``ops`` half presentation."""
 
 from __future__ import annotations
 
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Body, Load
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import Fold
+from emmy.compiler.ir.tile.ir import ProjectionRegion
 from emmy.compiler.ir.tile.ops import axis_names, sched_of
 from emmy.compiler.ir.tile.path import SLICE_FAMILIES
 
@@ -35,11 +36,11 @@ def unplaced_slices(tile) -> list[tuple[str, object]]:
 # --------------------------------------------------------------------------- #
 # The structural dump — the STORED term as a tree, and NOTHING derived.
 #
-# The tile term is a tree of three node kinds over operand EDGES, and every fact a pass
+# The tile term is a tree of one node kind over operand EDGES, and every fact a pass
 # dispatches on is a stored param on a node (this module's whole premise). The dump renders
 # exactly that: each node's own header, its stored params as labelled branches, and each operand
-# edge recursed into — so an inline COMPUTED edge is visibly a subtree and a MATERIALIZED one
-# visibly a leaf ``Load``.
+# edge's positional lambda binding before recursing into it — so an inline COMPUTED edge is
+# visibly a subtree and a MATERIALIZED one visibly a leaf ``Load``.
 #
 # It renders NO derived material. The structure is already complete in the stored tree — the
 # operand edges and their nesting — and a derived evaluation (the per-cell step, the synthesized
@@ -67,22 +68,21 @@ class _Ctx:
         self.sched = sched_of(tile) if tile is not None and tile.op is not None else None
         # The ITERATION SPACE a capture set is measured against. Only the OWNING ``TileOp`` knows
         # it in full: the term's own axes (:func:`axis_names`), the placement's free/grid axes, and
-        # a boundary store's sweep axis (off-term since 1q) — the same three the cut's closure
+        # an output specification's sweep axis (off-term) — the same three the cut's closure
         # check unions. Without a tile the placement is unknown, so ``captures`` declines to
         # answer rather than report grid coordinates as captured values.
         self.axes = None if tile is None else axis_names(root) if root is not None else set()
         if tile is not None:
             self.axes |= {a.name for a in (*tile.place.free, *tile.place.grid)}
-            self.axes |= {st.sweep.name for st in tile.stores if st.sweep is not None}
+            self.axes |= {st.sweep.name for st in tile.output_specs if st.sweep is not None}
 
     def captures(self, lam) -> tuple[str, ...]:
         """The VALUE names ``lam``'s body reads but neither binds nor takes from the iteration
-        space — the same reading the cut's closure predicate applies
-        (``_cut._captured_values``). Non-empty means the λ is NOT closed, which is exactly what
-        makes a subtree unhoistable to an operand edge: flash's ``P = exp(s − m)`` reads the
-        online-softmax carrier's running max, so it can never be an edge and its seam is not
-        cuttable. Empty when the iteration space is unknown (no owning ``TileOp``) — an unanswered
-        question prints as no annotation, never as "closed"."""
+        space. Non-empty means the λ is NOT closed, which is exactly what
+        makes a subtree unhoistable to an operand edge; no stored term prints one (the computed-A
+        cone binds the statistic's ``m`` positionally — ``ops.make_cone``), so an annotation marks
+        a hand-built tree. Empty when the iteration space is unknown (no owning ``TileOp``) — an
+        unanswered question prints as no annotation, never as "closed"."""
         return () if self.axes is None else tuple(sorted(lam.free_names() - self.axes))
 
     def note(self, node) -> str:
@@ -142,6 +142,10 @@ def _stmts(stmts, ctx: _Ctx):
             if isinstance(s, Fold):
                 out.append(f"{cont}  {_head(s, ctx)}")
                 out.extend(_branch(_items(s, ctx), cont + "  "))
+            elif isinstance(s, ProjectionRegion):
+                out.append(f"{cont}  project[{_axis_span(s.axis)}]{' unroll' if s.unroll else ''}")
+                out.append(f"{cont}    {_lam_sig(s.lift, ctx)}")
+                out.extend(_stmts(s.body, ctx)(cont + "    "))
             else:
                 out.extend(pretty_body(Body((s,)), cont + "  "))
         return out
@@ -153,30 +157,37 @@ def _subtree(node, ctx: _Ctx):
     return lambda cont: _branch(_items(node, ctx), cont)
 
 
-def _edge(label: str, edge, ctx: _Ctx) -> tuple[str, object]:
-    """One operand edge as a tree item — a ``Load`` is a leaf spelled inline, a computed edge
-    recurses into the node stored on it."""
+def _edge(edge, ctx: _Ctx, result: str | None = None) -> tuple[str, object]:
+    """One operand edge and the lift params it binds — a ``Load`` is a leaf spelled inline, a
+    computed edge recurses into the node stored on it. The binding is explicit because the
+    bilinear view prints edges in A/B role order, which can differ from the lift's positional
+    parameter order."""
+    names = _operand_result_names(edge)
+    head = f"operand[{', '.join(names)}]" + (f" -> {result}" if result is not None else "")
     if isinstance(edge, Load):
-        return f"{label}: {edge.pretty()[0].strip()}   ‹materialized›", lambda cont: []
-    return f"{label}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)
+        load = edge.pretty()[0].strip().removeprefix(f"{edge.name} = ")
+        return f"{head}: {load}   ‹materialized›", lambda cont: []
+    return f"{head}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)
 
 
 def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
-    """A node's STORED children, each a labelled branch. Nothing derived: the step, the
-    synthesized nodes inside it and the lowered nest are all consequences of these params."""
+    """A node's STORED children, each a labelled branch with operand bindings explicit. Nothing
+    derived: the step, the synthesized nodes inside it and the lowered nest are all consequences
+    of these params."""
     items: list[tuple[str, object]] = []
     if not isinstance(node, Fold):
         return items
     con = node._contraction
     if con is not None:
-        # The bilinear reading labels its edges ``a`` / ``b`` — the same labels the path codec
-        # spells, so a reader can match a dump line to a ``PLACE@a`` key by eye.
+        # The bilinear reading presents A before its B channels even though its stored operand
+        # order is ``(b₀, a, b₁…)``. Each edge's bracket names the positional lift param, so
+        # the presentation order cannot be mistaken for the binding order.
         a, chans = con
-        items.append(_edge("operand[a]", a, ctx))
+        items.append(_edge(a, ctx))
         one = len(chans) == 1
-        items += [_edge("operand[b]" if one else f"operand[b{i}] -> {ch.acc}", ch.b, ctx) for i, ch in enumerate(chans)]
+        items += [_edge(ch.b, ctx, None if one else ch.acc) for ch in chans]
     else:
-        items += [_edge(f"operand[{i}]", e, ctx) for i, e in enumerate(node.operands)]
+        items += [_edge(e, ctx) for e in node.operands]
     if node.axis is not None:
         init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
         items.append((f"init: ({init})", lambda cont: []))
@@ -199,11 +210,11 @@ def _branch(items: list[tuple[str, object]], cont: str) -> list[str]:
 
 def pretty(op, indent: str = "", *, tile=None) -> list[str]:
     """Structurally pretty-print a kernel op (for dumps) as the STORED tree and nothing else —
-    each node's kind and params, its operand edges recursed into. No derived material: the
-    per-cell step, the nodes synthesized inside it and the lowered nest all follow from these
-    params (``--ir loop`` is where a body lives). Pass ``tile`` — the owning ``TileOp`` — to
-    annotate each node with the schedule slices keyed against it. A bare stmt falls back to its
-    own pretty."""
+    each node's kind and params, and which lift param each recursed operand edge binds. No derived
+    material: the per-cell step, the nodes synthesized inside it and the lowered nest all follow
+    from these params (``--ir loop`` is where a body lives). Pass ``tile`` — the owning
+    ``TileOp`` — to annotate each node with the schedule slices keyed against it. A bare stmt
+    falls back to its own pretty."""
     ctx = _Ctx(tile, root=op)
     if isinstance(op, Fold):
         return [f"{indent}{_head(op, ctx)}", *_branch(_items(op, ctx), indent)]
@@ -253,6 +264,8 @@ def tile_body(tile) -> str:
     lines = [f"    {line}" for line in _pretty_place(tile)]
     lines += pretty(tile.op, "    ", tile=tile)
     lines += _pretty_region("schedule", [f"{k} = {v.spell() or '·'}" for k, v in unplaced_slices(tile)])
-    stores = [f"{f'sweep({st.sweep.name}) ' if st.sweep else ''}{ln.strip()}" for st in tile.stores for ln in st.write.pretty()]
-    lines += _pretty_region("stores", stores)
+    outputs = [
+        f"{f'sweep({spec.sweep.name}) ' if spec.sweep else ''}{line.strip()}" for spec in tile.output_specs for line in spec.write.pretty()
+    ]
+    lines += _pretty_region("outputs", outputs)
     return "\n".join(lines)

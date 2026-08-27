@@ -1,6 +1,10 @@
+tags:
+  - best-effort
+
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-
+  rationale: "Overshadowed by GLM-5.2. Lack of evidence indicates low interest."
+  heat: 30
 engine:
   llm:
     tensor_parallel_size: 8

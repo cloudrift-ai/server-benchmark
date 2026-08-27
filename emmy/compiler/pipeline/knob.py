@@ -36,7 +36,7 @@ from emmy import config
 from emmy.compiler.ir.tile.path import SLICE_FAMILIES
 
 # Reserved prefix for the structural-feature knobs stamped by
-# ``loop/stamp/020_stamp_structural_features`` — distinct from any tuning Knob
+# the ``IdentityStrategy`` (``passes/identity.py``) — distinct from any tuning Knob
 # name, so ``format_tuning_knobs`` drops them from the tuning view and
 # ``knob_features`` passes them through as-is. Declared here (rather than with
 # the producing pass, which is loaded under a bare module stem) so every
@@ -262,6 +262,23 @@ class Knob:
 _AXIS_FAMILIES = SLICE_FAMILIES  # the one list, defined in ``ir/tile/path.py``
 
 
+def decision_view(knobs: dict) -> dict:
+    """The DECIDED knobs of a row — everything that is not a FEATURE. A feature is a structural
+    ``S_*`` fact about the kernel or an ``H_*`` fact about the host/regime; neither is anything a
+    fork chose. So this is what a fork chose, in the values it chose: no canonicalization, no
+    ordering (see :func:`tuning_knob_items` for the rendered view).
+
+    This module owns the reserved prefixes, which is why the split lives here — a caller comparing
+    two kernels' decisions asks for the view rather than re-deriving what counts as one."""
+    return {k: v for k, v in knobs.items() if not k.startswith((STRUCT_PREFIX, CTX_PREFIX))}
+
+
+def context_view(knobs: dict) -> dict:
+    """The ``H_*`` host/regime features of a row (GPU compute capability, nvcc opt level) — the
+    regime a measurement was taken in, which is what lets one global prior span every card."""
+    return {k: v for k, v in knobs.items() if k.startswith(CTX_PREFIX)}
+
+
 def family_of(key: str) -> str:
     """The knob family — the part before an ``@<axis>`` suffix (``TILE@d`` → ``TILE``); the whole key
     when unsuffixed."""
@@ -346,7 +363,7 @@ def canon_family_value(name: str, value) -> str:
     form. The two site families decode under a DUMMY inventory (the worker widths never reach a site
     spelling, so the dummy cannot leak) and re-spell: ``f64x1`` ≡ ``f64``, the pin-only ``a:scalar``
     alias ≡ ``""``. ``STAGE`` needs no inventory and normalizes token ORDER, which binds order-free
-    but spells in schema order — so a hand pin ``cp/d2`` matches the realized ``d2/cp`` instead of
+    but spells in schema order — so a hand pin ``cp/d2`` matches the realized ``d2/smem-async`` instead of
     failing verification against its own value on the deploy path. Any other family — and any
     unparseable value — passes through untouched (the caller's own equality applies).
 
@@ -384,7 +401,7 @@ def values_equal(name: str, want, got) -> bool:
     their codec's normal form (:func:`canon_family_value`), so an atom-ALIAS pin
     (``mma_m16n8k16_f16/…``) keeps matching the canonically-stamped atom, the
     pin-only ``a:scalar`` alias matches the per-cell row, and an out-of-order
-    ``cp/d2`` matches the realized ``d2/cp``. ``WORK``
+    ``cp/d2`` matches the realized ``d2/smem-async``. ``WORK``
     compares through its own codec. An unregistered family compares by string only."""
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
@@ -455,6 +472,21 @@ def apply_knobs_env(raw: str | None = None) -> dict[str, str]:
     return applied
 
 
+def family_pins(family: str) -> tuple[tuple[str, str], ...]:
+    """Live pins for one knob family, bare first and scoped pins in key order."""
+    import os  # noqa: PLC0415 — knob.py owns the ``EMMY_<KNOB>`` environment namespace
+
+    family = family.upper()
+    prefix = config.knob_var(family)
+    pairs = []
+    if prefix in os.environ:
+        pairs.append((family, os.environ[prefix]))
+    scoped = sorted(
+        (family + "@" + name[len(prefix) + 1 :].lower(), value) for name, value in os.environ.items() if name.startswith(prefix + "@")
+    )
+    return tuple((*pairs, *scoped))
+
+
 def parse_knob_spec(raw: str) -> dict[str, str]:
     """Parse the shared ``K1=V1,K2=V2`` knob-spec grammar (the ``EMMY_KNOBS``
     aggregate, ``run --ab``) into an ordered ``{NAME: value}`` dict — whitespace
@@ -491,8 +523,8 @@ apply_knobs_env()
 # ``REDUCE@`` / ``STAGE@``) lead, each family's keys sorted by element; the bare exact-name knobs
 # follow in ``KNOB_ORDER``, unknown knobs last (alpha). Shared by the ``run --bench`` kernel table
 # and the ``emmy eval`` tables so columns read stably.
-_FAMILY_ORDER = ("TILE@", "REDUCE@", "STAGE@")
-KNOB_ORDER = ("WORK", "TILE", "REDUCE", "STAGE")
+_FAMILY_ORDER = ("PLACE@", "TILE@", "REDUCE@", "STAGE@")
+KNOB_ORDER = ("PLACE", "WORK", "TILE", "REDUCE", "STAGE")
 _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 
 # The greedy-fillable schedule codec families a golden RECORDING must pin explicitly. An entry that
@@ -501,6 +533,22 @@ _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 # config replaying with a surprise ``g2k`` fill). :func:`stamp_schedule_families` is the recording
 # view that closes the gap: every family explicit, OFF spelling (``""`` = decided unused) included.
 SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
+KERNEL_DECISION_FAMILIES = ("PLACE", *SCHEDULE_FAMILIES)
+
+
+def consume_kernel_row(knobs: dict) -> dict:
+    """``knobs`` with everything that described the kernel it came from removed — every kernel
+    decision family (``PLACE`` plus the schedule families) and every FEATURE (``S_*`` / ``H_*``).
+
+    A rule that splits a kernel calls this on the pieces it mints. What it takes out is
+    exactly what belongs to the kernel being replaced: the row it was scheduled with, and the
+    structural identity of the body it had. A piece is a brand-new kernel and must arrive with
+    neither — it is stamped and scheduled on its own, from its own body.
+
+    It leaves any knob outside those families that the rewrite computed for the piece itself."""
+    return {
+        k: v for k, v in knobs.items() if family_of(k) not in KERNEL_DECISION_FAMILIES and not k.startswith((STRUCT_PREFIX, CTX_PREFIX))
+    }
 
 
 #: Every env-pinned knob the schedule ENUMERATION consults: the :data:`SCHEDULE_FAMILIES` (bare
@@ -543,7 +591,7 @@ def format_tuning_knobs(knobs: dict) -> str:
     ``BINMASK`` values are already stored as binary strings in
     ``op.knobs`` (rules stamp via ``Knob.pretty``), so ``str(v)`` here
     round-trips correctly. ``STRUCT_PREFIX`` knobs (the structural-feature
-    stamp from ``992_stamp_structural_features``) are facts about the kernel, not
+    stamp from the ``IdentityStrategy``) are facts about the kernel, not
     tuning decisions, so they are dropped from this tuning-knob view.
     """
     items = tuning_knob_items(knobs)
@@ -588,11 +636,46 @@ def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
     return tuple(tuning_knob_items(knobs))
 
 
-def evidence_row_vouches(cand_tun: dict, row_tun: dict) -> bool:
+def schedule_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
+    """The verified tier's EXACT row identity: the recording-canonical view
+    (:func:`stamp_schedule_families`) restricted to the :data:`SCHEDULE_FAMILIES` keys — what the
+    schedule fork decides. A recorded row legitimately carries later forks' knobs too (the
+    kernel-stage policy BOOLs, ``LOOPIFY``); those are separate decisions at separate forks and
+    never part of THIS fork's identity."""
+    stamped = stamp_schedule_families(knobs)
+    return canonical_row_key({k: v for k, v in stamped.items() if family_of(k) in SCHEDULE_FAMILIES})
+
+
+def evidence_row_vouches(cand_tun: dict, row_tun: dict, *, exact_families: frozenset[str] = frozenset()) -> bool:
     """Whether a measured evidence row can vouch for a candidate under value-of-position
     semantics: every tunable knob the candidate specifies must match the row, a key absent
-    from the ROW reading as free (a later pass decides it)."""
-    return not any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items())
+    from the ROW reading as free (a later pass decides it). Families in
+    ``exact_families`` instead require the candidate and row to carry the same
+    complete family subset."""
+    if exact_families:
+        candidate_exact = {k: v for k, v in cand_tun.items() if family_of(k) in exact_families}
+        row_exact = {k: v for k, v in row_tun.items() if family_of(k) in exact_families}
+        if candidate_exact != row_exact:
+            return False
+    return not any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items() if family_of(k) not in exact_families)
+
+
+def drop_uninformative_scopes(knobs: dict) -> dict[str, str]:
+    """The two spelling rules that make a row equal its own realization, WITHOUT the
+    family-level OFF fill: a bare OFF beside scoped keys of the same family is dropped (a bare pin
+    fans out over every eligible site, so it would contradict them), and a scoped OFF is dropped
+    (it names a site that declined, which is exactly what stamping nothing there says). Both are
+    no-information spellings, so removing them changes no decision — unlike the fill, which turns
+    "this family was never mentioned" into "this family is pinned OFF" and would over-constrain a
+    partial row. :func:`stamp_schedule_families` applies these rules and then fills; a replay pin
+    wants only these."""
+    out = dict(tuning_knob_items(knobs))
+    for family in {family_of(name) for name in out if "@" in name}:
+        if out.get(family) == "":
+            out.pop(family)
+    for name in [n for n in out if "@" in n and out[n] == ""]:
+        out.pop(name)
+    return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))
 
 
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:
@@ -608,7 +691,8 @@ def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     # test temporarily replaces the registry after ``space`` has already loaded.
     from emmy.compiler.pipeline.search import space as _space  # noqa: PLC0415
 
-    out = dict(tuning_knob_items(knobs))
+    # The no-information spellings go first (:func:`drop_uninformative_scopes`), THEN the fill.
+    out = drop_uninformative_scopes(knobs)
     present = {family_of(k) for k in out}
     for fam in SCHEDULE_FAMILIES:
         if fam in present:

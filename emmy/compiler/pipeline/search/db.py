@@ -18,9 +18,9 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   known-good row. Deterministic rewrites (single option) trivially
   win their own slot via the same path.
 - ``perf`` — backend-agnostic measurement store. ``op_key`` is whichever
-  terminal op the backend measured (today: a CudaOp; tomorrow whatever
-  other backends lower to). ``backend`` partitions the table so the
-  loop interpreter and the CUDA backend can coexist in the same DB.
+  terminal op the backend measured, or the finalized Loop cache key for a
+  directly measured whole-slice structural route. ``backend`` partitions the
+  table so the loop interpreter and the CUDA backend can coexist in the same DB.
 - ``node`` — one row per search-tree node (every partial branch + leaf of a
   per-kernel autotune search), keyed by ``digest(context_key, op_sig,
   tunable-knob set)``. Each row carries the full feature dict passed to the
@@ -39,8 +39,6 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   watchdog's sentinel latency as ``value_us``; an ``ok`` row is never downgraded
   by a later fail), and ``run_id`` / ``measured_at`` (the tune session + time
   that produced the current ``value_us`` — replaced only on improvement). The
-  tune's deployable -O3 re-benches land as extra parentless ``H_opt=3`` leaf
-  rows under their own -O3 ``context_key`` (never colliding with the -O1 twin).
   Every write passes the physical-plausibility gate (:func:`implausible_value_reason`):
   an ``ok`` row whose latency implies throughput above its card's recorded peak is a
   mismeasurement, dropped with a warning — never stored (``purge_implausible`` is the
@@ -284,7 +282,7 @@ def impossible_kernel_reason(row: NodeRow) -> str | None:
         return None
     if not tp.is_warp:
         return None
-    if st.transport != "cp.async":
+    if st.transport != "smem-async":
         return None
     from emmy import gpu  # noqa: PLC0415
 
@@ -483,7 +481,7 @@ class SearchDB:
         ("measured_at", "TEXT"),
         # Featurizer-vocabulary stamp (``features.FEATURIZER_VERSION``). Default 1 =
         # unknown/pre-stamp vocabulary: such rows are excluded from prior evaluation
-        # (``diagnostics.node_report``) — a cross-vocabulary row featurizes to garbage —
+        # (``data/group.group_measured``) — a cross-vocabulary row featurizes to garbage —
         # but kept in the DB and carried by ``merge_nodes`` (data, not judgement).
         # NOTE: rows written after the 2026-07 tile-IR rebuild but before this column
         # shipped are spelled in the v2 vocabulary yet default to 1 — they quarantine
@@ -527,7 +525,7 @@ class SearchDB:
             if magic and magic != b"SQLite format 3\x00":  # empty file = valid empty DB
                 hint = (
                     " — this looks like a v1 JSONL measurement freeze; freezes are now per-GPU YAML directories, "
-                    "accepted only by the nodes-dataset consumers, e.g. `eval online --dataset nodes --db`"
+                    "accepted only by the nodes-dataset consumers, e.g. `eval prior --dataset nodes --db`"
                     if magic.startswith(b"{")
                     else ""
                 )
@@ -894,7 +892,7 @@ class SearchDB:
 
     def iter_nodes(self, *, context_key: str | None = None, op_sig: str | None = None) -> Iterator[NodeRow]:
         """Yield one :class:`NodeRow` per stored search-tree node (the value-of-position
-        dataset backing ``eval online --dataset nodes``). Self-contained — no join.
+        dataset backing ``eval prior --dataset nodes``). Self-contained — no join.
         A read-only open of a pre-``node`` DB has no such table, so this degrades to
         yielding nothing instead of raising (mirrors ``iter_perf_samples``'
         missing-column degrade). Optional ``context_key`` / ``op_sig`` scope to one

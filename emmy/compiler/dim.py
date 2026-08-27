@@ -48,6 +48,15 @@ from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyC
 # representative sequence length for tuning (vs the small trace example size).
 DEFAULT_SEQ_HINT = 512
 
+# Upper BOUND on a symbolic axis — every ``--dynamic`` axis is exported with this as its
+# ``torch.export.Dim`` max, so no legal resolution of a symbolic dim exceeds it. Unlike
+# ``DEFAULT_SEQ_HINT`` above, which is advisory and may be wrong in either direction, this one is
+# load-bearing: address rendering sizes its integer arithmetic against it, so a symbolic buffer
+# whose worst-case element count still fits ``int`` keeps 32-bit indexing. It lives here rather
+# than in ``trace.dynamic`` (which re-exports it) because the IR layer must be able to read it
+# without importing the frontend.
+DYNAMIC_DIM_MAX = 4096
+
 
 def _coerce_expr(value: int | str | Expr | Dim) -> Expr:
     """Coerce a Dim constructor argument to an ``Expr``.

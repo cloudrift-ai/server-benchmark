@@ -17,6 +17,12 @@ def register() -> None:
     # from docker logs, and the gemma4 verify gate greps them there.
     ensure_plugin_logging()
 
+    # vLLM 0.23 dummy-run seq lens exceed max_model_len for capture sizes above it,
+    # overrunning the block table (capture-warmup illegal access); see vllm_patches.
+    from emmy.serving.vllm_patches import clamp_dummy_run_seq_lens
+
+    clamp_dummy_run_seq_lens()
+
     if "EmmyEmbedModel" not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model("EmmyEmbedModel", "emmy.serving.vllm_model:EmmyEmbedModel")
     if "EmmyGenModel" not in ModelRegistry.get_supported_archs():

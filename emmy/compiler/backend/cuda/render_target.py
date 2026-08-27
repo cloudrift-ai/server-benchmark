@@ -23,13 +23,14 @@ _TYPE_NAME: dict[str, str] = {
     "i16": "short",
     "i32": "int",
     "i64": "long long",
+    "u8": "unsigned char",
     "u16": "unsigned short",
     "u32": "unsigned int",
     "u64": "unsigned long long",
     "bool": "bool",
 }
 
-_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u16", "u32", "u64"})
+_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u8", "u16", "u32", "u64"})
 _INTEGER_NATIVE_OPS = frozenset(
     {
         "add",
@@ -121,7 +122,9 @@ _NATIVE_FP16_OPS: frozenset[str] = frozenset(
         "copy",
         "reciprocal",
         "relu",
-        "sigmoid",
+        # Not ``sigmoid``: its half spelling ``1/(1+hexp(-x))`` rounds three times, which lands up
+        # to two half-ulps from torch's compute-in-f32-round-once value and fails the strict
+        # ``rtol=1e-3`` gate; the non-native path below computes it in f32 and converts once.
     }
 )
 

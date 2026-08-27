@@ -12,7 +12,7 @@ the feature vector each source built inline today.
 
 Featurization fidelity (the load-bearing invariant): a trained ``OnlinePrior``
 regresses on the full ``S_*`` histogram stamped by
-``992_stamp_structural_features``. DB / prior rows carry that histogram inline;
+the ``IdentityStrategy``. DB / prior rows carry that histogram inline;
 golden rows derive it by lowering their embedded frontend program and selecting
 the target through provenance. Neither the histogram nor ``ShapeKey`` is part of
 the stable golden format.

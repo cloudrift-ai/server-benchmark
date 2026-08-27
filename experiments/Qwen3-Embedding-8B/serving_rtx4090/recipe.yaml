@@ -1,0 +1,34 @@
+# Qwen3-Embedding-8B RTX 4090 verification experiment
+# Maintained recipe re-verification on the exact target hardware.
+model:
+  huggingface: "Qwen/Qwen3-Embedding-8B"
+  task: embed
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.92
+    context_length: 4096
+    max_concurrent_requests: 32
+    vllm:
+      extra_env:
+        EMMY_CUBIN_CACHE: "/hf_models/emmy-cubins"
+
+benchmark:
+  max_concurrency: 32
+  num_prompts: 256
+  random_input_len: 512
+
+matrices:
+  cross:
+    deploy.gpu: "NVIDIA GeForce RTX 4090"
+    deploy.gpu_count: 1
+    benchmark.random_input_len: [32, 512]
+    zip:
+      engine.llm.vllm.image:
+        - "vllm/vllm-openai:v0.22.1"
+        - "cloudriftai/vllm-emmy:0.22.1-90c70d5e"
+      engine.llm.vllm.extra_args:
+        - "--runner pooling"
+        - "--runner pooling --enforce-eager --hf-overrides '{\"architectures\":[\"EmmyEmbedModel\"]}'"

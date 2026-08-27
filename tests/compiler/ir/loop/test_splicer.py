@@ -1,4 +1,4 @@
-"""Standalone tests for ``splice_loop_ops``.
+"""Standalone tests for the Loop IR splicer.
 
 Each test builds producer/consumer ``LoopOp``s by hand and splices them
 directly, asserting on the merged body structure. This skips the usual
@@ -8,7 +8,12 @@ itself rather than some upstream lowering quirk.
 
 from __future__ import annotations
 
-from emmy.compiler.ir.expr import Literal, Var
+import pytest
+
+from emmy.compiler.dtype import F16, DataType
+from emmy.compiler.graph import Graph
+from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import (
     Accum,
     Assign,
@@ -17,9 +22,10 @@ from emmy.compiler.ir.loop import (
     Loop,
     LoopOp,
     Write,
-    splice_loop_ops,
+    splice_graph,
     splice_loops,
 )
+from emmy.compiler.tensor import Tensor
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -34,14 +40,88 @@ def _elementwise_fns(op: LoopOp) -> list[str]:
     return [s.op.name for s in op.body.iter() if isinstance(s, Assign)]
 
 
-# ---------------------------------------------------------------------------
+def _splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp | None:
+    """Pairwise fixture over the production N-way entry point."""
+    writes = producer.writes
+    if len(writes) != 1:
+        return None
+    return splice_loops(
+        loops={"producer": producer, "consumer": consumer},
+        splice_edges={("consumer", source): ("producer", writes[0].output)},
+    )
+
+
 # Fixtures — shared axes
 # ---------------------------------------------------------------------------
+
+
+def _reduce_producer(*, source: str, output: str, rounds_to: DataType | None = None) -> LoopOp:
+    """A bare sum reduce storing to ``output``, with its store rounding spelled when narrowing.
+
+    ``loop/lifting/090_spell_store_rounding`` is what spells it in the real pipeline; these tests
+    splice hand-built kernels, so they state it directly — the splicer's contract is to PRESERVE a
+    spelled conversion, never to re-derive one from the buffer.
+    """
+    acc, stored = f"{output}_sum", f"{output}__st"
+    tail: tuple = (Write(output=output, index=(Var("a0"),), value=acc),)
+    if rounds_to is not None:
+        tail = (
+            Assign(name=stored, op="copy", args=(acc,), dtype=rounds_to),
+            Write(output=output, index=(Var("a0"),), value=stored),
+        )
+    return LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=K,
+                        body=(
+                            Load(name=f"{output}_value", input=source, index=(Var("a0"), Var("k"))),
+                            Accum(name=acc, value=f"{output}_value", op="add"),
+                        ),
+                    ),
+                    *tail,
+                ),
+            ),
+        ),
+    )
 
 
 A0 = Axis("a0", 4)
 A1 = Axis("a1", 8)
 K = Axis("k", 16)
+
+
+def _splice_graph_producer(
+    producer: LoopOp,
+    *,
+    input_shape: tuple[int, ...],
+    output_shape: tuple[int, ...],
+    edge_dtype: DataType,
+) -> LoopOp:
+    consumer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="value", input="producer", index=(Var("a0"),)),
+                    Assign(name="activated", op="silu", args=("value",)),
+                    Write(output="consumer", index=(Var("a0"),), value="activated"),
+                ),
+            ),
+        ),
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", input_shape, F16), node_id="x")
+    graph.add_node(producer, ["x"], Tensor("producer", output_shape, edge_dtype), node_id="producer")
+    graph.add_node(consumer, ["producer"], Tensor("consumer", output_shape, edge_dtype), node_id="consumer")
+    graph.outputs = ["consumer"]
+    result = splice_graph(graph)
+    assert result is not None
+    merged, external = result
+    assert external == ["x"]
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +156,7 @@ def test_pointwise_chain():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     fns = _elementwise_fns(merged)
     # exp from producer + copy alias for the Load + add from consumer.
@@ -125,7 +205,7 @@ def test_shared_intermediate_deduped():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # Only one exp in the merged body (producer chain materializes once).
     assert _elementwise_fns(merged).count("exp") == 1
@@ -179,7 +259,7 @@ def test_different_indices_emit_twice():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # Two distinct σs ({a0:a0,a1:a1}, {a0:a1,a1:a0}) → exp materializes twice.
     assert _elementwise_fns(merged).count("exp") == 2
@@ -222,12 +302,177 @@ def test_reduction_producer():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # The Accum survives in the merged body.
     assert _count_kind(merged, Accum) == 1
     # Elementwise chain includes the producer-load copy + the consumer's exp.
     assert "exp" in _elementwise_fns(merged)
+
+
+@pytest.mark.parametrize("rounds_to", [F16, None])
+def test_graph_splice_preserves_a_spelled_store_rounding(rounds_to: DataType | None):
+    """Fusing a store away must not delete the rounding it spelled — and must invent none."""
+    producer = _reduce_producer(source="x", output="producer", rounds_to=rounds_to)
+    merged = _splice_graph_producer(producer, input_shape=(4, 16), output_shape=(4,), edge_dtype=F16)
+    typed = [c.dtype for c in merged.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    assert typed == ([rounds_to] if rounds_to is not None else [])
+
+
+def test_graph_splice_load_output_needs_no_conversion():
+    """A pass-through value is already represented at the loaded input dtype."""
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="x", input="x", index=(Var("a0"),)),
+                    Write(output="producer", index=(Var("a0"),), value="x"),
+                ),
+            ),
+        ),
+    )
+    merged = _splice_graph_producer(producer, input_shape=(4,), output_shape=(4,), edge_dtype=F16)
+    aliases = [stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
+    assert aliases == []
+
+
+@pytest.mark.parametrize(("rounds_to", "expected_aliases"), [(F16, 2), (None, 0)])
+def test_graph_splice_preserves_multi_reduction_output_dtypes(rounds_to: DataType | None, expected_aliases: int):
+    """Sibling reductions each keep their own spelled rounding through one shared projection."""
+
+    consumer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="left_value", input="left", index=(Var("a0"),)),
+                    Load(name="right_value", input="right", index=(Var("a0"),)),
+                    Load(name="aux_value", input="aux", index=(Var("a0"),)),
+                    Assign(name="activated", op="silu", args=("left_value",)),
+                    Assign(name="product", op="multiply", args=("activated", "right_value")),
+                    Assign(name="result", op="add", args=("product", "aux_value")),
+                    Write(output="consumer", index=(Var("a0"),), value="result"),
+                ),
+            ),
+        ),
+    )
+    pointwise = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="z_value", input="z", index=(Var("a0"),)),
+                    Assign(name="exp_value", op="exp", args=("z_value",), dtype=F16),
+                    Write(output="aux", index=(Var("a0"),), value="exp_value"),
+                ),
+            ),
+        ),
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4, 16), F16), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("y", (4, 16), F16), node_id="y")
+    graph.add_node(InputOp(), [], Tensor("z", (4,), F16), node_id="z")
+    graph.add_node(_reduce_producer(source="x", output="left", rounds_to=rounds_to), ["x"], Tensor("left", (4,), F16), node_id="left")
+    graph.add_node(_reduce_producer(source="y", output="right", rounds_to=rounds_to), ["y"], Tensor("right", (4,), F16), node_id="right")
+    graph.add_node(pointwise, ["z"], Tensor("aux", (4,), F16), node_id="aux")
+    graph.add_node(consumer, ["left", "right", "aux"], Tensor("consumer", (4,), F16), node_id="consumer")
+    graph.outputs = ["consumer"]
+
+    result = splice_graph(graph)
+    assert result is not None
+    merged, external = result
+    assert external == ["x", "y", "z"]
+    typed = [c.dtype for c in merged.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    assert len(typed) == expected_aliases
+    assert set(typed) <= {F16}
+    pointwise_result = next(stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "exp")
+    assert pointwise_result.dtype == F16
+
+
+def test_graph_splice_typed_boundary_roundtrips():
+    """A spelled rounding is body state, so it survives Loop IR serialization."""
+    producer = _reduce_producer(source="x", output="producer", rounds_to=F16)
+    merged = _splice_graph_producer(producer, input_shape=(4, 16), output_shape=(4,), edge_dtype=F16)
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4, 16), F16), node_id="x")
+    graph.add_node(merged, ["x"], Tensor("consumer", (4,), F16), node_id="consumer")
+    graph.outputs = ["consumer"]
+
+    restored = Graph.from_dict(graph.to_dict()).nodes["consumer"].op
+    typed = [c.dtype for c in restored.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    assert typed == [F16]
+
+
+# ---------------------------------------------------------------------------
+# Ordered prefix: a Write of the running accumulator cannot cross the splice
+# ---------------------------------------------------------------------------
+
+
+def _prefix_scan(*, source: str, output: str) -> LoopOp:
+    return LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=A1,
+                        body=(
+                            Load(name="x", input=source, index=(Var("a0"), Var("a1"))),
+                            Accum(name="prefix", value="x", op="add"),
+                            Write(output=output, index=(Var("a0"), Var("a1")), value="prefix"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_ordered_prefix_root_declines_splice():
+    """Rebuilding a root from its Writes must not move a prefix output after the reduce loop."""
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=A1,
+                        body=(
+                            Load(name="x", input="X", index=(Var("a0"), Var("a1"))),
+                            Assign(name="y", op="negative", args=("x",)),
+                            Write(output="P", index=(Var("a0"), Var("a1")), value="y"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert _splice_loop_ops(producer, _prefix_scan(source="P", output="OUT"), source="P") is None
+
+
+def test_ordered_prefix_producer_declines_splice():
+    """Resolving a producer edge must not replace its prefix output with one final reduction."""
+    consumer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=A1,
+                        body=(
+                            Load(name="x", input="P", index=(Var("a0"), Var("a1"))),
+                            Assign(name="y", op="negative", args=("x",)),
+                            Write(output="OUT", index=(Var("a0"), Var("a1")), value="y"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert _splice_loop_ops(_prefix_scan(source="X", output="P"), consumer, source="P") is None
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +510,7 @@ def test_consumer_extra_input_source_remap():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     loads = {s.name: s for s in merged.body.iter() if isinstance(s, Load)}
     # Producer's Load survives at source 0; consumer's unrelated Load shifts to 1.
@@ -385,6 +630,195 @@ def test_chain_three_loops():
 # ---------------------------------------------------------------------------
 
 
+def test_separate_roots_share_upstream_definition():
+    """Two terminal loops seed one worklist, so their common producer emits once."""
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="x", input="X", index=(Var("a0"),)),
+                    Assign(name="p", op="exp", args=("x",)),
+                    Write(output="P", index=(Var("a0"),), value="p"),
+                ),
+            ),
+        )
+    )
+
+    def consumer(output: str, op: str) -> LoopOp:
+        return LoopOp(
+            body=(
+                Loop(
+                    axis=A0,
+                    body=(
+                        Load(name="p", input="P", index=(Var("a0"),)),
+                        Assign(name="out", op=op, args=("p",)),
+                        Write(output=output, index=(Var("a0"),), value="out"),
+                    ),
+                ),
+            )
+        )
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("X", (4,)), node_id="X")
+    graph.add_node(producer, ["X"], Tensor("P", (4,)), node_id="P")
+    graph.add_node(consumer("LEFT", "negative"), ["P"], Tensor("LEFT", (4,)), node_id="LEFT")
+    graph.add_node(consumer("RIGHT", "abs"), ["P"], Tensor("RIGHT", (4,)), node_id="RIGHT")
+    graph.outputs = ["LEFT", "RIGHT"]
+
+    result = splice_graph(graph)
+    assert result is not None
+    merged, external = result
+    assert external == ["X"]
+    assert {write.output for write in merged.writes} == {"LEFT", "RIGHT"}
+    assert _elementwise_fns(merged).count("exp") == 1
+
+
+def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypatch):
+    """Flat-address-identical output copies collapse without inlining the reduction at their loads."""
+    i, j, k = Var("i"), Var("j"), Var("k")
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("i", 2),
+                body=(
+                    Loop(
+                        axis=Axis("k", 3),
+                        body=(
+                            Load(name="xk", input="x", index=(i, k)),
+                            Accum(name="total", value="xk", op="add", axes=("k",)),
+                        ),
+                    ),
+                    Loop(
+                        axis=Axis("j", 3),
+                        body=(
+                            Load(name="xj", input="x", index=(i, j)),
+                            Assign(name="scaled", op="multiply", args=("xj", "total")),
+                            Write(output="y", index=(i, j), value="scaled"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    p, q = Var("p"), Var("q")
+    first_copy = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("p", 3),
+                body=(
+                    Loop(
+                        axis=Axis("q", 2),
+                        body=(
+                            Load(
+                                name="mid_value",
+                                input="y",
+                                index=(
+                                    BinaryExpr("/", BinaryExpr("+", BinaryExpr("*", p, Literal(2, "int")), q), Literal(3, "int")),
+                                    BinaryExpr("%", BinaryExpr("+", BinaryExpr("*", p, Literal(2, "int")), q), Literal(3, "int")),
+                                ),
+                            ),
+                            Write(output="mid", index=(p, q), value="mid_value"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    r = Var("r")
+    second_copy = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("r", 6),
+                body=(
+                    Load(
+                        name="out_value",
+                        input="mid",
+                        index=(BinaryExpr("/", r, Literal(2, "int")), BinaryExpr("%", r, Literal(2, "int"))),
+                    ),
+                    Write(output="out", index=(r,), value="out_value"),
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
+    graph.add_node(producer, ["x"], Tensor("y", (2, 3)), node_id="y")
+    graph.add_node(first_copy, ["y"], Tensor("mid", (3, 2)), node_id="mid")
+    graph.add_node(second_copy, ["mid"], Tensor("out", (6,)), node_id="out")
+    graph.outputs = ["out"]
+    eval_expr = BinaryExpr.eval
+
+    def reject_coordinate_evaluation(expression, env):
+        if env:
+            pytest.fail("output equivalence must not enumerate coordinates")
+        return eval_expr(expression, env)
+
+    monkeypatch.setattr(BinaryExpr, "eval", reject_coordinate_evaluation)
+
+    result = splice_graph(graph)
+
+    assert result is not None
+    merged, external = result
+    assert external == ["x"]
+    assert _count_kind(merged, Accum) == 1
+    assert [write.output for write in merged.writes] == ["out"]
+    assert len(merged.writes[0].index) == 1
+    assert "/" not in merged.writes[0].index[0].pretty() and "%" not in merged.writes[0].index[0].pretty()
+
+
+def test_output_equivalence_retargets_transpose_in_canonical_storage_order():
+    """A proven permutation retargets the Write and adopts canonical output-storage order."""
+    i, j = Var("i"), Var("j")
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("i", 2),
+                body=(
+                    Loop(
+                        axis=Axis("j", 3),
+                        body=(
+                            Load(name="value", input="x", index=(i, j)),
+                            Write(output="y", index=(i, j), value="value"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    p, q = Var("p"), Var("q")
+    transpose = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("p", 3),
+                body=(
+                    Loop(
+                        axis=Axis("q", 2),
+                        body=(
+                            Load(name="transposed", input="y", index=(q, p)),
+                            Write(output="out", index=(p, q), value="transposed"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
+    graph.add_node(producer, ["x"], Tensor("y", (2, 3)), node_id="y")
+    graph.add_node(transpose, ["y"], Tensor("out", (3, 2)), node_id="out")
+    graph.outputs = ["out"]
+
+    result = splice_graph(graph)
+
+    assert result is not None
+    merged, _ = result
+    assert [loop.axis.extent for loop in merged.body.loops] == [3, 2]
+    load = next(load for load in merged.loads if load.input == "x")
+    write = next(write for write in merged.writes if write.output == "out")
+    assert load.index == tuple(reversed(write.index))
+
+
 def test_multi_output_root_preserves_all_writes():
     """A root whose body contains Writes at multiple output indices should
     seed each of them — the merged kernel carries all Writes."""
@@ -417,7 +851,7 @@ def test_multi_output_root_preserves_all_writes():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="out_0")
+    merged = _splice_loop_ops(producer, consumer, source="out_0")
     assert merged is not None
     writes = [s for s in merged.body.iter() if isinstance(s, Write)]
     assert {w.output for w in writes} == {"C0", "C1"}
@@ -529,7 +963,7 @@ def test_shared_load_dedup_into_reduce():
             ),
         ),
     )
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None  # would have failed pre-fix with SSA validation error
     # Reduce + full silu chain + final multiply should all materialize once.
     assert _count_kind(merged, Accum) == 1
@@ -566,7 +1000,64 @@ def test_literal_producer_write_index():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     assert "exp" in _elementwise_fns(merged)
     assert "negative" in _elementwise_fns(merged)
+
+
+def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(monkeypatch):
+    """A long producer chain reuses one large coordinate target without re-walking its tree."""
+    from emmy.compiler.ir.expr import BinaryExpr
+
+    producer_axis = Axis("p", 4096)
+    producer_stmts = [Load(name="x", input="X", index=(Var("p"),))]
+    previous = "x"
+    for i in range(128):
+        name = f"v{i}"
+        producer_stmts.append(Assign(name=name, op="negative", args=(previous,)))
+        previous = name
+    producer_stmts.append(Write(output="P", index=(Var("p"),), value=previous))
+    producer = LoopOp(body=(Loop(axis=producer_axis, body=tuple(producer_stmts)),))
+
+    i_axis, j_axis = Axis("i", 8), Axis("j", 8)
+    target = Var("i")
+    for _ in range(128):
+        target = target * 2 + Var("j")
+    target = BinaryExpr("^", target, Literal(1, "int"))
+    consumer = LoopOp(
+        body=(
+            Loop(
+                axis=i_axis,
+                body=(
+                    Loop(
+                        axis=j_axis,
+                        body=(
+                            Load(name="pv", input="P", index=(target,)),
+                            Write(output="OUT", index=(Var("i"), Var("j")), value="pv"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    root_walks = 0
+    original = BinaryExpr.free_vars
+
+    def counted_free_vars(expr):
+        nonlocal root_walks
+        if expr.op == "^":
+            root_walks += 1
+        return original(expr)
+
+    monkeypatch.setattr(BinaryExpr, "free_vars", counted_free_vars)
+    merged = splice_loops(loops={"producer": producer, "consumer": consumer}, splice_edges={("consumer", "P"): ("producer", "P")})
+
+    assert merged is not None
+    # Loop construction and normalization also inspect the coordinate expression, but the count
+    # must not grow with the 128 producer dependencies (without the per-splice memo it exceeds 128).
+    assert root_walks < 32
+
+
+# ---------------------------------------------------------------------------

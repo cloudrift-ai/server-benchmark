@@ -1,53 +1,63 @@
-# experiments/ — reproducible measurement configurations grouped by model
+# experiments/ — reproducible measurements grouped by model
 
-An experiment answers a comparison or qualification question. It uses the recipe format, but it is run with
+An experiment answers a comparison or qualification question. It uses the recipe format and runs through
 `emmy bench`; the recommended serving configuration belongs in `recipes/`.
 
 ## Directory convention
 
-Group model-specific experiments under one model directory:
-
 ```text
-experiments/<model>/
-  <workload_or_question>_<hardware>/
-    recipe.yaml
+experiments/<model>/<workload_or_question>/
+  recipe.yaml
+  golden/                                   # optional pre-tuned goldens the recipe replays
+  <YYYY-MM-DD_HH-MM-SS>/                    # temporary ignored raw output
+  results_<gpu-short>x<gpu-count>.tar.gz    # one Git LFS archive per exact platform, including row records
+  RESULTS.md                                # one interpretation across all platforms
 ```
 
-Use the model's established repository slug and a short `snake_case` child name. Name the workload or question
-first and add the hardware suffix when the result is hardware-specific, as in
-`experiments/gemma-4-12B/serving_rtx5090/`. Each child directory owns one `recipe.yaml`.
+Use the model's established repository slug and a short `snake_case` experiment name. Derive `<gpu-short>` with
+`emmy.hardware.gpu_short_name`; `results_rtx4090x1.tar.gz` is the archive for one RTX 4090. Keep one protocol in one
+recipe when platforms differ only by hardware allocation or a small control; use a zipped matrix rather than copied
+command bodies. Split directories only when the workload or raw evidence set differs.
 
-Measured output does not belong here by default. Benchmark JSON/TXT/logs, plots, dated recipe snapshots, compiler run
-summaries, and experiment `RESULTS.md` files stay ignored or outside the checkout. After a configuration is selected,
-embed its compact best result in `recipes/<model>/RESULTS.md` beside the final deployment recipe. Retain a measured
-experiment artifact only when the caller explicitly requests that exact file as durable publication evidence.
+## Pre-tuned goldens as a recipe input
 
-Related command workloads also stay under the model. Image qualification, kernel smoke tests, serving smoke tests,
-and final benchmarks for one model should not become unrelated top-level directories. A genuinely cross-model
-compiler experiment may remain at the top level.
+An experiment that measures tuned Emmy does not tune: searching a schedule is judgment work owned by the
+`tune-kernels` skill, and a recipe that scripted it would encode that judgment in the harness. Instead the skill
+produces the golden files, they are committed under `golden/`, and the recipe replays them. The recipe still owns the
+program definition — a checked-in snippet or trace input the skill reads — so the tuned program and the benched
+program cannot drift apart.
 
-## Result analysis
+The committed files remain search state, so the measuring lane re-measures every schedule they pin and its own
+records stay the experiment's evidence. They are per-card and are retuned when the platform changes, which is why a
+compiler change is re-measured by rerunning the recipe alone.
 
-`emmy bench` is an experiment-agnostic runner. Recipes define workloads and neutral matrix labels; they do not define
-semantic gates, log predicates, or output comparisons. A short self-contained `aggregate.run` command may perform
-readable mechanical post-processing, but it may not invoke an external script or generate the experiment report.
-Tests verify the intended configuration before measurement. After a run, an agent examines every raw result, failure,
-log, and artifact against the experiment protocol and writes the model-specific report.
+Give each lane and each measured operator (or other workload split) its own matrix parameter so `--filter` can
+re-measure one slice. Command rows for one GPU share a single execution group and therefore a single VM, so splitting
+a long sweep into rows costs staging, not hardware.
 
-When an experiment changes only hardware allocation or one small platform-specific control, keep one protocol in one
-recipe and express the platforms as a zipped recipe matrix. Split directories only when the workload, evidence set,
-or interpretation differs; do not copy a command body once per GPU.
+## Last-run artifacts
 
-Command workloads may preserve partial artifacts and then exit nonzero after all declared cases run. The harness
-still pulls every declared `result_files` match from a failed command task, so a failure remains in the denominator
-and retains the logs needed to classify it. A recipe should archive its evidence before returning its exit status.
+`emmy bench` creates a timestamped directory for every actual invocation and writes one YAML experiment record per
+expanded row there. It keeps raw client/server logs and every declared command result beside those records. It never
+writes legacy JSON/TXT wrappers, a task/instance manifest, or a report. Dry runs do not create a directory.
+
+Use the repository `run-experiment` skill to finish a requested run. The skill checks matrix-row coverage, system
+information, declared command-result presence, and terminal status; retains the platform's records inside the raw-run
+tree; replaces its Git LFS-backed named archive; updates its section in `RESULTS.md`; and commits the complete durable
+snapshot. Once the archive has been extracted or byte-checked against the raw files, the ignored timestamped directory
+may be deleted; the archive is the durable raw copy. Each platform's records inside that archive and its report section
+describe the same most recent run. Updating one platform preserves every other platform snapshot.
+
+`RESULTS.md` is an intelligent review across the retained platform runs. Each platform section reports the protocol,
+measurements, repeat variation, comparisons, conclusion, limitations, system, status, and archive location, with every
+claim grounded in its raw files. Recipes and repository scripts cannot contain result interpretation, post-processing,
+or report generation; command blocks are only the measured workload.
 
 ## Lifetime
 
-Keep experiment configurations that reproduce a published comparison, support a durable qualification, or are needed
-for a planned measurement. Delete exploratory configurations, intermediate candidates, duplicate run snapshots, and
-their one-off helper scripts after the result is encoded in a final recipe, its `RESULTS.md`, a golden config, a test,
-or a durable architecture note. Plans and local run artifacts are not experiment deliverables.
+Keep configurations that reproduce a published comparison, support a durable qualification, or are needed for a
+planned measurement. Delete exploratory configurations and one-off analysis helpers after their conclusion is encoded
+in a final recipe, golden configuration, test, or architecture note.
 
 See [`recipes/ARCHITECTURE.md`](../recipes/ARCHITECTURE.md) for the serving-recipe boundary and
 [`emmy/recipe/ARCHITECTURE.md`](../emmy/recipe/ARCHITECTURE.md) for the YAML format.

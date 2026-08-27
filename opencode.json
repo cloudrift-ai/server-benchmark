@@ -1,0 +1,32 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "enabled_providers": ["cloudrift"],
+  "model": "cloudrift/agent",
+  "share": "disabled",
+  "provider": {
+    "cloudrift": {
+      "name": "CloudRift Inference",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": ["CLOUDRIFT_API_KEY"],
+      "options": {
+        "apiKey": "{env:CLOUDRIFT_API_KEY}",
+        "baseURL": "{env:CLOUDRIFT_INFERENCE_URL}",
+        "timeout": 600000
+      },
+      "models": {
+        "agent": {
+          "id": "{env:AGENT_MODEL}",
+          "name": "Emmy API agent",
+          "reasoning": false,
+          "tool_call": true,
+          "options": {
+            "chat_template_kwargs": {
+              "enable_thinking": false
+            }
+          }
+        }
+      }
+    }
+  }
+}

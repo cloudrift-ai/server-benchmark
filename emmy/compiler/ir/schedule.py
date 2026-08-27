@@ -6,7 +6,7 @@ value types are used by both the tile IR and the kernel materializer, so they li
 beside :mod:`~emmy.compiler.ir.atom`, not under ``ir/tile``.
 
 **The schedule is separate from the combine.** The combine (the ⊕) lives in the op tree
-(:mod:`emmy.compiler.ir.stmt.algebra` + :mod:`~emmy.compiler.ir.tile.ir`); the
+(:mod:`emmy.compiler.ir.pure.algebra` + :mod:`~emmy.compiler.ir.tile.ir`); the
 schedule — which axes are parallel, how the reduce axis partitions across hardware levels — is the
 **codec value types** here (:class:`ReducePlan` / :class:`TilePlan` / :class:`Stage` /
 :class:`WarpSpec` + :class:`Placement`). The per-node slices live in ``TileOp.schedule`` (1r —
@@ -92,9 +92,8 @@ class FoldMove(enum.Enum):
     """The per-level combine *mechanism* — the placement-keyed fold MOVE, derived from the
     :class:`Level` (where the reduced axis sits), never tuned and never re-decided at a consumer.
     :meth:`ReduceStage.combine` is the ONE selector; every fold emitter consumes its output —
-    ``_factor.emit_combine`` (SHFL butterfly / SMEM tree at scalar residence), ``_twist``'s
-    streaming merge (the same SHFL move realized as a ``FragmentRowReduce`` at fragment
-    residence), and ``030_split_reduce`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
+    ``_factor.emit_combine`` (SHFL butterfly / SMEM tree at scalar residence) and
+    ``030_split_reduce`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
 
     SERIAL = "serial"  # no cross-unit combine (the serial / reg remainder)
     REG = "reg"  # register tree (ILP) — TODO(reg)
@@ -606,7 +605,7 @@ def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Workers | No
 @dataclass(frozen=True)
 class Placement:
     """Kind-neutral free-axis → grid binding (the parallel output axes and their grid
-    mapping). ``010_recognize`` builds an UNMAPPED placement (just ``free``); the schedule
+    mapping). ``010_lift`` builds an UNMAPPED placement (just ``free``); the schedule
     maps every free axis onto ``grid`` (the per-cell tier)."""
 
     free: tuple[Axis, ...] = ()
@@ -641,7 +640,8 @@ class Placement:
 
 
 # --------------------------------------------------------------------------- #
-# The operand-transport + warp-split descriptors. ``Stage`` (sync / cp.async / TMA) is the operand
+# The operand-transport + warp-split descriptors. ``Stage`` (the operand's intermediate storage
+# and fill mechanism) is the operand
 # pipeline; ``WarpSpec`` (the WSPEC worker split) partitions the CTA's warps into producer /
 # compute bands over that fixed pipeline — both resolved scheduler-side and applied verbatim by
 # the materializer (the liveness-scheduled ``lowering/kernel/_stage.pipelined_kloop``, via its
@@ -649,12 +649,15 @@ class Placement:
 # --------------------------------------------------------------------------- #
 
 
-#: The codec transport token (``cp``) vs the canonical stored value (``cp.async``).
-_TRANSPORT_CODEC = {"sync": "sync", "cp": "cp.async", "tma": "tma"}
-_TRANSPORT_SPELL = {v: k for k, v in _TRANSPORT_CODEC.items()}
+#: The transport tokens: the shared-memory intermediate named by its fill mechanism — the
+#: synchronous thread fill (``smem``: a byte copy of materialized edges, or the compute fill
+#: evaluating a computed edge into its slab), ``cp.async`` (``smem-async``) and TMA
+#: (``smem-tma``). An EMPTY ``STAGE`` is no intermediate at all: gmem→register on a
+#: materialized operand, register-to-register on a computed one.
+_TRANSPORTS = ("smem", "smem-async", "smem-tma")
 
 #: The ``STAGE`` grammar, rendered into every parse error so a bad pin names what it could have said.
-_STAGE_EXPECT = "expect d<n> / sync|cp|tma / split / p<n>"
+_STAGE_EXPECT = "expect d<n> / smem|smem-async|smem-tma / p<n>"
 
 
 @dataclass(frozen=True)
@@ -682,7 +685,7 @@ class Stage:
     ``depth`` is the **gmem→smem** ring (a synchronous slot fill or the cp.async / TMA prefetch
     over the serial reduce loop), ``reg_depth`` is the **smem→register** double-buffer (the
     fragment-load ping-pong over the inner atom-K steps, breaking the WAR hazard on the operand fragments). They are
-    orthogonal — ``d3/cp/p2`` is a 3-deep gmem ring feeding a 2-deep register ping-pong.
+    orthogonal — ``d3/smem-async/p2`` is a 3-deep gmem ring feeding a 2-deep register ping-pong.
     ``reg_depth = 1`` (the default) is the "optional register" OFF point (no inner prefetch).
     The slab K-*granularity* (how much K is resident) is ``TilePlan.bk``, NOT a third depth
     here — granularity and buffer depth are kept distinct.
@@ -692,49 +695,39 @@ class Stage:
     byte-identically with and without it."""
 
     depth: int = 1  # gmem→smem ring depth over the reduce loop (1 = single buffer, no prefetch)
-    transport: str = "sync"  # sync | cp.async | tma (the gmem→smem producer)
+    transport: str = "smem"  # smem | smem-async | smem-tma (the intermediate and its fill mechanism)
     smem: tuple[str, ...] = ()  # operands staged through smem (derived at resolution; not in the codec)
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
     bk_elems: int = 0  # contraction slab K-chunk, elements (derived at resolution; not in the codec)
-    # The transport GROUP GRANULARITY: how many transport groups this fold's staged edges are cut
-    # into. Off = ONE transport over all of them (a contraction's single multiply consumes both
-    # edges, so there is one group to cut). On = one transport PER edge, each with its own slab and
-    # mbarrier, so the refills interleave with the phases that no longer read them — the warp-flash
-    # stream's FA-2 choreography, where K refills under softmax + P·V and V under the next step's
-    # Q·K, so a wide (64-key) streaming block overlaps its copies within HALF the paired ring's
-    # smem. Implies the A (query) operand stages through smem too (the freed resident fragments are
-    # what make the wide block's registers fit). Eligible only where the fold has ≥ 2 staged operand
-    # edges consumed at DISTINCT positions of its derived evaluation, which is why the matmul
-    # resolvers decline it.
-    split: bool = False
 
     def __post_init__(self) -> None:
-        if self.transport not in _TRANSPORT_SPELL:
-            raise ValueError(f"bad Stage transport {self.transport!r} (expect sync | cp.async | tma)")
+        if self.transport not in _TRANSPORTS:
+            raise ValueError(f"bad Stage transport {self.transport!r} (expect smem | smem-async | smem-tma)")
         if self.depth < 1:
             raise ValueError(f"Stage depth must be ≥ 1, got {self.depth}")
         if self.reg_depth < 1:
             raise ValueError(f"Stage reg_depth must be ≥ 1, got {self.reg_depth}")
-        if self.split and self.depth != 1:
-            raise ValueError("the per-edge transport split is single-slab (d1) — its overlap comes from the phase split")
 
     @classmethod
     def parse(cls, spec: str | None) -> Stage:
         """Decode the ``STAGE`` knob codec into a stage: ``/``-separated tokens —
-        ``d<depth>`` (gmem→smem ring depth), ``sync`` | ``cp`` | ``tma`` (the transport), an
-        optional ``split`` flag (one transport per staged edge), and an optional ``p<reg_depth>``
-        (smem→register double-buffer depth). Empty / ``None`` = the depth-1 ``sync`` default (the
+        ``d<depth>`` (gmem→smem ring depth), ``smem`` | ``smem-async`` | ``smem-tma`` (the
+        intermediate and its fill mechanism: a synchronous thread fill — byte-copying a
+        materialized edge, evaluating a computed one, converting when the dtypes differ — the
+        cp.async ring, or TMA; the ABSENCE of a stage means no intermediate at all — gmem→register
+        for a materialized operand, register→register evaluation for a computed one), and an
+        optional ``p<reg_depth>`` (smem→register double-buffer depth). Empty / ``None`` = the depth-1 ``smem`` default (the
         caller maps an empty ``STAGE`` to ``stage=None``, the gmem-direct baseline — ``parse`` is
         only reached on a non-empty spec). ``smem`` is filled in later by the scheduler.
 
         Binding is order-free, but each token binds at most ONCE: a repeat has no last-one-wins
-        reading a caller could have meant — ``d2/cp/d3`` would land ``d3/cp`` and ``sync/tma``
-        would land ``d1/tma``, each quietly deploying a kernel the pin did not name. Raises
+        reading a caller could have meant — ``d2/smem-async/d3`` would land ``d3/smem-async`` and ``smem/smem-tma``
+        would land ``d1/smem-tma``, each quietly deploying a kernel the pin did not name. Raises
         ``ValueError`` and only ``ValueError`` on any malformed input (the featurizers degrade on
         it), naming the codec so a bad pin names its knob."""
         s = (spec or "").strip()
         seen: set[str] = set()
-        depth, transport, split, reg_depth = 1, "sync", False, 1
+        depth, transport, reg_depth = 1, "smem", 1
 
         def once(field: str, tok: str) -> None:
             if field in seen:
@@ -742,12 +735,9 @@ class Stage:
             seen.add(field)
 
         for t in s.split("/") if s else ():
-            if t in _TRANSPORT_CODEC:
+            if t in _TRANSPORTS:
                 once("transport", t)
-                transport = _TRANSPORT_CODEC[t]
-            elif t == "split":
-                once("split", t)
-                split = True
+                transport = t
             elif t.startswith("d"):
                 once("d", t)
                 depth = _codec_width(t[1:], tok=t, codec="STAGE")
@@ -756,15 +746,13 @@ class Stage:
                 reg_depth = _codec_width(t[1:], tok=t, codec="STAGE")
             else:
                 raise ValueError(f"bad STAGE token {t!r} ({_STAGE_EXPECT})")
-        return cls(depth=depth, transport=transport, split=split, reg_depth=reg_depth)
+        return cls(depth=depth, transport=transport, reg_depth=reg_depth)
 
     def spell(self) -> str:
         """The ``STAGE`` codec string for this stage (inverse of :meth:`parse`). ``smem`` is
         derived, so it is not spelled; ``reg_depth`` is spelled only when ≥ 2 (the ``p1``
         default is omitted, so an unstaged-register config round-trips byte-identical)."""
-        toks = [f"d{self.depth}", _TRANSPORT_SPELL[self.transport]]
-        if self.split:
-            toks.append("split")
+        toks = [f"d{self.depth}", self.transport]
         if self.reg_depth > 1:
             toks.append(f"p{self.reg_depth}")
         return "/".join(toks)
@@ -773,7 +761,7 @@ class Stage:
     def is_async(self) -> bool:
         """True for the asynchronous-copy transports (``cp.async`` / ``tma``) — the ones
         that issue a commit/wait or mbarrier handshake rather than a plain ``__syncthreads``."""
-        return self.transport in ("cp.async", "tma")
+        return self.transport in ("smem-async", "smem-tma")
 
 
 @dataclass(frozen=True)
@@ -791,7 +779,7 @@ class WarpSpec:
     is ``_legality.producer_transport``: a resolved TMA stage, un-split, on a kernel that is not
     split across CTAs. That is the whole legality rule — the box copy is issued by one elected
     thread onto a slot mbarrier any thread can parity-wait, so the fill moves warps freely, while
-    ``cp.async``'s wait-group is issuing-thread-scoped and a ``sync`` compute-fill has no async load
+    ``cp.async``'s wait-group is issuing-thread-scoped and an ``smem`` compute fill has no async load
     half.
 
     Materialized by the staged K-loop (``lowering/kernel/_stage.staged_kloop``): the producer band

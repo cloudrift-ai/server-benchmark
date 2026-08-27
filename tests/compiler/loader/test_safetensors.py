@@ -120,4 +120,4 @@ def test_pinned_model_id_tags_the_vllm_revision():
 
     assert pinned_model_id(mc("turboderp/GLM-4.5-Air-exl3", "6a309ed6")) == "turboderp/GLM-4.5-Air-exl3@6a309ed6"
     assert pinned_model_id(mc("Qwen/Qwen3-0.6B", None)) == "Qwen/Qwen3-0.6B"
-    assert pinned_model_id(mc("/local/snapshot/dir", None)) == "/local/snapshot/dir"
+    assert pinned_model_id(mc("/local/snapshot/dir", "retained-vllm-revision")) == "/local/snapshot/dir"

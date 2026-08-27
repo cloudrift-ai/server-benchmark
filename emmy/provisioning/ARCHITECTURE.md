@@ -17,7 +17,7 @@ provisioning/
   lease.py        # durable allocation ownership, deletion, and audit
   candidates.py   # iter_candidates: ordered list of allocation attempts
   errors.py       # CapacityExhausted, TerminalProvisionError
-  cloudrift.py    # CloudRift API wrapper (create/delete/wait)
+  cloudrift.py    # CloudRift API wrapper (availability/team resolution/create/delete/wait)
   gcp.py          # gcloud-compute wrapper
   ssh.py          # generic wait_for_ssh
   host.py         # RemoteHost abstraction over an existing SSH target
@@ -36,9 +36,29 @@ provisioning/
    * **CloudRift** → one candidate per base type.
    * **GCP** → one candidate per zone in `hardware.GPU_GCP_ZONES[gpu_name]` (falls back to `DEFAULT_GCP_ZONE`); all zones for the current base type before advancing to the next entry.
 
+A GPU missing from `GPU_INSTANCE_TYPES`, or mapped only to base types the provider no longer stocks, is
+unreachable: `iter_candidates()` raises or yields instance types with no nodes, and the recipe-query availability
+annotation quietly reports the deployment as unavailable rather than failing. Every GPU a recipe declares must
+therefore have a current entry, and the entries stay ordered with the stocked base type first.
+
 The orchestrator tries candidates in this order until one succeeds or all are exhausted. Without a provider filter,
 fallback follows the hardware table across providers. An explicit `--provider` restricts the entire candidate list,
 so callers that request CloudRift are never silently relocated to GCP.
+
+CloudRift rentals can also be pinned to one node (`vm create cloudrift --node <id-or-hostname>`): the rent request
+then uses the `ByNodeId` selector instead of `ByInstanceTypeAndLocation`, and `resolve_node_id()` turns a hostname
+into the node UUID via `/api/v1/nodes/list` (an operator-only endpoint — customers pass the UUID). A pinned node has
+no placement fallback, so the pin lives on the single-shot provider command, not the candidate orchestrator.
+
+Every CloudRift rental carries free-form tags for later filtering on listings. `create_instance` resolves them
+through `emmy.config.rental_tags()` — repeatable `--tag` flags win, else the comma-separated `EMMY_RENTAL_TAGS` env
+var (how an experiment run or CI job labels its whole rental lane), else the default `emmy` tag.
+
+`providers.cloudrift.team_id` assigns a rental to that exact team UUID, and `validate_team_id_access` proves the API
+key can act for the UUID through a team-scoped account request. Automation must pass an explicit UUID rather than
+inferring that a key rejected by the user-only team-list endpoint is necessarily team-scoped. `resolve_team_id` remains
+available for interactive user keys that can list one exact visible team name. `providers.cloudrift.with_public_ip`
+defaults to true for compatibility; callers on a reachable private network can disable public-IP allocation.
 
 For each candidate, the orchestrator makes up to `SAME_CANDIDATE_RETRIES` (= 2) attempts on transient errors. On the contracted exceptions it short-circuits:
 
@@ -65,7 +85,13 @@ after allocation.
 `emmy vm create gpu --lease PATH --owner ID` enables the observer. `emmy vm delete lease` validates the exact owner,
 deletes only the recorded handle, retries and polls provider state, then marks the lease deleted. `emmy vm audit
 lease` independently fails while that handle remains active. A missing lease is an idempotent no-op; an owner mismatch
-is always a hard refusal.
+is always a hard refusal. CloudRift's `Deactivating` state acknowledges that termination is scheduled, so cleanup and
+lease audit accept it without waiting for the provider's asynchronous transition to a terminal state.
+
+Run-unique automation may add a second ownership check with `terminate_instances_by_tags()`. It requires at least one
+non-empty tag, lists instances carrying every supplied tag across the caller's visible personal/team scope, terminates
+all nonterminal matches in one request, and polls until none remain. The complete run-specific tag set is the safety
+boundary; broad or empty tag cleanup is invalid.
 
 **Timing:** `bench` (`benchmark/execution.py`) wraps `provision_cloud_vm()` → `vm_provision` and `provision_remote()`
 → `remote_provision` in a timer. These run once per `ExecutionGroup` (shared VM) but are seeded into each task's timer,
@@ -75,10 +101,9 @@ so every task's result reflects its host's stand-up cost. `vm_provision` is omit
 ## Command source staging
 
 Command recipes stage only the Git-visible files under their declared paths: tracked and untracked files are included,
-while ignored files are excluded. Staging returns a manifest containing the Git revision, selected paths, per-file
-SHA-256 digests, working-tree status, and a content-derived source ID. `command.strict` rejects dirty selected paths
-before any transfer. The same manifest is retained in the command result, binding a measurement to the bytes sent to
-the remote host without requiring a `.git` directory there.
+while ignored files are excluded. `command.strict` rejects dirty selected paths before any transfer. Staging returns
+the invoking worktree's revision and path-scoped dirty flag to the benchmark runner, which records that source instead
+of deriving provenance from the installed package or a reused remote source tree.
 
 ## Error contract
 
@@ -116,6 +141,19 @@ Both providers swallow termination errors and log them — the original failure 
 Mismatches leave the GPU unusable because the wrong kernel-module flavor is on disk. The proprietary-driver image
 mirrors the recipe CloudRift's `rift-console` surfaces only for hosts whose `brand_short` matches `/\bV100|P100\b/`.
 
+## NVSwitch hosts need Fabric Manager
+
+On NVSwitch-connected baseboards — V100 SXM3 (DGX-2/HGX-2) and the SXM A100/H100 HGX boards — the switch fabric must
+be trained before CUDA will initialize. Until it is, `nvidia-smi` cheerfully lists every GPU while each process dies
+at `cudaGetDeviceCount()` with `error 802: system not yet initialized`, so the failure surfaces deep inside engine
+worker startup and reads like a model or engine bug rather than a missing host service.
+
+`remote._ensure_fabric_manager` closes that gap as the last `provision_remote` step. It detects an NVSwitch host from a
+non-empty `/proc/driver/nvidia-nvswitch/devices/` and is a no-op everywhere else, including when the service is already
+running. Fabric Manager refuses to run against a mismatched driver, so the package is pinned to the running driver's
+exact version, resolved out of `apt-cache madison` rather than guessed — Ubuntu's archive and NVIDIA's CUDA repo
+publish different revision suffixes (`-1`, `-1ubuntu1`, `-0ubuntu0.24.04.1`) for the same driver.
+
 ## CloudRift API protocol version
 
 Every CloudRift request carries an envelope `{"version": API_VERSION, "data": {...}}`. The server versions its public
@@ -125,7 +163,12 @@ to `2026-08-05`, the current public generation for the instance endpoints used h
 `~upcoming` (CloudRift's own client default) so a future server
 release can't change request/response shapes under us.
 
-Two v059-era behaviours the client relies on:
+CloudRift API behaviours the client relies on:
+
+* **Availability.** `instance-types/list` exposes per-variant `available_nodes`. Automated selection treats a variant
+  as available when that count is positive and does not use public-IP capacity as a selection constraint.
+* **Team ownership.** `instances/rent.team_id` makes the team account own the rental. A user API key must belong to the
+  selected team; CloudRift rejects a mismatched team rather than falling back to the user's personal account.
 
 * **`instances/list` mask.** v058 added a `mask` (`with_connection_info` / `with_hardware_info` / `with_usage_info`,
   all default-false) and honours it for v058+ callers — older callers were force-fed `ALL`. `_get_instance_info` sends

@@ -58,7 +58,7 @@ def test_bench_dry_run_tinyllama_block(run_cli, tmp_path):
     """
     # Isolate config so the test doesn't depend on the user's config.yaml.
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("benchmark:\n  local_results_dir: " + str(tmp_path / "results") + "\n")
+    config_path.write_text("benchmark: {}\n")
     recipe_dir = os.path.join(str(PROJECT_ROOT), "experiments", "tinyllama-block")
 
     rc, stdout, stderr = run_cli(

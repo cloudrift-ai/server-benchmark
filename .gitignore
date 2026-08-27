@@ -34,18 +34,15 @@ nginx.vllm.conf
 tests/perf/.results/
 _test_data
 
-# Experiment outputs
+# Experiment inputs and last-run artifacts are selectively force-added.
 /experiments/
-# Benchmark output is local. The only committed benchmark artifact is
-# recipes/<model>/RESULTS.md; experiment recipe.yaml files are force-added inputs.
+# A checkout-root results directory is not an experiment artifact.
 /results/
-recipes/*/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/*
-recipes/*/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/recipe.yaml
+# Preserve local output from pre-record checkouts without exposing it as untracked content.
+recipes/*/20??-??-??_*/
 recipes/**/benchmark*.log
-recipes/**/instances.json
-recipes/**/tasks.json
 
-# Claude Code per-user local settings (skills/agents under .claude/ are tracked)
+# Claude Code per-user local settings (.claude/skills contains tracked compatibility links)
 .claude/settings.local.json
 *-dump/
 .claude/scheduled_tasks.lock

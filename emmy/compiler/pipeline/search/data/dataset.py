@@ -5,8 +5,10 @@ and the two grouping axes the consumers need.
 The two groupings are deliberately distinct and do **not** collapse:
 
 - :meth:`group_by_op` keys on the full ``S_*`` structural signature — two different
-  shapes are different groups. This is what the prior diagnostics
-  (reachability / calibration / coverage) need.
+  shapes are different groups. The golden joins in ``prior/diagnostics.py`` index on it.
+  It is deliberately NOT a comparison key: it carries no card and no ``H_opt``, so rows
+  measured on different hardware or under different nvcc settings land in one group.
+  Anything ranking measured latencies wants ``data/group.group_measured`` instead.
 - :meth:`group_by_kernel_name` keys on the kernel C identifier (parsed from
   ``cuda_op.pretty``) — which *merges* shapes of the same kernel, by design, so the
   per-knob regret analysis measures relative knob impact across shapes.
@@ -93,15 +95,6 @@ class Dataset:
         ``FallbackPrior`` (it delegates ``_dataset`` to the online half)."""
         return cls([Sample.from_prior_row(k, v) for k, v in prior._dataset])
 
-    @classmethod
-    def from_node_rows(cls, rows) -> Dataset:
-        """Search-tree ``node`` rows (:meth:`SearchDB.iter_nodes`) as samples — each
-        node's full feature dict + value-of-position latency, split into
-        tunable/``H_*``/``S_*`` exactly like a reservoir row. Pure transform (no
-        I/O), so the caller reads the rows once and can also group them by
-        ``parent_key`` for the fork-ranking diagnostic."""
-        return cls([Sample.from_prior_row(r.features, r.value_us) for r in rows])
-
     # --- grouping ----------------------------------------------------------
 
     @staticmethod
@@ -115,11 +108,12 @@ class Dataset:
 
         ``by`` selects the axis:
 
-        - ``"op"`` — key on ``op_sig``: leave-one-op-out. An op's -O1 tree, its
-          -O3 regime rows, and its ``bench_fail`` leaves all share one ``op_sig``
-          (and ``parent_key`` edges never leave an op's tree), so the whole op
-          moves to one side atomically — a row-level split would leak the
-          value-correlated parent/child chains and the O1/O3 twins.
+        - ``"op"`` — key on ``op_sig``: leave-one-op-out. An op's whole search tree and its
+          ``bench_fail`` leaves share one ``op_sig`` (and ``parent_key`` edges never leave an
+          op's tree), so the whole op moves to one side atomically — a row-level split would leak
+          the value-correlated parent/child chains. A store written before sweeps moved to the
+          deployable regime also holds that op's rows under two opt levels; those move together
+          too, for the same reason.
         - ``"gpu"`` — key on ``gpu``: leave-one-GPU-out (cross-hardware transfer).
 
         ``"run"`` is **rejected**: ``run_id`` is provenance, not a fold axis — the

@@ -22,6 +22,7 @@ from emmy.commands.compile import (
     setup_pipeline_runtime,
     validate_trace_adapter_args,
 )
+from emmy.compiler.context import split_opt_level
 from emmy.compiler.pipeline import TuningSearch
 from emmy.compiler.pipeline.search.working_golden import (
     WorkingGoldenTarget,
@@ -33,6 +34,12 @@ from emmy.compiler.pipeline.search.working_golden import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The nvcc flags a sweep measures under — deliberately the SAME default as ``compile`` / ``run``
+# (``""`` = nvcc's own -O3, the deployable regime). Tuning measures in the regime it deploys into,
+# so a tuned latency is the deployed one and one context key serves both. Named rather than a bare
+# literal because that identity is the invariant, not the value.
+TUNE_NVCC_DEFAULT = ""
 
 
 def register_tune_command(subparsers):
@@ -108,7 +115,7 @@ def register_tune_command(subparsers):
         "-b",
         action="store_true",
         help=(
-            "After tuning, re-bench the winner at -O3 (deployable numbers, NOT the -O1 ranking pass): the full "
+            "After tuning, bench the winner end to end: the full "
             "compiled model and each individual kernel (via its in-memory frontend provenance slice) vs eager "
             "PyTorch / torch.compile / Emmy, then print a comparison table. Writes an HTML per-kernel chart "
             "to <dump-dir>/kernels.html when a dump dir is set. Can take minutes on a large model."
@@ -177,15 +184,28 @@ def _tune_backend(device_id: int | None = None):
     ``_bench_worker`` **subprocess** (``bench_wall_timeout_s`` set → the isolated
     path in ``benchmark_async``), so a wedged kernel dies
     with the worker and the **parent** CUDA stream stays clean. Tight per-variant
-    budgets: tune benches isolated single kernels at -Xcicc -O1 (fast), but the
-    big-N warp-MMA variants (fp16 N=28672, ``matmul.mlp_gate_up.h4096``) need ~5 s
-    of cicc even then — a 4 s compile budget would record that whole family as
-    bench failures and lock it out of the sweep, hence 12 s; 2 s run is ample and the wall SIGKILLs any runaway
-    (keeping a ~2 s margin over compile+run). ``device_id`` pins the async bench
-    worker to a physical GPU (multi-GPU tune)."""
+    budgets: 12 s compile (measured headroom — the slowest kernel in a 4,888-compile sweep of
+    this inventory needed 1.4 s, and the budget also covers cubin load, buffer alloc and TMA
+    descriptor prebuild, which that sweep did not measure); 2 s run is ample. A config that
+    overruns the compile budget is REPORTED, not recorded (see ``CompileBudgetExceeded``), which
+    is why the wall must not pre-empt it. ``device_id`` pins the async bench worker to a physical
+    GPU (multi-GPU tune)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
-    return CudaBackend(bench_compile_timeout_s=12.0, bench_run_timeout_s=2.0, bench_wall_timeout_s=16.0, device_id=device_id)
+    compile_s, run_s = 12.0, 2.0
+    # The wall cap must sit ABOVE the in-child budgets, not beside them (the same formula the
+    # pinned path uses). A wall that can fire first silently converts the two honest in-child
+    # verdicts into one SIGKILL: a compile that overran is checked only when it RETURNS, so under
+    # the old ~2 s margin any compile slower than the wall was killed instead, and recorded as a
+    # sticky ``bench_fail`` — precisely the wide-tile family the compile budget exists to report.
+    # Hangs are still caught promptly in-child by the per-launch watchdog; the wall is a backstop
+    # for a wedged worker, and 60 s of headroom is what lets that watchdog's first-iter grace fire.
+    return CudaBackend(
+        bench_compile_timeout_s=compile_s,
+        bench_run_timeout_s=run_s,
+        bench_wall_timeout_s=compile_s + run_s + 60.0,
+        device_id=device_id,
+    )
 
 
 async def _warm_tune_backends(backends) -> None:
@@ -281,7 +301,11 @@ def _context_for_device(device_id: int | None, *, target: str | None = None):
     raw_name = str(raw_name) if raw_name is not None else None
     spec = gpu.by_name(raw_name) if raw_name else None
     gpu_name = spec.name if spec else raw_name
-    ctx = Context.from_target(cap, gpu_name=gpu_name)
+    # Only a REGISTERED name goes to ``from_target`` — it raises on one it cannot resolve, and here
+    # that is the wrong answer: the card is physically present, so the live probe below supplies its
+    # real properties and the registry is only a fallback base. An unregistered card keeps its raw
+    # name on the returned context; it just does not pretend to have memorized specs.
+    ctx = Context.from_target(cap, gpu_name=spec.name if spec else None)
     fallback = ctx.device_props
     feature_keys = {
         "sm_count": "multiProcessorCount",
@@ -327,7 +351,7 @@ def _tune_one(
     import time
 
     from emmy.commands.tune_progress import TuneProgress
-    from emmy.compiler.pipeline.search.two_level import run_two_level_tune
+    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
 
     graph, _, bench_bundle = load_or_trace(args)
     if dump:
@@ -355,6 +379,7 @@ def _tune_one(
             ctx=ctx,
             max_candidates=getattr(args, "max_candidates", None),
             prior=prior,
+            run_id=run_id,
         )
         # Working-file feedback is durable as soon as its measurements finish;
         # an interrupted/failed MCTS must not discard already-paid proposal data.
@@ -362,9 +387,7 @@ def _tune_one(
             proposal_ranking_callback(rankings)
         budget = getattr(args, "max_candidates", None)
         remaining = None if budget is None else max(0, budget - min(len(proposals), budget))
-        result = await run_two_level_tune(
-            graph,
-            ctx=ctx,
+        strategy = TwoLevelStrategy(
             db=db,
             backends=backends,
             patience=patience,
@@ -377,6 +400,7 @@ def _tune_one(
             max_candidates=remaining,
             prior=prior,
         )
+        result = await strategy.run(graph, ctx)
         return result, rankings
 
     try:
@@ -470,7 +494,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
     """
     from emmy.commands.tune_progress import TuneProgress
     from emmy.compiler.pipeline.search.prior import load_prior
-    from emmy.compiler.pipeline.search.two_level import run_two_level_tune
+    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
 
     prepared = []
     temp_dumps: list[Path] = []
@@ -506,6 +530,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                 ctx=ctx,
                 max_candidates=getattr(args, "max_candidates", None),
                 prior=prior,
+                run_id=run_id,
             )
             if target.proposals:
                 persist_proposal_rankings(args.golden_file, document, target, rankings)
@@ -517,9 +542,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
         async def tune_target(index, target, graph, dump):
             budget = getattr(args, "max_candidates", None)
             remaining = None if budget is None else max(0, budget - min(len(target.proposals), budget))
-            return await run_two_level_tune(
-                graph,
-                ctx=ctx,
+            return await TwoLevelStrategy(
                 db=db,
                 backends=backends,
                 patience=patience,
@@ -534,7 +557,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                 manage_prior=False,
                 backend_slots=slots,
                 close_backends=False,
-            )
+            ).run(graph, ctx)
 
         try:
             results = await asyncio.gather(
@@ -588,7 +611,7 @@ def handle_tune(args):
         sys.exit(2)
     if not args.code and not args.input and not getattr(args, "golden_file", None):
         # No op to tune → offline mode: refit the online prior on its persisted
-        # dataset and print diagnostics (reachability, calibration, golden coverage).
+        # dataset and print what that dataset covers.
         _tune_offline(args)
         return
 
@@ -617,16 +640,17 @@ def handle_tune(args):
     from emmy.compiler.pipeline.search import SearchDB
 
     setup_pipeline_runtime(args)
-    # tune compiles at -Xcicc -O1 by default to dodge a cicc/LLVM blowup on big
-    # unrolled register-tile kernels (up to ~200x faster compile). The trade-off:
-    # -O1 latencies are a RANKING signal, NOT -O3-optimal — reduction / attention
-    # kernels can run 1.5-3x slower. Re-bench the winner at -O3 (``tune --bench``,
-    # or ``emmy run --bench``) for deployable numbers.
-    nvcc_flags = apply_nvcc_flags(args, default="-Xcicc -O1")
-    if "-O1" in nvcc_flags or "-O0" in nvcc_flags:
-        logger.info(
-            "tune compiling at cicc %s — latencies are a RANKING signal, not -O3-optimal",
-            "-O1" if "-O1" in nvcc_flags else "-O0",
+    # tune measures in the DEPLOYABLE regime — the same default as compile / run, so a tuned
+    # latency is the latency the deploy gets. It used to rank at ``-Xcicc -O1`` for compile speed;
+    # that saved nothing measurable on current codegen and mis-ranked by tile area, so a sweep
+    # under non-deployable flags is now an explicit opt-in that earns a warning: its rows key to
+    # their own regime and no deploy will read them.
+    nvcc_flags = apply_nvcc_flags(args, default=TUNE_NVCC_DEFAULT)
+    if split_opt_level(nvcc_flags)[0] != 3:
+        logger.warning(
+            "tune compiling at cicc -O%d — NOT the deployable regime: these latencies rank only "
+            "against each other, and nothing measured here will be read by a deploy",
+            split_opt_level(nvcc_flags)[0],
         )
 
     db_path = resolve_tune_db()  # ``EMMY_TUNE_DB`` env overrides the default path
@@ -651,7 +675,7 @@ def handle_tune(args):
     # One session id per CLI invocation (a golden sweep = one collection session) —
     # stamped on every node row this run writes, so cross-run keep-min drift in the
     # node store is traceable to its tune session.
-    from emmy.compiler.pipeline.search.two_level import _mint_run_id
+    from emmy.compiler.pipeline.search.strategy.two_level import _mint_run_id
 
     run_id = _mint_run_id()
 
@@ -808,8 +832,7 @@ _PER_KERNEL_BENCH_WALL_S = 120.0
 
 
 def _run_bench(args, bench_bundle, assembled, dump, *, html_dir, device_id: int | None = None) -> None:
-    """``tune --bench``: re-bench the tuned winner at -O3 (deployable numbers, NOT the
-    -O1 ranking pass) — full model **against the real torch module** (eager /
+    """``tune --bench``: bench the tuned winner — full model **against the real torch module** (eager /
     torch.compile / Emmy) and each in-memory per-kernel frontend slice against
     its torch-ref reconstruction, each in the SIGKILL-able bench worker so a hung kernel
     can't wedge the run. Prints both tables and (when ``html_dir`` is set) writes an HTML
@@ -821,14 +844,12 @@ def _run_bench(args, bench_bundle, assembled, dump, *, html_dir, device_id: int 
     from emmy.compiler.backend.cuda.program import benchmark_compare_isolated_async
     from emmy.compiler.pipeline.search.db import SearchDB
 
-    # Re-bench at -O3 (deployable) unless the user explicitly pinned --nvcc-flags;
-    # tune searched at -O1, which is a ranking signal only. The lowering-fork
-    # selection that tuning recorded is keyed by Op.cache_key (opt-level independent),
-    # so the -O1-tuned winners are still picked when re-benching here at -O3.
-    bench_flags = args.nvcc_flags if args.nvcc_flags is not None else ""
-    os.environ[config.NVCC_FLAGS] = bench_flags
+    # The sweep's own flags, already published by ``apply_nvcc_flags`` — the bench measures in the
+    # regime the search measured in. Re-forcing a regime here would report a number for a compile
+    # the search never made.
+    bench_flags = config.nvcc_flags()
     bench_ctx = _context_for_device(device_id, target=getattr(args, "target", None))
-    sys.stderr.write(f"\n[tune] --bench: re-benching at -O3 ({bench_flags or 'nvcc default -O3'}) — deployable numbers\n")
+    sys.stderr.write(f"\n[tune] --bench: {bench_flags or 'nvcc default -O3'}\n")
 
     # Build the bench backend with EMMY_DUMP_DIR cleared: CudaBackend defaults its
     # dump to CompilerDump.from_env(), whose __post_init__ would replace the dump dir.

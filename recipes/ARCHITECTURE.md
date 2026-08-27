@@ -10,13 +10,69 @@ emmy deploy cloud --recipe recipes/<model>          # provisions the VM first
 ```
 
 `emmy deploy` leaves the stack running and prints the endpoint (`--teardown` is the opt-in that stops it instead), so
-a recipe is a deployable artifact. The recipe format itself — matrices, `cross`/`zip`, deep merge, `extra_args`
-validation, `docker_options`, command recipes — is documented in
+maintained and best-effort recipes are deployable artifacts. Obsolete recipes and untested onboarding shells also live
+here for lifecycle continuity, but their tags disable deployment. The recipe format itself — lifecycle tags, matrices,
+`cross`/`zip`, deep merge, `extra_args` validation, `docker_options`, command recipes — is documented in
 [`emmy/recipe/ARCHITECTURE.md`](../emmy/recipe/ARCHITECTURE.md); this file is about **what belongs here** and why.
 
-Every `recipe.yaml` here also ships inside the published wheel, so `pip install emmy-ml` can deploy without a
-checkout: `--recipe <model>` (a bare name, no path) copies the bundled recipe into the current directory and uses
-that. Only the recipe files travel — `RESULTS.md` and local benchmark output do not.
+Every runnable `recipe.yaml` here also ships inside the published wheel. `--recipe <model>` (a bare name, no path)
+copies from this live tree in an editable install or from the packaged catalog in a wheel install, then uses that
+working copy. Obsolete recipes and onboarding shells remain repository-only, while canonical model goldens ship for
+all lifecycle states because they remain deploy evidence. `RESULTS.md` and local benchmark output do not travel.
+
+## Canonical model goldens
+
+A reviewed model golden belongs beside the recipe whose exact checkpoint it describes:
+
+`recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`
+
+Keep exactly one file per exact GPU in each recipe. The recipe directory already identifies the model, so the file
+name identifies only the GPU and compute capability; merge new realizations into that file instead of adding a second
+model- or run-suffixed YAML. Preserve the document's exact model and optional revision provenance. Model-agnostic
+hardware/kernel goldens have no recipe owner and remain under `emmy/compiler/pipeline/search/goldens/`.
+
+If complete compiler qualification produces a model golden before serving qualification produces a runnable recipe,
+create the normal `onboarding`/`untested` shell first and store the golden beneath it. The nightly `onboard-model`
+workflow owns repository validation, strict decode, and exact-GPU replay for recipe-local goldens; per-commit tests do
+not load checked-in golden YAML.
+
+## Lifecycle
+
+Discovery keeps exactly ten fully configured recipes tagged `maintained` for periodic testing and optimization. Other
+useful complete recipes are tagged `best-effort`: they remain runnable and bundled, but are not selected for periodic
+work. `obsolete` is reserved for a recipe with an all-around better replacement for the same task at a comparable or
+lower practical VRAM footprint and no retained material advantage in capability or operation, or a clear technical
+reason the recipe should no longer be used. Discovery demotes an invalid obsolete proposal to `best-effort` when the
+named replacement is inactive or serves a different task; the memory comparison itself is agent reasoning under the
+shared `prompts/model-fit.md` contract, not a repository check. Each lifecycle decision records its current rationale
+directly under `model`. Discovery also refreshes each recipe's 0-100 `model.heat`, which ranks current onboarding
+interest without changing serving behavior. Obsolete recipes are retained rather than deleted, so their configuration
+and evidence stay available and a later reassessment can return one to the maintained or best-effort set. New
+discoveries start as minimal shells:
+
+```yaml
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: org/model
+  rationale: Brief evidence-backed reason.
+  heat: 90
+  task: generate
+matrices:
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 1
+  - deploy.gpu: NVIDIA H100 80GB
+    deploy.gpu_count: 2
+```
+
+The one to three matrix entries are proposed qualification setups, not measured targets. Each is sized by a discovery
+fit subagent from the checkpoint's published configuration, and a later discovery run may re-size a shell that is
+still untested — a shell's hardware is a current estimate, not a commitment. A candidate nothing in the fleet can
+serve yields no shell at all. There is no onboarding-shell count limit; scheduled onboarding chooses the available
+shell with the highest heat. The shell is a handoff to model
+onboarding, not a serving claim. It becomes runnable only after qualification replaces the shell with a complete
+configuration and the `best-effort` lifecycle tag, while preserving its heat until discovery refreshes it.
 
 ## recipes/ vs experiments/
 
@@ -86,7 +142,8 @@ sweep rather than guessing (`release-serving-image` skill, Step 4).
    [`docker/vllm-emmy-serve/ARCHITECTURE.md`](../docker/vllm-emmy-serve/ARCHITECTURE.md). The headroom sweep there
    produces the shape the recipe must match.
 2. Add `recipes/<model>/recipe.yaml` pinning that image and that shape, one variant, no `benchmark:` block.
-3. If a configuration choice needs justifying, put the A/B in `experiments/<model>/<name>/` and reference the
+3. Store each qualified GPU's compiler evidence in `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`.
+4. If a configuration choice needs justifying, put the A/B in `experiments/<model>/<name>/` and reference the
    finding from the recipe's header comment — not the grid itself.
 
 Every qualified final recipe has one compact, self-contained `RESULTS.md` beside it. It embeds the best complete

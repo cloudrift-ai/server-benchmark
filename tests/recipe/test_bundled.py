@@ -8,7 +8,7 @@ reading the real one, so the suite behaves the same either way.
 import pytest
 
 from emmy.recipe import bundled
-from emmy.recipe.bundled import resolve_recipe_dir
+from emmy.recipe.bundled import bundled_root, default_recipe_root, editable_recipe_root, resolve_recipe_dir
 
 
 @pytest.fixture
@@ -18,6 +18,7 @@ def fake_package(tmp_path, monkeypatch):
     (packaged / "Qwen3-Embedding-0.6B").mkdir(parents=True)
     (packaged / "Qwen3-Embedding-0.6B" / "recipe.yaml").write_text("model:\n  name: Qwen/Qwen3-Embedding-0.6B\n")
     monkeypatch.setattr(bundled, "files", lambda _package: packaged)
+    monkeypatch.setattr(bundled, "__file__", str(tmp_path / "site-packages" / "emmy" / "recipe" / "bundled.py"))
     return packaged
 
 
@@ -30,6 +31,34 @@ def test_existing_directory_is_used_as_given(tmp_path, monkeypatch):
     assert resolve_recipe_dir(str(local)) == str(local)
 
 
+def test_bundled_root_returns_packaged_recipe_directory(fake_package):
+    with bundled_root() as root:
+        assert root == fake_package
+
+
+def test_default_root_prefers_live_recipes_in_an_editable_checkout(tmp_path, monkeypatch, fake_package):
+    checkout = tmp_path / "checkout"
+    source_file = checkout / "emmy" / "recipe" / "bundled.py"
+    source_file.parent.mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text("[project]\nname = 'emmy-ml'\n")
+    recipes = checkout / "recipes"
+    recipes.mkdir()
+    monkeypatch.setattr(bundled, "__file__", str(source_file))
+
+    assert editable_recipe_root() == recipes
+    with default_recipe_root() as root:
+        assert root == recipes
+
+
+def test_default_root_uses_package_bundle_outside_a_checkout(tmp_path, monkeypatch, fake_package):
+    installed_file = tmp_path / "site-packages" / "emmy" / "recipe" / "bundled.py"
+    monkeypatch.setattr(bundled, "__file__", str(installed_file))
+
+    assert editable_recipe_root() is None
+    with default_recipe_root() as root:
+        assert root == fake_package
+
+
 def test_bundled_name_materializes_a_local_copy(tmp_path, monkeypatch, fake_package):
     """deploy writes its compose file into the recipe dir, so site-packages will not do."""
     monkeypatch.chdir(tmp_path)
@@ -40,6 +69,21 @@ def test_bundled_name_materializes_a_local_copy(tmp_path, monkeypatch, fake_pack
     copied = tmp_path / "Qwen3-Embedding-0.6B" / "recipe.yaml"
     assert copied.is_file()
     assert "Qwen3-Embedding-0.6B" in copied.read_text()
+
+
+def test_editable_recipe_name_materializes_from_live_checkout(tmp_path, monkeypatch):
+    checkout = tmp_path / "checkout"
+    source_file = checkout / "emmy" / "recipe" / "bundled.py"
+    source_file.parent.mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text("[project]\nname = 'emmy-ml'\n")
+    recipe = checkout / "recipes" / "live-model" / "recipe.yaml"
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text("model:\n  name: org/live-model\n")
+    monkeypatch.setattr(bundled, "__file__", str(source_file))
+    monkeypatch.chdir(tmp_path)
+
+    assert resolve_recipe_dir("live-model") == "live-model"
+    assert (tmp_path / "live-model" / "recipe.yaml").read_text() == recipe.read_text()
 
 
 def test_local_directory_shadows_a_bundled_name(tmp_path, monkeypatch, fake_package):

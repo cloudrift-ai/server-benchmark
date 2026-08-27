@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from emmy.compiler.backend.plan_cache import PlanTemplateCache
 from emmy.compiler.graph import Graph, Tensor
@@ -34,6 +35,13 @@ def _split_graph() -> Graph:
     g.inputs = ["x"]
     g.outputs = ["y"]
     return g
+
+
+def test_compile_split_rejects_multiple_expert_input_formats():
+    from emmy.serving.gen_runner import _compile_split
+
+    with pytest.raises(ValueError, match="expert input formats are mutually exclusive"):
+        _compile_split(None, [], None, np.dtype("float16"), quant_specs={"weight": object()}, mxfp4_specs={"weight": object()})
 
 
 def test_compile_split_reuses_plan_but_builds_fresh_programs_and_weights(monkeypatch):

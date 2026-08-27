@@ -35,8 +35,23 @@ def _erf(x):  # numpy lacks an erf ufunc; scipy ships one and is a torch dep.
     return erf(x)
 
 
+def _arange(x):
+    """Elementwise ``arange`` — each element's value is its own (row-major) index.
+
+    Persisted programs spell a folded ``aten.arange`` as this elementwise op over the stop
+    value broadcast to the output extent (the current tracer emits ``RangeOp`` instead, so
+    the spelling only arrives from stored wire payloads). ``np.arange`` itself is NOT
+    elementwise — a multi-element operand hits its scalar coercion (``bool``/``float``) and
+    raises — so the interpreter needs the vectorized equivalent: an index ramp in the
+    operand's shape and dtype.
+    """
+    x = np.asarray(x)
+    return np.arange(x.size, dtype=x.dtype).reshape(x.shape)
+
+
 _NAME_TO_FN: dict[str, object] = {
     "exp_fast": np.exp,  # the FAST_EXP-lowered exp — host semantics identical, CUDA renders __expf
+    "arange": _arange,
     "rsqrt": lambda x: 1.0 / np.sqrt(x),
     "relu": lambda x: np.maximum(0.0, x),
     "sigmoid": lambda x: 1.0 / (1.0 + np.exp(-x)),
@@ -46,6 +61,10 @@ _NAME_TO_FN: dict[str, object] = {
     "gelu": lambda x: 0.5 * x * (1.0 + _erf(x / np.sqrt(2.0))),
     "gelu_tanh": lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3))),
     "copy": lambda x: x,
+    # ``aten.pad`` reaches the generic elementwise spelling only when every pad width is zero.
+    # The tracer rejects every non-empty pad before this point, so the stored unary op is an
+    # identity (kept distinct from ``copy`` for frontend provenance).
+    "pad": lambda x: x,
     "where": np.where,
     # Generic scalar same-width bit reinterpretation. The destination dtype lives on the
     # enclosing Assign/Tensor; source renderers spell the bitcast from both SSA dtypes.
@@ -114,8 +133,7 @@ class ElementwiseImpl:
     # consumer exists — but DO NOT add unused semirings (simplicity-first).
     _SEMIRING: dict[str, frozenset[str]] = {"add": frozenset({"multiply"})}
     # Storage-decode ops — op name → the bits-carrier storage dtype token the op is
-    # the decode cast for. This is the trait the tile binding arm (the k-invariant
-    # factor hoist, ``_atomize``) keys on instead of op-name lists: a new storage
+    # the decode cast for. This is the trait storage lowering keys on instead of op-name lists: a new storage
     # format registers its decode op here (one ``_NAME_TO_FN`` entry + one row)
     # and the binding arm covers it without change.
     _DECODES: dict[str, str] = {"from_f8e4m3": "f8e4m3", "from_f8e5m2": "f8e5m2"}

@@ -1,0 +1,16 @@
+# Compiler and task-local serving qualification target. The exact MXFP4 checkpoint traces and passes generation
+# correctness on four V100s, but its task-local image is unpublished and no full-coverage canonical golden is
+# available. This therefore remains an onboarding shell. The routing experiment under experiments/gpt-oss-120b
+# records the qualification.
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: openai/gpt-oss-120b
+  rationale: "Strong HF downloads and likes drive breakout attention."
+  heat: 92
+  revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA Tesla V100 SXM3 32GB
+  deploy.gpu_count: 4

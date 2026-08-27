@@ -15,11 +15,12 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.pipeline import TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import flatten_leaves
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import canonical_row_key, family_of
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.space import TILE
+from emmy.compiler.pipeline.search.space import REDUCE, TILE
 
 
 def _matmul_graph(n: int = 1, dtype: str = "f32") -> Graph:
@@ -36,16 +37,15 @@ def _matmul_graph(n: int = 1, dtype: str = "f32") -> Graph:
 
 
 def _resolve(ctx: Context, graph: Graph) -> list[tuple]:
-    """Resolve ``graph``'s forks on option-0, returning every TILE-fork leaf's row identity."""
+    """Resolve ``graph``'s forks on the first emitted leaf, returning its row per TILE fork."""
     idents: list[tuple] = []
 
     def decide(fp):
-        leaves = flatten_leaves(fp.options)
-        for leaf in leaves:
-            row = dict(getattr(leaf, "knobs", {}) or {})
-            if any("TILE" in family_of(k) for k in row):
-                idents.append(canonical_row_key(row))
-        return leaves[0]
+        leaf = next(iter_leaves(fp.options))
+        row = dict(getattr(leaf, "knobs", {}) or {})
+        if any("TILE" in family_of(k) for k in row):
+            idents.append(canonical_row_key(row))
+        return leaf
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)
     return idents
@@ -91,10 +91,19 @@ def test_a_dtype_change_keys_a_different_pool() -> None:
     original incident: one shared ctx, an f16 then an f32 SDPA trace, and the f32 fork came back
     with 24 warp geometries."""
     ctx = Context.from_target((12, 0))
-    f32 = _resolve(ctx, _matmul_graph())
-    f16 = _resolve(ctx, _matmul_graph(dtype="f16"))
+    _resolve(ctx, _matmul_graph())
+    before = set(ctx.session_cache._store)
+    _resolve(ctx, _matmul_graph(dtype="f16"))
     assert ctx.session_cache.misses >= 2, "an f16 twin must enumerate its own pool"
-    assert set(f16) != set(f32), "the f16 pool must differ (the warp tier is dtype-gated)"
+    new = set(ctx.session_cache._store) - before
+    assert len(before) == len(new) == 1
+    f32 = ctx.session_cache._store[next(iter(before))]
+    f16 = ctx.session_cache._store[next(iter(new))]
+
+    def sample(pool):
+        return tuple(canonical_row_key(dict(pool.rows[i])) for i in {0, len(pool.rows) // 2, len(pool.rows) - 1})
+
+    assert (f16.total, sample(f16)) != (f32.total, sample(f32)), "the f16 pool must differ (the warp tier is dtype-gated)"
 
 
 def test_a_precision_gate_pin_keys_a_different_pool() -> None:
@@ -114,9 +123,131 @@ def test_a_precision_gate_pin_keys_a_different_pool() -> None:
 def test_a_live_pin_keys_a_different_pool() -> None:
     ctx = Context.from_target((12, 0))
     unpinned = _resolve(ctx, _matmul_graph())
+    (unpinned_pool,) = ctx.session_cache._store.values()
+    before = set(ctx.session_cache._store)
     with TILE.pinned("f2x8"):
-        pinned = _resolve(ctx, _matmul_graph())
+        _resolve(ctx, _matmul_graph())
+    (pinned_key,) = set(ctx.session_cache._store) - before
+    pinned_pool = ctx.session_cache._store[pinned_key]
     assert ctx.session_cache.misses >= 2, "a pin state must never share the unpinned pool"
-    assert 0 < len(pinned) < len(unpinned), "the pinned fork must be a narrowing of the unpinned one"
+    assert 0 < len(pinned_pool.rows) < len(unpinned_pool.rows), "the pinned fork must be a narrowing of the unpinned one"
     # And back: the unpinned pool is still served intact after the pin lifts.
     assert _resolve(ctx, _matmul_graph()) == unpinned
+
+
+def test_a_live_context_never_samples() -> None:
+    """``dataclasses.replace`` SHARES the session cache, so a sampled Context and the live one it
+    was derived from sit on ONE memo. That is why the sample is part of the pool's cache KEY rather
+    than merely of the Context: without it the first compile to run would decide what every later
+    one sees, and a live deploy could be served a pool with most of its candidates missing."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.pool import PoolSample
+
+    ctx = Context.from_target((12, 0))
+    sampled = replace(ctx, pool_sample=PoolSample(rows=8))
+    assert sampled.session_cache is ctx.session_cache, "the shared memo is the hazard this test exists for"
+
+    with REDUCE.pinned(""):
+        drawn = _resolve(sampled, _matmul_graph())
+        (drawn_pool,) = ctx.session_cache._store.values()
+        before = set(ctx.session_cache._store)
+        full = _resolve(ctx, _matmul_graph())
+        (full_key,) = set(ctx.session_cache._store) - before
+        full_pool = ctx.session_cache._store[full_key]
+        assert 0 < len(drawn_pool.rows) < len(full_pool.rows), "the sampled Context sees a draw, the live one the whole pool"
+        assert drawn_pool.total == full_pool.total
+        assert set(map(canonical_row_key, drawn_pool.rows)) < set(map(canonical_row_key, full_pool.rows))
+        assert _resolve(sampled, _matmul_graph()) == drawn, "each keeps its own memo entry"
+        assert _resolve(ctx, _matmul_graph()) == full
+
+
+def _unmapped_tile(m: int, n: int, k: int = 64, dtype: str = "f16"):
+    """The lifted, unscheduled ``TileOp`` for one ``m x k @ k x n`` matmul, knobs and all.
+
+    Lifting by hand rather than through ``lowering/tile`` is what lets the assertion below name
+    the pool key directly instead of inferring a collision from downstream symptoms.
+    """
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (Dim(m), Dim(k)), dtype=dtype), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (Dim(k), Dim(n)), dtype=dtype), node_id="b")
+    g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (Dim(m), Dim(n)), dtype=dtype), node_id="o")
+    g.inputs, g.outputs = ["a", "b"], ["o"]
+    node = Pipeline.build(LOOP_PASSES).run(g).nodes["o"]
+    tile = lift_loop_op(node.op, name=node.op.name)
+    tile.knobs, tile.inputs, tile.outputs = dict(node.op.knobs), dict(node.op.inputs), dict(node.op.outputs)
+    return tile
+
+
+def test_transposed_free_extents_do_not_share_a_pool() -> None:
+    """Per-axis extents are an ENUMERATION input, so they must be a key part.
+
+    The term's algebra digest canonicalizes sizes away and the knobs carry only the lossy
+    ``S_ext_*`` summary (count / product / max), which ``8x512`` and ``512x8`` agree on. They
+    therefore reach identical ``structural_key`` AND ``cache_key`` while their spaces differ by
+    7x — the enumeration sizes the coop band against ``_inner_free`` and the fragment store
+    against the free axes — so sharing a pool let whichever compiled first decide the other.
+    """
+    from emmy.compiler.ir.tile.identity import pool_key
+    from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _enumerate, _Term
+
+    ctx = Context.from_target((12, 0))
+    wide, tall = _unmapped_tile(8, 512), _unmapped_tile(512, 8)
+
+    # The premise: everything the OLD key was built from agrees.
+    assert wide.structural_key() == tall.structural_key()
+    assert wide.cache_key() == tall.cache_key()
+
+    # The consequence: the spaces do not.
+    def total(tile) -> int:
+        return _enumerate(_Term(tile, tile.place.on_grid(), ctx))[2]
+
+    assert total(wide) != total(tall), "transposed M/N must not enumerate the same space"
+    pins = schedule_pin_fingerprint()
+    assert pool_key(wide, pins=pins) != pool_key(tall, pins=pins), "so they must not share a pool entry"
+
+
+def test_split_dim_store_does_not_share_an_identity() -> None:
+    """A buffer's SHAPE and the store's index are enumeration inputs, so both identities carry them.
+
+    The same iteration space can reach its output flat (``128x128``) or through a re-fused split
+    axis spelled as a dim pair (``4x32x128``, index ``a0/32, a0%32, a1``). The fragment store can
+    address the pair only under a divisibility rule, so the split form loses the warp tier — 50538
+    candidates against 10284. The term carries neither fact: ``TileOp.structural_key`` excludes the
+    stores by design and the algebra digest canonicalizes sizes away, so both reached one
+    ``deploy_identity`` as well as one ``pool_key``. The deploy collision is the worse half: a
+    golden measured on the flat kernel would be handed to a kernel that cannot realize its row.
+    """
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.ir.tile.identity import deploy_identity, pool_key
+    from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _enumerate, _Term
+
+    matmul = "(torch.randn(128,64,dtype=torch.float16) @ torch.randn(64,128,dtype=torch.float16))"
+    ctx = Context.from_target((12, 0))
+
+    def lifted(code: str):
+        graph, _, _ = graph_from_code(code)
+        out = Pipeline.build(LOOP_PASSES).run(graph)
+        node = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)][-1]
+        tile = lift_loop_op(node.op, name=node.op.name)
+        tile.knobs, tile.inputs, tile.outputs = dict(node.op.knobs), dict(node.op.inputs), dict(node.op.outputs)
+        return tile
+
+    flat, split = lifted(matmul), lifted(f"{matmul}.reshape(4,32,128)")
+
+    # The premise: the ALGEBRA and its extents agree — only the boundary differs.
+    assert flat.structural_key() == split.structural_key()
+    assert [a.extent.as_static() for a in flat.place.free] == [a.extent.as_static() for a in split.place.free]
+
+    def total(tile) -> int:
+        return _enumerate(_Term(tile, tile.place.on_grid(), ctx))[2]
+
+    assert total(flat) != total(split), "a split-pair store must not offer the same tiers"
+    assert deploy_identity(flat) != deploy_identity(split), "so a golden must not join across them"
+    pins = schedule_pin_fingerprint()
+    assert pool_key(flat, pins=pins) != pool_key(split, pins=pins), "and they must not share a pool"

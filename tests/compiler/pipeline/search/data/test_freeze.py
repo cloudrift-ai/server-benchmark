@@ -5,7 +5,7 @@ loader's hard-error contract, and the DB/freeze interchange seam (``load_node_ro
 The freeze is Phase 3 of the offline-prior rework: a fit must be a pure function of
 (repo, pinned data), so one command snapshots the live node DB into a digest-pinned
 directory of golden-spelled per-GPU YAML files. These tests never touch a GPU — the
-plausibility physics itself is covered by ``test_node_gate.py``; the specs here are
+plausibility physics itself is not covered here; the specs here are
 small fp32 matmuls so the loader's snippet re-trace stays cheap (and lru-cached)."""
 
 from __future__ import annotations
@@ -118,7 +118,8 @@ def _seed_db(path, rows) -> None:
 
 
 _SEED = [
-    # _SPEC_A's -O3/-O1 twins on the 5090 — same declarative op, two lanes.
+    # _SPEC_A on the 5090, plus the non-deployable twin an older store still holds: same
+    # declarative op, but only the deployable row is a measurement anything reads.
     _row("leaf-a3", value_us=500.0, op_sig="mm1", features=_feats(), run_id="run-a"),
     _row("leaf-a1", value_us=900.0, op_sig="mm1", features=_feats(opt=1.0), run_id="run-a"),
     _row("leaf-b", value_us=480.0, op_sig="mm2", gpu=_GPU2, features=_feats(cc=89.0), run_id="run-b"),
@@ -127,7 +128,7 @@ _SEED = [
     _row("leaf-stale", value_us=500.0, op_sig="mm1", features=_feats(), feat_ver=FEATURIZER_VERSION - 1),
     _row("leaf-legacy", value_us=500.0, op_sig="mm1", features=_feats()),  # no identity — never freezes
 ]
-_N_KEPT = 5
+_N_KEPT = 4
 
 
 def test_write_freeze_round_trip(tmp_path) -> None:
@@ -139,7 +140,7 @@ def test_write_freeze_round_trip(tmp_path) -> None:
     assert manifest["kind"] == FREEZE_KIND
     assert manifest["freeze_ver"] == FREEZE_VER
     assert manifest["feat_ver"] == manifest["knob_ver"] == manifest["encoding_ver"] == FEATURIZER_VERSION
-    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 4, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 4}}
+    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 3, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 3}}
     assert manifest["run_ids"] == ["run", "run-a", "run-b"]
     assert manifest["policy_note"] == "unit-test policy"
     assert manifest["source_db"] == str(db_path.resolve())
@@ -156,25 +157,25 @@ def test_write_freeze_round_trip(tmp_path) -> None:
     assert len(rows) == _N_KEPT
     by_run_value = {(r.run_id, r.value_us): r for r in rows}
     a3 = by_run_value[("run-a", 500.0)]
-    a1 = by_run_value[("run-a", 900.0)]
     fail = by_run_value[("run-a", 60000.0)]
     assert a3.status == "ok" and a3.measured_at == "2026-07-09T00:00:00+00:00"
     assert fail.status == "bench_fail"
     # Features are RE-DERIVED: card-faithful H_* (H_cc from the file cap), the opt lane
     # from the row's own field, full traced S_* keying to the spec, tunables verbatim.
     assert a3.features["H_cc"] == 120.0 and a3.features["H_opt"] == 3.0
-    assert a1.features["H_opt"] == 1.0
+    assert ("run-a", 900.0) not in by_run_value, "the non-deployable twin does not freeze"
     assert a3.features["TILE"] == "f2x2"
     assert ShapeKey.from_s_features(a3.features).joins(ShapeKey.from_matmul(_SPEC_A["M"], _SPEC_A["N"], _SPEC_A["K"], _SPEC_A["dtype"]))
     assert a3.feat_ver == FEATURIZER_VERSION
-    # Treeless contract + stored DB identity: -O1/-O3 twins share one op_sig.
+    # Treeless contract + stored DB identity.
     assert all(r.parent_key is None and r.depth == 0 and r.visits == 0 and r.is_leaf is True for r in rows)
-    assert a3.op_sig == a1.op_sig == "mm1"
-    assert a3.op_sig != fail.op_sig and a3.node_key != a1.node_key
-    # The existing consumers work unchanged on freeze rows.
-    assert len(Dataset.from_node_rows(rows)) == _N_KEPT
-    assert {g: len(rs) for g, rs in Dataset.fold_node_rows(rows, by="gpu").items()} == {_GPU: 4, _GPU2: 1}
-    assert {sig: len(rs) for sig, rs in Dataset.fold_node_rows(rows, by="op").items()} == {a3.op_sig: 3, fail.op_sig: 2}
+    assert a3.op_sig == "mm1"
+    assert a3.op_sig != fail.op_sig
+    # The fold seam reads freeze rows unchanged — the split unit for out-of-sample evaluation. It has no
+    # production caller yet: ``group_measured`` keys its own comparison sets and does not fold.
+    assert {g: len(rs) for g, rs in Dataset.fold_node_rows(rows, by="gpu").items()} == {_GPU: 3, _GPU2: 1}
+    assert {sig: len(rs) for sig, rs in Dataset.fold_node_rows(rows, by="op").items()} == {a3.op_sig: 2, fail.op_sig: 2}
+    assert len(rows) == _N_KEPT
 
 
 def test_freeze_twice_same_digest(tmp_path) -> None:
@@ -323,29 +324,6 @@ def test_open_readonly_rejects_v1_freeze_with_pointer(tmp_path) -> None:
         SearchDB.open_readonly(garbage)
 
 
-def test_anchor_walk_treats_freeze_rows_as_treeless(tmp_path) -> None:
-    # Freeze rows (parentless, the loader's depth=0 stamp) carry no fork structure: the
-    # golden-anchored descent must render its loud no-tree absence, never fabricate a
-    # root mega-fork from the op's whole leaf set. Live parentless TOP-fork rows
-    # (depth >= 1) keep walking.
-    from emmy.compiler.pipeline.search.prior import diagnostics
-
-    class _Flat:
-        fitted = True
-
-        def mean_scores_features(self, fvecs):
-            return [0.0] * len(fvecs)
-
-    out = _frozen(tmp_path)
-    _manifest, rows = load_freeze(out)
-    matched, steps, descriptor = diagnostics._anchor_walk(_Flat(), rows, {})
-    assert (matched, steps) == (0, [])
-    assert "no fork-tree data" in descriptor
-    live_top_fork = [_row("c1", value_us=500.0, depth=1), _row("c2", value_us=600.0, depth=1)]
-    matched_live, _steps, descriptor_live = diagnostics._anchor_walk(_Flat(), live_top_fork, {})
-    assert matched_live == 1 and "followed" in descriptor_live
-
-
 def test_load_node_rows_sniffs_db_and_freeze_dir(tmp_path) -> None:
     db_path = tmp_path / "autotune.db"
     _seed_db(db_path, _SEED)
@@ -359,3 +337,48 @@ def test_load_node_rows_sniffs_db_and_freeze_dir(tmp_path) -> None:
     garbage.write_text("hello\n")
     with pytest.raises(RuntimeError, match="neither a sqlite node DB nor"):
         load_node_rows(garbage)
+
+
+def test_an_lfs_pointer_is_named_rather_than_parsed(tmp_path) -> None:
+    """A checkout without LFS leaves a three-line pointer where the payload should be, and a pointer is
+    valid YAML — it parses to a string, and the first key lookup fails as ``TypeError: string indices must
+    be integers``, which says nothing about the real problem. This is how the checked-in freeze reached
+    ``main`` with red CI: the failure named a type error, not a missing file."""
+    from emmy import config
+
+    src = config.freeze_path()
+    (tmp_path / "manifest.json").write_text((src / "manifest.json").read_text())
+    name = next(iter(json.loads((src / "manifest.json").read_text())["files"]))
+    (tmp_path / name).write_text("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n")
+
+    with pytest.raises(RuntimeError, match="git-LFS pointer"):
+        load_node_rows(tmp_path)
+
+
+def test_the_checked_in_freeze_is_the_default_evaluation_corpus() -> None:
+    """The repo ships one measurement freeze, and ``config.freeze_path()`` resolves to it.
+
+    This is what makes an evaluation number reproducible: the tune DB and the online prior's
+    reservoir are machine-local and rewritten as tuning continues (the reservoir is additionally a
+    bounded random sample that churns), so a number computed over either is not one a second
+    machine — or the same machine tomorrow — can check. A freeze is digest-pinned and identical
+    row-for-row wherever it is read.
+
+    Loading it costs a few seconds because every row's features are RE-DERIVED by live code rather
+    than trusted from the file, which is the property that lets a freeze outlive a featurizer
+    change. That is worth paying once here: if this breaks, every reported prior number is
+    uncomparable and nothing else in the suite would say so."""
+    from emmy import config
+
+    freeze = config.freeze_path()
+    manifest = json.loads((freeze / "manifest.json").read_text())
+    assert manifest["kind"] == "emmy-node-freeze"
+    # The versions its rows are spelled in — a freeze from another featurizer generation reports
+    # itself rather than being silently re-read under today's vocabulary.
+    assert manifest["feat_ver"] == FEATURIZER_VERSION
+    assert len(manifest["sha256"]) == 64
+
+    rows = load_node_rows(freeze)
+    assert len(rows) == manifest["counts"]["rows"]
+    # Leaf-only by construction: a freeze holds benched configs, never a search tree's interior.
+    assert all(r.is_leaf and r.parent_key is None and r.depth == 0 for r in rows)

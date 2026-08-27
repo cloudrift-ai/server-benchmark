@@ -13,6 +13,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, FuncCallExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
+    Conv1dOp,
     LayerNormOp,
     LinearOp,
     MatmulOp,
@@ -119,6 +120,17 @@ def test_operation_round_trip(op):
     assert restored == op
 
 
+def test_conv1d_operation_wire_schema_round_trip():
+    op = Conv1dOp(stride=2, padding=3, dilation=4, groups=5)
+    wire = op_to_wire(op)
+
+    assert wire == {
+        "op": "torch.conv1d",
+        "attrs": {"stride": 2, "padding": 3, "dilation": 4, "groups": 5},
+    }
+    assert op_from_wire(json.loads(json.dumps(wire))) == op
+
+
 def _program() -> Graph:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (Dim("seq", hint=9), Dim(8)), "f16"), node_id="x")
@@ -132,13 +144,15 @@ def _program() -> Graph:
 def test_program_round_trip_is_deterministic():
     wire = graph_to_wire(_program())
     assert set(wire) == {"inputs", "outputs", "nodes"}
-    assert wire["nodes"][0] == {
+    assert [node["id"] for node in wire["nodes"]] == ["one", "x", "y"]
+    input_node = wire["nodes"][1]
+    assert input_node == {
         "id": "x",
         "op": "input",
         "outputs": [["x", "f16", [{"sym": "seq", "hint": 9}, 8]]],
     }
-    assert "attrs" not in wire["nodes"][0]
-    assert "inputs" not in wire["nodes"][0]
+    assert "attrs" not in input_node
+    assert "inputs" not in input_node
     restored = graph_from_wire(json.loads(json.dumps(wire)))
     assert graph_to_wire(restored) == wire
 

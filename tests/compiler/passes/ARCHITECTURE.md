@@ -22,14 +22,20 @@ tests/compiler/passes/
 ├── conftest.py                     # RecordingDump fixture for rule-fired assertions
 ├── test_decompose_rules.py         # decomposition rules (structural + correctness)
 ├── test_optimization_rules.py      # optimization rules (structural + correctness)
-├── test_fusion_rules.py            # fusion rules (structural — LoopOp not numpy-executable)
+├── test_fusion_rules.py            # maximal/multi-output fusion structure and Loop-runner correctness
 ├── test_matcher.py                 # Pattern matcher unit tests
+├── test_maximal_fusion.py          # one-pass maximal fusion, including nested reductions
+├── test_twisted_rewrite.py         # general exp-family Tile rewrite: softmax and masked/unmasked SDPA
 ├── test_matmul_rules.py            # matmul-specific rewrite rules
 ├── test_reduction_rules.py         # reduction-pattern rewrite rules
 ├── test_register_tile_rules.py     # register-tile lowering rules
 ├── test_partition_planner_rules.py # partition-planner pass
 ├── test_partition_planner_forks.py # partition-planner fork generation
 ├── test_launch_geometry_rules.py   # launch-geometry pass
+├── test_move_catalog.py           # schedule catalogs, site trees, and independent-root compatibility
+├── test_cut_forks.py              # fused/cut Fold-edge offers and pinned CUDA lowering
+├── test_placement_routing.py       # frontend placement pins, routing rows, and MIMO preservation
+├── test_split_fresh_kernels.py    # generic cross-CTA Fold splitting and fresh-piece invariants
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)
 ├── test_stage_inputs_classify.py   # Stage-input classifier
 ├── test_lowering_accuracy.py       # 040 / 060 / 070 + TMA end-to-end CUDA accuracy
@@ -50,7 +56,7 @@ lowering / backend / e2e tests — plus the `requires_cuda` skip marker. `tests/
 | Rule file          | Op                      | Structural | Correctness       |
 |--------------------|-------------------------|------------|-------------------|
 | `010_sdpa.py`      | `SdpaOp`                | ✓          | ✓                 |
-| `020_silu.py`      | `ElementwiseOp("silu")` | ✓          | ✓                 |
+| `020_silu.py`      | `ElementwiseOp("silu")` | ✓ (f16/bf16 opmath; f32/f64 controls) | ✓                 |
 | `030_pow.py`       | `ElementwiseOp("pow")`  | ✓          | ✓                 |
 | `040_linear.py`    | `LinearOp`              | ✓          | ✓ (± bias)        |
 | `070_matmul.py`    | `MatmulOp`              | ✓          | ✓ (± bias)        |
@@ -69,18 +75,18 @@ lowering / backend / e2e tests — plus the `requires_cuda` skip marker. `tests/
 
 ### Fusion (`passes/loop/lifting/` + `passes/loop/fusion/`)
 
-Lifting wraps each surviving tensor primitive (elementwise / reduce /
-indexmap / gather) in a trivial single-op `LoopOp`. Fusion then splices
-adjacent `LoopOp` pairs by inlining the producer body at each consumer
-`Load` that reads it. `test_fusion_rules.py` runs lifting followed by
-fusion as a single pass; the splicer's behaviour is exercised
-end-to-end there (no separate unit-test file — the old
-`test_merge_core.py` was retired with `_merge_core.py`).
+Lifting wraps each surviving tensor primitive (elementwise / reduce / scan / indexmap / gather) in a trivial
+single-op `LoopOp`. Fusion takes a maximal downstream region; separate terminal branches become output ports, and
+one splicer worklist inlines common producers once across all roots. `test_fusion_rules.py` runs lifting followed by
+fusion as a single pass; `tests/compiler/ir/loop/test_splicer.py` covers the multi-root worklist and scope rules
+and output equivalence clusters directly, while the pass tests exercise the resulting graph through Loop and CUDA
+lowering.
 
 | Rule file                              | Op                         | Tested via                                                                         |
 |----------------------------------------|----------------------------|------------------------------------------------------------------------------------|
 | `loop/lifting/010_lift_elementwise.py` | `ElementwiseOp` → `LoopOp` | `test_fusion_rules.py` (pass fixpoint)                                             |
 | `loop/lifting/020_lift_reduce.py`      | `ReduceOp` → `LoopOp`      | `test_fusion_rules.py::test_contraction_*`                                         |
+| `loop/lifting/025_lift_scan.py`        | `ScanOp` → `LoopOp`        | `test_pipeline_semantics.py::test_scan_*`                                          |
 | `loop/lifting/030_lift_indexmap.py`    | `IndexMapOp` → `LoopOp`    | `test_optimization_rules.py::test_matmul_with_transpose_fuses_to_one_kernel` (e2e) |
 | `loop/lifting/040_lift_gather.py`      | `GatherOp` → `LoopOp`      | `test_torch_ops.py::test_gather`                                                   |
 | `loop/fusion/010_merge_loop_ops.py`    | `LoopOp → LoopOp` (splice) | `test_fusion_rules.py` (fixpoint)                                                  |
@@ -99,6 +105,22 @@ numpy backends in three places:
   for the CUDA lane) compiled end-to-end and compared against PyTorch
   eager. The `_cpu` variant runs `LoopBackend` + CPU eager (always
   on, ~3s); the `_cuda` variants are gated by `@requires_cuda`.
+
+### Tile lowering (`passes/lowering/tile/`)
+
+`test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `015_twisted` rule,
+then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
+sites through the CUDA pipeline. `test_pool_space.py` addresses large spaces by boundary/sample indices and narrows
+paired MMA checks with exact pins; it never exhausts a live catalog. `test_move_catalog.py` checks that independent
+roots with reversed M/N readings combine only when their tile
+widths and unit counts match on the physical output axes, and that f32 computed-A contractions retain scalar
+output-tile rows when no MMA atom applies. `test_cut_forks.py` checks fused and closed Fold-edge choices for SDPA score
+production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA lowering. Direct
+contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype. The
+pool-space tests inspect combined, atomic, and deferred reduce partitions through the lazy partition index rather than
+enumerating the full schedule space. The generated carrier's numerical laws are covered
+independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax and
+attention accuracy remain covered by the e2e suites.
 
 ## Adding a New Rule Test
 

@@ -7,11 +7,14 @@ target identity needed by search consumers directly as data.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property
 from numbers import Real
@@ -19,11 +22,15 @@ from pathlib import Path
 
 import yaml
 
+from emmy.compiler.ir.tile.identity import deploy_identity
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.structural import digest
 from emmy.compiler.torch_wire import graph_from_wire, validate_program_pool
+from emmy.recipe.bundled import default_recipe_root
 
-_GOLDENS_DIR = Path(__file__).parent / "goldens"
+_HARDWARE_GOLDENS_DIR = Path(__file__).parent / "goldens"
+_RECIPE_GOLDEN_DIR = "golden"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
@@ -137,40 +144,6 @@ def precision_trading_pins(pins: Mapping) -> bool:
     return any(bool(pins.get(name, umbrella)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
 
 
-def _golden_shape_key(structural_features: Mapping, knobs: Mapping) -> ShapeKey:
-    """Derive a record key through the same offer-aware classifier as deployment.
-
-    Most targets classify completely from their stamped ``S_*`` histogram. Flash and
-    pre-split computed-A forks are the exceptions: deployment recognizes them from an
-    unmistakable schedule offer. A reviewed record stores the selected schedule prefix,
-    so an axis pair or ``d*/sync`` compute-fill carries that same signal without
-    serializing a derived ShapeKey.
-    """
-    from emmy.compiler.pipeline.search.policy.greedy import _fork_shape_key  # noqa: PLC0415
-
-    base = dict(structural_features)
-    key = _fork_shape_key([{**base, **knobs}], base=base)
-    # ``PLACE@a`` names the computed-A subtree of a contraction. A statistic-bearing cone's
-    # histogram already classifies as fused, but a stat-free activation cone otherwise persists
-    # a plain key that cannot join the live tree's structural computed-A convention.
-    if key.kind == "" and "PLACE@a" in knobs:
-        key = replace(key, kind="fused", is_warp=True)
-    # Legacy dynamic-flash rows predate axis-keyed ``TILE@dd`` / ``TILE@pj`` knobs. Main's
-    # old fusion boundary left enough exp-family histogram on the consumer for ShapeKey's
-    # fallback classifier; gate-free fusion moves that histogram into the probability producer.
-    # The flash recognizer is the stronger fact, so target derivation stamps this marker when it
-    # certifies the consumer+producer unit. Keep those persisted rows on their stable flash key.
-    if structural_features.get("S_flash_certified"):
-        key = ShapeKey(
-            free_prod=key.free_prod,
-            reduce_max=0 if key.is_dyn else key.reduce_max,
-            is_warp=key.is_warp,
-            is_dyn=key.is_dyn,
-            kind="flash",
-        )
-    return key
-
-
 def golden_entry_state(entry: Mapping) -> GoldenEntryState:
     has_knobs = "knobs" in entry
     has_measurements = "measurements" in entry
@@ -206,6 +179,36 @@ class GoldenRecord:
     ranking: dict | None
     loop_index: int | None = None
     loop_wire: dict | None = None
+
+    @property
+    def is_routing(self) -> bool:
+        """Whether this row records a kernel-placement decision rather than a kernel schedule."""
+        return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
+
+    @cached_property
+    def pool_key(self) -> tuple:
+        """Which candidate pool this record belongs to — the ONE place that question is answered, so every
+        consumer that groups goldens groups them the same way.
+
+        Derived today, because nothing records it: ``enumerate_graph(self.target_program, ctx)`` under
+        ``self.pin_map`` reads the card, the wire the target specializes from, which node it selects, the
+        bindings and the pins, and records agreeing on all five run the same enumeration. Two consequences
+        worth knowing before relying on it. It is SUFFICIENT, not necessary — it never fuses two pools that
+        differ, but it splits two recordings of one program made in different sessions, whose node ids differ
+        and whose pools do not. And it keys on what the enumeration READS, never on what it produced, so it
+        does not go stale when the scheduler changes.
+
+        When a group identity is recorded with the golden instead, this property returns it and its callers
+        do not change."""
+        wire = self.loop_wire if self.loop_wire is not None else self.program_wire
+        kind = "loop" if self.loop_wire is not None else "prog"
+        digest = hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest()
+        return (self.gpu_name, tuple(self.compute_cap), kind, digest, tuple(self.origins), tuple(self.bindings), self.pin_key)
+
+    @cached_property
+    def pin_key(self) -> tuple:
+        """This record's pins as a hashable tuple — already sorted, as the loader stores them."""
+        return tuple((k, str(v)) for k, v in self.pins)
 
     @cached_property
     def program(self):
@@ -253,8 +256,10 @@ class GoldenRecord:
 
     @cached_property
     def shape_key(self) -> ShapeKey:
-        """Deployment join key derived by lowering the stable frontend target."""
-        return _golden_shape_key(self.structural_features, self.knobs)
+        """The arithmetic-identity descriptor for eval / diagnostics grouping, derived from the
+        lowered target's stamped histogram. NOT the deploy join key — that is
+        :func:`kernel_identity` (strict structural identity); this key only groups eval rows."""
+        return ShapeKey.from_s_features(self.structural_features)
 
     @cached_property
     def structural_features(self) -> dict[str, float]:
@@ -286,8 +291,11 @@ class GoldenRecord:
 
     @property
     def is_matmul(self) -> bool:
-        """Whether this target is a plain frontend contraction."""
-        return self.shape_key.kind == "" and any(op in {"torch.matmul", "torch.linear"} for op in self.origin_ops)
+        """Whether this target is a plain frontend contraction — read off the STORED origin
+        operations alone (a fused norm→linear names its norm origin too, so the subset test
+        separates them), never by lowering the target: an eval listing must classify a record
+        the current compiler can no longer lower."""
+        return bool(self.origin_ops) and set(self.origin_ops) <= {"torch.matmul", "torch.linear"}
 
     @property
     def emmy_us(self) -> float:
@@ -300,18 +308,6 @@ class GoldenRecord:
     @property
     def reference_backend(self) -> str | None:
         return str(self.measurements["reference_backend"]) if self.measurements else None
-
-    @property
-    def ratio(self) -> float:
-        return self.reference_us / self.emmy_us if self.emmy_us else 0.0
-
-    @property
-    def golden(self) -> bool:
-        return self.ratio >= 0.95
-
-    @property
-    def is_routing(self) -> bool:
-        return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
 
     @property
     def dynamic(self) -> bool:
@@ -405,10 +401,8 @@ def validate_golden_file(
         program_ref = entry.get("program")
         if isinstance(program_ref, bool) or not isinstance(program_ref, int) or not 0 <= program_ref < len(programs):
             raise ValueError(f"{where}.program does not resolve in this document: {program_ref!r}")
-        try:
-            graph_from_wire(programs[program_ref])
-        except ValueError as exc:
-            raise ValueError(f"{where}.program {program_ref}: {exc}") from exc
+        # The pool check above already decoded every program. A whole-model inventory points
+        # hundreds of configurations at a handful of programs, so do not decode again per config.
         _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
         realizations = entry.get("realizations")
         if not isinstance(realizations, list) or not realizations:
@@ -463,10 +457,15 @@ def validate_golden_file(
                 if strict:
                     for family in families:
                         scoped = [str(key) for key in realization["knobs"] if str(key).split("@", 1)[0] == family]
-                        if family in scoped and any("@" in key for key in scoped):
+                        # A stamped row legitimately carries the primary node's bare key beside
+                        # axis-scoped site decisions (``STAGE: d2/smem`` + ``STAGE@a1: ''``) — that
+                        # IS the canonical codec spelling. The ambiguous shape is a bare OFF next
+                        # to scoped keys: replaying it would fan OFF across every eligible site,
+                        # so ``stamp_schedule_families`` drops it and a recording must not store it.
+                        if family in scoped and any("@" in key for key in scoped) and str(realization["knobs"][family]) == "":
                             raise ValueError(
-                                f"{realization_where}.knobs mixes bare and axis-scoped {family} keys; "
-                                "repository goldens must store one schedule spelling per family"
+                                f"{realization_where}.knobs mixes bare and axis-scoped {family} keys with a bare OFF; "
+                                "the scoped spelling is the site decision — drop the bare OFF"
                             )
             if "ranking" in realization and not isinstance(realization["ranking"], Mapping):
                 raise ValueError(f"{realization_where}.ranking must be a mapping")
@@ -529,6 +528,284 @@ def load_golden_records(document: Mapping) -> list[GoldenRecord]:
 
 
 _STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
+_IDENTITY_CACHE: dict[tuple, str | None] = {}
+#: The persisted identity memo: {record fingerprint: identity | None}, valid only under one
+#: compiler fingerprint. Purely derived data — a stale or missing store just re-derives.
+_IDENTITY_STORE: dict | None = None
+_IDENTITY_STORE_DIRTY: bool = False
+_WIRE_DIGESTS: dict[int, str] = {}
+
+
+def _compiler_fingerprint() -> str:
+    """A cheap fingerprint of the compiler tree — (path, mtime, size) of every ``emmy/compiler``
+    source file. Any edit invalidates the persisted identity memo, so a derivation can never be
+    replayed across compiler versions."""
+    import emmy.compiler as _pkg  # noqa: PLC0415
+
+    root = Path(_pkg.__file__).parent
+    parts = []
+    for path in sorted(root.rglob("*.py")):
+        st = path.stat()
+        parts.append(f"{path.relative_to(root)}:{st.st_mtime_ns}:{st.st_size}")
+    return digest("\n".join(parts))
+
+
+def _identity_store() -> dict:
+    global _IDENTITY_STORE
+    if _IDENTITY_STORE is None:
+        import json  # noqa: PLC0415
+
+        from emmy import config  # noqa: PLC0415
+
+        fingerprint = _compiler_fingerprint()
+        entries: dict = {}
+        verdicts: dict = {}
+        try:
+            payload = json.loads(config.golden_identity_cache_path().read_text())
+            if payload.get("fingerprint") == fingerprint:
+                entries = payload.get("entries", {})
+                verdicts = payload.get("verdicts", {})
+        except (OSError, ValueError):
+            pass
+        _IDENTITY_STORE = {"fingerprint": fingerprint, "entries": entries, "verdicts": verdicts}
+    return _IDENTITY_STORE
+
+
+def flush_identity_store() -> None:
+    """Persist newly derived identities (atomic replace; concurrent writers last-win — a lost
+    write only re-derives later)."""
+    global _IDENTITY_STORE_DIRTY
+    if not _IDENTITY_STORE_DIRTY or _IDENTITY_STORE is None:
+        return
+    import json  # noqa: PLC0415
+
+    from emmy import config  # noqa: PLC0415
+
+    path = config.golden_identity_cache_path()
+    try:
+        # MERGE with the on-disk state before writing: concurrent processes (xdist workers each
+        # walking one golden set) flush independently, and overwrite-last-wins silently dropped
+        # every other worker's derivations.
+        try:
+            on_disk = json.loads(path.read_text())
+        except (OSError, ValueError):
+            on_disk = None
+        if on_disk is not None and on_disk.get("fingerprint") == _IDENTITY_STORE["fingerprint"]:
+            for section in ("entries", "verdicts"):
+                merged = dict(on_disk.get(section, {}))
+                merged.update(_IDENTITY_STORE.get(section, {}))
+                _IDENTITY_STORE[section] = merged
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.", delete=False) as out:
+            json.dump(_IDENTITY_STORE, out)
+            temporary = Path(out.name)
+        temporary.replace(path)
+        _IDENTITY_STORE_DIRTY = False
+    except OSError:
+        pass  # the store is a memo; failing to persist only costs a re-derivation
+
+
+def _record_fingerprint(record: GoldenRecord) -> str:
+    """A stable content digest for one record's TARGET (identity depends on nothing else): the
+    persisted wire payload, the target selector, bindings, card. Wire digests are memoized per
+    payload object — one document's records share their program pool."""
+    import json  # noqa: PLC0415
+
+    wire = record.loop_wire if record.loop_wire is not None else record.program_wire
+    wd = _WIRE_DIGESTS.get(id(wire))
+    if wd is None:
+        wd = _WIRE_DIGESTS.setdefault(id(wire), digest(json.dumps(wire, sort_keys=True, default=str)))
+    return digest(wd, str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
+
+
+#: Enumerated rows per (target, pins) — sibling realizations of one config decode against one
+#: enumeration (the tripwire and the migration validator walk whole files) — and ONE Context per
+#: card, so same-shape targets share the schedule pool cache across configs and files.
+_DECODE_ROWS_CACHE: dict[tuple, list[dict]] = {}
+_DECODE_CTX_CACHE: dict[tuple, object] = {}
+
+
+def _record_cache_key(record: GoldenRecord) -> tuple:
+    payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
+    return (payload_id, record.target_key, record.compute_cap, record.bindings)
+
+
+def _target_kernel_nodes(record: GoldenRecord):
+    """The record's target kernels in the CURRENT compiler: lower the persisted program through
+    the loop passes and select the target's ``LoopOp`` node(s) — every output kernel for a Loop IR
+    target, the provenance-selected ones for a frontend target. Returns ``(lowered graph, nodes)``.
+    Raises when the selector no longer resolves — the strict tripwire's loud case."""
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+
+    ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
+    graph = record.target_program.copy()
+    if record.loop_wire is None:
+        provenance.seed(graph)
+    lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
+    if record.loop_wire is not None:
+        nodes = [node for output in lowered.outputs if (node := lowered.producer(output)) is not None and isinstance(node.op, LoopOp)]
+    else:
+        wanted = frozenset(record.origins)
+        nodes = []
+        for node_id in lowered.topological_order():
+            node = lowered.nodes[node_id]
+            if not isinstance(node.op, LoopOp):
+                continue
+            origins = frozenset(origin for origin in provenance.get(node) if origin in record.program.nodes)
+            if origins == wanted:
+                nodes.append(node)
+    if not nodes:
+        raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
+    return lowered, nodes
+
+
+def _lifted_target(record: GoldenRecord):
+    """Lift the record's single selected kernel to Tile IR."""
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
+
+    lowered, nodes = _target_kernel_nodes(record)
+    if len(nodes) != 1:
+        raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
+    node = nodes[0]
+    node.op.populate_io(lowered, node)
+    tile = lift_loop_op(node.op, name=node.id)
+    # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
+    # half of the identity (``deploy_identity``) reads the same output fingerprint.
+    tile.outputs = {node.output.name: node.output}
+    return tile
+
+
+def decode_record(record: GoldenRecord) -> str | None:
+    """STRICTLY decode one record against the current compiler — ``None`` on success, else the
+    failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
+    program selects exactly one kernel; a routing record names a legal closed Fold seam; a SCHEDULE record's spelled row
+    equals one enumerated
+    leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
+    any-of, no classified shape."""
+    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+
+    try:
+        tile = _lifted_target(record)
+    except Exception as exc:  # noqa: BLE001 — the reason IS the product here
+        return f"{type(exc).__name__}: {exc}"
+    verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
+    store = _identity_store()
+    verdicts = store.setdefault("verdicts", {})
+    if verdict_key in verdicts:
+        return verdicts[verdict_key]
+    if record.is_routing:
+        from dataclasses import replace  # noqa: PLC0415
+
+        from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
+
+        axes = [axis.name for axis in tile.place.free]
+        axes.extend(store.sweep.name for store in tile.output_specs if store.sweep is not None)
+        tile = replace(tile, op=rewrite_twisted(tile.op, axes))
+        seams = cuttable_seams(tile)
+        seam_ids = {id(seam.node) for seam in seams}
+        all_sites = sites(tile.op)
+        for key, value in record.knobs.items():
+            if str(value) != "cut":
+                return _remember_verdict(verdict_key, f"routing value {key}={value!r} is not a cut")
+            try:
+                site = resolve(tile.op, str(key), all_sites=all_sites)
+            except ValueError as exc:
+                return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
+            if site is None or id(site.node) not in seam_ids:
+                return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the Fold tree")
+        return _remember_verdict(verdict_key, None)
+    candidates = _candidate_row_keys(record)
+    if schedule_row_key(record.knobs) in candidates:
+        reason = None
+    else:
+        reason = f"no enumerated row equals the recording ({len(candidates)} candidate rows)"
+    verdicts[verdict_key] = reason
+    global _IDENTITY_STORE_DIRTY
+    _IDENTITY_STORE_DIRTY = True
+    return reason
+
+
+def _remember_verdict(key: str, reason: str | None) -> str | None:
+    global _IDENTITY_STORE_DIRTY
+    _identity_store().setdefault("verdicts", {})[key] = reason
+    _IDENTITY_STORE_DIRTY = True
+    return reason
+
+
+def _candidate_row_keys(record: GoldenRecord) -> frozenset:
+    """Every schedule-row identity the record's target can realize under its pins: the fork
+    leaves' rows, PLUS each resolved kernel's own realized row — a forkless kernel (the schedule
+    space collapsed to one row, often the all-OFF anchor) never opens a fork, so its one row is
+    read off the resolved op instead."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import flatten_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    cache_key = (_record_cache_key(record), record.pins)
+    cached = _DECODE_ROWS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    ctx_key = (record.compute_cap, record.gpu_name or None)
+    ctx = _DECODE_CTX_CACHE.get(ctx_key)
+    if ctx is None:
+        ctx = _DECODE_CTX_CACHE.setdefault(ctx_key, Context.from_target(ctx_key[0], gpu_name=ctx_key[1]))
+    keys: set = set()
+
+    def decide(fp):
+        leaves = flatten_leaves(fp.options)
+        ops = [o for o in leaves if not _is_structural_option(o)]
+        for leaf in ops:
+            row = dict(getattr(leaf, "knobs", None) or {})
+            if row:
+                keys.add(schedule_row_key(row))
+        return ops[0] if ops else leaves[0]
+
+    with pinned_knobs(record.pin_map):
+        out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(record.target_program.copy(), decide)
+    for node in out.nodes.values():
+        if isinstance(node.op, TileOp):
+            keys.add(schedule_row_key(dict(node.op.knobs or {})))
+    result = frozenset(keys)
+    _DECODE_ROWS_CACHE[cache_key] = result
+    return result
+
+
+def kernel_identity(record: GoldenRecord) -> str | None:
+    """The record's kernel identity under the CURRENT compiler — the verified-tier join key
+    (``_schedule.deploy_identity``) of the lifted tile of the record's ONE target kernel,
+    derived through the exact total lift the live compile uses (``_fromloop.lift_loop_op``).
+    ``None`` when the record cannot carry a deploy identity: the target lowers to several kernels
+    (a schedule row decorates exactly one), or selection/lifting fails — best-effort here
+    (a corpus row must never break a compile); nightly strict decoding is where failure is loud."""
+    global _IDENTITY_STORE_DIRTY
+    key = _record_cache_key(record)
+    if key in _IDENTITY_CACHE:
+        return _IDENTITY_CACHE[key]
+    store = _identity_store()
+    fingerprint = _record_fingerprint(record)
+    if fingerprint in store["entries"]:
+        identity = store["entries"][fingerprint]
+        _IDENTITY_CACHE[key] = identity
+        return identity
+    try:
+        identity = deploy_identity(_lifted_target(record))
+    except Exception:  # noqa: BLE001 — see the docstring; the decode tripwire re-derives loudly
+        identity = None
+    _IDENTITY_CACHE[key] = identity
+    store["entries"][fingerprint] = identity
+    _IDENTITY_STORE_DIRTY = True
+    return identity
+
+
 _PROGRAM_TARGET_CACHE: dict[
     tuple[int, tuple[int, int], str, tuple[tuple[str, int], ...]],
     dict[frozenset[str], set[tuple[tuple[str, float], ...]]],
@@ -572,7 +849,6 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
         return result
 
     from emmy.compiler import provenance  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
 
     wanted = set(record.origins)
     program_key = (id(record.program_wire), record.compute_cap, record.gpu_name, record.bindings)
@@ -584,22 +860,15 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
         provenance.seed(graph)
         ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
         lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
-        absorbed_ids = {
-            producer for node in lowered.nodes.values() if isinstance(node.op, LoopOp) for producer in fused_producer_ids(lowered, node)
-        }
         target_index = {}
         for node_id in lowered.topological_order():
             node = lowered.nodes[node_id]
-            if not isinstance(node.op, LoopOp) or node_id in absorbed_ids:
+            if not isinstance(node.op, LoopOp):
                 continue
-            fused = fused_producer_ids(lowered, node)
-            absorbed = [lowered.nodes[producer] for producer in fused if producer in lowered.nodes]
-            origins = frozenset(origin for item in (node, *absorbed) for origin in provenance.get(item) if origin in record.program.nodes)
+            origins = frozenset(origin for origin in provenance.get(node) if origin in record.program.nodes)
             feature_map = {
                 name: float(value) for name, value in (getattr(node.op, "knobs", {}) or {}).items() if name.startswith(STRUCT_PREFIX)
             }
-            if fused:
-                feature_map["S_flash_certified"] = 1.0
             features = tuple(sorted(feature_map.items()))
             if origins and features:
                 target_index.setdefault(origins, set()).add(features)
@@ -618,23 +887,56 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
     return result
 
 
+_POOL_KEYS = ("programs", "loops")
+_POOL_CACHE: tuple[list, dict[str, str]] | None = None
+
+
+def _dump_block(key: str, value: object) -> str:
+    """One top-level key as YAML. Block-style keys concatenate into exactly the document
+    ``yaml.dump`` writes for the whole mapping, so a block can be reused verbatim."""
+    return yaml.dump({key: value}, Dumper=_GoldenDumper, sort_keys=False, width=140)
+
+
+def _pool_blocks(document: Mapping, *, reuse: bool) -> dict[str, str]:
+    """The serialized program and loop pools, kept across repeated persists of one document.
+
+    Keyed by pool identity, and the cache holds the pools it serialized: a document whose pools
+    are the very objects that were dumped last has the same bytes for them.
+    """
+    global _POOL_CACHE
+
+    pools = [document.get(key) for key in _POOL_KEYS]
+    if reuse and _POOL_CACHE is not None and all(cached is pool for cached, pool in zip(_POOL_CACHE[0], pools, strict=True)):
+        return _POOL_CACHE[1]
+    blocks = {key: _dump_block(key, [_style_program(program) for program in document[key]]) for key in _POOL_KEYS if key in document}
+    if reuse:
+        _POOL_CACHE = (pools, blocks)
+    return blocks
+
+
 def dump_golden_file(
     document: Mapping,
     path: str | Path,
     *,
     validation: GoldenFileValidation = GoldenFileValidation.WORKING,
     overwrite: bool = False,
+    incremental: bool = False,
 ) -> Path:
+    """Write one golden document, atomically.
+
+    ``incremental`` is for the repeated working-golden persists of a single loaded document that
+    ``tune`` makes as it records ranking feedback per target: those persists mutate realizations
+    only, so the program and loop pools keep the text they were serialized to instead of being
+    reserialized once per target. The whole document is still validated, and the bytes written are
+    the ones a full dump writes. Canonical and promotion dumps leave it off and reserialize everything.
+    """
     validate_golden_file(document, validation=validation)
     destination = Path(path)
     if destination.exists() and not overwrite:
         raise FileExistsError(f"{destination} already exists; pass overwrite=True to replace it")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    styled = dict(document)
-    styled["programs"] = [_style_program(program) for program in document["programs"]]
-    if "loops" in document:
-        styled["loops"] = [_style_program(program) for program in document["loops"]]
-    payload = yaml.dump(styled, Dumper=_GoldenDumper, sort_keys=False, width=140)
+    blocks = _pool_blocks(document, reuse=incremental)
+    payload = "".join(blocks[key] if key in blocks else _dump_block(key, value) for key, value in document.items())
     temporary = None
     mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o644
     try:
@@ -653,15 +955,106 @@ def dump_golden_file(
 
 def is_repository_golden_path(path: str | Path) -> bool:
     resolved = Path(path).resolve()
-    repository = _GOLDENS_DIR.resolve()
-    return resolved == repository or repository in resolved.parents
+    hardware_root = _HARDWARE_GOLDENS_DIR.resolve()
+    if resolved == hardware_root or hardware_root in resolved.parents:
+        return True
+    with default_recipe_root() as recipe_root:
+        if recipe_root is None:
+            return False
+        try:
+            relative = resolved.relative_to(recipe_root.resolve())
+        except ValueError:
+            return False
+        return len(relative.parts) >= 2 and relative.parts[1] == _RECIPE_GOLDEN_DIR
+
+
+@contextmanager
+def _repository_golden_paths():
+    """Yield model-agnostic hardware goldens plus recipe-local model goldens."""
+    with default_recipe_root() as recipe_root:
+        paths = list(_HARDWARE_GOLDENS_DIR.glob("*.yaml"))
+        if recipe_root is not None:
+            paths.extend(recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.yaml"))
+        yield sorted(paths)
+
+
+def _file_gpu_name(path: Path) -> str | None:
+    """The document's ``gpu_name`` read off the file HEAD without parsing the body — the dump
+    writes it as the first key, so a card-scoped consumer can skip foreign multi-megabyte files
+    (the whole-corpus parse is the dominant first-evidence cost). ``None`` when the head does not
+    carry it — the caller falls back to the full parse."""
+    try:
+        head = path.open("r").read(256)
+    except OSError:
+        return None
+    for line in head.splitlines():
+        if line.startswith("gpu_name:"):
+            return str(yaml.load(line, Loader=_SAFE_LOADER)["gpu_name"])
+    return None
+
+
+#: Optional scope override for :func:`records_for_card` — the corpus the deploy tier reads.
+#: ``None`` (the default, and the only value a real deploy ever sees) reads the repository files.
+#: The drift audit (``search/audit.py``) installs one file's / one precision lane's records here so
+#: its verdicts judge exactly that set, the way the release gate needs them scoped. Set it through
+#: :func:`records_override`, never by hand.
+RECORDS_OVERRIDE: list[GoldenRecord] | None = None
+
+
+@contextmanager
+def records_override(records: list[GoldenRecord] | None):
+    """Scope the corpus :func:`records_for_card` reads, restoring the previous scope after.
+    ``[]`` hides every record — how a caller that must not consult the verified tier says so;
+    ``None`` is a no-op, leaving whatever scope is already installed.
+
+    **The body must not ``await``.** This swaps a module global, so it is only atomic with respect
+    to other coroutines while the block stays synchronous — and it is used inside concurrently
+    gathered tune targets, which share one event loop."""
+    global RECORDS_OVERRIDE  # noqa: PLW0603 — the documented scope seam, one owner
+    if records is None:
+        yield
+        return
+    prev = RECORDS_OVERRIDE
+    RECORDS_OVERRIDE = records
+    try:
+        yield
+    finally:
+        RECORDS_OVERRIDE = prev
+
+
+def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
+    """The repository records for ONE card, loading only that card's files (header sniff) — the
+    deploy tier's loader. ``GOLDEN_RECORDS`` stays the full corpus for the eval / fit consumers;
+    both share the per-path document memo so nothing parses twice. :data:`RECORDS_OVERRIDE`
+    replaces the repository corpus when the audit has scoped it."""
+    if RECORDS_OVERRIDE is not None:
+        return [r for r in RECORDS_OVERRIDE if r.gpu_name == gpu_name and tuple(r.compute_cap) == tuple(compute_cap)]
+    records: list[GoldenRecord] = []
+    with _repository_golden_paths() as paths:
+        for path in paths:
+            head_gpu = _file_gpu_name(path)
+            if head_gpu is not None and head_gpu != gpu_name:
+                continue
+            records.extend(r for r in _records_of(path) if r.gpu_name == gpu_name and tuple(r.compute_cap) == tuple(compute_cap))
+    return records
+
+
+_DOCUMENT_MEMO: dict[Path, list[GoldenRecord]] = {}
+
+
+def _records_of(path: Path) -> list[GoldenRecord]:
+    cached = _DOCUMENT_MEMO.get(path)
+    if cached is None:
+        document = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
+        cached = _DOCUMENT_MEMO.setdefault(path, load_golden_records(document))
+    return cached
 
 
 def _load_goldens() -> list[GoldenRecord]:
     records: list[GoldenRecord] = []
-    for path in sorted(_GOLDENS_DIR.rglob("*.yaml")):
-        document = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
-        records.extend(load_golden_records(document))
+    with _repository_golden_paths() as paths:
+        for path in paths:
+            records.extend(_records_of(path))
     return records
 
 

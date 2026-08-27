@@ -23,6 +23,7 @@ config as well as the image repository:
 
 | HF model id | slug | config | image repository |
 | --- | --- | --- | --- |
+| `google/gemma-4-12B` | `gemma-4-12b` | `models/gemma-4-12b.env` | `cloudriftai/vllm-emmy-gemma-4-12b` |
 | `google/gemma-4-12B-it` | `gemma-4-12b-it` | `models/gemma-4-12b-it.env` | `cloudriftai/vllm-emmy-gemma-4-12b-it` |
 | `Qwen/Qwen3-Embedding-0.6B` | `qwen3-embedding-0.6b` | `models/qwen3-embedding-0.6b.env` | `cloudriftai/vllm-emmy-qwen3-embedding-0.6b` |
 
@@ -71,7 +72,8 @@ Hence the warm: one real serving run on the target card, inside the image. The f
 
 - `source` — live-probed target-card featurization + the real program enumeration (above).
 - `toolkit_tag` is the compiling nvcc — the warm must run **inside the image**, not on the host toolchain.
-- `flags` — production `-O3`: never warm with `EMMY_NVCC_FLAGS` set (tune's `-Xcicc -O1` would poison the key).
+- `flags` — production `-O3`: never warm with `EMMY_NVCC_FLAGS` set to a non-deployable opt level (it would
+  poison the key).
 - The serving config (model / revision / dtype / max-model-len / max-num-batched-tokens / decode bucket / cudagraph
   capture ladder / any pinned flag that moves the plugin's path, such as `--kv-cache-dtype`) changes **which
   programs exist and their shapes** — warm and release must use identical values. The revision is the one whose
@@ -96,8 +98,11 @@ should be deterministic across processes); the fixpoint warm contains it but doe
 **The pack changes the fixpoint's role.** The online pass also writes the execution-plan pack (`warm/pack`, keyed
 on the model **config hash** + serving shape — not the id/path, precisely so the offline boots share it; a
 compressed checkpoint adds a digest of its compression declaration, which the config hash cannot see, so two rungs
-of one conversion never share a pack), and every
-subsequent boot — the offline fixpoint passes, verify, customer boots — loads it: fork picks are frozen in the
+of one conversion never share a pack). The generative config digest excludes only `eos_token_id`, which is
+scheduler policy rather than tensor-program
+structure; base and instruction-tuned checkpoints whose architecture and geometry are otherwise identical can share
+the same weight-independent pack identity. Architecture/geometry changes still miss the pack. Every subsequent boot
+— the offline fixpoint passes, verify, customer boots — loads it: fork picks are frozen in the
 artifact, so the bimodal-pick class vanishes and the fixpoint converges immediately whenever the pack takes. The
 loop stays as a safety net for the case where the pack write was skipped (a weight outside the pack vocabulary) or
 the load falls back — then the old cubin-union behavior is exactly what runs.
@@ -135,12 +140,14 @@ not regress, so that selected shape must converge and pass pack-HIT plus zero-re
   reproduce a dense,
   unquantized, default-branch release exactly — `SERVE_WARM_SHAPES`, `SERVE_REVISION`, `SERVE_QUANT`,
   `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
-  (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), and the release-gate scope
-  opt-in `SERVE_STATIC_ONLY`. The latter four map
+  (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the qualified vLLM runner
+  opt-in `SERVE_V2_MODEL_RUNNER`, the release-gate scope opt-in `SERVE_STATIC_ONLY`, and the golden-consultation
+  baseline `SERVE_CONSULT_BASELINE`. The runner shape fields map
   immutably to their `EMMY_GEN_*` variables in initial warm, every shape fixpoint, the baked image, and verify;
   an extra warm shape's prefill field overrides the pinned bucket. A test rejects any other key, because a
   misspelled one reads as a value nothing consumes.
-  `SERVE_GOLDEN_FILE` names the one canonical YAML that trace, tune handoff, release audit, and image gate share.
+  `SERVE_GOLDEN_FILE` names the recipe-local canonical YAML that trace, tune handoff, release audit, and image gate
+  share: `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, one file per exact GPU.
   `SERVE_STATIC_ONLY=1` narrows the realization matrix and is fail-closed: it requires runner capacity, decode bucket,
   and scheduler maximum all equal to one, prefill disabled, the M1 tier enabled, capture sizes exactly `[1]`, and no
   warm-shape override outside that same envelope. Without it the audit derives every warm width plus symbolic.
@@ -153,15 +160,20 @@ not regress, so that selected shape must converge and pass pack-HIT plus zero-re
   quantization method and refuses the boot at config parsing, though nothing in the engine needs one — emmy owns
   every coded weight), and `SERVE_CAPTURE_SIZES` replaces the power-of-two capture ladder, which an **MoE model must
   cap at `[1]`**: single-token steps ride the runner's fixed-slot expert dispatch (fixed launch set, capture-legal)
-  while wider decode steps keep the routed dispatch, which host-syncs and stays eager.
+  while wider decode steps keep the routed dispatch, which host-syncs and stays eager. `SERVE_V2_MODEL_RUNNER=1`
+  opts a qualified dense model into vLLM's V2 runner; it executes real prefill/decode warmups before enabling vLLM's
+  request-time JIT monitor.
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
   the download happens here, once), `warm/cubin` (every compiled kernel), and `warm/pack`
-  (the execution-plan pack the first boot writes). Before any of it, two refusals: the live GPU against `SERVE_GPU`,
+  (the execution-plan pack the first boot writes). `TRITON_CACHE_DIR` points at `warm/triton`, so vLLM attention
+  helpers first reached by that completion are retained too rather than recompiling on the first customer request.
+  Before any of it, two refusals: the live GPU against `SERVE_GPU`,
   and an unpinned `SERVE_REVISION` against the repo's branch list (one HTTP call to the HF refs API; unreachable
   refs skip the check rather than fail it, since warming offline off a pre-seeded snapshot is supported).
   `SKIP_REVISION_CHECK=1` overrides, for the case where the default branch really is the target.
-- `Dockerfile` — `FROM` the plain image, `COPY warm/hf` + `COPY warm/cubin` + `COPY warm/pack` to `/opt/emmy`, bakes
+- `Dockerfile` — `FROM` the plain image, copies `warm/hf`, `warm/cubin`, `warm/pack`, and `warm/triton` to
+  `/opt/emmy`, bakes
   the config env, `EMMY_PACK_DIR` and `HF_HUB_OFFLINE=1`, entrypoint `serve.sh`. The caches live at **`/opt/emmy`**
   on purpose: compose/recipes bind-mount the host HF cache over `/root/.cache/huggingface`, which would shadow
   anything baked there. The baked `HF_HOME` + `HF_HUB_OFFLINE=1` pair is also the signal `emmy deploy` reads
@@ -171,8 +183,8 @@ not regress, so that selected shape must converge and pass pack-HIT plus zero-re
   prebuilt image was possible.
 - `verify.sh` — compares the image's baked `SERVE_REVISION` against the config's (a tag built from an older config
   serves different weights and still passes every check below), then cold-starts the **baked** image with no token,
-  issues one completion, and diffs the cubin file set before/after: an empty diff proves 100% cache hit (zero
-  compiles), and the offline boot proves zero downloads.
+  issues one completion, and diffs the cubin file set before/after: an empty diff proves 100% Emmy cache hit. It
+  also rejects any new vLLM Triton JIT warning emitted by that request; the offline boot proves zero downloads.
   When a pack is baked, it also asserts the boot **hit** it (a silent fallback to the full compile would still pass
   the cubin check while re-paying the frontend on every customer boot). The hit signal is the runner's "pack hit"
   line grepped from `docker logs` — reachable because `emmy.serving.register()` self-attaches a log handler under
@@ -199,7 +211,7 @@ flowchart LR
     class headroom,gold,warm,verify gpu
 ```
 
-The `release-serving-image` skill (`.claude/skills/release-serving-image/`) automates this whole session — rental or
+The `release-serving-image` skill (`.agents/skills/release-serving-image/`) automates this whole session — rental or
 local mode, abort gates per step, a human approval pause before the push, guaranteed teardown. The manual steps:
 
 The full release session on a rented card (each step from the repo checkout; host prereqs for steps 0–4:
@@ -250,6 +262,14 @@ The full release session on a rented card (each step from the repo checkout; hos
    requires every structural target to carry every config-derived static/symbolic precision realization; reproduces
    each row; and audits the freshly traced serving twins. Any missing realization, DRIFT, GAP, or compile failure is
    a hard failure.
+
+   With a `SERVE_CONSULT_BASELINE` JSON in the config, the audit additionally ratchets each twin's verified-tier
+   consultation count per lane against that checked-in baseline. MATCH/DRIFT/GAP only report on forks that consult
+   the verified tier; a pass change that removes a kernel's schedule fork deploys it single-option with **no**
+   consultation, so its recorded goldens silently stop applying with zero DRIFT — the count drop is the only
+   deploy-side signal, and it fails the gate naming the twin. Seed or refresh the baseline with
+   `emmy eval golden … --update-consult-baseline` on the target GPU (only a passing audit records), and commit the
+   JSON next to the config.
 
    Model provenance matches in two halves. The **repo** half compares as slugs, with a `-`-boundary prefix rule so a
    base checkpoint's goldens cover its instruction-tuned sibling (same layer geometry, same kernel shapes) while a

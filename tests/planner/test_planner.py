@@ -42,14 +42,16 @@ def test_task_recipe_name_trailing_slash():
     assert task.recipe_name == "" or task.recipe_name == "Qwen3-Coder-30B"
 
 
-def test_task_result_path():
+def test_task_record_path():
     task_obj = _make_task(gpu="NVIDIA GeForce RTX 5090", gpu_count=1, recipe_dir="/recipes/MyModel")
     task_obj.run_dir = Path("/run/123")
-    result = task_obj.result_path()
-    assert result == Path("/run/123/rtx5090x1_vllm_benchmark.txt")
+    result = task_obj.record_path()
+    assert result.parent == Path("/run/123")
+    assert result.name.startswith("rtx5090x1_")
+    assert result.name.endswith(".experiment.yaml")
 
 
-def test_task_result_path_with_matrix_label():
+def test_task_record_path_with_matrix_label():
     variant = Variant(
         params={
             "deploy.gpu": "NVIDIA GeForce RTX 5090",
@@ -66,8 +68,9 @@ def test_task_result_path_with_matrix_label():
         ),
         run_dir=Path("/run/123"),
     )
-    result = task_obj.result_path()
-    assert result == Path("/run/123/rtx5090x1_mc128_vllm_benchmark.txt")
+    result = task_obj.record_path()
+    assert result.name.startswith("rtx5090x1_mc128_")
+    assert result.name.endswith(".experiment.yaml")
 
 
 def test_task_gpu_properties():
@@ -106,10 +109,10 @@ def test_command_tasks_grouped_by_gpu_only():
     assert len(by_gpu["GPU_B"].tasks) == 1
 
 
-def test_command_task_result_path_is_log():
+def test_command_task_uses_common_record_path():
     t = _make_command_task()
     t.run_dir = Path("/run/x")
-    assert t.result_path().name.endswith("_command.log")
+    assert t.record_path().name.endswith(".experiment.yaml")
 
 
 def test_same_model_same_gpu_one_group():

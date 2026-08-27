@@ -199,11 +199,16 @@ def resolve_golden_arg(args) -> None:
     # purpose is to verify the exact target currently being tuned (including Loop IR fallbacks).
     document = None
     if golden_file:
-        try:
-            document = load_golden_file(golden_file)
-        except ValueError as exc:
-            logger.error(str(exc))
-            sys.exit(2)
+        # A multi-target replay hands us the document it already parsed: this file is a
+        # whole model inventory, so re-reading and re-validating it per target is the
+        # difference between minutes and days on a large golden.
+        document = getattr(args, "_golden_document", None)
+        if document is None:
+            try:
+                document = load_golden_file(golden_file)
+            except ValueError as exc:
+                logger.error(str(exc))
+                sys.exit(2)
         records = load_golden_records(document)
         available = records
     else:
@@ -317,9 +322,10 @@ def add_nvcc_args(parser) -> None:
         default=None,
         help=(
             "Override the extra nvcc compile flags (space-separated), e.g. "
-            '"-Xcicc -O3" or "-Xcicc -O1". Defaults: tune uses "-Xcicc -O1" (fast compile — but latencies are a '
-            "RANKING signal, NOT -O3-optimal: reductions/attention can run 1.5-3x slower); compile/run use nvcc's "
-            "default -O3. Folded into the cubin + perf cache keys. Equivalent to setting EMMY_NVCC_FLAGS."
+            '"-Xcicc -O1". Default everywhere is nvcc\'s own -O3, the deployable regime: tune measures in the '
+            "same regime it deploys into, so a tuned latency is the deployed one. Pinning a non-deployable opt "
+            "level makes a sweep rank only against itself — its rows key to that regime and no deploy reads them. "
+            "Folded into the cubin + perf cache keys. Equivalent to setting EMMY_NVCC_FLAGS."
         ),
     )
 
@@ -610,6 +616,7 @@ def _trace_model(
     from emmy.compiler.loader.safetensors import split_revision
     from emmy.compiler.trace.huggingface import (
         load_architecture_trace_twin,
+        load_quantized_layer_twin,
         load_quantized_trace_twin,
         load_quantized_twin,
         quantized_checkpoint_dir,
@@ -621,10 +628,15 @@ def _trace_model(
     quant_dir = quantized_checkpoint_dir(model_id)
     repo, revision = split_revision(model_id)
     if quant_dir is not None:
-        # Quantized checkpoint (fp8 / EXL3): trace the architecture twin from config,
+        # Quantized checkpoint (FP8 / AWQ / EXL3): trace the architecture twin from config,
         # carrying the decoded real weights (from_pretrained would engage transformers'
         # own quantizer machinery — the trace is quantization-blind; see the FP8 plan).
-        model = load_quantized_trace_twin(quant_dir, dtype, layer) if architecture_only else load_quantized_twin(quant_dir, dtype)
+        if architecture_only:
+            model = load_quantized_trace_twin(quant_dir, dtype, layer)
+        elif layer is not None:
+            model = load_quantized_layer_twin(quant_dir, dtype, layer)
+        else:
+            model = load_quantized_twin(quant_dir, dtype)
     elif architecture_only and layer is not None:
         # Inventory traces need shapes and module structure, not checkpoint
         # values. Constructing from config under ``meta`` avoids downloading or

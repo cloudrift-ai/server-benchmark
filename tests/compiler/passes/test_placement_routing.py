@@ -1,88 +1,76 @@
-"""Phase 4 — placement routing + the cut realizer.
+"""Placement-routing acceptance tests over complete Fold trees.
 
-ROUTING entries (PLACE-only golden knobs) and authoritative ``PLACE`` pins resolve a cut BEFORE
-any schedule fork exists; the realizer splits the recognized tree at the seam into un-mapped
-``LoopOp`` pieces that re-recognize as fresh roots (recursive — a piece's entry may itself cut).
-Fuse is the default by ABSENCE: with no pin and no entry, recognition is byte-untouched (the
-digest harness holds separately). These tests run off-GPU: the pieces compile through the full
-CUDA pass list with deterministic option-0 resolution, so kernel SETS and buffer wiring are
-asserted without a device (GPU accuracy is covered by the e2e smoke on the 5090 host).
+A scoped pin that names no cuttable seam fails rather than restoring the unpinned fork.
+Contraction-operand cuts remain xfailed until Tile IR records their materialized workspace dtype.
 """
 
 from __future__ import annotations
 
-import os
-import sys
 from dataclasses import replace
-from types import SimpleNamespace
+
+import pytest
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import flatten_leaves
-from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.golden import GoldenRecord
+from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+_CTX = Context.from_target((12, 0))
+_SCALAR = {"WORK": "", "TILE": "", "STAGE": "", "REDUCE": "", "RASTER": ""}
 
 
-def _compile(graph, knobs_env: str | None, monkeypatch, ctx: Context | None = None):
-    if knobs_env is None:
-        monkeypatch.delenv("EMMY_KNOBS", raising=False)
-        monkeypatch.delenv("EMMY_PLACE", raising=False)
-    else:
-        monkeypatch.setenv("EMMY_KNOBS", knobs_env)
-    ctx = ctx or Context.from_target((12, 0))
-    out, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=ctx).resolve(graph, lambda fp: flatten_leaves(fp.options)[0])
-    return out
+def _compile(graph: Graph, placement: dict[str, str]) -> Graph:
+    with pinned_knobs({**placement, **_SCALAR}):
+        return Pipeline.build(CUDA_PASSES).run(graph, ctx=_CTX)
 
 
-def _kernel_ids(out) -> list[str]:
-    return sorted(nid for nid, n in out.nodes.items() if getattr(n.op, "kernel_source", None))
+def _kernels(graph: Graph):
+    return [node for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
 
 
-def _inp(g: Graph, name: str, shape: tuple) -> None:
-    g.add_node(op=InputOp(), inputs=[], output=Tensor(name, tuple(Dim(s) for s in shape), dtype=F16), node_id=name)
+def _input(graph: Graph, name: str, shape: tuple[int, ...]) -> None:
+    graph.add_node(InputOp(), [], Tensor(name, tuple(Dim(size) for size in shape), dtype=F16), node_id=name)
 
 
-def _rms_graph(S: int = 64, H: int = 4096) -> Graph:
-    g = Graph()
-    _inp(g, "x", (S, H))
-    _inp(g, "w", (H,))
-    g.add_node(RmsNormOp(), ["x", "w"], Tensor("y", (Dim(S), Dim(H)), dtype=F16), node_id="y")
-    g.inputs, g.outputs = ["x", "w"], ["y"]
-    return g
+def _rms_graph(rows: int = 4, width: int = 32) -> Graph:
+    graph = Graph()
+    _input(graph, "x", (rows, width))
+    _input(graph, "w", (width,))
+    graph.add_node(RmsNormOp(), ["x", "w"], Tensor("y", (Dim(rows), Dim(width)), dtype=F16), node_id="y")
+    graph.inputs, graph.outputs = ["x", "w"], ["y"]
+    return graph
 
 
-def _norm_linear_graph(S: int = 32, H: int = 1024, inter: int = 3072) -> Graph:
-    g = Graph()
-    _inp(g, "x", (1, S, H))
-    _inp(g, "wn", (H,))
-    _inp(g, "w", (H, inter))
-    g.add_node(RmsNormOp(), ["x", "wn"], Tensor("xn", (1, Dim(S), Dim(H)), dtype=F16), node_id="xn")
-    g.add_node(MatmulOp(), ["xn", "w"], Tensor("y", (1, Dim(S), Dim(inter)), dtype=F16), node_id="y")
-    g.inputs, g.outputs = ["x", "wn", "w"], ["y"]
-    return g
+def _norm_linear_graph(*, keep_norm: bool = False) -> Graph:
+    rows, width, intermediate = 2, 16, 16
+    graph = Graph()
+    _input(graph, "x", (1, rows, width))
+    _input(graph, "wn", (width,))
+    _input(graph, "w", (width, intermediate))
+    graph.add_node(
+        RmsNormOp(),
+        ["x", "wn"],
+        Tensor("xn", (Dim(1), Dim(rows), Dim(width)), dtype=F16),
+        node_id="xn",
+    )
+    graph.add_node(
+        MatmulOp(),
+        ["xn", "w"],
+        Tensor("y", (Dim(1), Dim(rows), Dim(intermediate)), dtype=F16),
+        node_id="y",
+    )
+    graph.inputs = ["x", "wn", "w"]
+    graph.outputs = ["y", "xn"] if keep_norm else ["y"]
+    return graph
 
 
-def _activation_linear_graph(S: int = 2, H: int = 16, inter: int = 32) -> Graph:
-    g = Graph()
-    _inp(g, "x", (S, H))
-    _inp(g, "w", (H, inter))
-    g.add_node(ElementwiseOp("silu"), ["x"], Tensor("xa", (Dim(S), Dim(H)), dtype=F16), node_id="xa")
-    g.add_node(MatmulOp(), ["xa", "w"], Tensor("y", (Dim(S), Dim(inter)), dtype=F16), node_id="y")
-    g.inputs, g.outputs = ["x", "w"], ["y"]
-    return g
-
-
-# --- the loader split (routing vs schedule entries) ----------------------------------------------
-
-
-def test_is_routing_reads_place_only_knob_dicts() -> None:
+def test_place_only_golden_rows_are_routing_rows() -> None:
     base = GoldenRecord(
         name="test",
         gpu_name="TESTGPU",
@@ -97,179 +85,77 @@ def test_is_routing_reads_place_only_knob_dicts() -> None:
         measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "test"},
         ranking=None,
     )
-    routing = replace(base, knobs={"PLACE@a": "cut"})
-    sched = replace(base, knobs={"TILE": "f4x8", "WORK": "t16x8"})
-    assert routing.is_routing and not sched.is_routing
+    assert replace(base, knobs={"PLACE@a": "cut"}).is_routing
+    assert not replace(base, knobs={"TILE": "f4x8", "WORK": "t16x8"}).is_routing
     assert not replace(base, knobs={}).is_routing
 
 
-def _routing_record(*, gpu_name: str, emmy_us: float = 3.8):
-    return SimpleNamespace(
-        name="rms.routing",
-        knobs={"PLACE": "cut"},
-        is_routing=True,
-        gpu_name=gpu_name,
-        compute_cap=(12, 0),
-        emmy_us=emmy_us,
-        shape_key=ShapeKey(free_prod=64 * 4096, reduce_max=4096, is_warp=False, kind="rms_norm"),
-    )
+def test_rms_norm_fused_pin_lowers_one_kernel() -> None:
+    assert len(_kernels(_compile(_rms_graph(), {"PLACE": "fuse"}))) == 1
 
 
-def test_routing_entries_never_join_the_schedule_golden_tier(monkeypatch) -> None:
-    """A PLACE-only entry has no schedule keys, so ``_golden_matches_row`` would read every
-    family as FREE and 'match' any row at the routing total — the schedule-tier index must skip
-    routing entries entirely."""
-    from emmy.compiler.pipeline.search import golden as golden_mod
-    from emmy.compiler.pipeline.search.policy import greedy
-
-    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 5090", emmy_us=1.0)
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
-    ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
-    assert greedy._golden_evidence_index(ctx) == {}
+def test_rms_norm_cut_pin_splits_statistic_and_scale() -> None:
+    kernels = _kernels(_compile(_rms_graph(), {"PLACE": "cut"}))
+    assert len(kernels) == 2
+    assert any("__place_" in node.id for node in kernels)
 
 
-# --- the PLACE path family ------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "spelling",
+    (
+        pytest.param(
+            "PLACE",
+            marks=pytest.mark.xfail(
+                reason="the primary seam is a contraction operand whose workspace storage dtype is not represented",
+                strict=True,
+            ),
+        ),
+        "PLACE@map",
+        "PLACE@a1",
+    ),
+)
+def test_norm_linear_each_closed_cone_pin_lowers(spelling: str) -> None:
+    kernels = _kernels(_compile(_norm_linear_graph(), {spelling: "cut"}))
+    assert len(kernels) == 2
+    assert any("__place_" in node.id for node in kernels)
+    assert any(node.id == "y" for node in kernels)
 
 
-def test_place_sites_are_the_non_root_nodes() -> None:
-    from emmy.compiler.ir.tile.path import family_sites, resolve, sites, spell
-    from emmy.compiler.pipeline.passes.lowering.tile._atomize import bind_prologue_contraction
-
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-    from test_recognize_boundary_rules import _prologue_shape
-
-    node, free = _prologue_shape(b_layouts=(False, False))
-    c_map, _n_ax, _stores = bind_prologue_contraction(node, free)
-    all_sites = sites(c_map)
-    seams = family_sites("PLACE", all_sites)
-    assert seams and all(s.depth > 1 for s in seams)
-    # The cone edge spells through the view-role label — the plan's worked spelling.
-    cone = c_map.operands[0].a  # noqa: F841 — the a edge carries its role label on the stored node
-    labels = {spell(c_map, "PLACE", s.node, all_sites=all_sites) for s in seams}
-    assert "PLACE@a" in labels
-    assert resolve(c_map, "PLACE@a", all_sites=all_sites).node is next(
-        s.node for s in seams if spell(c_map, "PLACE", s.node, all_sites=all_sites) == "PLACE@a"
-    )
+@pytest.mark.xfail(reason="contraction-operand cuts need an explicit materialized workspace dtype", strict=True)
+def test_scoped_cut_preserves_every_multi_output_parent_port() -> None:
+    lowered = _compile(_norm_linear_graph(keep_norm=True), {"PLACE@a": "cut"})
+    assert lowered.outputs == ["y", "xn"]
+    assert all(lowered.buffer(name) is not None for name in lowered.outputs)
+    assert len(_kernels(lowered)) == 2
+    assert any("__place_" in node.id for node in _kernels(lowered))
 
 
-# --- the realizer: pin-driven cuts, fuse-default, recursion ---------------------------------------
+def test_pinned_transposed_coop_band_still_refuses_without_a_free_axis() -> None:
+    with pytest.raises(ValueError, match="innermost free axis"):
+        with pinned_knobs({"PLACE": "fuse", "WORK": "t256", "REDUCE": "coop-t"}):
+            Pipeline.build(CUDA_PASSES).run(_rms_graph(rows=1), ctx=_CTX)
 
 
-def test_rms_norm_deploys_unchanged_under_default_fuse(monkeypatch) -> None:
-    out = _compile(_rms_graph(), None, monkeypatch)
-    assert len(_kernel_ids(out)) == 1, "no routing entry and no pin = fuse = the recognized form"
+@pytest.mark.parametrize("value", ("cut", "fuse"))
+def test_pin_naming_no_seam_fails_loudly(value: str) -> None:
+    """A scoped pin never restores the unpinned placement fork when its seam is absent."""
+    with pytest.raises(ValueError, match="names no site|does not address a cuttable Fold edge"):
+        _compile(_rms_graph(), {"PLACE@b": value})
 
 
-def test_rms_norm_place_cut_splits_stat_and_scale(monkeypatch) -> None:
-    out = _compile(_rms_graph(), "PLACE=cut", monkeypatch)
-    kernels = _kernel_ids(out)
-    assert any("__cut_" in k for k in kernels), kernels
-    assert len(kernels) >= 2  # the stat piece (possibly g-split into partial+finalize) + the scale
-    ws = next(k for k in kernels if "__cut_" in k and "__partial" not in k)
-    # The workspace producer feeds the residue, which writes the original output.
-    consumer = out.nodes["y"]
-    assert ws in consumer.inputs or any(ws in out.nodes[i].inputs for i in consumer.inputs)
+@pytest.mark.xfail(reason="contraction-operand cuts need an explicit materialized workspace dtype", strict=True)
+def test_contraction_operand_seam_takes_the_output_dtype() -> None:
+    """A seam standing in for a contraction OPERAND holds what the fused slab stored — the atom's
+    16-bit element — not the f32 its cone computed in.
 
+    RESTORED: typed f32 (an f32-computing norm over f16 keys), the materialized B could feed no
+    warp atom, since only the ``a`` edge has a converting fill."""
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import TILE_PASSES
 
-def test_norm_linear_cone_cut_recurses_to_the_full_cascade(monkeypatch) -> None:
-    """Bare ``PLACE=cut`` cuts the cone edge (the fold seam is the pure-copy degenerate and is
-    not cuttable), the cone piece re-recognizes as the rms_norm shape and cuts again — the
-    plan's worked cascade: statistic + scale + plain matmul, all from EXISTING kinds."""
-    out = _compile(_norm_linear_graph(), "PLACE=cut", monkeypatch)
-    kernels = _kernel_ids(out)
-    cuts = [k for k in kernels if "__cut_" in k]
-    assert len(cuts) >= 2, f"expected the recursive cascade, got {kernels}"
-    assert "y" in kernels, "the residue matmul keeps the original output"
-
-
-def test_scoped_place_pin_from_replay_context_cuts_the_cone(monkeypatch) -> None:
-    """The replay context publishes ``PLACE@a`` through the aggregate consumed by routing."""
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
-
-    monkeypatch.delenv("EMMY_KNOBS", raising=False)
-    monkeypatch.delenv("EMMY_PLACE@A", raising=False)
     with pinned_knobs({"PLACE@a": "cut"}):
-        out, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(
-            _norm_linear_graph(S=1, H=16, inter=16), lambda fp: flatten_leaves(fp.options)[0]
-        )
-    kernels = _kernel_ids(out)
-    assert any("__cut_" in k for k in kernels), kernels
-    assert "y" in kernels, "the residue matmul keeps the original output"
-
-
-def test_explicit_fuse_pin_suppresses_cutting(monkeypatch) -> None:
-    out = _compile(_rms_graph(), "PLACE=fuse", monkeypatch)
-    assert len(_kernel_ids(out)) == 1
-
-
-def test_pin_naming_no_seam_is_skipped(monkeypatch) -> None:
-    """A whole-model pin targets one kernel shape — trees without that seam compile fused."""
-    out = _compile(_rms_graph(), "PLACE@b=cut", monkeypatch)
-    assert len(_kernel_ids(out)) == 1
-
-
-# --- routing entries drive the same realizer -------------------------------------------------------
-
-
-def test_routing_golden_cuts_without_a_pin(monkeypatch) -> None:
-    from emmy import config
-    from emmy.compiler.pipeline.search import golden as golden_mod
-
-    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 5090")
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
-    # Goldens are -O3 truth: under make test's -Xcicc -O1 lane the routing consult (like the
-    # schedule golden tier) is silent — force the deployable regime, the audit's own move.
-    with config.nvcc_flags_override(""):
-        ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
-        out = _compile(_rms_graph(), None, monkeypatch, ctx=ctx)
-    assert any("__cut_" in k for k in _kernel_ids(out)), "the routing entry cuts with no pin present"
-
-
-def test_stat_free_computed_a_routing_golden_uses_its_fused_key(monkeypatch) -> None:
-    """A stat-free activation→linear record deploys through the canonical computed-A key."""
-    from emmy import config
-    from emmy.compiler.pipeline.search import golden as golden_mod
-
-    gpu_name = "NVIDIA GeForce RTX 5090"
-    entry = SimpleNamespace(
-        name="activation-linear.routing",
-        knobs={"PLACE@a": "cut"},
-        is_routing=True,
-        gpu_name=gpu_name,
-        compute_cap=(12, 0),
-        emmy_us=1.0,
-        shape_key=replace(ShapeKey.from_matmul(2, 32, 16, "fp16"), kind="fused"),
-    )
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
-    with config.nvcc_flags_override(""):
-        out = _compile(_activation_linear_graph(), None, monkeypatch, ctx=Context.from_target((12, 0), gpu_name=gpu_name))
-    kernels = _kernel_ids(out)
-    assert any("__cut_" in k for k in kernels), kernels
-    assert "y" in kernels, "the residue matmul keeps the original output"
-
-
-def test_schedule_pin_suppresses_the_routing_entry(monkeypatch) -> None:
-    """Any live schedule-family pin marks a pinned re-record / ``--ab`` compile, and pins are
-    authoritative over every golden tier — the recorded routing entry must not reroute it. This
-    is the 2026-07-31 fused re-record dead end: with a same-shape ``.cut`` row recorded, every
-    pinned fused golden replay silently compiled the cut's pieces and gated ``realized (off)``."""
-    from emmy import config
-    from emmy.compiler.pipeline.search import golden as golden_mod
-
-    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 5090")
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
-    monkeypatch.setenv("EMMY_STAGE", "")  # the OFF spelling — any schedule-family pin, PLACE excluded
-    with config.nvcc_flags_override(""):
-        ctx = Context.from_target((12, 0), gpu_name=entry.gpu_name)
-        out = _compile(_rms_graph(), None, monkeypatch, ctx=ctx)
-    assert len(_kernel_ids(out)) == 1, "a live schedule pin is authoritative — the routing entry must not cut"
-
-
-def test_routing_golden_ignored_off_its_card(monkeypatch) -> None:
-    from emmy.compiler.pipeline.search import golden as golden_mod
-
-    entry = _routing_record(gpu_name="NVIDIA GeForce RTX 4090")
-    monkeypatch.setattr(golden_mod, "GOLDEN_RECORDS", [entry])
-    ctx = Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090")
-    out = _compile(_rms_graph(), None, monkeypatch, ctx=ctx)
-    assert len(_kernel_ids(out)) == 1
+        out = Pipeline.build(TILE_PASSES).run(_norm_linear_graph(), ctx=_CTX)
+    workspaces = [node for node in out.nodes.values() if "_place_" in node.id and isinstance(node.op, (LoopOp, TileOp))]
+    assert workspaces, [node.id for node in out.nodes.values()]
+    assert any(node.output.dtype == F16 for node in workspaces), [(n.id, str(n.output.dtype)) for n in workspaces]

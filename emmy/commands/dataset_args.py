@@ -33,12 +33,14 @@ def add_dataset_args(parser, *, default: str, with_min_variants: bool = False) -
         choices=["golden", "db", "nodes"],
         default=default,
         help="Measurement-data source: 'golden' (recorded golden configs), 'db' (tune DB perf rows), or 'nodes' "
-        f"(tune DB search-tree node store, for `eval online`). Default: {default}.",
+        f"(tune DB search-tree node store — or a measurement freeze — for `eval prior`). Default: {default}.",
     )
     parser.add_argument(
         "--db",
-        help="Tune DB path for --dataset db/nodes — or, for --dataset nodes, a measurement-freeze directory "
-        "(scripts/freeze_node_store.py). Default: EMMY_TUNE_DB or ~/.cache/emmy/autotune.db.",
+        help="Measurement source to override the default. For --dataset nodes the default is the repo-checked "
+        "measurement freeze (EMMY_FREEZE_DIR, else search/freezes/) — pass a tune DB or another freeze directory "
+        "here to look at one machine's data instead. For --dataset db the default is EMMY_TUNE_DB or "
+        "~/.cache/emmy/autotune.db.",
     )
     parser.add_argument(
         "--kernel",

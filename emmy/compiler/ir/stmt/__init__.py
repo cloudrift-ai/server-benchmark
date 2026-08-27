@@ -16,7 +16,7 @@ Defined here rather than under any one IR package because all three IRs
 - Tree walks: :meth:`Body.iter` (pre-order recursive) and
   :meth:`Body.map` (flat 1:N transformer) — methods on
   :class:`Body` (in :mod:`.body`).
-- Body normalization: ``normalize_body`` driver + 8 passes
+- Body normalization: ``normalize_body`` driver and its ordered passes
   (drop-size-one, canonicalize-axis-order, copy-alias-elim,
   reduce-axis-unify, hoist, simplify, dedup-loads, rename-ssa) in
   :mod:`.normalize`.
@@ -37,14 +37,6 @@ they enforce Loop-IR's invariants (SSA scoping rules, axis uniqueness)
 and produce Loop-IR's canonical form.
 """
 
-from emmy.compiler.ir.stmt.algebra import (
-    M,
-    component_ops,
-    degenerate,
-    eval_lambda,
-    foldmap_eval,
-    rename_combine,
-)
 from emmy.compiler.ir.stmt.base import (
     INDENT,
     RenderCtx,
@@ -62,7 +54,7 @@ from emmy.compiler.ir.stmt.base import (
     _pad as _pad,  # re-export for ir.kernel.ir
 )
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body, Lambda
+from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
@@ -72,7 +64,6 @@ from emmy.compiler.ir.stmt.leaves import (
     Pack,
     Select,
     SelectBranch,
-    StateMerge,
     Unpack,
     Write,
     ZeroPrologue,
@@ -96,17 +87,11 @@ __all__ = [
     "Accum",
     "Assign",
     "Body",
-    "StateMerge",
     "Cond",
     "Init",
-    "Lambda",
     "Load",
     "Loop",
     "Mma",
-    "M",
-    "component_ops",
-    "degenerate",
-    "rename_combine",
     "Pack",
     "RenderCtx",
     "ZeroPrologue",
@@ -121,8 +106,6 @@ __all__ = [
     "dedup_loads",
     "drop_size_one_free_axes",
     "eliminate_copy_aliases",
-    "eval_lambda",
-    "foldmap_eval",
     "hoist_loop_invariants",
     "normalize_body",
     "op_to_expr",

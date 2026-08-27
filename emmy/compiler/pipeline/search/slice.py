@@ -5,13 +5,14 @@ Used in two places:
 
 - the **dump** sink writes one ``<kname>.json`` reproducer per kernel
   (``CompilerDump._dump_kernel_subgraphs``), and
-- the **two-level tuner** (`search.two_level`) slices each post-fusion kernel
+- the **two-level tuner** (`search.strategy.two_level`) slices each post-fusion kernel
   into its own graph so the inner per-op search explores only that op's forks.
 
 The slice keeps the root kernel node plus its transitive ``ConstantOp`` /
 ``InputOp`` producers (so scalar-constant inlining and load-op replay behave
-identically) and replaces every *compute* ancestor — another kernel feeding
-this one — with a synthetic ``InputOp`` boundary, so the result is standalone.
+identically), declares every retained ``InputOp`` as an external boundary, and
+replaces every *compute* ancestor — another kernel feeding this one — with a
+synthetic ``InputOp`` boundary, so the result is standalone.
 The root op is shared **by reference**: its body (and therefore
 :meth:`~emmy.compiler.ir.base.Op.cache_key`) is byte-for-byte the full-graph op's, which is what lets
 inner-tuned ``perf`` / ``lowering`` rows transfer back to the assembled graph.
@@ -33,16 +34,11 @@ def _kernel_compute_types() -> tuple[type, ...]:
     return (LoopOp, KernelOp, CudaOp)
 
 
-def collect_kernel_ancestors(
-    graph: Graph, root_id: str, compute_types: tuple[type, ...], absorb: frozenset[str] = frozenset()
-) -> tuple[set[str], set[str]]:
-    """Collect ``root_id`` + its transitive ``ConstantOp`` / ``InputOp``
-    ancestors. Compute-op ancestors (another kernel feeding this one) are
+def collect_kernel_ancestors(graph: Graph, root_id: str, compute_types: tuple[type, ...]) -> tuple[set[str], set[str]]:
+    """Collect ``root_id`` + its transitive Loop / leaf ancestors.
+    Compute-op ancestors (another kernel feeding this one) are
     returned in the ``synthetic`` set — they become synthetic ``InputOp``
-    boundaries in the slice and their own producers are NOT walked — EXCEPT
-    the ``absorb`` set: a producer a fusion of the root would consume (the
-    flash score matmul) is kept as a real node and walked through, so the
-    fusion can fire inside the slice."""
+    boundaries in the slice and their own producers are NOT walked."""
     from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
 
     keep: set[str] = {root_id}
@@ -60,49 +56,37 @@ def collect_kernel_ancestors(
         if node is None:
             continue
         if isinstance(node.op, compute_types):
-            if cur in absorb:
-                stack.extend(node.inputs)
-            else:
-                synthetic.add(cur)
+            synthetic.add(cur)
             continue
         if isinstance(node.op, (ConstantOp, InputOp)):
             stack.extend(node.inputs)
+            continue
+        # Cast/layout sentinels can deliberately survive between LoopOps (for
+        # example a compact AWQ integer decode followed by a value cast). Loop
+        # wire format intentionally carries only LoopOp compute, so such a
+        # node becomes a synthetic boundary just like an upstream kernel.
+        # Retaining it without marking it synthetic leaves its own input
+        # unbound and produces an invalid slice.
+        synthetic.add(cur)
     return keep, synthetic
 
 
 def topo_order(graph: Graph, keep: set[str]) -> list[str]:
     """Topo-sorted node ids restricted to ``keep`` (producers first)."""
-    visited: set[str] = set()
-    order: list[str] = []
-
-    def visit(nid: str) -> None:
-        if nid in visited or nid not in keep:
-            return
-        visited.add(nid)
-        for dep in graph.nodes[nid].inputs:
-            p = graph.producer(dep)
-            visit(p.id if p is not None else dep)
-        order.append(nid)
-
-    for nid in keep:
-        visit(nid)
-    return order
+    return [nid for nid in graph.topological_order() if nid in keep]
 
 
-def single_node_graph(graph: Graph, node_id: str, absorb: frozenset[str] = frozenset()) -> Graph:
+def single_node_graph(graph: Graph, node_id: str) -> Graph:
     """Slice ``graph`` to the single kernel node ``node_id`` plus its
     leaf-op closure, with every compute-op input turned into a synthetic
     ``InputOp``. Returns a standalone :class:`Graph` whose sole output is
-    ``node_id`` and whose ``inputs`` list its synthetic boundaries + real
-    graph inputs — sized identically to the full graph (partition
-    enumeration depends on the producers' extents). ``absorb`` names
-    producer kernels kept as REAL nodes (a fusion of the root consumes
-    them in-slice — the flash score matmul); the slice is then that
-    fusion's whole offer, one or two kernels depending on the trajectory."""
+    ``node_id`` and whose ``inputs`` list every retained or synthetic
+    ``InputOp`` boundary — sized identically to the full graph (partition
+    enumeration depends on the producers' extents)."""
     from emmy.compiler.graph import Graph as _Graph  # noqa: PLC0415
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
 
-    keep, synthetic = collect_kernel_ancestors(graph, node_id, _kernel_compute_types(), absorb)
+    keep, synthetic = collect_kernel_ancestors(graph, node_id, _kernel_compute_types())
     sub = _Graph()
     for kid in topo_order(graph, keep):
         src = graph.nodes[kid]
@@ -114,8 +98,8 @@ def single_node_graph(graph: Graph, node_id: str, absorb: frozenset[str] = froze
             sub.inputs.extend(src.buffer_names())
         else:
             sub.add_node(src.op, list(src.inputs), outputs=src.outputs, node_id=src.id)
-            if isinstance(src.op, InputOp) and kid in graph.inputs:
-                sub.inputs.append(kid)
+            if isinstance(src.op, InputOp):
+                sub.inputs.extend(src.buffer_names())
     # Every buffer of the sliced node is a slice output (a non-primary buffer
     # with no in-slice consumer must plan as an output, not dead scratch).
     sub.outputs.extend(graph.nodes[node_id].buffer_names())

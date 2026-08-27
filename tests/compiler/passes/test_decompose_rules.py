@@ -7,9 +7,11 @@ correctness (numpy backend output before rewrite == after rewrite).
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import BF16, F16, F32, F64
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import Literal, placeholder
@@ -27,8 +29,10 @@ from emmy.compiler.ir.frontend.ir import (
     TransposeOp,
     UnsqueezeOp,
 )
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.stmt import Assign
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, ReduceOp
-from emmy.compiler.pipeline import Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 
 _DECOMP_PASS = "frontend/decomposition"
 
@@ -163,10 +167,10 @@ def test_pow_neg_half_correctness():
 # ===================================================================
 
 
-def _make_silu_graph():
+def _make_silu_graph(dtype=F32):
     g = Graph()
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 32)), node_id="x")
-    g.add_node(op=ElementwiseOp(op="silu"), inputs=["x"], output=Tensor("out", (4, 32)), node_id="out")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 32), dtype), node_id="x")
+    g.add_node(op=ElementwiseOp(op="silu"), inputs=["x"], output=Tensor("out", (4, 32), dtype), node_id="out")
     g.inputs, g.outputs = ["x"], ["out"]
     return g
 
@@ -176,6 +180,36 @@ def test_silu_decomposes():
     fns = {n.op.name for n in result.nodes.values() if isinstance(n.op, ElementwiseOp)}
     assert "silu" not in fns
     assert "exp" in fns
+
+
+@pytest.mark.parametrize(
+    ("dtype", "opmath_dtype"),
+    ((F16, F32), (BF16, F32), (F32, F32), (F64, F64)),
+)
+def test_silu_uses_the_input_opmath_dtype(dtype, opmath_dtype):
+    result = _apply(_make_silu_graph(dtype), "020_silu.py")
+    elementwise = [n for n in result.nodes.values() if isinstance(n.op, ElementwiseOp)]
+    by_name = {n.op.name: n for n in elementwise}
+
+    assert [n.op.name for n in elementwise].count("copy") == (dtype != opmath_dtype)
+    assert all(by_name[name].output.dtype == opmath_dtype for name in ("negative", "exp", "add", "reciprocal"))
+    assert by_name["multiply"].output.dtype == dtype
+    assert all(result.nodes[inp].output.dtype == opmath_dtype for inp in by_name["multiply"].inputs)
+
+
+def test_silu_f16_lifting_keeps_one_widening_and_one_final_narrowing():
+    result = Pipeline.build(LOOP_PASSES).run(_make_silu_graph(F16))
+    loop = next(n.op for n in result.nodes.values() if isinstance(n.op, LoopOp))
+    assigns = [(stmt.op.name, stmt.dtype) for stmt in loop.body.iter() if isinstance(stmt, Assign)]
+
+    assert assigns == [
+        ("copy", F32),
+        ("negative", None),
+        ("exp", None),
+        ("add", None),
+        ("reciprocal", None),
+        ("multiply", F16),
+    ]
 
 
 def test_silu_correctness():
@@ -794,7 +828,7 @@ def test_cat_to_indexmap_correctness():
 
 
 # ---------------------------------------------------------------------------
-# 050_fold_into_constant — the sub-sm_90 matvec exception
+# 050_fold_into_constant — unconditional layout canonicalization
 # ---------------------------------------------------------------------------
 
 
@@ -821,30 +855,34 @@ def _folded_weights(graph: Graph) -> list[str]:
     ]
 
 
-def test_transpose_fold_sub_sm90_matvec_exception():
-    """Below sm_90 the transpose-into-constant fold fires ONLY for an M=1
-    matvec weight (the decode gemv tier needs the k-major layout for the
-    ``b<n>t`` REDUCE band — the recorded ``.m1.t`` golden winners on sm_89);
-    a matrix-matmul weight keeps the historic no-fold behavior."""
+def test_transpose_fold_is_capability_and_shape_unconditional():
+    """The fold is a structural canonicalization: a parameter transpose dissolves into the load
+    chain on EVERY capability and consumer shape — no sub-sm_90 gate, no matvec carve-out (the
+    deleted shape/hardware special-casing; which layout realization wins is evidence's call)."""
     from emmy.compiler import target as target_mod
 
-    target_mod.set_target((8, 9))
-    try:
-        folded_m1 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(1)))
-        folded_m64 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(64)))
-    finally:
-        target_mod.set_target(None)
-    assert folded_m1, "M=1 matvec weight must fold k-major below sm_90 (the .m1.t golden layout)"
-    assert not folded_m64, "M>1 weights must keep the historic sub-sm_90 no-fold behavior"
+    for cap in ((7, 0), (8, 9), (12, 0)):
+        target_mod.set_target(cap)
+        try:
+            folded_m1 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(1)))
+            folded_m64 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(64)))
+        finally:
+            target_mod.set_target(None)
+        assert folded_m1, f"M=1 matvec weight must fold at {cap}"
+        assert folded_m64, f"M>1 weight must fold at {cap} — the sub-sm_90 no-fold gate is deleted"
 
 
-def test_transpose_fold_sm90_unchanged():
-    """At sm_90+ the fold fires for every parameter transpose, matvec or not."""
-    from emmy.compiler import target as target_mod
-
-    target_mod.set_target((12, 0))
-    try:
-        folded_m64 = _folded_weights(Pipeline.build([_DECOMP_PASS]).run(_linear_graph(64)))
-    finally:
-        target_mod.set_target(None)
-    assert folded_m64
+def test_sdpa_scores_take_the_key_length_from_k():
+    """A decode step scores one query against every key: the scores and K^T shapes read the key
+    length off K, not the query (the query-length reading scored key 0 alone)."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("Q", (2, 1, 8)), node_id="Q")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("K", (2, 16, 8)), node_id="K")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("V", (2, 16, 8)), node_id="V")
+    g.add_node(op=SdpaOp(is_causal=False, scale=None), inputs=["Q", "K", "V"], output=Tensor("out", (2, 1, 8)), node_id="sdpa_out")
+    g.inputs, g.outputs = ["Q", "K", "V"], ["sdpa_out"]
+    result = _apply(g, "010_sdpa.py")
+    shapes = {n.output.name: tuple(d.as_static() for d in n.output.shape) for n in result.nodes.values()}
+    assert shapes["out_kt"] == (2, 8, 16)
+    assert shapes["out_scaled"] == (2, 1, 16)
+    assert shapes["out_softmax"] == (2, 1, 16)

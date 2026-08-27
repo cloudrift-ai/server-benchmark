@@ -27,59 +27,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from emmy.compiler.ir.pure.algebra import rename_combine
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Load
-from emmy.compiler.ir.stmt.algebra import rename_combine
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.tile.ir import Fold, _operand_result_names
-from emmy.compiler.structural import digest
+from emmy.compiler.ir.tile.ir import ProjectionRegion
+from emmy.compiler.structural import digest, form
 
 #: Per-instance memo slot (``Fold`` is frozen; the slot rides ``__dict__`` beside the
 #: ``cached_property`` entries, set via ``object.__setattr__`` like they are).
 _CACHE_ATTR = "_structural_cache"
-
-
-def _canon_order(stmts: tuple) -> tuple:
-    """A DETERMINISTIC dependency-respecting order for an ANF stmt sequence — the hash-time
-    body-order canonicalization: Kahn's algorithm over the def/use edges, ready stmts
-    picked by a NAME-INDEPENDENT token (stmt kind, op spelling, buffer, arity), ties keeping the
-    original relative order. Two α-equivalent lift bodies that differ only in the interleaving of
-    independent stmts canonicalize to one order; the stored term itself is never reordered — the
-    lowered nest depends on storage order, identity does not."""
-    stmts = tuple(stmts)
-    if len(stmts) <= 1:
-        return stmts
-
-    def token(s) -> tuple:
-
-        op = getattr(s, "op", None)
-        return (
-            type(s).__name__,
-            getattr(op, "name", "") if op is not None else "",
-            s.input if isinstance(s, Load) else "",
-            len(getattr(s, "args", ()) or ()),
-        )
-
-    def reads(s) -> set:
-        out = set(s.deps())
-        for b in s.nested():
-            for c in b:
-                out |= set(reads(c))
-        return out
-
-    defs_of = [set(s.defines()) | {d for b in s.nested() for c in b for d in c.defines()} for s in stmts]
-    read_of = [reads(s) for s in stmts]
-    placed: list = []
-    done: set = set()
-    remaining = list(range(len(stmts)))
-    while remaining:
-        ready = [i for i in remaining if not (read_of[i] & {n for j in remaining if j != i for n in defs_of[j]} - done)]
-        if not ready:
-            return stmts  # a cycle (state-reading merge material) — keep the stored order
-        pick = min(ready, key=lambda i: (token(stmts[i]), i))
-        placed.append(stmts[pick])
-        done |= defs_of[pick]
-        remaining.remove(pick)
-    return tuple(placed)
 
 
 def structural_key(root) -> str:
@@ -132,6 +89,14 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
             for n in _operand_result_names(s):
                 note(n)
             return
+        if isinstance(s, ProjectionRegion):
+            for param in s.lift.params[1:]:
+                note(param)
+            for child in s.body:
+                note_stmt(child)
+            for result in s.lift.results:
+                note(result)
+            return
         if isinstance(s, Load):
             note_buf(s.input)
         for n in s.defines():
@@ -141,11 +106,7 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
                 assert not isinstance(c, Fold), "a Fold below a non-Fold stmt is not a stored form"
                 note_stmt(c)
 
-    body = tuple(node.lift.body)
-    if node._contraction is None:
-        # The bilinear reading's lift is generated, so only the EDGES canonicalize (reordering a
-        # contraction's multiply stmts would be meaningless and would move the key).
-        body = _canon_order(body)
+    body = tuple(node.lift.body)  # Fold construction already canonicalized this local lambda.
     if node.axis is None:
         # The zero-axis reading names its binder first, then walks the sources — the order the
         # projection wrapper always used.
@@ -193,7 +154,16 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
             child = next(consumed)
             key, cbufs = _structural(child)
             return ("node", key, tuple(bindex[b] for b in cbufs), tuple(rn(n) for n in _operand_result_names(child)))
-        return repr(rebuffered(s).rewrite(rn))
+        if isinstance(s, ProjectionRegion):
+            return (
+                "projection",
+                form(s.axis),
+                s.unroll,
+                tuple(rn(param) for param in s.lift.params[1:]),
+                tuple(render(child) for child in s.body),
+                tuple(rn(result) if isinstance(result, str) else result for result in s.lift.results),
+            )
+        return form(rebuffered(s).rewrite(rn))
 
     if node.axis is None:
         body_part = tuple(render(s) for s in body)
@@ -206,13 +176,13 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
         # twisted program REGENERATES over the renamed state, so the ``__o`` / ``__t`` derived
         # names follow their components without entering the local map.
         c = rename_combine(node.combine, rn)
-        combine_part = (c.params, tuple(repr(s) for s in c.body), c.results)
+        combine_part = (c.params, tuple(form(s) for s in c.body), c.results)
 
     key = digest(
         "Fold",
-        repr(node.axis),
+        form(node.axis),
         node.unroll,
-        repr(node.init),
+        form(node.init),
         tuple(rn(p) for p in node.lift.params),
         body_part,
         tuple(rn(r) if isinstance(r, str) else r for r in node.lift.results),

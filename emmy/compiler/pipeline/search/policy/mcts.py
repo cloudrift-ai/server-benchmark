@@ -5,15 +5,14 @@ signal (greedy and the ``+∞``-unvisited UCB rule are gone).
 
     select   — descend from root, picking at each level
                ``argmax_c [ Q(c) + c · P(c) · √(N_parent+1) / (1+N_c) ]``
-               where ``Q = best_reward / global_best`` and ``P`` is the prior's
-               *predicted* reward on the same scale: the prior predicts latency,
-               which this loop converts to reward (``1/û``) and normalizes by the
-               same ``global_best`` as ``Q``. No softmax, no ``+∞``-unvisited rule
-               → no forced breadth: a confidently-bad sibling gets a small ``P``
-               and is skipped. A cold or absent prior gives a uniform ``P = 1``
-               (PUCT still explores via the exploration term; a single-shot
-               compile with no prior descends emission-order). Live-count
-               filtering skips drained subtrees.
+               where ``Q = best_reward / global_best`` and ``P`` is
+               ``Prior.policy`` over the sibling set — each sibling's predicted
+               preference relative to the best of them, one batched call per
+               fork. No ``+∞``-unvisited rule → no forced breadth: a
+               confidently-bad sibling gets a small ``P`` and is skipped. A cold
+               or absent prior gives a uniform ``P = 1`` (PUCT still explores via
+               the exploration term; a single-shot compile with no prior descends
+               emission-order). Live-count filtering skips drained subtrees.
     expand   — :meth:`TuningSearch.push` adds the engine's spawned
                candidates as children of the ``parent`` token (the
                ``SearchNode`` their spawning candidate was popped with);
@@ -34,31 +33,25 @@ import random
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from emmy import config
+from emmy.compiler.ir.cuda.ir import CudaOp
+from emmy.compiler.ir.schedule import ReducePlan, Workers
+from emmy.compiler.pipeline.knob import (
+    canonical_row_key,
+    context_view,
+    decision_view,
+    family_of,
+    stamp_schedule_families,
+    tuning_knob_items,
+)
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
 from emmy.compiler.pipeline.search.db import NodeRow, PerfStats
+from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.base import Search
+from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from emmy.compiler.pipeline.search.prior import Prior
-
-# Re-bench at -O3 any config whose -O1 latency is within this fraction of the best
-# -O1 so far (not just a strict new best). -O1 is the fast ranking compile but its
-# ranking diverges at -O3 (deployable): register-tile mma kernels run 1.5–3× slower at
-# -O1 (the cicc unroll blowup the ranking compile dodges), so an mma config outside a
-# narrow -O1 band can still be the -O3 deploy winner — and without a deployable sample
-# the evidence-first deploy hierarchy only ever sees scalar -O3 rows and keeps deploying
-# them (the qwen3-emb layer-0 projections: scalar g2a evidence at 394 µs deployed over
-# the 70 µs-class mma picks). The band covers that skew (within 3× of best -O1); cost is
-# bounded by ``_o3_done``'s per-config dedup — one -O3 compile + short bench each.
-# Env-overridable via ``EMMY_O3_TOL`` (a fraction, e.g. ``0.15`` for 15%).
-O3_REBENCH_TOL = 2.0
-
-# The nvcc flags of that deployable re-bench (``pipeline._rebench_o3_async``) — also
-# the regime the re-bench's node rows are keyed under (``two_level`` derives their
-# ``context_key`` from the tune context with these flags substituted).
-O3_NVCC_FLAGS = "-Xcicc -O3"
 
 
 @dataclass
@@ -85,10 +78,10 @@ class SearchNode:
     # CUDA kernels (for example a split reduction + combine). A candidate-file
     # annotation is only unambiguous in the one-CudaOp case.
     realized_cuda_ops: int | None = field(default=None, repr=False)
-    # The leaf's deployable -O3 re-bench median (``observe_o3``), ``None`` when the
-    # config wasn't in the re-bench tolerance band (or the sweep already ran at -O3).
-    # Read back by ``_collect_node_records`` to emit the leaf's -O3-regime node row.
-    o3_us: float | None = field(default=None, repr=False)
+    # Decision rows from the directly measured per-kernel receipts. Structural winners use them to
+    # reject a parent row whose ordinary schedule pins describe a different
+    # independently tuned child than the terminal actually measured.
+    realized_cuda_knobs: list[dict] | None = field(default=None, repr=False)
 
 
 class SearchTree:
@@ -144,12 +137,12 @@ class TuningSearch(Search):
         # ε-greedy exploration: with probability ``explore_eps`` a selection step
         # descends a UNIFORMLY RANDOM live child instead of the PUCT argmax. PUCT
         # alone is deterministic — a tie (cold prior → uniform ``P``) always goes
-        # to the first-in-list (= heuristic enumeration order), so each fork is
-        # visited once and takes its heuristic-preferred child; a binary fork like
-        # ``WARPSPEC`` then never benches its option-1 branch even when that's the
-        # real win. ε-randomness makes ~half the visits to such a fork take the
-        # other branch, so tuning finds good configs WITHOUT relying on the
-        # heuristic/prior ordering. ``0.0`` (the default) restores deterministic
+        # to the first-in-list (= the enumeration's emission order, which means
+        # nothing), so each fork is visited once and takes whichever child the walk
+        # emitted first; a binary fork like ``WARPSPEC`` then never benches its
+        # second branch even when that's the real win. ε-randomness makes ~half the
+        # visits to such a fork take the other branch, so tuning finds good configs
+        # WITHOUT relying on emission order at all. ``0.0`` (the default) restores deterministic
         # PUCT — kept for the unit tests and single-shot compile. Seeded for
         # reproducibility (vary ``seed`` per op/run upstream, not via wall clock).
         self._explore_eps = explore_eps
@@ -180,26 +173,6 @@ class TuningSearch(Search):
         self.last_status: str | None = None
         # Set in ``observe`` when a bench sets a new global best.
         self.last_improved_best = False
-        # Set in ``observe`` when the just-benched config is a *deployable-bench
-        # candidate* — within ``O3_REBENCH_TOL`` of the best -O1 so far and not
-        # already re-benched. The engine reads it to trigger an -O3 re-bench
-        # (``observe_o3``). Widening from "strict new best" to a tolerance band is
-        # what lets configs that TIE at -O1 but differ at -O3 (the warp-tier
-        # WARPSPEC / occupancy split is the motivating case) get a deployable
-        # sample, so the prior can rank them by -O3 cost. ``_o3_done`` dedups so
-        # each config is -O3'd at most once; ``o3_rows`` holds the samples
-        # (knobs tagged ``H_opt=3``) for the prior.
-        self.last_o3_worthy = False
-        self._o3_done: set[tuple] = set()
-        self.o3_rows: list[tuple[dict, float]] = []
-        # Best -O1 latency among STANDARD-regime rows (no precision-trading realization). Under a
-        # precision gate (FAST_MATH / F16_MMA_F32_ACC) the global best is usually a fast-math row,
-        # and a regime-blind tolerance band would then starve the standard lane of -O3 samples —
-        # the gate-off deploy hierarchy is evidence-first, so a shape whose only -O3 rows are
-        # fast-math (absent from the gate-off enumeration) falls to the model argmin (the
-        # qkv.h4096 ~1000x scalar deploy, 2026-07-09 fm sweep). A standard row therefore competes
-        # in its OWN band; with no gate every row is standard and this equals the global best.
-        self._best_std_lat: float | None = None
 
     def note_bench(self, *, measured: bool) -> None:
         """Count only terminals that reached the live backend.
@@ -211,7 +184,27 @@ class TuningSearch(Search):
         if measured:
             self.measurements += 1
 
-    def observe(self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None) -> None:
+    def prepare_ctx(self, ctx):
+        """Policy-owned ctx setup, applied by the engine's run construction: the tune search is
+        exempt from the strict knob-pin validator — it explores tier-foreign forks and steers
+        heterogeneous multi-op graphs with a union pin vector (each op takes its tier's subset).
+        A per-op contradiction is a pruned branch here, not the loud user error the greedy
+        compile wants."""
+        return replace(ctx, validate_pins=False) if ctx.validate_pins else ctx
+
+    async def evaluate(self, token: object | None, cand, *, backend, db) -> None:
+        """Value one terminal the engine's loop yielded — the whole of what a terminal is worth
+        is policy: bench every CudaOp (or serve the cache / stub), persist the per-kernel
+        ``perf`` / inventory / lowering rows, and feed the tree and the prior (:meth:`observe`).
+        Every bench is taken in the deployable regime, so a terminal earns exactly one
+        measurement. The engine awaits this and nothing else."""
+        stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
+        self.note_bench(measured=measured)
+        self.observe(token, stats, status, candidate=cand, kernels=per_kernel)
+
+    def observe(
+        self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None, kernels: list | None = None
+    ) -> None:
         self.last_stats = stats
         self.last_status = status
         assert isinstance(token, SearchNode), f"TuningSearch.observe needs the terminal's pop token, got {type(token).__name__}"
@@ -221,80 +214,56 @@ class TuningSearch(Search):
         # fork-prefix when no candidate is supplied.
         token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
         token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
+        token.realized_cuda_knobs = [dict(decision_view(knobs)) for knobs, _us, _status in kernels] if kernels is not None else None
         token.bench_stats = stats
         token.bench_status = status
         reward = (1.0 / stats.median) if status == "ok" and stats.median > 0 else 0.0
         prev_best = self.tree.best_reward
         self.tree.record_terminal(token, reward)
         self.last_improved_best = status == "ok" and self.tree.best_reward > prev_best
-        # Re-bench at -O3 not only a strict new best but any config within the
-        # tolerance band of the best -O1 so far — configs that tie at -O1 can
-        # differ sharply at -O3 (the warp WARPSPEC / occupancy split), so the
-        # prior needs an -O3 sample for every near-best contender, not just the
-        # winner. Dedup via ``_o3_done`` so each config is -O3'd at most once.
-        self.last_o3_worthy = False
-        if status == "ok" and stats.median > 0 and self.tree.best_reward > 0:
-            from emmy.compiler.pipeline.search.golden import fast_math_knobs  # noqa: PLC0415 — layering: policy → search core
-
-            # A standard-regime row competes in its own band (see ``_best_std_lat``): the best
-            # standard row must reach -O3 even when a fast-math row owns the global best, or the
-            # gate-off deploy lane is left with no deployable evidence for this shape.
-            is_fm = fast_math_knobs(token.realized_knobs or {})
-            if not is_fm and (self._best_std_lat is None or stats.median < self._best_std_lat):
-                self._best_std_lat = stats.median
-            ref_lat = 1.0 / self.tree.best_reward
-            if not is_fm and self._best_std_lat is not None:
-                ref_lat = self._best_std_lat
-            tol = config.o3_tol(O3_REBENCH_TOL)
-            sig = self._o3_sig(token.realized_knobs)
-            if stats.median <= ref_lat * (1.0 + tol) and sig not in self._o3_done:
-                self._o3_done.add(sig)
-                self.last_o3_worthy = True
         if self.prior_model is not None:
-            # Record the leaf for the end-of-run stats. The model itself is fixed
-            # during a run — it refits in batches between ops (see ``Prior``), not
-            # per bench — so there is nothing to refit here.
-            self.prior_model.record_bench(token.realized_knobs, stats.median, status)
+            # Train on the rows that actually earned a latency: the terminal's own when it lowered
+            # to one kernel, else one per KERNEL (its own decisions, its own measured µs, under
+            # this run's host regime). The Σ is the tree's reward; it is not any single row's
+            # label, and a terminal a structural fork made several kernels of has no row of its
+            # own to give the prior.
+            # The model itself is fixed during a run — it refits in batches between ops (see
+            # ``Prior``), not per bench — so there is nothing to refit here.
+            if token.realized_knobs is not None:
+                self.prior_model.record_bench(token.realized_knobs, stats.median, status)
+            else:
+                regime = context_view(self._base_knobs)
+                for knobs, median, st in kernels or ():
+                    self.prior_model.record_bench({**regime, **knobs}, median, st)
 
-    def observe_o3(self, token: object | None, o3_us: float) -> None:
-        """Record an extra training row for an -O1 winner re-benched at -O3: the
-        same realized knobs but tagged ``H_opt=3`` (the deployable regime) and
-        labeled with the -O3 median latency (µs) — the prior's regression target
-        is latency, converted to reward only in the MCTS selection loop. The prior
-        can then rank winners by -O3 cost where -O1 ties them; ``H_opt`` lets the
-        -O1 and -O3 rows coexist. Also stashed on the token so
-        :meth:`_collect_node_records` emits the leaf's -O3-regime node row."""
-        if o3_us <= 0 or not isinstance(token, SearchNode) or token.realized_knobs is None:
-            return
-        token.o3_us = o3_us
-        knobs = dict(token.realized_knobs)
-        knobs["H_opt"] = 3.0
-        self.o3_rows.append((knobs, o3_us))
-        if self.prior_model is not None:
-            self.prior_model.record_bench(knobs, o3_us, "ok")
+    def _realized_knobs(self, candidate: object) -> dict | None:
+        """The terminal's ONE knob row — the kernel's ``base_knobs`` (``S_*`` identity + ``H_*``
+        regime) merged with the realized op ``knobs`` off the resolved graph (every tunable knob,
+        including deterministically-stamped ones that ``_node_knobs`` can't see), or ``None`` when
+        the terminal has no single row.
 
-    @staticmethod
-    def _o3_sig(knobs: dict | None) -> tuple:
-        """A hashable signature of a realized knob set for -O3 dedup. Values are
-        ``str()``-ified for a uniform hashable key, and the ``H_opt`` regime tag is
-        excluded so the -O1 row and its -O3 re-bench share one signature."""
-        if not knobs:
-            return ()
-        return tuple(sorted((k, str(v)) for k, v in knobs.items() if k != "H_opt"))
-
-    def _realized_knobs(self, candidate: object) -> dict:
-        """The terminal's complete knob set: the kernel's ``base_knobs`` (``S_*``
-        identity + ``H_*`` regime) merged with the realized op ``knobs`` off the
-        resolved graph (every tunable knob, including deterministically-stamped
-        ones that ``_node_knobs`` can't see). Unions all op knob dicts — a
-        single-kernel slice has one kernel-bearing op, constants carry none."""
-        merged: dict = dict(self._base_knobs)
+        A terminal is a Σ over the kernels it lowered to. When it lowered to ONE, that kernel's row
+        earned the whole measurement and the merge is exact. When a structural fork made it
+        several — a cut, a cross-CTA split — the kernels carry DIFFERENT decisions for the same
+        families, and merging them fabricates a row no kernel realized (last write wins: the
+        finalize's OFF ``WORK`` used to overwrite the partial's real one in the row that fed the
+        online prior, the node table and the tune winner). There is no such row, so this answers
+        ``None`` and the per-KERNEL rows — which the bench hands over intact — carry the training
+        signal instead."""
         graph = getattr(candidate, "graph", None)
-        if graph is not None:
-            for node in graph.nodes.values():
-                knobs = getattr(node.op, "knobs", None)
-                if knobs:
-                    merged.update(knobs)
+        if graph is None:
+            return dict(self._base_knobs)
+        merged: dict = dict(self._base_knobs)
+        decided: dict = {}
+        for node in graph.nodes.values():
+            knobs = getattr(node.op, "knobs", None)
+            if not knobs:
+                continue
+            for k, v in decision_view(knobs).items():
+                if k in decided and decided[k] != v:
+                    return None  # two kernels, two decisions — no single row to attribute the Σ to
+                decided[k] = v
+            merged.update(knobs)
         return merged
 
     @staticmethod
@@ -303,33 +272,88 @@ class TuningSearch(Search):
         graph = getattr(candidate, "graph", None)
         if graph is None:
             return None
-        from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-
         return sum(isinstance(node.op, CudaOp) for node in graph.nodes.values())
 
-    def best_realized(self) -> tuple[dict, float, int | None] | None:
-        """Return the fastest directly observed successful terminal.
+    @staticmethod
+    def _structural_row(knobs: dict | None) -> dict[str, str] | None:
+        """The exact kernel-set-changing replay row in ``knobs``, if any."""
+        if not knobs:
+            return None
+        row = dict(tuning_knob_items(knobs))
+        placement = {key: value for key, value in row.items() if family_of(key) == "PLACE"}
+        if placement:
+            return placement
+        work = Workers.parse(row.get("WORK"))
+        if any(ReducePlan.parse(value, work).needs_split for key, value in row.items() if family_of(key) == "REDUCE"):
+            return stamp_schedule_families(row)
+        return None
 
-        Unlike ``tree.best_reward``, this preserves the knobs and direct cost as
-        one indivisible observation. Callers must not reconstruct the knobs from
-        a later greedy/deploy replay, whose evidence hierarchy can select a
-        different configuration. Equal medians break deterministically by the
-        canonical knob row.
-        """
-        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+    def _structural_replay_row(self, node: SearchNode) -> dict[str, str] | None:
+        """The first exact kernel-set-changing row on ``node``'s path."""
+        path: list[SearchNode] = []
+        cur: SearchNode | None = node
+        while cur is not None:
+            path.append(cur)
+            cur = cur.parent
+        for cur in reversed(path):
+            knobs = getattr(cur.candidate, "resolved_knobs", None)
+            structural = self._structural_row(knobs)
+            if structural is not None:
+                return structural
+        return None
 
-        best: tuple[dict, float, int | None] | None = None
+    def _best_terminal_node(self) -> SearchNode | None:
+        """The fastest directly observed successful terminal node."""
+        best: tuple[float, bool, tuple, SearchNode] | None = None
         stack = list(self.tree.root.children)
         while stack:
             node = stack.pop()
             stack.extend(node.children)
             stats = node.bench_stats
-            if node.bench_status != "ok" or node.realized_knobs is None or stats is None or stats.median <= 0:
+            if node.bench_status != "ok" or stats is None or stats.median <= 0:
                 continue
-            candidate = (dict(node.realized_knobs), float(stats.median), node.realized_cuda_ops)
-            if best is None or (candidate[1], canonical_row_key(candidate[0])) < (best[1], canonical_row_key(best[0])):
+            key = canonical_row_key(node.realized_knobs) if node.realized_knobs is not None else ()
+            candidate = (float(stats.median), node.realized_knobs is None, key, node)
+            if best is None or candidate[:3] < best[:3]:
                 best = candidate
-        return best
+        return best[3] if best is not None else None
+
+    def best_realized(self, *, validated_input_route: dict | None = None) -> tuple[dict, float, int | None, bool] | None:
+        """Return an exact replay row for the fastest directly observed successful terminal.
+
+        Unlike ``tree.best_reward``, this preserves the knobs and direct cost as
+        one indivisible observation. Callers must not reconstruct the knobs from
+        a later greedy/deploy replay, whose evidence hierarchy can select a
+        different configuration. When the winner changes the kernel set, its
+        first structural row is the replay contract and the independently
+        scheduled pieces remain separate targets. If neither that row nor one
+        terminal knob row exists, never fall back to a slower representable
+        sibling. An authoritative ``validated_input_route`` may supply the row
+        when pinning made the structural choice deterministic rather than a tree
+        node, but only for a conflicting multi-CUDA terminal. Equal medians
+        prefer a representable row and then break deterministically by its
+        canonical key.
+        """
+        node = self._best_terminal_node()
+        if node is None:
+            return None
+        structural = self._structural_replay_row(node)
+        # A compatible multi-CUDA terminal has one exact merged row even though
+        # its kernel-set-changing choice never appeared as a search-tree fork.
+        if structural is None and (node.realized_cuda_ops or 0) > 1:
+            structural = self._structural_row(node.realized_knobs)
+        if structural is None and node.realized_knobs is None and (node.realized_cuda_ops or 0) > 1:
+            structural = self._structural_row(validated_input_route)
+        if structural is not None:
+            if (
+                not node.realized_cuda_knobs
+                or unreproducible_pin_flag(structural, node.realized_cuda_knobs, reject_conflicts=True) is not None
+            ):
+                return None
+            return structural, float(node.bench_stats.median), node.realized_cuda_ops, True
+        if node.realized_knobs is None:
+            return None
+        return dict(node.realized_knobs), float(node.bench_stats.median), node.realized_cuda_ops, False
 
     def push(self, *cands: LazyCandidate, parent: object | None = None, structural: bool = False) -> None:
         # ``parent`` is the token the spawning candidate was popped with;
@@ -362,13 +386,27 @@ class TuningSearch(Search):
             cur = cur.parent
         return node, node.candidate
 
-    def _prior_score(self, child: SearchNode) -> float:
-        """The prior's predicted *latency* (µs) for a child (``0`` when no model
-        is attached, the model is unfit, or the child is the root sentinel — the
-        ``_select`` loop treats a non-positive prediction as a uniform ``P``)."""
-        if self.prior_model is None or child.candidate is None:
-            return 0.0
-        return self.prior_model.score(self._node_knobs(child))
+    def _prior_policy(self, children: list[SearchNode]) -> list[float]:
+        """The prior's ``P`` for each child — ONE batched call over the whole sibling
+        set, so a vectorized model pays its per-call overhead once per fork rather
+        than once per candidate.
+
+        A child the prior cannot speak about takes the uniform ``1.0`` that keeps the
+        exploration term driving breadth: no model attached, or a node with no candidate
+        (the root sentinel). Such a node is EXCLUDED from the call rather than passed an
+        empty knob dict — an empty row is a row the model has an opinion about (the
+        linear model scores it its neutral value), and normalizing it against real
+        siblings would rank a sentinel among them. A cold model needs no special case
+        here: its all-zero predictions come back uniform from ``Prior.policy`` itself."""
+        if self.prior_model is None:
+            return [1.0] * len(children)
+        live = [i for i, c in enumerate(children) if c.candidate is not None]
+        if not live:
+            return [1.0] * len(children)
+        out = [1.0] * len(children)
+        for i, p in zip(live, self.prior_model.policy([self._node_knobs(children[i]) for i in live]), strict=True):
+            out[i] = p
+        return out
 
     def _select(self, children: list[SearchNode], parent: SearchNode) -> SearchNode:
         """PUCT is the *only* selection rule — the prior is the sole signal.
@@ -376,19 +414,25 @@ class TuningSearch(Search):
             score(c) = Q(c) + c_ucb · P(c) · √(N_parent + 1) / (1 + N_c)
 
         where ``Q = best_reward / global_best`` (``0`` for an unvisited child) and
-        ``P`` is the prior's *predicted reward* on the same scale: the prior
-        predicts latency ``û(c)``, which this loop converts to reward (``1/û``)
-        and normalizes by the same ``global_best`` as ``Q`` — no softmax. A
-        confidently-bad sibling gets a small ``P`` → tiny exploration term → it is
-        deprioritized rather than force-visited. The prior is always consulted —
-        the ``FallbackPrior`` returns the online model's prediction once trained
-        and the ``OfflinePrior`` heuristic cold, so even a fresh ``tune`` is
-        prior-guided, not uniform. Only when there is NO usable prediction (no
-        prior attached, or a non-positive score) does ``P`` fall to a uniform
-        ``1`` so the exploration term still drives breadth. ``c_ucb`` is
-        ``--ucb-c``. With ``explore_eps > 0`` (tune, opt-in) a fraction of steps
-        instead descend a uniformly random live child (ε-greedy); off by default
-        so a single-shot compile / the unit tests stay deterministic. NOTE: a
+        ``P`` is ``Prior.policy`` over this sibling set: each sibling's preference
+        relative to the best of them, so the best scores ``1.0`` and one the model
+        prices 10× slower scores ``0.1``. A confidently-bad sibling therefore gets a
+        small ``P`` → tiny exploration term → it is deprioritized rather than
+        force-visited. The prior is always consulted — the composite prior answers
+        with the online model once trained and the offline one cold, so even a fresh
+        ``tune`` is prior-guided, not uniform. Only where there is NO usable
+        prediction does ``P`` fall back to a uniform ``1`` so the exploration term
+        still drives breadth.
+
+        ``P`` is normalized within the SIBLING SET, not against the tree's
+        ``global_best``: a fork is a choice among its own children, ``global_best``
+        is a moving target set elsewhere in the tree, and the offline prior's scores
+        are not µs at all — pushing their raw magnitude through ``1/û`` is what left
+        the cold policy meaningless.
+
+        ``c_ucb`` is ``--ucb-c``. With ``explore_eps > 0`` (tune, opt-in) a fraction
+        of steps instead descend a uniformly random live child (ε-greedy); off by
+        default so a single-shot compile / the unit tests stay deterministic. NOTE: a
         *random tie-break* under a cold prior was tried and reverted — it discarded
         the heuristic ordering and regressed fp16 tuning ~2×; exploration must
         perturb the prior order, not replace it."""
@@ -396,14 +440,10 @@ class TuningSearch(Search):
             return self._rng.choice(children)
         global_best = self.tree.best_reward or 1.0
         sqrt_parent = math.sqrt(parent.visits + 1)
+        policy = self._prior_policy(children)
         best, best_v = children[0], float("-inf")
-        for c in children:
+        for c, p in zip(children, policy, strict=True):
             q = (c.best_reward / global_best) if c.visits > 0 else 0.0
-            pred_us = self._prior_score(c)
-            if pred_us > 0:
-                p = (1.0 / pred_us) / global_best
-            else:
-                p = 1.0  # cold / absent prior → uniform exploration
             v = q + self._ucb_c * p * sqrt_parent / (1 + c.visits)
             if v > best_v:
                 best_v, best = v, c
@@ -443,13 +483,19 @@ class TuningSearch(Search):
 
         A directly-benched leaf uses its ``realized_knobs`` (the FULL config);
         a branch (no realized knobs of its own) uses its partial fork-prefix
-        (``_node_knobs``) — the value-of-position label still rides on it."""
+        (``_node_knobs``) — the value-of-position label still rides on it. A leaf that was benched
+        but has NO single row (a structural fork made it several kernels with different decisions)
+        contributes nothing here: its measurement was already attributed per kernel at
+        :meth:`observe`, and its fork-prefix would merge the pieces' rows into one that no kernel
+        realized — the fabrication this whole path exists to avoid."""
         rows: list[tuple[dict, float]] = []
         stack = list(self.tree.root.children)
         while stack:
             node = stack.pop()
             stack.extend(node.children)
             if node.candidate is None or node.visits == 0 or node.best_reward <= 0:
+                continue
+            if node.bench_stats is not None and node.realized_knobs is None:
                 continue
             knobs = node.realized_knobs if node.realized_knobs is not None else self._node_knobs(node)
             rows.append((knobs, 1.0 / node.best_reward))
@@ -464,19 +510,32 @@ class TuningSearch(Search):
         rows would collide and keep-min would silently drop one card's data. ``S_*`` /
         ``H_*`` features are excluded from the set — already folded via ``op_sig`` /
         ``context_key`` (and ``gpu``) — so the key is the within-op node identity.
-        ``str()``-ified values mirror :meth:`_o3_sig` so non-string knob values
-        stay stable, and the sorted tuple keeps :func:`digest`
+        ``str()``-ified values keep non-string knob values stable, and the sorted tuple keeps :func:`digest`
         (order-sensitive) deterministic."""
         tun = tuple(sorted((k, str(v)) for k, v in feats.items() if not k.startswith(("S_", "H_"))))
         return digest(context_key, gpu, op_sig, tun)
 
     def _collect_node_records(
-        self, *, context_key: str, op_sig: str, gpu: str = "", run_id: str = "", o3_context_key: str | None = None
+        self,
+        *,
+        context_key: str,
+        op_sig: str,
+        gpu: str = "",
+        run_id: str = "",
+        validated_input_route: dict | None = None,
     ) -> list[NodeRow]:
         """Post-search tree walk producing keyed, parent-linked :class:`NodeRow`
         records for :meth:`SearchDB.record_nodes` — the persistent/keyed/deduped
         sibling of :meth:`_collect_rows` (which feeds the prior's in-memory
         reservoir).
+
+        ``validated_input_route`` is an authoritative proposal row whose
+        realized-pin check already passed. When that row is structural and the
+        directly measured winner is a conflicting multi-CUDA terminal with no
+        structural node on its path, the walk records the original Loop parent
+        and its measured structural child. This is the pinned full-fork case:
+        the input route was applied deterministically instead of becoming an
+        ordinary search-tree node.
 
         Pre-order descent from the top forks (the sentinel root is skipped); each
         node passing the same ``visits > 0 and best_reward > 0`` guard as
@@ -497,14 +556,6 @@ class TuningSearch(Search):
         the inherited ``parent_key``; a branch whose descendants ALL failed stays
         unrecorded (``best_reward == 0``).
 
-        A leaf carrying an ``o3_us`` (the deployable :data:`O3_NVCC_FLAGS` re-bench
-        of a near-best config — ``observe_o3``) additionally emits an **-O3-regime
-        row** when ``o3_context_key`` is given: keyed under that context (so it never
-        collides with its -O1 twin), features stamped ``H_opt=3.0`` (the reservoir
-        convention), ``parent_key=None`` (a regime re-measurement, not part of this
-        tree — it never enters a fork sibling group), ``visits=1`` per re-bench, and
-        no variance/n_samples (the re-bench returns a bare median).
-
         ``parent_key`` is the *nearest emitted ok ancestor*'s ``node_key`` (a skipped
         intermediate node passes its own inherited parent down), so it always
         references a recorded row — true ancestry from the live ``parent`` edge,
@@ -520,6 +571,15 @@ class TuningSearch(Search):
         taking the max (not sum) of the duplicates' ``visits`` so
         ``record_nodes``'s SUM accumulation never double-counts within one run."""
         out: dict[str, NodeRow] = {}
+        structural_leaf = self._best_terminal_node()
+        structural_input = self._structural_row(validated_input_route)
+        if (
+            structural_leaf is None
+            or structural_leaf.realized_knobs is not None
+            or (structural_leaf.realized_cuda_ops or 0) <= 1
+            or self._structural_replay_row(structural_leaf) is not None
+        ):
+            structural_input = None
 
         def emit(row: NodeRow) -> None:
             prev = out.get(row.node_key)
@@ -543,9 +603,56 @@ class TuningSearch(Search):
         def visit(node: SearchNode, parent_key: str | None, parent_value: float | None, depth: int) -> None:
             nk = parent_key
             if node.candidate is not None:
-                is_leaf = node.realized_knobs is not None
+                is_leaf = node.bench_stats is not None
                 stats = node.bench_stats if is_leaf else None
-                if node.visits > 0 and node.best_reward > 0:
+                # A benched leaf with no single row (several kernels with different
+                # decisions) has nothing to key a node record on — see :meth:`_collect_rows`.
+                skip = is_leaf and node.realized_knobs is None
+                if node is structural_leaf and structural_input is not None and node.visits > 0 and node.best_reward > 0:
+                    value_us = 1.0 / node.best_reward
+                    route_parent = parent_key
+                    route_depth = depth
+                    if route_parent is None:
+                        base_features = dict(self._base_knobs)
+                        route_parent = self._node_key(base_features, op_sig, context_key, gpu)
+                        emit(
+                            NodeRow(
+                                node_key=route_parent,
+                                parent_key=None,
+                                context_key=context_key,
+                                op_sig=op_sig,
+                                features=base_features,
+                                value_us=value_us,
+                                depth=depth,
+                                gpu=gpu,
+                                visits=node.visits,
+                                is_leaf=False,
+                                status="ok",
+                                run_id=run_id,
+                            )
+                        )
+                        route_depth += 1
+                    route_features = {**self._base_knobs, **structural_input}
+                    nk = self._node_key(route_features, op_sig, context_key, gpu)
+                    emit(
+                        NodeRow(
+                            node_key=nk,
+                            parent_key=route_parent,
+                            context_key=context_key,
+                            op_sig=op_sig,
+                            features=route_features,
+                            value_us=value_us,
+                            depth=route_depth,
+                            gpu=gpu,
+                            visits=node.visits,
+                            is_leaf=True,
+                            variance=stats.variance if stats is not None else None,
+                            n_samples=stats.n_samples if stats is not None else None,
+                            status="ok",
+                            run_id=run_id,
+                        )
+                    )
+                elif node.visits > 0 and node.best_reward > 0 and not skip:
                     feats = node.realized_knobs if is_leaf else self._node_knobs(node)
                     value_us = 1.0 / node.best_reward
                     assert parent_value is None or value_us >= parent_value - 1e-9, "value-of-position not monotone up the tree"
@@ -569,25 +676,11 @@ class TuningSearch(Search):
                         )
                     )
                     parent_value = value_us
-                    if is_leaf and node.o3_us is not None and o3_context_key is not None:
-                        feats_o3 = {**node.realized_knobs, "H_opt": 3.0}
-                        emit(
-                            NodeRow(
-                                node_key=self._node_key(feats_o3, op_sig, o3_context_key, gpu),
-                                parent_key=None,
-                                context_key=o3_context_key,
-                                op_sig=op_sig,
-                                features=feats_o3,
-                                value_us=node.o3_us,
-                                depth=depth,
-                                gpu=gpu,
-                                visits=1,
-                                is_leaf=True,
-                                status="ok",
-                                run_id=run_id,
-                            )
-                        )
-                elif is_leaf and node.bench_status == "bench_fail" and stats is not None:
+                elif is_leaf and node.bench_status == "bench_fail" and stats is not None and node.realized_knobs is not None:
+                    # ``skip`` above sends an unrealized leaf here, so the same
+                    # nothing-to-key-on rule has to hold: a variant that bench-failed before
+                    # its knobs were realized (a run-stage timeout, a missing bench input)
+                    # carries ``realized_knobs is None`` and cannot be keyed at all.
                     # Sentinel latency from the failed bench; NOT a value anchor — no
                     # assert, no parent_value update, children keep the inherited nk.
                     emit(

@@ -8,10 +8,10 @@ import pytest
 from emmy.compiler.backend import torch_ref
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
+from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp
 
 # torch is only needed to build reference tensors / call the evaluator; the
 # emmy imports above are torch-free, so gate after them.
@@ -54,6 +54,156 @@ def test_linear_and_elementwise():
     g.inputs, g.outputs = ["x", "w"], ["o"]
     r = _rng()
     _assert_matches_numpy(g, {"x": r.standard_normal((4, 8)), "w": r.standard_normal((16, 8))})
+
+
+def test_multi_output_preserves_declared_order_and_single_output_tensor_contract():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
+    g.add_node(ElementwiseOp(op="multiply"), ["x", "x"], Tensor("intermediate", (2, 3)), node_id="intermediate")
+    g.add_node(ElementwiseOp(op="silu"), ["intermediate"], Tensor("hidden", (2, 3)), node_id="hidden")
+    g.add_node(ElementwiseOp(op="add"), ["hidden", "x"], Tensor("final", (2, 3)), node_id="final")
+    g.inputs = ["x"]
+    # A working golden may expose a live intermediate after the semantic final
+    # output so exact target replay can validate both buffers.
+    g.outputs = ["final", "intermediate"]
+    x = np.arange(6, dtype=np.float32).reshape(2, 3) - 2
+    expected = NumpyBackend().run(g, input_data={"x": x})[0].outputs
+    fn, inputs = torch_ref.build_callable(g, {"x": torch.from_numpy(x)})
+
+    actual = fn(*inputs)
+
+    assert isinstance(actual, tuple)
+    assert len(actual) == 2
+    for value, output_name in zip(actual, g.outputs, strict=True):
+        np.testing.assert_allclose(value.numpy(), expected[output_name], rtol=1e-4, atol=1e-4)
+
+    g.outputs = ["final"]
+    single_fn, single_inputs = torch_ref.build_callable(g, {"x": torch.from_numpy(x)})
+    single = single_fn(*single_inputs)
+
+    assert torch.is_tensor(single)
+    np.testing.assert_allclose(single.numpy(), expected["final"], rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize(("dtype_name", "torch_dtype"), [("f16", torch.float16), ("f32", torch.float32)])
+def test_zero_width_pad_is_runnable_identity(dtype_name, torch_dtype):
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 3), dtype_name), node_id="x")
+    g.add_node(ElementwiseOp(op="pad"), ["x"], Tensor("out", (2, 3), dtype_name), node_id="out")
+    g.inputs, g.outputs = ["x"], ["out"]
+    expected = torch.arange(6, dtype=torch_dtype).reshape(2, 3)
+
+    assert torch_ref.is_runnable(g)
+    fn, inputs = torch_ref.build_callable(g, {"x": expected})
+    actual = fn(*inputs)
+
+    assert actual.dtype == torch_dtype
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_source_free_range_is_runnable_on_cpu():
+    g = Graph()
+    g.add_node(RangeOp(stop=4, dtype="i32"), [], Tensor("axis", (4,), "i32"), node_id="axis")
+    g.inputs, g.outputs = [], ["axis"]
+
+    assert torch_ref.is_runnable(g)
+    fn, inputs = torch_ref.build_callable(g, {})
+
+    assert inputs == []
+    torch.testing.assert_close(fn(), torch.arange(4, dtype=torch.int32), rtol=0, atol=0)
+
+
+def test_scan_sum_is_runnable_and_matches_torch():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 4)), node_id="x")
+    g.add_node(ScanOp(op="sum", axis=-1), ["x"], Tensor("out", (2, 4)), node_id="out")
+    g.inputs, g.outputs = ["x"], ["out"]
+    x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+
+    assert torch_ref.is_runnable(g)
+    fn, inputs = torch_ref.build_callable(g, {"x": x})
+    actual = fn(*inputs)
+
+    torch.testing.assert_close(actual, torch.cumsum(x, dim=-1), rtol=0, atol=0)
+
+
+def test_where_preserves_bool_condition_dtype_and_broadcasts():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("condition", (2, 1), "bool"), node_id="condition")
+    g.add_node(InputOp(), [], Tensor("left", (2, 3)), node_id="left")
+    g.add_node(InputOp(), [], Tensor("right", (1, 3)), node_id="right")
+    g.add_node(ElementwiseOp(op="where"), ["condition", "left", "right"], Tensor("out", (2, 3)), node_id="out")
+    g.inputs, g.outputs = ["condition", "left", "right"], ["out"]
+    arrays = {
+        "condition": np.array([[True], [False]]),
+        "left": np.arange(6, dtype=np.float32).reshape(2, 3),
+        "right": np.array([[10, 20, 30]], dtype=np.float32),
+    }
+    expected = NumpyBackend().run(g, input_data=arrays)[0].outputs["out"]
+    tensors = {name: torch.from_numpy(array) for name, array in arrays.items()}
+    fn, inputs = torch_ref.build_callable(g, tensors)
+
+    actual = fn(*inputs)
+
+    assert torch_ref.is_runnable(g)
+    assert actual.dtype == torch.float32
+    assert actual.shape == (2, 3)
+    np.testing.assert_array_equal(actual.numpy(), expected)
+
+
+@pytest.mark.parametrize(("dtype_name", "value", "expected_dtype"), [("bool", 1.0, torch.bool), ("i64", 7.0, torch.int64)])
+def test_indexmap_scalar_preserves_declared_dtype(dtype_name, value, expected_dtype):
+    g = Graph()
+    g.add_node(ConstantOp(name="scalar", value=value), [], Tensor("scalar", (1,), dtype_name), node_id="scalar")
+    g.add_node(
+        IndexMapOp(out_shape=(2, 2), sources=(IndexSource(input_idx=0, coord_map=(Literal(0, "int"),)),)),
+        ["scalar"],
+        Tensor("out", (2, 2), dtype_name),
+        node_id="out",
+    )
+    g.outputs = ["out"]
+
+    fn, inputs = torch_ref.build_callable(g, {})
+    actual = fn(*inputs)
+
+    assert torch_ref.is_runnable(g)
+    assert actual.dtype == expected_dtype
+    assert actual.tolist() == [[int(value), int(value)], [int(value), int(value)]]
+
+
+def test_where_accepts_bool_scalar_broadcast_through_triangular_indexmap():
+    g = Graph()
+    g.add_node(ConstantOp(name="one", value=1.0), [], Tensor("one", (1,), "bool"), node_id="one")
+    g.add_node(ConstantOp(name="zero", value=0.0), [], Tensor("zero", (1,), "bool"), node_id="zero")
+    g.add_node(
+        IndexMapOp(
+            out_shape=(2, 2),
+            sources=(
+                IndexSource(
+                    input_idx=0,
+                    coord_map=(Literal(0, "int"),),
+                    select=BinaryExpr(">=", placeholder(1), placeholder(0)),
+                ),
+                IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
+            ),
+        ),
+        ["one", "zero"],
+        Tensor("condition", (2, 2), "bool"),
+        node_id="condition",
+    )
+    g.add_node(InputOp(), [], Tensor("left", (2, 2)), node_id="left")
+    g.add_node(InputOp(), [], Tensor("right", (2, 2)), node_id="right")
+    g.add_node(ElementwiseOp(op="where"), ["condition", "left", "right"], Tensor("out", (2, 2)), node_id="out")
+    g.inputs, g.outputs = ["left", "right"], ["out"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    left = torch.full((2, 2), 1.0, device=device)
+    right = torch.full((2, 2), -1.0, device=device)
+
+    fn, inputs = torch_ref.build_callable(g, {"left": left, "right": right})
+    actual = fn(*inputs)
+
+    assert torch_ref.is_runnable(g)
+    torch.testing.assert_close(actual, torch.tensor([[1.0, 1.0], [-1.0, 1.0]], device=device), rtol=0, atol=0)
 
 
 def test_declared_dtype_cast_is_enforced():
@@ -191,6 +341,30 @@ def test_indexmap_cat_with_select():
     )
     g = _imap_graph([(4, 2), (4, 2)], (4, 4), (s0, s1))
     _assert_matches_numpy(g, {"in0": _rng().standard_normal((4, 2)), "in1": _rng().standard_normal((4, 2))})
+
+
+def test_indexmap_recurrence_patch_uses_tensor_ternary_coordinates():
+    # Insert a two-cell recurrence update into columns 1:3 of a larger carried state.
+    column = placeholder(1)
+    bounds = BinaryExpr("&&", BinaryExpr(">=", column, Literal(1, "int")), column.lt(Literal(3, "int")))
+    in_patch = BinaryExpr("&&", Literal(True, "bool"), bounds)
+    patch_column = TernaryExpr(in_patch, column - Literal(1, "int"), Literal(0, "int"))
+    sources = (
+        IndexSource(input_idx=0, coord_map=(placeholder(0), patch_column), select=in_patch),
+        IndexSource(input_idx=1, coord_map=(placeholder(0), column)),
+    )
+    g = _imap_graph([(2, 2), (2, 4)], (2, 4), sources)
+    patch = np.array([[10, 11], [20, 21]], dtype=np.float32)
+    carried = np.arange(8, dtype=np.float32).reshape(2, 4)
+
+    _assert_matches_numpy(g, {"in0": patch, "in1": carried})
+
+
+@pytest.mark.parametrize(("condition", "expected"), [(1, 7), (0, 9)])
+def test_index_expr_ternary_preserves_scalar_condition(condition, expected):
+    expr = TernaryExpr(Literal(condition, "int"), Literal(7, "int"), Literal(9, "int"))
+
+    assert torch_ref._idx_expr(expr, {}) == expected
 
 
 def test_symbolic_shapes_resolve_from_input_tensors():

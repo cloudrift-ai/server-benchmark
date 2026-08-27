@@ -1,9 +1,9 @@
 """Shared node-row builders for the search-package tests.
 
-The dicts here are PHYSICS-CALIBRATED against the node-store plausibility gate and are
-consumed by both ``test_node_gate.py`` (which tests the predicates directly) and
-``test_freeze.py`` (whose filter composes them) — one copy, so a featurizer-vocabulary
-or GPU-registry change cannot silently leave one suite exercising stale spellings.
+The dicts here are PHYSICS-CALIBRATED against the node-store plausibility gate, which
+``test_freeze.py``'s filter composes: a row is kept or dropped by the same predicates the
+gate applies, so these spellings must track the featurizer vocabulary and the GPU registry
+or the freeze suite silently stops exercising the real filter.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ def impossible_staged_feats() -> dict:
         **{k: v for k, v in F16_MATMUL_FEATS.items() if not k.startswith(("S_ext_free", "S_ext_reduce"))},
         "S_ext_free_prod": 512.0,
         "S_ext_reduce_max": 512.0,
-        "STAGE@a2": "d1/cp",
+        "STAGE@a2": "d1/smem-async",
     }
 
 

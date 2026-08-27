@@ -62,7 +62,12 @@ GPU_INSTANCE_TYPES = {
     "AMD Instinct MI350X": [
         ("cloudrift", "mi350x-15-250-1000-gv"),
     ],
+    "NVIDIA Tesla V100 SXM2 16GB": [
+        ("cloudrift", "v100-6-52-400-generic"),
+    ],
     "NVIDIA Tesla V100 SXM3 32GB": [
+        # The RAID 6 DGX-2 pair sells 400 GiB of disk per GPU; the RAID 0 pair sells 800.
+        ("cloudrift", "v100-5-85-400-generic"),
         ("cloudrift", "v100-5-85-800-generic"),
     ],
 }

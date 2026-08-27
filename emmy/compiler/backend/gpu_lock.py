@@ -8,6 +8,10 @@ the same GPU. Without it, two processes' kernels share clocks / caches /
 thermal state and timings turn into noise (we saw 2× variance on tiny
 ops like ``rmsnorm`` and ``silu_mul`` at small seqlens).
 
+The lock is scoped per PHYSICAL device (UUID suffix on the lock path):
+multi-rank serving workers each own a different card and must never
+serialize — or deadlock — on one machine-wide lock.
+
 Activated when ``EMMY_GPU_LOCK`` is set to a path (the perf
 conftest exports ``/tmp/emmy-gpu.lock``); otherwise the context
 manager is a no-op so ad-hoc ``emmy run`` invocations don't pay
@@ -30,11 +34,28 @@ from emmy import config
 _LOCK_CACHE: dict[str, object] = {}
 
 
+def _device_scoped(path: str) -> str:
+    """One lock per PHYSICAL device: processes contend only when they share the card.
+
+    The lock exists to keep two processes' kernels off the SAME GPU; ranks of a tensor- or
+    pipeline-parallel serving group each own a different card, and a machine-wide lock
+    deadlocks them — one rank holds it while its stream waits on a collective whose peer
+    needs the lock to reach the matching call. ``CUDA_VISIBLE_DEVICES`` renumbers every
+    worker's card to index 0, so the scope key is the device UUID, not the index."""
+    with contextlib.suppress(Exception):
+        import torch  # noqa: PLC0415 — resolve lazily; the lock is also used before CUDA init
+
+        if torch.cuda.is_available():
+            return f"{path}.{torch.cuda.get_device_properties(torch.cuda.current_device()).uuid}"
+    return path
+
+
 def _resolve_lock():
     """Return the cached ``FileLock`` instance, or ``None`` for no-op."""
     path = config.gpu_lock_path()
     if not path:
         return None
+    path = _device_scoped(path)
     cached = _LOCK_CACHE.get(path)
     if cached is not None:
         return cached

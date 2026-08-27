@@ -3,7 +3,8 @@
 :func:`knob_features` is the single featurizer over a whole knob dict (the ``D_*`` engineered
 geometry / occupancy family, the ``MMA_*`` atom expansion, the ``S_*`` / ``H_*`` pass-throughs);
 :func:`tile_signature` is the schema-agnostic structural identity used to join golden YAML rows
-against enumerated candidates. Lives in the same package as :mod:`.space` so the whole search space
+against enumerated candidates; :data:`ROUTING_FEATURES` and :func:`is_dynamic_row` are the routing stamp's
+spelling and its one reader. Lives in the same package as :mod:`.space` so the whole search space
 (dimensions × values × encoding) is analyzable in one place; the ``Knob`` descriptor / registry /
 env plumbing stays in :mod:`~emmy.compiler.pipeline.knob`.
 """
@@ -49,6 +50,30 @@ from emmy.compiler.pipeline.knob import (
 # Until then: the prior loses the ``ring`` signal (collinear with ``depth >= 2 AND async``, so no
 # real loss) and cannot price ``split`` (weightless, scores 0 — and nothing enumerates it yet).
 FEATURIZER_VERSION = 3
+
+# The features that SELECT a weight set rather than describe a candidate — the ``S_ext_n_symbolic_axis`` stamp
+# a masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
+# spelling, so a dataset can read it without importing a model; what to DO with it stays with the model classes
+# (``prior/linear_model.py``: the two weight sets, and ``descent_cols``, which keeps the stamp out of the linear
+# descent because a pool-constant term cancels out of a within-pool ranking).
+#: The ``H_opt`` value of the DEPLOYABLE regime — the nvcc opt level ``compile`` / ``run`` / ``tune``
+#: all compile at, and therefore the only one a measurement is worth anything under. Rows carrying
+#: any other value came from a deliberately pinned sweep or from the era when tuning ranked at
+#: ``-Xcicc -O1``; nothing trains on them and no deploy reads them. Spelled here because both the
+#: data layer and the model layer test against it and neither may import the other.
+DEPLOYABLE_OPT = 3.0
+
+ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
+
+
+def is_dynamic_row(feats: dict) -> bool:
+    """Whether a featurized row carries the symbolic-axis (masked-tile) routing stamp — the ONE reading of it.
+
+    What the stamp SELECTS is the reader's business: the linear model routes to a second weight vector
+    (``LinearModel.weight_set``), a tree splits on the column, and ``ShapeKey.is_dyn`` records it as part of a
+    shape's identity. All three ask this one question, because a second spelling of "is the stamp set" would be
+    a second chance to disagree about which regime a pool belongs to."""
+    return any(feats.get(name, 0.0) > 0 for name in ROUTING_FEATURES)
 
 
 def _row_values(knobs: dict) -> tuple:
@@ -119,7 +144,7 @@ def _stage_features(knobs: dict) -> dict[str, float]:
     ``STAGE`` (the gmem-direct baseline) contributes nothing (``{}``); a present codec emits
     the pipeline depth and a small transport one-hot so the model separates the synchronous
     smem copy from cp.async from TMA. Read schema-agnostically off the raw codec, exactly as
-    ``_reduce_decomp`` reads ``REDUCE`` — so a ``d2/cp`` stage featurizes identically on a
+    ``_reduce_decomp`` reads ``REDUCE`` — so a ``d2/smem-async`` stage featurizes identically on a
     scalar (``TILE``) and a warp (``WARP``) contraction (the cross-kind feature transfer)."""
     spec = family_value(knobs, "STAGE")
     if not spec:
@@ -142,12 +167,11 @@ def _stage_features(knobs: dict) -> dict[str, float]:
         # no ``FEATURIZER_VERSION`` bump is owed for the addition itself.
         "D_stage_prefetch": 1.0 if st.depth >= 2 else 0.0,
         "D_stage_async": 1.0 if st.is_async else 0.0,
-        "D_stage_tma": 1.0 if st.transport == "tma" else 0.0,
+        "D_stage_tma": 1.0 if st.transport == "smem-tma" else 0.0,
         "D_stage_reg_depth": float(st.reg_depth),  # smem→register double-buffer (p<n>)
         # The per-edge transport split (``/split`` — the flash stream's FA-2 choreography, which
         # also stages Q): enumerated as a sibling of the paired ring on flash rows, so without
-        # this flag ``d1/tma/split`` featurizes byte-identically to plain ``d1/tma``.
-        "D_stage_split": 1.0 if st.split else 0.0,
+        # this flag ``d1/smem-tma/split`` featurizes byte-identically to plain ``d1/smem-tma``.
     }
 
 
@@ -432,7 +456,7 @@ def tile_signature(knobs: dict) -> tuple:
     knobs (``TILE`` / ``REDUCE`` / ``STAGE``, bare or ``@<axis>``-suffixed alike). Two configs
     with equal signatures are the same kernel variant whichever key form spelled them, so this
     is the bridge for matching a recorded golden YAML row against the native enumeration's
-    candidate rows (``emmy fit``'s case builder / ``search/golden_eval.evaluate_record``).
+    candidate rows (``emmy fit``'s golden group builder / ``search/golden_eval.evaluate_record``).
     The K-chunk (``TilePlan.bk``) is part of the identity — without it every ``k<n>`` sibling in
     a warp pool joined ambiguously (a golden recorded at ``k4`` matched the ``k1`` candidate).
     Operand staging (the ``STAGE`` codec) is part of the identity — a staged and a gmem-direct
@@ -458,7 +482,7 @@ def _stage_sig(knobs: dict) -> tuple | None:
     if not spec:
         return None
     st = _parsed_stage(str(spec))
-    return (st.depth, st.transport, st.split) if st is not None else None
+    return (st.depth, st.transport) if st is not None else None
 
 
 def _geom_feats(

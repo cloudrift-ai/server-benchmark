@@ -99,7 +99,12 @@ def handle_trace(args):
         except (OSError, ValueError) as exc:
             logger.error("invalid serving config: %s", exc)
             sys.exit(2)
-        graphs = capture_twin_graphs(args.input, decode_bucket=0, prefill_bucket=0)
+        # The release audit's graph set (``emmy eval golden``): the symbolic programs plus the
+        # config's static widths — a golden traced from fewer graphs leaves the audit with gaps.
+        if serving.static_only:
+            graphs = capture_twin_graphs(args.input, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True)
+        else:
+            graphs = capture_twin_graphs(args.input, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True)
         source_name = args.input.rstrip("/").rsplit("/", 1)[-1].partition("@")[0]
         destination = args.output or f"{source_name}.serving-twins.golden.yaml"
         try:

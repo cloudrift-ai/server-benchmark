@@ -21,14 +21,19 @@ stamp the output tensor.
 
 Tensor constructors whose receiver supplies only dtype/device metadata (`new_zeros`, `new_full`) lower from a scalar
 constant plus an explicit broadcast; the receiver's unrelated shape and values never become operands. Exported
-`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. A static, unit-step slice chain
-rooted at a local `new_zeros` / `new_full` allocation additionally reassembles the updated base as a two-source
-`IndexMapOp`: the copied value supplies the written region and the previous base supplies the remainder. Rebinding
-the allocation's FX name versions sequential slice writes and later aliases built from that name; an empty slice write
-leaves that version unchanged. A write through an input/parameter, a dynamic or strided slice, a used `copy_` return,
-or a view created before the write still fails closed; those forms need general alias versioning rather than this local
-functional update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
-instead of becoming NaN through arithmetic selection.
+`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. A static, unit-step slice/select
+chain rooted at a locally computed tensor additionally reassembles the updated base as a two-source `IndexMapOp`: the
+copied value supplies the written region and the previous base supplies the remainder. Rebinding the root's FX name
+versions sequential overlapping writes and later aliases built from that name; an empty write leaves that version
+unchanged. The written-region predicate starts from a boolean literal, so coordinate ternaries and the source select
+retain a boolean condition in vectorized reference evaluation and after Loop IR lifting. A write through an
+input/parameter, a dynamic or strided view, a used `copy_` return, or a view created
+before the write still fails closed; those forms need general alias versioning rather than this local functional
+update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
+instead of becoming NaN through arithmetic selection. `triu` and `tril` lower to two-source `IndexMapOp` regions over
+the last two axes: the selected triangular region reads the input and the complement reads a scalar zero. The
+diagonal must be a static integer; tensor-valued or symbolic diagonals fail closed instead of becoming broadcast
+elementwise operands.
 
 A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions. An exported
 `fill_` is functional through its returned value. If a later live read observes the written storage, a static unit-step
@@ -38,6 +43,18 @@ fail closed.
 
 Static integer `arange` lowers to the zero-input tensor `RangeOp`, so constant-source replay evaluates one sequence
 instead of applying NumPy `arange` elementwise to a broadcast stop. Dynamic and non-integer ranges fail closed.
+
+Static rank-two `eye` lowers to a two-source `IndexMapOp`: output coordinates select a typed scalar one on the
+diagonal and a typed scalar zero everywhere else. Square and rectangular dimensions must be static integers and match
+the exported tensor metadata. Dynamic dimensions, non-strided layouts, pinned memory, and unsupported overloads or
+constructor options fail closed rather than being stored as an elementwise operation without coordinate semantics.
+
+An explicit all-zero `aten.pad` width tuple stays as a unary `ElementwiseOp("pad")` identity so a working golden
+retains the frontend provenance and exact dtype. Any nonzero, symbolic, or otherwise unrepresented padding fails
+closed: the elementwise form has no coordinate, mode, or fill-value fields and cannot describe a changed tensor.
+
+The default `aten.cumsum` overload with a static integer axis lowers to an additive `ScanOp`, preserving the input
+shape and dtype. Dynamic axes, dtype overrides, and unsupported overloads or keyword arguments fail closed.
 
 `aten.chunk` is the deliberate exception to the otherwise single-output frontend: the walker materializes every
 FX-described static chunk as its own `SliceOp` and stores a transient tuple of node IDs only while walking FX.
@@ -53,8 +70,7 @@ broadcasts that mask to the scores shape and adds it before the softmax.
 Dropping it silently turns masked attention into full bidirectional
 attention — invisible to uniform input but wrong on any varying sequence.
 The `scale=` kwarg is captured onto `SdpaOp.scale` (`None` = torch's `1/sqrt(head_dim)` default) and honored
-by both reference backends, the decomposition's scale constant, and the flash re-synthesis (which reads the
-value back off the score producer's constant). Gemma-nano (E2B/E4B) passes `scale=1.0` — its q_norm absorbs
+by both reference backends and the decomposition's scale constant. Gemma-nano (E2B/E4B) passes `scale=1.0` — its q_norm absorbs
 the scaling — so dropping the kwarg re-scaled every logit by `1/sqrt(d)` and redistributed the whole softmax.
 
 ### `huggingface.py` — trace-friendly wrapper
@@ -138,36 +154,90 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   `split_gate_up=True` selects a third form, `expert(x, w_gate, w_up, w_down)` — the EXL3 shape. There each
   coded linear carries its own input-side channel vector, so the merged gate_up weight has no single
   input-side channel vector and the merged spelling would only add a concat the chunk split undoes.
-  A model's `routed_scaling_factor` multiplies only the routed expert result before that shared-expert addition.
+  A model's `routed_scaling_factor` ordinarily multiplies only the routed expert result before that shared-expert
+  addition. An architecture may mark the factor as folded into router weights when fp16 partials cannot carry it.
   Laguna's optional softplus `g_proj` attention gate is likewise retained in both dense and MoE post-attention
   programs; per-head gates reshape the flattened attention seam to `[tokens, heads, head_dim]` for multiplication.
   The split reads an explicit gate layout when the Transformers module provides one and otherwise derives it from the
   gate, query-projection, and head widths, covering older built-in Laguna modules without a model-name special case.
+  The `F.linear` expert form applies the module's `swiglu_limit` when the experts carry one (DeepSeek V4: gate clamped
+  above, up clamped on both sides, then SwiGLU and the down projection); OLMoE has no limit and is unchanged.
   Config-only selected-layer tracing replaces routing with one representative routed expert before materialization.
-  DeepSeek V4 requires that replacement to be confirmed and preserves its expert `swiglu_limit`: gate is clamped
-  above, up is clamped on both sides, then SwiGLU and the down projection run. Missing the replacement fails closed.
+  DeepSeek V4 requires that replacement to be confirmed and preserves the same clamp. Missing the replacement fails
+  closed.
 
-- `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the SHARD-STREAMED serving load of a
-  quantized MoE checkpoint (gpt-oss fp8): the twin builds from config on the META device (weights never read at
-  trace; the experts' would-be init never materializes), the dense trunk streams per shard as real values
-  (fp8 attention weights resolved by their `<key>_scale` partners) attached via `load_state_dict(assign=True)`,
-  and the expert tensors collect into a per-layer store keyed by the expert program's input names — fp8 weights
-  as raw bits on the uint8 carrier plus f32 scale tensors, biases as `dtype` values. An EXL3 checkpoint takes the
-  same split at the trellis format's own shapes (`fmt == "exl3"`). Its explicit reference API may decode trunk
-  values, while serving passes `compress_trunk=True`: the twin parameters stay uninitialized placeholders and the
-  caller re-sources each coded linear from the checkpoint (`serving/gen_runner.py`). There is no automatic dense
-  serving fallback; an unsupported coded linear fails during birth-time spelling. Either
-  way every routed expert keeps its PACKED CODES. EXL3 stores experts as per-expert MODULES, so `_expert_slot`
-  reports an expert index and `_stack_exl3_experts` stacks each `(layer, projection, leaf)` triple into one
-  E-leading tensor, putting `suh` in its 128-blocked form and trimming `svh` to the logical out extent — the
-  shapes `spell_trellis_inputs` declares, so a launch's per-expert slice needs no reshape. The store also carries
-  `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus `dir` and
-  `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the
-  whole dict at once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the
-  whole-dict eager/accuracy twin for models small enough to hold (fp8 and EXL3 checkpoints alike); on the way in
-  it trims EXL3's encode padding back to the declared parameter shapes (`_trim_padded_weights` — both weight dims
-  round up to 128 at encode time) and packs per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`,
-  the DeepSeek/GLM lineage) into the v5 3-D expert params (`_pack_expert_state`).
+  A DeepSeek V4 block (`hyper_connection_seam(block)` is not `None`: it carries `attn_hc` / `ffn_hc`) takes the
+  **attention-sublayer seam** instead of the q/k/v one, because the 1Cat vLLM fork's paged MLA attention owns the
+  whole sublayer — low-rank q projection, shared-KV projection, HCA/CSA compressors, the lightning indexer and the
+  grouped output projection are fused with its paged caches, and nothing external can hand it compressed latents.
+  The carrier is the `hc_mult` hyper-connection residual streams flattened to `[num_tokens, hc_mult * hidden]`:
+  `pre(hidden[T, hc·H]) → x[T, H]` is the attention-site stream collapse plus `input_layernorm` (exactly what the
+  fork's `DeepseekV4Attention.forward(positions, x)` consumes); `post(attn_out[T, H], residual[T, hc·H]) → (mixed[T,
+  hc·H], xn[T, H], mix[T, hc])` recomputes the attention-site collapse weights from the carrier (one small GEMM, so
+  only the carrier crosses the seam), mixes the attention output onto the streams, runs the feed-forward collapse and
+  `post_attention_layernorm`, places the shared expert on the streams, and returns the feed-forward per-stream `post`
+  weights. The routed combine runs in torch as before and lands through `place_routed_streams(mixed, routed, mix)`
+  (`mixed + mix ⊗ routed`). Both halves call the block's own `DeepseekV4HyperConnection` modules on a `[1, T, hc, H]`
+  view, so the sigmoid / Sinkhorn / float32 contract is the installed modeling code's. `build_attention_split_wrapper`
+  rejects these blocks (no dense DeepSeek V4 layer exists), and the seam has no coded-trunk or float32-residual form
+  (`tests/serving/test_deepseek_v4_split.py` proves the carve against the eager layer for sliding, HCA and CSA
+  layers with both hash and top-k routers).
+
+- `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the shard-streamed serving load of a
+  quantized MoE checkpoint. The twin builds from config on the meta device (weights never read at trace; the
+  experts' would-be initialization never materializes), while the dense trunk streams per shard as real values and
+  attaches via `load_state_dict(assign=True)`. Expert tensors collect into a per-layer store keyed by the expert
+  program's input names: FP8 weights remain raw bits with f32 scales, and native-MXFP4 gpt-oss weights remain uint8
+  blocks with uint8 E8M0 scales; biases stay in the requested value dtype. `expert_range=(lo, hi)` narrows the read to
+  one tensor-parallel rank's expert shard, re-indexed rank-locally, so a rank never reads bytes it does not own.
+  The twin's config must resolve to Transformers' OWN class for the architecture: a hosting process can re-register
+  the model type onto its own minimal config class (vLLM's config parser does, process-wide), which drops every field
+  the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a same-named native class exists, the
+  loader reloads the config with it.
+
+  A checkpoint published in its own namespace is translated by `_native_checkpoint_renamer`, which reuses the renaming
+  Transformers itself publishes for the architecture (`get_checkpoint_conversion_mapping`) instead of keeping a second
+  copy that can drift from the modeling code the twin is built from. Only its `WeightRenaming` entries apply: the
+  accompanying `WeightConverter` entries merge routed experts into one dense parameter, which is exactly what a
+  serving load must not do. DeepSeek V4 is the architecture that needs this today — `layers.N.attn.wq_a`,
+  `layers.N.ffn.experts.E.w1`, `hc_attn_fn`, `embed`/`head`, and `.scale` for every block-scale sibling. Two rules
+  finish it: routed `w1`/`w3`/`w2` take their gate/up/down module names, and a `.scale` leaf becomes the
+  `weight_scale` sibling ONLY when the module's `.weight` is also present — the hyper-connection blocks carry a
+  LEARNED `hc_attn_scale` parameter whose name ends the same way, and renaming it leaves the twin's stream mixing on
+  meta. Sibling lookups therefore run in the module namespace, or a natively spelled block scale never pairs and every
+  fp8 trunk weight loads unscaled. That checkpoint also declares an fp8 trunk while storing routed experts as native
+  MXFP4 (`expert_dtype: fp4`, `I8 [out, in/2]` nibble pairs beside `F8_E8M0 [out, in/32]` exponents), which the loader
+  views — never casts — onto the uint8 blocks/scales carrier the expert programs bind.
+
+  A multi-token-prediction head is never owned by this loader: no twin instantiates it, and on DeepSeek V4 its 256
+  routed experts are 4,608 of the checkpoint's tensors, read in full on every rank only to be discarded. An EXL3
+  checkpoint takes the same split at the trellis format's own shapes (`fmt == "exl3"`). Laguna EXL3 additionally
+  stores routed up projections with the architecture's `interm_div=128` scale; the loader folds the inverse and the
+  model's base routed scale into selected routing weights and marks their combine for fp32 accumulation, matching the
+  reference runtime without scaling expert partials in fp16. The architecture's residual stream is fp32 from embedding
+  through every decoder block. Norms, q/k/v, attention output, and gate/up intermediates stay fp16; the marked trace
+  promotes exactly the checkpoint-provenanced attention `o_proj`, dense and routed `down_proj`, and the shared-expert
+  activation/down cone to fp32 before trellis spelling. Operands remain compressed. The final norm returns fp16 for
+  the head. The precision marker is limited to Laguna EXL3; ordinary and other EXL3 graphs keep their existing dtypes.
+  Its explicit reference API may decode trunk values, while serving passes `compress_trunk=True`: the twin parameters
+  stay uninitialized placeholders and the caller re-sources each coded linear from the checkpoint
+  (`serving/gen_runner.py`). There is no automatic dense serving fallback; an unsupported coded linear fails during
+  birth-time spelling. Either way every routed expert keeps its PACKED CODES. EXL3 stores experts as per-expert
+  MODULES, so `_expert_slot` reports an expert index and `_stack_exl3_experts` stacks each `(layer, projection, leaf)`
+  triple into one E-leading tensor, putting `suh` in its 128-blocked form and trimming `svh` to the logical out extent
+  — the shapes `spell_trellis_inputs` declares, so a launch's per-expert slice needs no reshape. DeepSeek-lineage FP8
+  checkpoints use the same per-expert module layout for ordinary 2-D weights and block scales; `_stack_expert_modules`
+  preserves FP8 bits on the uint8 carrier, stacks scales as float32, concatenates gate and up along the output axis,
+  and leaves down weights in checkpoint orientation. Ignored dense layers take the same path without scales. The store
+  also carries `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus
+  `dir` and `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the whole dict at
+  once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the whole-dict
+  eager/accuracy twin for models small enough to hold (FP8, native MXFP4, and EXL3 checkpoints alike). A
+  selected-layer native-MXFP4 eager twin instead decodes and attaches only its shard-streamed expert store, preserving
+  the value-reference contract without expanding every layer. On the way in the EXL3 path trims encode padding back to
+  the declared parameter shapes (`_trim_padded_weights` — both weight dims round up to 128 at encode time) and packs
+  per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`, the DeepSeek/GLM lineage) into the v5 3-D
+  expert params (`_pack_expert_state`).
 
   Quantized architecture construction uses the same guarded remote-code rule as the ordinary model trace. It first
   asks Transformers for its built-in config/model class and retries with `trust_remote_code=True` only when that call
@@ -217,8 +287,9 @@ shared with CausalLM traces.
   target is selected by unique frontend origins when possible; an empty or ambiguous selector stores the standalone
   post-fusion Loop IR slice instead. The smaller provenance tuning reproducer is derived in memory when the working
   file is loaded. Quantized model traces also embed the digest of their exact checkpoint declaration. Frontend nodes
-  carrying the generic `trace.materialize` hint become auxiliary outputs only in the inventory copy, preserving an
-  internal storage boundary without changing an ordinary model call.
+  carrying the generic `trace.materialize` hint become auxiliary outputs only in the inventory copy. Maximal fusion
+  retains that storage value as a live output in one frontend target; placement then enumerates its materialized cut
+  without changing an ordinary model call.
   `commands.trace` only validates CLI paths and reports that single artifact; traced JSON and sidecars are not outputs.
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,

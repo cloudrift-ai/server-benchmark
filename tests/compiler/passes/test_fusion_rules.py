@@ -1,12 +1,10 @@
 """Tests for the fusion pass (lift-then-splice).
 
 The fusion pass lifts each tensor op into a trivial ``LoopOp`` and then
-splices adjacent pairs and closed reconvergent ``LoopOp`` DAGs through
-the SSA-preserving N-way splicer. Tests verify post-fixpoint structural
-properties (kernel count, graph composition, expected ops in SSA bodies)
-*and* numeric correctness — each fixture is executed via ``NumpyBackend``
-both pre- and post-fusion, and the outputs must match. ``LoopOp.forward``
-makes the post-fusion run possible without a GPU.
+splices maximal downstream regions through one multi-root, SSA-preserving
+worklist. Tests verify post-fixpoint structure, shared-producer reuse, and
+numeric correctness through ``NumpyBackend``. ``LoopOp.forward`` executes
+multi-output fused kernels without a GPU.
 """
 
 import numpy as np
@@ -16,8 +14,8 @@ from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import Literal, placeholder
-from emmy.compiler.ir.frontend.ir import LinearOp
-from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
+from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
+from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Select, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
 from emmy.compiler.pipeline import Pipeline
 
@@ -75,6 +73,47 @@ def _has_update(body) -> bool:
 
 def _local_combine_fns(locals_) -> set[str]:
     return {lb.op.name for lb in locals_ if lb.op is not None}
+
+
+def test_multisource_indexmap_lifts_unconditional_branch_as_bool():
+    """The fallback predicate remains boolean through rendering and Loop IR persistence."""
+    import json
+
+    from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("left", (2, 2)), node_id="left")
+    graph.add_node(InputOp(), [], Tensor("right", (2, 2)), node_id="right")
+    graph.add_node(
+        IndexMapOp(
+            out_shape=(2, 2),
+            sources=(
+                IndexSource(
+                    input_idx=0,
+                    coord_map=(placeholder(0), placeholder(1)),
+                    select=placeholder(1).lt(Literal(1, "int")),
+                ),
+                IndexSource(input_idx=1, coord_map=(placeholder(0), placeholder(1))),
+            ),
+        ),
+        ["left", "right"],
+        Tensor("out", (2, 2)),
+        node_id="out",
+    )
+    graph.inputs, graph.outputs = ["left", "right"], ["out"]
+    inputs = {
+        "left": np.array([[1, 2], [3, 4]], dtype=np.float32),
+        "right": np.array([[5, 6], [7, 8]], dtype=np.float32),
+    }
+    lifted = Pipeline.build(["loop/lifting"]).run(graph)
+    select = next(stmt for stmt in _kernel_nodes(lifted)[0].op.body.iter() if isinstance(stmt, Select))
+    assert select.branches[-1].select == Literal(True, "bool")
+    assert select.branches[-1].select.render(None) == "1"
+    _assert_close(_run(graph, inputs), _run(lifted, inputs))
+
+    restored = loop_graph_from_wire(json.loads(json.dumps(loop_graph_to_wire(lifted))))
+    restored_select = next(stmt for stmt in _kernel_nodes(restored)[0].op.body.iter() if isinstance(stmt, Select))
+    assert restored_select.branches[-1].select == Literal(True, "bool")
 
 
 # ===================================================================
@@ -169,14 +208,23 @@ def test_reconvergent_dag_fusion_is_numerically_exact():
     _assert_close(before, after)
 
 
-def test_non_reconvergent_fanout_stays_materialized():
+def test_non_reconvergent_fanout_becomes_one_mimo_kernel():
     graph = _make_pointwise_diamond()
     graph.add_node(ElementwiseOp("exp"), ["shared"], Tensor("escape", (8,)), node_id="escape")
     graph.outputs.append("escape")
     result = _fuse(graph)
-    shared = result.nodes.get("shared")
-    assert shared is not None and isinstance(shared.op, LoopOp)
+    (kernel,) = _kernel_nodes(result)
+    assert len(kernel.outputs) == 2
+    assert _assign_fns(kernel.op.body).count("negative") == 1
     assert len(result.outputs) == 2
+
+
+def test_non_reconvergent_mimo_fusion_is_numerically_exact():
+    graph = _make_pointwise_diamond()
+    graph.add_node(ElementwiseOp("exp"), ["shared"], Tensor("escape", (8,)), node_id="escape")
+    graph.outputs.append("escape")
+    inputs = {name: rng.standard_normal(8).astype(np.float32) for name in ("x", "a", "b")}
+    _assert_close(_run(graph, inputs), _run(_fuse(graph), inputs))
 
 
 def _make_indexmap_diamond():
@@ -193,11 +241,7 @@ def _make_indexmap_diamond():
 
 
 def test_reconvergent_indexmap_is_owned_by_shared_region_merge():
-    lifted = Pipeline.build(["loop/lifting"]).run(_make_indexmap_diamond())
-    split_only = Pipeline.build(["loop/fusion"], select={"split_shared_indexmap"}).run(lifted)
-    assert "one_bc" in split_only.nodes
-
-    result = Pipeline.build(["loop/fusion"]).run(split_only)
+    result = _fuse(_make_indexmap_diamond())
     (kernel,) = _kernel_nodes(result)
     assert sum(isinstance(stmt, Load) and stmt.input == "one" for stmt in kernel.op.body.iter()) == 1
 
@@ -264,7 +308,7 @@ def test_multisource_gated_activation_still_fuses_into_contraction():
     g = _make_activation_linear("exp")
     g.add_node(InputOp(), [], Tensor("gate", (2, 16)), node_id="gate")
     g.add_node(ElementwiseOp("multiply"), ["activated", "gate"], Tensor("gated", (2, 16)), node_id="gated")
-    g.nodes["out"].inputs[0] = "gated"
+    g.replace_input("out", "activated", "gated")
     g.inputs.append("gate")
 
     result = _decompose_and_fuse(g)
@@ -598,12 +642,10 @@ def test_softmax_has_both_accumulators():
 
 
 # ===================================================================
-# Split non-reconvergent shared index-map fan-out (005).
+# Multi-output shared index-map fan-out.
 #
-# Closed reconvergent fan-out is absorbed as one SSA region by
-# ``merge_loop_ops``. When consumers remain separate, a pure index map can be
-# cheaply copied into each consumer; ``005_split_shared_indexmap`` performs
-# that multi-output rewrite and leaves no copy kernel behind.
+# Separate consumers are roots of one MIMO region. Their common index map and
+# any equal-coordinate upstream compute remain one SSA definition.
 # ===================================================================
 
 
@@ -617,14 +659,6 @@ def _pure_indexmap_kernels(graph: Graph) -> list:
 
 def _loads_from(op: LoopOp) -> set[str]:
     return {ld.input for ld in op.body.loads}
-
-
-def _split_only(graph: Graph) -> Graph:
-    """Run lifting + the split rule alone (no merge) — the in-isolation view."""
-    return Pipeline.build(
-        ["loop/lifting", "loop/fusion"],
-        select={"lift_elementwise", "lift_reduce", "lift_indexmap", "lift_gather", "split_shared_indexmap"},
-    ).run(graph)
 
 
 def _make_shared_const_broadcast():
@@ -650,13 +684,11 @@ def test_shared_const_broadcast_no_pure_indexmap_remains():
 
 
 def test_shared_const_broadcast_consumers_load_constant_directly():
-    """Both consumers Load the ``ConstantOp`` (``one``) directly — the broadcast
-    folded in, so the cuda literal-inline path can stamp ``float x = 1.0f;``."""
+    """The MIMO kernel loads the constant directly and shares the broadcast."""
     result = _fuse(_make_shared_const_broadcast())
-    kernels = _kernel_nodes(result)
-    assert len(kernels) == 2, f"expected 2 consumer kernels, got {len(kernels)}"
-    for k in kernels:
-        assert "one" in _loads_from(k.op), f"{k.id} does not load the constant directly: {_loads_from(k.op)}"
+    (kernel,) = _kernel_nodes(result)
+    assert len(kernel.outputs) == 2
+    assert "one" in _loads_from(kernel.op)
 
 
 def test_shared_const_broadcast_correctness():
@@ -665,16 +697,15 @@ def test_shared_const_broadcast_correctness():
     _assert_correctness(_make_shared_const_broadcast, {"x": x, "y": y})
 
 
-def test_shared_const_broadcast_split_in_isolation():
-    """Split rule alone (no merge): the producer is fused into *all* consumers in
-    one shot — no broadcast kernel survives and each consumer reads the constant
-    directly, without ``merge_loop_ops`` running at all."""
-    result = _split_only(_make_shared_const_broadcast())
-    assert _pure_indexmap_kernels(result) == [], "the shared broadcast should be fully dissolved by the split rule alone"
-    kernels = _kernel_nodes(result)
-    assert len(kernels) == 2, f"expected 2 fused consumer kernels, got {len(kernels)}"
-    for k in kernels:
-        assert "one" in _loads_from(k.op), f"{k.id} does not load the constant directly: {_loads_from(k.op)}"
+def test_shared_const_broadcast_lowers_as_one_mimo_cuda_kernel():
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.pipeline import CUDA_PASSES
+
+    result = Pipeline.build(CUDA_PASSES).run(_make_shared_const_broadcast())
+    (kernel,) = [node for node in result.nodes.values() if isinstance(node.op, CudaOp)]
+    assert kernel.buffer_names() == ("c1", "c2")
+    assert kernel.op.arg_order[-2:] == ("c1", "c2")
+    assert "float* c1" in kernel.op.kernel_source and "float* c2" in kernel.op.kernel_source
 
 
 def _make_shared_transpose():
@@ -699,13 +730,11 @@ def test_shared_transpose_no_pure_indexmap_remains():
 
 
 def test_shared_transpose_consumers_index_source_directly():
-    """Both consumers read the transpose's source (``x``) directly — the layout
-    op folded into each as lazy per-consumer indexing."""
+    """One MIMO kernel reads the transpose source directly for both outputs."""
     result = _fuse(_make_shared_transpose())
-    kernels = _kernel_nodes(result)
-    assert len(kernels) == 2, f"expected 2 consumer kernels, got {len(kernels)}"
-    for k in kernels:
-        assert "x" in _loads_from(k.op), f"{k.id} does not load the source directly: {_loads_from(k.op)}"
+    (kernel,) = _kernel_nodes(result)
+    assert len(kernel.outputs) == 2
+    assert "x" in _loads_from(kernel.op)
 
 
 def test_shared_transpose_correctness():
@@ -724,7 +753,7 @@ def test_shared_transpose_correctness():
 # or the second read's index dangles and the canonical renamer collapses it into
 # a self-referential Load (``in4 = load w[(int)in4]``) — silently reading a
 # constant row instead of ``idx[pos]``. ``Load.deps()`` reporting index SSA +
-# ``dedup_loads`` rewiring kept Loads' indices is what makes this correct.
+# Body normalization rewiring kept Loads' indices is what makes this correct.
 # ===================================================================
 
 
@@ -755,6 +784,76 @@ def test_gather_into_reduce_correctness():
     w = rng.standard_normal((16, 8)).astype(np.float32)
     idx = rng.integers(0, 16, size=(1, 4)).astype(np.float32)
     _assert_correctness(_make_gather_into_reduce, {"w": w, "idx": idx})
+
+
+def _make_repeated_projection_read():
+    """A reduction producer consumed twice by one pointwise node."""
+    m, k, n = 2, 8, 6
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (m, k)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w", (n, k)), node_id="w")
+    g.add_node(LinearOp(), ["x", "w"], Tensor("projection", (m, n)), node_id="projection")
+    g.add_node(ElementwiseOp("multiply"), ["projection", "projection"], Tensor("square", (m, n)), node_id="square")
+    g.inputs, g.outputs = ["x", "w"], ["square"]
+    return g
+
+
+def test_equal_coordinate_projection_reads_share_one_reduction():
+    """The splicer shares identical demands instead of treating every repeated read as duplication."""
+    result = _decompose_and_fuse(_make_repeated_projection_read())
+    kernels = _kernel_nodes(result)
+    assert len(kernels) == 1
+    assert sum(isinstance(stmt, Accum) for stmt in kernels[0].op.body.iter()) == 1
+
+
+def test_repeated_projection_read_fusion_is_correct():
+    x = rng.standard_normal((2, 8)).astype(np.float32)
+    w = rng.standard_normal((6, 8)).astype(np.float32)
+    _assert_correctness(_make_repeated_projection_read, {"x": x, "w": w})
+
+
+def _make_norm_linear():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 8)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("nw", (8,)), node_id="nw")
+    g.add_node(InputOp(), [], Tensor("w", (6, 8)), node_id="w")
+    g.add_node(RmsNormOp(eps=1e-6), ["x", "nw"], Tensor("normalized", (2, 8)), node_id="normalized")
+    g.add_node(LinearOp(), ["normalized", "w"], Tensor("out", (2, 6)), node_id="out")
+    g.inputs, g.outputs = ["x", "nw", "w"], ["out"]
+    return g
+
+
+def test_single_read_norm_linear_still_fuses():
+    """The repeated-reduce guard must not block the intended computed-A norm→linear cone."""
+    result = _decompose_and_fuse(_make_norm_linear())
+    assert len(_kernel_nodes(result)) == 1
+
+
+def _make_projection_norm():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (2, 8)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w", (6, 8)), node_id="w")
+    g.add_node(InputOp(), [], Tensor("nw", (6,)), node_id="nw")
+    g.add_node(LinearOp(), ["x", "w"], Tensor("projection", (2, 6)), node_id="projection")
+    g.add_node(RmsNormOp(eps=1e-6), ["projection", "nw"], Tensor("out", (2, 6)), node_id="out")
+    g.inputs, g.outputs = ["x", "w", "nw"], ["out"]
+    return g
+
+
+def test_projection_feeding_rms_fuses_despite_nested_reductions():
+    """Recognition coverage is not a fusion gate: projection and RMSNorm form one kernel."""
+    result = _decompose_and_fuse(_make_projection_norm())
+    kernels = _kernel_nodes(result)
+    assert [node.id for node in kernels] == ["out"]
+
+
+def test_projection_norm_nested_fusion_is_correct():
+    inputs = {
+        "x": rng.standard_normal((2, 8)).astype(np.float32),
+        "w": rng.standard_normal((6, 8)).astype(np.float32),
+        "nw": rng.standard_normal((6,)).astype(np.float32),
+    }
+    _assert_correctness(_make_projection_norm, inputs)
 
 
 def _make_shared_broadcast_chain():
@@ -797,12 +896,11 @@ def test_shared_broadcast_chain_correctness():
 
 
 def test_output_reshape_folds_into_reduce_producer():
-    """``030_fold_output_reshape``: a graph-output memcpy-identity flatten of a reduce-bearing
-    producer folds by retargeting the producer's ``Write`` to the output buffer at the same flat
-    address (clean affine per-dim index — no div/mod), dropping the copy kernel. The normal merge
-    rule can't take this pair (inlining the producer at the consumer's load would re-run the
-    reduce per element; the flatten's div/mod reader σ defeats the splicer anyway) — the gemma-4
-    decode pre twin's q/k/v head-layout flattens after the per-head qk norms."""
+    """A graph-output flat-address identity joins its producer's output equivalence cluster.
+
+    The splicer retargets the producer's ``Write`` to the output shape with clean affine indices
+    instead of reconstructing its reduction at the flatten's div/mod-indexed loads.
+    """
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
@@ -1004,3 +1102,53 @@ def test_pending_product_exp_residual_correctness():
     w = rng.standard_normal((6, 8)).astype(np.float32)
     r = rng.standard_normal((4, 6)).astype(np.float32)
     _assert_correctness(_make_pending_product_into_exp_residual_add, {"act": act, "w": w, "r": r})
+
+
+def test_product_reduction_fuses_before_upstream_activation():
+    """An activation feeding a decomposed contraction must not strand its M×K×N product."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.loop import Load, Loop
+    from emmy.compiler.ir.stmt import Body
+
+    graph = _make_pending_product_into_exp_residual_add()
+    graph.rename_node("act", "act_src")
+    a0, a1 = Var("a0"), Var("a1")
+    activation = LoopOp(
+        body=Body(
+            (
+                Loop(
+                    axis=Axis("a0", Dim(4)),
+                    body=Body(
+                        (
+                            Loop(
+                                axis=Axis("a1", Dim(8)),
+                                body=Body(
+                                    (
+                                        Load(name="x", input="act_src", index=(a0, a1)),
+                                        Assign(name="xa", op="tanh", args=("x",)),
+                                        Write(output="act", index=(a0, a1), value="xa"),
+                                    )
+                                ),
+                            ),
+                        )
+                    ),
+                ),
+            )
+        )
+    )
+    graph.add_node(activation, ["act_src"], Tensor("act", (4, 8)), node_id="act")
+    graph.replace_input("ew", "act_src", "act")
+
+    before = graph.copy()
+    fused = Pipeline.build(["loop/fusion"]).run(graph)
+    bare = [node.id for node in _kernel_nodes(fused) if not _has_update(node.op.body) and len(node.output.shape) > 2]
+    assert bare == [], f"activation fusion stranded a product workspace: {bare}"
+
+    inputs = {
+        "act_src": rng.standard_normal((4, 8)).astype(np.float32),
+        "w": rng.standard_normal((6, 8)).astype(np.float32),
+        "r": rng.standard_normal((4, 6)).astype(np.float32),
+    }
+    _assert_close(_run(before, inputs), _run(fused, inputs))

@@ -1,4 +1,4 @@
-.PHONY: help setup clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard \
+.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard pypi-dist \
 	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
@@ -6,12 +6,14 @@ help:
 	@echo ""
 	@echo "Available targets:"
 	@echo "  setup          - Install system dependencies, create venv, and install Python packages"
+	@echo "  setup-agent    - Create venv and install API-agent workflow dependencies"
 	@echo "  lint           - Run linter and format checks"
 	@echo "  format         - Auto-format code and fix lint violations"
 	@echo "  bench          - Run benchmarks in parallel"
 	@echo "  bench-force    - Run benchmarks in parallel (force re-run, skip cached results)"
 	@echo "  bench-kernels  - Run per-kernel perf comparison vs PyTorch (tests/perf/, requires CUDA)"
 	@echo "  wheel          - Build the emmy wheel into dist/"
+	@echo "  pypi-dist      - Dry-run the exact PyPI sdist + wheel build into dist/"
 	@echo "  vllm-emmy-image - Build the vLLM + emmy serving image (docker/vllm-emmy)"
 	@echo "  vllm-emmy-push  - Push the serving image to Docker Hub (cloudriftai/)"
 	@echo "  serve-goldens / serve-warm / serve-image / serve-verify  MODEL=<hf-id>"
@@ -24,6 +26,17 @@ help:
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
 setup: venv/.setup-complete
+
+setup-agent: venv/.setup-agent-complete
+
+venv/.setup-agent-complete: pyproject.toml
+	@if [ ! -x "venv/bin/python" ]; then \
+		echo "Creating virtual environment..."; \
+		python3.12 -m venv venv --prompt "emmy"; \
+	fi
+	@echo "Installing API-agent workflow dependencies..."
+	./venv/bin/pip install -e .
+	@touch $@
 
 # Keep the completion marker inside the venv so an interrupted dependency install
 # cannot leave `make setup` permanently succeeding with an unusable environment.
@@ -38,7 +51,7 @@ venv/.setup-complete: pyproject.toml
 	@touch $@
 
 setup-ci:
-	python3.12 -m venv venv --prompt "emmy"
+	python3.13 -m venv venv --prompt "emmy"
 	./venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
 	./venv/bin/pip install -e ".[compile,test,image]"
 
@@ -50,10 +63,12 @@ format: setup
 	./venv/bin/ruff format
 	./venv/bin/ruff check --fix
 
-# Compile CUDA kernels at -Xcicc -O1: ~3x faster suite (dodges the cicc/LLVM unroll
-# blowup on big register-tile kernels). This is the CORRECTNESS lane — -O1 changes
-# runtime perf, not numerics, and the deployable perf tests (tests/perf, -m perf) run
-# at -O3 via `make bench-kernels`. Override with EMMY_NVCC_FLAGS= to test at -O3.
+# Compile CUDA kernels at -Xcicc -O1: the CORRECTNESS lane — -O1 changes runtime perf,
+# not numerics, and the deployable perf tests (tests/perf, -m perf) run at -O3 via
+# `make bench-kernels`. Override with EMMY_NVCC_FLAGS= to test at -O3. The saving is
+# ~12% cold / ~6% warm on a 5090 (923s vs 1031s cold), not the "~3x" this comment used
+# to claim — that predated the WMMA->mma.sync migration which removed the cicc unroll
+# blowup it rested on. See AGENTS.md for the measurement.
 # --durations: the slowest tests are printed on every run (CI included), so a new long
 # pole is visible in the log the moment it lands rather than after someone profiles.
 test: setup
@@ -85,12 +100,23 @@ tune-kernels: setup
 
 # --- vLLM + emmy serving image (emmy/serving, docker/vllm-emmy) ---
 VLLM_VERSION ?= v0.23.0
+VLLM_BASE_IMAGE ?= vllm/vllm-openai:$(VLLM_VERSION)
+VLLM_EMMY_CUPY_PACKAGE ?= cupy-cuda13x
 VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
 
 wheel: setup
 	./venv/bin/pip install --quiet build
 	./venv/bin/python scripts/prepare_dist.py --recipes
 	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
+
+# The release runner starts with a bare Python. Keep its complete build contract in one
+# target so pull-request CI can exercise the exact same dependency install and staging path.
+EMMY_PYPI_PYTHON ?= python3
+pypi-dist:
+	$(EMMY_PYPI_PYTHON) -m pip install --disable-pip-version-check build PyYAML
+	$(EMMY_PYPI_PYTHON) scripts/prepare_dist.py --recipes --readme
+	rm -rf dist build
+	$(EMMY_PYPI_PYTHON) -m build
 
 # Image tags embed the short sha; an empty rev-parse (e.g. root over a synced tree without
 # git safe.directory) would silently tag "...:0.23.0-" — fail loudly instead.
@@ -100,7 +126,8 @@ git-sha-guard:
 		 echo "  likely fix: git config --global --add safe.directory $(CURDIR)"; exit 1)
 
 vllm-emmy-image: wheel git-sha-guard
-	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) \
+	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) --build-arg BASE_IMAGE=$(VLLM_BASE_IMAGE) \
+		--build-arg CUPY_PACKAGE=$(VLLM_EMMY_CUPY_PACKAGE) \
 		-t $(VLLM_EMMY_TAG) .
 
 vllm-emmy-push: vllm-emmy-image
@@ -207,6 +234,7 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
 		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \
 		--build-arg M1_TIER=$(SERVE_M1_TIER) \
+		--build-arg V2_MODEL_RUNNER=$(SERVE_V2_MODEL_RUNNER) \
 		-t $(SERVE_TAG) $(SERVE_DIR)
 
 serve-verify: serve-config-guard

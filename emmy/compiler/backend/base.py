@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from emmy import config
 from emmy.compiler.ir.base import ConstantOp, InputOp
 
 if TYPE_CHECKING:
@@ -56,7 +57,7 @@ class LaunchTime:
     ``time_ms`` is the median over ``samples`` (the canonical selection
     statistic — robust to single-iter outliers from cupy framing
     jitter). ``samples`` carries every measured per-iter latency in
-    ms so callers downstream (e.g. ``Pipeline._bench_terminal``) can
+    ms so callers downstream (e.g. ``search.policy.terminal_bench``) can
     compute min/max/mean/variance without re-running the bench."""
 
     idx: int
@@ -100,15 +101,21 @@ class Backend(ABC):
     # Subclasses override.
     name: str = "stub"
 
+    # Bench budgets. The underscored attributes hold each caller's own policy value
+    # (constructor argument on ``CudaBackend``; class default elsewhere); the public
+    # properties read the paired ``EMMY_BENCH_*`` env var live through ``emmy.config``
+    # (the env owner) with that value as the default, so one env override reaches every
+    # bench path uniformly — including the bench-worker subprocess, which inherits the
+    # env. Never cache a property read at import.
+    #
     # Wall-clock cap on the NVRTC-compile stage of a single
     # ``benchmark()`` call. Enforced at the C-call boundary after compile
     # finishes so the worker raises cleanly and no daemon thread is ever
     # left holding the CUDA context. Autotune cache pins ``bench_fail``
     # latency to (this + ``bench_run_timeout_s``). Default 30 s gives the
-    # whole-graph compile/run commands headroom for a large kernel's -O3 nvcc
-    # compile; the ``tune`` sweep overrides it down (single kernels, and it
-    # compiles at -Xcicc -O1 which is fast) — see ``commands/tune.py``.
-    bench_compile_timeout_s: float = 30.0
+    # whole-graph compile/run commands headroom for a large kernel's nvcc
+    # compile; the ``tune`` sweep overrides it (single kernels) — see ``commands/tune.py``.
+    _bench_compile_timeout_s: float = 30.0
     # Cumulative GPU-time cap on the iter loop. Enforced *after* each
     # iter completes — checked against the running sum of per-launch
     # event-measured ms. Catches the case where every iter is just
@@ -116,7 +123,7 @@ class Backend(ABC):
     # × 20 iters = 20 s of GPU time) which the watchdog by design lets
     # through. Distinct from a wall-clock cap so Python/cupy framing
     # overhead doesn't artificially shrink the budget for tiny ops.
-    bench_run_timeout_s: float = 10.0
+    _bench_run_timeout_s: float = 10.0
     # Optional hard wall-clock cap on a single ``benchmark()`` call.
     # When set, the call runs in a subprocess-isolated worker so the
     # parent can SIGKILL the GPU process if a kernel keeps the device
@@ -125,7 +132,19 @@ class Backend(ABC):
     # some hangs). Set this for autotune sweeps; leave ``None`` for
     # interactive ``emmy run`` so on-iter callbacks and the
     # parent's torch instance can be shared in-process.
-    bench_wall_timeout_s: float | None = None
+    _bench_wall_timeout_s: float | None = None
+
+    @property
+    def bench_compile_timeout_s(self) -> float:
+        return config.bench_compile_timeout_s(self._bench_compile_timeout_s)
+
+    @property
+    def bench_run_timeout_s(self) -> float:
+        return config.bench_run_timeout_s(self._bench_run_timeout_s)
+
+    @property
+    def bench_wall_timeout_s(self) -> float | None:
+        return config.bench_wall_timeout_s(self._bench_wall_timeout_s)
 
     @abstractmethod
     def compile(self, graph: Graph) -> Any:

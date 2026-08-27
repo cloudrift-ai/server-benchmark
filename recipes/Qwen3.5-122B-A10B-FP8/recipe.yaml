@@ -1,6 +1,10 @@
+tags:
+  - best-effort
+
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B-FP8"
-
+  rationale: "Niche FP8 utility for large model with low current evidence."
+  heat: 32
 engine:
   llm:
     pipeline_parallel_size: 1

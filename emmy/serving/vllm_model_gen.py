@@ -13,19 +13,20 @@ instead to serve eager — the runner's `run_device` is capture-aware either way
 
 NOT ``IsAttentionFree``: it constructs real vLLM ``Attention`` layers (one per decoder
 layer, unique ``prefix``) so vLLM allocates a KV-cache spec and runs paged attention. All
-weight-bearing **trunk** compute (embed + per-layer pre/post + final norm) lives in the
-emmy ``EmmyGenRunner``; vLLM owns only ``lm_head`` (loaded via ``load_weights``)
-and applies RoPE through a ``get_rope`` module the model builds (a bare ``Attention`` does
-none). ``forward`` brackets each vLLM attention call with two emmy replays (``pre`` /
-``post``); RoPE is applied between ``pre`` and ``self.attn`` (A2).
+weight-bearing **trunk** compute lives in the emmy ``EmmyGenRunner``. Under pipeline
+parallelism, each rank loads only its absolute decoder interval; the first rank owns the
+embedding and the last owns the final norm and ``lm_head``. vLLM owns stage transport,
+scheduling and the last-rank head. RoPE is applied between each ``pre`` replay and paged
+attention (A2), followed by the matching ``post`` replay.
 
 Numpy host I/O at the runner boundary (the per-layer host-sync interleave — Top risk #1);
 the device zero-copy path is the Phase-4 optimization.
 
-Speculative decoding (MTP drafter, e.g. gemma-4-assistant) works: vLLM's drafter reaches into
+Speculative decoding on one pipeline rank (MTP drafter, e.g. gemma-4-assistant) works: vLLM's drafter reaches into
 ``target.model.embed_tokens`` to share the target's raw embedding with the draft head, so this
 class exposes a thin ``.model`` shim over the tied embed/``lm_head`` weight the runner gathers from
-(built only when a draft is configured). See ``_SharedRawEmbedding``.
+(built only when a draft is configured). Pipeline-parallel speculative decoding is rejected.
+See ``_SharedRawEmbedding``.
 """
 
 from __future__ import annotations
@@ -36,6 +37,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from vllm.distributed import get_pp_group, get_tp_group
+from vllm.distributed.utils import get_pp_indices
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     _encode_layer_name,
@@ -47,12 +50,37 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.yarn_scaling_rope import YaRNScalingRotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.utils import PPMissingLayer, make_empty_intermediate_tensors_factory
+from vllm.sequence import IntermediateTensors
 
 from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
 from emmy.serving.gen_runner import EmmyGenRunner
 from emmy.serving.vllm_model import _trunk_dtype_str, pinned_model_id
 
 logger = logging.getLogger(__name__)
+
+
+def _pipeline_layer_range(num_layers: int, pp_group=None) -> tuple[int, int]:
+    """The absolute decoder interval owned by one vLLM pipeline rank."""
+    pp_group = get_pp_group() if pp_group is None else pp_group
+    return get_pp_indices(num_layers, pp_group.rank_in_group, pp_group.world_size)
+
+
+def _hidden_intermediate_tensors_factory(hidden_size: int, transport_dtype: torch.dtype):
+    """Allocate PP hidden buffers in the runner's residual-stream dtype.
+
+    vLLM supplies the model activation dtype to this callback. Laguna EXL3 deliberately keeps
+    norms and q/k/v in fp16 while transporting an fp32 residual stream, so the runner's explicit
+    dtype is authoritative at every pipeline boundary.
+    """
+    factory = make_empty_intermediate_tensors_factory(["hidden_states"], hidden_size)
+
+    def make_empty_intermediate_tensors(batch_size: int, dtype: torch.dtype, device: torch.device):
+        del dtype
+        return factory(batch_size, transport_dtype, device)
+
+    return make_empty_intermediate_tensors
 
 
 class _BoundedYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
@@ -141,11 +169,12 @@ def _build_rotaries(config, runner, n_layers, max_position, dtype):
     if layer_types and isinstance(rope_params, dict) and set(layer_types) <= set(rope_params):
         by_type: dict = {}
         for i in range(n_layers):
-            lt = layer_types[i]
+            global_i = runner.global_layer_id(i)
+            lt = layer_types[global_i]
             if lt not in by_type:
                 hd = runner.layer_meta(i)[0]
                 by_type[lt] = _get_rope(hd, max_position, rope_params[lt], dtype)
-        return [by_type[layer_types[i]] for i in range(n_layers)]
+        return [by_type[layer_types[runner.global_layer_id(i)]] for i in range(n_layers)]
     return [_build_rotary(config, runner.layer_meta(0)[0], max_position, dtype)] * n_layers
 
 
@@ -203,6 +232,66 @@ def _decode_lm_head_into(head: nn.Module, src: dict) -> None:
             break
         param.data[lo:hi].copy_(torch.from_numpy(np.ascontiguousarray(block[:, : hi - lo].T)))
     logger.info("[EmmyGenModel] decoded the EXL3 lm_head (%d x %d) from the checkpoint", param.shape[0], param.shape[1])
+
+
+def _fork_attention_dest(rel):
+    """A checkpoint attention key, relative to ``layers.N.attn.`` → ``(module-relative param name,
+    shard_id)``, spelled the way the fork's own loader spells it: the published ``.scale`` sibling
+    is the fp8 block scale (``weight_scale_inv``), the attention-level compressor lives under the
+    fork's ``mla_attn`` submodule (the indexer's own compressor does not), and the two fused pairs
+    load as shards of their merged projections — ``wq_a``+``wkv`` into ``fused_wqa_wkv``, and each
+    compressor's ``wkv``+``wgate`` into its ``fused_wkv_wgate`` (matched by substring, so the
+    indexer's compressor fuses the same way, exactly as the fork's substring matching does)."""
+    if rel.endswith(".scale"):
+        rel = rel[: -len(".scale")] + ".weight_scale_inv"
+    if rel.startswith("compressor."):
+        rel = "mla_attn." + rel
+    for source, fused, shard in (
+        ("compressor.wkv.", "compressor.fused_wkv_wgate.", 0),
+        ("compressor.wgate.", "compressor.fused_wkv_wgate.", 1),
+    ):
+        if source in rel:
+            return rel.replace(source, fused), shard
+    for source, fused, shard in (("wq_a.", "fused_wqa_wkv.", 0), ("wkv.", "fused_wqa_wkv.", 1)):
+        if rel.startswith(source):
+            return fused + rel[len(source) :], shard
+    return rel, None
+
+
+def _build_fork_attention(vllm_config, runner, n_layers, prefix):
+    """One engine-owned attention sublayer per local decoder layer (DeepSeek V4).
+
+    The 1Cat fork's ``DeepseekV4Attention`` is self-contained: ``forward(positions, hidden_states,
+    llama_4_scaling) -> [num_tokens, hidden]`` runs the low-rank query path, the shared-KV projection,
+    RoPE, the FP8 paged cache insert, the HCA/CSA compressor, the lightning indexer, sparse MLA and
+    the grouped output projection, against paged caches it registers itself. Emmy therefore hands it
+    the normalized hidden states its own ``pre`` program produced and takes the sublayer's output
+    back — there is no q/k/v seam to place a vLLM ``Attention`` in.
+
+    Two engine-level objects are shared across the layers exactly as the fork's own model builds
+    them: one reserved top-k indices buffer for every indexer, and the auxiliary streams its GEMMs
+    overlap on. The prefix carries the ABSOLUTE layer index so each layer's SWA / compressor /
+    indexer cache layers register distinct names — vLLM keys its KV-cache specs on them and rejects
+    duplicates, and under pipeline parallelism the local index is not the absolute one."""
+    import torch
+    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4Attention
+
+    config = getattr(vllm_config.model_config.hf_config, "text_config", vllm_config.model_config.hf_config)
+    topk_indices_buffer = torch.empty(
+        vllm_config.scheduler_config.max_num_batched_tokens,
+        config.index_topk,
+        dtype=torch.int32,
+    )
+    aux_streams = [torch.cuda.Stream() for _ in range(3)]
+    return [
+        DeepseekV4Attention(
+            vllm_config,
+            prefix=f"{prefix}.layers.{runner.global_layer_id(i)}.attn",
+            topk_indices_buffer=topk_indices_buffer,
+            aux_stream_list=aux_streams,
+        )
+        for i in range(n_layers)
+    ]
 
 
 class _SharedRawEmbedding(nn.Module):
@@ -266,7 +355,7 @@ class _EmmyTargetInner(nn.Module):
         self.embed_tokens = embed_tokens
 
 
-class EmmyGenModel(nn.Module):
+class EmmyGenModel(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__()
         mc = vllm_config.model_config
@@ -278,6 +367,25 @@ class EmmyGenModel(nn.Module):
         # Revision-tagged: ``load_weights`` re-opens the checkpoint for an EXL3-coded head, and the
         # runner resolves it again for the trace — both must land on the rung vLLM was pinned to.
         self._model_id = pinned_model_id(mc)
+        pp = get_pp_group()
+        self._pp_rank = pp.rank_in_group
+        self._pp_size = pp.world_size
+        self.start_layer, self.end_layer = _pipeline_layer_range(config.num_hidden_layers, pp)
+        self._is_first_rank = self.start_layer == 0
+        self._is_last_rank = self.end_layer == config.num_hidden_layers
+        self._coded_head_source = _coded_lm_head_source(self._model_id) if self._is_last_rank else None
+        self._coded_head_spec = None
+        if self._coded_head_source is not None:
+            from emmy.serving.exl3_head import Exl3HeadSpec
+
+            self._coded_head_spec = Exl3HeadSpec.from_source(
+                self._coded_head_source,
+                hidden_size=config.hidden_size,
+                vocab_size=config.vocab_size,
+                tensor_parallel_size=vllm_config.parallel_config.tensor_parallel_size,
+                tied=getattr(config, "tie_word_embeddings", False),
+            )
+        self._coded_head = None
 
         # Per-layer sliding/global attention (Gemma-3/4) IS supported: each vLLM Attention below
         # gets its layer's window and each layer its own-theta RoPE. A single uniform sliding
@@ -325,12 +433,29 @@ class EmmyGenModel(nn.Module):
         prefill_bucket = emmy_config.gen_prefill_bucket()
         if prefill_bucket < 0:
             prefill_bucket = capacity or 0
+        # Routed experts are sharded across the tensor-parallel group: the runner loads only this
+        # rank's contiguous expert slice, its combine yields a PARTIAL sum over the rank's own
+        # hits, and the group all-reduce (installed below) completes it. A rank cannot hold every
+        # expert of the models this exists for — one DeepSeek V4 stage's experts alone outweigh a
+        # 32 GB card.
+        tp = get_tp_group()
+        expert_range = None
+        n_routed = getattr(config, "n_routed_experts", None) or getattr(config, "num_local_experts", None)
+        if tp.world_size > 1 and n_routed:
+            if n_routed % tp.world_size:
+                raise ValueError(f"{n_routed} routed experts do not divide across tensor_parallel_size={tp.world_size}")
+            per_rank = n_routed // tp.world_size
+            expert_range = (tp.rank_in_group * per_rank, (tp.rank_in_group + 1) * per_rank)
         self.runner = EmmyGenRunner.create(
             model_id=self._model_id,
             dtype_str=_trunk_dtype_str(mc.dtype),
             decode_bucket=decode_bucket,
             max_tokens=capacity,
             prefill_bucket=prefill_bucket,
+            layer_range=(self.start_layer, self.end_layer),
+            include_embed=self._is_first_rank,
+            include_norm=self._is_last_rank,
+            expert_range=expert_range,
         )
         if max_batched and max_batched > max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width):
             # The over-cap headroom was granted on the promise of the split; if the twin
@@ -342,6 +467,10 @@ class EmmyGenModel(nn.Module):
                 f"serve with --max-num-batched-tokens {self.runner.prefill_capacity} or lower"
             )
         n_layers = self.runner.num_layers
+        # The pipeline boundary transports whatever the SEAM carries — the flattened hyper-connection
+        # stream stack for DeepSeek V4, the plain hidden vector otherwise. Re-deriving it from the
+        # config here would silently truncate every stage transition to one stream's worth.
+        self.make_empty_intermediate_tensors = _hidden_intermediate_tensors_factory(self.runner.carrier_size, self.runner.residual_dtype)
 
         # AUTHORITATIVE MoE capture guard (the serve command's config probe is best-effort UX
         # only): single-token decode is capture-legal through the runner's FIXED-SLOT tier
@@ -355,6 +484,22 @@ class EmmyGenModel(nn.Module):
         if self.runner._moe is not None and not mc.enforce_eager:
             cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
             if cg_mode is None or getattr(cg_mode, "name", str(cg_mode)) != "NONE":
+                if self.runner.hc_mult > 1:
+                    # The hyper-connection combine always rides the routed dispatch (the placement
+                    # closes the layer AFTER the shard reduction) — no fixed-slot tier serves it,
+                    # so every decode step host-syncs and capture would crash mid-record.
+                    raise ValueError(
+                        "hyper-connection MoE decode capture is not supported (the routed combine "
+                        "host-syncs on every step); serve with --enforce-eager"
+                    )
+                if expert_range is not None:
+                    # The fixed-slot selector writes the router's GLOBAL expert ids into the slot
+                    # tables, which under sharding hold only this rank's experts — capture would
+                    # record reads past (or into the wrong rows of) the shard's tables.
+                    raise ValueError(
+                        "MoE decode capture is not supported with tensor-parallel expert shards "
+                        "(the fixed-slot selector is unsharded); serve with --enforce-eager"
+                    )
                 if not self.runner.has_moe_fixed_slot:
                     raise ValueError(
                         "MoE decode capture needs the fixed-slot expert tier, which is unavailable on this "
@@ -376,7 +521,7 @@ class EmmyGenModel(nn.Module):
         def _layer_window(i):
             # Gemma sliding layers get the config window; global layers (and homogeneous
             # full-causal models with no layer_types) get None → plain causal.
-            if layer_types is not None and layer_types[i] == "sliding_attention":
+            if layer_types is not None and layer_types[self.runner.global_layer_id(i)] == "sliding_attention":
                 return sliding_window
             return None
 
@@ -399,36 +544,63 @@ class EmmyGenModel(nn.Module):
         # KV-cache spec accordingly).
         # Dims come from the runner PER LAYER: Gemma-4's global layers use a larger head_dim than
         # its sliding ones, so a single (num_heads, head_dim) would misshape the global layers.
-        attn = []
-        for i in range(n_layers):
-            hd, nh, nkv, scaling = self.runner.layer_meta(i)
-            attn.append(
-                Attention(
-                    nh,
-                    hd,
-                    scaling,
-                    num_kv_heads=nkv,
-                    cache_config=vllm_config.cache_config,
-                    quant_config=vllm_config.quant_config,
-                    per_layer_sliding_window=_layer_window(i),
-                    prefix=f"{prefix}.layers.{i}.self_attn.attn",
-                    **({"sinks": self.sinks[i]} if self.sinks is not None else {}),
+        # A hyper-connection architecture hands the WHOLE attention sublayer to the engine (see
+        # ``hyper_connection_seam``): its projections, compressors, indexer, paged FP8 cache insert
+        # and grouped output projection are fused with caches Emmy never sees, so there is no q/k/v
+        # to hand a vLLM ``Attention`` and no external RoPE to apply.
+        self.fork_attn = None
+        if self.runner.hc_mult > 1:
+            self.fork_attn = nn.ModuleList(_build_fork_attention(vllm_config, self.runner, n_layers, prefix))
+            self.attn = nn.ModuleList()
+            self.rotary_emb = nn.ModuleList()
+        else:
+            attn = []
+            for i in range(n_layers):
+                global_i = self.runner.global_layer_id(i)
+                hd, nh, nkv, scaling = self.runner.layer_meta(i)
+                attn.append(
+                    Attention(
+                        nh,
+                        hd,
+                        scaling,
+                        num_kv_heads=nkv,
+                        cache_config=vllm_config.cache_config,
+                        quant_config=vllm_config.quant_config,
+                        per_layer_sliding_window=_layer_window(i),
+                        prefix=f"{prefix}.layers.{global_i}.self_attn.attn",
+                        **({"sinks": self.sinks[i]} if self.sinks is not None else {}),
+                    )
                 )
-            )
-        self.attn = nn.ModuleList(attn)
-        # RoPE is NOT in Attention. One module per layer (applied between pre and attn): homogeneous
-        # models share a single rotary; Gemma-3/4 keys theta AND head_dim on layer type (local/global).
-        max_pos = _rope_cache_limit(mc, config)
-        self.rotary_emb = nn.ModuleList(_build_rotaries(config, self.runner, n_layers, max_pos, mc.dtype))
+            self.attn = nn.ModuleList(attn)
+            # RoPE is NOT in Attention. One module per layer (applied between pre and attn): homogeneous
+            # models share a single rotary; Gemma-3/4 keys theta AND head_dim on layer type (local/global).
+            max_pos = _rope_cache_limit(mc, config)
+            self.rotary_emb = nn.ModuleList(_build_rotaries(config, self.runner, n_layers, max_pos, mc.dtype))
 
-        # vLLM owns ONLY lm_head; the runner owns embed + the trunk.
-        self.lm_head = ParallelLMHead(
-            config.vocab_size, config.hidden_size, quant_config=vllm_config.quant_config, prefix=f"{prefix}.lm_head"
+        # The shard's combine is a PARTIAL sum; the group reduction completes it before the
+        # placement closes the layer.
+        if tp.world_size > 1:
+            from vllm.distributed import tensor_model_parallel_all_reduce
+
+            self.runner._reduce_routed = tensor_model_parallel_all_reduce
+
+        # vLLM owns the output head on the last pipeline rank; the runner owns only its
+        # absolute decoder interval plus the first-rank embedding / last-rank final norm.
+        self.lm_head = (
+            ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.lm_head",
+            )
+            if self._is_last_rank and self._coded_head_spec is None
+            else PPMissingLayer()
         )
         # Gemma-4 softcaps final logits (``final_logit_softcapping``, e.g. 30.0); other models leave
         # it None (no-op). Passed to the LogitsProcessor exactly as stock vLLM's gemma3 does.
         self.logits_processor = LogitsProcessor(
             config.vocab_size,
+            logits_as_input=self._coded_head_spec is not None,
             scale=getattr(config, "logit_scale", 1.0),
             soft_cap=getattr(config, "final_logit_softcapping", None),
         )
@@ -450,6 +622,8 @@ class EmmyGenModel(nn.Module):
         # drafter's ``* sqrt(hidden)`` normalizer only reproduces the target's embed scale when the
         # embedding is tied to ``lm_head``, so reject an untied target early and clearly.
         if getattr(vllm_config, "speculative_config", None) is not None:
+            if self._pp_size != 1:
+                raise NotImplementedError("EmmyGenModel: speculative decoding is not supported with pipeline parallelism")
             if not getattr(config, "tie_word_embeddings", False):
                 raise NotImplementedError(
                     "EmmyGenModel: speculative decoding requires a tied-embedding target so the draft "
@@ -459,10 +633,25 @@ class EmmyGenModel(nn.Module):
             self.model = _EmmyTargetInner(_SharedRawEmbedding(self))
 
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
+        # Snapshot BEFORE this uncaptured call so a short probe can delimit the preceding
+        # workload. Captured decode replay still updates the device counters because the
+        # scatter itself lives inside the graph; only this host read is capture-excluded.
+        self.runner.maybe_log_routing_histogram()
         device = positions.device
-        # clamp guards vLLM's _dummy_run garbage-id profiling batches (out-of-vocab → IndexError).
-        ids = input_ids.clamp(0, self.config.vocab_size - 1)
-        t = int(ids.shape[0])
+        t = int(positions.shape[0])
+        # Every rank clamps the step's ids (vLLM hands them to all pipeline stages): the first rank
+        # embeds them, and any rank's hash-routed MoE layers select experts by them. The clamp
+        # guards vLLM's _dummy_run garbage-id profiling batches (out-of-vocab → IndexError).
+        ids = input_ids.clamp(0, self.config.vocab_size - 1) if input_ids is not None else None
+        if self._is_first_rank:
+            if inputs_embeds is not None:
+                hidden = inputs_embeds
+            else:
+                hidden = self.runner.embed_device(ids)
+        else:
+            if intermediate_tensors is None:
+                raise ValueError("a non-first pipeline stage requires intermediate_tensors")
+            hidden = intermediate_tensors["hidden_states"]
         # Device-resident forward for EVERY width the compiled programs cover: decode
         # (T <= bucket, the captured static twins), prefill / mixed chunked-prefill steps
         # (bucket < T <= prefill_capacity, the symbolic programs via ``run_device_sym``),
@@ -473,9 +662,15 @@ class EmmyGenModel(nn.Module):
         decode_ok = self.runner.has_device_decode and 0 < t <= self.runner.decode_bucket
         prefill_ok = 0 < t <= max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width)
         if decode_ok or prefill_ok:
-            return self._forward_device(ids, positions)
-        ids_np = ids.cpu().numpy()
-        hidden_np = self.runner.embed(ids_np)  # [T, H] numpy
+            return self._forward_device(hidden, positions, ids)
+        if self.fork_attn is not None:
+            # The host numpy fallback carries q/k/v across the seam and has no stream form; a step
+            # this wide would silently take the wrong path rather than run slowly.
+            raise ValueError(
+                f"token width {t} exceeds the compiled widths for this hyper-connection model "
+                f"(prefill capacity {self.runner.prefill_capacity}); lower --max-num-batched-tokens"
+            )
+        hidden_np = hidden.detach().cpu().numpy()
         for layer in range(self.runner.num_layers):
             residual_np = hidden_np
             q_np, k_np, v_np = self.runner.forward_layer_pre(layer, hidden_np, positions)
@@ -488,13 +683,34 @@ class EmmyGenModel(nn.Module):
             q, k = q.to(self.dtype), k.to(self.dtype)
             attn_out = self.attn[layer](q, k, v)  # vLLM paged attention (pulls attn_metadata from forward context)
             hidden_np = self.runner.forward_layer_post(layer, attn_out.detach().cpu().numpy(), residual_np)
-        hidden_np = self.runner.final_norm(hidden_np)
-        return torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)
+        if self._is_last_rank:
+            hidden_np = self.runner.final_norm(hidden_np)
+            return torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)
+        return IntermediateTensors({"hidden_states": torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)})
 
-    def _forward_device(self, ids, positions):
+    def _forward_streams(self, hidden, positions, token_ids):
+        """Device-resident forward for a hyper-connection architecture (DeepSeek V4).
+
+        ``hidden`` is the flattened residual-stream carrier. Per layer: Emmy's ``pre`` collapses the
+        streams and normalizes, the engine-owned sublayer runs the whole of attention against its own
+        paged caches, and Emmy's ``post`` mixes the result back onto the streams, runs the
+        feed-forward collapse, norm and shared expert, and closes with the routed combine (reduced
+        across the expert shards inside the runner)."""
+        for layer in range(self.runner.num_layers):
+            carrier = hidden
+            x = self.runner.forward_layer_pre_device(layer, carrier)
+            x = x[0] if isinstance(x, tuple) else x
+            attn_out = self.fork_attn[layer](positions, x.to(self.dtype), None)
+            hidden = self.runner.forward_layer_post_device(layer, attn_out, carrier, token_ids=token_ids)
+        if self._is_last_rank:
+            return self.runner.final_norm_device(hidden)
+        return IntermediateTensors({"hidden_states": hidden})
+
+    def _forward_device(self, hidden, positions, token_ids=None):
         """Device-resident decode forward (T <= decode_bucket): q/k/v and attn_out stay CUDA
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
-        hidden = self.runner.embed_device(ids)  # [T, H] CUDA
+        if self.fork_attn is not None:
+            return self._forward_streams(hidden, positions, token_ids)
         for layer in range(self.runner.num_layers):
             residual = hidden
             q, k, v = self.runner.forward_layer_pre_device(layer, hidden)
@@ -504,7 +720,9 @@ class EmmyGenModel(nn.Module):
             if attn_out is None:
                 attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
             hidden = self.runner.forward_layer_post_device(layer, attn_out, residual)
-        return self.runner.final_norm_device(hidden)
+        if self._is_last_rank:
+            return self.runner.final_norm_device(hidden)
+        return IntermediateTensors({"hidden_states": hidden})
 
     def _attn_aliased(self, layer, q, k, v):
         """vLLM paged attention writing INTO the M=1 post twin's ``attn_out`` input backing —
@@ -546,13 +764,21 @@ class EmmyGenModel(nn.Module):
         return out
 
     def compute_logits(self, hidden_states, *args):
-        logits = self.logits_processor(self.lm_head, hidden_states)
+        if not self._is_last_rank:
+            raise RuntimeError("only the last pipeline stage computes logits")
+        coded_head = getattr(self, "_coded_head", None)
+        if getattr(self, "_coded_head_spec", None) is not None and coded_head is None:
+            raise RuntimeError("EXL3 coded lm_head was not loaded")
+        processor_input = coded_head(hidden_states) if coded_head is not None else hidden_states
+        logits = self.logits_processor(self.lm_head, processor_input)
         if logits is not None and self._suppress_token_ids:
             logits[:, self._suppress_token_ids] = -float("inf")
         return logits
 
     def embed_input_ids(self, input_ids):
         # vLLM embedding hook → the runner owns embedding; on-device gather (no host hop).
+        if not self._is_first_rank:
+            raise RuntimeError("only the first pipeline stage owns the token embedding")
         return self.runner.embed_device(input_ids.clamp(0, self.config.vocab_size - 1))
 
     def load_weights(self, weights):
@@ -567,29 +793,104 @@ class EmmyGenModel(nn.Module):
         own strict check waives any parameter whose quant method defines
         ``process_weights_after_loading``, which the head's does, so nothing downstream would
         notice a head left at its construction garbage and the server would serve noise while
-        looking healthy."""
-        param = self.lm_head.weight
-        loader = getattr(param, "weight_loader", default_weight_loader)
+        looking healthy.
+
+        A hyper-connection model adds a second vLLM-owned family: every ``layers.N.attn.*`` key of
+        this rank's layer interval loads into the fork's attention sublayer (``_fork_attention_dest``
+        spells the destination and fused shard). The ownership table is enforced loudly BOTH ways —
+        an attention key that maps to no fork parameter raises, and a fork parameter the stream did
+        not fully load raises — because vLLM's strict check waives the fork's fp8-quantized
+        parameters the same way it waives the head's. The checkpoint's other families need no claim:
+        the runner already loaded the trunk, experts and embedding at construction, ``head.weight``
+        is the published spelling of ``lm_head.weight``, and the MTP head serves no twin."""
+        is_last_rank = getattr(self, "_is_last_rank", True)
+        coded_spec = getattr(self, "_coded_head_spec", None)
+        param = self.lm_head.weight if is_last_rank and coded_spec is None else None
+        loader = getattr(param, "weight_loader", default_weight_loader) if param is not None else None
         tied = getattr(self.config, "tie_word_embeddings", False)
         loaded: set[str] = set()
-        coded = _coded_lm_head_source(self._model_id)
-        if coded is not None:
+        coded = getattr(self, "_coded_head_source", None)
+        if coded is None and is_last_rank and not hasattr(self, "_coded_head_source"):
+            coded = _coded_lm_head_source(self._model_id)
+        if coded is not None and coded_spec is not None:
+            from emmy.serving.exl3_head import Exl3CodedHead
+
+            self._coded_head = Exl3CodedHead(coded_spec, coded)
+            self._coded_head_source = None
+            loaded.add("lm_head.weight")
+        elif coded is not None:
             _decode_lm_head_into(self.lm_head, coded)
             loaded.add("lm_head.weight")
-        if coded is None or self.sinks is not None:
+        fork_attn = getattr(self, "fork_attn", None)
+        fork_params = None
+        if fork_attn is not None:
+            fork_params = [dict(module.named_parameters()) for module in fork_attn]
+            fork_loaded: dict[tuple[int, str], set] = {}
+        if (is_last_rank and coded is None) or self.sinks is not None or fork_params is not None:
             for name, w in weights:
-                if name == "lm_head.weight" and coded is None:
+                if is_last_rank and name in ("lm_head.weight", "head.weight") and coded is None:
                     loader(param, w)
                     loaded.add("lm_head.weight")
-                elif tied and coded is None and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
+                elif is_last_rank and tied and coded is None and name.endswith("embed_tokens.weight") and "lm_head.weight" not in loaded:
                     loader(param, w)
                     loaded.add("lm_head.weight")
                 elif self.sinks is not None and name.endswith(".self_attn.sinks"):
-                    # gpt-oss attention sinks — the per-layer [num_heads] weight beside lm_head
-                    # (see __init__). Single GPU: the full copy (stock's tp narrow at tp=1).
+                    # gpt-oss attention sinks are stage-local beside the runner's layer interval.
                     layer = int(name.split(".layers.")[1].split(".")[0])
-                    self.sinks[layer].data.copy_(w)
-                    loaded.add(name)
+                    if self.start_layer <= layer < self.end_layer:
+                        local_layer = layer - self.start_layer
+                        self.sinks[local_layer].data.copy_(w)
+                        # vLLM's strict tracker compares the returned names with this module's
+                        # registered parameters, not with the checkpoint source spelling.
+                        loaded.add(f"sinks.{local_layer}")
+                elif fork_params is not None and name.startswith("layers."):
+                    layer_str, _, rest = name.removeprefix("layers.").partition(".")
+                    if not rest.startswith("attn."):
+                        continue  # runner-owned trunk key (attn_norm, ffn, hc_*) — loaded at construction
+                    layer = int(layer_str)
+                    if not (self.start_layer <= layer < self.end_layer):
+                        continue  # another pipeline rank's attention
+                    local = layer - self.start_layer
+                    rel, shard = _fork_attention_dest(rest.removeprefix("attn."))
+                    params = fork_params[local]
+                    if rel not in params:
+                        raise ValueError(
+                            f"EmmyGenModel: attention checkpoint key '{name}' maps to '{rel}', which is not a "
+                            "parameter of the fork's attention sublayer — the ownership table is stale"
+                        )
+                    if shard in fork_loaded.get((local, rel), set()):
+                        raise ValueError(
+                            f"EmmyGenModel: attention checkpoint key '{name}' loads 'fork_attn.{local}.{rel}' "
+                            f"(shard {shard}) a second time — two checkpoint keys map to one destination, and "
+                            "the later one would silently win"
+                        )
+                    if rel == "attn_sink":
+                        # Head-sharded copy, exactly as the fork loads it: each tensor-parallel rank
+                        # keeps its own head range of the per-head sink logits.
+                        tp = get_tp_group()
+                        n_local = self.config.num_attention_heads // tp.world_size
+                        narrow = w[tp.rank_in_group * n_local : (tp.rank_in_group + 1) * n_local]
+                        params[rel].data[: narrow.shape[0]].copy_(narrow)
+                    elif shard is not None:
+                        params[rel].weight_loader(params[rel], w, shard)
+                    else:
+                        getattr(params[rel], "weight_loader", default_weight_loader)(params[rel], w)
+                    fork_loaded.setdefault((local, rel), set()).add(shard)
+                    loaded.add(f"fork_attn.{local}.{rel}")
+        if fork_params is not None:
+            for local, params in enumerate(fork_params):
+                for rel in params:
+                    need = {0, 1} if "fused_" in rel else {None}
+                    got = fork_loaded.get((local, rel), set())
+                    if got != need:
+                        raise ValueError(
+                            f"EmmyGenModel: fork attention parameter 'fork_attn.{local}.{rel}' was not fully "
+                            f"loaded from the checkpoint (needed shards {sorted(need, key=str)}, got "
+                            f"{sorted(got, key=str)}) — this layer's attention would run on construction garbage"
+                        )
+        if not is_last_rank:
+            self.reclaim_device_memory()
+            return loaded
         if "lm_head.weight" not in loaded:
             raise ValueError(
                 "EmmyGenModel: no source for lm_head.weight in this checkpoint (no 'lm_head.weight', "

@@ -12,7 +12,17 @@ from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.kernel.ir import LDMATRIX_SWIZZLE_XOR, CpAsyncCopy, KernelOp, LdmatrixLoad, Smem, TmaDescriptor, pack_smem
+from emmy.compiler.ir.kernel.ir import (
+    CpAsyncCopy,
+    KernelOp,
+    LdmatrixLoad,
+    RegStore,
+    Smem,
+    TmaDescriptor,
+    pack_smem,
+    swizzle_fn,
+    swizzle_xor,
+)
 from emmy.compiler.ir.stmt import RenderCtx, render_body
 from emmy.compiler.ir.stmt.leaves import Assign, Write
 from emmy.compiler.tensor import Tensor
@@ -822,25 +832,22 @@ def _swizzle_prelude(kernel_op: KernelOp) -> str:
     """One ``emmy_swizzle_<mode>`` helper per swizzle mode the body uses — on ``LdmatrixLoad``
     drains (undoing the TMA hardware in-copy permutation, or reading back a software-swizzled
     slab), on ``CpAsyncCopy`` fills (the software swizzle's producer side), and on swizzled
-    slab ``Write``\\ s (the sync compute-fill's producer side). Built from
-    ``LDMATRIX_SWIZZLE_XOR`` (the single source of the shift/mask), so the call sites spell their
+    slab ``Write``\\ s / ``RegStore``\\ s (the sync compute-fill's producer side, per-thread and
+    at fragment residence). Built from
+    :func:`swizzle_xor` (the single source of the shift/mask), so the call sites spell their
     (often long) element index once instead of inlining it twice around the XOR.
     ``__forceinline__``; same SASS as the inlined form."""
     modes = sorted(
-        {
-            s.swizzle
-            for s in kernel_op.body.iter()
-            if isinstance(s, (LdmatrixLoad, CpAsyncCopy, Write)) and s.swizzle in LDMATRIX_SWIZZLE_XOR
-        }
+        {s.swizzle for s in kernel_op.body.iter() if isinstance(s, (LdmatrixLoad, CpAsyncCopy, RegStore, Write)) and swizzle_xor(s.swizzle)}
     )
     chunks = []
     for mode in modes:
-        shift, mask = LDMATRIX_SWIZZLE_XOR[mode]
+        shift, mask = swizzle_xor(mode)
         chunks.append(
             f"// {mode} slab swizzle: XOR a b16 smem element index the way the fill permuted the\n"
             f"// 16-byte chunks (TMA in-copy, or the same XOR on a cp.async fill destination);\n"
             f"// the ldmatrix drain must read them back through the identical permutation.\n"
-            f"static __device__ __forceinline__ int emmy_swizzle_{mode.lower()}(int e) {{\n"
+            f"static __device__ __forceinline__ int {swizzle_fn(mode)}(int e) {{\n"
             f"    return e ^ (((e >> {shift}) & {mask}) << 3);\n"
             f"}}\n\n"
         )
@@ -949,6 +956,16 @@ def render_kernelop(
 
     def _dtype_for(name: str) -> object:
         return tmap[name].dtype if name in tmap else F32
+
+    # Graph buffer names become kernel parameter names verbatim (binding is positional; the C
+    # spelling is the graph id). A non-identifier id — a checkpoint path used as a node id —
+    # would otherwise surface as nvcc syntax gibberish several stages later.
+    for n in (*kernel_op.inputs, *kernel_op.outputs):
+        if not n.isidentifier():
+            raise ValueError(
+                f"kernel {kernel_op.name!r}: buffer {n!r} is not a C identifier — graph node ids that reach "
+                "kernels are parameter names; keep checkpoint paths on ConstantOp.source_path, never the id"
+            )
 
     indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
     sig_parts = [

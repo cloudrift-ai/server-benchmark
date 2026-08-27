@@ -102,6 +102,10 @@ class ModelConfig:
     """Model configuration."""
 
     huggingface: str = ""
+    # Why this model belongs in the recipe inventory at its current lifecycle level.
+    rationale: str | None = None
+    # Current discovery priority on a 0-100 scale. It does not affect serving behavior.
+    heat: int | None = None
     # Immutable Hugging Face revision used by both model prefetch and the serving engine.
     revision: str | None = None
     # What the model serves: "generate" (completion/chat, the default) or
@@ -122,9 +126,10 @@ class BenchmarkConfig:
     ``random_output_len`` tokens. Unset fields emit no flag, keeping the client's defaults
     (note: an unset temperature is the server's default sampling, not greedy).
 
-    ``repeats`` reruns the identical bench-client workload N times against the one deployed
-    server; the JSON result then reports per-field mean and stddev across the runs, so the
-    spread is run-to-run noise, not workload variation."""
+    ``num_warmups`` runs requests before measurement so request-time initialization does not
+    contaminate the first repeat. ``repeats`` reruns the identical measured workload N times
+    against the one deployed server; the JSON result then reports per-field mean and stddev
+    across the runs, so the spread is run-to-run noise, not workload variation."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -133,6 +138,7 @@ class BenchmarkConfig:
     seed: int | None = None
     temperature: float | None = None
     ignore_eos: bool = False
+    num_warmups: int = 0
     repeats: int = 1
 
 
@@ -167,14 +173,6 @@ class CommandConfig:
 
 
 @dataclass
-class AggregateConfig:
-    """Small, self-contained post-processing step run after a recipe matrix."""
-
-    run: str = ""
-    timeout: int = 300
-
-
-@dataclass
 class DeployConfig:
     """Optional deploy section — GPU info for cloud provisioning."""
 
@@ -188,12 +186,12 @@ class DeployConfig:
 class Recipe:
     """Complete recipe configuration."""
 
+    tags: tuple[str, ...] = ()
     model: ModelConfig = field(default_factory=ModelConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
     deploy: DeployConfig = field(default_factory=DeployConfig)
     command: CommandConfig | None = None
-    aggregate: AggregateConfig | None = None
 
     @property
     def kind(self) -> str:
@@ -203,9 +201,13 @@ class Recipe:
     @classmethod
     def from_dict(cls, d: dict) -> "Recipe":
         """Build a Recipe from a (post-merge, post-migrate) config dict."""
+        if "aggregate" in d:
+            raise ValueError("aggregate is not supported")
         model_dict = d.get("model", {})
         model = ModelConfig(
             huggingface=model_dict.get("huggingface", ""),
+            rationale=model_dict.get("rationale"),
+            heat=model_dict.get("heat"),
             revision=model_dict.get("revision"),
             task=model_dict.get("task", "generate"),
             smoke_test=model_dict.get("smoke_test", "chat"),
@@ -241,6 +243,7 @@ class Recipe:
             "seed",
             "temperature",
             "ignore_eos",
+            "num_warmups",
             "repeats",
         }
         unsupported_benchmark_fields = set(bench_dict) - workload_fields
@@ -255,6 +258,7 @@ class Recipe:
             seed=bench_dict.get("seed"),
             temperature=bench_dict.get("temperature"),
             ignore_eos=bench_dict.get("ignore_eos", False),
+            num_warmups=bench_dict.get("num_warmups", 0),
             repeats=bench_dict.get("repeats", 1),
         )
 
@@ -278,21 +282,13 @@ class Recipe:
                 strict=cmd_dict.get("strict", False),
             )
 
-        aggregate = None
-        agg_dict = d.get("aggregate")
-        if agg_dict is not None:
-            aggregate = AggregateConfig(
-                run=agg_dict.get("run", ""),
-                timeout=agg_dict.get("timeout", 300),
-            )
-
         return cls(
+            tags=tuple(d.get("tags", ())),
             model=model,
             engine=EngineConfig(llm=llm),
             benchmark=benchmark,
             deploy=deploy,
             command=command,
-            aggregate=aggregate,
         )
 
     @property

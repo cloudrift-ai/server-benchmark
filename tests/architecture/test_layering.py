@@ -118,7 +118,7 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
 _KERNEL_DIR = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "lowering" / "kernel"
 
 # The enumeration / split move-composer layer: where the *forks* live — offer
-# enumeration, knob schema, the algebra classifiers, the edge-placement cut. A
+# enumeration, knob schema, and the algebra classifiers. A
 # kernel pass importing any of these is reaching above assemble to (re-)make a
 # scheduling decision instead of reading a stamped fact off the ``TileOp``.
 _FORBIDDEN_IMPORTS = (
@@ -126,15 +126,15 @@ _FORBIDDEN_IMPORTS = (
     "lowering.tile.split",
 )
 
-# Schedule-decision functions (offer enumeration / algebra classifiers / the
-# edge-placement cut). A kernel pass must not *call* one — not even a re-rolled
+# Schedule-decision functions (offer enumeration / algebra classifiers). A
+# kernel pass must not *call* one — not even a re-rolled
 # local copy. ``classify_fragment_epilogue`` (``lowering/_predicates.py``) is the
 # one allowed ``classify*`` name: it is a mechanical fragment-epilogue lowering
 # analysis shared by both layers, not a ranked scheduling choice.
 _FORBIDDEN_CALL_RE = re.compile(
     r"\b("
     r"\w*_offers"  # thread_offers / map_reg_offers / warp_bk_offers / coop_reduce_offers / …
-    r"|cut_offers|stage_candidates|legal_decomps|eligible_atoms"
+    r"|stage_candidates|legal_decomps|eligible_atoms"
     r"|classify_algebra|classify_matmul_operands"
     r")\b"
 )
@@ -179,7 +179,7 @@ def test_lowering_kernel_calls_no_schedule_classifier() -> None:
     and it also catches a re-rolled *local* copy of a classifier (no import to
     flag). A kernel pass may read a stamped ``TileOp`` attribute (``StageBundle.
     policy``, ``SerialTile.kind``, ``WarpSpecialize.ring_depth``, …) but must not
-    invoke the offer enumeration / algebra classification / edge-placement cut
+    invoke the offer enumeration or algebra classification
     that produced those facts — those are mechanical-pass discipline violations.
     """
     offenders: list[str] = []
@@ -193,3 +193,89 @@ def test_lowering_kernel_calls_no_schedule_classifier() -> None:
         "lowering/kernel/*.py must not call a schedule classifier / offer fn — "
         "read the stamped TileOp attribute instead of re-deriving the decision.\n" + "\n".join(offenders)
     )
+
+
+def test_search_data_does_not_import_the_prior() -> None:
+    """``search/data/*.py`` may not import from ``search.prior``.
+
+    The data layer describes candidates and their labels — a :class:`Group` is a packed pool plus what
+    is known about its rows, and that is the same object whether a trainer, a fold harness or an
+    evaluation report is asking. Deciding what a SCORE means is the layer above, and it has two model
+    classes that disagree: the linear one narrows the routing stamp out of its coordinates, the tree
+    splits on it. A dataset that imported either would be answering for both — which is exactly the
+    train/serve skew ``Group`` shipped with while it stripped the routing column on the linear model's
+    behalf, leaving the tree a column of NaN.
+
+    If this fires, the fact you reached for is either feature SPELLING (``search/features.py``, imported
+    by both layers) or a model DECISION that belongs to its caller — pass it in.
+    """
+    data_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "search" / "data"
+    assert data_dir.is_dir(), f"search/data/ not found at {data_dir}"
+    # Both spellings, because the repo uses both: the dotted path (``from ….search.prior.linear_model import X``)
+    # and the package-import idiom (``from ….search import prior``) that ``commands/fit.py`` already writes for
+    # ``features``. A guard that caught only the first would wave through the form a future violation is most
+    # likely to be written in.
+    forbidden = re.compile(r"^\s*(?:from|import)\s+emmy\.compiler\.pipeline\.search(?:\.prior\b|\s+import\s+\(?\s*prior\b)")
+    offenders: list[str] = []
+    for py in sorted(data_dir.rglob("*.py")):
+        for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+            if forbidden.match(line):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "search/data/*.py must not import search.prior — the data layer carries columns and labels; "
+        "each model class decides for itself which columns it wants.\n" + "\n".join(offenders)
+    )
+
+
+_IDENTITY_HOME = "emmy/compiler/ir/tile/identity.py"
+
+
+def test_kernel_identity_is_not_redefined_outside_its_home() -> None:
+    """No module outside the home may DEFINE one of its readings.
+
+    Identity has several legitimate meanings — the algebra digest, the deploy join key, the
+    schedule-space key, the ``S_*`` row — and each is answered once, in a module whose docstring
+    says which. What this forbids is a second copy of one of THESE readings: a fingerprint
+    re-derived beside its caller drifts from the thing it identifies, silently, and the failure is
+    two kernels sharing a cache entry or a golden record joining the wrong shape.
+
+    ``pool_key`` shipped omitting per-axis extents for exactly that reason — it lived next to the
+    enumeration it keyed, read as a local memo detail, and nobody treated it as a contract with
+    three external consumers.
+
+    Deliberately narrow: it matches the home's own names, not every function whose name contains
+    "identity" or "sig". A guard that flagged those would be exempted rather than obeyed, and the
+    exemption list would become the real rule.
+    """
+    owned = ("deploy_identity", "pool_key", "dtype_fingerprint", "extent_fingerprint", "hint_fingerprint", "hint_extent")
+    forbidden = re.compile(r"^def\s+_?(" + "|".join(owned) + r")\s*\(")
+    offenders: list[str] = []
+    for py in sorted((_REPO_ROOT / "emmy").rglob("*.py")):
+        relative = py.relative_to(_REPO_ROOT).as_posix()
+        if relative == _IDENTITY_HOME:
+            continue
+        for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+            if forbidden.match(line):
+                offenders.append(f"{relative}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        f"these readings are defined in {_IDENTITY_HOME}; import them instead of re-deriving. A new "
+        "fact the enumeration reads belongs in a fingerprint THERE.\n" + "\n".join(offenders)
+    )
+
+
+def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
+    """Identity readers import ``ir/tile/identity``, never a lowering pass's private module.
+
+    ``search/golden.py`` and ``search/policy/greedy.py`` used to import ``deploy_identity`` and
+    ``pool_key`` from ``passes/lowering/tile/_schedule`` — inside functions, with ``noqa: PLC0415``,
+    because the module-level direction is a cycle (``_schedule`` imports ``search.space``). A
+    deferred import with a lint suppression is what a layering inversion looks like when the code
+    has not moved yet.
+    """
+    forbidden = re.compile(r"lowering\.tile\._schedule\s+import\s+.*\b(?:deploy_identity|pool_key)\b")
+    offenders: list[str] = []
+    for py in sorted((_REPO_ROOT / "emmy").rglob("*.py")):
+        for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+            if forbidden.search(line):
+                offenders.append(f"{py.relative_to(_REPO_ROOT).as_posix()}:{lineno}: {line.strip()}")
+    assert not offenders, "import kernel identity from emmy.compiler.ir.tile.identity\n" + "\n".join(offenders)

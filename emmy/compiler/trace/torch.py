@@ -20,6 +20,8 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
+    Conv1dOp,
+    EinsumOp,
     LayerNormOp,
     LinearOp,
     MatmulOp,
@@ -32,7 +34,7 @@ from emmy.compiler.ir.frontend.ir import (
     TransposeOp,
     UnsqueezeOp,
 )
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp
 
 if TYPE_CHECKING:
     import torch
@@ -255,24 +257,6 @@ def _observable_alias_read_after_write(node) -> tuple[Any, Any] | None:
     return None
 
 
-def _static_local_slice_destination(node) -> tuple[Any, tuple[int, ...], tuple[int, ...]] | None:
-    """Describe a unit-step slice destination rooted at a local tensor constructor.
-
-    Returns ``(root, offsets, extents)`` in root coordinates. This deliberately accepts
-    only the allocation + static ``aten.slice`` form whose functional update is exactly
-    representable by a two-source ``IndexMapOp``. Other aliases stay fail-closed.
-    """
-    destination = _static_affine_view_destination(node)
-    if destination is None:
-        return None
-    root, offsets, extents, view_axes = destination
-    if any(axis is None for axis in view_axes):
-        return None
-    if root.op != "call_function" or _op_name(root.target) not in ("new_zeros", "new_full"):
-        return None
-    return root, offsets, extents
-
-
 def _static_affine_view_destination(
     node,
 ) -> tuple[Any, tuple[int, ...], tuple[int, ...], tuple[int | None, ...]] | None:
@@ -356,16 +340,20 @@ def _static_fx_shape(node) -> tuple[int, ...] | None:
     return tuple(shape)
 
 
-def _reassemblable_local_slice_copy(node) -> tuple[Any, tuple[int, ...], tuple[int, ...]] | None:
-    """Return a local slice-update description when every alias can be versioned safely."""
+def _reassemblable_local_affine_copy(
+    node,
+) -> tuple[Any, tuple[int, ...], tuple[int, ...], tuple[int | None, ...]] | None:
+    """Return a local affine-view update when every alias can be versioned safely."""
     # A used ``copy_`` return is itself an alias. Supporting both it and an updated base would
     # require versioning that returned view across later writes, outside this narrow local form.
     if node.users:
         return None
-    destination = _static_local_slice_destination(node)
+    destination = _static_affine_view_destination(node)
     if destination is None:
         return None
-    root, _, _ = destination
+    root, _, _, _ = destination
+    if root.op != "call_function":
+        return None
     if not _local_alias_version_is_rebindable(node, root):
         return None
     return destination
@@ -660,6 +648,19 @@ def _resolve_inputs(fx_node: Any, node_map: dict[str, NodeRef], g: Graph | None 
             node_map[const_name] = const_id
             result.append(const_id)
     return result
+
+
+# Fill-value tensor constructors and their static fill; ``None`` reads the fill from the call.
+_FILL_CONSTRUCTORS = {
+    "new_zeros": 0.0,
+    "zeros": 0.0,
+    "zeros_like": 0.0,
+    "ones": 1.0,
+    "ones_like": 1.0,
+    "new_full": None,
+    "full": None,
+    "full_like": None,
+}
 
 
 def _handle_placeholder(
@@ -1032,6 +1033,115 @@ def _handle_max_dim_values(
     node_map[fx_node.name] = (value_id,)
 
 
+def _normalize_einsum(equation: str, ranks: list[int]) -> tuple[list[str], str]:
+    """Split an einsum equation into its operand terms and an explicit output term.
+
+    torch's implicit form (no ``->``) outputs every label appearing exactly once, in
+    alphabetical order; spelling it out here keeps the op's stored equation explicit.
+    """
+    eq = equation.replace(" ", "")
+    if "..." in eq:
+        raise NotImplementedError("aten.einsum with an ellipsis is not supported; write the batch labels explicitly")
+    if "->" in eq:
+        lhs, out_labels = eq.split("->")
+    else:
+        lhs = eq
+        counts: dict[str, int] = {}
+        for label in lhs.replace(",", ""):
+            counts[label] = counts.get(label, 0) + 1
+        out_labels = "".join(sorted(label for label, count in counts.items() if count == 1))
+    terms = lhs.split(",")
+    if len(terms) != len(ranks):
+        raise NotImplementedError(f"aten.einsum equation {equation!r} declares {len(terms)} operands for {len(ranks)} tensors")
+    for term, rank in zip(terms, ranks, strict=True):
+        if len(term) != rank:
+            raise NotImplementedError(f"aten.einsum term {term!r} does not match its rank-{rank} operand")
+        if len(set(term)) != len(term):
+            raise NotImplementedError(f"aten.einsum term {term!r} repeats a label (a diagonal), which has no contraction form")
+    return terms, out_labels
+
+
+def _handle_einsum(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
+    """Capture a two-operand einsum whose contraction is a plain permute-and-matmul."""
+    equation = fx_node.args[0]
+    if not isinstance(equation, str):
+        raise NotImplementedError("aten.einsum requires a static equation string")
+    operands = fx_node.args[1] if len(fx_node.args) > 1 else []
+    if not isinstance(operands, (list, tuple)):
+        operands = list(fx_node.args[1:])
+    input_ids = [node_map[o.name] for o in operands if hasattr(o, "name") and o.name in node_map]
+    if len(input_ids) != 2:
+        raise NotImplementedError(f"aten.einsum supports exactly two operands, got {len(input_ids)}")
+
+    ranks = [len(g.nodes[i].output.shape) for i in input_ids]
+    terms, out_labels = _normalize_einsum(equation, ranks)
+    a_labels, b_labels = terms
+    contracted = [c for c in a_labels if c in b_labels and c not in out_labels]
+    free_a = [c for c in a_labels if c not in b_labels]
+    free_b = [c for c in b_labels if c not in a_labels]
+    unknown = [c for c in out_labels if c not in a_labels and c not in b_labels]
+    if unknown:
+        raise NotImplementedError(f"aten.einsum output label {unknown[0]!r} appears in no operand")
+    if len(contracted) != 1 or len(free_a) != 1 or len(free_b) != 1:
+        raise NotImplementedError(
+            f"aten.einsum {equation!r} needs exactly one contracted and one free label per operand to lower without a "
+            f"reshape (got {len(contracted)} contracted, {len(free_a)}/{len(free_b)} free)"
+        )
+    if any(c not in out_labels for c in free_a + free_b):
+        raise NotImplementedError(f"aten.einsum {equation!r} drops a free label, which is a reduction rather than a contraction")
+
+    name = fx_node.name
+    nid = g.add_node(
+        op=EinsumOp(equation=f"{a_labels},{b_labels}->{out_labels}"),
+        inputs=input_ids,
+        output=Tensor(name, _get_shape(fx_node, sym_rename), _get_dtype(fx_node)),
+        node_id=name,
+    )
+    node_map[name] = nid
+
+
+def _conv_attr(fx_node: Any, index: int, key: str, default: int) -> int:
+    """Read a conv attribute that torch spells as either a scalar or a one-element list."""
+    raw = fx_node.args[index] if len(fx_node.args) > index else (fx_node.kwargs or {}).get(key, default)
+    if isinstance(raw, (list, tuple)):
+        if len(raw) != 1:
+            raise NotImplementedError(f"aten.conv1d expects a 1-D {key}, got {raw!r}")
+        raw = raw[0]
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise NotImplementedError(f"aten.conv1d requires a static integer {key}, got {raw!r}")
+    return raw
+
+
+def _handle_conv1d(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
+    """Capture conv1d in the two forms the decomposition can lower: dense and depthwise."""
+    args = fx_node.args
+    tensor_ids = [node_map[a.name] for a in args[:3] if hasattr(a, "name") and a.name in node_map]
+    if len(tensor_ids) < 2:
+        raise ValueError("aten.conv1d requires an input and a weight")
+    groups = _conv_attr(fx_node, 6, "groups", 1)
+    in_channels = g.nodes[tensor_ids[0]].output.shape[-2]
+    in_channels = in_channels.as_static() if hasattr(in_channels, "as_static") else in_channels
+    if groups != 1 and groups != in_channels:
+        raise NotImplementedError(
+            f"aten.conv1d supports dense (groups=1) and depthwise (groups=C_in={in_channels}) convolutions; "
+            f"grouped convolutions with groups={groups} have no decomposition yet"
+        )
+
+    name = fx_node.name
+    nid = g.add_node(
+        op=Conv1dOp(
+            stride=_conv_attr(fx_node, 3, "stride", 1),
+            padding=_conv_attr(fx_node, 4, "padding", 0),
+            dilation=_conv_attr(fx_node, 5, "dilation", 1),
+            groups=groups,
+        ),
+        inputs=tensor_ids,
+        output=Tensor(name, _get_shape(fx_node, sym_rename), _get_dtype(fx_node)),
+        node_id=name,
+    )
+    node_map[name] = nid
+
+
 def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
     """Handle call_function nodes — faithful 1:1 capture of FX ops."""
     if fx_node.target is operator.getitem:
@@ -1047,6 +1157,12 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
     if op_name == "unbind":
         _handle_unbind(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+    if op_name == "einsum":
+        _handle_einsum(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+    if op_name in ("conv1d", "convolution") and len(_get_shape(fx_node, sym_rename)) == 3:
+        _handle_conv1d(g, fx_node, node_map, sym_rename=sym_rename)
         return
     if op_name == "max" and isinstance(fx_node.meta.get("val"), (list, tuple)):
         _handle_max_dim_values(g, fx_node, node_map, sym_rename=sym_rename)
@@ -1064,6 +1180,109 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     name = fx_node.name
     shape = _get_shape(fx_node, sym_rename)
     dtype = _get_dtype(fx_node)
+
+    # ``eye`` constructs values from output coordinates; its dimensions are not tensor
+    # operands. Preserve that coordinate meaning directly and reject forms whose constructor
+    # semantics cannot be represented by the static tensor dialect.
+    if op_name == "eye":
+        import torch
+
+        overload = str(fx_node.target)
+        if overload not in ("aten.eye.default", "aten.eye.m"):
+            raise NotImplementedError(f"unsupported aten.eye overload {overload}")
+        if len(fx_node.args) not in (1, 2):
+            raise NotImplementedError(f"aten.eye requires one or two static integer dimensions, got {len(fx_node.args)}")
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in fx_node.args):
+            raise NotImplementedError("aten.eye requires static integer dimensions")
+        rows = fx_node.args[0]
+        columns = fx_node.args[1] if len(fx_node.args) == 2 else rows
+        expected_shape = (rows, columns)
+        if _static_fx_shape(fx_node) != expected_shape:
+            raise ValueError(f"aten.eye output shape mismatch: expected {expected_shape}, got {_static_fx_shape(fx_node)}")
+
+        kwargs = fx_node.kwargs or {}
+        unexpected = set(kwargs) - {"dtype", "layout", "device", "pin_memory"}
+        if unexpected:
+            raise NotImplementedError(f"aten.eye unsupported keyword arguments: {sorted(unexpected)}")
+        if kwargs.get("layout") not in (None, torch.strided):
+            raise NotImplementedError(f"aten.eye requires strided layout, got {kwargs['layout']}")
+        if kwargs.get("pin_memory") not in (None, False):
+            raise NotImplementedError("aten.eye does not support pinned-memory construction")
+        resolve_dtype(dtype)
+
+        one_name = f"{name}_one"
+        one_id = g.add_node(
+            op=ConstantOp(name=one_name, value=True if dtype == "bool" else 1.0),
+            inputs=[],
+            output=Tensor(one_name, (1,), dtype),
+            node_id=one_name,
+        )
+        zero_name = f"{name}_zero"
+        zero_id = g.add_node(
+            op=ConstantOp(name=zero_name, value=False if dtype == "bool" else 0.0),
+            inputs=[],
+            output=Tensor(zero_name, (1,), dtype),
+            node_id=zero_name,
+        )
+        node_map[name] = g.add_node(
+            op=IndexMapOp(
+                out_shape=shape,
+                sources=(
+                    IndexSource(
+                        input_idx=0,
+                        coord_map=(Literal(0, "int"),),
+                        select=BinaryExpr("==", placeholder(0), placeholder(1)),
+                    ),
+                    IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
+                ),
+            ),
+            inputs=[one_id, zero_id],
+            output=Tensor(name, shape, dtype),
+            node_id=name,
+        )
+        return
+
+    # ``aten.cumsum`` is an ordered prefix reduction, not an elementwise function. Keep the
+    # static axis on ``ScanOp`` and reject dtype-changing or otherwise unrepresented forms.
+    if op_name == "cumsum":
+        overload = str(fx_node.target)
+        if overload != "aten.cumsum.default":
+            raise NotImplementedError(f"unsupported aten.cumsum overload {overload}")
+        if len(fx_node.args) != 2:
+            raise NotImplementedError(f"aten.cumsum requires one tensor and one static integer axis, got {len(fx_node.args)} arguments")
+        axis = fx_node.args[1]
+        if not isinstance(axis, int) or isinstance(axis, bool):
+            raise NotImplementedError(f"aten.cumsum requires a static integer axis, got {axis!r}")
+        kwargs = fx_node.kwargs or {}
+        unexpected = set(kwargs) - {"dtype"}
+        if unexpected:
+            raise NotImplementedError(f"aten.cumsum unsupported keyword arguments: {sorted(unexpected)}")
+        if kwargs.get("dtype") is not None:
+            raise NotImplementedError(f"aten.cumsum dtype override is unsupported, got {kwargs['dtype']}")
+
+        source_name = getattr(fx_node.args[0], "name", None)
+        source_id = node_map.get(source_name)
+        if not isinstance(source_id, str) or source_id not in g.nodes:
+            raise ValueError("aten.cumsum requires one traced tensor input")
+        source = g.nodes[source_id].output
+        ndim = len(source.shape)
+        normalized_axis = axis if axis >= 0 else axis + ndim
+        if normalized_axis < 0 or normalized_axis >= ndim:
+            raise ValueError(f"aten.cumsum axis {axis} out of range for rank {ndim}")
+        output = Tensor(name, shape, dtype)
+        if tuple(output.shape) != tuple(source.shape) or output.dtype != source.dtype:
+            raise ValueError(
+                f"aten.cumsum without a dtype override must preserve shape and dtype, got "
+                f"{tuple(source.shape)}/{source.dtype} -> {tuple(output.shape)}/{output.dtype}"
+            )
+        node_map[name] = g.add_node(
+            op=ScanOp(op="sum", axis=axis),
+            inputs=[source_id],
+            output=output,
+            node_id=name,
+        )
+        return
+
     input_ids = _resolve_inputs(fx_node, node_map, g)
 
     if op_name is None:
@@ -1103,17 +1322,19 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     # dtype/device template; receiver values do not participate in the result. Represent the
     # constructed tensor as a scalar plus an explicit broadcast so its FX metadata shape is
     # preserved even when the receiver has an unrelated shape.
-    if op_name in ("new_zeros", "new_full"):
+    # The ``_like`` forms and the receiver-less factories (``zeros``/``ones``/``full``, exported as
+    # leaves with no tensor input at all) construct the same way.
+    if op_name in _FILL_CONSTRUCTORS:
         from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
-        if op_name == "new_full":
-            fill = fx_node.args[2] if len(fx_node.args) > 2 else (fx_node.kwargs or {}).get("fill_value")
+        fill = _FILL_CONSTRUCTORS[op_name]
+        scalar_id = None
+        if fill is None:
+            fill_position = 2 if op_name == "new_full" else 1
+            fill = fx_node.args[fill_position] if len(fx_node.args) > fill_position else (fx_node.kwargs or {}).get("fill_value")
             if not isinstance(fill, (int, float, bool)):
-                raise NotImplementedError(f"aten.new_full requires a static scalar fill value, got {fill!r}")
+                raise NotImplementedError(f"aten.{op_name} requires a static scalar fill value, got {fill!r}")
             scalar_id = input_ids[-1] if input_ids and isinstance(g.nodes[input_ids[-1]].op, ConstantOp) else None
-        else:
-            fill = 0.0
-            scalar_id = None
         if scalar_id is None:
             scalar_name = f"{name}_scalar"
             scalar_id = g.add_node(
@@ -1248,7 +1469,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         if any(extent == 0 for extent in extents):
             return
 
-        select = Literal(1, "int")
+        select = Literal(True, "bool")
         for axis, (offset, extent) in enumerate(zip(offsets, extents, strict=True)):
             coord = placeholder(axis)
             in_axis = BinaryExpr(">=", coord, Literal(offset, "int"))
@@ -1279,14 +1500,14 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         )
         return
 
-    # ``copy_(dest, src)`` returns destination-shaped source values. A static slice of a local
-    # constructor can also update its base functionally: one IndexMap source supplies the written
+    # ``copy_(dest, src)`` returns destination-shaped source values. A static slice/select of a
+    # local value can also update its base functionally: one IndexMap source supplies the written
     # region and the previous base supplies the rest. Broader alias mutation remains fail-closed.
     if op_name == "copy_":
         from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
         observable = _observable_alias_read_after_write(fx_node)
-        reassembly = _reassemblable_local_slice_copy(fx_node) if observable is not None else None
+        reassembly = _reassemblable_local_affine_copy(fx_node) if observable is not None else None
         if observable is not None and reassembly is None:
             later, source = observable
             raise NotImplementedError(
@@ -1310,7 +1531,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         node_map[name] = copied_id
 
         if reassembly is not None:
-            root, offsets, extents = reassembly
+            root, offsets, extents, view_axes = reassembly
             previous_base = node_map.get(root.name)
             if not isinstance(previous_base, str):
                 raise ValueError(f"aten.copy_ local destination root {root.name!r} did not resolve to a tensor")
@@ -1321,20 +1542,29 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
                 return
             base = g.nodes[previous_base].output
             base_shape = tuple(base.shape)
-            if len(base_shape) != len(offsets) or tuple(shape) != tuple(extents):
+            view_shape = [0] * sum(axis is not None for axis in view_axes)
+            for root_axis, view_axis in enumerate(view_axes):
+                if view_axis is not None:
+                    view_shape[view_axis] = extents[root_axis]
+            if len(base_shape) != len(offsets) or tuple(shape) != tuple(view_shape):
                 raise ValueError(
-                    f"aten.copy_ local slice shape mismatch: base={base_shape}, destination={tuple(extents)}, copy={tuple(shape)}"
+                    f"aten.copy_ local view shape mismatch: base={base_shape}, destination={tuple(view_shape)}, copy={tuple(shape)}"
                 )
 
-            select = Literal(1, "int")
-            source_coords = []
+            select = Literal(True, "bool")
             for axis, (offset, extent) in enumerate(zip(offsets, extents, strict=True)):
                 coord = placeholder(axis)
                 in_axis = BinaryExpr(">=", coord, Literal(offset, "int"))
                 in_axis = BinaryExpr("&&", in_axis, coord.lt(Literal(offset + extent, "int")))
                 select = BinaryExpr("&&", select, in_axis)
+            source_coords: list[Any] = [Literal(0, "int")] * len(view_shape)
+            for root_axis, view_axis in enumerate(view_axes):
+                if view_axis is None:
+                    continue
+                coord = placeholder(root_axis)
+                offset = offsets[root_axis]
                 source_coord = coord - Literal(offset, "int") if offset else coord
-                source_coords.append(TernaryExpr(select, source_coord, Literal(0, "int")))
+                source_coords[view_axis] = TernaryExpr(select, source_coord, Literal(0, "int"))
 
             identity = tuple(placeholder(axis) for axis in range(len(base_shape)))
             update_name = f"{name}_base"
@@ -1374,6 +1604,44 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
             node_id=name,
         )
         node_map[name] = nid
+        return
+
+    # ``triu`` / ``tril`` keep one triangular region of the last two dimensions and
+    # fill the other with zero. They are coordinate maps, not scalar elementwise
+    # functions: the diagonal selects output coordinates and is not a tensor operand.
+    if op_name in ("triu", "tril"):
+        if not input_ids:
+            raise ValueError(f"aten.{op_name} requires a resolved tensor input")
+        if len(shape) < 2:
+            raise ValueError(f"aten.{op_name} requires a tensor with at least two dimensions, got shape {shape}")
+        diagonal = fx_node.args[1] if len(fx_node.args) > 1 else (fx_node.kwargs or {}).get("diagonal", 0)
+        if not isinstance(diagonal, int) or isinstance(diagonal, bool):
+            raise NotImplementedError(f"aten.{op_name} requires a static integer diagonal, got {diagonal!r}")
+
+        row = placeholder(len(shape) - 2)
+        column = placeholder(len(shape) - 1)
+        boundary = row if diagonal == 0 else BinaryExpr("+", row, Literal(diagonal, "int"))
+        keep = BinaryExpr(">=", column, boundary) if op_name == "triu" else BinaryExpr("<=", column, boundary)
+        identity = tuple(placeholder(axis) for axis in range(len(shape)))
+        zero_name = f"{name}_zero"
+        zero_id = g.add_node(
+            op=ConstantOp(name=zero_name, value=False if dtype == "bool" else 0.0),
+            inputs=[],
+            output=Tensor(zero_name, (1,), dtype),
+            node_id=zero_name,
+        )
+        node_map[name] = g.add_node(
+            op=IndexMapOp(
+                out_shape=shape,
+                sources=(
+                    IndexSource(input_idx=0, coord_map=identity, select=keep),
+                    IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
+                ),
+            ),
+            inputs=[input_ids[0], zero_id],
+            output=Tensor(name, shape, dtype),
+            node_id=name,
+        )
         return
 
     # --- Elementwise ops ---
@@ -1427,6 +1695,26 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         "maximum",
         "minimum",
     }
+    # Some chunked recurrent paths call ``F.pad`` even when the static sequence length
+    # already fills the chunk. Preserve that unary no-op in the graph for provenance, but
+    # reject every non-empty pad here: the generic elementwise spelling has no pad-width,
+    # mode, or fill-value fields and therefore cannot represent changed coordinates.
+    if op_name == "pad":
+        raw_pad = fx_node.args[1] if len(fx_node.args) > 1 else (fx_node.kwargs or {}).get("pad")
+        if not isinstance(raw_pad, (tuple, list)) or not raw_pad or any(type(width) is not int or width != 0 for width in raw_pad):
+            raise NotImplementedError(f"aten.pad supports only explicit zero-width padding, got {raw_pad!r}")
+        if len(input_ids) != 1:
+            raise ValueError(f"zero-width aten.pad requires one tensor input, got {len(input_ids)}")
+        input_shape = tuple(g.nodes[input_ids[0]].output.shape)
+        if input_shape != tuple(shape):
+            raise ValueError(f"zero-width aten.pad changed shape from {input_shape} to {tuple(shape)}")
+        node_map[name] = g.add_node(
+            op=ElementwiseOp(op="pad"),
+            inputs=input_ids,
+            output=Tensor(name, shape, dtype),
+            node_id=name,
+        )
+        return
     # --- Clamp ---
     # ``aten.clamp(x, min, max)`` / ``clamp_min`` / ``clamp_max`` decompose to the
     # elementwise ``maximum`` (lower bound) / ``minimum`` (upper bound) chain with the
@@ -1750,7 +2038,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     # computed in reaches the graph anyway (the traced scalar constants are f32, so
     # ``f16 ** f32 -> f32`` promotes the whole chain), but dropping the closing ``type_as``
     # left the norm OUTPUT f32 too. Every consumer then became a mixed f32xf16 contraction,
-    # which is not offered the staged (``d2/tma``) transports — the gemma-4 prefill
+    # which is not offered the staged (``d2/smem-tma``) transports — the gemma-4 prefill
     # norm->qkv projections deployed at 147-174 us each on a spilling ``w1x1`` tile instead
     # of the ~31-51 us their pure-f16 goldens record.
     #

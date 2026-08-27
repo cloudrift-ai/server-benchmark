@@ -85,16 +85,27 @@ def test_serving_ab_expands_to_18_lane_points(project_root):
 
 def test_base_serving_experiment_is_the_exact_checkpoint_smoke(project_root):
     tasks = enumerate_tasks([_exp(project_root, "serving_base_rtx5090")])
-    assert len(tasks) == 1
+    assert len(tasks) == 5
 
-    recipe = tasks[0].recipe
-    assert recipe.model.huggingface == "google/gemma-4-12B"
-    assert recipe.model.smoke_test == "completion"
-    assert recipe.engine.llm.context_length == 16384
-    assert recipe.engine.llm.gpu_memory_utilization == 0.95
-    assert recipe.benchmark.random_input_len == 256
-    assert recipe.benchmark.random_output_len == 128
-    assert recipe.benchmark.max_concurrency == 1
+    points = set()
+    for task in tasks:
+        recipe = task.recipe
+        assert recipe.model.huggingface == "google/gemma-4-12B"
+        assert recipe.model.revision == "023679ed352de9bb66cc873c9009ce3482585c08"
+        assert recipe.model.smoke_test == "completion"
+        assert recipe.engine.llm.context_length == 131072
+        assert recipe.engine.llm.gpu_memory_utilization == 0.96
+        assert "EMMY_FAST_MATH=1" in recipe.engine.llm.vllm.extra_env
+        assert "VLLM_USE_V2_MODEL_RUNNER=1" in recipe.engine.llm.vllm.extra_env
+        assert recipe.engine.llm.max_concurrent_requests == 64
+        points.add(
+            (
+                recipe.benchmark.random_input_len,
+                recipe.benchmark.random_output_len,
+                recipe.benchmark.max_concurrency,
+            )
+        )
+    assert points == {(4096, 4096, 1), (4096, 4096, 4), (4096, 4096, 8), (8192, 256, 4), (256, 256, 64)}
 
 
 def test_mtp_smoke_test_expands_to_32_lane_points(project_root):

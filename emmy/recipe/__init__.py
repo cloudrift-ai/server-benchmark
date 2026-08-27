@@ -1,6 +1,6 @@
 """Recipe loading and configuration."""
 
-from emmy.recipe.bundled import bundled_names, resolve_recipe_dir
+from emmy.recipe.bundled import bundled_names, bundled_root, default_recipe_root, editable_recipe_root, resolve_recipe_dir
 from emmy.recipe.engines import banned_extra_arg_flags, build_engine_args
 from emmy.recipe.matrix import (
     build_override,
@@ -18,7 +18,6 @@ from emmy.recipe.recipe import (
     validate_extra_args,
 )
 from emmy.recipe.types import (
-    AggregateConfig,
     BenchmarkConfig,
     CommandConfig,
     DeployConfig,
@@ -31,7 +30,6 @@ from emmy.recipe.types import (
 )
 
 __all__ = [
-    "AggregateConfig",
     "BenchmarkConfig",
     "CommandConfig",
     "DeployConfig",
@@ -47,9 +45,12 @@ __all__ = [
     "build_engine_args",
     "build_override",
     "bundled_names",
+    "bundled_root",
+    "default_recipe_root",
     "deep_merge",
     "dot_to_nested",
     "expand_matrix",
+    "editable_recipe_root",
     "filter_combinations",
     "load_recipe",
     "resolve_for_hardware",

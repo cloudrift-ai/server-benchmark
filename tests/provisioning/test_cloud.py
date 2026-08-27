@@ -250,6 +250,40 @@ async def test_provision_cloudrift_no_network(mock_create, tmp_path):
     assert mock_create.call_args.kwargs["network"] is None
 
 
+@patch.dict("os.environ", {"CLOUDRIFT_API_KEY": "test-key"})
+@patch("emmy.provisioning.cloud.cr_provider.create_instance", new_callable=AsyncMock)
+async def test_provision_cloudrift_team_id(mock_create, tmp_path):
+    """team_id in providers_config is forwarded to create_instance."""
+    key_file = tmp_path / "id_ed25519"
+    key_file.write_text("private-key")
+    pub_file = tmp_path / "id_ed25519.pub"
+    pub_file.write_text("ssh-ed25519 AAAA test@host\n")
+    mock_create.return_value = VMConnectionInfo(host="1.2.3.4", username="user", ssh_port=22222)
+
+    providers_config = {"cloudrift": {"team_id": "team-robots"}}
+    conn = await _provision_cloudrift(_cr_cand(), str(key_file), providers_config, False, logging.getLogger())
+
+    assert conn is not None
+    assert mock_create.call_args.kwargs["team_id"] == "team-robots"
+
+
+@patch.dict("os.environ", {"CLOUDRIFT_API_KEY": "test-key"})
+@patch("emmy.provisioning.cloud.cr_provider.create_instance", new_callable=AsyncMock)
+async def test_provision_cloudrift_public_ip_setting(mock_create, tmp_path):
+    """with_public_ip in providers_config is forwarded to create_instance."""
+    key_file = tmp_path / "id_ed25519"
+    key_file.write_text("private-key")
+    pub_file = tmp_path / "id_ed25519.pub"
+    pub_file.write_text("ssh-ed25519 AAAA test@host\n")
+    mock_create.return_value = VMConnectionInfo(host="1.2.3.4", username="user", ssh_port=22222)
+
+    providers_config = {"cloudrift": {"with_public_ip": False}}
+    conn = await _provision_cloudrift(_cr_cand(), str(key_file), providers_config, False, logging.getLogger())
+
+    assert conn is not None
+    assert mock_create.call_args.kwargs["with_public_ip"] is False
+
+
 # ── read_public_key_files (extra authorized keys) ────────────────
 
 

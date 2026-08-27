@@ -1,0 +1,11 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: riftstack/Laguna-S-2.1-exl3
+  rationale: "Niche exl3 format with zero adoption signals."
+  heat: 10
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 1

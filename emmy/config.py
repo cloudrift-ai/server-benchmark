@@ -26,7 +26,6 @@ the parse primitives here but keeps its own descriptor logic.
 from __future__ import annotations
 
 import os
-import warnings
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -34,6 +33,7 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
+FREEZE_DIR = "EMMY_FREEZE_DIR"
 ONLINE_FILE = "EMMY_ONLINE_FILE"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 NVCC_FLAGS = "EMMY_NVCC_FLAGS"
@@ -42,12 +42,16 @@ DUMP_DIR = "EMMY_DUMP_DIR"
 KNOBS = "EMMY_KNOBS"
 TUNE_PATIENCE = "EMMY_TUNE_PATIENCE"
 TUNE_EPS = "EMMY_TUNE_EPS"
-O3_TOL = "EMMY_O3_TOL"
 OFFLINE_TILT = "EMMY_OFFLINE_TILT"
+PRIOR_BLEND = "EMMY_PRIOR_BLEND"
 BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 PACK_DIR = "EMMY_PACK_DIR"
 NO_NVCC = "EMMY_NO_NVCC"
+KERNEL_TIMEOUT_MS = "EMMY_KERNEL_TIMEOUT_MS"
+BENCH_COMPILE_TIMEOUT_S = "EMMY_BENCH_COMPILE_TIMEOUT_S"
+BENCH_RUN_TIMEOUT_S = "EMMY_BENCH_RUN_TIMEOUT_S"
+BENCH_WALL_TIMEOUT_S = "EMMY_BENCH_WALL_TIMEOUT_S"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
@@ -57,32 +61,13 @@ GEN_M1_TIER = "EMMY_GEN_M1_TIER"
 GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
+GEN_CHUNK_CAPTURE = "EMMY_GEN_CHUNK_CAPTURE"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
+GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
+RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
-
-# The 2026-07 prior rename (analytic → offline, learned → online) respelled three
-# env vars. The old spellings keep working with a one-time DeprecationWarning —
-# they live in shell profiles and remote-run scripts, unlike the Python names.
-_LEGACY_VARS = {
-    ONLINE_FILE: "EMMY_PRIOR_FILE",
-    OFFLINE_FILE: "EMMY_ANALYTIC_FILE",
-    OFFLINE_TILT: "EMMY_ANALYTIC_TILT",
-}
-
-
-def _env_aliased(name: str) -> str | None:
-    """Live ``os.environ`` read that also honors the var's pre-rename legacy
-    spelling (the new name wins when both are set; a legacy hit warns)."""
-    raw = os.environ.get(name)
-    if raw is not None:
-        return raw
-    legacy = _LEGACY_VARS.get(name)
-    raw = os.environ.get(legacy) if legacy else None
-    if raw is not None:
-        warnings.warn(f"{legacy} is deprecated — use {name}", DeprecationWarning, stacklevel=3)
-    return raw
 
 
 def knob_var(name: str) -> str:
@@ -166,6 +151,17 @@ def _str(name: str, default: str = "") -> str:
 # --- Typed getters (read os.environ live) ----------------------------------
 
 
+def rental_tags() -> list[str]:
+    """Tags attached to cloud VM rentals: ``EMMY_RENTAL_TAGS`` (comma-separated)
+    → ``["emmy"]``. The env override lets a caller label a whole rental lane —
+    e.g. an experiment run or a GitHub workflow job — without plumbing a flag
+    through every provisioning path."""
+    raw = _str(RENTAL_TAGS)
+    if not raw:
+        return ["emmy"]
+    return [tag.strip() for tag in raw.split(",") if tag.strip()]
+
+
 def tune_db_path() -> Path:
     """Autotune SQLite cache path: ``EMMY_TUNE_DB`` → ``~/.cache/emmy/autotune.db``.
 
@@ -176,28 +172,53 @@ def tune_db_path() -> Path:
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
 
 
-def online_path() -> Path:
-    """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` (legacy
-    ``EMMY_PRIOR_FILE``) → ``~/.cache/emmy/online.json``. A single JSON file (not
-    the tune DB) holding the one global prior; ``tune`` writes it, ``compile`` /
-    ``run`` read it. A pre-rename ``prior.json`` already in the cache keeps being
-    used (and written) so existing checkpoints survive the rename."""
-    override = _env_aliased(ONLINE_FILE)
+def freeze_path() -> Path:
+    """The measurement freeze the prior is evaluated against: ``EMMY_FREEZE_DIR`` → the
+    repo-checked ``search/freezes/``.
+
+    A freeze is the only measurement store that is a durable, comparable ARTIFACT. It is
+    digest-pinned (``manifest.sha256``), stamped with the featurizer / knob / encoding versions
+    its rows are spelled in, and identical row-for-row on any machine that has it — so two
+    evaluations of two models are a fair comparison, and a number in a report is one someone
+    else can reproduce. The tune DB and the online prior's reservoir are neither: both are
+    machine-local, both are rewritten as tuning continues, and the reservoir is additionally a
+    bounded random SAMPLE that churns, so one model evaluated twice on one machine need not
+    score the same. They stay reachable through ``--db`` for looking at a specific machine's
+    data; they are not what a reported number should mean.
+
+    Advisory, like :func:`tune_db_path`: callers check it exists."""
+    override = os.environ.get(FREEZE_DIR)
     if override:
         return Path(override)
-    path = _CACHE_ROOT / "online.json"
-    legacy = _CACHE_ROOT / "prior.json"
-    return legacy if legacy.exists() and not path.exists() else path
+    return Path(__file__).resolve().parent / "compiler" / "pipeline" / "search" / "freezes"
+
+
+def golden_identity_cache_path() -> Path:
+    """The derived golden-identity store — ``~/.cache/emmy/golden_identity.json``. Purely a
+    memo of ``kernel_identity`` derivations (keyed by a compiler fingerprint + per-record
+    content digests); safe to delete at any time."""
+    return _CACHE_ROOT / "golden_identity.json"
+
+
+def online_path() -> Path:
+    """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` →
+    ``~/.cache/emmy/online.json``. A single JSON file (not
+    the tune DB) holding the one global prior; ``tune`` writes it, ``compile`` /
+    ``run`` read it."""
+    override = os.environ.get(ONLINE_FILE)
+    if override:
+        return Path(override)
+    return _CACHE_ROOT / "online.json"
 
 
 @contextmanager
 def online_file_override(path: str | Path | None):
     """Temporarily point ``EMMY_ONLINE_FILE`` at ``path`` (``None`` is a no-op).
 
-    The golden drift audit uses this with a nonexistent path so a compile's
-    evidence hierarchy sees NO machine-local online prior / reservoir — the
-    golden tier plus the repo-shipped offline prior are the only inputs, making
-    MATCH/DRIFT verdicts machine-independent."""
+    The verified-tier drift audit (``search/audit.py``) uses this with a nonexistent path so a
+    compile's evidence hierarchy sees NO machine-local online prior / reservoir — the verified
+    goldens plus the repo-shipped offline prior are the only inputs, making the MATCH / DRIFT /
+    GAP verdicts machine-independent."""
     if path is None:
         yield
         return
@@ -213,15 +234,14 @@ def online_file_override(path: str | Path | None):
 
 
 def offline_path() -> Path | None:
-    """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` (legacy
-    ``EMMY_ANALYTIC_FILE``) → ``None``.
+    """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` → ``None``.
 
     ``None`` means the repo-checked default (``offline_weights.json`` next to
     ``search/prior/offline.py`` — package-relative, so it resolves there, not
     here). Swap in a candidate fit for an A/B by pointing this at another
     artifact; a version-mismatched or missing file is a hard error, never a
     silent fallback."""
-    override = _env_aliased(OFFLINE_FILE)
+    override = os.environ.get(OFFLINE_FILE)
     return Path(override) if override else None
 
 
@@ -298,21 +318,24 @@ def tune_eps(default: float = 0.0) -> float:
     return float_env(TUNE_EPS, default)
 
 
-def o3_tol(default: float = 0.15) -> float:
-    """``EMMY_O3_TOL`` — tolerance band (fraction of the best -O1 latency)
-    within which a tuned config is also re-benched at -O3 for a deployable prior
-    sample. ``0.15`` = re-bench everything within 15% of the best -O1."""
-    return float_env(O3_TOL, default)
+def prior_blend(default: str = "tilt") -> str:
+    """``EMMY_PRIOR_BLEND`` — how the online and offline priors interact:
+    ``tilt`` (default; online owns deploys, its PUCT policy tilted by the offline
+    one), ``gate`` (no interaction — whichever half is live answers), or the
+    single-half A/B arms ``online`` / ``offline``, which ignore the calibration
+    gate. See :mod:`emmy.compiler.pipeline.search.prior.blend`; an unknown name
+    raises there rather than silently defaulting, so a mislabelled A/B arm cannot
+    report the default's numbers."""
+    return os.environ.get(PRIOR_BLEND) or default
 
 
 def offline_tilt(default: float = 0.3) -> float:
-    """``EMMY_OFFLINE_TILT`` (legacy ``EMMY_ANALYTIC_TILT``) — exponent ``W`` of
-    the cold ``OfflinePrior`` multiplier in :meth:`FallbackPrior.score` (selection
-    only): the online µs are tilted by ``offline**W`` so the heuristic's ranking
-    nudges PUCT exploration toward configs it favors without overriding the online
-    scale (``W=0`` = pure online, large ``W`` = offline dominates). See the method
-    docstring."""
-    raw = _env_aliased(OFFLINE_TILT)
+    """``EMMY_OFFLINE_TILT`` — exponent ``W`` in the ``tilt`` blend's PUCT policy,
+    ``p_online · p_offline**W`` (selection only): the cold heuristic's ranking nudges
+    exploration toward configs it favors without overriding the online model's order
+    (``W=0`` = pure online, large ``W`` = offline dominates). See
+    :class:`~emmy.compiler.pipeline.search.prior.blend.TiltBlend`."""
+    raw = os.environ.get(OFFLINE_TILT)
     if not raw:
         return default
     try:
@@ -369,6 +392,26 @@ def gen_prefill_capacity(default: int = -1) -> int:
     return int_env(GEN_PREFILL_CAPACITY, default)
 
 
+def gen_chunk_capture(default: int = 1) -> int:
+    """``EMMY_GEN_CHUNK_CAPTURE`` — capture WHOLE chunk-prefill and mixed prefill+decode steps
+    as vLLM CUDA graphs (default 1 = ON). ``emmy serve --generate`` then asks for
+    ``cudagraph_mode: FULL`` instead of ``FULL_DECODE_ONLY``, extends the capture sizes with
+    token-count rungs spanning the prefill widths (the exact chunk width and the rider top
+    included), and selects the ``TRITON_ATTN`` attention backend — the one broadly-available
+    backend whose full-graph support covers mixed batches (FA2 declares uniform-batch support
+    only, and vLLM silently downgrades ``FULL`` back to ``FULL_DECODE_ONLY`` on such a
+    backend). Eager mixed steps were the measured c64 TPOT loss (~5 ms/step of host framing
+    plus ~170 MB/step of staging D2D on the 2026-08-12 5090 re-baseline) and the short-prompt
+    TTFT loss (the eager symbolic-prefill burst); with capture on, small_c1 TTFT closed from
+    1.36x to 1.09x of stock and greedy chat outputs stayed content-identical (2026-08-15 5090
+    validation). Set 0 to restore decode-only capture and vLLM's own attention-backend choice.
+    Off automatically under speculative decoding (the chunk rungs are not spec-adjusted).
+    Rungs above ``--max-model-len`` rely on the plugin's dummy-run seq-lens clamp
+    (``serving/vllm_patches.py``). See ``commands/serve.py`` and
+    `serving/ARCHITECTURE.md`."""
+    return int_env(GEN_CHUNK_CAPTURE, default)
+
+
 def gen_embed_host(default: int = 0) -> int:
     """``EMMY_GEN_EMBED_HOST`` — keep the generative runner's token-embedding table in
     **mapped host memory** instead of device memory (default 0 = device-resident).
@@ -386,6 +429,16 @@ def gen_embed_host(default: int = 0) -> int:
     checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
     nothing to share. See `serving/gen_runner.py`."""
     return int_env(GEN_EMBED_HOST, default)
+
+
+def gen_routing_histogram_interval(default: int = 0) -> int:
+    """``EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL`` — emit a cumulative routed-buffer
+    selection histogram every N uncaptured generative-model forwards (default 0 = off).
+
+    Selection counters stay on the GPU and their updates are CUDA-graph-safe, so captured
+    decode replays remain visible. Snapshotting synchronizes the counters to the host and is
+    therefore attempted only from an uncaptured forward. See `serving/ARCHITECTURE.md`."""
+    return int_env(GEN_ROUTING_HISTOGRAM_INTERVAL, default)
 
 
 def gen_m1_tier(default: int = 1) -> int:
@@ -448,6 +501,43 @@ def nvcc_disabled() -> bool:
     return _bool(NO_NVCC)
 
 
+def kernel_timeout_ms() -> float:
+    """``EMMY_KERNEL_TIMEOUT_MS`` — the per-launch hung-kernel watchdog deadline (default 2000;
+    the deadline-cliff rationale lives at the backend call site)."""
+    raw = os.environ.get(KERNEL_TIMEOUT_MS)
+    return float(raw) if raw else 2000.0
+
+
+def bench_compile_timeout_s(default: float = 30.0) -> float:
+    """``EMMY_BENCH_COMPILE_TIMEOUT_S`` — wall-clock cap on the compile stage of one
+    ``benchmark()`` call. ``default`` is the caller's own budget (constructor policy —
+    e.g. ``tune`` shrinks it for fast-fail single-kernel sweeps); the env var, when set,
+    overrides every caller uniformly. Semantics live on ``Backend.bench_compile_timeout_s``."""
+    return float_env(BENCH_COMPILE_TIMEOUT_S, default)
+
+
+def bench_run_timeout_s(default: float = 10.0) -> float:
+    """``EMMY_BENCH_RUN_TIMEOUT_S`` — accumulated-GPU-time cap on a ``benchmark()`` call's
+    iter loop. Same override contract as :func:`bench_compile_timeout_s`; raise it to bench
+    a program whose per-launch latency times the iter count exceeds the default budget.
+    Semantics live on ``Backend.bench_run_timeout_s``."""
+    return float_env(BENCH_RUN_TIMEOUT_S, default)
+
+
+def bench_wall_timeout_s(default: float | None = None) -> float | None:
+    """``EMMY_BENCH_WALL_TIMEOUT_S`` — hard SIGKILL wall-clock cap on one isolated-worker
+    ``benchmark()`` call. Same override contract as :func:`bench_compile_timeout_s`;
+    ``None`` (unset, no caller value) keeps the in-process path. Semantics live on
+    ``Backend.bench_wall_timeout_s``."""
+    raw = os.environ.get(BENCH_WALL_TIMEOUT_S)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def gpu_lock_path() -> str | None:
     """``EMMY_GPU_LOCK`` path, or ``None`` for the no-op (unset) case."""
     return os.environ.get(GPU_LOCK)
@@ -476,7 +566,8 @@ def set_nvcc_flags(cli_value: str | None, default: str) -> str:
 
     Precedence: ``cli_value`` (a ``--nvcc-flags`` override, when not ``None``) >
     a pre-set env var > ``default`` (per-command policy: ``""`` for compile/run,
-    ``"-Xcicc -O1"`` for tune). Must run before any compile/bench. Returns the
+    ``""`` everywhere today — tune measures in the same deployable regime it deploys into).
+    Must run before any compile/bench. Returns the
     effective string."""
     if cli_value is not None:
         os.environ[NVCC_FLAGS] = cli_value

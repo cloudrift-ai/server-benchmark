@@ -8,6 +8,7 @@ Tile / Cond) live in ``blocks``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
@@ -20,7 +21,6 @@ from emmy.compiler.ir.stmt.base import (
     dtype_promote,
     op_to_expr,
     render_index,
-    render_merge_program,
     select_to_ternary,
 )
 
@@ -656,12 +656,12 @@ class Init(Stmt):
     """Explicit accumulator / carried-state seed at this scope:
     ``<dtype> <name> = <identity>;`` — a scope-local declaration.
 
-    Currently UNPRODUCED — a fold's seed now rides on its ``Accum`` and is derived by
-    ``Loop.render`` from ``op.identity``, so no pass emits an explicit ``Init``. Kept as a primitive
-    (with its render / rewrite / validation handlers) for an explicit cross-scope seed
-    the cooperative / split-K reduce tier may want — e.g. a chunked-K accumulator that
-    must seed above the outer loop and NOT reset per chunk. ``identity`` is the neutral
-    element (one scalar — 0 / 1 / -inf), held directly.
+    A fold's OWN seed does not ride here — it lives on its ``Accum`` and is derived by
+    ``Loop.render`` from ``op.identity``. What produces an ``Init`` is the CLAMP-TO-IDENTITY
+    masking: a masked tail's ``Select`` needs the identity as an SSA name to select, so the
+    masked ILP copy (``lowering/kernel/_factor``) and the compute fill's K mask
+    (``lowering/kernel/_atom._k_masked``) each bind one. ``identity`` is the neutral element
+    (one scalar — 0 / 1 / -inf), held directly.
     """
 
     name: str
@@ -800,6 +800,7 @@ class Write(Stmt):
     def exprs(self) -> tuple[Expr, ...]:
         return self.index
 
+    @cached_property
     def has_side_effects(self) -> bool:
         return True
 
@@ -807,7 +808,9 @@ class Write(Stmt):
         """The flattened store index, XOR-permuted through the slab's swizzle helper when this
         Write targets a swizzled smem slab (the sync compute-fill's producer side) — inert at
         the default ``"NONE"``."""
-        return flat if self.swizzle == "NONE" else f"emmy_swizzle_{self.swizzle.lower()}({flat})"
+        from emmy.compiler.ir.kernel.ir import swizzle_fn, swizzle_xor  # noqa: PLC0415 — kernel IR imports this module
+
+        return flat if not swizzle_xor(self.swizzle) else f"{swizzle_fn(self.swizzle)}({flat})"
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.index)
@@ -973,6 +976,7 @@ class ZeroPrologue(Stmt):
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst,)
 
+    @cached_property
     def has_side_effects(self) -> bool:
         return True
 
@@ -988,66 +992,3 @@ class ZeroPrologue(Stmt):
             f"{p1}for (int _zi = threadIdx.x; _zi < {self.words}; _zi += blockDim.x) _zp_{self.dst}[_zi] = 0;",
             f"{pad}}}",
         ]
-
-
-@dataclass(frozen=True)
-class StateMerge(Stmt):
-    """The cross-partition state⊕state combine, as a **renderable** loop-IR stmt (its right
-    operand is a second fully-reduced state named :attr:`state_b` — the merge program baked in
-    at construction, so no algebra source is needed downstream). Built by the lowering layer
-    (``Reduction.state_merge``) for the REG tree / cooperative-tree / cross-CTA finalize; it
-    renders the ψ-rescale state reassignment via ``render_merge_program``. Unlike ``Accum`` it is
-    not a fold carrier — it sits in a combine region, not a streaming fold loop, so it never
-    makes its enclosing loop ``is_reduce``."""
-
-    state: tuple[str, ...]
-    merge: tuple[Stmt, ...]
-    state_b: tuple[str, ...]
-
-    def deps(self) -> tuple[str, ...]:
-        """Every external name the render references: ``state_b`` plus any other outer name a
-        merge-program stmt reads (:func:`_merge_reads` — carried state and program-internal temps
-        excluded, matching the ``Accum`` convention that read-modify-written names live in
-        ``defines()``). ``deps`` must be the COMPLETE read set — read counters / liveness / the
-        splicer's rename resolve references through it, and the render walks the merge program
-        directly (``merge`` is not a nested ``Body``), so a read absent here is invisible to them."""
-        seen = set(self.state_b)
-        extra = tuple(n for n in _merge_reads(self.merge, self.state) if n not in seen)
-        return self.state_b + extra
-
-    def defines(self) -> tuple[str, ...]:
-        return self.state
-
-    def pretty(self, indent: str = "") -> list[str]:
-        lines = [f"{indent}({', '.join(self.state)}) <- combine_states({', '.join(self.state_b)})"]
-        for a in self.merge:
-            lines += a.pretty(indent + "    ")
-        return lines
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        return render_merge_program(self.merge, self.state, ctx)
-
-
-def _stmt_reads(a: Stmt) -> tuple[str, ...]:
-    """The arg reads of one merge-program stmt. An ``Assign`` reads its ``args``; an
-    ``Accum`` reads its folded ``value`` and (when redirected) its rescaled ``base`` — its
-    carried ``name`` is the loop-carried state, not a same-program read."""
-    if isinstance(a, Accum):
-        return (a.base, a.value) if a.base is not None and a.base != a.name else (a.value,)
-    return a.args
-
-
-def _merge_reads(merge: tuple[Stmt, ...], state_names: tuple[str, ...]) -> tuple[str, ...]:
-    """The external read names of a merge program — args read but neither carried state
-    nor a temp defined within the program — in first-use order. These are the partials the
-    merge folds into the state. The program is a mix of ``Assign`` temps/rescales and ``Accum``
-    folds (a twisted fold's streaming merge); both expose their reads via :func:`_stmt_reads`
-    and their def via ``name``."""
-    state, defined, seen, reads = set(state_names), set(), set(), []
-    for a in merge:
-        for arg in _stmt_reads(a):
-            if arg not in state and arg not in defined and arg not in seen:
-                seen.add(arg)
-                reads.append(arg)
-        defined.add(a.name)
-    return tuple(reads)

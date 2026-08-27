@@ -1,5 +1,6 @@
 """Shared pytest fixtures for all test modules."""
 
+import functools
 import json
 import os
 import random
@@ -23,7 +24,88 @@ import yaml
 # without this serialization, peer-worker CUDA activity interleaves
 # with our kernels and the per-position fp32 rounding drift breaks
 # the accuracy comparison.
-os.environ.setdefault("EMMY_GPU_LOCK", "/tmp/emmy-gpu.lock")
+# Per-uid path: on a multi-user runner the first user's lock file (mode 0644, sticky /tmp)
+# is unopenable by everyone else, so a shared path fails the run with PermissionError
+# instead of serializing (CI run 32339655489). Cross-user serialization was never real.
+os.environ.setdefault("EMMY_GPU_LOCK", f"/tmp/emmy-gpu-{os.getuid()}.lock")
+
+
+# ── CUDA context poisoning containment ──────────────────────────────
+# An illegal / misaligned access leaves the CUDA context in a STICKY error
+# state: every later CUDA call in the process returns that same status until
+# the context is torn down, which no in-process caller can do. So one faulting
+# test silently takes down every later CUDA test in its xdist worker — the run
+# that motivated this reported 1 failure and 51 errors, and all 51 named
+# innocent tests, because ``--dist=loadgroup`` keeps the whole ``cuda`` group on
+# one worker. Worse, the fault does not have to fail anything: an
+# ``xfail(strict=False)`` swallows it as an expected failure and the context
+# stays poisoned regardless.
+#
+# The probe is the one the bench worker already trusts
+# (``_bench_worker._context_dirty``): a ``deviceSynchronize`` surfaces the
+# sticky status. Running it after every test buys the attribution — the process
+# stops at the test that poisoned the context, so the culprit is named instead
+# of the first innocent bystander. Under xdist the controller then restarts the
+# worker on a fresh context and reschedules the rest of its queue, so the run
+# still finishes and reports exactly one failure.
+def _cuda_context_poisoned() -> bool:
+    """Whether the live CUDA context is in a sticky-error state.
+
+    ``False`` when no CUDA context can exist: ``torch.cuda.is_available()`` is
+    the CPU-lane gate (cupy imports fine without a device, and its
+    ``deviceSynchronize`` would then raise ``cudaErrorNoDevice`` — an
+    unpoisoned box, not a poisoned one), and an unimported cupy means nothing
+    in this worker ever created a context.
+    """
+    cupy = sys.modules.get("cupy")
+    if cupy is None or not torch.cuda.is_available():
+        return False
+    try:
+        cupy.cuda.runtime.deviceSynchronize()
+    except Exception:  # noqa: BLE001 — any CUDA error here means the context is unusable
+        return True
+    return False
+
+
+#: Node id of the test that poisoned the context, set the moment it is detected and
+#: consumed by the next test's setup — see :func:`pytest_runtest_setup`.
+_POISONED_BY: str | None = None
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item):
+    global _POISONED_BY
+    if _POISONED_BY is not None or not _cuda_context_poisoned():
+        return
+    _POISONED_BY = item.nodeid
+    print(
+        f"\nCUDA CONTEXT POISONED by {item.nodeid}\n"
+        "The context is in a sticky-error state, so every later CUDA call in this process "
+        "returns the same error. This process will stop before the next test rather than "
+        "cascade the fault across the rest of its queue.\n",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def pytest_runtest_setup(item):
+    """Stop the process once the context is poisoned, before running anything else on it.
+
+    Deliberately here and not at the moment of detection: the poisoning test's own reports
+    must reach the xdist controller first, or the controller sees a worker that died mid-test,
+    re-queues that test on a fresh worker, and it poisons that one too — a crash loop rather
+    than containment. Dying in the NEXT test's setup leaves only that (innocent) test to
+    reschedule, which then passes on a clean context.
+    """
+    if _POISONED_BY is None:
+        return
+    message = f"stopping: the CUDA context was poisoned by {_POISONED_BY}; {item.nodeid} cannot run on it"
+    if hasattr(item.config, "workerinput"):
+        # An xdist worker: die so the controller respawns it with a clean context and
+        # reschedules the tests this worker had not reached.
+        print(f"\n{message}\n", file=sys.stderr, flush=True)
+        os._exit(1)
+    pytest.exit(message, returncode=1)
 
 
 @pytest.fixture(autouse=True)
@@ -111,6 +193,13 @@ _UNKNOWN_COST = 0.05
 #: several times slower than a dev box), and only a pole-sized test can actually distort
 #: the plan. Nothing near the recording threshold can drift into this range.
 _GATE_SECONDS = 5.0
+#: Markers whose tests are deselected from the default suite. They cannot distort ITS bucketing,
+#: so they are exempt from the staleness gate and from the written baseline — otherwise every
+#: `make bench-kernels` would fail demanding entries that `make test`, which skips it,
+#: can never record.
+_OFF_LANE_MARKERS = ("perf",)
+#: Node ids seen carrying an off-lane marker this session (filled during collection).
+_OFF_LANE_ITEMS: set[str] = set()
 
 
 def pytest_addoption(parser):
@@ -145,7 +234,7 @@ def pytest_sessionfinish(session):
         # will never run (the two whole-card gate entries, 340 s and 150 s, outlived the
         # split into shards). Regenerate with `make test-durations`, which runs the WHOLE
         # suite — pointing this at a subset writes a baseline covering only that subset.
-        fresh = {k: round(v, 2) for k, v in _CALL_DURATIONS.items() if v >= _MIN_RECORDED}
+        fresh = {k: round(v, 2) for k, v in _CALL_DURATIONS.items() if v >= _MIN_RECORDED and k not in _OFF_LANE_ITEMS}
         with open(_DURATIONS_FILE, "w") as fh:
             json.dump(dict(sorted(fresh.items())), fh, indent=1)
             fh.write("\n")
@@ -157,7 +246,10 @@ def pytest_sessionfinish(session):
     # holds every test's duration (an xdist worker sees just its own slice).
     if is_controller and _CALL_DURATIONS:
         baseline = _load_baseline()
-        missing = sorted(((d, n) for n, d in _CALL_DURATIONS.items() if d >= _GATE_SECONDS and n not in baseline), reverse=True)
+        missing = sorted(
+            ((d, n) for n, d in _CALL_DURATIONS.items() if d >= _GATE_SECONDS and n not in baseline and n not in _OFF_LANE_ITEMS),
+            reverse=True,
+        )
         if missing:
             session.exitstatus = 1
             print(f"\nERROR: {len(missing)} test(s) at or over {_GATE_SECONDS:g}s are missing from {_DURATIONS_FILE}:")
@@ -217,21 +309,42 @@ def _is_cuda_item(item) -> bool:
     return "[cuda" in nid or "-cuda-" in nid or nid.endswith("-cuda]")
 
 
-def _cuda_toolchain_available() -> bool:
-    """Whether tests can compile and execute Emmy CUDA programs.
+_NO_TOOLCHAIN = "CUDA not available (need cupy + GPU + nvcc)"
+
+
+@functools.cache
+def _cuda_unavailable_reason() -> str | None:
+    """Why Emmy CUDA tests cannot run here, or ``None`` when they can.
 
     A visible device and importable CuPy are not sufficient: Emmy compiles its
     kernels with the CUDA toolkit's ``nvcc`` binary.  Some CI runners expose a
-    GPU through the driver while installing only the CuPy runtime wheel.
+    GPU through the driver while installing only the CuPy runtime wheel.  The
+    other silent case is a pre-Turing card whose NVRTC is too new to target it:
+    left unnamed, one setup problem reads as dozens of unrelated
+    ``NVRTC_ERROR_INVALID_OPTION`` failures.  Cached — the answer is a property
+    of the host, and the probe touches the driver.
     """
     try:
         import cupy as cp
 
         from emmy.compiler.backend.cuda.nvcc import nvcc_path
+        from emmy.compiler.target import check_nvrtc_supports_live_device
 
-        return cp.cuda.runtime.getDeviceCount() > 0 and nvcc_path() is not None
+        if cp.cuda.runtime.getDeviceCount() == 0 or nvcc_path() is None:
+            return _NO_TOOLCHAIN
+        check_nvrtc_supports_live_device()  # raises SystemExit, carrying the remedy
+    except SystemExit as exc:
+        return str(exc)
     except Exception:  # noqa: BLE001 -- an unusable CUDA runtime means skip
-        return False
+        return _NO_TOOLCHAIN
+    return None
+
+
+def pytest_report_header() -> list[str]:
+    """Name an unusable CUDA toolchain once, at the top of the run, instead of
+    letting it reappear as every CUDA test's individual failure."""
+    reason = _cuda_unavailable_reason()
+    return reason.splitlines() if reason else []
 
 
 # xdist_group for every IN-PROCESS CUDA-touching test. The host only has
@@ -277,6 +390,7 @@ def pytest_collection_modifyitems(config, items):
     # collection (e.g. ``pytest tests/serving/``), not only runs that happen
     # to collect ``tests/perf/`` and load its conftest.
     selected = config.getoption("-m") or ""
+    _OFF_LANE_ITEMS.update(i.nodeid for i in items if any(m in i.keywords for m in _OFF_LANE_MARKERS))
     if "perf" not in selected:
         skip_perf = pytest.mark.skip(reason="perf marker not selected; run with `pytest -m perf`")
         for item in items:
@@ -291,11 +405,12 @@ def pytest_collection_modifyitems(config, items):
     # already grouped.
     cuda_items: list = []
     other_items: list = []
-    cuda_available = _cuda_toolchain_available()
-    skip_cuda = pytest.mark.skip(reason="CUDA not available (need cupy + GPU + nvcc)")
+    cuda_reason = _cuda_unavailable_reason()
+    # Only the first line on each item — the full remedy is in the report header.
+    skip_cuda = pytest.mark.skip(reason=cuda_reason.splitlines()[0] if cuda_reason else "")
     for it in items:
         if _is_cuda_item(it):
-            if not cuda_available:
+            if cuda_reason:
                 it.add_marker(skip_cuda)
             group = _CUDA_CLI_GROUP if "run_cli" in getattr(it, "fixturenames", ()) else _CUDA_GROUP
             it.add_marker(pytest.mark.xdist_group(group))
@@ -396,7 +511,6 @@ def make_bench_config(recipes_dir):
     def _make(tmp_dir):
         config = {
             "benchmark": {
-                "local_results_dir": os.path.join(str(tmp_dir), "results"),
                 "model_dir": "/hf_models",
             },
         }

@@ -311,6 +311,33 @@ def test_static_layer_trace_supplies_declared_attention_inputs(monkeypatch):
     torch.testing.assert_close(kwargs["input_ids"], torch.zeros((1, 8), dtype=torch.long))
 
 
+def test_static_layer_trace_omits_optional_none_attention_mask(monkeypatch):
+    """An optional None is call policy, not a tensor input to compile/bind."""
+    import torch.nn as nn
+
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.commands.compile import _trace_model
+
+    class OptionalMaskAttention(nn.Module):
+        def forward(self, x, position_embeddings, attention_mask=None):
+            assert attention_mask is None
+            return x
+
+    class OptionalMaskBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = OptionalMaskAttention()
+
+        def forward(self, x, position_embeddings=None, **kwargs):
+            return self.self_attn(x, position_embeddings=position_embeddings, **kwargs)
+
+    monkeypatch.setattr(transformers.AutoModelForCausalLM, "from_pretrained", lambda model_id, **kw: _fake_causal_lm(OptionalMaskBlock()))
+    graph, (_mod, _args, kwargs) = _trace_model("fake/optional-attention-mask", 0, 8)
+    assert graph.nodes
+    assert "attention_mask" not in kwargs
+
+
 def test_attention_split_rejects_ple_block():
     """The serving carve has no seam for the PLE multiply — it must reject loudly,
     not silently drop the ``per_layer_input`` term."""
@@ -501,6 +528,50 @@ def test_quantized_trace_twin_materializes_only_requested_layer(tmp_path):
     assert next(decoder.layers[0].parameters()).device.type == "meta"
     assert next(decoder.layers[2].parameters()).device.type == "meta"
     assert next(decoder.rotary_emb.buffers()).device.type == "cpu"
+
+
+def test_quantized_layer_twin_streams_only_requested_value_layer(monkeypatch, tmp_path):
+    """The runnable layer lane must not decode the other 31 decoder blocks."""
+    from types import SimpleNamespace
+
+    torch = pytest.importorskip("torch")
+    import torch.nn as nn
+
+    import emmy.compiler.trace.huggingface as huggingface
+
+    class Rotary(nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+            self.register_buffer("inv_freq", torch.ones(2))
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.decoder = nn.Module()
+            self.decoder.layers = nn.ModuleList([nn.Linear(2, 2) for _ in range(3)])
+            self.decoder.config = SimpleNamespace()
+            self.decoder.rotary_emb = Rotary(self.decoder.config)
+            self.config = self.decoder.config
+
+    model = Model()
+    seen = {}
+
+    def split(path, dtype, **kwargs):
+        seen.update(path=path, dtype=dtype, **kwargs)
+        return model, {}
+
+    monkeypatch.setattr(huggingface, "load_quantized_split", split)
+    got = huggingface.load_quantized_layer_twin(tmp_path, torch.float16, 1)
+    assert got is model
+    assert seen == {
+        "path": tmp_path,
+        "dtype": torch.float16,
+        "layer_range": (1, 2),
+        "include_embed": False,
+        "include_norm": False,
+    }
+    assert next(model.decoder.rotary_emb.buffers()).device.type == "cpu"
 
 
 def test_architecture_trace_twin_replaces_laguna_experts_before_materialization(tmp_path):
@@ -811,3 +882,36 @@ def test_pack_expert_state_shape_mismatch_raises():
     state = {"m.experts.0.down_proj.weight": torch.randn(3, 4)}  # transposed vs expected
     with pytest.raises(ValueError, match="expert packing"):
         _pack_expert_state(model, state)
+
+
+def test_expert_slot_reads_per_expert_fp8_modules_and_stacks_them():
+    """DeepSeek / Laguna store routed experts one MODULE per expert — ``experts.<e>.<proj>.weight``
+    with a block ``weight_scale_inv`` — not the transformers-v5 E-stacked 3-D tensors. They map
+    to the same E-leading program inputs: ``w_gate_up`` is ``[gate | up]`` along the output axis
+    (the de-interleaved convention the expert wrapper's ``chunk(2)`` reads), ``w_down`` as
+    stored, block scales concatenated alike, fp8 bits on the ``uint8`` carrier."""
+    import torch
+
+    from emmy.compiler.trace.huggingface import _expert_slot, _stack_expert_modules
+
+    assert _expert_slot("model.layers.12.mlp.experts.3.gate_proj.weight") == (12, "w_gate", 3)
+    assert _expert_slot("model.layers.12.mlp.experts.3.up_proj.weight_scale_inv") == (12, "w_up_scale", 3)
+    assert _expert_slot("model.layers.12.mlp.experts.0.down_proj.weight") == (12, "w_down", 0)
+    assert _expert_slot("model.layers.12.mlp.experts.0.down_proj.bias") is None
+
+    e, inter, hidden = 2, 4, 8
+    by_name = {
+        "w_gate": {i: torch.full((inter, hidden), 10 * i + 1, dtype=torch.uint8) for i in range(e)},
+        "w_up": {i: torch.full((inter, hidden), 10 * i + 2, dtype=torch.uint8) for i in range(e)},
+        "w_down": {i: torch.full((hidden, inter), 10 * i + 3, dtype=torch.uint8) for i in range(e)},
+        "w_gate_scale": {i: torch.full((1, 1), float(i + 1)) for i in range(e)},
+        "w_up_scale": {i: torch.full((1, 1), float(i + 5)) for i in range(e)},
+        "w_down_scale": {i: torch.full((1, 1), float(i + 9)) for i in range(e)},
+    }
+    out = _stack_expert_modules(12, by_name, model=None)
+    assert set(out) == {"w_gate_up", "w_down", "w_gate_up_scale", "w_down_scale"}
+    assert out["w_gate_up"].shape == (e, 2 * inter, hidden) and out["w_gate_up"].dtype == torch.uint8
+    assert out["w_gate_up"][1, 0, 0] == 11 and out["w_gate_up"][1, inter, 0] == 12, "[gate | up] halves per expert"
+    assert out["w_down"].shape == (e, hidden, inter)
+    assert out["w_gate_up_scale"].shape == (e, 2, 1) and out["w_gate_up_scale"][1].flatten().tolist() == [2.0, 6.0]
+    assert out["w_down_scale"][0].item() == 9.0

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run Experiment"
+  short_description: "Run Emmy experiments and retain evidence"
+  default_prompt: "Use $run-experiment to update one GPU platform's archive and records while preserving other platform evidence."

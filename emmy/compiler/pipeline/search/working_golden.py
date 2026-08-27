@@ -20,6 +20,7 @@ from emmy.compiler.pipeline.search.golden import (
     is_repository_golden_path,
     load_golden_file,
 )
+from emmy.compiler.pipeline.strategy import PipelineStrategy
 
 
 @dataclass
@@ -160,7 +161,6 @@ def _append_trace_inventory(
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._flash import fused_producer_ids  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
 
@@ -184,20 +184,10 @@ def _append_trace_inventory(
     input_graph = graph.copy()
     fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
 
-    # Match two-level tuning's fold-aware target set. A flash score producer is
-    # part of its consuming attention target, not a second inventory row.
-    absorbed: dict[str, str] = {}
-    for node_id in fused.topological_order():
-        node = fused.nodes[node_id]
-        if not isinstance(node.op, LoopOp):
-            continue
-        for producer_id in fused_producer_ids(fused, node):
-            absorbed[producer_id] = node_id
-
     targets: list[tuple[str, object]] = []
     for node_id in fused.topological_order():
         node = fused.nodes[node_id]
-        if not isinstance(node.op, LoopOp) or node_id in absorbed:
+        if not isinstance(node.op, LoopOp):
             continue
         targets.append((node_id, node))
 
@@ -208,22 +198,40 @@ def _append_trace_inventory(
     program_ref: int | None = None
     inventory = []
     for node_id, node in targets:
-        folded = [fused.nodes[producer_id] for producer_id, consumer in absorbed.items() if consumer == node_id]
-        target_prov = provenance.union(*(provenance.get(item) for item in (node, *folded)))
-        origins = tuple(sorted(origin for origin in target_prov if origin in input_graph.nodes))
-        inventory.append((node_id, node, folded, origins))
-    origin_counts = Counter(origins for _node_id, _node, _folded, origins in inventory if origins)
+        origins = tuple(sorted(origin for origin in provenance.get(node) if origin in input_graph.nodes))
+        inventory.append((node_id, node, origins))
+    origin_counts = Counter(origins for _node_id, _node, origins in inventory if origins)
+    used_names = {
+        realization["name"]
+        for entry in entries
+        for realization in entry.get("realizations", [])
+        if isinstance(realization, dict) and isinstance(realization.get("name"), str)
+    }
 
-    for node_id, node, folded, origins in inventory:
+    for node_id, node, origins in inventory:
         key = node.op.cache_key()
         suffix = key[:12] if key is not None else node_id
         name = f"{node.op.name or node_id}.{suffix}"
         if name_prefix:
             name = f"{name_prefix}.{name}"
+        if name in used_names:
+            # One kernel body/cache key can occur at multiple exact Loop
+            # targets whose boundary shapes or checkpoint sources differ.
+            # ``emmy run --golden`` resolves by name, so retaining the bare
+            # duplicate makes the generated file impossible to replay. Node
+            # ids are deterministic within the persisted source program and
+            # distinguish these otherwise same-bodied target sites.
+            base = f"{name}.{node_id}"
+            name = base
+            duplicate = 2
+            while name in used_names:
+                name = f"{base}.{duplicate}"
+                duplicate += 1
+        used_names.add(name)
         if origins and origin_counts[origins] == 1 and not force_loop_targets:
             target = {"origins": list(origins)}
         else:
-            loop_graph = single_node_graph(fused, node_id, absorb=frozenset(item.id for item in folded))
+            loop_graph = single_node_graph(fused, node_id)
             loop_ref = intern_loop_program(loops, loop_graph)
             if seen_loops is not None and loop_ref in seen_loops:
                 continue
@@ -338,7 +346,70 @@ def realized_tuning_knobs(graph) -> dict[str, str] | None:
     return merged
 
 
-async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidates: int | None, prior=None) -> list[dict]:
+class _ProposalLoopIdentity(PipelineStrategy):
+    """Capture the finalized Loop target and any measured structural parent."""
+
+    def __init__(self) -> None:
+        self.value: tuple[str, str, dict] | None = None
+        self.structural_parents: list[tuple[dict[str, str], str, dict]] = []
+
+    def _capture(self, graph) -> None:
+        if self.value is not None:
+            return
+        from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+        from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.identity import IdentityStrategy  # noqa: PLC0415
+        from emmy.compiler.pipeline.strategy import discovered_strategies  # noqa: PLC0415
+
+        loops = [node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
+        if len(loops) != 1:
+            return
+        identity = next(strategy for strategy in discovered_strategies() if isinstance(strategy, IdentityStrategy))
+        stamped = {key: float(value) for key, value in loops[0].knobs.items() if key.startswith(STRUCT_PREFIX)}
+        cache_key = loops[0].cache_key()
+        if stamped and cache_key is not None:
+            self.value = identity.op_sig(loops[0], graph), cache_key, stamped
+
+    def on_run_start(self, event) -> None:
+        self._capture(event.graph)
+
+    def on_pass_end(self, event) -> None:
+        self._capture(event.graph)
+
+    def on_splice(self, event) -> None:
+        """Capture the consumed parent whose cross-CTA route changes the kernel set."""
+        from emmy.compiler.pipeline import TuningSearch  # noqa: PLC0415
+
+        root = event.root_op
+        route = TuningSearch._structural_row(getattr(root, "knobs", None))
+        if route is None:
+            return
+        parent = copy.copy(root)
+        parent.knobs = {**(getattr(root, "knobs", None) or {}), **route}
+        if not any(key.startswith("S_") for key in parent.knobs):
+            return
+        key = parent.cache_key()
+        if key is None:
+            return
+        receipt = (dict(route), key, dict(parent.knobs))
+        if receipt not in self.structural_parents:
+            self.structural_parents.append(receipt)
+
+    def structural_parent(self, route: dict) -> tuple[str, dict] | None:
+        """The one consumed parent that realized ``route``, or ``None`` if ambiguous."""
+        from emmy.compiler.pipeline import TuningSearch  # noqa: PLC0415
+
+        wanted = TuningSearch._structural_row(route)
+        matches = {(key, tuple(sorted(knobs.items()))) for got, key, knobs in self.structural_parents if got == wanted}
+        if len(matches) != 1:
+            return None
+        key, knob_items = matches.pop()
+        return key, dict(knob_items)
+
+
+async def measure_proposals(
+    graph, proposals, *, backend, db, ctx, max_candidates: int | None, prior=None, run_id: str | None = None
+) -> list[dict]:
     """Measure working-file candidates exactly, in file order, before MCTS."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline, TuningSearch  # noqa: PLC0415
@@ -364,16 +435,53 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
             prior_model=prior,
             base_knobs=ctx.features(),
         )
+        loop_identity = _ProposalLoopIdentity()
         terminal = None
         with pinned_knobs(pins):
-            async for candidate in Pipeline.build(CUDA_PASSES).tune_async(graph.copy(), search=search, ctx=ctx, backend=backend, db=db):
+            pipeline = Pipeline.build(CUDA_PASSES).with_strategies(loop_identity)
+            async for candidate in pipeline.tune_async(graph.copy(), search=search, ctx=ctx, backend=backend, db=db):
                 terminal = candidate
-        if prior is not None:
-            prior.add_rows(search._collect_rows() + search.o3_rows)
-            prior.maybe_refit()
+        if loop_identity.value is not None:
+            search._base_knobs.update(loop_identity.value[2])
         raw_rows = [node.op.knobs for node in terminal.graph.nodes.values() if isinstance(node.op, CudaOp)] if terminal else []
-        measured_knobs = realized_tuning_knobs(terminal.graph) if terminal is not None else None
         pin_error = unreproducible_pin_flag(pins, raw_rows) if raw_rows else "proposal produced no CUDA kernel"
+        validated_route = pins if pin_error is None and loop_identity.value is not None else None
+        searched = search.best_realized(validated_input_route=validated_route)
+        structural = searched if searched is not None and searched[3] else None
+        structural_parent = loop_identity.structural_parent(structural[0]) if structural is not None else None
+        if structural_parent is not None:
+            search._base_knobs.update({key: value for key, value in structural_parent[1].items() if key.startswith("S_")})
+        if (
+            pin_error is None
+            and structural_parent is not None
+            and (structural[2] or 0) > 1
+            and search.last_status == "ok"
+            and search.last_stats is not None
+        ):
+            structural_key, structural_knobs = structural_parent
+            db.record_perf(
+                ctx.structural_key(),
+                structural_key,
+                backend=ctx.backend_name or "cuda",
+                status="ok",
+                stats=search.last_stats,
+                knobs={**ctx.features(), **structural_knobs},
+                captured=True,
+            )
+        if prior is not None:
+            prior.add_rows(search._collect_rows())
+            prior.maybe_refit()
+        if loop_identity.value is not None:
+            db.record_nodes(
+                search._collect_node_records(
+                    context_key=ctx.structural_key(),
+                    op_sig=loop_identity.value[0],
+                    gpu=ctx.hardware_id(),
+                    run_id=run_id or "",
+                    validated_input_route=validated_route,
+                )
+            )
+        measured_knobs = dict(structural[0]) if structural is not None else (realized_tuning_knobs(terminal.graph) if terminal else None)
         knob_error = None
         if raw_rows and measured_knobs is None:
             knob_error = f"proposal lowered to {len(raw_rows)} CUDA kernels with conflicting tuning knobs"
@@ -392,14 +500,14 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
 
 
 def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingGoldenTarget, rankings: list[dict]) -> None:
-    """Atomically persist measured proposal feedback."""
+    """Atomically persist measured proposal feedback for one target of a loaded document."""
     configs = document["configs"]
     for ((entry_index, realization_index), _pins), ranking in zip(target.proposals, rankings, strict=True):
         realization = configs[entry_index]["realizations"][realization_index]
         if golden_entry_state(realization) == GoldenEntryState.VERIFIED:
             continue
         realization["ranking"] = {**ranking, "source": "proposal"}
-    dump_golden_file(document, path, overwrite=True)
+    dump_golden_file(document, path, overwrite=True, incremental=True)
 
 
 def persist_tune_winner(
@@ -410,7 +518,7 @@ def persist_tune_winner(
     *,
     compile_flags: str,
 ) -> None:
-    """Atomically persist one unambiguous directly searched winner."""
+    """Atomically persist one unambiguous directly searched winner into a loaded document."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
     configs = document["configs"]
@@ -451,4 +559,4 @@ def persist_tune_winner(
             seed["ranking"] = {**winner_ranking, "tune_winner": True}
             configs[config_index]["realizations"].append(seed)
             target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
-    dump_golden_file(document, path, overwrite=True)
+    dump_golden_file(document, path, overwrite=True, incremental=True)

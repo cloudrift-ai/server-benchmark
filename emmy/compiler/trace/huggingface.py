@@ -1699,6 +1699,7 @@ def load_quantized_split(
         _skip_patterns,
         dequantize,
         dequantize_awq4,
+        native_mxfp4_experts,
         scale_is_reciprocal,
     )
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
@@ -1712,8 +1713,9 @@ def load_quantized_split(
 
     mxfp4_qc = _mxfp4_quant_config(model_dir)
     # DeepSeek V4 declares an fp8 TRUNK while storing its routed experts as native MXFP4: the expert
-    # storage is named by ``expert_dtype``, not by ``quant_method``.
-    native_mxfp4_experts = str(getattr(config, "expert_dtype", "") or "") == "fp4"
+    # storage is named by ``expert_dtype``, not by ``quant_method``. The twin capture reads the same
+    # predicate, so the golden records the expert program this load produces.
+    native_experts = native_mxfp4_experts(config)
     qc = _fp8_quant_config(model_dir) or mxfp4_qc or {}
     awq = _awq_quant_config(model_dir)
     patterns = _skip_patterns(qc)
@@ -1797,7 +1799,7 @@ def load_quantized_split(
                         # index 0, and the router maps global selections onto that axis at dispatch.
                         expert -= expert_range[0]
                     t = f.get_tensor(k)
-                    if native_mxfp4_experts:
+                    if native_experts:
                         # The published MXFP4 dialect: ``I8 [out, in/2]`` nibble pairs beside
                         # ``F8_E8M0 [out, in/32]`` exponents. Both are raw byte carriers, so VIEW
                         # (never cast) and give the blocks the ``(out, groups, 16)`` shape the

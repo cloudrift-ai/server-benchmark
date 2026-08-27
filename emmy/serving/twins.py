@@ -204,10 +204,12 @@ def capture_twin_graphs(
                 expert_name = f"expert{name}{suffix}"
                 if storage:
                     graphs.update(_spell_expert_twins(expert_name, graph, storage))
+                elif mxfp4 is not None:
+                    # BEFORE fp8: a checkpoint can declare an fp8 trunk beside natively MXFP4
+                    # routed experts (DeepSeek V4), and the experts are what this twin records.
+                    graphs.update(_spell_mxfp4_expert_twins(expert_name, graph, mxfp4, members, moe_expert_layout(parts[1])[0]))
                 elif fp8 is not None:
                     graphs.update(_spell_fp8_expert_twins(expert_name, graph, fp8, members))
-                elif mxfp4 is not None:
-                    graphs.update(_spell_mxfp4_expert_twins(expert_name, graph, mxfp4, members, moe_expert_layout(parts[1])[0]))
                 else:
                     graphs[expert_name] = graph
     return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes) if storage else graphs

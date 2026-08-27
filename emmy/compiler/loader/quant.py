@@ -367,14 +367,30 @@ def fp8_weight_profile(hf_config) -> tuple[str, tuple[int, int] | None, list[str
     return fmt, (None if block is None else tuple(int(b) for b in block)), _skip_patterns(qc)
 
 
+def native_mxfp4_experts(hf_config) -> bool:
+    """True when the ROUTED EXPERTS are stored as native MXFP4 under the checkpoint's own
+    declaration (``expert_dtype: fp4``), whatever the trunk's ``quant_method`` says.
+
+    DeepSeek V4 publishes an fp8 trunk beside fp4 experts, so the expert storage is named by
+    this field and by nothing in ``quantization_config``. The serving loader and the twin
+    capture both key on it, which is what keeps the recorded expert program the one serving
+    binds."""
+    return str(getattr(hf_config, "expert_dtype", "") or "") == "fp4"
+
+
 def mxfp4_weight_profile(hf_config) -> list[str] | None:
-    """MXFP4 skip patterns from a shape-only config, or ``None`` for another scheme."""
+    """MXFP4 skip patterns from a shape-only config, or ``None`` for another scheme.
+
+    Two declarations select native MXFP4: ``quant_method: mxfp4`` for a wholly-MXFP4 checkpoint
+    (gpt-oss), and :func:`native_mxfp4_experts` for one whose routed experts alone are MXFP4."""
     qc = getattr(hf_config, "quantization_config", None)
     if qc is None:
         return None
     if not isinstance(qc, dict):
         qc = {key: getattr(qc, key, None) for key in ("quant_method", *_SKIP_KEYS)}
-    return _skip_patterns(qc) if qc.get("quant_method") == "mxfp4" else None
+    if qc.get("quant_method") == "mxfp4" or native_mxfp4_experts(hf_config):
+        return _skip_patterns(qc)
+    return None
 
 
 _SKIP_KEYS = ("ignored_layers", "modules_to_not_convert", "ignore")

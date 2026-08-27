@@ -60,7 +60,13 @@
         # venv-installed wheels (numpy, torch, ...) dlopen these at run time;
         # makeLibraryPath picks each package's lib output, so plain `zlib` is
         # correct here (no `.out` footgun).
-        LD_LIBRARY_PATH = nixpkgs.lib.makeLibraryPath [
+        # ``/run/opengl-driver/lib`` FIRST: NixOS puts the NVIDIA driver's ``libcuda.so.1`` there
+        # rather than in any store path, and nothing else on this list supplies it. Without it
+        # every CUDA program reports "Found no NVIDIA driver on your system" while the driver is
+        # loaded and ``nvidia-smi`` works — torch and cupy both see zero devices. It is a host
+        # path by necessity: the driver has to match the running kernel, so it cannot come from
+        # the flake.
+        LD_LIBRARY_PATH = "/run/opengl-driver/lib:" + nixpkgs.lib.makeLibraryPath [
           pkgs.stdenv.cc.cc
           pkgs.zlib
         ];

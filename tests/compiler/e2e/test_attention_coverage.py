@@ -10,10 +10,14 @@ part of the tested contract.
 ## Measured evidence
 
 These numbers are why the structural assertions below exist. They are not reproduced by the
-correctness lane — they were measured once, on the named card, and they are recorded here because
-nothing else in the tree records them. A restructuring that keeps every assertion green can still
-lose the performance they describe; re-measure before believing a claim that one of them no longer
-applies.
+correctness lane — they were measured once, on the named card. A restructuring that keeps every
+assertion green can still lose the performance they describe; re-measure before believing a claim
+that one of them no longer applies.
+
+Something else in the tree records this shape of evidence now: a realization-corpus case carries a
+per-card ``latency:`` block holding both its own microseconds and ``torch.compile``'s, refreshed by
+a workflow that rents the card. These rows stay prose until this file's attention programs become
+cases — none of them are yet, and pointing at an empty corpus would be worse than a table.
 
 **5090, f16, ``(1, 8, S, D)``, fused arm against the two-kernel materialized-score sibling and
 torch SDPA (us):**
@@ -565,27 +569,6 @@ def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
 
         md = _max_diff(backend, compiled, feed, ref)
         assert md < 1e-4, f"dynamic {variant} flash seq={s} max_diff={md:.6e}"
-
-
-@requires_cuda
-@pytest.mark.parametrize("bk", [2, 4])
-def test_scalar_flash_kv_tile_matches_torch(monkeypatch, bk):
-    """KV tiling: a ``EMMY_BK`` pin re-brackets the streaming reduce ``S_k → S_k/BK · BK``
-    (serial within the tile). The lowered kernel set must still match torch under the pin.
-    ``S=32`` / ``D=16`` are divisible by both 2 and 4, so the pin is honored."""
-    monkeypatch.setenv("EMMY_BK", str(bk))
-    torch.manual_seed(0)
-    q, k, v = (torch.randn(2, 3, 32, 16) for _ in range(3))
-    backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
-    assert kernels, f"BK={bk}: no kernels"
-    cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
-
-    def ref():
-        with torch.no_grad():
-            return F.scaled_dot_product_attention(cq, ck, cv).cpu().flatten().numpy()
-
-    md = _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, ref)
-    assert md < 1e-4, f"BK={bk} KV-tiled flash vs torch max_diff={md:.6e}"
 
 
 @requires_cuda

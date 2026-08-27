@@ -879,8 +879,6 @@ def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr
     pure strength-reduction, and sees through a division already standing
     in the way — the shape a sub-byte-packed operand address arrives in.
 
-    Every arm proves its operands non-negative, so a successful return
-    carries that as an invariant; :func:`_split_addend` relies on it.
     """
     if isinstance(expr, Literal) and expr.dtype == "int" and isinstance(expr.value, int) and expr.value >= 0:
         return (_make_int_literal(expr.value // n), _make_int_literal(expr.value % n))
@@ -908,10 +906,13 @@ def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr
     if isinstance(expr, BinaryExpr) and expr.op == "+":
         L = _div_mod_decompose(expr.left, n, ctx)
         R = _div_mod_decompose(expr.right, n, ctx)
-        if L is None and R is None:
-            return None  # two opaque addends contribute two full remainders; their sum never proves below n
-        L = L if L is not None else _split_addend(expr.left, n, ctx)
-        R = R if R is not None else _split_addend(expr.right, n, ctx)
+        # An addend that is a clean multiple of ``n`` leaves the WHOLE remainder to its partner, so
+        # the partner needs no closed form of its own — the definition carries it (:func:`_split_addend`).
+        # Any other pairing sums two live remainders, and two live remainders never prove below ``n``.
+        if L is not None and R is None and _is_zero(L[1]):
+            R = _split_addend(expr.right, n, ctx)
+        elif R is not None and L is None and _is_zero(R[1]):
+            L = _split_addend(expr.left, n, ctx)
         if L is None or R is None:
             return None
         ql, rl = L
@@ -943,14 +944,14 @@ def _div_mod_decompose(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr
 
 def _split_addend(expr: Expr, n: int, ctx: SimplifyCtx) -> tuple[Expr, Expr] | None:
     """One addend as ``n·q + r`` through the DEFINITION ``expr = n·(expr/n) + expr%n``, for a sum
-    whose other addend decomposed in closed form.
+    whose OTHER addend is a clean multiple of ``n``.
 
-    Sound for a non-negative ``expr`` (every :func:`_div_mod_decompose` arm proves its operands
-    non-negative, so this restates the same invariant on the arm that gave up). Restating an addend
-    buys nothing on its own — the caller still has to prove the SUMMED remainder below ``n``, which
-    only holds when the partner contributed little or no remainder. That is exactly the packed-address
-    shape: the row term is a clean multiple of the divisor, so the whole remainder is the reduce
-    axis', and the row leaves the division behind."""
+    Sound for a non-negative ``expr`` — every :func:`_div_mod_decompose` arm proves its operands
+    non-negative, so this restates that invariant on the arm that gave up. Restating an addend
+    simplifies nothing by itself; what it buys is the partner. A packed operand address adds a row
+    term that IS a multiple of the divisor to a reduce term that is not, and once the reduce term
+    carries its own quotient and remainder the row cancels out of both — which is the point, since a
+    consumer asking whether the row axis survives outside a div/mod then gets ``no``."""
     rng = expr.range(ctx)
     if rng is None or rng.lo < 0:
         return None

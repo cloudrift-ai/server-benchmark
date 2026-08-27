@@ -29,10 +29,13 @@
           pkgs.gcc
           pkgs.cmake
           # The interpreter ``make setup`` builds the venv with (``python3.12 -m venv``), so the
-          # version has to match the Makefile's or `make setup` fails inside the shell. Keeping it
-          # in the closure is also what holds that store path alive: without it a garbage
-          # collection leaves ``venv/bin/python`` dangling, and the venv then looks present while
-          # every call through it fails.
+          # version has to match the Makefile's or `make setup` fails inside the shell.
+          #
+          # Keeping it in the closure holds THIS store path alive, which protects a venv built
+          # INSIDE the shell — and only that one. A venv built against some other 3.12 keeps
+          # pointing at that other store path, which a garbage collection is free to remove: the
+          # venv then still looks present while every call through it fails, because pip-installed
+          # wheels are not nix-managed and nothing else references the interpreter they symlink.
           pkgs.python312
           # ``pip install ruff`` puts a generic-linux binary in the venv, which NixOS cannot
           # exec. The nixpkgs build is what ``make lint`` finds on PATH here.

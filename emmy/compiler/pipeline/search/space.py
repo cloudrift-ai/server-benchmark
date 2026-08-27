@@ -55,6 +55,13 @@ logger = logging.getLogger(__name__)
 
 # --- Schedule codec knobs ---------------------------------------------------
 
+PLACE = Knob(
+    "PLACE",
+    KnobType.STR,
+    hints=("fuse", "cut"),
+    help="Stored Fold-edge placement (fuse into the consumer or cut to a fresh workspace kernel).",
+)
+
 # The reduce-axis partition codec. ``off=""`` = the scalar serial fold.
 REDUCE = Knob(
     "REDUCE",

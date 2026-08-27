@@ -1,4 +1,4 @@
-"""Standalone tests for ``splice_loop_ops``.
+"""Standalone tests for the Loop IR splicer.
 
 Each test builds producer/consumer ``LoopOp``s by hand and splices them
 directly, asserting on the merged body structure. This skips the usual
@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.dtype import F16, F32, DataType
+from emmy.compiler.dtype import F16, DataType
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.frontend.ir import MatmulOp
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import (
     Accum,
     Assign,
@@ -24,7 +23,6 @@ from emmy.compiler.ir.loop import (
     LoopOp,
     Write,
     splice_graph,
-    splice_loop_ops,
     splice_loops,
 )
 from emmy.compiler.tensor import Tensor
@@ -42,9 +40,52 @@ def _elementwise_fns(op: LoopOp) -> list[str]:
     return [s.op.name for s in op.body.iter() if isinstance(s, Assign)]
 
 
-# ---------------------------------------------------------------------------
+def _splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp | None:
+    """Pairwise fixture over the production N-way entry point."""
+    writes = producer.writes
+    if len(writes) != 1:
+        return None
+    return splice_loops(
+        loops={"producer": producer, "consumer": consumer},
+        splice_edges={("consumer", source): ("producer", writes[0].output)},
+    )
+
+
 # Fixtures — shared axes
 # ---------------------------------------------------------------------------
+
+
+def _reduce_producer(*, source: str, output: str, rounds_to: DataType | None = None) -> LoopOp:
+    """A bare sum reduce storing to ``output``, with its store rounding spelled when narrowing.
+
+    ``loop/lifting/090_spell_store_rounding`` is what spells it in the real pipeline; these tests
+    splice hand-built kernels, so they state it directly — the splicer's contract is to PRESERVE a
+    spelled conversion, never to re-derive one from the buffer.
+    """
+    acc, stored = f"{output}_sum", f"{output}__st"
+    tail: tuple = (Write(output=output, index=(Var("a0"),), value=acc),)
+    if rounds_to is not None:
+        tail = (
+            Assign(name=stored, op="copy", args=(acc,), dtype=rounds_to),
+            Write(output=output, index=(Var("a0"),), value=stored),
+        )
+    return LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=K,
+                        body=(
+                            Load(name=f"{output}_value", input=source, index=(Var("a0"), Var("k"))),
+                            Accum(name=acc, value=f"{output}_value", op="add"),
+                        ),
+                    ),
+                    *tail,
+                ),
+            ),
+        ),
+    )
 
 
 A0 = Axis("a0", 4)
@@ -58,8 +99,6 @@ def _splice_graph_producer(
     input_shape: tuple[int, ...],
     output_shape: tuple[int, ...],
     edge_dtype: DataType,
-    shared_origin: bool = False,
-    private_origin_output: bool = False,
 ) -> LoopOp:
     consumer = LoopOp(
         body=(
@@ -73,14 +112,6 @@ def _splice_graph_producer(
             ),
         ),
     )
-    if shared_origin:
-        origin = MatmulOp()
-        producer.source = origin
-        consumer.source = origin
-    elif private_origin_output:
-        origin = MatmulOp()
-        origin.outputs["frontend_output"] = Tensor("frontend_output", output_shape, edge_dtype)
-        producer.source = origin
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", input_shape, F16), node_id="x")
     graph.add_node(producer, ["x"], Tensor("producer", output_shape, edge_dtype), node_id="producer")
@@ -125,7 +156,7 @@ def test_pointwise_chain():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     fns = _elementwise_fns(merged)
     # exp from producer + copy alias for the Load + add from consumer.
@@ -174,7 +205,7 @@ def test_shared_intermediate_deduped():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # Only one exp in the merged body (producer chain materializes once).
     assert _elementwise_fns(merged).count("exp") == 1
@@ -228,7 +259,7 @@ def test_different_indices_emit_twice():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # Two distinct σs ({a0:a0,a1:a1}, {a0:a1,a1:a0}) → exp materializes twice.
     assert _elementwise_fns(merged).count("exp") == 2
@@ -271,7 +302,7 @@ def test_reduction_producer():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # The Accum survives in the merged body.
     assert _count_kind(merged, Accum) == 1
@@ -279,93 +310,13 @@ def test_reduction_producer():
     assert "exp" in _elementwise_fns(merged)
 
 
-@pytest.mark.parametrize(("edge_dtype", "expected_alias_dtype"), [(F16, F16), (F32, None)])
-def test_graph_splice_preserves_distinct_origin_reduction_dtype(edge_dtype: DataType, expected_alias_dtype: DataType | None):
-    """A reduction entering a distinct frontend operation crosses its tensor boundary."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=K,
-                        body=(
-                            Load(name="x", input="x", index=(Var("a0"), Var("k"))),
-                            Accum(name="sum", value="x", op="add"),
-                        ),
-                    ),
-                    Write(output="producer", index=(Var("a0"),), value="sum"),
-                ),
-            ),
-        ),
-    )
-    merged = _splice_graph_producer(producer, input_shape=(4, 16), output_shape=(4,), edge_dtype=edge_dtype)
-    aliases = [stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
-    if expected_alias_dtype is None:
-        assert aliases == []
-    else:
-        assert len(aliases) == 1
-        assert aliases[0].dtype == expected_alias_dtype
-
-
-def test_graph_splice_same_origin_reduction_is_private():
-    """Nodes decomposed from one frontend operation may reconstruct their private edge directly."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=K,
-                        body=(
-                            Load(name="x", input="x", index=(Var("a0"), Var("k"))),
-                            Accum(name="sum", value="x", op="add"),
-                        ),
-                    ),
-                    Write(output="producer", index=(Var("a0"),), value="sum"),
-                ),
-            ),
-        ),
-    )
-    merged = _splice_graph_producer(
-        producer,
-        input_shape=(4, 16),
-        output_shape=(4,),
-        edge_dtype=F16,
-        shared_origin=True,
-    )
-    aliases = [stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
-    assert aliases == []
-
-
-def test_graph_splice_private_origin_output_is_private_in_mixed_fragment():
-    """An internal decomposition output reconstructs after its consumer has mixed origins."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=K,
-                        body=(
-                            Load(name="x", input="x", index=(Var("a0"), Var("k"))),
-                            Accum(name="sum", value="x", op="add"),
-                        ),
-                    ),
-                    Write(output="producer", index=(Var("a0"),), value="sum"),
-                ),
-            ),
-        ),
-    )
-    merged = _splice_graph_producer(
-        producer,
-        input_shape=(4, 16),
-        output_shape=(4,),
-        edge_dtype=F16,
-        private_origin_output=True,
-    )
-    aliases = [stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
-    assert aliases == []
+@pytest.mark.parametrize("rounds_to", [F16, None])
+def test_graph_splice_preserves_a_spelled_store_rounding(rounds_to: DataType | None):
+    """Fusing a store away must not delete the rounding it spelled — and must invent none."""
+    producer = _reduce_producer(source="x", output="producer", rounds_to=rounds_to)
+    merged = _splice_graph_producer(producer, input_shape=(4, 16), output_shape=(4,), edge_dtype=F16)
+    typed = [c.dtype for c in merged.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    assert typed == ([rounds_to] if rounds_to is not None else [])
 
 
 def test_graph_splice_load_output_needs_no_conversion():
@@ -386,28 +337,9 @@ def test_graph_splice_load_output_needs_no_conversion():
     assert aliases == []
 
 
-@pytest.mark.parametrize(("edge_dtype", "expected_aliases"), [(F16, 2), (F32, 0)])
-def test_graph_splice_preserves_multi_reduction_output_dtypes(edge_dtype: DataType, expected_aliases: int):
-    """Sibling reductions cross their tensor boundaries before their shared projection."""
-
-    def producer(input_name: str, output_name: str) -> LoopOp:
-        return LoopOp(
-            body=(
-                Loop(
-                    axis=A0,
-                    body=(
-                        Loop(
-                            axis=K,
-                            body=(
-                                Load(name=f"{input_name}_value", input=input_name, index=(Var("a0"), Var("k"))),
-                                Accum(name=f"{output_name}_sum", value=f"{input_name}_value", op="add"),
-                            ),
-                        ),
-                        Write(output=output_name, index=(Var("a0"),), value=f"{output_name}_sum"),
-                    ),
-                ),
-            ),
-        )
+@pytest.mark.parametrize(("rounds_to", "expected_aliases"), [(F16, 2), (None, 0)])
+def test_graph_splice_preserves_multi_reduction_output_dtypes(rounds_to: DataType | None, expected_aliases: int):
+    """Sibling reductions each keep their own spelled rounding through one shared projection."""
 
     consumer = LoopOp(
         body=(
@@ -441,8 +373,8 @@ def test_graph_splice_preserves_multi_reduction_output_dtypes(edge_dtype: DataTy
     graph.add_node(InputOp(), [], Tensor("x", (4, 16), F16), node_id="x")
     graph.add_node(InputOp(), [], Tensor("y", (4, 16), F16), node_id="y")
     graph.add_node(InputOp(), [], Tensor("z", (4,), F16), node_id="z")
-    graph.add_node(producer("x", "left"), ["x"], Tensor("left", (4,), edge_dtype), node_id="left")
-    graph.add_node(producer("y", "right"), ["y"], Tensor("right", (4,), edge_dtype), node_id="right")
+    graph.add_node(_reduce_producer(source="x", output="left", rounds_to=rounds_to), ["x"], Tensor("left", (4,), F16), node_id="left")
+    graph.add_node(_reduce_producer(source="y", output="right", rounds_to=rounds_to), ["y"], Tensor("right", (4,), F16), node_id="right")
     graph.add_node(pointwise, ["z"], Tensor("aux", (4,), F16), node_id="aux")
     graph.add_node(consumer, ["left", "right", "aux"], Tensor("consumer", (4,), F16), node_id="consumer")
     graph.outputs = ["consumer"]
@@ -451,32 +383,16 @@ def test_graph_splice_preserves_multi_reduction_output_dtypes(edge_dtype: DataTy
     assert result is not None
     merged, external = result
     assert external == ["x", "y", "z"]
-    aliases = [stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
-    assert len(aliases) == expected_aliases
-    assert {alias.dtype for alias in aliases} <= {F16}
+    typed = [c.dtype for c in merged.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    assert len(typed) == expected_aliases
+    assert set(typed) <= {F16}
     pointwise_result = next(stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "exp")
     assert pointwise_result.dtype == F16
 
 
 def test_graph_splice_typed_boundary_roundtrips():
-    """Serialized Loop IR retains the conversion when source-chain metadata is absent."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=K,
-                        body=(
-                            Load(name="x", input="x", index=(Var("a0"), Var("k"))),
-                            Accum(name="sum", value="x", op="add"),
-                        ),
-                    ),
-                    Write(output="producer", index=(Var("a0"),), value="sum"),
-                ),
-            ),
-        ),
-    )
+    """A spelled rounding is body state, so it survives Loop IR serialization."""
+    producer = _reduce_producer(source="x", output="producer", rounds_to=F16)
     merged = _splice_graph_producer(producer, input_shape=(4, 16), output_shape=(4,), edge_dtype=F16)
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (4, 16), F16), node_id="x")
@@ -484,9 +400,8 @@ def test_graph_splice_typed_boundary_roundtrips():
     graph.outputs = ["consumer"]
 
     restored = Graph.from_dict(graph.to_dict()).nodes["consumer"].op
-    aliases = [stmt for stmt in restored.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
-    assert len(aliases) == 1
-    assert aliases[0].dtype == F16
+    typed = [c.dtype for c in restored.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    assert typed == [F16]
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +449,7 @@ def test_ordered_prefix_root_declines_splice():
         ),
     )
 
-    assert splice_loop_ops(producer, _prefix_scan(source="P", output="OUT"), source="P") is None
+    assert _splice_loop_ops(producer, _prefix_scan(source="P", output="OUT"), source="P") is None
 
 
 def test_ordered_prefix_producer_declines_splice():
@@ -557,7 +472,7 @@ def test_ordered_prefix_producer_declines_splice():
         ),
     )
 
-    assert splice_loop_ops(_prefix_scan(source="X", output="P"), consumer, source="P") is None
+    assert _splice_loop_ops(_prefix_scan(source="X", output="P"), consumer, source="P") is None
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +510,7 @@ def test_consumer_extra_input_source_remap():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     loads = {s.name: s for s in merged.body.iter() if isinstance(s, Load)}
     # Producer's Load survives at source 0; consumer's unrelated Load shifts to 1.
@@ -715,6 +630,195 @@ def test_chain_three_loops():
 # ---------------------------------------------------------------------------
 
 
+def test_separate_roots_share_upstream_definition():
+    """Two terminal loops seed one worklist, so their common producer emits once."""
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="x", input="X", index=(Var("a0"),)),
+                    Assign(name="p", op="exp", args=("x",)),
+                    Write(output="P", index=(Var("a0"),), value="p"),
+                ),
+            ),
+        )
+    )
+
+    def consumer(output: str, op: str) -> LoopOp:
+        return LoopOp(
+            body=(
+                Loop(
+                    axis=A0,
+                    body=(
+                        Load(name="p", input="P", index=(Var("a0"),)),
+                        Assign(name="out", op=op, args=("p",)),
+                        Write(output=output, index=(Var("a0"),), value="out"),
+                    ),
+                ),
+            )
+        )
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("X", (4,)), node_id="X")
+    graph.add_node(producer, ["X"], Tensor("P", (4,)), node_id="P")
+    graph.add_node(consumer("LEFT", "negative"), ["P"], Tensor("LEFT", (4,)), node_id="LEFT")
+    graph.add_node(consumer("RIGHT", "abs"), ["P"], Tensor("RIGHT", (4,)), node_id="RIGHT")
+    graph.outputs = ["LEFT", "RIGHT"]
+
+    result = splice_graph(graph)
+    assert result is not None
+    merged, external = result
+    assert external == ["X"]
+    assert {write.output for write in merged.writes} == {"LEFT", "RIGHT"}
+    assert _elementwise_fns(merged).count("exp") == 1
+
+
+def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypatch):
+    """Flat-address-identical output copies collapse without inlining the reduction at their loads."""
+    i, j, k = Var("i"), Var("j"), Var("k")
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("i", 2),
+                body=(
+                    Loop(
+                        axis=Axis("k", 3),
+                        body=(
+                            Load(name="xk", input="x", index=(i, k)),
+                            Accum(name="total", value="xk", op="add", axes=("k",)),
+                        ),
+                    ),
+                    Loop(
+                        axis=Axis("j", 3),
+                        body=(
+                            Load(name="xj", input="x", index=(i, j)),
+                            Assign(name="scaled", op="multiply", args=("xj", "total")),
+                            Write(output="y", index=(i, j), value="scaled"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    p, q = Var("p"), Var("q")
+    first_copy = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("p", 3),
+                body=(
+                    Loop(
+                        axis=Axis("q", 2),
+                        body=(
+                            Load(
+                                name="mid_value",
+                                input="y",
+                                index=(
+                                    BinaryExpr("/", BinaryExpr("+", BinaryExpr("*", p, Literal(2, "int")), q), Literal(3, "int")),
+                                    BinaryExpr("%", BinaryExpr("+", BinaryExpr("*", p, Literal(2, "int")), q), Literal(3, "int")),
+                                ),
+                            ),
+                            Write(output="mid", index=(p, q), value="mid_value"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    r = Var("r")
+    second_copy = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("r", 6),
+                body=(
+                    Load(
+                        name="out_value",
+                        input="mid",
+                        index=(BinaryExpr("/", r, Literal(2, "int")), BinaryExpr("%", r, Literal(2, "int"))),
+                    ),
+                    Write(output="out", index=(r,), value="out_value"),
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
+    graph.add_node(producer, ["x"], Tensor("y", (2, 3)), node_id="y")
+    graph.add_node(first_copy, ["y"], Tensor("mid", (3, 2)), node_id="mid")
+    graph.add_node(second_copy, ["mid"], Tensor("out", (6,)), node_id="out")
+    graph.outputs = ["out"]
+    eval_expr = BinaryExpr.eval
+
+    def reject_coordinate_evaluation(expression, env):
+        if env:
+            pytest.fail("output equivalence must not enumerate coordinates")
+        return eval_expr(expression, env)
+
+    monkeypatch.setattr(BinaryExpr, "eval", reject_coordinate_evaluation)
+
+    result = splice_graph(graph)
+
+    assert result is not None
+    merged, external = result
+    assert external == ["x"]
+    assert _count_kind(merged, Accum) == 1
+    assert [write.output for write in merged.writes] == ["out"]
+    assert len(merged.writes[0].index) == 1
+    assert "/" not in merged.writes[0].index[0].pretty() and "%" not in merged.writes[0].index[0].pretty()
+
+
+def test_output_equivalence_retargets_transpose_in_canonical_storage_order():
+    """A proven permutation retargets the Write and adopts canonical output-storage order."""
+    i, j = Var("i"), Var("j")
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("i", 2),
+                body=(
+                    Loop(
+                        axis=Axis("j", 3),
+                        body=(
+                            Load(name="value", input="x", index=(i, j)),
+                            Write(output="y", index=(i, j), value="value"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    p, q = Var("p"), Var("q")
+    transpose = LoopOp(
+        body=(
+            Loop(
+                axis=Axis("p", 3),
+                body=(
+                    Loop(
+                        axis=Axis("q", 2),
+                        body=(
+                            Load(name="transposed", input="y", index=(q, p)),
+                            Write(output="out", index=(p, q), value="transposed"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
+    graph.add_node(producer, ["x"], Tensor("y", (2, 3)), node_id="y")
+    graph.add_node(transpose, ["y"], Tensor("out", (3, 2)), node_id="out")
+    graph.outputs = ["out"]
+
+    result = splice_graph(graph)
+
+    assert result is not None
+    merged, _ = result
+    assert [loop.axis.extent for loop in merged.body.loops] == [3, 2]
+    load = next(load for load in merged.loads if load.input == "x")
+    write = next(write for write in merged.writes if write.output == "out")
+    assert load.index == tuple(reversed(write.index))
+
+
 def test_multi_output_root_preserves_all_writes():
     """A root whose body contains Writes at multiple output indices should
     seed each of them — the merged kernel carries all Writes."""
@@ -747,7 +851,7 @@ def test_multi_output_root_preserves_all_writes():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="out_0")
+    merged = _splice_loop_ops(producer, consumer, source="out_0")
     assert merged is not None
     writes = [s for s in merged.body.iter() if isinstance(s, Write)]
     assert {w.output for w in writes} == {"C0", "C1"}
@@ -859,7 +963,7 @@ def test_shared_load_dedup_into_reduce():
             ),
         ),
     )
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None  # would have failed pre-fix with SSA validation error
     # Reduce + full silu chain + final multiply should all materialize once.
     assert _count_kind(merged, Accum) == 1
@@ -896,7 +1000,7 @@ def test_literal_producer_write_index():
         ),
     )
 
-    merged = splice_loop_ops(producer, consumer, source="src_0")
+    merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     assert "exp" in _elementwise_fns(merged)
     assert "negative" in _elementwise_fns(merged)
@@ -957,100 +1061,3 @@ def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(mon
 
 
 # ---------------------------------------------------------------------------
-# Construction work bound
-# ---------------------------------------------------------------------------
-
-
-def test_construction_work_bound_preserves_body_at_the_exact_limit():
-    """The bound changes only rejection; an admitted splice stays byte-identical."""
-    axis = Axis("i", 4)
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=axis,
-                body=(
-                    Load(name="x", input="X", index=(Var("i"),)),
-                    Assign(name="y", op="exp", args=("x",)),
-                    Write(output="P", index=(Var("i"),), value="y"),
-                ),
-            ),
-        )
-    )
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=axis,
-                body=(
-                    Load(name="p", input="P", index=(Var("i"),)),
-                    Assign(name="z", op="negative", args=("p",)),
-                    Write(output="O", index=(Var("i"),), value="z"),
-                ),
-            ),
-        )
-    )
-    loops = {"producer": producer, "consumer": consumer}
-    edges = {("consumer", "P"): ("producer", "P")}
-
-    unbounded = splice_loops(loops, edges)
-    at_limit = splice_loops(loops, edges, max_work=8)
-
-    assert unbounded is not None and at_limit is not None
-    assert at_limit.body == unbounded.body
-    assert splice_loops(loops, edges, max_work=7) is None
-
-
-def test_construction_work_bound_stops_repeated_affine_recurrence(monkeypatch):
-    """A minimized recurrence/mask shape terminates before its coordinate paths expand.
-
-    Each update reads the preceding value at two affine coordinates. Composing 32 updates is the
-    same repeated-coordinate structure as the 169-node onboarding region, but the ordinary 8×
-    input-work ceiling must stop construction without a wall-clock assertion.
-    """
-    from emmy.compiler.ir.loop import splicer as splicer_module
-
-    depth = 32
-    axis = Axis("i", 4)
-    loops: dict[str, LoopOp] = {
-        "n0": LoopOp(
-            body=(
-                Loop(
-                    axis=axis,
-                    body=(
-                        Load(name="x", input="X", index=(Var("i"),)),
-                        Assign(name="y", op="negative", args=("x",)),
-                        Write(output="n0", index=(Var("i"),), value="y"),
-                    ),
-                ),
-            )
-        )
-    }
-    edges: dict[tuple[str, str], tuple[str, str]] = {}
-    for i in range(1, depth):
-        previous, current = f"n{i - 1}", f"n{i}"
-        loops[current] = LoopOp(
-            body=(
-                Loop(
-                    axis=axis,
-                    body=(
-                        Load(name="left", input=previous, index=(Var("i"),)),
-                        Load(name="right", input=previous, index=(Var("i") + Literal(1, "int"),)),
-                        Assign(name="y", op="add", args=("left", "right")),
-                        Write(output=current, index=(Var("i"),), value="y"),
-                    ),
-                ),
-            )
-        )
-        edges[(current, previous)] = (previous, previous)
-
-    resolutions = 0
-    original = splicer_module._Splicer._resolve
-
-    def counted(self, demand):
-        nonlocal resolutions
-        resolutions += 1
-        return original(self, demand)
-
-    monkeypatch.setattr(splicer_module._Splicer, "_resolve", counted)
-    input_work = depth * axis.extent.as_static()
-    assert splice_loops(loops, edges, max_work=8 * input_work) is None
-    assert resolutions < 1000

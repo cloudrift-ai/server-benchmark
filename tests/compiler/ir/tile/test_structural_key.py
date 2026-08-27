@@ -15,13 +15,13 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.tile.ir import TileOp
+from emmy.compiler.ir.tile.ir import ProjectionRegion, TileOp
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.structural import Structural
 
 
 def _bare(*, buf: str = "x", acc: str = "acc0", load: str = "in0", v: str = "v1", extent: int = 512, op: str = "multiply") -> Fold:
-    """A recognized squared-sum reduce — loads inline, PLANAR (the demoted shape)."""
+    """A lifted squared-sum reduce — loads inline, PLANAR (the demoted shape)."""
     body = Body(
         (
             Load(name=load, input=buf, index=(Var("m"), Var("k"))),
@@ -83,16 +83,40 @@ def test_independent_stmt_interleaving_never_moves_the_key() -> None:
     assert one.structural_key() == two.structural_key()
 
 
+def test_projection_region_keys_ignore_ssa_and_buffer_spelling() -> None:
+    def term(*, value: str, buffer: str, extent: int = 4) -> Fold:
+        region = ProjectionRegion(
+            axis=Axis("q", extent),
+            lift=Lambda(
+                params=("q",),
+                body=Body((Load(name=value, input=buffer, index=(Var("m"), Var("q"))),)),
+                results=(value,),
+            ),
+        )
+        return Fold.projection(body=Body((region,)), results=())
+
+    base = term(value="v0", buffer="x")
+    assert base.structural_key() == term(value="renamed", buffer="other").structural_key()
+    assert base.structural_key() != term(value="v0", buffer="x", extent=8).structural_key()
+
+
 def test_twisted_state_renames_never_move_the_key() -> None:
     # The generated exp-family combine's internal temps are namespaced on the state names; the
     # key renames through ``rename_combine``'s regeneration lockstep, so state spelling is free.
-    from emmy.compiler.ir.pure.carrier import exp_merge
+    from emmy.compiler.ir.pure.carrier import exp_combine_states
 
     def softmax(names: tuple[str, str]) -> Fold:
-        body = Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))), *exp_merge(names, ("x0", 1.0), key=names[0])))
-        fold = fold_from_loop(Loop(axis=Axis("k", 2048), body=body, role=AxisRole.TWISTED))
-        assert fold is not None
-        return fold
+        other = tuple(f"{name}__o" for name in names)
+        return Fold(
+            axis=Axis("k", 2048),
+            lift=Lambda(
+                params=("k",),
+                body=Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))),)),
+                results=("x0", 1.0),
+            ),
+            init=(-1e30, 0.0),
+            combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
+        )
 
     assert softmax(("m_i", "l_i")).structural_key() == softmax(("p", "q")).structural_key()
 

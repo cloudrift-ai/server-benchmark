@@ -35,6 +35,19 @@ class Tensor:
     Together they let downstream consumers (cuda lowering, the load
     vectorizer) recognize a scalar-literal buffer without re-querying
     the graph for ``ConstantOp`` predecessors.
+
+    ``transient`` marks a buffer that only ever existed inside a rewrite
+    fragment — a decomposition's private intermediate, a split's f32
+    workspace. It has no storage in the program the trace described, so
+    its ``dtype`` carries SHAPE, not a rounding boundary: fusing the
+    buffer away deletes no rounding the reference performed. A
+    non-transient buffer is a tensor the source program materialized, so
+    a producer that computes wider than ``dtype`` rounds there and
+    fusion has to keep that rounding (``ir/loop/splicer.py``).
+    :meth:`Graph.splice` is the ONE place that answers this — every
+    fragment-internal buffer is transient and a replacement inherits the
+    replaced buffer's answer — so no rewrite rule restates it and no
+    consumer reconstructs it from op history.
     """
 
     name: str
@@ -42,6 +55,7 @@ class Tensor:
     dtype: DataType = F32
     constant: bool = False
     value: float | None = None
+    transient: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.dtype, DataType):

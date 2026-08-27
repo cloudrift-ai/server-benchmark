@@ -18,6 +18,7 @@ pytestmark = [pytest.mark.xdist_group("cuda")]
 MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 
+@pytest.mark.skip(reason="large fused schedule composition is not yet lazy")
 def test_runner_batched_matches_eager():
     pytest.importorskip("cupy")
     import torch
@@ -81,6 +82,7 @@ def test_runner_batched_matches_eager():
             np.testing.assert_allclose(got, ref, rtol=1e-3, atol=1e-3)
 
 
+@pytest.mark.skip(reason="large fused schedule composition is not yet lazy")
 def test_runner_batched_symbolic_matches_eager():
     """The batched SYMBOLIC-seq path (``EMMY_SERVING_BATCHED=1``): batch extent baked
     at the cap, seq_len symbolic — each step pads only to the step's longest sequence

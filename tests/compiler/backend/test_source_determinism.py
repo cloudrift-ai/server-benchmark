@@ -8,7 +8,7 @@ prebuilt-cache image impossible. Found on a real RTX 5090 release run: ~270 of ~
 serving kernels re-keyed per boot — the vectorized-store temp name embedded
 ``id(self)``. The compile here runs in two SUBPROCESSES (fresh address space and hash
 seed — an in-process double compile cannot see this class of bug), off-GPU (CUDA
-hidden; sources render without a device), and the traced pointwise reshape is pinned
+hidden; sources render without a device), and the traced pointwise add is pinned
 to the production ``f2`` register-strip schedule so it must emit a vectorized store.
 The explicit pin keeps coverage independent of deploy-policy and tune-database picks.
 """
@@ -25,7 +25,7 @@ from emmy.compiler.trace.torch import trace_module
 
 class M(torch.nn.Module):
     def forward(self, x):
-        return (x + 1).reshape(8, 4, 16)
+        return x + 1
 
 g = trace_module(M().eval(), (torch.zeros(8, 64),))
 with pinned_knobs({"TILE": "f2"}):

@@ -50,6 +50,11 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   operation; an edge means that one operation uses a value produced by another.
 - **Node** — One item in a graph. In Emmy, it stores an operation, the names of the input buffers it reads (usually
   the producing node's ID), one or more output tensors, and optional hints.
+- **Multi-output node (MIMO)** — One graph node or kernel that writes several output buffers. Independent terminal
+  branches may fuse into one MIMO kernel while retaining one output port per observable value.
+- **Output equivalence cluster** — A single-owner chain of same-dtype copies that preserves every element's flat
+  address while changing only shape. With one terminal live output, the splicer may retarget the computed source's
+  `Write` across the cluster instead of reconstructing its computation at the copies' loads.
 - **Intermediate representation (IR)** — A compiler's internal description of a program. Emmy uses several IR
   stages. Early stages resemble PyTorch; later stages explicitly describe loops, GPU threads, memory, and CUDA
   source.
@@ -77,16 +82,18 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   performs.
 - **Lowering** — Moving from a high-level representation to a more detailed, machine-oriented one while preserving
   the program's meaning.
-- **Total lift** — The first half of Emmy's loop→tile boundary: one algorithm that turns any loop nest into a tree
-  of typed fold nodes, verified by re-deriving the loop and comparing. A loop it cannot read stays as-is (the raw
-  escape), so the lift never fails — its worst case is leaving the program unchanged.
-- **Classification** — The second half: deciding which algebra each lifted fold realizes (a matrix multiplication,
-  an online softmax, a fused normalize-then-multiply edge) by reading the fold's stored fields. A stage that cannot
-  decide changes nothing, and the fold keeps its plain reduction reading.
+- **Total lift** — The loop→tile boundary: one mechanical conversion that turns every inner reduction loop into a
+  Fold tree, turns local output loops into pure projection regions, peels outer parallel loops into placement, and
+  separates output specifications. Unsupported non-canonical Loop IR fails formation; Tile IR has no raw-loop escape.
+- **Classification** — Reading a Fold tree's stored algebra to derive a contraction or other scheduling-relevant
+  structure. Context-independent Lambda normalization and contraction canonicalization happen during Tile IR
+  formation; separate algebraic rewrites recover families such as online softmax. A rule that cannot classify a
+  Fold leaves its plain reduction reading unchanged.
 - **Runtime** — The code and state involved while a compiled program is executing. Emmy's CUDA runtime allocates
   buffers, resolves dynamic sizes, and launches kernels.
 - **Fusion** — Combining operations so that one GPU kernel performs work that would otherwise require several
-  kernels. Fusion can avoid writing temporary values to slower global memory.
+  kernels. Emmy fuses every structurally legal region before placement considers cuts; only correctness or termination
+  may retain an earlier kernel boundary.
 - **Static shape** — A tensor shape known when compiling, such as exactly 512 tokens.
 - **Dynamic or symbolic shape** — A shape containing a named value, such as `seq_len`, whose actual size is supplied
   when the program runs.
@@ -196,7 +203,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   nothing and all the alternatives go back into the ordinary ranking; none of them is withheld to keep the set of
   kernels unchanged. Every kernel such an alternative produces is a **brand-new kernel**: it inherits nothing from
   the kernel it replaced — not the tile, not the staging, not the identity that measurements are filed under — and
-  chooses its own settings from scratch, exactly like a kernel the compiler recognized in the first place. Nothing
+  chooses its own settings from scratch, exactly like any newly lifted kernel. Nothing
   downstream can tell the two apart.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Pin** — To force a tuning choice by hand instead of letting the compiler make it, either by setting an environment
@@ -207,7 +214,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   fused norm→linear kernel folds both its statistic and its contraction — the name carries a suffix identifying the
   step, as in the statistic's `REDUCE@<axis>` beside the contraction's bare `REDUCE`. The shortest name that is
   unambiguous is the one golden files, the tuning database and hand-set pins all
-  use. (In the code, these names are produced by walking the structure recognized for the kernel, which is why the
+  use. (In the code, these names are produced by walking the kernel's stored Fold tree, which is why the
   source calls the machinery the tree-path codec.)
 - **Realize** — A recorded configuration *realizes* when the compiler, at the point where it makes that choice, offers
   a candidate matching the recording. A configuration that realizes nowhere cannot be deployed, however good the

@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph, Node
-from emmy.compiler.pipeline.fork import Fork, OptionFork
+from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, format_tuning_knobs
 from emmy.compiler.pipeline.strategy import PassEndEvent, RunStartEvent, discovered_strategies
 
@@ -111,17 +111,12 @@ class Rule:
     * ``pass_`` — backref to the owning ``Pass``. Stamped by ``Pass``
       at construction time; ``None`` only on stray ``Rule`` instances
       built outside a pipeline (none exist in production paths).
-    * ``watch_consumers`` — include the root's immediate consumers in the
-      match identity snapshot without consuming them. A graph-aware rewrite
-      such as Loop region fusion can then discover its dynamic region while
-      retaining the same overlap invalidation a static two-node pattern had.
     """
 
     name: str
     pattern: list[Pattern]
     rewrite: Callable[..., Graph | Op | None] | None = None
     param_names: tuple[str, ...] = field(default_factory=tuple)
-    watch_consumers: bool = False
     pass_: Pass | None = field(default=None, repr=False, compare=False)
 
 
@@ -208,7 +203,6 @@ class Pass:
             spec.loader.exec_module(module)
             pattern = getattr(module, "PATTERN", None)
             rewrite_fn = getattr(module, "rewrite", None)
-            watch_consumers = bool(getattr(module, "WATCH_CONSUMERS", False))
             if pattern is None:
                 raise ValueError(f"Rule {path} missing PATTERN")
             if rewrite_fn is None:
@@ -220,7 +214,6 @@ class Pass:
                     pattern=pattern,
                     rewrite=rewrite_fn,
                     param_names=param_names,
-                    watch_consumers=watch_consumers,
                 )
             )
             # Collect the knobs this rule module declares OR imports (e.g. the
@@ -267,10 +260,10 @@ class Match:
     # splice — see ``Graph.splice``). ``None`` defaults to ``root_node_id``.
     output: str | dict[str, str] | None = None
     is_last: bool = False
-    # Strong snapshot of every consumed or explicitly watched node. The
-    # ``is_alive`` check uses object identity to detect removal followed by a
-    # different node at the same graph id. Holding the object itself prevents
-    # CPython from recycling its integer ``id()`` before the check.
+    # Strong snapshot of every consumed node. The ``is_alive`` check uses
+    # object identity to detect removal followed by a different node at the
+    # same graph id. Holding the object itself prevents CPython from recycling
+    # its integer ``id()`` before the check.
     _identities: dict[str, Node] = field(default_factory=dict, repr=False)
 
     @property
@@ -443,7 +436,7 @@ class Pipeline:
         (cursor advance flows through ``Candidate.try_rewrite`` /
         ``Candidate.apply``). Drops matches that fail
         :meth:`Match.is_alive` — an earlier match in the same batch
-        may have removed a consumed or explicitly watched node."""
+        may have removed a consumed node."""
         results: list[Match] = []
         for nid in graph.topological_order():
             m = _match_at(graph, nid, rule)
@@ -886,13 +879,10 @@ class Run:
 def _is_structural_option(option: object) -> bool:
     """Classify one raw rewrite option by its effect: a ``Graph`` splice
     changes which ops exist — **structural**; an ``Op`` rebind is in-place —
-    **op-variant**. The Op/Graph return type IS the classification; rules wrap
-    a Graph option in a leaf :class:`OptionFork` (no production rule emits one today),
-    whose ``option`` is readable without firing any thunk. A *branch* ``Fork``
-    reads op-variant: the sole branch-Fork emitter today is the partition
-    planner (all ``TileOp`` leaves), and typing it would require ``expand()`` —
-    the body-normalizing build the lazy tree exists to avoid."""
-    return isinstance(option, Graph) or (isinstance(option, OptionFork) and isinstance(option.option, Graph))
+    **op-variant**. A deferred leaf declares the same fact through ``Fork.structural`` so graph
+    construction stays lazy. A branch Fork reads op-variant: schedule-product branches contain
+    only TileOp leaves, and typing them would require the expansion their lazy structure avoids."""
+    return isinstance(option, Graph) or (isinstance(option, Fork) and option.structural)
 
 
 def _concrete_option(option: object) -> object | None:
@@ -1008,11 +998,6 @@ def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:
     # straight off the op without re-querying the graph.
     for node in matched_nodes:
         node.op.populate_io(graph, node)
-    if rule.watch_consumers:
-        for consumer_id in graph.users(start):
-            consumer = graph.nodes.get(consumer_id)
-            if consumer is not None:
-                identities[consumer_id] = consumer
     return Match(
         graph=graph,
         root_node_id=start,

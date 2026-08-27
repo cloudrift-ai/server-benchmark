@@ -246,9 +246,10 @@ def test_trace_keeps_materialized_storage_outputs_and_quant_digest(tmp_path) -> 
     )
     document = load_golden_file(path)
 
-    assert result.target_count == 2
+    assert result.target_count == 1
     assert document["model_quant_digest"] == "0123456789abcdef"
     assert "x_bits" in document["programs"][0]["outputs"]
+    assert document["configs"][0]["target"]["origins"] == ["out", "x_bits"]
 
 
 def test_trace_target_resolves_in_original_multi_op_fusion_context(tmp_path) -> None:

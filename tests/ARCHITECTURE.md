@@ -52,7 +52,8 @@ to them.
 
 The suite runs in four layers, distinguished by what they touch rather than by where they live:
 
-- **Unit** — pure functions and dataclasses with synthetic inputs. No I/O. The bulk of the suite.
+- **Unit** — pure functions and dataclasses with synthetic inputs. No I/O. Compiler IR units also pin construction
+  idempotence and output-specification round trips, including sibling projection regions. The bulk of the suite.
 - **CLI dry-run** — the full argument-parsing → config-loading → orchestration path invoked as a subprocess with
   `--dry-run`, stopping just before any real side effect (SSH, Docker, file writes). Covers `deploy ssh/local/cloud`,
   `bench`, `teardown`, and `vm create/delete/audit`. These use real recipes from `recipes/` so config drift fails a
@@ -217,9 +218,10 @@ masked-symbolic sweep (symbolic M/N/K at off-hint sizes), the static-vs-dynamic 
 double-buffer (`/p<n>`), each asserted **bit-identical** to the single-buffer / gmem-direct baseline (a pure perf
 transform) — gating its GPU cases on `requires_sm90` / `_supports_tma()` (≥ sm_90); its GPU-less render / structure cases
 run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`). The same
-gate applies to TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin declines and the kernel stays
-gmem-direct, so `test_attention_coverage.py`'s TMA-staged flash cases carry `requires_sm90` (their `cp` siblings run on
-sm_80+). Golden-scoped CLI tests are the other environment trap: `--golden` / `eval --dataset golden` resolve against the
+gate applies to TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin refuses rather than selecting a
+different transport, so `test_attention_coverage.py`'s TMA-staged flash cases carry `requires_sm90` (their `cp`
+siblings run on sm_80+). Golden-scoped CLI tests are the other environment trap: `--golden` / `eval --dataset golden`
+resolve against the
 **live card's** recordings, so tests asserting specific golden names (or monkeypatching `GOLDEN_RECORDS` with card-less
 fakes) must pin themselves off-GPU (`torch.cuda.is_available → False` in-process, `CUDA_VISIBLE_DEVICES=""` for
 `run_cli` subprocesses) to take the multi-card-union path — otherwise they pass or fail depending on which shapes the

@@ -8,6 +8,7 @@ Tile / Cond) live in ``blocks``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
@@ -799,6 +800,7 @@ class Write(Stmt):
     def exprs(self) -> tuple[Expr, ...]:
         return self.index
 
+    @cached_property
     def has_side_effects(self) -> bool:
         return True
 
@@ -974,6 +976,7 @@ class ZeroPrologue(Stmt):
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst,)
 
+    @cached_property
     def has_side_effects(self) -> bool:
         return True
 

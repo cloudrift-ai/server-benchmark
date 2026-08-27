@@ -5,8 +5,7 @@ node-kind dispatcher, ``_factor.factorize`` — every ``TileOp`` root (a tiled c
 cooperative / ILP reduce, or a pointwise / scalar cell) lowers through that single emitter, which
 reads the node kind + role + reduce plan off ``tile.op`` and picks the tier:
 
-- **Tiled ``CONTRACTION``** (warp / register tile) — the high-level contraction was
-  built recognize-side (``_classify.bind_bilinear``); ``factorize`` synthesizes its bare
+- **Tiled ``CONTRACTION``** (warp / register tile) — ``factorize`` synthesizes its bare
   grid-``Write`` (needs ``root.output``, so it can't ride the node) and expands it (mma → the
   ``RegFragment`` / ``LdmatrixLoad`` / ``MmaSyncPtx`` / ``RegStore`` fragment soup; scalar → the
   per-thread register cell tile) through the shared four-level tiling layer (in ``_factor``).

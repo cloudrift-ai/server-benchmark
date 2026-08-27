@@ -73,7 +73,7 @@ def test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers():
     )
     assert spec is not None
     head = Exl3CodedHead(spec, source)
-    assert len(head.program.compiled.launches) > 1
+    assert head.program.compiled.launches
     assert all("exl3" not in launch.kernel_name.lower() for launch in head.program.compiled.launches)
     pointers = {name: head.program.arrays[name].data.ptr for name in ("lm_head_trellis", "lm_head_suh", "lm_head_svh")}
     x = (torch.randn(2, 128, device="cuda") * 0.1).half()

@@ -10,9 +10,8 @@
 - **Scoring is DECLARED SEPARABLE**: an outer terminal's reward is the Σ of its unique kernels'
   bests, each kernel measured independently in its own single-node slice
   (:func:`single_node_graph`) by a plain :class:`TuningSearch` (MCTS) over ``INNER_PASSES``.
-  Tile-dialect structural forks (a ``PLACE`` cut, a cross-CTA split) are part of a kernel's
-  independent measurement — a slice whose kernel set changed benches as the Σ over the pieces it
-  minted.
+  A Tile-dialect cross-CTA split is part of a kernel's independent measurement — a slice whose
+  kernel set changed benches as the Σ over the pieces it minted.
 - **Minted kernels become first-class targets**: the strategy's private splice watcher
   (:class:`_KernelInventory`) rides every inner run; each genuinely new kernel it reports (deduped by structural identity across the
   whole session, outer kernels included) is ENROLLED — tuned in its own slice, its rows keyed
@@ -184,10 +183,10 @@ class _Work:
 class _KernelInventory(PipelineStrategy):
     """TwoLevelStrategy's PRIVATE splice watcher — not a composable component: the strategy
     composes one instance into every inner run's pipeline (``Pipeline.with_strategies``) so
-    kernels minted during lowering (a cut's fragments, a split's pieces) can be enrolled as
-    tuning targets. Reports each new loop-dialect kernel — one whose structural identity has not
+    kernels minted during lowering (currently a split's pieces) can be enrolled as
+    tuning targets. Reports each new kernel-bearing op — one whose structural identity has not
     been seen — to ``on_kernel(node_id, op, fragment)``. Cross-trajectory by design: the MCTS
-    re-minting the same cut on every variant reports it once, and the seen-set is seeded with
+    re-minting the same piece on every variant reports it once, and the seen-set is seeded with
     the outer terminal's kernels so pieces structurally identical to an outer kernel are not
     re-enrolled. Identity is COMPUTED through the IdentityStrategy's read API, so nothing here
     depends on a stamp having happened or on strategy dispatch order. It derives from
@@ -202,7 +201,7 @@ class _KernelInventory(PipelineStrategy):
     def on_splice(self, e: SpliceEvent) -> None:
         for nid, node in e.fragment.nodes.items():
             op = node.op
-            if not isinstance(op, LoopOp):
+            if op.dialect is None:
                 continue
             key = self.identity.op_sig(op, e.fragment)
             if key in self.seen:

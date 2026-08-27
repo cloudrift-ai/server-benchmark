@@ -83,17 +83,22 @@ thread left to right, so a choice anywhere restricts everything enumerated after
     S(node, ctx) = for each option o of node under ctx:  o x S(children(node), ctx + o)
 
 There is no product over a flat site list and no join afterwards. The reasons two sites are not one kernel — one
-worker inventory, agreeing tile geometry on a shared physical axis, one decision per Fold however many paths reach it
-— are stated once, in `Ctx.extend`, and applied while descending, so an illegal combination is never built. That
+worker inventory, agreeing tile geometry on a shared physical axis, one decision per Fold however many paths reach it,
+and a compatible fragment seam across a producer/consumer edge — are stated once, in `Ctx.extend`, and applied while
+descending, so an illegal combination is never built. That
 matters because the join is where nearly all the pruning happens: on flash attention the unconstrained product is
 8.9e6 against 13,280 legal rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
 
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated
-under the CTA thread budget, so no member can exceed it); constraints that are a function of the NODE live beside the
-moves they filter — the warp tier's eligible atoms are read once per node from its algebra, its operand dtypes and the
-gmem addressing its fragment loaders and fragment store must reach. Nothing may narrow for SPEED — a slow candidate is
-a fork the evidence decides, never a row withheld.
+under the CTA thread budget, so no member can exceed it; the stage catalog filters its copy transports through
+`Stage.available_on`, so a target without TMA never sees a TMA move — the atom registry's own shape); constraints that
+are a function of the NODE live beside the moves they filter — the warp tier's eligible atoms are read once per node
+from its algebra, its operand dtypes and the gmem addressing its fragment loaders and fragment store must reach, and
+the fragment seam's refusals (the paired register bound included) sit beside the option builder in `_schedule`.
+`tile/_staging.py` is not a legality layer: it holds the three stage RESOLVERS (whose legal answer is a size) plus the
+compute fill's own node refusals, which live there because the fill is the move they filter. Nothing may narrow for
+SPEED — a slow candidate is a fork the evidence decides, never a row withheld.
 
 **A pin is authoritative over the VALUE, not over the catalog.** A site's spelling carries no worker widths — they are
 read off `WORK` — so one `TILE` pin names a different plan under each inventory, and it may well name a plan no ladder
@@ -114,13 +119,41 @@ tree carries choices only. Traversal order is the fork order — there is no sep
 with the walk. `WORK` leads because the root owns the free axes it is read off, and it is stamped the moment an
 option claims an inventory, which `Ctx.extend` then refuses to change.
 
+**Operand staging is resolved at option construction.** A contraction's option carries its already-SIZED `Stage`: the
+resolvers (`tile/_staging.py`) answer with a size, not a yes/no — the resolved `bk_elems` slab chunk and the deepest
+ring the per-site smem budget (`ctx.max_dynamic_smem`) affords — so an over-budget row is never offered rather than
+failing at materialization, and the row's spelling is the RESOLVED one. Three transport families: the copy transports
+(the synchronous copy on atoms that stage that way, cp.async, TMA — gmem-direct `None` is their ever-present sibling),
+the fp8 byte slabs (a 1-byte operand staged as raw bytes and converted at the drain — the same `d<n>` fork family, no
+new knob), and the smem compute fill, which is MANDATORY for a computed operand, a multi-channel product, or a
+materialized A the atom cannot bind (only the fill's typed slab store converts — byte transports move raw bits), so it
+has no gmem-direct sibling and a `STAGE` pin can only choose its depth. The fp8 (k32) gmem-direct tier rides the same
+two-layer policy as the f16-accumulate family: precision-gated for the catalog (`FP8_MMA` / the `FAST_MATH` umbrella),
+bindable by a pin regardless; its sm_89 hardware floor lives in the atom registry's target filter, which no pin
+overrides.
+
+**The fragment seam is a `Ctx` decision.** A fragment edge joins a consumer contraction to the one contraction
+producing its computed fragment operand — nested in its A cone, or a sibling in the enclosing fold's derived step
+(flash's PV reading the score). The walk decides the two at different steps, so each endpoint's option stakes a seam
+entry the context reconciles whichever side arrives second: an untiled producer composes with anything (it is
+evaluated elementwise into the consumer's synchronous slab); a TILED producer produces fragments, so it composes only
+with a warp consumer over an smem compute fill whose atom family matches and whose slab chunk the producer's
+single-unit N tile fills exactly. The paired producer/consumer register bound is NOT cross-site — the producer's
+fragment block is a function of the consumer's own stage — so it filters at option construction. Derived sites (the
+synthesized PV) join the one walk in `tile/_tree.py`; a derived unit-marker contraction inherits its enclosing fold's
+reduction domain, a prescan fact, never a rewritten tree.
+
+**The producer band is inventory a stage can drive.** `+p<n>` rides `WORK`: an option whose resolved stage is TMA also
+offers band variants (the band arms the box-copy mbarrier ring; cp.async's wait-group is issuing-thread-scoped and a
+compute fill has no async load half), budgeted against the CTA thread limit. A `+p` pin that no option can drive
+composes with nothing and the term stays unmapped — the band is part of the inventory, not a row key.
+
 Because options are a function of the node and the live pins alone, a node that offers nothing offers it under every
 context: one pass over the tree says whether the term has a schedule at all. Past that check every node still has an
 option that composes with anything (the per-cell tile, the serial fold), so no branch can expand to nothing and promise
 leaves it does not have — a site pin that would empty a selected tier's offer raises there instead. A `WORK` pin can
 only be answered once the walk reaches a leaf, and a bare site pin can still be emptied by a sibling site's geometry
-— unreachable today, and the fragment-seam cluster will make it real. A term with no schedule leaves the tile
-unmapped for the scalar materialization path.
+(the fragment seam). A term with no schedule leaves the tile unmapped for the scalar materialization path.
 
 A row is the kernel's WHOLE identity, so a family the walk decided nowhere is spelled at its declared OFF rather than
 left absent — otherwise two rows of one kernel would carry different family vocabularies and the evidence hierarchy

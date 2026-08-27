@@ -763,6 +763,18 @@ class Stage:
         that issue a commit/wait or mbarrier handshake rather than a plain ``__syncthreads``."""
         return self.transport in ("smem-async", "smem-tma")
 
+    def available_on(self, ctx) -> bool:
+        """Whether this stage's copy instruction family exists on ``ctx`` — the ONE statement of
+        the transport/target rule (``cp.async`` is sm_80+, TMA sm_90+; the synchronous ``smem``
+        fill is universal). ``stage_moves`` filters the catalog through it, exactly as the atom
+        registry filters through :meth:`AtomKind.available_on`; a PIN's refusal message reads it
+        through the scheduler's ``stage_target``."""
+        if self.transport == "smem-async":
+            return ctx.has_cp_async
+        if self.transport == "smem-tma":
+            return ctx.has_tma
+        return True
+
 
 @dataclass(frozen=True)
 class WarpSpec:

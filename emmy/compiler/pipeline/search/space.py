@@ -441,7 +441,7 @@ def map_tile_moves() -> list[TilePlan]:
     return [TilePlan(regs=(1, 2)), TilePlan(regs=(1, 4)), TilePlan(regs=(1, 8))]  # (m, n): the strip widens the INNER axis
 
 
-def stage_moves(*, warp: bool) -> list[Stage]:
+def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
     """The operand-staging candidates as TYPED :class:`Stage` slices — the transport / depth /
     double-buffer variants. Both tiers offer the asynchronous gmem→smem prefetch ring depths (the
     scalar ring lands on the same ``staged_kloop`` phases; its slab K-chunk is depth-aware, derived
@@ -454,7 +454,9 @@ def stage_moves(*, warp: bool) -> list[Stage]:
 
     Gmem-direct is the ABSENCE of a stage (``None``), so it is not a member here — the scheduler
     offers it beside these. Emission is resolver-gated: a candidate is offered only when it
-    RESOLVES against the built node, and the row carries the RESOLVED spelling."""
+    RESOLVES against the built node, and the row carries the RESOLVED spelling. ``ctx`` filters the
+    catalog to the copy instruction families the target has (:meth:`Stage.available_on` — the same
+    shape as the atom registry's target filter); ``None`` returns the full catalog."""
     depths = [
         Stage.parse(s)
         for s in (
@@ -468,10 +470,10 @@ def stage_moves(*, warp: bool) -> list[Stage]:
             "d4/smem-tma",
         )
     ]
-    if not warp:
-        return depths
-    smems = [Stage.parse(s) for s in ("d1/smem", "d2/smem", "d3/smem", "d4/smem", "d1/smem/p2", "d2/smem/p2")]
-    return [*smems, *depths, Stage.parse("d2/smem-async/p2"), Stage.parse("d2/smem-tma/p2")]
+    if warp:
+        smems = [Stage.parse(s) for s in ("d1/smem", "d2/smem", "d3/smem", "d4/smem", "d1/smem/p2", "d2/smem/p2")]
+        depths = [*smems, *depths, Stage.parse("d2/smem-async/p2"), Stage.parse("d2/smem-tma/p2")]
+    return depths if ctx is None else [m for m in depths if m.available_on(ctx)]
 
 
 # Cross-CTA split-K widths (the ``REDUCE`` codec's ``g<w>`` field). Divisor legality — the width

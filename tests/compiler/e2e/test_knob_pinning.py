@@ -234,22 +234,24 @@ def test_mma_matmul_k_split_staged(M: int, N: int, K: int, monkeypatch):
 # The eighth-golden-sweep TMA box regression: a warp register tile with tile_m > 256 (16 mma rows
 # × w4 × f8 = 512) paired with a TMA stage encoded an A box of (512, bk) and crashed at
 # ``cuTensorMapEncodeTiled`` ("TMA box dim 0 extent 512 outside the hardware range 1..256"). The
-# warp stage resolver now declines TMA for any tile whose box side exceeds 256 (a pinned tma stage
-# has no cp.async fallback, so the kernel lowers gmem-direct); the pinned config must produce
-# correct output rather than raise at descriptor-encode time.
+# warp stage resolver gates the box extent, and a pinned stage the resolver declines REFUSES —
+# the pin names a kernel, so silently deploying its gmem-direct sibling would deploy something the
+# user did not ask for (the same contract ``test_scalar_cpasync_pin_refuses_odd_stride`` states).
 _OVERSIZED_BOX_KNOBS = {"TILE": "mma_m16n8k16_f16_f32/f8x2/k2", "WORK": "w4x2", "STAGE": "d2/smem-tma"}
 
 
-@requires_cuda
-def test_warp_tma_declines_oversized_box(monkeypatch):
+def test_warp_tma_pin_refuses_oversized_box(monkeypatch):
     """fp16 warp matmul pinned to a 512-row register tile + TMA stage — the box-extent gate must
-    decline TMA (→ gmem-direct) instead of encoding an illegal (512, bk) descriptor box."""
-    M = N = K = 512
-    g, inputs, ref = _build_f16_matmul_graph(M, N, K)
-    forced = _run_with_knobs(g, inputs, "c", _OVERSIZED_BOX_KNOBS, monkeypatch)
-    peak = float(np.max(np.abs(ref.astype(np.float32))))
-    atol = max(5e-1, 0.1 * peak)
-    np.testing.assert_allclose(forced.astype(np.float32), ref.astype(np.float32), atol=atol, rtol=0.1)
+    refuse the pin instead of encoding an illegal (512, bk) descriptor box or silently selecting
+    gmem-direct. Compile-only (the refusal is scheduler-side). No CUDA needed."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+
+    g, _inputs, _ref = _build_f16_matmul_graph(512, 512, 512)
+    for k, v in _OVERSIZED_BOX_KNOBS.items():
+        monkeypatch.setenv(f"EMMY_{k}", str(v))
+    with pytest.raises(ValueError, match="does not resolve"):
+        Pipeline.build(TILE_PASSES).run(g, ctx=Context.from_target((9, 0)))
 
 
 # Scalar-FMA fp16 regression (prerequisite for the split-pipe GEMM). On cc>=9.0 the F16 atom is
@@ -398,11 +400,11 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkey
     scheduler then leaves that term unmapped; scalar materialization must restore its free-axis
     grid rather than emit loads and stores that reference coordinates no thread binds.
 
-    Two dtype-choice drops, one per arm: an ``f8`` ``a`` edge has no warp tier at all in this
-    prototype (the byte tier is not restored, and the 16-bit-only converting smem compute fill
-    cannot carry it), and an ``f32`` ``a`` selects no tensor-core atom on any target. A 16-bit
-    ``a`` the atom cannot bind directly would ride the converting fill instead — realizable, so it
-    would not exercise the fallback."""
+    Two dtype-choice drops, one per arm: an ``f8`` ``a`` edge over 16-bit channels is a mixed-width
+    byte gather no fp8 atom reads (and the 16-bit converting smem compute fill cannot carry a
+    1-byte A), and an all-``f32`` contraction selects no tensor-core atom on any target. An
+    f16-channel ``f32`` ``a`` would ride the converting fill instead — realizable, so it would not
+    exercise the fallback."""
     from emmy.compiler.context import Context
     from emmy.compiler.dtype import F8E4M3, F16, F32
     from emmy.compiler.graph import Graph, Tensor
@@ -423,7 +425,7 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkey
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (1, 8, 32), {"f8": F8E4M3, "f32": F32}[a_dtype]), node_id="x")
-    graph.add_node(InputOp(), [], Tensor("w", (4, 32), F16), node_id="w")
+    graph.add_node(InputOp(), [], Tensor("w", (4, 32), F16 if a_dtype == "f8" else F32), node_id="w")
     graph.add_node(LinearOp(), ["x", "w"], Tensor("o", (1, 8, 4), F32), node_id="o")
     graph.inputs, graph.outputs = ["x", "w"], ["o"]
 

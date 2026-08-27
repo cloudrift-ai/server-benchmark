@@ -1,0 +1,55 @@
+# A layout op between an activation and its matmul is absorbed into the operand's load index,
+# so the operand is no longer a plain window of its buffer — but every tiled loader reads one
+# anyway. Taking the operand's DECLARED trailing extent as the row stride was the miscompile:
+# a reshape that re-strides the rows reads a rectangle of the wrong buffer, silently, on plain
+# f16 with no quantization in sight. The contract now is that the row stride is DERIVED from
+# the index, the columns must be gmem-contiguous, and a form no loader can read falls back.
+#
+# A's rows re-strided to 128 against a declared trailing extent of 256, read gmem-direct: the
+# mma fragment loader steps rows by a scalar leading dimension, and it takes the DECLARED
+# extent rather than the one derived from the index. 80% of the output is wrong.
+#
+# evidence: imap-reshape-a-cp.yaml is the SAME program under the cp.async transport and is
+# correct, so the derived row stride is recoverable from this index; and imap-slice-a-gmem.yaml
+# is the same transport on a canonical index and is correct, so the loader itself is sound.
+# The source test carried this whole matrix as one xfail(run=False) reading 'reshape index-map
+# accuracy faults (misaligned address) and poisons the CUDA context'. That is NOT what this row
+# does: it launches cleanly, returns, and computes a wrong answer. A silent wrong answer is a
+# different and worse finding than a fault, which is why the rows are recorded one at a time.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x, w]
+  outputs: [o]
+  nodes:
+  - id: w
+    op: input
+    outputs: [[w, f16, [128, 64]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [128, 256]]]
+  - id: xr
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [256, 128]}}
+    inputs: [x]
+    outputs: [[xr, f16, [256, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [xr, w]
+    outputs: [[o, f16, [256, 64]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+    - xr
+  realizations:
+  - name: k_matmul_fd43f7.d8cc89489c4e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      STAGE: ''
+    identity: 09ca8ac30e5a4f056ce71f077b8e83e309bd1b25db4828f0b5ee5f3030099777

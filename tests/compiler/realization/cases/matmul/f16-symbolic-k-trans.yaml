@@ -1,0 +1,47 @@
+# A symbolic axis reaches the warp tier as a MASKED tile: the planner ceil-divs the grid,
+# hoists the K pipeline above a boundary condition, stamps per-element row/column guards onto
+# the register store, and zero-fills the partial final slab past a symbolic reduce extent.
+# One cached kernel serves every runtime size.
+#
+# The source test sweeps deliberately off-hint sizes (1, 31, 130, 700). A case file has no
+# spelling for that: a symbolic case runs at the symbol's own hint, and binding the symbol
+# here would SPECIALIZE the program rather than size a run of it. What is stored is therefore
+# the schedule claim — that this masked row is still offered, realized, built and correct —
+# with the off-hint extents left to the sweep that owns them.
+#
+# A symbolic K with a TRANSPOSED B (A @ B-transpose, K contiguous in both operands): the
+# masked tail zero-fills through the (n, k)-swapped helper, a separate path from the canonical
+# one. M and N are tile divisors so only K masks. The source test hand-builds this as a
+# LoopOp; frontend linear is its twin (see the mma coverage cases).
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [64, {sym: seq_len, hint: 512}]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [32, {sym: seq_len, hint: 512}]]]
+  - id: o
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[o, f16, [64, 32]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_linear_5f6d13.eaed7b3188d4
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      WORK: w2x2
+    identity: 20b2c1cc93cfe98c9cd1f5d6be70c99cfaa51f0568b7e6eb487d3e35eb131bf5

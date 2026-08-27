@@ -1,0 +1,54 @@
+# A symbolic axis reaches the warp tier as a MASKED tile: the planner ceil-divs the grid,
+# hoists the K pipeline above a boundary condition, stamps per-element row/column guards onto
+# the register store, and zero-fills the partial final slab past a symbolic reduce extent.
+# One cached kernel serves every runtime size.
+#
+# The source test sweeps deliberately off-hint sizes (1, 31, 130, 700). A case file has no
+# spelling for that: a symbolic case runs at the symbol's own hint, and binding the symbol
+# here would SPECIALIZE the program rather than size a run of it. What is stored is therefore
+# the schedule claim — that this masked row is still offered, realized, built and correct —
+# with the off-hint extents left to the sweep that owns them.
+#
+# Softmax feeding P@V with the reduce axis symbolic, left to the planner's own pick over the
+# fused computed-operand cone. Only the kernel-wide tile and inventory are authored: this
+# program's greedy schedule spells its transport SITE-scoped (a per-axis STAGE key), and a
+# site-scoped spelling is shape-dependent, so pinning one here would claim a site rather than
+# a schedule. The computed-A sibling of this same program pins the transport explicitly.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [scores, v]
+  outputs: [o]
+  nodes:
+  - id: scores
+    op: input
+    outputs: [[scores, f16, [16, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+  - id: probs
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [scores]
+    outputs: [[probs, f16, [16, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+  - id: v
+    op: input
+    outputs: [[v, f16, [16, {sym: seq_len, hint: 512}, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [probs, v]
+    outputs: [[o, f16, [16, {sym: seq_len, hint: 512}, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+    - probs
+  realizations:
+  - name: k_matmul_softmax_reduce_e8aabe.3845b4dd5edb
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f4x8/k8
+      WORK: w2x2
+    identity: 616f258c3746972783926208ae1b043caa819aba3a7d40efbd97126dddb5c24d

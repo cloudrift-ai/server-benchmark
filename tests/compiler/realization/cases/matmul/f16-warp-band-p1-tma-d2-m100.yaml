@@ -1,0 +1,42 @@
+# A warp-SPECIALIZED staged matmul: the +p<n> producer band rides the WORK inventory (never a
+# row key of its own), the launch widens past the compute band's threads, the grid decode
+# wraps the aux warps onto the CTA's cells, the TMA fill moves to the producer's elected
+# thread, and the compute band drains through the data / empty mbarrier handshake. Bit
+# identity with the uniform pipeline is NOT expected — the split changes scheduling, not the
+# mma math — so accuracy against numpy is the whole claim.
+#
+# A masked M: the producer's box zero-fills past the last row and the store guards it.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [100, 256]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [256, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[o, f16, [100, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_matmul_d18b47.c6ba56f54a13
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      WORK: w2x2+p1
+      REDUCE: ''
+      STAGE: d2/smem-tma
+    identity: 06c2375ca92cec0c02bbfb61d4b940107dd25d6bc94c28e9a95b58696bfc13f3

@@ -1,0 +1,39 @@
+# The f16-accumulate atom's ARRAY-fragment (rolled store) form under an atomic split-K over a
+# TMA ring. The rolled store is rewritten statement-by-statement on its way down, and dropping
+# the atomic flag in that reconstruction silently degrades the store to racing plain assigns:
+# the partitions clobber instead of accumulate, which is numerically wrong with no loud
+# failure. A deep K and a one-row-tall M are what make the split worth taking here.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [32, 1024]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [1024, 256]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[o, f32, [32, 256]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_matmul_0193cd.373f887c0fc1
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
+      WORK: w1x8
+      REDUCE: g2a
+      STAGE: d2/smem-tma
+    identity: 873ed57d9a26b610e589ef548c3dcc8add0b4a3fe31b00d1fe911f597dd691ab

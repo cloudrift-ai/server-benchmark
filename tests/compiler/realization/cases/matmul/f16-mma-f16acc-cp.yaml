@@ -1,0 +1,42 @@
+# The f16-accumulate atom: the mma chain accumulates into PACKED f16 fragments at the full
+# HMMA rate and a periodic promote folds them into the f32 shadows the store reads. The
+# precision policy gates the fork, so FAST_MATH rides the input pins as the umbrella that
+# offers it — without it the atom is enumerated nowhere and the pin names no row.
+#
+# REDUCE is deliberately ABSENT, as in the source test: the subject is the accumulator and
+# its promote cadence, and the reduce partition stays the schedule's own decision.
+#
+# Over a cp.async ring, where the promote instead fires once per staged K chunk.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [128, 128]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [128, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[o, f16, [128, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_matmul_8ae30d.f863eb95a3db
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      WORK: w2x2
+      STAGE: d2/smem-async
+    identity: 657e2039c8aabc82ffeecc2e80d5ebfc772c4614d47b595f3b8cf57a1535e2cb

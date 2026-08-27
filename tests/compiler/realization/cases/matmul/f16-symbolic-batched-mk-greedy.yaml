@@ -1,0 +1,49 @@
+# A symbolic axis reaches the warp tier as a MASKED tile: the planner ceil-divs the grid,
+# hoists the K pipeline above a boundary condition, stamps per-element row/column guards onto
+# the register store, and zero-fills the partial final slab past a symbolic reduce extent.
+# One cached kernel serves every runtime size.
+#
+# The source test sweeps deliberately off-hint sizes (1, 31, 130, 700). A case file has no
+# spelling for that: a symbolic case runs at the symbol's own hint, and binding the symbol
+# here would SPECIALIZE the program rather than size a run of it. What is stored is therefore
+# the schedule claim — that this masked row is still offered, realized, built and correct —
+# with the off-hint extents left to the sweep that owns them.
+#
+# A batched contraction whose query AND key axes are both symbolic, run under the schedule a
+# GREEDY compile picks for it — the 128-row warp tile, gmem-direct, serial K. The source test
+# leaves this one unpinned; a case must name a schedule, so the greedy pick is what is named.
+# The pv-materialized sibling asks the same program under the 64-row tile instead.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [xna, xnb]
+  outputs: [o]
+  nodes:
+  - id: xna
+    op: input
+    outputs: [[xna, f16, [16, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+  - id: xnb
+    op: input
+    outputs: [[xnb, f16, [16, {sym: seq_len, hint: 512}, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [xna, xnb]
+    outputs: [[o, f16, [16, {sym: seq_len, hint: 512}, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_matmul_1e3d63.9a5869d1645c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f4x8/k8
+      WORK: w2x2
+      STAGE: ''
+      REDUCE: ''
+    identity: d2c54f0b31e3da0baf50a37c359735399592b7638d3fe19ca2d8e4cf1cb3aaf5

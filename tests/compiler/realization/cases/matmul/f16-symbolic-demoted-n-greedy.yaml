@@ -1,0 +1,68 @@
+# A symbolic axis reaches the warp tier as a MASKED tile: the planner ceil-divs the grid,
+# hoists the K pipeline above a boundary condition, stamps per-element row/column guards onto
+# the register store, and zero-fills the partial final slab past a symbolic reduce extent.
+# One cached kernel serves every runtime size.
+#
+# The source test sweeps deliberately off-hint sizes (1, 31, 130, 700). A case file has no
+# spelling for that: a symbolic case runs at the symbol's own hint, and binding the symbol
+# here would SPECIALIZE the program rather than size a run of it. What is stored is therefore
+# the schedule claim — that this masked row is still offered, realized, built and correct —
+# with the off-hint extents left to the sweep that owns them.
+#
+# A COMPUTED B cone (the rotary Q@K-transpose shape): an elementwise scale on BOTH operands
+# feeds a transposed linear, so fusion demotes the matmul and the canonical B producer is
+# materialized for it. M and N are the same symbol, so the demoted cone overhangs on both.
+# The schedule is the greedy pick — note the smem COMPUTE fill, which is the only transport a
+# computed operand has.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x, sx, w, sw]
+  outputs: [o]
+  nodes:
+  - id: sw
+    op: input
+    outputs: [[sw, f16, [{sym: seq_len, hint: 512}, 128]]]
+  - id: sx
+    op: input
+    outputs: [[sx, f16, [{sym: seq_len, hint: 512}, 128]]]
+  - id: w
+    op: input
+    outputs: [[w, f16, [{sym: seq_len, hint: 512}, 128]]]
+  - id: ws
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [w, sw]
+    outputs: [[ws, f16, [{sym: seq_len, hint: 512}, 128]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [{sym: seq_len, hint: 512}, 128]]]
+  - id: xs
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [x, sx]
+    outputs: [[xs, f16, [{sym: seq_len, hint: 512}, 128]]]
+  - id: o
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [xs, ws]
+    outputs: [[o, f16, [{sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+    - ws
+    - xs
+  realizations:
+  - name: k_linear_c28d28.57bd81d83053
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f4x8/k8
+      WORK: w2x2
+      STAGE: d1/smem
+      REDUCE: ''
+    identity: 4dad7ecfc99152ae00957c2f708e56ee2509856e0b2edfb271b9d1af35547e2e

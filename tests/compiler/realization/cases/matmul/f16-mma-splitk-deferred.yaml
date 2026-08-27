@@ -1,0 +1,40 @@
+# A cross-CTA split of the contraction on the tensor-core tier, finalized DEFERRED: each
+# partition retargets its C fragment into a workspace that a sibling additive kernel sums, so
+# no atomicAdd is emitted anywhere. A low-precision output takes this arm.
+#
+# The split is realized by REPLACING the kernel — the structural fork mints fresh pieces and
+# strips their schedule row — so no piece may carry the g2 it came from; the oracles read the
+# cross-CTA stage structurally for exactly that reason.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [128, 512]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [512, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[o, f16, [128, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_matmul_05eff1.40fe6f075b96
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      WORK: w2x2
+      REDUCE: g2k
+    identity: 59a26be3ce61e2dc54fc8f393e8ff8188e0a3cee0f881f6447e75dcbaa83f62d

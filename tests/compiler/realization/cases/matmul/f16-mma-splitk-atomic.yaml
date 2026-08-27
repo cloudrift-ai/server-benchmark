@@ -1,0 +1,36 @@
+# The same split finalized ATOMICALLY: ONE kernel, each partition's C fragment atomically
+# adding into a per-launch zero-initialized f32 output, with no workspace and no finalize
+# node. The output dtype is what admits this arm.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [128, 512]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [512, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[o, f32, [128, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_matmul_97bb07.760b28bdb244
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      WORK: w2x2
+      REDUCE: g2a
+    identity: e187945ba6e6fd0a9b6e17b2fe805d6bffac56546b6b9d05a539b0467dfbc8c4

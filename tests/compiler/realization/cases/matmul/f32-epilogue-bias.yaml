@@ -1,0 +1,50 @@
+# A projection Map over the contraction (project after contract): the pointwise tail folds
+# into the contraction kernel and is replicated per register cell. PLACE=fuse rides the
+# input pins rather than the schedule row — the golden loader refuses a realization that
+# mixes routing knobs with schedule knobs, and PLACE is consumed by a splice rather than
+# stamped on a kernel either way.
+#
+# A per-column bias: shared across the tile's m cells, distinct per n cell.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b, bias]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f32, [1, 64, 64]]]
+  - id: b
+    op: input
+    outputs: [[b, f32, [64, 64]]]
+  - id: ab
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[ab, f32, [1, 64, 64]]]
+  - id: bias
+    op: input
+    outputs: [[bias, f32, [64]]]
+  - id: o
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [ab, bias]
+    outputs: [[o, f32, [1, 64, 64]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - ab
+    - o
+  realizations:
+  - name: k_matmul_b0cecb.aed65d192029
+    bindings: {}
+    pins:
+      FAST_MATH: false
+      PLACE: fuse
+    knobs:
+      TILE: f2x2
+      WORK: t16x16
+      REDUCE: ''
+    identity: c93922e3cb1e210caf49b13ed013262c77ac72f3a8b121840f97839f5ab5ab38

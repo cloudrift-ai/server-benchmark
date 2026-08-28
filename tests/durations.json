@@ -490,6 +490,7 @@
  "tests/serving/test_attention_split.py::test_split_matches_eager_gemma4": 5.0,
  "tests/serving/test_attention_split_gpu.py::test_gemma_post_wrapper_compiles_and_runs_dynamic@cuda": 128.5,
  "tests/serving/test_attention_split_gpu.py::test_post_wrapper_compiles_with_shared_dim@cuda": 6.3,
+ "tests/serving/test_deepseek_native_loader.py::test_host_process_config_shadow_does_not_reach_the_twin": 5.2,
  "tests/serving/test_deepseek_native_loader.py::test_multi_token_prediction_head_is_never_read": 1.9,
  "tests/serving/test_moe_split.py::test_exl3_laguna_dense_and_sparse_blocks_preserve_float32_residuals": 0.1,
  "tests/serving/test_moe_split.py::test_moe_split_folds_shared_experts_into_post_attn": 5.2,

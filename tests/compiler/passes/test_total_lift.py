@@ -10,6 +10,9 @@ number, never as a slow kernel.
 
 from __future__ import annotations
 
+import numpy as np
+
+from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole
@@ -118,6 +121,45 @@ def test_total_lift_fires_through_the_pipeline() -> None:
     from emmy.compiler.ir.tile import TileOp
 
     assert any(isinstance(node.op, TileOp) for node in lowered.nodes.values())
+
+
+def test_singleton_reduce_over_an_enclosing_value_lifts_as_a_projection() -> None:
+    """Decode softmax can hoist its sole value ahead of the extent-one max/sum loop.  The
+    canonical Loop IR must collapse that identity reduction before total lift, rather than ask a
+    fold lambda to return a name defined only by its enclosing projection."""
+    m, k = Axis("m", Dim(4)), Axis("k", Dim(1))
+    body = Body(
+        (
+            Loop(
+                axis=m,
+                body=Body(
+                    (
+                        Load(name="xv", input="x", index=(Var("m"),)),
+                        Loop(
+                            axis=k,
+                            body=Body((Accum(name="acc", value="xv", op="maximum", axes=("k",)),)),
+                        ),
+                        Write(output="out", index=(Var("m"),), value="acc"),
+                    )
+                ),
+            ),
+        )
+    )
+
+    tile = _tile(body)
+
+    graph = Graph()
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,)), node_id="x")
+    graph.add_node(op=LoopOp(body=body), inputs=["x"], output=Tensor("out", (4,)), node_id="out")
+    graph.inputs, graph.outputs = ["x"], ["out"]
+    values = np.array([3.0, -2.0, 7.5, 0.25], dtype=np.float32)
+    result = NumpyBackend().run(NumpyBackend().compile(graph), input_data={"x": values})[0].outputs["out"]
+
+    assert tuple(axis.extent for axis in tile.place.free) == (Dim(4),)
+    assert isinstance(tile.op, Fold) and tile.op.axis is None
+    assert not any(isinstance(member, Fold) and member.axis is not None for member in tile.op.body)
+    assert lower_with_output_specs(tile.op, tile.output_specs)[-1].value in deep_defines(tile.op)
+    np.testing.assert_array_equal(result, values)
 
 
 def test_sibling_q_and_kv_regions_total_lift_with_separate_outputs() -> None:

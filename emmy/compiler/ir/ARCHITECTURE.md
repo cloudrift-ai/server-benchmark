@@ -418,6 +418,9 @@ canonicalized before validation:
 - `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
 - `drop_size_one_free_axes` — inline extent-1 free Loops.
+- `drop_size_one_reduce_axes` — collapse a canonical extent-1 reduction to its single monoid update. This includes
+  decode-softmax values that fusion hoists into the enclosing scope; copy-alias elimination then removes the identity
+  update before total reduction lifting.
 - `canonicalize_free_axis_order` — sort outer free Loops by their row-major position in boundary writes, so output
   storage geometry rather than axis spelling decides the nest. When the writes cannot totally order the chain, axis
   names provide a deterministic fallback. A cross-CTA partition coordinate occupies the workspace's leading index,

@@ -956,7 +956,8 @@ provides both its knob row and cost. When that row matches an existing proposal,
 proposal feedback to a direct tune winner so strict replay can use it as an automatic exact pin. When the fastest
 searched terminal changes the kernel set, the winner is its
 first exact structural replay row: a `PLACE`-only routing row for a placement cut, or the complete pre-split schedule
-row for a cross-CTA reduction. The pieces remain independent tuning targets; promotion never fabricates their
+row for a cross-CTA reduction. `PLACE=fuse` does not change the kernel set, so it retains the terminal's complete
+schedule row instead of truncating the winner to a routing receipt. The pieces remain independent tuning targets; promotion never fabricates their
 heterogeneous schedules into one row or falls back to a slower monolithic sibling. A cross-CTA parent becomes a tune
 winner only when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a
 parent whose pins

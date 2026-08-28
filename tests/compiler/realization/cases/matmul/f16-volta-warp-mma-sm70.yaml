@@ -1,0 +1,40 @@
+# Volta's mma tier on a model-sized f16 projection. This shape's warp rows were once
+# unreachable — every proposed mma_m8n8k4 row on a Laguna k_linear twin reported
+# pin_unmatched while the same family was the measured winner on another model's sm_70
+# golden at a neighbouring shape. The lockout is closed; this case is the ratchet that
+# keeps it closed, and it runs its enumeration and lowering stages on any box, because
+# a case is replayed at its DECLARED capability rather than the live card's.
+compute_cap:
+- 7
+- 0
+programs:
+- inputs: [x, w]
+  outputs: [o]
+  nodes:
+  - id: w
+    op: input
+    outputs: [[w, f16, [12288, 3072]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [1024, 3072]]]
+  - id: o
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x, w]
+    outputs: [[o, f16, [1024, 12288]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_linear_3057af.d29a63de7ee5
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      STAGE: d2/smem
+      REDUCE: ''
+    identity: 0dea019b122e91e51eebb12f63ee59ed77496f83b56e8922a6b7a1ca5bce7a7f

@@ -192,7 +192,13 @@ def load_function(source: str, name: str, options, *, uses_tma: bool):  # noqa: 
 def load_cubin_function(path: Path | str, name: str):
     """``RawModule``-load an existing cubin and return kernel ``name`` — the load half of
     :func:`load_function`, used directly by the execution-plan path when a plan references the
-    cubin by its content-addressed cache key (no source, no compile)."""
+    cubin by its content-addressed cache key (no source, no compile).
+
+    ONE NAME, ONE SOURCE: launches resolve kernels by function name (first source wins), so two
+    kernels compiled from different sources under one name silently run one body twice. Every
+    kernel-minting or kernel-rewriting site must keep names unique per distinct source — the cut
+    pass suffixes producer names with the seam digest (``lowering/tile/_cut.realize``), and the
+    zero-init delegation re-suffixes with the baked word count (``lowering/cuda/005``)."""
     import cupy as cp  # noqa: PLC0415
 
     return cp.RawModule(path=str(path)).get_function(name)

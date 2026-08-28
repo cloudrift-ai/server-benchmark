@@ -201,7 +201,7 @@ def build_golden_groups(
     :func:`_pool_identity`; every group is built knowing all of its goldens. This logs how many goldens merged, and the caller records
     groups against positives in the metrics header.
 
-    Matmul goldens enumerate via ``golden_eval._enumerate`` — the SAME gate-narrowed
+    Matmul goldens enumerate via ``golden_eval.enumerate_graph`` — the SAME gate-narrowed
     pool ``eval prior --dataset golden`` and the greedy deploy rank over (fp32 → thread tier,
     fp16/bf16 → warp tier; the block-DAG rework moved the scalar↔warp choice to a
     structural fork, so a real fp16 matmul ranks within the warp tier alone, no
@@ -218,10 +218,11 @@ def build_golden_groups(
     run's group and positive counts are its own, and only an unfiltered run compares against a fit.
 
     ``sample`` draws that many candidates per pool DURING enumeration (0 enumerates every row).
-    The draw is a pure function of ``(pool size, sample, seed)`` and never looks at a row, so two
-    goldens over one pool retain identical rows and still merge into one group; every recorded
-    config survives it whatever the draw picks (:func:`_keep_sets`), so a golden that misses its
-    pool still means what it always meant - a pin or dtype mismatch.
+    The draw is a reservoir over the schedule walk's leaf stream — a pure function of that stream
+    and ``(sample, seed)`` that never reads a row — so two goldens over one pool retain identical
+    rows and still merge into one group; every recorded config survives it whatever the draw picks
+    (:func:`_keep_sets`), so a golden that misses its pool still means what it always meant - a pin
+    or dtype mismatch.
 
     Each golden is reconstructed under its OWN card's context
     (``Context.from_target(cap, gpu_name=…)``, mirroring ``Sample.from_golden``):

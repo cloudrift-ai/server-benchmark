@@ -1,0 +1,42 @@
+# A masked (non-divisor) output axis admits no staged transport: with a register tile
+# pinned the depth is refused outright, and with the tile free the schedule falls back
+# to a per-cell row that stages nothing.
+#
+# evidence: the identical program at N=64 — same dtype, same K, same WORK/TILE pair —
+# realizes d1/smem-async and d2/smem-async (see f32-scalar-staging-d1-64x64x64.yaml and
+# its d2 sibling), so the transport is available to this tile and is lost to the mask
+# alone. The test this case replaces parametrized both depths at this shape and passed
+# on a kernel that stamped no stage at all.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [c]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f32, [64, 64]]]
+  - id: b
+    op: input
+    outputs: [[b, f32, [64, 47]]]
+  - id: c
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[c, f32, [64, 47]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - c
+  realizations:
+  - name: k_matmul_fa3f68.d8fee7834d5c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: f2x2
+      WORK: t16x8
+      STAGE: d1/smem-async
+    identity: a1bbc1798a0bc1c314a22c6f210347547b96965a0c1d06dc4ac2f88fdfd6b0ea

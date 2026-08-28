@@ -1,4 +1,4 @@
-.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations lint format git-sha-guard pypi-dist \
+.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations test-corpus-regen lint format git-sha-guard pypi-dist \
 	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
@@ -22,6 +22,7 @@ help:
 	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
 	@echo "  serve-models    - List the models with a pinned release config"
 	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
+	@echo "  test-corpus-regen - Restamp the realization corpus after an identity / codec change"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
@@ -73,6 +74,13 @@ format: setup
 # pole is visible in the log the moment it lands rather than after someone profiles.
 test: setup
 	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=25
+
+# Restamp the realization corpus's derived half (program wire, name, identity, canonical knobs)
+# after a kernel-identity or schedule-codec change. `make test` DETECTS staleness on any machine,
+# GPU or not; this applies the fix. It refuses to write a case whose verdict also changed — that
+# is a realization regression to review, not a mechanical restamp.
+test-corpus-regen: setup
+	./venv/bin/python -m tests.compiler.realization.regen
 
 # Regenerate tests/durations.json — the checked-in per-test timings the conftest
 # LPT-buckets on, so CI's first (cache-less) run is balanced. Runs serially: xdist

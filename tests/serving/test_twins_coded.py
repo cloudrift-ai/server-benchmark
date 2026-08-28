@@ -240,11 +240,13 @@ def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tm
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
-def test_deepseek_fp8_declaration_spells_the_expert_twin_for_the_cast_lane(tmp_path):
-    """The pinned checkpoint declares an fp8 trunk while storing its routed experts as MXFP4
-    (``expert_dtype: fp4``). The snapshot's converter casts those experts LOSSLESSLY into exactly the
-    declared fp8 [128, 128]-block form, so the ``@f8e4m3`` expert twin records the program the
-    fp8-cast serving lane deploys; the hyper-connection pre/post twins keep their value constants."""
+def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp_path):
+    """The pinned checkpoint declares an fp8 TRUNK while storing its routed experts as native MXFP4
+    (``expert_dtype: fp4``), and the serving loader keeps those experts packed. The expert twin has
+    to follow the experts, not the trunk declaration, or the golden records a program serving never
+    runs. ``w_down``'s packed shape also pins the layout the caller passes down: these experts are
+    ``F.linear`` parameters, so the blocks lead with ``out``; the ``x @ W`` reading would produce
+    (16, 2, 16) here instead."""
     pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
 
@@ -252,8 +254,8 @@ def test_deepseek_fp8_declaration_spells_the_expert_twin_for_the_cast_lane(tmp_p
 
     config = transformers.DeepseekV4Config(
         vocab_size=64,
-        hidden_size=32,
-        moe_intermediate_size=16,
+        hidden_size=64,
+        moe_intermediate_size=32,
         num_hidden_layers=2,
         num_attention_heads=4,
         head_dim=8,
@@ -285,11 +287,13 @@ def test_deepseek_fp8_declaration_spells_the_expert_twin_for_the_cast_lane(tmp_p
     config.expert_dtype = "fp4"
     config.save_pretrained(tmp_path)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
-    assert set(graphs) == {"pre4", "pre-sym", "post4", "post-sym", "expert4@f8e4m3", "expert-sym@f8e4m3"}
-    expert = graphs["expert4@f8e4m3"]
+    assert set(graphs) == {"pre4", "pre-sym", "post4", "post-sym", "expert4@mxfp4", "expert-sym@mxfp4"}
+    expert = graphs["expert4@mxfp4"]
+    assert set(expert.inputs) >= {"w_gate_up", "w_gate_up_scale", "w_down", "w_down_scale"}
     by_id = {i: expert.nodes[i].output for i in expert.inputs}
-    assert {out.dtype.name for i, out in by_id.items() if i in ("w_gate_up", "w_down")} == {"f8e4m3"}
-    assert {i for i in expert.inputs} >= {"w_gate_up", "w_gate_up_scale", "w_down", "w_down_scale"}
+    assert {out.dtype.name for i, out in by_id.items() if i.startswith("w_")} == {"u8"}
+    shape = tuple(d.as_static() for d in by_id["w_down"].shape)
+    assert shape == (64, 1, 16), f"expected (out, in/32, 16) for an F.linear expert, got {shape}"
 
 
 @pytest.mark.skip(reason="global greedy ranking still traverses the full coded-expert schedule space")
@@ -519,7 +523,7 @@ def test_mxfp4_expert_twins_spell_native_blocks_and_scales():
     )
     config = type("Cfg", (), {"quantization_config": {"quant_method": "mxfp4", "modules_to_not_convert": ["lm_head"]}})()
     profile = mxfp4_weight_profile(config)
-    twins = _spell_mxfp4_expert_twins("expert1", graph, profile, {0, 1})
+    twins = _spell_mxfp4_expert_twins("expert1", graph, profile, {0, 1}, True)
     assert set(twins) == {"expert1@mxfp4"}
     spelled = twins["expert1@mxfp4"]
     spelled.validate()
@@ -530,4 +534,4 @@ def test_mxfp4_expert_twins_spell_native_blocks_and_scales():
     assert profile == ["lm_head"]
 
     with pytest.raises(NotImplementedError, match=r"requires every routed-expert layer.*layer\(s\) \[1\]"):
-        _spell_mxfp4_expert_twins("expert1", graph, ["model.layers.1.mlp.experts"], {0, 1})
+        _spell_mxfp4_expert_twins("expert1", graph, ["model.layers.1.mlp.experts"], {0, 1}, True)

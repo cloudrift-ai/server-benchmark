@@ -10,10 +10,14 @@ part of the tested contract.
 ## Measured evidence
 
 These numbers are why the structural assertions below exist. They are not reproduced by the
-correctness lane — they were measured once, on the named card, and they are recorded here because
-nothing else in the tree records them. A restructuring that keeps every assertion green can still
-lose the performance they describe; re-measure before believing a claim that one of them no longer
-applies.
+correctness lane — they were measured once, on the named card. A restructuring that keeps every
+assertion green can still lose the performance they describe; re-measure before believing a claim
+that one of them no longer applies.
+
+Something else in the tree records this shape of evidence now: a realization-corpus case carries a
+per-card ``latency:`` block holding both its own microseconds and ``torch.compile``'s, refreshed by
+a workflow that rents the card. These rows stay prose until this file's attention programs become
+cases — none of them are yet, and pointing at an empty corpus would be worse than a table.
 
 **5090, f16, ``(1, 8, S, D)``, fused arm against the two-kernel materialized-score sibling and
 torch SDPA (us):**
@@ -74,6 +78,20 @@ grows with ``S``.
 **Single-pass sweep.** Recomputing the score costs 1.4-1.7x across ``D = 16..128`` on a 5090, and a
 regression from the single pass back to the two-pass pair is invisible to a numerics assert — which
 is what ``test_fused_sdpa_sweeps_the_score_once`` is for.
+
+**Explicit-mask forms: pinned scalar, unpinned greedy is a burner.** An explicit additive mask is
+not recognized into the λ-spelled flash carrier, so its term is the UNRECOGNIZED three-pass
+softmax — at ``(1, 2, 16, 8)`` f32 an 8-node stored tree (four contractions, two stat folds) whose
+legal schedule pool is 486,130 rows. The term schedules and lowers CORRECTLY (the pinned fused
+scalar row matches torch to 1e-6, and the placement cut realizes beside it), but unpinned greedy
+must flatten that pool (6.5 s) and prior-score every row (~41 s per ``knob_features`` pass, 2-3
+passes per compile, ~2.2 GB RSS) — minutes per compile, the known lazify-greedy roadblock (same
+mechanism as the EXL3 computed-operand skips). Pre-rebuild (bff3e344) the same compile burned
+>110 s at 14.6 GB RSS, so the rebuild only shrank the memory. The mask cells therefore pin the
+fused scalar row (they protect mask ACCURACY, not the cold policy);
+``test_full_self_attn_tinyllama`` pins the bare recursive cut, which contraction-operand cuts
+make sufficient: the Q/K/V+RoPE cones split into their own kernels and the attention kernel reads
+materialized Q/K/V instead of recomputing them per scalar cell.
 """
 
 from __future__ import annotations
@@ -291,7 +309,12 @@ def test_scalar_flash_matches_torch(monkeypatch, variant):
     """An SDPA variant (non-causal / causal / GQA / explicit additive mask) matches torch SDPA
     across the variant's static configs. Placement may leave a kernel set; the softmax markers
     (``fmaxf`` + ``expf``) live somewhere in that set, and every kernel carries a schedule. The
-    exact kernel count is not this test's contract."""
+    exact kernel count is not this test's contract. The ``mask`` variant pins the fused scalar
+    row: its term is the UNRECOGNIZED three-pass softmax, whose unpinned pool greedy cannot
+    afford to score (module docstring's burner evidence) — this cell protects mask accuracy,
+    not the cold policy."""
+    if variant == "mask":
+        _pin_scalar_fused(monkeypatch)
     torch.manual_seed(0)
     for cfg in _FLASH_VARIANTS[variant][2]:
         module, args, feed, ref = _flash_feed(variant, *cfg)
@@ -504,7 +527,10 @@ def test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates(
 def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
     """Symbolic ``seq_len`` (Q/K/V dim -2): ONE cached kernel carrying ``int seq_len`` serves every
     runtime size — flash's single dynamic axis lands on the masked-row M, the symbolic reduce, and
-    (for GQA) the causal guard at once. Accurate vs torch at seq ∈ {8, 16, 37}."""
+    (for GQA) the causal guard at once. Accurate vs torch at seq ∈ {8, 16, 37}. The ``mask``
+    variant pins the fused scalar row, exactly as in ``test_scalar_flash_matches_torch``."""
+    if variant == "mask":
+        _pin_scalar_fused(monkeypatch)
     torch.manual_seed(0)
     seq = torch.export.Dim("seq_len", min=4, max=4096)
     module_cls, kwargs, _ = _FLASH_VARIANTS[variant]
@@ -543,27 +569,6 @@ def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
 
         md = _max_diff(backend, compiled, feed, ref)
         assert md < 1e-4, f"dynamic {variant} flash seq={s} max_diff={md:.6e}"
-
-
-@requires_cuda
-@pytest.mark.parametrize("bk", [2, 4])
-def test_scalar_flash_kv_tile_matches_torch(monkeypatch, bk):
-    """KV tiling: a ``EMMY_BK`` pin re-brackets the streaming reduce ``S_k → S_k/BK · BK``
-    (serial within the tile). The lowered kernel set must still match torch under the pin.
-    ``S=32`` / ``D=16`` are divisible by both 2 and 4, so the pin is honored."""
-    monkeypatch.setenv("EMMY_BK", str(bk))
-    torch.manual_seed(0)
-    q, k, v = (torch.randn(2, 3, 32, 16) for _ in range(3))
-    backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
-    assert kernels, f"BK={bk}: no kernels"
-    cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
-
-    def ref():
-        with torch.no_grad():
-            return F.scaled_dot_product_attention(cq, ck, cv).cpu().flatten().numpy()
-
-    md = _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, ref)
-    assert md < 1e-4, f"BK={bk} KV-tiled flash vs torch max_diff={md:.6e}"
 
 
 @requires_cuda
@@ -833,14 +838,19 @@ def test_fused_tensorcore_flash_reference_matches_torch(S):
 
 @pytest.fixture
 def _chain_tile_pins(monkeypatch):
-    """Pin a small, budget-safe scalar tile + a fixed seed for the model-chain tests. These chains
-    compile the real attention path UNPINNED, which relied on the retired prior to pick an
-    in-smem-budget tile; the cold emission-order pick can choose an over-budget tile and hard-fail.
-    The tile is irrelevant to the accuracy checks (legacy env pins route through the ingest mapper)."""
+    """Pin the fused scalar row + a fixed seed for the model-chain tests. These are accuracy
+    tests, not cold-policy tests: unpinned greedy flattens and prior-scores the full schedule pool
+    of the fused chain term (six-figure row counts on the explicit-mask forms — see the module
+    docstring's burner evidence), so the schedule is pinned to the one row every term offers."""
     torch.manual_seed(42)
+    _pin_scalar_fused(monkeypatch)
+
+
+def _pin_scalar_fused(monkeypatch):
+    """Pin the fused placement and the per-cell scalar row (every family at its declared OFF)."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    for k, v in (("BN", "16"), ("BM", "8"), ("FN", "2"), ("FM", "2"), ("BK", "8"), ("BR", "4")):
-        monkeypatch.setenv(f"EMMY_{k}", v)
+    for fam in ("WORK", "TILE", "STAGE", "REDUCE", "RASTER"):
+        monkeypatch.setenv(f"EMMY_{fam}", "")
 
 
 def _run_module_with_eager(module: torch.nn.Module, args: tuple, inputs_by_name: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:

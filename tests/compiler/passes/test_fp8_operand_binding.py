@@ -33,7 +33,7 @@ from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
-from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_stage
+from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 from tests.compiler.helpers import requires_cuda
 
 # ===================================================================

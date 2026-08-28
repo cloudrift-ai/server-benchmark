@@ -1774,7 +1774,15 @@ def _fold_staged(
     )
 
     k0 = Var("_ks")
-    boundary = None if fold.axis.extent.is_static else (fold.axis.name, fold.axis.extent.expr, float(fold.init[0]))
+    # Runtime bounds on the fragment coordinates: the reduced K overhang clamp-reads AND masks to
+    # the fold identity (the fold consumes it); a masked M only clamp-reads — the overhanging row
+    # computes a duplicate of the last valid row and its store is discarded by the ``RegStore``
+    # guard, the same contract the copy transports follow.
+    bounds: tuple[tuple[str, Expr, float | None], ...] = (
+        () if fold.axis.extent.is_static else ((fold.axis.name, fold.axis.extent.expr, float(fold.init[0])),)
+    )
+    if m.mask:
+        bounds += ((m.axis.name, m.ext, None),)
     if producer is not None:
         producer_slabs = (
             (invariant_op.slab, invariant_op.shape[1], invariant_op.swizzle) if invariant_op is not None else None,
@@ -1796,8 +1804,31 @@ def _fold_staged(
         )
         producer_body = []
         producer_value = None
+    # The fragment column cells must cover the whole ``bk``-wide slab chunk the drain reads —
+    # ``bk / atom_n`` cells, NOT the output tile's ``n.reg`` (the two agree only when
+    # ``bk == n.reg · atom_n``; a deeper chunk left the slab tail unwritten). A scheduled
+    # producer's grid is its own register tiling, so it must AGREE with that cover — refuse a
+    # seam whose producer grid would leave (or overrun) the slab tail rather than emit it.
+    # No modern atom can fail the divisibility — the k16/k32 families are 2·bk / 4·bk cells — and
+    # the one that could (``mma_m8n8k4_f16_f32``: logical (16,16,4), so ``bk // atom_n`` is
+    # ``tile.bk // 4`` and reads 0 at bk∈{1,2}) is unreachable today: sm70 computed-A rides the
+    # per-cell sync fill, which never enters ``_fold_staged``. Kept so a future ladder or pin that
+    # does reach it refuses loudly here rather than emitting a zero-width column grid over an
+    # unwritten slab.
+    if bk % active_tile.atom.atom_n:
+        raise ValueError(
+            f"the fragment Fold's {bk}-element slab chunk is not a whole number of "
+            f"{active_tile.atom.atom_n}-column {active_tile.atom.name} fragment cells"
+        )
+    col_cells = bk // active_tile.atom.atom_n
+    if producer is not None and active_tile.n.reg != col_cells:
+        raise ValueError(
+            f"fragment seam mismatch: the scheduled producer's {active_tile.n.reg}-cell "
+            f"({active_tile.atom.atom_n}-column) fragment grid does not cover the "
+            f"{bk}-element slab chunk the drain reads ({col_cells} cells required)"
+        )
     bases = tuple(
-        tuple((producer_offset[0].base(i), producer_offset[1].base(j)) for j in range(active_tile.n.reg)) for i in range(active_tile.m.reg)
+        tuple((producer_offset[0].base(i), producer_offset[1].base(j)) for j in range(col_cells)) for i in range(active_tile.m.reg)
     )
 
     def child(node: Fold, env: dict[str, Value]):
@@ -1810,7 +1841,7 @@ def _fold_staged(
                 child=child,
                 bases=bases,
                 axes=(m.axis.name, fold.axis.name),
-                boundary=boundary,
+                bounds=bounds,
             )
             return body, results
         raise ValueError("only scheduled contraction children may execute inside a fragment Fold")
@@ -1830,7 +1861,7 @@ def _fold_staged(
         child=child,
         bases=bases,
         axes=(m.axis.name, fold.axis.name),
-        boundary=boundary,
+        bounds=bounds,
     )
     pivot_accum = next(stmt for stmt in steps if isinstance(stmt, Accum) and stmt.name == fold.combine.results[0])
     raw_pivot_names = tuple(tuple(f"_fold_pivot_raw_{i}_{r}" for r in range(lay.rows_per_lane)) for i in range(active_tile.m.reg))
@@ -1853,7 +1884,7 @@ def _fold_staged(
     prefix = [stmt for stmt in steps[:value_at] if isinstance(stmt, (Assign, Select)) and stmt.defines()[0] not in env]
     if prefix:
         lam = Lambda(params=tuple(env), body=Body(tuple(prefix)), results=tuple(stmt.defines()[0] for stmt in prefix))
-        prefix_body, _, env = evaluate(lam, env, bases=bases, axes=(m.axis.name, fold.axis.name), boundary=boundary)
+        prefix_body, _, env = evaluate(lam, env, bases=bases, axes=(m.axis.name, fold.axis.name), bounds=bounds)
     else:
         prefix_body = []
     weight_body, (weight,), env = evaluate(
@@ -1862,7 +1893,7 @@ def _fold_staged(
         child=child,
         bases=bases,
         axes=(m.axis.name, fold.axis.name),
-        boundary=boundary,
+        bounds=bounds,
     )
     if weight.kind != FRAG:
         raise ValueError("a fragment contraction producer must produce a fragment operand")

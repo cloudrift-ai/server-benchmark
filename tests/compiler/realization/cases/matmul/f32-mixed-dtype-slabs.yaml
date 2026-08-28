@@ -1,0 +1,37 @@
+# A mixed-dtype staged contraction (f32 A, f16 B). Sizing both slab fills by A's element
+# width issues 16 B cp.async chunks at f32 spacing over f16 memory — misaligned addresses
+# and overlapped data. Each slab, fill and descriptor must be sized by its own operand's
+# width. The strides here are 16 B-aligned, so the fill itself is what is under test.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [c]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f32, [64, 128]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [128, 96]]]
+  - id: c
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[c, f32, [64, 96]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - c
+  realizations:
+  - name: k_matmul_867c74.3dd08738fe0f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: f2x4
+      WORK: t16x8
+      STAGE: d1/smem-async
+    identity: 4b71223c1e87edf85da732f9cfb0998d6fd82a04ce08f6bf0239e9ace24ea6a4

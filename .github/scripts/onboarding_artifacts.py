@@ -27,6 +27,14 @@ SUMMARY_TEXT_LIMIT = 1000
 MAX_IMPLEMENTATION_FILES = 8
 MAX_IMPLEMENTATION_CHANGED_LINES = 500
 
+#: Checked-in reproducers for the realization corpus. They live under ``tests/`` but are evidence,
+#: not code: an onboarding run records a compiler gap it measured by adding one YAML file here.
+CORPUS_CASE_DIR = "tests/compiler/realization/cases/"
+#: The four stages a corpus case may declare as its expected failure, via its filename suffix. The
+#: filename is semantic, so an ``_xfail``-shaped token naming anything else must be rejected rather
+#: than silently read as a closed case that asserts more than the author meant.
+CORPUS_XFAIL_STAGES = ("offered", "realized", "built", "correct")
+
 
 def _summary_text(summary: dict, field: str) -> str:
     value = summary.get(field)
@@ -81,12 +89,32 @@ def _is_tracked_deletion(workspace: Path, path: Path) -> bool:
     return result.returncode == 0 and path.as_posix() in result.stdout.splitlines()
 
 
+def _is_corpus_case(path: Path) -> bool:
+    return path.as_posix().startswith(CORPUS_CASE_DIR) and path.suffix == ".yaml"
+
+
+def _validate_corpus_case(path: Path) -> None:
+    stem = path.stem
+    if "_xfail" not in stem:
+        return
+    _, _, suffix = stem.partition("_xfail")
+    if suffix.removeprefix("_") not in CORPUS_XFAIL_STAGES:
+        raise ValueError(
+            f"Realization corpus case names an unknown expected-failure stage: {path.as_posix()} "
+            f"(expected _xfail_<stage> naming one of {', '.join(CORPUS_XFAIL_STAGES)})"
+        )
+
+
 def _relative_artifact(workspace: Path, raw_path: str) -> Path:
     path = Path(raw_path)
     normalized = path.as_posix()
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"Artifact path is not repository-relative: {raw_path}")
-    allowed_implementation_file = path.parts[0] not in {"emmy", "tests"} or path.suffix == ".py" or path.name == "ARCHITECTURE.md"
+    if _is_corpus_case(path):
+        _validate_corpus_case(path)
+    allowed_implementation_file = (
+        path.parts[0] not in {"emmy", "tests"} or path.suffix == ".py" or path.name == "ARCHITECTURE.md" or _is_corpus_case(path)
+    )
     if (
         normalized.startswith(ALLOWED_ARTIFACT_PREFIXES)
         and allowed_implementation_file
@@ -131,18 +159,28 @@ def _archive_platform_records(workspace: Path, archive: Path, platform: str) -> 
 
 
 def _is_implementation_artifact(path: Path) -> bool:
-    return bool(path.parts) and path.parts[0] in {"emmy", "tests"}
+    """Whether a changed path counts against the bounded small-fix budget.
+
+    A realization-corpus case does not. The budget exists to bound CODE churn, and a case is a
+    minimized reproducer recorded as data — an onboarding run that measures five compiler gaps
+    would otherwise blow an eight-file limit without touching a line of Python.
+    """
+    return bool(path.parts) and path.parts[0] in {"emmy", "tests"} and not _is_corpus_case(path)
 
 
 def _validate_implementation_patch(workspace: Path, changed: set[str]) -> None:
     implementation = sorted(Path(path) for path in changed if _is_implementation_artifact(Path(path)))
+    corpus_cases = [Path(path) for path in changed if _is_corpus_case(Path(path))]
     if len(implementation) > MAX_IMPLEMENTATION_FILES:
         raise ValueError(f"Onboarding small fix changes too many implementation files: {len(implementation)}")
     if not implementation:
         return
     source_changes = [path for path in implementation if path.parts[0] == "emmy" and path.suffix == ".py"]
     test_changes = [path for path in implementation if path.parts[0] == "tests" and path.suffix == ".py"]
-    if source_changes and not test_changes:
+    # A corpus case IS the focused test for a compiler fix — that pairing (fix the lockout, record
+    # the reproducer that proves it closed) is the workflow the corpus exists to make routine, and
+    # demanding a Python test beside it would forbid exactly the change it wants.
+    if source_changes and not test_changes and not corpus_cases:
         raise ValueError("Onboarding small fix must include a focused test change")
 
     result = subprocess.run(

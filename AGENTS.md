@@ -81,6 +81,31 @@ parallelize (add `-p no:randomly` for a stable order):
 `-n auto` spawns one worker per core; `--dist=loadgroup` keeps tests sharing an `xdist_group` (e.g. CUDA context) on the
 same worker.
 
+### The realization corpus
+
+`tests/compiler/realization/` replays pinned schedules from checked-in case files. A case's expectation is its
+filename: no suffix means every stage must pass, `_xfail_<stage>` means it is a known gap expected to fail at
+`offered`, `realized`, `built` or `correct`.
+
+- A case **without** a suffix that fails is a regression. Fix the compiler. **Never add an `_xfail_` suffix to make a
+  red test green** — that converts a regression into a recorded gap and the ratchet stops meaning anything.
+- A case **with** a suffix that passes means the gap closed. `git mv` the file to drop the suffix; do not delete the
+  case.
+- A **stale case** failure means a kernel identity or a schedule codec changed and the stored derived data no longer
+  matches. `make test` detects this on its own, on any machine; `make test-corpus-regen` is the fix. It refuses to
+  write when a case's verdict also changed; that refusal is the signal, not an obstacle to work around.
+- **The corpus never asks for something this machine cannot do.** With no GPU, the only obligation is the stale case
+  above, and it is always fixable where you are: `offered` and `realized` run at the case's declared capability, while
+  `built` and `correct` run only on a card whose capability equals it.
+- **Latency is measured in `tests/perf/`, whose case list IS the corpus.** `make test` compiles at `-O1` and never
+  measures; `make bench-kernels` benches every closed case the card can run, prints the comparison against eager and
+  `torch.compile`, and reports a case slower than its stored number. A regression there is a finding, not a failure.
+- **Never write a benchmark script.** `emmy run --golden-file FILE --bench --record` benches a golden and writes its
+  timings back. If it cannot express what you need, that is a missing flag to add, not a script to write.
+
+Before adding a case, read `tests/compiler/realization/ARCHITECTURE.md` — it owns what earns a case, the knob spelling
+rules, and what deliberately stays in Python.
+
 ### macOS: the suite exits 139 (SIGSEGV)
 
 The loop backend JIT-compiles kernels in-process through cppyy / Cling (`emmy/compiler/ir/loop/runner.py`), and
@@ -123,11 +148,16 @@ Quick test models / scripts (for local iteration):
   serving-validated on a 4080, tuned TPOT 1.28x stock; defaults to thinking mode — pass `enable_thinking: false`
   in chat probes for terse outputs). `TinyLlama/TinyLlama-1.1B-Chat-v1.0` stays as the ungated **Llama-arch**
   smoke model. GPU embedding model (0.6B): `Qwen/Qwen3-Embedding-0.6B`
-- Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `bench_golden_set.py`, `profile_gen_decode.py`,
+- Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `profile_gen_decode.py`,
   `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`, `digest_kernels.py` — the kernel-source byte-identity
   gate for tile-IR storage migrations, each case also asserting its pins reached a kernel) — run with `--help` for
   usage;
   the skills that drive them document the flows.
+- **Never write a benchmark script.** `emmy run --bench --json PATH` is the machine-readable record every consumer
+  reads; `--golden-file FILE` benches every target in a working golden and `--golden NAME` selects one. If the CLI
+  cannot express what you need, that is a missing flag to add, not a script to write — the two scripts that
+  re-implemented it (one parsing stdout with a regex, one diffing perf snapshots) had silently stopped working before
+  anyone noticed.
 
 ## Key Make Targets
 
@@ -135,6 +165,8 @@ Quick test models / scripts (for local iteration):
 - `make test` — run `pytest` using the venv (skips `perf`-marked tests; see the `tests/perf` architecture). Compiles
   kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
   `make bench-kernels`)
+- `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
+  change (`make test` detects the staleness on any machine; this applies the fix)
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
   xdist workers on; commit the result when the balance has drifted
 - `make lint` — run `ruff check` and `ruff format --check`

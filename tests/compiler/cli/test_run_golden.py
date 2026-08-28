@@ -15,27 +15,24 @@ def _parser():
     return parser
 
 
-def test_run_golden_schema_has_no_process_wrapper_flags():
-    args = _parser().parse_args(["run", "--golden", "working.yaml", "--target", "linear.layer0", "--gpu-arch", "sm_90"])
+def test_run_golden_schema_matches_compile():
+    """``run`` spells golden selection the way ``compile`` does: a NAME plus an optional PATH.
 
-    assert args.golden == "working.yaml"
-    assert args.golden_target == "linear.layer0"
+    One flag with two meanings across two commands is what sent callers to write wrappers; the
+    aligned pair is also what ``_run_golden_targets`` already translated into internally."""
+    args = _parser().parse_args(["run", "--golden-file", "working.yaml", "--golden", "linear.layer0", "--gpu-arch", "sm_90"])
+
+    assert args.golden_file == "working.yaml"
+    assert args.golden == "linear.layer0"
     assert args.gpu_arch == "sm_90"
-    for removed in ("all_targets", "repeats", "require_kernel_source", "golden_file"):
+    for removed in ("all_targets", "repeats", "require_kernel_source", "golden_target"):
         assert not hasattr(args, removed)
-
-
-def test_target_requires_golden(run_cli):
-    rc, stdout, stderr = run_cli("run", "--target", "linear.layer0")
-
-    assert rc == 2
-    assert "--target requires --golden PATH" in stdout + stderr
 
 
 def _args(tmp_path, **updates):
     values = {
-        "golden": str(tmp_path / "working.yaml"),
-        "golden_target": None,
+        "golden_file": str(tmp_path / "working.yaml"),
+        "golden": None,
         "input": None,
         "code": None,
         "ir": None,
@@ -63,16 +60,12 @@ def test_golden_runs_every_distinct_target_in_process(monkeypatch, tmp_path):
     assert all(args.golden_file.endswith("working.yaml") for args in calls)
 
 
-def test_target_limits_golden_to_one_match(monkeypatch, tmp_path):
-    _patch_records(monkeypatch, ["linear.layer0", "linear.layer1"])
-    calls = []
-    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+def test_naming_one_target_skips_the_multi_target_walk(run_cli):
+    """``--golden NAME`` goes straight down the single-run path — the walk is for a bare file."""
+    rc, stdout, stderr = run_cli("run", "--golden", "linear.layer0", "--code", "torch.randn(4, 4)")
 
-    run_mod._run_golden_targets(_args(tmp_path, golden_target="layer1", json=str(tmp_path / "result.json")))
-
-    assert len(calls) == 1
-    assert calls[0].golden == "layer1"
-    assert calls[0].json.endswith("result.json")
+    assert rc == 2
+    assert "mutually exclusive" in stdout + stderr
 
 
 def test_multi_target_json_uses_one_readable_file_per_target(monkeypatch, tmp_path):

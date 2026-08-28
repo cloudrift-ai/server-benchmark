@@ -204,51 +204,56 @@ def _f8_term(cap=(12, 0), *, a_dtype=F8E4M3, b_dtype=F8E4M3, k=512):
     node = Fold.contraction(k_axis=ka, a=a, channels=(Channel(b=b, acc="acc"),))
     inputs = {"a_bits": Tensor("a_bits", (32, k), a_dtype), "w_bits": Tensor("w_bits", (k, 512), b_dtype)}
     tile = TileOp(op=node, name="lin", place=Placement(free=(Axis("m", Dim(32)), Axis("n", Dim(512)))), inputs=inputs)
-    return sched._Term(tile, tile.place.on_grid(), Context.from_target(cap)), node
+    return tile, Context.from_target(cap), node
+
+
+def _offered_atoms(tile, ctx, node):
+    """The tensor-core atoms the catalog OFFERS at this node under the live precision pins — the
+    prescan's choice layer (``_node_refusal``) plus the policy half of the atom families."""
+    from emmy.compiler.ir.tile.ops import projection_tail
+
+    tail = projection_tail(tile)
+    if sched._node_refusal(tile, ctx, node, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op))) is not None:
+        return ()
+    return sched._atom_families(tile, ctx, node, tail)[0]
 
 
 def test_k32_enumeration_requires_the_precision_gate(monkeypatch):
     monkeypatch.delenv("EMMY_FP8_MMA", raising=False)
     monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
-    term, node = _f8_term()
-    assert sched._warp_atoms(term, node) == ()
+    term = _f8_term()
+    assert _offered_atoms(*term) == ()
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
-    assert sched._warp_atoms(term, node) == (K32,)
+    assert _offered_atoms(*term) == (K32,)
     monkeypatch.delenv("EMMY_FAST_MATH")
     monkeypatch.setenv("EMMY_FP8_MMA", "1")
-    assert sched._warp_atoms(term, node) == (K32,)
+    assert _offered_atoms(*term) == (K32,)
     monkeypatch.setenv("EMMY_FP8_MMA", "0")
     monkeypatch.setenv("EMMY_FAST_MATH", "1")  # the precise pin wins over the umbrella
-    assert sched._warp_atoms(term, node) == ()
+    assert _offered_atoms(*term) == ()
 
 
 def test_k32_enumeration_structural_requirements(monkeypatch):
     monkeypatch.setenv("EMMY_FP8_MMA", "1")
     # both operands must carry the SAME f8 dtype — a 16-bit B never rides the byte gather
-    term, node = _f8_term(b_dtype=F16)
-    assert sched._warp_atoms(term, node) == ()
+    assert _offered_atoms(*_f8_term(b_dtype=F16)) == ()
     # the sm_89 hardware floor is absolute (the bare PTX form does not compile below)
-    term, node = _f8_term(cap=(8, 6))
-    assert sched._warp_atoms(term, node) == ()
+    assert _offered_atoms(*_f8_term(cap=(8, 6))) == ()
     # a symbolic K declines — no masked-K byte gather
-    from emmy.compiler.pipeline.passes.lowering.tile import _legality as legal
-
-    term, node = _f8_term()
     plan = TilePlan.parse(f"{K32}/f2x2/k2", Workers.parse("w1x8"))
     sym = Fold.contraction(
         k_axis=Axis("k", Dim("seq")),
         a=Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=F8E4M3),
         channels=(Channel(b=Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3), acc="acc"),),
     )
-    assert legal.warp_k_step(sym, plan) is not None
+    assert sched._kstep_refusal(sym.axis, plan) is not None
 
 
 def test_k32_never_offered_on_16bit_operands(monkeypatch):
     """The k16 path's picks are untouched: 16-bit operands never see a k32 atom, with or without
     the gate."""
     monkeypatch.setenv("EMMY_FP8_MMA", "1")
-    term, node = _f8_term(a_dtype=F16, b_dtype=F16)
-    atoms = sched._warp_atoms(term, node)
+    atoms = _offered_atoms(*_f8_term(a_dtype=F16, b_dtype=F16))
     assert K32 not in atoms and "mma_m16n8k16_f16_f32" in atoms
     assert atoms_for(F16) == ("mma_m16n8k16_f16_f32",)
 
@@ -259,9 +264,9 @@ def test_f8_atoms_offer_staged_byte_slabs():
     replaced kept every fp8 arm on the transaction-bound gmem-direct path; the parity/legality
     battery is ``test_fp8_staged``)."""
     from emmy.compiler.ir.schedule import Stage
-    from emmy.compiler.pipeline.passes.lowering.tile._legality import resolve_warp_stage
+    from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 
-    _term, node = _f8_term()
+    _tile, _ctx, node = _f8_term()
     tile = TilePlan.parse(f"{K32}/f4x1/k4", Workers.parse("w1x8")).at(Axis("m", Dim(512)), Axis("n", Dim(512)))
     inputs = {"a_bits": Tensor("a_bits", (512, 512), F8E4M3), "w_bits": Tensor("w_bits", (512, 512), F8E4M3)}
     for spec in ("d2/smem-async", "d2/smem-tma"):
@@ -363,13 +368,16 @@ def _w8a8_graph(m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-@pytest.mark.xfail(reason="static W8A8 still routes an f8 operand through the 16-bit shared-memory fill", strict=True)
 def test_w8a8_static_act_quant_e2e_cuda():
-    """The W8A8 e2e (M3 priority 4): the encode kernel materializes ``x_f8`` via the
-    <cuda_fp8.h> constructor, the linear's double decode cone binds BOTH raw f8 operands onto the
-    k32 mma, and the epilogue composes ``act_scale ⊗ weight_scale`` on the f32 accumulator.
-    Compared against (a) the f32 reference of the SAME quantized computation (tight) and (b) the
-    unquantized reference (the activation-quantization error, loose documented gate)."""
+    """The W8A8 e2e (M3 priority 4): under the bare recursive cut, the fused MIMO kernel (whose
+    independent ``x_f8`` output refuses the fragment epilogue, so it has no warp tier at all)
+    decomposes until the contraction stands alone — the A cone cuts at its STORAGE FRONTIER
+    (``storage_frontier``: the encode prefix becomes its own kernel, the raw f8 bytes the
+    workspace), normalization re-binds the residue as the raw f8 load with ``act_scale`` hoisted,
+    and the bare contraction piece feeds the k32 mma raw bytes on both operands with the scale
+    product composed per element downstream. Compared against (a) the f32 reference of the SAME
+    quantized computation (tight) and (b) the unquantized reference (the activation-quantization
+    error, loose documented gate)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -384,7 +392,7 @@ def test_w8a8_static_act_quant_e2e_cuda():
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
+    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": "", "PLACE": "cut"}):
         compiled = backend.compile(_w8a8_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     assert any("__nv_fp8_e4m3(" in s and "x_f8[" in s for s in srcs), "no encode kernel materializing x_f8"
@@ -452,14 +460,22 @@ def _dyn_w8a8_graph(m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-@pytest.mark.xfail(reason="dynamic W8A8 effects are not yet representable as Tile IR output specifications", strict=True)
+@pytest.mark.xfail(
+    reason="dynamic W8A8 never reaches Tile IR: the fused kernel's swept output region interleaves two "
+    "independent output cones (the x_f8 encode beside the y contraction), the region's Lambda stores its "
+    "body in normalized order, and extract_output_specs' byte-identical reconstitution gate refuses the "
+    "reordered round trip — the term stays a Loop-IR fallback. Closing it means fissioning a swept "
+    "multi-output region into per-output-cone regions under an order-insensitive reconstitution contract, "
+    "then a storage-frontier cut whose producer carries the amax statistic cone as a real operand",
+    strict=True,
+)
 def test_w8a8_dynamic_per_token_amax_cuda():
-    """Dynamic per-token amax (M3 priority 5): the composition falls out of the existing
-    machinery — the amax statistic + encode ride their own kernels, the k32 mma consumes the
-    materialized bits, and the m-indexed per-token scale hoists like any k-invariant factor.
-    Verified against the DEVICE's own encoded bits (tight — isolates the mma path from host/device
-    encode boundary-tie divergence at x/s values landing exactly between e4m3 codes) and the host
-    quantized reference (loose)."""
+    """Dynamic per-token amax (M3 priority 5): the intended composition — the amax statistic +
+    encode ride their own kernels, the k32 mma consumes the materialized bits, and the m-indexed
+    per-token scale hoists like any k-invariant factor (m-indexed is K-FREE, so the same
+    ``_decode_split`` reassociation applies). Verified against the DEVICE's own encoded bits
+    (tight — isolates the mma path from host/device encode boundary-tie divergence at x/s values
+    landing exactly between e4m3 codes) and the host quantized reference (loose)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.pipeline.search.pins import pinned_knobs

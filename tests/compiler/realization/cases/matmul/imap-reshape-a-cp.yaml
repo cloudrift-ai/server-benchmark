@@ -1,0 +1,41 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x, w]
+  outputs: [o]
+  nodes:
+  - id: w
+    op: input
+    outputs: [[w, f16, [128, 64]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [128, 256]]]
+  - id: xr
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [256, 128]}}
+    inputs: [x]
+    outputs: [[xr, f16, [256, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [xr, w]
+    outputs: [[o, f16, [256, 64]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+    - xr
+  realizations:
+  - name: k_matmul_fd43f7.d8cc89489c4e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      STAGE: d2/smem-async
+    identity: 09ca8ac30e5a4f056ce71f077b8e83e309bd1b25db4828f0b5ee5f3030099777
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 1.754263582883275
+        tcompile_us: 2.0503002291753982

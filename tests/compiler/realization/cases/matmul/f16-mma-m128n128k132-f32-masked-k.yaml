@@ -1,0 +1,37 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [128, 132]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [132, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[o, f32, [128, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_matmul_08e4c1.587521501d0b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      WORK: w2x2
+      REDUCE: ''
+    identity: 9390cb6118a7afb258507885001886c5a1fac7494467c26955615da26966df34
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 7.228753704955612
+        tcompile_us: 4.086938052050836

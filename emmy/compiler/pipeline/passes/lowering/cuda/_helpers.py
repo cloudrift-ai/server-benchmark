@@ -13,7 +13,7 @@ from emmy.compiler.ir.stmt import Write
 
 
 def atomic_outputs(kernel: KernelOp) -> tuple[str, ...]:
-    """Output buffers an atomic reduce-write (``030_split_reduce``'s atomic finalize) accumulates
+    """Output buffers an atomic reduce-write (``035_split_reduce``'s atomic finalize) accumulates
     into — they must be zero-init'd before each launch (``CudaOp.zero_outputs``), since every
     contributing CTA ``atomicAdd``\\ s into the same cell. The scalar tier's atomic ``Write``
     survives materialization verbatim; the mma tier's is a ``RegStore(atomic=True)``.

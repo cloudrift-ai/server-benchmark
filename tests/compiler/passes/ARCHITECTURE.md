@@ -108,17 +108,20 @@ numpy backends in three places:
 
 ### Tile lowering (`passes/lowering/tile/`)
 
-`test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `015_twisted` rule,
+`test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
-sites through the CUDA pipeline. `test_pool_space.py` addresses large spaces by boundary/sample indices and narrows
-paired MMA checks with exact pins; it never exhausts a live catalog. `test_move_catalog.py` checks that independent
+sites through the CUDA pipeline. `test_schedule_walk.py` pins the walk's enumeration contracts — one prescan per
+term, computed and derived fold sites keyed as schedule sites, the paired MMA row under exact pins, and the
+structural split fork's atomic and deferred arms on offer — observing complete traversals through the sampled leaf
+stream rather than flattening a live space into test memory. `test_schedule_pool_cache.py` pins the session memo:
+sharing, hit equality, read-only payloads, and the keying that holds pin states, dtypes, extents, stores and the
+sample apart. `test_move_catalog.py` checks that independent
 roots with reversed M/N readings combine only when their tile
 widths and unit counts match on the physical output axes, and that f32 computed-A contractions retain scalar
 output-tile rows when no MMA atom applies. `test_cut_forks.py` checks fused and closed Fold-edge choices for SDPA score
 production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA lowering. Direct
-contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype. The
-pool-space tests inspect combined, atomic, and deferred reduce partitions through the lazy partition index rather than
-enumerating the full schedule space. The generated carrier's numerical laws are covered
+contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
+The generated carrier's numerical laws are covered
 independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax and
 attention accuracy remain covered by the e2e suites.
 

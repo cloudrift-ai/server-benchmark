@@ -1952,7 +1952,7 @@ class RegStore(Stmt):
     scalar strided writes, while the ordinary contiguous-N case keeps packed pairs.
 
     ``atomic`` renders each store as an ``atomicAdd`` accumulate instead of a
-    plain assign — ``030_split_reduce``'s atomic finalize on the mma tier: every
+    plain assign — ``035_split_reduce``'s atomic finalize on the mma tier: every
     split partition's C fragment adds into the (per-launch zero-init'd) output.
     f16 / bf16 keep the vectorized row pair (native packed-pair ``atomicAdd``);
     an f32 destination has no packed atomic below sm_90, so it drops to

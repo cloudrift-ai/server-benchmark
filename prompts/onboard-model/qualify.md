@@ -50,8 +50,10 @@ every edit, command, measurement, and conclusion.
 ## Repository artifacts
 
 Allowed areas are `recipes/` (including the model's `golden/` subdirectory), `experiments/`,
-`docker/vllm-emmy-serve/models/`, and a bounded small fix under `emmy/` with its focused tests and nearest
-`ARCHITECTURE.md` updates.
+`docker/vllm-emmy-serve/models/`, `tests/compiler/realization/cases/` for the realization-corpus cases the skill's
+section 3b records, and a bounded small fix under `emmy/` with its focused tests and nearest `ARCHITECTURE.md`
+updates. A corpus case is evidence rather than code: it does not count against the small-fix budget, and it satisfies
+the focused-test requirement for a compiler fix on its own.
 
 Reuse this model's existing serving experiment root when it already represents the protocol; many models keep a
 platform-named root such as `serving_v100_sxm2_16gb`. Create `experiments/<model>/serving/` only when the model has
@@ -70,7 +72,9 @@ Git LFS is already configured through the caller's local attributes. Verify that
 ## Output
 
 Always write the skill's atomic summary to `summary_path`, on success and on failure, with `mode` set to the task's
-mode. List every intended created, modified, or deleted repository file in `artifacts` and no exploratory output.
+mode. List every intended created, modified, or deleted repository file in `artifacts` and no exploratory output —
+including every realization-corpus case, which is staged only when the summary manifests it. Report those cases in
+`compiler.realization_gaps` as `{file, stage, emmy_us, tcompile_us}`.
 Include `experiment_artifacts` with the shared experiment recipe and `RESULTS.md` plus the exact platform archive, and
 one-line `deployment_summary` and `performance_summary` values drawn from the exact selected recipe lane.
 

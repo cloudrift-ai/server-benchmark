@@ -1,7 +1,7 @@
 """The axis-realization layer (`kernel/_tiling.py`) — the four levels a schedule's plan becomes
 bound `Axis` objects through, exercised without a node, a `Ctx` or any algebra.
 
-`020_schedule` decides the plan; nothing it produces is an axis a kernel loops over. This layer is
+`040_schedule` decides the plan; nothing it produces is an axis a kernel loops over. This layer is
 the other half, and it is algebra-free by construction: it takes a `Side` pair, integer counts and
 three callables. These tests hold that boundary — they never build a `bilinear fold` — and pin the
 per-cell coordinate arithmetic `AxisOffset.base` accumulates across the levels, which is what the

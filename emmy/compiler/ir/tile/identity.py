@@ -189,7 +189,7 @@ def shape_fingerprint(tile: TileOp) -> tuple[tuple[str, ...] | str, ...]:
     Not implied by :func:`extent_fingerprint`: the axes say how far a loop runs, the shape says how
     the buffer SPELLS that coordinate. A re-fused split axis reaches its buffer as a dim pair
     (``[…, f/Q, …, f%Q]``), which the fragment store can address only under a divisibility rule
-    (``_legality.warp_split_store``) — so a ``(128, 128)`` output and a ``(4, 32, 128)`` one over
+    (``lowering/_addr.split_addressable``) — so a ``(128, 128)`` output and a ``(4, 32, 128)`` one over
     the same iteration space do not offer the same tiers. They were reaching identical
     ``deploy_identity`` AND ``pool_key`` over spaces of 50538 and 10284 candidates, which put a
     golden measured on the flat kernel onto a kernel that cannot realize the row it names.
@@ -205,7 +205,7 @@ def store_fingerprint(tile: TileOp) -> tuple:
     the sweep axis's extent when it rides an output ``Loop``. Buffer and SSA names are excluded —
     those are spelling, and identity is name-free — while the index EXPR is kept whole
     (:func:`~emmy.compiler.structural.form`, a structural walk, not its ``repr``), since it is exactly what
-    :func:`~_legality.warp_split_store` reads to decide addressability.
+    the scheduler's split-store gate (``lowering/_addr.split_addressable``) reads to decide addressability.
 
     ``TileOp.structural_key`` excludes the output specifications by design (they are a kernel-boundary fact beside
     ``place``, not algebra), so any identity coarser than the term folds them back in here.
@@ -244,13 +244,14 @@ def deploy_identity(tile: TileOp) -> str:
     )
 
 
-def pool_key(tile: TileOp, *, pins: str) -> str:
+def pool_key(tile: TileOp, *, pins: tuple[tuple[str, str], ...]) -> str:
     """The schedule-space key — would this enumerate the same candidates?
 
     ``tile.cache_key()`` covers the term and the knobs; every OTHER input the enumeration reads is
     folded in explicitly, because ``structural_key`` excludes it by design — the operand/output
     dtypes (atom eligibility), the per-axis extents, and the symbolic-axis hints. ``pins`` is the
-    live env-pin fingerprint (``knob.schedule_pin_fingerprint``), passed in rather than read here
+    live env-pin fingerprint (``knob.schedule_pin_fingerprint``'s sorted ``(env var, raw value)``
+    pairs), passed in rather than read here
     so this module stays a pure function of a ``TileOp`` and below the pipeline layer.
 
     Target facts (smem cap, TMA, the f16acc gate) need no part: the pool cache lives ON the

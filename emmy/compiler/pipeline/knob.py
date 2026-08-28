@@ -358,28 +358,37 @@ def pin_key_matches(pinned: str, realized: str) -> bool:
     return pinned == realized or axis_of(pinned) is None or axis_of(realized) is None
 
 
-def canon_family_value(name: str, value) -> str:
-    """The canonical spelling of a ``TILE`` / ``REDUCE`` / ``STAGE`` value — the codec's own normal
-    form. The two site families decode under a DUMMY inventory (the worker widths never reach a site
+def canon_family_value(name: str, value, *, strict: bool = False) -> str:
+    """The canonical spelling of a ``WORK`` / ``TILE`` / ``REDUCE`` / ``STAGE`` value — the codec's own
+    normal form. The two site families decode under a DUMMY inventory (the worker widths never reach a site
     spelling, so the dummy cannot leak) and re-spell: ``f64x1`` ≡ ``f64``, the pin-only ``a:scalar``
     alias ≡ ``""``. ``STAGE`` needs no inventory and normalizes token ORDER, which binds order-free
-    but spells in schema order — so a hand pin ``cp/d2`` matches the realized ``d2/smem-async`` instead of
-    failing verification against its own value on the deploy path. Any other family — and any
+    but spells in schema order — so a hand pin ``smem-async/d2`` matches the realized ``d2/smem-async`` instead of
+    failing verification against its own value on the deploy path. ``WORK`` re-spells its inventory
+    (``t4x1`` ≡ ``t4``). Any other family — and any
     unparseable value — passes through untouched (the caller's own equality applies).
+
+    ``strict`` turns that last fallback into a ``ValueError``. Comparison callers want the
+    fallback: an unparseable realized spelling should simply fail to equal the pin. A caller that
+    is *storing* a hand-authored value wants the raise, because a retired spelling that
+    canonicalizes to itself then matches no candidate and reports as a compiler lockout — a
+    phantom gap. The realization corpus regenerates under ``strict=True`` for exactly that reason.
 
     Memoized on ``(family, value)``: the value vocabulary is tiny beside the comparison count (a
     golden consult runs :func:`values_equal` per candidate row per recorded knob), so the parse
     runs once per distinct spelling per process."""
     fam = family_of(name)
     v = str(value).strip()
-    return _canon_family_cached(fam, v) if v else v
+    return _canon_family_cached(fam, v, strict) if v else v
 
 
 @lru_cache(maxsize=8192)
-def _canon_family_cached(fam: str, v: str) -> str:
+def _canon_family_cached(fam: str, v: str, strict: bool = False) -> str:
     from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers  # noqa: PLC0415
 
     try:
+        if fam == "WORK":
+            return Workers.parse(v).spell()
         if fam == "TILE":
             return TilePlan.parse(v, Workers(kind="warp", units=(1, 1))).spell()
         if fam == "REDUCE":
@@ -387,6 +396,8 @@ def _canon_family_cached(fam: str, v: str) -> str:
         if fam == "STAGE":
             return Stage.parse(v).spell()
     except ValueError:
+        if strict:
+            raise
         return v
     return v
 
@@ -401,7 +412,7 @@ def values_equal(name: str, want, got) -> bool:
     their codec's normal form (:func:`canon_family_value`), so an atom-ALIAS pin
     (``mma_m16n8k16_f16/…``) keeps matching the canonically-stamped atom, the
     pin-only ``a:scalar`` alias matches the per-cell row, and an out-of-order
-    ``cp/d2`` matches the realized ``d2/smem-async``. ``WORK``
+    ``smem-async/d2`` matches the realized ``d2/smem-async``. ``WORK``
     compares through its own codec. An unregistered family compares by string only."""
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
@@ -552,8 +563,8 @@ def consume_kernel_row(knobs: dict) -> dict:
 
 
 #: Every env-pinned knob the schedule ENUMERATION consults: the :data:`SCHEDULE_FAMILIES` (bare
-#: and ``@``-keyed) plus the precision gates ``_schedule._f16acc_allowed`` / ``_f8_mma_allowed``
-#: read (the precise ``F16_MMA_F32_ACC`` / ``FP8_MMA`` pins and their ``FAST_MATH`` umbrella —
+#: and ``@``-keyed) plus the precision gates the scheduler's catalog arm reads through
+#: ``precision_pin`` (the precise ``F16_MMA_F32_ACC`` / ``FP8_MMA`` pins and their ``FAST_MATH`` umbrella —
 #: they decide whether the f16-accumulate / native-fp8 atom rows are OFFERED, so they change the
 #: pool exactly like a family pin). The pool cache's pin
 #: fingerprint must cover exactly this set; a knob outside it cannot change which rows enumerate.

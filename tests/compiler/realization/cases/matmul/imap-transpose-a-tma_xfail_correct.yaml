@@ -1,0 +1,52 @@
+# A layout op between an activation and its matmul is absorbed into the operand's load index,
+# so the operand is no longer a plain window of its buffer — but every tiled loader reads one
+# anyway. Taking the operand's DECLARED trailing extent as the row stride was the miscompile:
+# a reshape that re-strides the rows reads a rectangle of the wrong buffer, silently, on plain
+# f16 with no quantization in sight. The contract now is that the row stride is DERIVED from
+# the index, the columns must be gmem-contiguous, and a form no loader can read falls back.
+#
+# The transposed A under a TMA box. Unlike cp.async, a descriptor CAN name a strided rectangle,
+# so the pin is not declined here — it is realized, and 85% of the output is wrong.
+#
+# evidence: imap-transpose-a-gmem.yaml is the SAME program with the transport pinned off and is
+# correct, so this operand form is schedulable and the answer is reachable; imap-slice-a-tma.yaml
+# is this transport on a canonical index and is correct, so the box copy is sound where the index
+# is. The source test recorded transpose_a as wrong 'on all three' transports at up to 100%
+# relative error. It does not fault here — it launches cleanly and returns a wrong answer.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x, w]
+  outputs: [o]
+  nodes:
+  - id: w
+    op: input
+    outputs: [[w, f16, [256, 64]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [256, 128]]]
+  - id: xr
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 0]}}
+    inputs: [x]
+    outputs: [[xr, f16, [128, 256]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [xr, w]
+    outputs: [[o, f16, [128, 64]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+    - xr
+  realizations:
+  - name: k_matmul_525ad8.f35e1e91b603
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      STAGE: d2/smem-tma
+    identity: bd66107a1021da89b540b190f85bf5ec5e9c8d5f9a3b3f18ef658c93a5954cf1

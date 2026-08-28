@@ -1,29 +1,26 @@
-"""Cooperative-reduce coverage — the carrier-generic monoid combine, one file.
+"""Cooperative-reduce coverage — what a realization case cannot state.
 
-The cross-execution-unit reduction the monoid-combine work generalizes (lanes → warps → CTAs)
-is **carrier-generic**: a plain reduction (``Accum``), online softmax / its stats (``Accum``
-max+sum), and flash attention (the ``(m, d, o)`` twisted ``Monoid``) all fold through the SAME
-combine, differing only in carrier state. This file pins each reduction *variant* and checks
-every op type stays accurate vs torch AND emits the matching lowering structure, so a change to
-one combine stage (warp-shuffle / hierarchical smem) or the cross-CTA finalize (atomic ``c<cta>a``
-vs deferred ``c<cta>k``) can't silently break a carrier it wasn't tuned on.
+The cross-execution-unit reduction the monoid-combine work generalizes (lanes → warps → CTAs) is
+**carrier-generic**: a plain reduction (``Accum``), online softmax / its stats (``Accum`` max+sum),
+and flash attention (the ``(m, d, o)`` twisted ``Monoid``) all fold through the SAME combine,
+differing only in carrier state. That matrix — op type × reduction variant × (static / symbolic)
+reduce axis, the cross-CTA split and its atomic / deferred finalize, the transposed ``coop-t``
+band, the 2D segmented row, and the fused residual-add producer — is replayed as data by
+``tests/compiler/realization/cases/reduce``: one case per (program, authored schedule), asserting
+the schedule is offered, realized (every authored family stamped on the kernel), built and correct.
 
-Sections:
-- **cooperative combine matrix** — op type × reduction variant × (static / symbolic) reduce axis.
-- **symbolic straddling sweep** — one symbolic-reduce softmax kernel run at off-hint runtime
-  sizes (the strided ``< seq_len`` bound IS the masked tail).
-- **flash carrier + cross-CTA finalize** — the twisted ``(m, l, O)`` combine, split-KV / split-K,
-  atomic vs deferred-kernel finalize, and the projection-epilogue distributivity guard.
-- **online-softmax fusion** — the two-pass → one-pass streaming rewrite (GPU).
-- **2D segmented coop** — a pinned ``BN>1`` × ``BR>1`` reduce, segmented shuffle per row.
+Three things stay here because no case can say them:
 
-Pure GPU accuracy (no ``-O1`` numerics change), so it runs in the correctness lane. The
-exp-family generator unit test needs no GPU and stays ungated.
+- **the exp-family generator's algebra** — a pure IR unit test with no schedule to author.
+- **the transposed band is OFFERED** at a swept extent 32 does not divide — an enumeration-only
+  claim about a schedule nothing then realizes. Neither of these needs a GPU.
+- **the two verdicts a row has no spelling for**: an emitted-source signature no knob pins (the
+  online-softmax pairing), and a refusal message (the atomic finalize declining a projection that
+  does not distribute over the add).
 """
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import torch
 
@@ -32,351 +29,39 @@ from emmy.compiler.trace.torch import trace_module
 from tests.compiler.helpers import requires_cuda
 
 # --------------------------------------------------------------------------- #
-# Shared harness: code → graph → compiled kernel, plus a torch reference.
+# Cross-CTA split-reduce — the projection epilogue the atomic finalize refuses.
 # --------------------------------------------------------------------------- #
+# The ATOMIC finalize applies the projection to each CTA's partition before the ``atomicAdd``, so it
+# is correct only when the projection DISTRIBUTES over the add (``Σ φ(xₛ) = φ(Σ xₛ)``): ``mean``'s
+# ``×1/N`` (a constant scale) distributes; ``l2``'s ``sqrt`` does not. The three cells that DO
+# realize are corpus cases (``split-reduce-mean-atomic``, ``split-reduce-mean-kernel``,
+# ``split-reduce-l2-kernel``); the fourth stays here, because a schedule the compiler correctly
+# refuses has no row to live in.
+_L2_SPLIT_REDUCE = "torch.sqrt((lambda t: (t * t).sum(dim=1, keepdim=True))(torch.randn(4, 1024)))"
 
 
-def _ref_mean(xs):
-    return xs[0].mean(axis=1, keepdims=True)
-
-
-def _ref_amax(xs):
-    return xs[0].max(axis=1, keepdims=True)
-
-
-def _ref_softmax(xs):
-    return torch.softmax(torch.from_numpy(xs[0]), dim=1).numpy()
-
-
-def _ref_attention(xs):
-    q, k, v = (torch.from_numpy(a) for a in xs)
-    return torch.nn.functional.scaled_dot_product_attention(q, k, v).numpy()
-
-
-def _ref_matmul(xs):
-    return xs[0] @ xs[1]
-
-
-def _ref_sum(xs):
-    return xs[0].sum(axis=1, keepdims=True)
-
-
-def _ref_sumsq(xs):
-    # Prologue: the ⊗ pre-map (square) feeds the ⊕ fold — a Map partial under the Monoid.
-    return (xs[0] ** 2).sum(axis=1, keepdims=True)
-
-
-def _ref_l2(xs):
-    # Prologue (square) + epilogue (sqrt projection) around the sum carrier.
-    return np.sqrt((xs[0] ** 2).sum(axis=1, keepdims=True))
-
-
-# (label, code, ref_fn). The reduce axis is sized 1024 (reduction/softmax) so coop=128 reaches
-# the 4-warp hierarchical smem combine; attention's KV is 64 (coop ≤ 64).
-_OPS = {
-    "mean": ("torch.randn(4, 1024).mean(dim=1, keepdim=True)", _ref_mean),
-    "amax": ("torch.randn(4, 1024).amax(dim=1, keepdim=True)", _ref_amax),
-    "softmax": ("torch.softmax(torch.randn(4, 1024), dim=1)", _ref_softmax),
-    "attention": (
-        "torch.nn.functional.scaled_dot_product_attention(torch.randn(1, 4, 64, 32), torch.randn(1, 4, 64, 32), torch.randn(1, 4, 64, 32))",
-        _ref_attention,
-    ),
-    "matmul": ("torch.matmul(torch.randn(8, 1024), torch.randn(1024, 16))", _ref_matmul),
-    "sum": ("torch.randn(4, 1024).sum(dim=1, keepdim=True)", _ref_sum),
-    # Prologue (a ⊗ pre-map under the fold) and prologue+epilogue (the φ projection around it):
-    # ``sum(x·x)`` squares each element before the additive fold; ``l2`` then ``sqrt``s the result.
-    "sumsq": ("(lambda t: (t * t).sum(dim=1, keepdim=True))(torch.randn(4, 1024))", _ref_sumsq),
-    "l2": ("torch.sqrt((lambda t: (t * t).sum(dim=1, keepdim=True))(torch.randn(4, 1024)))", _ref_l2),
-}
-
-
-def _compile_run(
-    code: str, env: dict[str, str], monkeypatch, *, dynamic: str | None = None, seq: int = 512
-) -> tuple[np.ndarray, list[np.ndarray], str]:
-    """Trace + compile ``code`` under the pinned ``env``, run on seeded inputs, and return
-    ``(output, ordered_inputs, kernel_source)``. With ``dynamic`` (a ``parse_position_specs``
-    spec like ``"seq_len@x:1"``) the named axis is traced symbolic and run at runtime size
-    ``seq`` — one compiled kernel exercised at an off-hint length (the cooperative reduce
-    strides to ``seq``, idle lanes folding the identity)."""
+@requires_cuda
+def test_split_reduce_projection_epilogue(monkeypatch):
+    """``l2``'s ``sqrt`` epilogue does not distribute over the add, so the pinned ATOMIC cross-CTA
+    finalize must raise and direct the caller to ``g<n>k`` — not silently finalize raw partial sums
+    (the bug this guards silently dropped ``mean``'s ``×1/N`` that way). Refusal-only: the accurate
+    cells of the old matrix are realization cases now."""
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.ir.base import ConstantOp
 
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    if dynamic is not None:
-        from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
-
-        ds = build_torch_dynamic_shapes(parse_position_specs([dynamic]))
-        graph = graph_from_code(code, dynamic_shapes=ds)[0]
-    else:
-        graph = graph_from_code(code)[0]
-    be = CudaBackend()
-    compiled = be.compile(graph)
-    rng = np.random.default_rng(0)
-    feed: dict[str, np.ndarray] = {}
-    ordered: list[np.ndarray] = []
-    for name in graph.inputs:
-        # A symbolic axis resolves to the runtime size ``seq``; static dims keep their extent.
-        shape = tuple(d.as_static() if d.is_static else seq for d in graph.nodes[name].output.shape)
-        arr = (rng.standard_normal(shape) * 0.5).astype(np.float32)
-        feed[name] = arr
-        ordered.append(arr)
-    # Supply any baked constants the backend kept as ConstantOp nodes (e.g. RMSNorm weight).
-    for nid, node in compiled.nodes.items():
-        if isinstance(node.op, ConstantOp) and nid not in feed and node.op.value is not None:
-            feed[nid] = np.array([node.op.value], dtype=np.float32)
-    out_name = graph.outputs[0]
-    got = np.asarray(be.run(compiled, input_data=feed)[0].outputs[out_name])
-    src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None))
-    return got, ordered, src
-
-
-# --------------------------------------------------------------------------- #
-# Cooperative combine matrix — op type × reduction variant × shape mode.
-# --------------------------------------------------------------------------- #
-
-# Reduce-partition variants, pinned as ``(REDUCE, WORK)`` — the step-7 value grammar, where the
-# cooperative WIDTH lives in the kernel-global ``WORK`` inventory and ``REDUCE`` keeps only the
-# site-local partition kind. Each has a distinct lowering STRUCTURE, asserted below (not just
-# output accuracy):
-#   serial   (``""``)             — one thread per cell, no cross-thread / register fold
-#   coop_warp (``coop`` @ t32)    — a single-warp ``__shfl_xor_sync`` butterfly
-#   coop_hier (``coop`` @ t128)   — the 4-warp hierarchical shuffle→smem-tree
-#   ilp      (``r4``)             — standalone ILP: 4 register accumulators + a register tree
-#   ilp_coop (``r2/coop`` @ t32)  — ILP composed with coop: 2 register accs, tree, then shuffle
-_COOP_VARIANTS = {
-    "serial": ("", ""),
-    "coop_warp": ("coop", "t32"),
-    "coop_hier": ("coop", "t128"),
-    "ilp": ("r4", ""),
-    "ilp_coop": ("r2/coop", "t32"),
-}
-
-
-def _reduce_env(variant: str) -> dict[str, str]:
-    """The ``(REDUCE, WORK)`` pin pair for a variant — ``WORK`` only when the partition has a
-    cooperative width to carry (a serial / pure-ILP row's launch geometry stays derived)."""
-    spec, work = _COOP_VARIANTS[variant]
-    return {"EMMY_REDUCE": spec, **({"EMMY_WORK": work} if work else {})}
-
-
-# Degenerate (mean / amax), twisted full-row (softmax), and the prologue / prologue+epilogue
-# carriers (sumsq / l2) — the pre-map and projection ride the same cooperative combine.
-_REDUCE_OPS = ("mean", "amax", "softmax", "sumsq", "l2")
-
-# Shape modes — the reduce-carrier ops all reduce dim=1 of input ``x``, so the SAME matrix
-# runs over a static reduce axis and a SYMBOLIC one (``seq_len@x:1``, traced dynamic, run at
-# an off-hint runtime size so the cooperative reduce's strided ``< seq_len`` bound masks the
-# tail). One compiled kernel per (op, variant) covers any length.
-_SHAPES = {"static": None, "dynamic": "seq_len@x:1"}
-_DYNAMIC_SEQ = 700  # off the 512 Dim hint → exercises the masked tail / partial final warp
-
-
-def _assert_combine_structure(src: str, variant: str, label: str) -> None:
-    """Assert the kernel source carries the intra-CTA combine each ``REDUCE`` variant pins —
-    the structural counterpart to the accuracy check (a wrong schedule that still happens to
-    compute the right answer serially must not pass as ``coop_warp`` / ``coop_hier``)."""
-    has_shfl = "__shfl_xor_sync" in src
-    has_smem_tree = "_smem[" in src and "for (int s =" in src  # the cross-warp TreeHalve slab
-    has_reg = "__r1" in src  # a replicated register-accumulator copy (the ILP fold)
-    if variant == "serial":
-        assert not has_shfl, f"{label}/serial: unexpected warp-shuffle combine in a serial reduce"
-        assert not has_reg, f"{label}/serial: unexpected register-fold replication"
-        assert "__launch_bounds__(256)" in src, f"{label}/serial: expected the scalar-tier block (256)"
-    elif variant == "coop_warp":
-        assert has_shfl, f"{label}/coop_warp: expected a __shfl_xor_sync warp butterfly"
-        assert not has_smem_tree, f"{label}/coop_warp: single-warp coop must NOT emit a cross-warp smem tree"
-        assert "__launch_bounds__(32)" in src, f"{label}/coop_warp: expected a one-warp block (32)"
-    elif variant == "coop_hier":
-        assert has_shfl and has_smem_tree, f"{label}/coop_hier: expected the hierarchical shuffle→smem-tree combine"
-        assert "__launch_bounds__(128)" in src, f"{label}/coop_hier: expected the 4-warp block (128)"
-    elif variant == "ilp":
-        assert has_reg, f"{label}/ilp: expected replicated register accumulators (the ILP fold)"
-        assert not has_shfl, f"{label}/ilp: standalone ILP must NOT emit a cross-thread combine"
-        assert "__launch_bounds__(256)" in src, f"{label}/ilp: standalone ILP runs the scalar-tier block (256)"
-    else:  # ilp_coop
-        assert has_reg, f"{label}/ilp_coop: expected replicated register accumulators (the ILP fold)"
-        assert has_shfl, f"{label}/ilp_coop: ILP composed with coop must still emit the warp butterfly"
-        assert "__launch_bounds__(32)" in src, f"{label}/ilp_coop: coop=32 sets a one-warp block"
-
-
-@requires_cuda
-@pytest.mark.parametrize("op", _REDUCE_OPS)
-@pytest.mark.parametrize("variant", list(_COOP_VARIANTS))
-@pytest.mark.parametrize("shape", list(_SHAPES))
-def test_cooperative_combine_accuracy(op, variant, shape, monkeypatch):
-    """Every reduce-carrier op — degenerate (``mean`` / ``amax``) AND twisted full-row
-    (``softmax``, the online-softmax ``(m, d)`` carrier) — over BOTH a static and a SYMBOLIC
-    reduce axis, stays accurate AND emits the pinned intra-CTA combine structure across the
-    three stages (serial → warp-shuffle → hierarchical smem), pinned via the ``REDUCE`` coop
-    field. The dynamic column proves the same combine deploys over a runtime ``seq_len`` (the
-    strided ``< seq_len`` bound masking the tail), one kernel for any length. ``mean``'s
-    divisor is the runtime extent too (a ``context_value`` constant resolved at launch), so
-    dynamic ``mean`` divides by the right count."""
-    code, ref_fn = _OPS[op]
-    got, xs, src = _compile_run(code, _reduce_env(variant), monkeypatch, dynamic=_SHAPES[shape], seq=_DYNAMIC_SEQ)
-    want = ref_fn(xs).reshape(got.shape)
-    diff = float(np.abs(got - want).max())
-    assert diff < 1e-3, f"{op}/{variant}/{shape}: combine mismatch (max abs err {diff})"
-    _assert_combine_structure(src, variant, f"{op}/{shape}")
-    if shape == "dynamic":
-        assert "int seq_len" in src, f"{op}/dynamic: symbolic reduce must carry the runtime extent arg"
-        assert "< seq_len" in src, f"{op}/dynamic: each lane must stride to the runtime extent (the masked tail)"
-
-
-# --------------------------------------------------------------------------- #
-# Symbolic straddling sweep — one symbolic-reduce softmax kernel, off-hint sizes.
-# --------------------------------------------------------------------------- #
-# The cooperative reduce splits a symbolic axis across ``coop`` lanes exactly like a static
-# reduce: each lane strides ``for k = lane; k < seq_len; k += coop`` and the partials fold
-# through the carrier-generic combine. The strided ``< seq_len`` bound IS the masked tail — a
-# lane whose start is past ``seq_len`` does zero iterations and folds the carrier identity, so
-# no ceil-div tiling / gmem clamp / explicit per-element mask is needed. This is the deployed
-# softmax-producer perf path over a symbolic key axis. ``coop=b64`` sets a 2-warp block.
-_STRADDLE_SOFTMAX = "torch.softmax(torch.randn(8, 512), dim=1)"
-
-
-@requires_cuda
-@pytest.mark.parametrize("seq", [1, 31, 64, 512, 513, 700])
-def test_symbolic_cooperative_softmax_sweep(monkeypatch, seq):
-    """One compiled symbolic-reduce softmax kernel is accurate at runtime sizes below / at /
-    above the 512 hint — the off-hint sizes (1, 31, 513, 700) straddle the coop tile, so idle
-    lanes (start past ``seq_len``) must fold the reduce identity, not garbage. The same kernel
-    carries the runtime ``seq_len`` arg + the cooperative ``__shfl_xor_sync`` combine over the
-    strided ``< seq_len`` bound (vs the old degenerate per-thread serial reduce), in a 2-warp
-    block."""
-    got, xs, src = _compile_run(_STRADDLE_SOFTMAX, {"EMMY_REDUCE": "coop", "EMMY_WORK": "t64"}, monkeypatch, dynamic="seq_len@x:1", seq=seq)
-    want = _ref_softmax(xs).reshape(got.shape)
-    assert got.shape == (8, seq)
-    diff = float(np.abs(got - want).max())
-    assert diff < 1e-4, f"seq={seq}: cooperative symbolic softmax mismatch (max abs err {diff})"
-    assert "int seq_len" in src, "symbolic reduce must carry the runtime extent arg"
-    assert "__shfl_xor_sync" in src, "cooperative reduce must emit the segmented-shuffle combine"
-    assert "< seq_len" in src, "each lane must stride to the runtime extent (the strided bound is the masked tail)"
-    assert "__launch_bounds__(64)" in src, "the pinned coop=64 sets the per-CTA thread count"
-
-
-# --------------------------------------------------------------------------- #
-# Flash carrier + cross-CTA finalize.
-# --------------------------------------------------------------------------- #
-
-
-@requires_cuda
-@pytest.mark.parametrize("variant", ["serial", "coop_warp"])
-def test_attention_combine_accuracy(variant, monkeypatch):
-    """The flash ``(m, l, O)`` twisted-monoid carrier is accurate AND emits the pinned combine
-    serially and with a cooperative-KV combine — a 3-component warp butterfly over the static
-    KV axis (the same carrier-generic combine, ``coop_warp`` = ``coop`` at ``WORK=t32``)."""
-    env = _reduce_env(variant)
-    code, ref_fn = _OPS["attention"]
-    got, xs, src = _compile_run(code, env, monkeypatch)
-    want = ref_fn(xs).reshape(got.shape)
-    diff = float(np.abs(got - want).max())
-    assert diff < 2e-3, f"attention/{variant}: flash mismatch (max abs err {diff})"
-    if variant == "serial":
-        assert "__shfl_xor_sync" not in src, "attention/serial: unexpected cooperative combine"
-    else:
-        # The multi-component twisted carrier folds EVERY state component through the SAME
-        # butterfly — the online-softmax carrier is (m, d), so at least two distinct
-        # components ride the shuffle.
-        assert "__shfl_xor_sync" in src, "attention/coop_warp: expected the cooperative-KV warp butterfly"
-        assert src.count("__shfl_xor_sync(__activemask(),") >= 2, (
-            "attention/coop_warp: the twisted combine must shuffle every carrier component"
-        )
-
-
-# The carrier-generic cross-CTA producer + finalize, one case per (carrier × finalize). The
-# additive carriers (matmul split-K, ``sum`` split-reduce) take BOTH finalize folds; the twisted
-# flash ``(m, l, O)`` carrier is **kernel-only** (the ``e^{Δm}`` rescale can't be an ``atomicAdd``).
-# ``flash`` marks the fused streaming flash op (fusion is unconditional); all split the reduce/KV axis
-# across 2 CTAs via the native ``REDUCE`` ``c2`` codec, the same knob for matmul / reduce / flash.
-_CROSS_CTA = {
-    "matmul": {"op": "matmul", "flash": False, "tol": 1e-2, "finalizes": ("atomic", "kernel")},
-    "sum": {"op": "sum", "flash": False, "tol": 1e-2, "finalizes": ("atomic", "kernel")},
-    "flash": {"op": "attention", "flash": True, "tol": 2e-3, "finalizes": ("kernel",)},
-}
-# The TWISTED carrier survives the Tile→Loop→Tile round-trip: its cross-partition combine reaches
-# the finalize as ordinary ``Assign`` temps + ``base``-``Accum``\ s (``StateMerge.stmts``), so the
-# generic rename / liveness / identity placement all see it. While the combine travelled as one
-# opaque stmt instead, its temps escaped the SSA rename and the finalize came out wrong
-# (max abs err 0.42 against this 2e-3 tolerance).
-_CROSS_CTA_CASES = [(carrier, fin) for carrier, spec in _CROSS_CTA.items() for fin in spec["finalizes"]]
-
-
-@requires_cuda
-@pytest.mark.parametrize("carrier,finalize", _CROSS_CTA_CASES)
-def test_cross_cta_finalize_accuracy_and_structure(carrier, finalize, monkeypatch):
-    """The **carrier-generic cross-CTA producer + finalize**, one matrix over (carrier × finalize):
-    a SEMIRING matmul split-K, an additive ``Accum`` ``sum`` split-reduce, and the twisted flash
-    ``(m, l, O)`` split-KV (Flash-Decoding) all split their contraction axis across CTAs through
-    the SAME fork — the matmul is the 1-component instantiation, flash the N-component twisted one.
-    Each is accurate vs torch and emits the matching kernel set: ATOMIC (``c2a``) = one kernel with
-    ``atomicAdd`` (additive only — illegal for the twisted carrier); deferred KERNEL (``c2k``) = a
-    second ``__global__`` combine kernel writing/reading a ``__partial`` workspace, no ``atomicAdd``.
-    The finalize is the native ``REDUCE`` codec's ``c`` letter — one knob owns split + finalize."""
-    spec = _CROSS_CTA[carrier]
-    code, ref_fn = _OPS[spec["op"]]
-    env = {"EMMY_PLACE": "fuse", "EMMY_REDUCE": "g2a" if finalize == "atomic" else "g2k"}
-    got, xs, src = _compile_run(code, env, monkeypatch)
-    want = ref_fn(xs).reshape(got.shape)
-    diff = float(np.abs(got - want).max())
-    assert diff < spec["tol"], f"{carrier}/{finalize}: cross-CTA mismatch (max abs err {diff})"
-    n_global = src.count("__global__")
-    if finalize == "atomic":
-        assert "atomicAdd" in src, "the atomic finalize must emit atomicAdd"
-        assert n_global == 1, f"atomic finalize is one kernel, got {n_global}"
-    else:
-        assert "atomicAdd" not in src, "the deferred kernel finalize must not emit atomicAdd"
-        # The finalize adds exactly ONE combine kernel over a simple carrier's one-kernel
-        # lowering. SDPA's twisted split has its own kernel structure, so only the split workspace
-        # contract is asserted there.
-        if carrier != "flash":
-            assert n_global == 2, f"deferred finalize splices one combine kernel over 1, got {n_global}"
-        assert "__partial" in src, "the producer writes its partial state to a workspace"
-
-
-# A reduce carrier with a PROJECTION epilogue under cross-CTA split-reduce. The ATOMIC finalize
-# applies the projection to each CTA's partition before the ``atomicAdd``, so it is correct only
-# when the projection DISTRIBUTES over the add (``Σ φ(xₛ) = φ(Σ xₛ)``): ``mean``'s ``×1/N`` (a
-# constant scale) distributes; ``l2``'s ``sqrt`` does not. The deferred-KERNEL finalize projects
-# once after the cross-CTA combine, so it is correct for either. Regression guard for the bug
-# where the atomic finalize wrote raw partial sums and silently dropped ``mean``'s ``×1/N``.
-_PROJECTION_DISTRIBUTES = {"mean": True, "l2": False}
-
-
-@requires_cuda
-@pytest.mark.parametrize("op", list(_PROJECTION_DISTRIBUTES))
-@pytest.mark.parametrize("finalize", ["atomic", "kernel"])
-def test_split_reduce_projection_epilogue(op, finalize, monkeypatch):
-    """A split-reduce carrier carrying a projection epilogue. ``mean``'s ``×1/N`` distributes over
-    the atomic add, so the atomic finalize rides it per-partition and stays accurate; ``l2``'s
-    ``sqrt`` does not, so the pinned atomic finalize raises ``ValueError`` and directs the caller to ``g<n>k``.
-    The deferred-kernel finalize projects once after the combine and is accurate for both."""
-    code, ref_fn = _OPS[op]
-    env = {"EMMY_PLACE": "fuse", "EMMY_REDUCE": "g2a" if finalize == "atomic" else "g2k"}
-    if finalize == "atomic" and not _PROJECTION_DISTRIBUTES[op]:
-        with pytest.raises(ValueError, match="must distribute over the add"):
-            _compile_run(code, env, monkeypatch)
-        return
-    got, xs, src = _compile_run(code, env, monkeypatch)
-    want = ref_fn(xs).reshape(got.shape)
-    diff = float(np.abs(got - want).max())
-    assert diff < 1e-2, f"{op}/{finalize}: split-reduce projection mismatch (max abs err {diff})"
-    if finalize == "atomic":
-        assert "atomicAdd" in src, f"{op}/atomic: the per-partition projection still finalizes via atomicAdd"
-        assert src.count("__global__") == 1, f"{op}/atomic: the atomic finalize is one kernel"
-    else:
-        assert "atomicAdd" not in src, f"{op}/kernel: the deferred finalize must not emit atomicAdd"
-        assert src.count("__global__") == 2, f"{op}/kernel: the deferred finalize splices a combine kernel"
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    with pytest.raises(ValueError, match="must distribute over the add"):
+        CudaBackend().compile(graph_from_code(_L2_SPLIT_REDUCE)[0])
 
 
 # --------------------------------------------------------------------------- #
 # Online-softmax fusion — the two-pass → one-pass streaming rewrite.
 # --------------------------------------------------------------------------- #
 # The standalone two-pass softmax (row-max reduce + ``Σ exp(x − max)`` reduce + normalize) fuses
-# into a single streaming online-softmax ``(m, d)`` ``Monoid`` pass (3 reads of ``x`` → 2). The
-# The Tile rewrite has its own unit tests; this GPU test pins numerics and emitted structure.
+# into a single streaming online-softmax ``(m, d)`` ``Monoid`` pass (3 reads of ``x`` → 2). The Tile
+# rewrite has its own unit tests (``passes/test_twisted_rewrite.py``); what is pinned here is that
+# it survives all the way into the emitted kernel.
 
 
 class _Softmax(torch.nn.Module):
@@ -397,73 +82,31 @@ def test_exp_family_generator_builds_asymmetric_monoid() -> None:
 
 @requires_cuda
 @pytest.mark.parametrize("shape", [(4, 128), (8, 256), (2, 64), (2, 4, 128)])
-def test_online_softmax_matches_torch(shape) -> None:
-    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+def test_online_softmax_pairing_reaches_the_kernel(shape) -> None:
+    """The pairing must have fired: ONE fused kernel streaming the twisted carrier, whose signature
+    is the dissolved exp-family merge's rescale temps (``<state>__tN = expf(...)`` — ``exp_merge``
+    namespaces them on the carried state, so they are stable across SSA renaming).
+
+    This is the only assertion in the tree that the rewrite reaches CUDA. No knob names the fusion,
+    so the corpus cases (``online-softmax-*``) author the post-fusion schedule whether or not it
+    fires, and an unfused two-pass softmax computes the identical numbers — their ``correct`` stage
+    provably cannot see the rewrite stop firing."""
+    import re
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
 
     torch.manual_seed(0)
-    x = torch.randn(*shape)
-    graph = trace_module(_Softmax().cpu(), (x,))
-    backend = CudaBackend()
-    compiled = backend.compile(graph)
-
-    # The pairing must have fired: a single fused kernel streaming the TWISTED carrier — the
-    # dissolved exp-family merge's rescale temps (``<state>__tN = expf(...)``) are its signature
-    # (exp_merge namespaces them on the carried state, stable across SSA renaming).
-    import re as _re
-
-    srcs = [getattr(compiled.nodes[n].op, "kernel_source", "") for n in compiled.nodes]
-    assert any(_re.search(r"__t\d+ = expf\(", src) for src in srcs), "online-softmax pairing did not fire"
-
-    run_result, eager = backend.run(compiled, input_data={"x": x.numpy()}, pre_run=lambda: _Softmax()(x).numpy())
-    got = list(run_result.outputs.values())[0]
-    assert got.shape == eager.shape
-    assert np.max(np.abs(got.flatten() - eager.flatten())) < 1e-4
+    graph = trace_module(_Softmax().cpu(), (torch.randn(*shape),))
+    compiled = CudaBackend().compile(graph)
+    srcs = [getattr(node.op, "kernel_source", "") for node in compiled.nodes.values()]
+    assert any(re.search(r"__t\d+ = expf\(", src) for src in srcs), "online-softmax pairing did not fire"
 
 
 # --------------------------------------------------------------------------- #
-# 2D segmented coop — a pinned BN>1 × BR>1 reduce, segmented shuffle per row.
-# --------------------------------------------------------------------------- #
-# A pinned 2D cooperative reduce (``BN > 1`` free-axis threads alongside ``BR > 1`` cooperative-K
-# lanes) must compute the same per-row sums as numpy: the cross-thread combine is a SEGMENTED
-# warp shuffle over each row's ``BR`` lanes, combining each row independently. (Legacy ``BN`` /
-# ``BR`` / ``FN`` / ``FK`` / ``BK`` knobs — the surviving backend-accuracy assertion from the
-# deleted ``passes/test_strided_coop_rows.py``.)
-
-
-def _reduce_graph(shape: tuple):
-    from emmy.compiler.graph import Graph, Tensor  # noqa: PLC0415
-    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-    from emmy.compiler.ir.tensor.ir import ReduceOp  # noqa: PLC0415
-
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", shape), node_id="x")
-    out_shape = (*shape[:-1], 1)
-    g.add_node(ReduceOp(op="sum", axis=-1), ["x"], Tensor("o", out_shape), node_id="o")
-    g.inputs, g.outputs = ["x"], ["o"]
-    return g
-
-
-@requires_cuda
-def test_2d_segmented_coop_reduce_accuracy(monkeypatch):
-    """A pinned 2D row (BN=8, BR=16) computes the same per-row sums as numpy —
-    the segmented shuffle combines each row independently."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
-
-    for key, val in dict(BN=8, BR=16, FN=1, FK=1, BK=2).items():
-        monkeypatch.setenv(f"EMMY_{key}", str(val))
-    g = _reduce_graph((64, 128))
-    rng = np.random.default_rng(0)
-    x = rng.standard_normal((64, 128)).astype(np.float32)
-    be = CudaBackend()
-    out = be.run(be.compile(g), input_data={"x": x})[0].outputs["o"]
-    np.testing.assert_allclose(out, x.sum(-1, keepdims=True), rtol=1e-4, atol=1e-4)
-
-
-# --------------------------------------------------------------------------- #
-# Transposed cooperative band (``coop-t``) — the k-major matvec sweep and its overhang.
+# Transposed cooperative band (``coop-t``) — the k-major matvec sweep's enumeration.
 # --------------------------------------------------------------------------- #
 
-_COOPT_K = 256  # the contraction extent; kept apart from the swept extents below
+_COOPT_K = 256  # the contraction extent; kept apart from the swept extent
 
 
 def _matvec_code(n_out: int) -> str:
@@ -471,146 +114,17 @@ def _matvec_code(n_out: int) -> str:
     return f"torch.nn.functional.linear(torch.randn(1, {_COOPT_K}), torch.randn({n_out}, {_COOPT_K}))"
 
 
-@requires_cuda
-@pytest.mark.parametrize("n_out", [512, 500, 33])
-def test_transposed_coop_band_masks_an_overhanging_sweep(n_out, monkeypatch):
-    """The ``coop-t`` band's 32 lanes sweep the output axis over a ``ceil(N/32)`` grid, so a swept
-    extent 32 does not tile leaves the last block's upper lanes OVERHANGING. They clamp-read the
-    last valid column (a duplicate sweep, in-bounds) and their store is guarded off — the same
-    masked-overhang contract the tiled contraction states, and what makes the band reachable on a
-    non-32-divisible output at all. A tiling extent emits no guard (byte-identical to before)."""
-    import re  # noqa: PLC0415
-
-    got, xs, src = _compile_run(_matvec_code(n_out), {"EMMY_WORK": "t128", "EMMY_REDUCE": "coop-t"}, monkeypatch)
-    x = next(a for a in xs if a.shape == (1, _COOPT_K))
-    w = next(a for a in xs if a.shape == (n_out, _COOPT_K))
-    want = x @ w.T
-    diff = float(np.abs(got.reshape(want.shape) - want).max())
-    assert diff < 1e-3, f"N={n_out}: transposed coop band mismatch (max abs err {diff})"
-    guarded = re.search(r"\* 32 \+ \w+_ln < ", src) is not None
-    assert guarded is (n_out % 32 != 0), f"N={n_out}: overhang guard should be {n_out % 32 != 0}"
-
-
-@requires_cuda
-@pytest.mark.parametrize("rows", [64, 70, 33])
-def test_transposed_coop_band_sweeps_a_symbolic_axis(rows, monkeypatch):
-    """The swept axis may be SYMBOLIC too — ONE kernel run at sizes on and off the 32-lane block.
-    The guard bounds against the runtime extent, so the overhanging lanes' stores are discarded
-    whatever the size; the band used to need a static extent for want of that guard."""
-    got, xs, src = _compile_run(
-        "torch.randn(64, 256).sum(dim=1)", {"EMMY_WORK": "t128", "EMMY_REDUCE": "coop-t"}, monkeypatch, dynamic="rows@x:0", seq=rows
-    )
-    want = xs[0].sum(axis=1)
-    diff = float(np.abs(got.reshape(-1)[:rows] - want).max())
-    assert diff < 1e-3, f"rows={rows}: symbolic transposed sweep mismatch (max abs err {diff})"
-    assert "_ln < " in src, "a symbolic swept extent always overhangs, so the guard must be emitted"
-
-
 @pytest.mark.parametrize("n_out", [512, 500])
 def test_transposed_coop_band_is_offered_on_a_non_divisible_sweep(n_out, monkeypatch):
     """The band's rows (bare and the ``g<n>k/`` split composites) are OFFERED at a swept extent 32
     does not divide — no GPU, enumeration only. The 32-divisibility rule used to drop every one of
     them, so no golden could record the band on such a shape."""
-    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
     rows = enumerate_graph(graph_from_code(_matvec_code(n_out))[0], Context.from_target((12, 0))).rows
     offered = {str(v) for r in rows for k, v in r.items() if k.startswith("REDUCE")}
     assert any(s.endswith("coop-t") for s in offered), offered
-
-
-@requires_cuda
-@pytest.mark.parametrize("seq", [17, 33, 301, 511])
-def test_symbolic_ilp_softmax_masked_tail(monkeypatch, seq):
-    """The masked ILP (register-fold) tail on a TWISTED carrier: one symbolic-reduce softmax
-    kernel pinned ``REDUCE=r4``, run at sizes off the 4-wide register stride, must clamp the
-    tail copies' STREAMED value to the pivot identity — per-``Accum`` masking alone lets the
-    merge's shared intermediates (``t0 = max(m, s_raw)`` → the ``l·exp(m − t0)`` rescale) read
-    the raw wrapped duplicate and silently down-scale the denominator when the duplicate beats
-    the running max (the 2026-07-09 refit regression: err up to 5.7e-3 at seq=33). Tight
-    tolerance — the bug is a numerics corruption, not fp noise. Also pins the symbolic-dim
-    protection in the ILP rename (``seq_len`` in buffer strides must not suffix to
-    ``seq_len__r3`` — an nvcc failure)."""
-    got, xs, src = _compile_run(_STRADDLE_SOFTMAX, {"EMMY_REDUCE": "r4"}, monkeypatch, dynamic="seq_len@x:1", seq=seq)
-    want = _ref_softmax(xs).reshape(got.shape)
-    assert got.shape == (8, seq)
-    diff = float(np.abs(got - want).max())
-    assert diff < 1e-5, f"seq={seq}: masked ILP twisted softmax mismatch (max abs err {diff})"
-    assert "__r3" in src, "the r4 pin must replicate register accumulator chains"
-    assert "seq_len__r" not in src, "the symbolic dim must never be suffixed by the ILP rename"
-
-
-# --------------------------------------------------------------------------- #
-# Fused residual-add → rms_norm producer (the serving decode residual chain).
-# --------------------------------------------------------------------------- #
-
-
-def _add_norm_module():
-    import torch.nn as nn
-
-    class AddNorm(nn.Module):
-        def __init__(self, escape: bool) -> None:
-            super().__init__()
-            self.w = nn.Parameter(torch.randn(256))
-            self.escape = escape
-
-        def forward(self, x, r):
-            h = x + r
-            n = torch.nn.functional.rms_norm(h, (256,), self.w, eps=1e-6)
-            return (n, h) if self.escape else n
-
-    torch.manual_seed(0)
-    return AddNorm
-
-
-def _compile_add_norm(escape: bool):
-    from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.ir.cuda import CudaOp
-    from emmy.compiler.loader.binder import bind_constants
-    from emmy.compiler.trace.torch import trace_module
-
-    m = _add_norm_module()(escape).eval()
-    x, r = torch.randn(8, 256), torch.randn(8, 256)
-    graph = trace_module(m, (x, r))
-    be = CudaBackend()
-    compiled = be.compile(graph)
-    kernel_ids = [nid for nid, n in compiled.nodes.items() if isinstance(n.op, CudaOp)]
-    const_feed = bind_constants(compiled, {"w": m.w.detach().numpy()})
-    in_names = list(graph.inputs)
-    feed = {**const_feed, in_names[0]: x.numpy(), in_names[1]: r.numpy()}
-    outs = be.run(compiled, input_data=feed)[0].outputs
-    return m, x, r, graph, kernel_ids, outs
-
-
-@requires_cuda
-def test_fused_add_rms_norm_consumes_the_add():
-    """A residual add feeding an rms_norm (no other consumer) fuses into the norm's
-    sweep — the ``fused_add_rms_norm`` analog the serving decode twins already show:
-    no standalone pointwise add kernel survives. Kernel COUNT is not pinned (a
-    ``REDUCE=g<w>`` pick legitimately splits into partial + finalize)."""
-    m, x, r, graph, kernel_ids, outs = _compile_add_norm(escape=False)
-    assert kernel_ids and all(nid.startswith("rms_norm") for nid in kernel_ids), (
-        f"the residual add must fuse into the rms_norm kernel(s), got {kernel_ids}"
-    )
-    with torch.no_grad():
-        want = m(x, r)
-    np.testing.assert_allclose(np.asarray(outs[graph.outputs[0]]), want.numpy(), rtol=1e-4, atol=1e-4)
-
-
-@requires_cuda
-def test_add_rms_norm_escaping_residual_keeps_both_outputs():
-    """When the add's result ALSO escapes as a graph output (the decode
-    residual-stream shape: the updated residual is both the norm input and the
-    carry), fusion must NOT consume it — the splice would silently DROP the second
-    output from the compiled graph (the pre-fix behavior: ``compiled.outputs`` lost
-    ``add`` and callers got only the normed value). Pins the guard: both outputs
-    present and correct; the add stays materialized."""
-    m, x, r, graph, kernel_ids, outs = _compile_add_norm(escape=True)
-    with torch.no_grad():
-        want_n, want_h = m(x, r)
-    assert set(graph.outputs) <= set(outs), f"graph outputs {graph.outputs} missing from compiled outputs {list(outs)}"
-    np.testing.assert_allclose(np.asarray(outs[graph.outputs[0]]), want_n.numpy(), rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(np.asarray(outs[graph.outputs[1]]), want_h.numpy(), rtol=1e-4, atol=1e-4)

@@ -176,9 +176,13 @@ ordinary outcome — a fusion-band decision upstream of the tile binding, shared
 Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
 
 **Native MXFP4 expert inputs.** OpenAI gpt-oss stores each routed matrix as uint8 `*_blocks` (two FP4 nibbles per
-byte, 32 values per group) plus uint8 E8M0 `*_scales`. `loader.quant.spell_mxfp4_inputs` re-mints a traced logical
-`(in, out)` expert input at its packed `(out, in/32, 16)` shape, appends the `(out, in/32)` scale input, and spells
-generic integer extraction, the exact FP4 value map, power-of-two scaling, reshape, and transpose algebra. U8 is an
+byte, 32 values per group) plus uint8 E8M0 `*_scales`; the published DeepSeek V4 dialect stores the same bytes under
+its own names. `loader.quant.spell_mxfp4_inputs` re-mints a traced logical expert input at its packed
+`(out, in/32, 16)` shape, appends the `(out, in/32)` scale input, and spells generic integer extraction, the exact FP4
+value map, power-of-two scaling, and reshape algebra. Nibbles always decode in the stored `(out, in)` orientation, so
+each spec also declares its experts module's layout: an `x @ W` module traces `(in, out)` and ends in a transpose,
+while an `F.linear` one traces the stored orientation and takes none. Shapes cannot decide it — a square expert matrix
+reads both ways — so the layout is declared, never sniffed. U8 is an
 ordinary one-byte integer dtype throughout the generic compiler; no MXFP4 operation or metadata crosses the
 birth-time spelling boundary. `decode_mxfp4` is the NumPy value reference. The serving loader preserves the packed
 checkpoint tensors and only permutes the gate/up output axis once to restore concatenated gate/up halves.

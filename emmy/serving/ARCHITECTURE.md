@@ -119,7 +119,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `quantization_config` alone (`loader.quant.fp8_weight_profile` — format token, `weight_block_size`, skip patterns;
   `…@f8e4m3` carries `w_gate_up` / `w_down` as bits + block scales tiled over the traced weight shapes), with the
   plain twin kept beside it only for a profile whose layers the quantizer left unconverted (Laguna's last four), and
-  native MXFP4 from logical expert shapes (`…@mxfp4`, uint8 blocks plus uint8 E8M0 scales).
+  native MXFP4 from logical expert shapes (`…@mxfp4`, uint8 blocks plus uint8 E8M0 scales, in the layout the experts
+  module declares). The format follows the EXPERTS, not the trunk: a checkpoint may declare an fp8 trunk beside
+  natively MXFP4 routed experts (DeepSeek V4's `expert_dtype: fp4`), and `loader.quant.native_mxfp4_experts` is the
+  one predicate both this capture and the serving loader read, so the two cannot disagree about what the expert
+  program binds.
   Query-head discovery validates the classic `q_proj` signature and DeepSeek's complete low-rank `q_a_proj` /
   `q_b_proj` plus shared-`kv_proj` layout. A DeepSeek V4 layer is captured through the attention-sublayer seam
   (`hyper_connection_seam` in `compiler/trace/huggingface.py`): the carrier is the `hc_mult` hyper-connection residual
@@ -297,7 +301,11 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   input name, and gate/up de-interleaved once on its physical output axis. FP8 keeps raw bits,
   f32 scales and value-dtype biases; `_compile_split` applies `spell_quantized_inputs`. MXFP4 keeps raw uint8 blocks,
   uint8 E8M0 scales and value-dtype biases; `_compile_split` applies `spell_mxfp4_inputs` and binds the physical feed
-  by name because its shapes differ from the traced logical weights. Native MXFP4 currently requires every routed
+  by name because its shapes differ from the traced logical weights. Stored blocks are always `(out, in/32, 16)`, so
+  the decode lands in the `(out, in)` orientation — the spelling ends in a transpose only for the `x @ W` expert
+  layout, and none for the `F.linear` one the published DeepSeek experts share with their stored blocks. That layout
+  is DECLARED by the experts module (`moe_expert_layout`), never read off the shapes: a square expert matrix fits both
+  readings, and the wrong one silently transposes the weights. Native MXFP4 currently requires every routed
   expert layer to remain compressed; skip patterns that would mix plain and MXFP4 expert formats are rejected before
   twin compilation. Every per-expert input is a per-launch slice of
   the store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
@@ -650,14 +658,15 @@ Recorded follow-ups, in impact order:
   min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
   --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
   flag wins).
-- **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) serves in-repo; the 16× V100 recipe is not yet validated.**
+- **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) serves the published checkpoint at TP8 × PP2.**
   The pieces above — the fork's attention hosted per layer, the native-naming loader lane with its `.scale` ue8m0
   block scales and compressed MXFP4 routed experts, tensor-parallel expert sharding with the group all-reduce, the
   carrier-width pipeline transport — are implemented and gated (see the hyper-connection section), including a
   real-engine TP2×PP2 greedy-parity test on a small config. Decode capture is unsupported for this architecture
   (the routed combine host-syncs every step; the fixed-slot selector is unsharded) — the boot guard and
-  `emmy serve` both force eager. Still ahead: the TP8×PP2 boot of the published checkpoint in the pinned 1Cat
-  sm_70 image serving mixed prefill/decode, and real-checkpoint numerics/greedy gates.
+  `emmy serve` both force eager. The 16× V100 boot serving mixed prefill/decode, its memory and KV numbers, and
+  greedy agreement against the fork's own implementation are recorded in the recipe's `RESULTS.md`. Still ahead:
+  a prebuilt serving image with a warmed pack, and the equal-envelope A/B.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 

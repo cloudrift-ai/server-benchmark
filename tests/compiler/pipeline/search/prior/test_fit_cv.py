@@ -116,11 +116,11 @@ def _build(records, monkeypatch, **kwargs):
     """``build_golden_groups`` over stub records: the pool arrives as the record's ``target_program``, a row
     is ``{"TILE": tag}``, and its one feature is the tag's position in the alphabet — enough for two pools to
     featurize differently whenever their rows differ. The stub enumerator honours ``ctx.pool_sample``: a list
-    IS a space as far as the draw is concerned (it asks only for a length and a member)."""
+    IS a candidate stream as far as the reservoir draw is concerned."""
 
     def enumerate_stub(rows, ctx):
         sample = ctx.pool_sample
-        return Candidates(rows if sample is None else sample.take(rows), len(rows))
+        return Candidates(list(rows), len(rows)) if sample is None else sample.take(rows)
 
     monkeypatch.setattr(fit_cmd, "GOLDEN_RECORDS", records)
     monkeypatch.setattr(fit_cmd, "Context", _StubContext)
@@ -165,9 +165,9 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
 
     The two are one group before the draw happens — they share a program, so they share an enumeration and
     the builder runs it once. What sampling must not break is the PINS: both recorded rows have to survive
-    the draw, which they do because it is a pure function of ``(pool size, sample, seed)`` and both goldens
-    bucket onto the same keep-set. Neither was picked by the draw itself: the pool's first and last rows are
-    exactly the positions a 4-of-26 draw is least likely to reach."""
+    the draw, which they do because it is a pure function of the stream and ``(sample, seed)`` and both
+    goldens bucket onto the same keep-set. Neither was picked by the draw itself: the pool's first and last
+    rows are exactly the positions a 4-of-26 draw is least likely to reach."""
     pool = [{"TILE": chr(ord("a") + i)} for i in range(26)]
     groups, skipped = _build(
         [

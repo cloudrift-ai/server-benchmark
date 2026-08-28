@@ -42,6 +42,7 @@ tests/compiler/passes/
 ├── test_knob_pinning.py            # EMMY_KNOBS-pinned regression configs (article-reproduction tile/transport sweep)
 ├── test_warp_specialize_deadlock.py # WS=1 stranded-TMA deadlock (Qwen3 k_linear_mean_reduce) regressions
 ├── test_tile_naming.py             # provenance-driven k_<op>_<suffix> kernel naming
+├── test_shared_constant_cone.py    # one broadcast constant, two sibling cones — one declaration per scope
 └── test_pipeline_semantics.py      # full pass chain (decompose → opt → fuse) vs numpy
 ```
 

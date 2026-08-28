@@ -24,8 +24,9 @@ A **statement** (`ir/stmt/`) occupies a position in an instruction stream: it ha
 scope, and — for a carrier — a seed the enclosing scope has to declare. A **pure term**
 (`ir/pure/`) denotes a value: it binds names, carries an algebra, substitutes and compares up to
 α-renaming, and has no position at all. `Lambda`, the `Fold` term, the monoid vocabulary (`M` / `component_ops` /
-`rename_combine` / the foldMap spec oracle) and the exp-family combine generators all live on the
-term side.
+`rename_combine` / the foldMap spec oracle), the monoid-family registry (`family_of` — every stored combine is
+claimed by a registered family, componentwise or twisted, by generator-output equality) and the exp-family combine
+generators all live on the term side.
 
 **A pure class is never a `Stmt` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
@@ -265,9 +266,12 @@ type to dispatch on and no second place for a fact to live.
   combine — is what `Contraction` was, exposing `a` / `channels` / `b_trans` off `operands`. The `⊗` and the
   additive fold `Accum` appear in the DERIVED `Fold.loop`, never as stored loop syntax.
 - Every ROLE derives from arity (`Fold.role`, never stored): `FREE` with no axis, `TWISTED` off the combine's
-  twist family, `CONTRACTION` off the bilinear reading alone, `PLANAR` otherwise. `ops.head` reaches the node
+  claiming family, `CONTRACTION` off the bilinear reading alone, `PLANAR` otherwise. `ops.head` reaches the node
   through the projection wrapper. Scheduling reads these facts directly from the Fold tree; `Fold.lower()` is
   reserved for callers that consume Loop IR.
+- A SCAN is a fold with a per-step `observe` — a pure `λ(axis, *state)` run after each combine whose fresh results
+  only boundary output writes consume (`Fold.observed`, a structural probe like `composed`). Observation makes the
+  stream order-visible, so an observed fold schedules as the serial fold only.
 
 `Fold.lower()` flattens the term to the loop nest: `Fold.loop` reconstructs the annotated reduce `Loop`
 from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO

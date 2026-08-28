@@ -129,6 +129,11 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
             note(r)
         for r in node.combine.results:
             note(r)
+        if node.observe is not None:  # the observer's body/results ride the same walk (no nested nodes by formation)
+            for s in node.observe.body:
+                note_stmt(s)
+            for r in node.observe.results:
+                note(r)
 
     # ---- render: the same walk again, each stmt as its renamed repr (buffers positional), each
     # child as (key, its buffers in THIS scope's numbering, its result names in THIS scope's
@@ -165,6 +170,7 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
             )
         return form(rebuffered(s).rewrite(rn))
 
+    observe_part = None
     if node.axis is None:
         body_part = tuple(render(s) for s in body)
         edge_part = tuple(render(e) for e in node.operands)
@@ -177,6 +183,12 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
         # names follow their components without entering the local map.
         c = rename_combine(node.combine, rn)
         combine_part = (c.params, tuple(form(s) for s in c.body), c.results)
+        if node.observe is not None:
+            observe_part = (
+                tuple(rn(p) for p in node.observe.params),
+                tuple(render(s) for s in node.observe.body),
+                tuple(rn(r) if isinstance(r, str) else r for r in node.observe.results),
+            )
 
     key = digest(
         "Fold",
@@ -188,6 +200,9 @@ def _structural(node: Fold) -> tuple[str, tuple[str, ...]]:
         tuple(rn(r) if isinstance(r, str) else r for r in node.lift.results),
         combine_part,
         edge_part,
+        # Folded only when present, so every observer-free digest stays byte-identical to the
+        # pre-observer era (a cumsum keys apart from a sum; nothing else moves).
+        *(() if observe_part is None else ("observe", observe_part)),
     )
     out = (key, tuple(bufs))
     object.__setattr__(node, _CACHE_ATTR, out)

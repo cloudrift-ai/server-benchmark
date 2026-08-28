@@ -241,6 +241,11 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
                 out.append(accums[i])
                 placed.add(i)
     out.extend(accums[i] for i in range(len(accums)) if i not in placed)
+    if fold.observe is not None:
+        # The observer taps the post-combine state: its stmts run AFTER every Accum, so reading a
+        # state name yields iteration k's inclusive prefix. The streamed store itself stays a
+        # kernel-boundary OutputSpec; only the pure tap rides the step.
+        out.extend(fold.observe.body)
     return tuple(out)
 
 
@@ -300,6 +305,15 @@ class Fold:
     lift: Lambda = field(kw_only=True)
     init: tuple = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
     combine: Lambda | None = field(kw_only=True, default=None)  # S × S → S — THE ⊕; None at zero axes
+    # The per-step OBSERVER — the scan spelling: a pure λ(k, s₁…sₙ) over the carried state,
+    # evaluated AFTER iteration k's combine (inclusive; exclusive is an init/index shift, never a
+    # stored flag), binding the iteration var then the state positionally. Its results are FRESH
+    # names (disjoint from the state) that only kernel-boundary ``OutputSpec`` writes consume —
+    # the effect stays at the boundary, the term stays pure. Part of the ALGEBRA: it keys into
+    # ``structural_key`` (a cumsum is not a sum), and it makes the stream order-visible, so an
+    # observed fold offers exactly the serial reduce plan (every partitioned combine — coop band,
+    # ILP register partials, the cross-CTA split — changes which prefixes exist).
+    observe: Lambda | None = field(kw_only=True, default=None)
 
     def __post_init__(self) -> None:
         if not isinstance(self.init, tuple):
@@ -309,6 +323,7 @@ class Fold:
             # positional binding — one lift param per operand RESULT COMPONENT, no leading
             # iteration var. (The projection (zero-axis) fold was exactly this, with ``fn`` for ``lift``.)
             assert self.combine is None and not self.init, "a zero-axis Fold carries no monoid"
+            assert self.observe is None, "a zero-axis Fold carries no per-step state to observe"
             bound = tuple(n for e in self.operands for n in _operand_result_names(e))
             assert tuple(self.lift.params) == bound, f"lift params {self.lift.params} must bind the operands {bound} positionally"
             return
@@ -329,7 +344,22 @@ class Fold:
         # registered derivation is rejected loudly, never stored. The claiming family is memoized
         # (:attr:`family`) for every downstream family-shaped read.
         family = self.family
-        assert family is not None, "no registered monoid family claims this Fold's combine — the stored program must be a family generator's exact output"
+        assert family is not None, (
+            "no registered monoid family claims this Fold's combine — the stored program must be a family generator's exact output"
+        )
+        if self.observe is not None:
+            assert family.observable, f"the {family.name} family does not support a per-step observer"
+            assert tuple(self.observe.params) == (self.axis.name, *self.combine.results), (
+                f"observer params {self.observe.params} must bind the iteration var then the carried state "
+                f"{(self.axis.name, *self.combine.results)} positionally"
+            )
+            defined = {name for stmt in self.observe.body for name in stmt.defines()}
+            assert all(isinstance(r, str) and r in defined for r in self.observe.results), (
+                "observer results must be FRESH names its body defines — never the carried state itself "
+                "(the boundary distinguishes a streamed store from a post-fold store by the name)"
+            )
+            assert not any(isinstance(stmt, Fold) for stmt in self.observe.body), "an observer body holds plain stmts, never a nested node"
+            assert not _identity_lift(self), "an identity-lift fold (a split partial/finalize) carries no observer"
         if not family.twisted:
             return  # the componentwise family — nothing further to validate
         # TWISTED: the state-component ROLE decision is shape-derived off the lift's injected
@@ -679,10 +709,20 @@ class Fold:
     # stmt siblings without dispatching on which they are. Nothing here is statement behaviour —
     # a term has no scope to seed, no effect to order and no ``render``; it becomes statements
     # once, through :meth:`lower`. ---------- #
+    @property
+    def observed(self) -> bool:
+        """Whether this fold carries a per-step observer — the structural probe (like
+        :attr:`composed`, not a role) the schedule gates and the boundary read."""
+        return self.observe is not None
+
     def defines(self) -> tuple[str, ...]:
-        """The result names this node exposes to its containing lambda."""
+        """The result names this node exposes to its containing lambda — the combine's state,
+        plus an observer's results: the streamed store reads them at the stream position after
+        the node, so they are interface names (protected through canonicalization like any
+        result), relocated into the loop only at reconstitution."""
         results = self.lift.results if self.axis is None else self.combine.results
-        return tuple(result for result in results if isinstance(result, str))
+        observed = self.observe.results if self.observe is not None else ()
+        return tuple(result for result in (*results, *observed) if isinstance(result, str))
 
     def nested(self) -> tuple[Body, ...]:
         """The one nested body is the lift's — EXCEPT under the bilinear reading, whose lift is
@@ -802,7 +842,9 @@ def _operand_result_names(op) -> tuple[str, ...]:
             # none, and falls back to its primary bound value).
             named = tuple(r for r in op.lift.results if isinstance(r, str))
             return named if named else (op.out,)
-        return tuple(op.combine.results)
+        # An observed fold's results include the observer's fresh names — the same interface
+        # ``defines()`` exposes, so the enclosing scope's rename/identity walks see them.
+        return tuple(op.defines()) if op.observe is not None else tuple(op.combine.results)
     return (operand_name(op),)
 
 
@@ -881,7 +923,16 @@ def _(s: Fold, rename, sigma, axis_fn):
         results=tuple(rename(r) if isinstance(r, str) else r for r in s.lift.results),
     )
     combine = rename_combine(s.combine, rename) if s.combine is not None else None
-    return replace(s, axis=axis, operands=operands, lift=lift, combine=combine)
+    observe = None
+    if s.observe is not None:
+        # The observer renames in lockstep: param 0 tracks the axis, the state params track the
+        # combine's renamed results, the body/results are ordinary SSA material.
+        observe = Lambda(
+            params=(axis.name, *(rename(p) for p in s.observe.params[1:])),
+            body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.observe.body)),
+            results=tuple(rename(r) if isinstance(r, str) else r for r in s.observe.results),
+        )
+    return replace(s, axis=axis, operands=operands, lift=lift, combine=combine, observe=observe)
 
 
 __all__ = [

@@ -680,6 +680,17 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
       the kernel's pinned inventory over a fold as narrow as the split width."""
     extent = hint_extent(node.axis)
     pin = _pin(REDUCE, key)
+    if node.observed:
+        # An observer makes the stream order-visible: every partitioned combine — cooperative
+        # band, ILP register partials, the cross-CTA split — changes which prefixes exist, so a
+        # scan offers exactly the serial fold. A pin naming a partition is a recorded refusal,
+        # never a silent drop.
+        if pin is not None and ReducePlan.parse(pin, state.work_pin).stages:
+            raise PinRefused(
+                f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a partition, but an observed fold "
+                f"(a scan) preserves its stream order — only the serial fold realizes"
+            )
+        return [ReducePlan()]
     if pin is None:
         return [ReducePlan(), *(p for p in coop_reduce_moves() if _band_refusal(p, extent, state.transposed_ok) is None)]
     return [_parsed_reduce_pin(state, pin, key)]
@@ -723,6 +734,15 @@ def _contraction_reduces(state: _State, node, key: str | None, tiled: bool) -> l
     RAISES when no plan honors the pin (``REDUCE`` has no choice of tier, so there is no drop
     layer) — while a serial pin keeps every plan on the serial fold."""
     pin = _pin(REDUCE, key)
+    if node.observed:
+        # Same stream-order gate as the plain fold's (:func:`_reduce_moves`) — defensive here:
+        # nothing builds an observed contraction yet.
+        if pin is not None and ReducePlan.parse(pin, state.work_pin).stages:
+            raise PinRefused(
+                f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a partition, but an observed fold "
+                f"(a scan) preserves its stream order — only the serial fold realizes"
+            )
+        return [ReducePlan()]
     if pin is not None:
         pinned = _parsed_reduce_pin(state, pin, key)
         if pinned.coop > 1 or pinned.reg > 1:

@@ -202,3 +202,13 @@ def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkey
     assert sum(key.startswith("TILE@") and "mma_" in str(value) for key, value in partial.knobs.items()) == 2, (
         "the sliced piece must still spell both paired mma sites"
     )
+
+
+def test_an_observed_fold_offers_only_the_serial_reduce(unpinned) -> None:
+    """A scan (an observed fold) preserves its stream order: no cooperative/ILP REDUCE band and
+    no cross-CTA split row is ever offered — the serial fold is the whole catalog."""
+    rows = _rows(_code_graph("torch.cumsum(torch.randn(8, 32), -1)"))
+    assert rows, "the scan kernel must still enumerate (the serial tier realizes it)"
+    for row in rows:
+        offending = {k: v for k, v in row.items() if k.split("@", 1)[0] == "REDUCE" and v not in ("", None)}
+        assert not offending, f"a partitioned REDUCE row reached an observed fold: {offending}"

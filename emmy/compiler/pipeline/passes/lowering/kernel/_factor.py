@@ -58,7 +58,7 @@ from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
-from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs
+from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs, observed_result_names
 from emmy.compiler.ir.tile.ops import cone_seam, projection_regions, sched_of
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
@@ -253,18 +253,31 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         proj = [*siblings, *_emit_body(op.body, ctx, output_specs)]
         region_results = _projection_results(op.body)
         root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= region_results)
-        if root_specs:
-            proj = apply_output_specs(proj, root_specs)
-        return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store)
+        # A STREAMED store (values = an observer's results) rides the recursion down to the leaf
+        # so the scalar arm can splice it into the observed fold's reduce loop — applying it here
+        # would land it in the projection tail, after a loop that is not yet emitted.
+        observed = observed_result_names(op)
+        streamed = tuple(spec for spec in root_specs if set(spec.write.values) <= observed)
+        streamed_ids = {id(spec) for spec in streamed}
+        plain = tuple(spec for spec in root_specs if id(spec) not in streamed_ids)
+        if plain:
+            proj = apply_output_specs(proj, plain)
+        return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store, output_specs=streamed)
     if output_specs and isinstance(op, Fold) and op.axis is None:
         # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
         # its output specifications only after that body is emitted so an output sweep wraps every stmt
         # that reads the sweep coordinate.
         return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
     if output_specs:
-        # A non-projection flat root can carry plain root ``Write``\\ s only.
+        # A non-projection flat root can carry plain root ``Write``\\ s only. A STREAMED store
+        # (its values an observer's results) stays a spec so the scalar arm splices it into the
+        # observed fold's reduce loop; the rest append as the kernel tail.
         assert all(st.sweep is None for st in output_specs), "sweep stores ride a projecting zero-axis fold"
-        tail = (*tail, *(st.write for st in output_specs))
+        observed = observed_result_names(op)
+        streamed = tuple(st for st in output_specs if set(st.write.values) <= observed)
+        streamed_ids = {id(st) for st in streamed}
+        tail = (*tail, *(st.write for st in output_specs if id(st) not in streamed_ids))
+        return _bind(op, ctx, tail, out_val, store, output_specs=streamed)
     return _bind(op, ctx, tail, out_val, store)
 
 
@@ -416,7 +429,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             body = [*_emit(op, ctx, output_specs).body, *tail]
             root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= _projection_results(op.body))
             if root_specs:
-                body = apply_output_specs(body, root_specs)
+                # ``observed`` streams a scan store into its reduce loop; every other spec keeps
+                # its kernel-tail reconstitution.
+                body = apply_output_specs(body, root_specs, observed=observed_result_names(op))
             state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
         elif plan.coop_transposed:
             # The ``b<n>t`` k-major matvec partition: the innermost output axis splits into a

@@ -1,5 +1,7 @@
-# evidence: the same Qwen3 attention slice builds when the value-width output axis is in the kernel placement;
-# the scalar t128/cooperative schedule uses no architecture-gated feature.
+# evidence: the same reduced q/k RMSNorm -> causal SDPA tree offers PLACE@map.fold.a.fold.b1 (the
+# softmax-V arm's computed B operand, corpus case rmsnorm-gqa-b-cut) and cuts it correctly; the
+# statistic arm's score contraction carries the alpha-equivalent computed K operand cone, closed
+# against the key sweep's body by normalization, so its seam must offer and realize the same way.
 compute_cap:
 - 12
 - 0
@@ -49,12 +51,11 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-      PLACE: fuse
+      PLACE@map.fold.a.map.fold.fold.b1: cut
     knobs:
       TILE: ''
-      WORK: t128
+      WORK: t16
       REDUCE: coop
-      REDUCE@a7: ''
       STAGE: ''
       RASTER: ''
     identity: 83e4f2a6fa484a4b2a50babe833fc9cf35021c1f551fcfabaf496658c24d055f

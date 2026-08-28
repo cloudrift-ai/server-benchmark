@@ -284,3 +284,34 @@ def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
     assert not node.op.placement_decided
     options = _CUT.rewrite(match, node)
     assert {"fuse", "cut"} <= {value for option in options for value in option.knobs.values()}
+
+
+def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() -> None:
+    """Every scoped PLACE pin that resolves on one kernel joins ONE realization — a producer per
+    seam and one consumer, with a producer reading another seam's workspace when its value nests
+    inside it — while a pin whose site path exists on no kernel here is another kernel's and is
+    skipped, never an error."""
+    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
+    (record,) = load_golden_records(load_golden_file(case))
+    tile = _lifted_target(record)
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
+    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    pins = {
+        "PLACE@map.fold.a21": "cut",
+        "PLACE@map.fold.a.map.fold.fold.b1": "cut",
+        "PLACE@map.fold.a.map.fold.fold.a1": "cut",
+        "PLACE@map.map.map.map1": "cut",  # no such site here — another kernel's pin
+    }
+    with pinned_knobs(pins):
+        fork = _CUT.rewrite(match, graph.nodes[tile.name])
+    assert set(fork.knobs) == {"PLACE@map.fold.a21", "PLACE@map.fold.a.map.fold.fold.b1", "PLACE@map.fold.a.map.fold.fold.a1"}
+    (fragment,) = fork.expand()
+    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    producers = [node for node in pieces if "__place_" in node.id]
+    assert len(producers) == 3 and len(pieces) == 4
+    assert all(node.op.placement_decided for node in pieces)
+    workspaces = {node.id for node in producers}
+    assert any(set(node.inputs) & workspaces for node in producers), "the nested value's producer must read a sibling workspace"

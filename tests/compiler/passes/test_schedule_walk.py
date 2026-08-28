@@ -235,3 +235,23 @@ def test_an_observed_fold_offers_only_the_serial_reduce(unpinned) -> None:
     for row in rows:
         offending = {k: v for k, v in row.items() if k.split("@", 1)[0] == "REDUCE" and v not in ("", None)}
         assert not offending, f"a partitioned REDUCE row reached an observed fold: {offending}"
+
+
+def test_computed_b_statistic_is_a_keyed_schedule_site(unpinned, monkeypatch) -> None:
+    """A score contraction's computed B operand cone closes over its per-key statistic
+    (``normalize_fold_tree``'s reduce-body closing), and the walk keys that relocated fold as an
+    ordinary schedule site — nothing nested inside a B edge is silently undecided."""
+    monkeypatch.setenv("EMMY_TILE", "")
+    monkeypatch.setenv("EMMY_STAGE", "")
+    monkeypatch.setenv("EMMY_RASTER", "")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    graph = _code_graph(
+        "torch.nn.functional.scaled_dot_product_attention("
+        f"{_NORM}(torch.randn(1, 2, 8, 16, dtype=torch.float16)), "
+        f"{_NORM}(torch.randn(1, 2, 8, 16, dtype=torch.float16)), "
+        "torch.randn(1, 2, 8, 16, dtype=torch.float16))"
+    )
+    rows = _rows(graph)
+    assert rows, "the fused attention kernel must still enumerate"
+    keyed_under_b = [key for row in rows for key in row if key.split("@", 1)[0] == "REDUCE" and "b" in key.split("@", 1)[-1].split(".")]
+    assert keyed_under_b, "no REDUCE site was keyed inside a computed B operand cone"

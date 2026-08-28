@@ -746,9 +746,11 @@ bytes are independently pinned across fresh interpreters by `test_source_determi
 score it; `greedy_decide` asks the same evidence a different way instead. The splices (top-level siblings by
 construction) are each priced by a nested `resolve` per fragment kernel over a `lowering/tile`-only pipeline, the
 price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per `Op.cache_key` with the
-compile's decision memo shared into the nested resolves; the keep-fused side's price is its own streamed scan's best
-(the identical quantity — the deploy evidence hierarchy's best at that kernel's fork — without a nested compile per
-enumerated leaf), and the argmin across the two decides. So an unpinned compile deploys the splits `tune` measured
+compile's decision memo shared into the nested resolves; the keep-fused side prices by ONE nested resolve of the
+streamed scan's winning leaf (the scan already found the best row, so pricing is one resolve, not one per enumerated
+leaf), and the argmin across the two decides. One price definition holds throughout: a price is the Σ of a
+resolution's trace, never a fork-local score — so the two sides of a kernel-set comparison are always the same
+quantity. So an unpinned compile deploys the splits `tune` measured
 best. The nested resolve carries the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a
 knob pick (the reservoir, then the tune DB's measured rows, model prediction only where unmeasured) — a pure
 sum-of-predictions comparison would be exposed to the model's absolute-µs error, which doesn't cancel across

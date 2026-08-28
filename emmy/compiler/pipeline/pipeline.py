@@ -29,6 +29,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -621,6 +622,20 @@ class ForkPoint:
     def node_id(self) -> str:
         """The graph node this fork is rewriting — the blocklist / trace key."""
         return self.match.root_node_id
+
+    # The offer's TYPED partition. Structural options are top-level siblings by construction
+    # (``_is_structural_option``: schedule-product branches contain only ``TileOp`` leaves), so
+    # the engine can classify without expanding anything, and consumers read the partition
+    # instead of each re-deriving it from the raw list.
+    @cached_property
+    def splices(self) -> tuple:
+        """The structural (``Graph``-splicing, kernel-set-changing) offers."""
+        return tuple(o for o in self.options if _is_structural_option(o))
+
+    @cached_property
+    def variants(self) -> tuple:
+        """The op-variant offers — the schedule pool this fork ranks in place."""
+        return tuple(o for o in self.options if not _is_structural_option(o))
 
 
 @dataclass(frozen=True)

@@ -168,21 +168,25 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
     one attempt the pick is deterministic, so N same-shape kernels — 28 identical per-layer
     matmuls — decide once and the rest replay by tree descent instead of a flatten-and-score.
 
-    ``TileOp``-rooted forks only, keyed on the scheduler's own ``pool_key``: it carries the
-    dtype / hint / pin discriminators op identity deliberately excludes, so the memo can never
-    serve a twin with different atom eligibility (the pool cache's f16-serves-f32 hazard, same
-    class). The rule identity separates two forks offered on one op, and the node's blocklist
-    CONTENT keys the validate-retry path — a retry with a blocked tile is a different decision."""
+    ``TileOp``-rooted forks only, keyed on the enumeration's MINTED pool identity
+    (:attr:`~emmy.compiler.pipeline.fork.Fork.pool_id` — the session memo's own cache digest,
+    which also folds the split receipt and the spelled key vocabulary the bare ``pool_key``
+    only entails by serialization accident). One minting site means the decision memo and the
+    pool memo cannot key differently. A fork carrying no stamp (offered outside the schedule
+    enumeration) falls back to the derived ``pool_key`` + pins. The rule identity separates two
+    forks offered on one op, and the node's blocklist CONTENT keys the validate-retry path — a
+    retry with a blocked tile is a different decision."""
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
     if not isinstance(fp.root_op, TileOp):
         return None
+    pid = next((p for o in fp.variants if (p := getattr(o, "pool_id", None)) is not None), None)
     rule = fp.match.rule
     node_blocked = blocked.get(fp.node_id) if blocked else None
     return (
         getattr(getattr(rule, "pass_", None), "name", None),
         getattr(rule, "name", None),
-        pool_key(fp.root_op, pins=schedule_pin_fingerprint()),
+        pid if pid is not None else pool_key(fp.root_op, pins=schedule_pin_fingerprint()),
         frozenset(node_blocked) if node_blocked else frozenset(),
     )
 
@@ -965,15 +969,14 @@ def greedy_decide(
         # price stays the nested Σ over its fragment kernels (:func:`_price_graph`); an op-vs-op
         # score tie keeps the content tie rule, an op-vs-splice tie keeps the fused side.
         node_blocked = blocked.get(fp.node_id) if blocked else None
-        splices = [o for o in fp.options if _is_structural_option(o)]
-        plain = [o for o in fp.options if not _is_structural_option(o)]
+        splices, plain = fp.splices, fp.variants
         if splices and not price_structural:
             # Structural RETIREMENT, not a ranking rule: a fragment kernel that failed to lower
             # cannot be blocklisted at the fork site (the splice minted fresh node ids), so
             # ``Pipeline.run`` re-resolves with the splices withdrawn — the same role ``blocked``
             # plays for a tile. It also stops a nested price probe from re-splitting the slice it
             # is pricing. All-splice forks keep their options (the old ``or leaves`` fallback).
-            splices, plain = [], plain or fp.options
+            splices, plain = (), plain or fp.options
         streamed = _stream_tiers(fp, the_prior, node_blocked, db_index(), options=plain) if plain else None
         if streamed is not None:
             leaf, row, price = streamed
@@ -981,14 +984,21 @@ def greedy_decide(
                 return leaf  # degenerate pool (≤1 leaf / all blocklisted): plain, unscored return
             if row is not None:
                 if splices:
+                    # ONE price definition: a price is the Σ of a resolution's trace. The splices
+                    # price by nested resolution of their fragments; the fused side prices by one
+                    # nested resolution of the STREAMED winner — the scan already found the best
+                    # row, so this is a single resolve, not one per enumerated leaf — keeping the
+                    # two sides of the kernel-set comparison the same quantity (a fork-local row
+                    # score would omit any further scored forks the fused resolution hits).
                     priced = [(o, _price_graph(_leaf_graph(o), fp.ctx, the_prior, memo, db, decisions)) for o in splices]
-                    if all(us is not None for _, us in priced):
+                    fused_us = _price_op_leaf(fp, leaf, the_prior, memo, db, decisions)
+                    if fused_us is not None and all(us is not None for _, us in priced):
                         best_o, best_us = min(priced, key=lambda o_us: o_us[1])
-                        if best_us < price:
+                        if best_us < fused_us:
                             fp.score = best_us
                             return best_o
                     else:
-                        # An unpriceable splice: the old contract sends EVERY leaf to the ordinary
+                        # An unpriceable side: the old contract sends EVERY leaf to the ordinary
                         # ranking, structural ones included — the flatten path below keeps that.
                         streamed = None
                 if streamed is not None:

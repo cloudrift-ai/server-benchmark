@@ -1256,6 +1256,12 @@ class _State:
     #: the same purity is what lets the prescan ride the session memo (:class:`_Pool`) across
     #: same-pool kernels and tune trajectories.
     options: dict = field(default_factory=dict)
+    #: The pool's minted identity — the SAME digest the session memo caches under (``pool_key`` +
+    #: pins + the split receipt + the spelled key vocabulary + the sample identity). Minted once
+    #: here, at the one place that knows every enumeration input, and carried by every Fork of the
+    #: tree (:attr:`Fork.pool_id`) so consumers (the greedy decision memo) key on the stamped
+    #: identity instead of re-deriving a weaker one.
+    pool_id: str = ""
 
     def honors_work_pin(self, work: Workers | None) -> bool:
         """Whether ``work`` is the inventory the live ``WORK`` pin named (vacuously true unpinned).
@@ -1362,6 +1368,10 @@ class _Branch(Fork):
     knobs: dict
     is_leaf = False
 
+    @property
+    def pool_id(self) -> str:
+        return self.state.pool_id
+
     def expand(self) -> list[Fork]:
         return _step(self.state, self.stack, self.ctx, self.knobs)
 
@@ -1373,6 +1383,10 @@ class _Leaf(Fork):
     state: _State
     knobs: dict
     is_leaf = True
+
+    @property
+    def pool_id(self) -> str:
+        return self.state.pool_id
 
     def expand(self) -> list[TileOp]:
         return [_materialize(self.state, self.knobs)]
@@ -1518,6 +1532,17 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     # sliced axis carries (a realized split's independent projection sibling — ``split_consumed``):
     # both mean the kernel-set decision was consumed, so a ``REDUCE`` pin's ``g`` half strips.
     partition = carries_partition(tile.op) or tile.split_consumed
+    cache = getattr(ctx, "session_cache", None)
+    sample = getattr(ctx, "pool_sample", None)
+    # The sample is part of the KEY, not merely of the Context: ``dataclasses.replace`` SHARES
+    # the session cache, so a sampled Context and the live one it came from sit on one memo and
+    # a Context-only flag would serve a sampled pool to a live compile. The split receipt
+    # and the spelled key vocabulary are explicit key terms beside ``pool_key`` (see
+    # :class:`_Pool`): a receipt-free twin must miss and raise where the partial memoized its
+    # stripped ``g``-pin options, and an α-renamed twin must enumerate its own spellings.
+    # Minted unconditionally: the digest is also the pool identity every Fork of this tree
+    # carries (``_State.pool_id``), whether or not a session cache is consulted.
+    key = digest(pool_key(tile, pins=schedule_pin_fingerprint()), sample.key if sample is not None else "", partition, tuple(off))
     state = _State(
         tile,
         sched,
@@ -1531,19 +1556,9 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         carries_partition=partition,
         work_pin=Workers.parse(raw) if raw is not None else None,
         work_pinned=raw is not None,
+        pool_id=key,
     )
     nodes = tuple(_nodes(tile.op))
-    cache = getattr(ctx, "session_cache", None)
-    sample = getattr(ctx, "pool_sample", None)
-    key = None
-    if cache is not None or sample is not None:
-        # The sample is part of the KEY, not merely of the Context: ``dataclasses.replace`` SHARES
-        # the session cache, so a sampled Context and the live one it came from sit on one memo and
-        # a Context-only flag would serve a sampled pool to a live compile. The split receipt
-        # and the spelled key vocabulary are explicit key terms beside ``pool_key`` (see
-        # :class:`_Pool`): a receipt-free twin must miss and raise where the partial memoized its
-        # stripped ``g``-pin options, and an α-renamed twin must enumerate its own spellings.
-        key = digest(pool_key(tile, pins=schedule_pin_fingerprint()), sample.key if sample is not None else "", partition, tuple(off))
     pool = cache.get(key) if cache is not None else None
     if isinstance(pool, _Draw):
         sample.totals[key] = pool.total  # the drawn rows cannot carry it; the caller reads it here

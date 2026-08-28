@@ -37,7 +37,7 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
@@ -231,7 +231,9 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
     """Recover an elided matrix row when every boundary write proves ``[0, n]``.
 
     The column axis may already be free or may still be the one shared output sweep that
-    contraction canonicalization will promote.
+    contraction canonicalization will promote. A pure reshape of the same column coordinate
+    proves the same boundary: all varying index expressions still read only ``n`` while a
+    literal-zero coordinate carries the elided unit row.
     """
     if not specs:
         return None
@@ -243,7 +245,8 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
         return None
     for spec in specs:
         index = spec.write.index
-        if not (len(index) >= 2 and index[-1] == Var(n_name) and isinstance(index[-2], Literal) and index[-2].value == 0):
+        variables = frozenset().union(*(expr.free_vars() for expr in index))
+        if not (n_name in variables and variables <= {n_name} and any(isinstance(expr, Literal) and expr.value == 0 for expr in index)):
             return None
     return Axis("_um", Dim(1))
 

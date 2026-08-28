@@ -167,6 +167,44 @@ def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row(
     assert TileOp(op=tile.op, place=tile.place, output_specs=tile.output_specs).op is tile.op
 
 
+def test_matvec_recovers_an_implicit_unit_row_through_an_output_reshape() -> None:
+    """A split head/value boundary is still one varying matrix column coordinate."""
+    n, k = Axis("n", 2048), Axis("k", 1024)
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    product = Fold(
+        axis=k,
+        lift=Lambda(
+            params=("k",),
+            body=Body(
+                (
+                    Load(name="left", input="x", index=(Var("k"),)),
+                    Load(name="right", input="w", index=(Var("k"), Var("n"))),
+                    Assign(name="product", op="multiply", args=("left", "right")),
+                )
+            ),
+            results=("product",),
+        ),
+        init=init,
+        combine=combine,
+    )
+    tile = TileOp(
+        op=product,
+        place=Placement(free=(n,)),
+        output_specs=(
+            OutputSpec(
+                write=Write(
+                    output="out",
+                    index=(Literal(0, "int"), Literal(0, "int"), Var("n") / 128, Var("n") % 128),
+                    value="acc",
+                )
+            ),
+        ),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
+    assert isinstance(tile.op, Fold) and tile.op.role is AxisRole.CONTRACTION
+
+
 def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
     """The reduced Qwen3 target needs its promoted value-width axis to close computed B."""
     case = Path(__file__).parents[2] / "realization/cases/attention/rmsnorm-gqa-b-cut_xfail_offered.yaml"

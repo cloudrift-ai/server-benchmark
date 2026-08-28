@@ -752,13 +752,14 @@ _CHUNK = 4096
 #: verified / measured tiers deploy by direct descent regardless of pool size.
 _POOL_BUDGET = 65_536
 
-#: Complete rows drawn for a budgeted pool: seeded uniform descents through the lazy tree — each
-#: descent picks one option per level, so the draw covers every level's values (an emission-order
-#: prefix would freeze the leading levels at option-0 and sweep only the deepest), costs
-#: O(depth × siblings) per row however large the pool, and yields only LEGAL complete rows (the
-#: walk's own ``Ctx`` reconciliation runs as usual). Deterministic: the RNG seeds from the pool's
-#: minted identity, so one pool draws one sample on every boot.
+#: Maximum complete rows drawn for a budgeted pool: seeded uniform descents through the lazy tree
+#: cover every level's values, unlike an emission-order prefix. The option-check budget below may
+#: reduce this count for a wide, deep tree; each emitted row remains a legal complete schedule.
 _POOL_DRAW = 2_048
+
+#: Maximum option checks spent drawing one cold pool, including the four-attempt allowance for a
+#: dead or blocklisted descent. A fixed row count is not a work bound for wide, deep terms.
+_POOL_DESCENT_WORK = 262_144
 
 
 def _descent_sample(options, pool_id: str, node_blocked) -> list:
@@ -770,8 +771,10 @@ def _descent_sample(options, pool_id: str, node_blocked) -> list:
 
     rng = random.Random(pool_id)
     sample: list = []
-    attempts = 4 * _POOL_DRAW
-    while len(sample) < _POOL_DRAW and attempts > 0:
+    descent_bound = max((getattr(option, "pool_descent_bound", None) or 1 for option in options), default=1)
+    draw = min(_POOL_DRAW, max(1, _POOL_DESCENT_WORK // (4 * descent_bound)))
+    attempts = 4 * draw
+    while len(sample) < draw and attempts > 0:
         attempts -= 1
         option = options[rng.randrange(len(options))]
         dead = False

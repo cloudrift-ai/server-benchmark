@@ -1289,6 +1289,12 @@ class _State:
             bound *= len(opts)
         return bound
 
+    @property
+    def pool_descent_bound(self) -> int:
+        """Upper bound on ``Ctx.extend`` calls in one complete random descent. ``_step`` checks
+        every sibling at a level before choosing one, so the bound is the sum of option counts."""
+        return sum(len(opts) for opts in self.options.values())
+
     def honors_work_pin(self, work: Workers | None) -> bool:
         """Whether ``work`` is the inventory the live ``WORK`` pin named (vacuously true unpinned).
         Compared as parsed :class:`Workers`, never as spellings — ``t16x1`` and ``t16`` are one
@@ -1409,6 +1415,10 @@ class _Branch(Fork):
     def pool_bound(self) -> int:
         return self.state.pool_bound
 
+    @property
+    def pool_descent_bound(self) -> int:
+        return self.state.pool_descent_bound
+
     def expand(self) -> list[Fork]:
         return _step(self.state, self.stack, self.ctx, self.knobs)
 
@@ -1428,6 +1438,10 @@ class _Leaf(Fork):
     @property
     def pool_bound(self) -> int:
         return self.state.pool_bound
+
+    @property
+    def pool_descent_bound(self) -> int:
+        return self.state.pool_descent_bound
 
     def expand(self) -> list[TileOp]:
         return [_materialize(self.state, self.knobs)]

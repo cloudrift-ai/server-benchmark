@@ -168,6 +168,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
         knobs: dict = field(default_factory=dict)
         pool_bound = 10**9
         pool_id = "test-pool"
+        pool_descent_bound = 100
         is_leaf = False
 
         def expand(self):
@@ -195,3 +196,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     prior2 = _CountingPrior()
     again = _stream_tiers(point, prior2, None, {})
     assert again[1] == knobs and again[2] == price  # seeded off the pool identity → reproducible
+    monkeypatch.setattr(greedy, "_POOL_DESCENT_WORK", 800)
+    bounded = _CountingPrior()
+    assert _stream_tiers(point, bounded, None, {}) is not None
+    assert bounded.scored == 2

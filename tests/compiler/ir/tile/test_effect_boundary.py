@@ -235,13 +235,11 @@ def test_sweep_body_out_of_canonical_order_still_extracts() -> None:
     assert extract_output_specs(rebuilt) is not None
 
 
-def test_sweep_write_of_a_captured_accumulator_declines_cleanly() -> None:
+def test_sweep_write_of_a_captured_accumulator_extracts() -> None:
     """A sweep may store an enclosing scope's value unchanged — ``o[j] = acc`` broadcasting an
-    already-reduced accumulator. The result is not a body def; spelling it as a captured param
-    produced a kernel reading a free axis under its pre-canonicalization name (an undefined
-    identifier at nvcc), so the shape is DECLINED — a clean ``None`` the fusion preflight turns
-    into "leave the region unfused", not the Lambda formation crash probing it used to raise
-    ("Lambda results ['acc'] are not defined")."""
+    already-reduced accumulator. The result is not a body def, so the region's Lambda must bind
+    it as a captured param; building the capture probe WITH results raised the formation error
+    instead ("Lambda results ['acc'] are not defined"), a crash on a legitimate stream."""
     first = Loop(
         axis=_ax("a1", 8),
         body=Body(
@@ -256,4 +254,10 @@ def test_sweep_write_of_a_captured_accumulator_declines_cleanly() -> None:
         axis=_ax("a2", 4),
         body=Body((Write(output="o2", index=(Var("a2"),), value="acc"),)),
     )
-    assert extract_output_specs([first, second]) is None
+    split = extract_output_specs([first, second])
+    assert split is not None
+    pure, stores = split
+    assert [store.write.output for store in stores] == ["o1", "o2"]
+    region = pure[-1]
+    assert isinstance(region, ProjectionRegion) and "acc" in region.lift.params
+    assert extract_output_specs(apply_output_specs(pure, stores)) is not None

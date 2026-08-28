@@ -120,6 +120,12 @@ canonical form is gated on byte-identity exactly as before. A write whose stored
 scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) has no body def to name, and is declined:
 the fusion lift-preflight turns that into "leave the region unfused".
 
+A sweep axis is bound only by the per-cell output `Loop` reconstitution wraps around the projection body — never at
+kernel scope. Canonicalization therefore keeps a non-contraction fold that reads a sweep axis a projection BODY
+member: hoisting it onto an operand edge would lower it outside the sweep loop, rendering the axis as an undefined
+identifier (DeepSeek-V4 post16's per-column sum was the live case). A contraction is exempt because post-init
+promotes a sweep its operands read into a real free axis right after normalization.
+
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
 specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or
 split into row-major quotient/remainder coordinates by a pure reshape. The `n` coordinate may already be free or may

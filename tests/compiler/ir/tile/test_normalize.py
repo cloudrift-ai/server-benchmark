@@ -364,6 +364,28 @@ def test_reduced_qk_attention_offers_the_statistic_arm_b_seams_idempotently() ->
     assert TileOp(op=tile.op, name=tile.name, place=tile.place, output_specs=tile.output_specs).op is tile.op
 
 
+def test_a_fold_reading_a_sweep_axis_stays_a_body_member() -> None:
+    """A per-column reduce whose streamed load reads the boundary store's sweep axis must stay a
+    projection BODY member: reconstitution re-wraps body stmts inside the sweep ``Loop``, but an
+    operand edge lowers at kernel scope, where the sweep axis is unbound (found live: DeepSeek-V4
+    post16's ``k_div_36`` column sum rendered its sweep column as an undefined identifier at nvcc)."""
+    k = Axis("k", Dim(4))
+    j = Axis("j", Dim(4))
+    body = Body((Load(name="xin", input="x", index=(Var("m"), Var("k"), Var("j"))),))
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    fold = Fold(axis=k, lift=Lambda(params=("k",), body=body, results=("xin",)), init=init, combine=combine)
+    epilogue = Assign(name="v", op="relu", args=("acc",))
+
+    tile = TileOp(
+        op=Fold.projection(body=Body((fold, epilogue))),
+        place=Placement(free=(Axis("m", 8),)),
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("j")), value="v"), sweep=j),),
+    )
+
+    assert not tile.op.operands
+    assert any(isinstance(stmt, Fold) for stmt in tile.op.body)
+
+
 def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
     axis = Axis("k", Dim(32))
     body = Body(

@@ -350,14 +350,11 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
                 results = tuple(dict.fromkeys(value for spec in child_direct for value in spec.write.values))
                 # A write may store a value captured from the enclosing scope unchanged (a sweep
                 # broadcasting an already-reduced accumulator, ``o[j] = acc``). Such a result is
-                # not a body def; spelling it as a captured param produced a kernel whose reduce
-                # body read a free axis under its pre-canonicalization name (an undefined
-                # identifier at nvcc), so the shape is DECLINED — a clean ``None`` (the merge
-                # stays unfused), not the Lambda formation crash probing it used to raise.
+                # not a body def, so probe free names with results left off, then bind captured
+                # results as params alongside the body's own free reads.
                 probe = Lambda(params=(stmt.axis.name,), body=child_body, results=())
-                if any(value not in probe.defined for value in results):
-                    return None
-                captures = tuple(sorted(probe.free_names()))
+                captured_results = tuple(value for value in results if value not in probe.defined)
+                captures = tuple(sorted(probe.free_names() | set(captured_results)))
                 region = ProjectionRegion(
                     axis=stmt.axis,
                     lift=Lambda(params=(stmt.axis.name, *captures), body=child_body, results=results),
@@ -462,13 +459,16 @@ class TileOp(Op):
     def __post_init__(self) -> None:
         scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
         axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
-        normalized = normalize_fold_tree(self.op, axes)
+        free_names = {axis.name for axis in self.place.free}
+        sweep_axes = frozenset(name for name in axes if name not in free_names)
+        normalized = normalize_fold_tree(self.op, axes, sweep_axes=sweep_axes)
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
         if unit_row is not None:
             candidate_free = (unit_row, *self.place.free)
             candidate_scope = (*candidate_free, *(store.sweep for store in self.output_specs if store.sweep is not None))
             candidate_axes = tuple(dict.fromkeys(axis.name for axis in candidate_scope))
-            candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,))
+            candidate_sweeps = frozenset(name for name in candidate_axes if name not in {axis.name for axis in candidate_free})
+            candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,), sweep_axes=candidate_sweeps)
             if any(is_contraction(site.node) for site in sites(candidate)):
                 normalized = candidate
                 self.place = replace(self.place, free=candidate_free)
@@ -508,7 +508,8 @@ class TileOp(Op):
         # different Fold tree or placement seam.
         scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
         final_axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
-        renormalized = normalize_fold_tree(self.op, final_axes)
+        final_sweeps = frozenset(name for name in final_axes if name not in {axis.name for axis in self.place.free})
+        renormalized = normalize_fold_tree(self.op, final_axes, sweep_axes=final_sweeps)
         if self.schedule and renormalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
         self.op = renormalized

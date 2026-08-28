@@ -335,24 +335,38 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
     return replace(fold, operands=tuple(ordered), lift=lift)
 
 
-def _normalize_body(body: Body, axes: tuple[str, ...], implicit_axes: frozenset[str]) -> Body:
+def _normalize_body(body: Body, axes: tuple[str, ...], implicit_axes: frozenset[str], sweep_axes: frozenset[str]) -> Body:
     out = []
     for stmt in body:
         if isinstance(stmt, Fold):
-            out.append(_normalize_fold(stmt, axes, implicit_axes))
+            out.append(_normalize_fold(stmt, axes, implicit_axes, sweep_axes))
             continue
         nested = stmt.nested()
         if not nested:
             out.append(stmt)
             continue
         child_axes = (*axes, *stmt.binds_axes())
-        out.append(stmt.with_bodies(tuple(_normalize_body(child, child_axes, implicit_axes) for child in nested)))
+        out.append(stmt.with_bodies(tuple(_normalize_body(child, child_axes, implicit_axes, sweep_axes) for child in nested)))
     return Body(out)
 
 
-def _hoist_closed_folds(root: Fold, axes: tuple[str, ...]) -> Fold:
-    """Move closed child Folds from a zero-axis body onto operand edges."""
-    candidates = [stmt for stmt in root.body if isinstance(stmt, Fold) and not (set(stmt.lift.free_names()) - set(axes))]
+def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
+    """Move closed child Folds from a zero-axis body onto operand edges.
+
+    A non-contraction fold that reads a SWEEP axis is never hoisted: a sweep axis is bound only by
+    the per-cell output ``Loop`` reconstitution wraps around the projection body
+    (``apply_output_specs``), so a body member re-enters that scope while an operand edge lowers
+    at kernel scope, where the axis is an undefined identifier (``head``'s sweep case — the fold
+    must stay the projection's body member; found live on DeepSeek-V4 post16's per-column sum,
+    ``k_div_36``). A CONTRACTION is exempt: ``TileOp.__post_init__`` promotes a sweep its operands
+    read into a real free axis right after normalization, so the hoisted edge stays bound."""
+    candidates = [
+        stmt
+        for stmt in root.body
+        if isinstance(stmt, Fold)
+        and not (set(stmt.lift.free_names()) - set(axes))
+        and (is_contraction(stmt) or not any(edge_refs_axis(stmt, name) for name in sweep_axes))
+    ]
     if not candidates:
         return root
     candidate_ids = {id(candidate) for candidate in candidates}
@@ -383,7 +397,7 @@ def _edge_free_names(edge) -> frozenset[str]:
     return frozenset(edge.deps()) if isinstance(edge, Fold) else frozenset()
 
 
-def _close_projection(root: Fold, axes: tuple[str, ...]) -> Fold:
+def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
     """Move an enclosing projection's dependencies onto captured contraction operands."""
     assert root.axis is None
     provider_order = tuple(
@@ -409,7 +423,7 @@ def _close_projection(root: Fold, axes: tuple[str, ...]) -> Fold:
             return None
         moved_members.update(id(stmt) for stmt in cone.members)
         moved_edges.update(id(edge) for edge in edges)
-        hoisted = _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names), axes)
+        hoisted = _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names), axes, sweep_axes)
         return _passthrough(hoisted) or hoisted
 
     def close(node: Fold) -> Fold:
@@ -459,7 +473,7 @@ def _close_projection(root: Fold, axes: tuple[str, ...]) -> Fold:
     return Fold.projection(operands=remaining_operands, body=remaining_body, results=root.lift.results)
 
 
-def _close_reduce_body(root: Fold, axes: tuple[str, ...]) -> Fold:
+def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
     """Move a reducing fold's body-resident producer chain onto a captured contraction operand.
 
     :func:`_close_projection` closes contraction operands against a zero-axis root, but a chain
@@ -483,7 +497,7 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...]) -> Fold:
         if not set(names) <= defined:
             return None
         moved.update(id(stmt) for stmt in cone.members)
-        return _hoist_closed_folds(Fold.projection(body=Body(cone.members), results=names), axes)
+        return _hoist_closed_folds(Fold.projection(body=Body(cone.members), results=names), axes, sweep_axes)
 
     def close(node: Fold) -> Fold:
         operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in node.operands)
@@ -711,28 +725,31 @@ def _hoist_decode_operands(root: Fold) -> Fold:
     return Fold.projection(operands=root.operands, body=Body(tuple(members)), results=root.lift.results)
 
 
-def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str]) -> Fold:
-    operands = tuple(_normalize_fold(edge, axes, implicit_axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
+def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str], sweep_axes: frozenset[str]) -> Fold:
+    operands = tuple(_normalize_fold(edge, axes, implicit_axes, sweep_axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
     node = replace(fold, operands=operands) if operands != fold.operands else fold
     if node.axis is None and (collapsed := _passthrough(node)) is not None:
         return collapsed
     body_axes = (*axes, node.axis.name) if node.axis is not None else axes
-    body = _normalize_body(node.lift.body, body_axes, implicit_axes)
+    body = _normalize_body(node.lift.body, body_axes, implicit_axes, sweep_axes)
     if body != node.lift.body:
         node = node.with_bodies((body,))
     node = _canonical_semiring(node, axes, implicit_axes)
     if node.axis is not None:
-        return _close_reduce_body(node, body_axes)
+        return _close_reduce_body(node, body_axes, sweep_axes)
     node = _hoist_decode_operands(node)
-    node = _close_projection(node, axes)
-    return _hoist_closed_folds(node, axes)
+    node = _close_projection(node, axes, sweep_axes)
+    return _hoist_closed_folds(node, axes, sweep_axes)
 
 
-def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[str] = ()):
-    """Normalize a complete Tile IR tree bottom-up; ``None`` placeholders pass through."""
+def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[str] = (), sweep_axes: Iterable[str] = ()):
+    """Normalize a complete Tile IR tree bottom-up; ``None`` placeholders pass through.
+
+    ``sweep_axes`` names the axes bound only by output-sweep reconstitution (never kernel scope);
+    :func:`_hoist_closed_folds` keeps a fold reading one as a projection body member."""
     if not isinstance(root, Fold):
         return root
-    normalized = _normalize_fold(root, tuple(axes), frozenset(implicit_axes))
+    normalized = _normalize_fold(root, tuple(axes), frozenset(implicit_axes), frozenset(sweep_axes))
     # A contraction reached as the whole tree has no projection to host hoisted factors, so the
     # hoist creates one here. Nested contractions are handled by their own projection, which keeps
     # the common shape flat.

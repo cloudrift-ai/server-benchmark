@@ -48,10 +48,10 @@ configs:
     - o
     - wr
   realizations:
-  - name: k_matmul_0ba8ca.61f1567bfecc
+  - name: k_matmul_97a08c.5b437b55a5ce
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       STAGE: d2/smem-tma
-    identity: 4ebd18af8f64f8aff0b639c82533981a89feadb37a52d3c6d04e1c708f059a44
+    identity: 4b2b2932020dbca8896696548a05f70892b0744425118a1177e5ce16b356f661

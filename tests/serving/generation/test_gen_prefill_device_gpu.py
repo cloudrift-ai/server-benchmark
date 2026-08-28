@@ -16,9 +16,10 @@ pytestmark = [pytest.mark.xdist_group("cuda")]
 
 
 @pytest.mark.skip(
-    reason="greedy still flattens + featurizes every schedule row (~12k rows/s over ~500k-row pools, several kernels x "
-    "2-3 scoring passes), so this layer compile went 11.9 s -> >15 min when the full schedule families returned "
-    "(2026-08-27, RTX 5090 box); revives when greedy consumes the walk's lazy fork tree instead of flatten_leaves"
+    reason="greedy now streams the pool scan (bounded ~1.1 GB RSS, one walk + one scoring pass), but the compile is "
+    "still >35 min: the lazy walk's own per-branch spelling (Ctx.extend dict work) and the nested structural pricing "
+    "resolves dominate (2026-08-28, RTX 5090 box); revives when greedy enumerates rows off the prescan memo instead "
+    "of live expand()"
 )
 def test_run_device_sym_matches_host_path():
     pytest.importorskip("cupy")

@@ -1125,8 +1125,9 @@ def _assert_e2e_gate(emmy_logits, ref_logits, label):
 
 @requires_cuda
 @pytest.mark.skip(
-    reason="greedy flattens the fused dequant-cone schedule pool to score it (the lazify-greedy roadblock): "
-    "measured 2026-08 on a 5090 box, the compile burns >100 s inside iter_leaves at 1.7 GB RSS and climbing"
+    reason="greedy now streams the pool scan (bounded RSS, one walk + one scoring pass), but the fused dequant-cone "
+    "compile is still minutes-long: the lazy walk's own per-branch spelling and the nested structural pricing "
+    "resolves dominate; revives when greedy enumerates rows off the prescan memo instead of live expand()"
 )
 def test_quantized_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny quantized model through the same seam ``emmy compile`` / ``emmy run`` use,

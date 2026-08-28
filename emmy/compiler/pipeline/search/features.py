@@ -325,6 +325,41 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
     return feats
 
 
+def _geometry_key(node_knobs: dict) -> frozenset | None:
+    """The memo key for one node slice's geometry block: the slice restricted to what
+    :func:`_schedule_node_features` actually reads — the per-node schedule codecs (bare or
+    ``@<axis>``-suffixed), the ``WORK`` inventory, and the ``S_*`` / ``H_*`` context. A pool's
+    rows differ mostly in knobs OUTSIDE this projection (a 486k-row enumeration spells a few
+    hundred distinct geometry keys), which is what makes the memo collapse a scoring pass.
+    ``None`` (compute uncached) on an unhashable value."""
+    try:
+        return frozenset(
+            (k, v)
+            for k, v in node_knobs.items()
+            if k.startswith((STRUCT_PREFIX, CTX_PREFIX)) or family_of(k) in _AXIS_FAMILIES or family_of(k) == "WORK"
+        )
+    except TypeError:
+        return None
+
+
+@lru_cache(maxsize=65536)
+def _geometry_block(key: frozenset) -> dict[str, float]:
+    """:func:`_schedule_node_features` memoized on :func:`_geometry_key` — the block is a pure
+    function of that projection. The returned dict is SHARED across hits: callers sum-pool it and
+    must never mutate it."""
+    return _schedule_node_features(dict(key))
+
+
+def _node_geometry(node_knobs: dict) -> dict[str, float]:
+    """The memoized front door onto :func:`_schedule_node_features`. The parses under the block
+    are already memoized per spelling (:func:`_resolved_tile`); this memoizes the whole derived
+    feature dict, which is what dominates per-row featurization on a large candidate pool."""
+    key = _geometry_key(node_knobs)
+    if key is None:
+        return _schedule_node_features(node_knobs)
+    return _geometry_block(key)
+
+
 def knob_features(knobs: dict) -> dict[str, float]:
     """Convert a knob dict into a flat numeric feature vector for the planner priors — the single
     featurizer over the whole dict.
@@ -375,7 +410,7 @@ def knob_features(knobs: dict) -> dict[str, float]:
         # STR knobs with no custom featurizer: no generic numeric encoding.
     # Per-node schedule geometry: featurize each schedule-bearing node's slice and sum-pool the blocks.
     for axis in _node_axes(knobs):
-        for name, val in _schedule_node_features(_node_slice(knobs, axis)).items():
+        for name, val in _node_geometry(_node_slice(knobs, axis)).items():
             feats[name] = feats.get(name, 0.0) + val
     feats.setdefault("MMA_tier", 0.0)  # scalar tier / no schedule node = no warp atom
     return feats

@@ -673,3 +673,39 @@ def test_stamp_schedule_families_fills_absent_families_with_off():
     declined_only = stamp_schedule_families({"STAGE@a1": "", "REDUCE@a1": "", "WORK": "w1x16"})
     assert declined_only["STAGE"] == "" and declined_only["REDUCE"] == ""
     assert not any("@" in key for key in declined_only)
+
+
+def test_knob_features_geometry_memo_is_invisible():
+    """The geometry-block memo (``features._geometry_block``, keyed on the codec + ``S_*``/``H_*``
+    projection) must be byte-invisible: memoized output equals the uncached per-slice computation
+    on every row shape — scalar, warp+staging, coop, flash multi-node, masked, and rows carrying
+    unrelated tunable knobs the projection excludes."""
+    import emmy.compiler.pipeline.search.features as features_mod
+
+    rows = [
+        {"TILE": "f2x4", "WORK": "t32x8"},
+        {"TILE": "f2x4", "WORK": "t32x8", "S_ext_free_prod": 2048.0, "H_sm_count": 128.0},
+        {"TILE": "f2x4", "WORK": "t32x8", "S_masked_m": 1.0, "S_ext_free_prod": 2048.0, "H_sm_count": 84.0},
+        {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "S_ext_free_prod": 2048.0 * 2048.0, "H_sm_count": 128.0},
+        {"TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "coop", "STAGE": "d2/smem-async", "WORK": "w4x2"},
+        {"STAGE": "d3/smem-tma"},
+        {"TILE@dd": "f2", "TILE@pj": "f4", "REDUCE": "coop", "WORK": "t32x8", "S_ext_free_prod": 64.0, "H_sm_count": 128.0},
+        {"TILE": "f2x4", "WORK": "t32x8", "BN": 64, "unrelated": 3},
+        {"S_n_load": 3.0, "S_ext_free_prod": 512.0},
+    ]
+    features_mod._geometry_block.cache_clear()
+    memoized = [knob_features(r) for r in rows]
+    repeat = [knob_features(r) for r in rows]  # second pass = all cache hits
+    uncached = []
+    for r in rows:  # force the uncached path through the same front door
+        orig = features_mod._geometry_key
+        features_mod._geometry_key = lambda _slice: None
+        try:
+            uncached.append(knob_features(r))
+        finally:
+            features_mod._geometry_key = orig
+    assert memoized == uncached == repeat
+    # The key must separate rows differing only in a structural extent the block reads.
+    a = knob_features({"TILE": "f2x4", "WORK": "t32x8", "S_ext_free_prod": 512.0, "H_sm_count": 128.0})
+    b = knob_features({"TILE": "f2x4", "WORK": "t32x8", "S_ext_free_prod": 2048.0, "H_sm_count": 128.0})
+    assert any(a.get(k) != b.get(k) for k in a if k.startswith("D_"))

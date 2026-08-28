@@ -13,9 +13,11 @@ Exploration stays in :class:`~.mcts.TuningSearch` (``Pipeline.tune``).
 
 **Evaluate complete rows.** A branch carries only a partial schedule, so a prior cannot score it as
 though it were a complete row. Direct measured and verified rows descend to their exact spelling;
-otherwise greedy scores the complete offered rows and chooses the global argmin. This can be
-expensive until every schedule-space operation is factorized, but it does not substitute the first
-descendant of each branch for the schedules that branch actually contains.
+otherwise greedy scores the complete offered rows and chooses the global argmin — streamed off the
+lazy walk in bounded chunks (:func:`_stream_tiers`), so the scan is O(chunk) memory however large
+the pool. The scan can still be time-expensive until every schedule-space operation is factorized,
+but it does not substitute the first descendant of each branch for the schedules that branch
+actually contains.
 
 **Greedy is ranked by evidence and by nothing else.** Its tiers are recorded
 goldens, then measurements, then the fitted prior — every one of them a
@@ -458,7 +460,9 @@ def _db_measured_pick(
     return best
 
 
-def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float]]], rows: list[dict], node_id: str) -> None:
+def _warn_disjoint_evidence(
+    index: dict[frozenset, list[tuple[dict, float]]], rows: list[dict], node_id: str, *, n_rows: int | None = None
+) -> None:
     """Warn when a fork's candidate set is DISJOINT from its measured evidence:
     the DB holds rows for this kernel's structural signature, yet
     :func:`_db_measured_pick` matched none of them against any offered
@@ -467,7 +471,9 @@ def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float]]], ro
     evidence-free candidate set, which shipped gemma o_proj on a scalar tile
     16x its own measured mma rows (the stale-placeholder offer gap). A cold
     compile (no rows for the signature at all) stays silent — extrapolation
-    is expected there."""
+    is expected there. ``n_rows`` reports the full candidate count when ``rows`` is a
+    representative sample (the streamed scan passes one row — every candidate at one fork shares
+    the offer op's ``S_*`` signature, so one row carries the whole set's signature)."""
     sigs = {frozenset((k, str(v)) for k, v in r.items() if k.startswith("S_")) for r in rows}
     n_measured = sum(len(g) for sig in sigs for g in _sig_groups(index, sig))
     if n_measured:
@@ -477,7 +483,7 @@ def _warn_disjoint_evidence(index: dict[frozenset, list[tuple[dict, float]]], ro
             "the model prediction. Investigate the enumeration (offer gates) for this kernel.",
             node_id,
             n_measured,
-            len(rows),
+            n_rows if n_rows is not None else len(rows),
         )
 
 
@@ -736,6 +742,97 @@ def _direct_measured_pick(fp: ForkPoint, blocked, db_index: dict) -> tuple[objec
     return None
 
 
+#: Leaves scored per batch in the streamed scan: large enough to amortize CatBoost's per-``predict``
+#: overhead (its batched surface exists because per-row calls pay it N times), small enough that the
+#: transient row dicts stay bounded — the flat 486k-row pools this replaces held ~GBs of them at once.
+_CHUNK = 4096
+
+
+def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple[object, dict | None, float | None] | None:
+    """The deploy evidence hierarchy over a non-structural pool, in ONE streamed walk.
+
+    The lazy walk is not free — each branch expansion re-spells its schedule step, and on the
+    research-class pools (a 486k-row explicit-mask softmax term) the walk itself costs minutes —
+    so this scan walks exactly once, like the flatten it replaces, and evaluates every tier
+    chunk-wise as the leaves go by: measured reservoir evidence, the tune DB's measured best, and
+    the model score, each folded into its own running best. The tier PRIORITY is applied after
+    the stream ends (evidence > DB > model, the same hierarchy as before); the one behavioral
+    trade is that the model's ``mean_scores`` runs even when a later chunk turns up evidence —
+    acceptable because measured forks are normally decided upstream by the verified /
+    direct-measured descents, never here. The pick is EXACTLY the flattened argmin: every tier
+    breaks ties by candidate content (``canonical_row_key``), never enumeration order, so
+    per-chunk winners folded through a running ``(price, key)`` min are chunk-invariant.
+
+    Returns ``None`` when a structural (``Graph``-splicing) option is present — those forks carry
+    a handful of options and keep the flatten path, where :func:`_priced_pick` needs the whole
+    leaf set. ``(leaf, None, None)`` is the degenerate plain return (≤1 leaf, or every leaf
+    blocklisted — no score, no decision memo); ``(leaf, knobs, price)`` is the ranked pick."""
+    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+
+    base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
+    picker = getattr(the_prior, "pick", None)
+    ev = getattr(the_prior, "evidence_pick", None) if picker is not None else None
+    use_db = picker is not None and bool(db_idx)
+    # Per-tier running bests: (price, canonical_row_key, leaf, knobs).
+    best_ev: tuple | None = None
+    best_db: tuple | None = None
+    best_model: tuple | None = None
+
+    def fold(best: tuple | None, chunk: list, got: tuple[int, float] | None) -> tuple | None:
+        if got is None:
+            return best
+        i, price = got
+        key = (price, canonical_row_key(chunk[i][2]))
+        if best is None or key < (best[0], best[1]):
+            return (price, key[1], chunk[i][0], chunk[i][1])
+        return best
+
+    def scan(chunk: list) -> None:
+        nonlocal best_ev, best_db, best_model
+        rows = [row for _, _, row in chunk]
+        if ev is not None:
+            best_ev = fold(best_ev, chunk, ev(rows))
+        if use_db:
+            best_db = fold(best_db, chunk, _db_measured_pick(db_idx, rows))
+        scores = the_prior.mean_scores(rows)
+        i = min(range(len(scores)), key=lambda j: (scores[j], canonical_row_key(rows[j])))
+        best_model = fold(best_model, chunk, (i, scores[i]))
+
+    n_leaves = n_live = 0
+    first: object = None
+    sample_row: dict | None = None  # one live row — carries the fork's shared ``S_*`` signature
+    chunk: list = []
+    for leaf in iter_leaves(fp.options):
+        if _is_structural_option(leaf):
+            return None
+        n_leaves += 1
+        if first is None:
+            first = leaf
+        knobs = _leaf_knobs(leaf)
+        if node_blocked is not None and _tile_blocked(knobs, node_blocked):
+            continue
+        n_live += 1
+        row = {**base, **knobs}
+        if sample_row is None:
+            sample_row = row
+        chunk.append((leaf, knobs, row))
+        if len(chunk) >= _CHUNK:
+            scan(chunk)
+            chunk = []
+    if n_leaves <= 1 or n_live == 0:
+        return (first if first is not None else _first_leaf(fp.options[0])), None, None
+    if chunk:
+        scan(chunk)
+    if best_ev is not None:
+        return best_ev[2], best_ev[3], best_ev[0]
+    if best_db is not None:
+        return best_db[2], best_db[3], best_db[0]
+    if use_db:
+        _warn_disjoint_evidence(db_idx, [sample_row], fp.node_id, n_rows=n_live)
+    return best_model[2], best_model[3], best_model[0]
+
+
 def greedy_decide(
     blocked: dict[str, set[frozenset]] | None = None,
     *,
@@ -744,8 +841,9 @@ def greedy_decide(
     db: object | None = None,
 ) -> Callable[[ForkPoint], object]:
     """The greedy compile pick as a :meth:`Run.resolve` ``decide`` callback:
-    descend directly to exact evidence when available, otherwise flatten complete rows, skip
-    ``blocked`` tile identities, and take the prior's global argmin. The prior is the
+    descend directly to exact evidence when available, otherwise stream the complete rows in
+    bounded chunks (:func:`_stream_tiers`), skip ``blocked`` tile identities, and take the
+    prior's global argmin. The prior is the
     ``OnlinePrior`` once trained and the ``OfflinePrior``
     cold-start heuristic otherwise (both behind ``load_prior``'s
     ``FallbackPrior``). With no prior at all (a failed load, or the explicit
@@ -836,12 +934,26 @@ def greedy_decide(
                 fp.score = price
                 decisions[dkey] = (dict(row), price)
                 return leaf
-        # Flatten: greedy benches nothing, so it must pick the globally best
-        # COMPLETE tile, not a partial branch — see ``flatten_leaves`` (the
-        # prior is blind at a partial ``BM/BN`` branch: ``knob_features``
-        # can't compute the tile's area / occupancy until ``FM/FN`` exist).
-        # The pick equals scoring the flat candidate set, invariant to how
-        # the lazy tree's levels are arranged.
+        # Greedy benches nothing, so it must pick the globally best COMPLETE
+        # tile, not a partial branch (the prior is blind at a partial ``BM/BN``
+        # branch: ``knob_features`` can't compute the tile's area / occupancy
+        # until ``FM/FN`` exist). ``_stream_tiers`` scores those complete rows
+        # off the lazy walk in bounded chunks — the pick equals the flattened
+        # scoring's argmin exactly (content-keyed tie rules make the running
+        # min chunk-invariant), without ever retaining the O(pool) leaf and
+        # row lists that made a 486k-row cold pool an OOM.
+        node_blocked = blocked.get(fp.node_id) if blocked else None
+        streamed = _stream_tiers(fp, the_prior, node_blocked, db_index())
+        if streamed is not None:
+            leaf, row, price = streamed
+            if row is None:
+                return leaf  # degenerate pool (≤1 leaf / all blocklisted): plain, unscored return
+            fp.score = price
+            if dkey is not None:
+                decisions[dkey] = (dict(row), price)
+            return leaf
+        # A structural (``Graph``-splicing) option is present — those forks offer a handful of
+        # options, and ``_priced_pick`` needs the whole leaf set, so the flat path stays.
         leaves = flatten_leaves(fp.options)
         base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
         # Structural options (Graph splices that change the kernel set): the
@@ -874,7 +986,6 @@ def greedy_decide(
         # regime — the feature base tune trained on (``two_level.inner_reward``).
         # Tiles this node already failed to lower on an earlier attempt — skip
         # the matching leaf so greedy falls back to the next prior-ranked one.
-        node_blocked = blocked.get(fp.node_id) if blocked else None
         live = [(o, _leaf_knobs(o)) for o in leaves]
         if node_blocked is not None:
             live = [(o, k) for o, k in live if not _tile_blocked(k, node_blocked)]

@@ -228,6 +228,9 @@ Repeated names that resolve to different embedded targets remain ambiguous;
 qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
 stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel
 rows, so promotion compares aggregate execution rather than a sum of isolated launch windows.
+`--record` attributes that latency to the measured realization by exact name, pins, and knobs; a repeated name alone
+is never enough to choose a row. Newly appended tune winners start without copied latency because the seed row's
+measurement describes a different schedule.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.

@@ -499,7 +499,17 @@ async def measure_proposals(
     return rankings
 
 
-def record_latency(path: str | Path, document: dict, name: str, *, hardware_id: str, emmy_us: float, tcompile_us: float | None) -> None:
+def record_latency(
+    path: str | Path,
+    document: dict,
+    name: str,
+    *,
+    hardware_id: str,
+    emmy_us: float,
+    tcompile_us: float | None,
+    knobs: dict | None = None,
+    pins: dict | None = None,
+) -> None:
     """Write one card's measured latencies back into a working golden's realization.
 
     The per-card block is keyed by ``Context.hardware_id`` — the identity that already separates
@@ -515,17 +525,28 @@ def record_latency(path: str | Path, document: dict, name: str, *, hardware_id: 
     destination = Path(path)
     if is_repository_golden_path(destination):
         raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
+    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
+    wanted_knobs = canonical_row_key(knobs) if knobs is not None else None
+    wanted_pins = tuple(sorted((key, str(value)) for key, value in pins.items())) if pins is not None else None
+    matches = []
     for entry in document["configs"]:
         for realization in entry["realizations"]:
             if realization["name"] != name:
                 continue
-            timings = {"emmy_us": float(emmy_us)}
-            if tcompile_us:
-                timings["tcompile_us"] = float(tcompile_us)
-            realization.setdefault("latency", {})[hardware_id] = timings
-            dump_golden_file(document, destination, overwrite=True, incremental=True)
-            return
-    raise ValueError(f"{destination} has no realization named {name!r}")
+            if wanted_knobs is not None and canonical_row_key(realization.get("knobs", {})) != wanted_knobs:
+                continue
+            got_pins = tuple(sorted((key, str(value)) for key, value in realization.get("pins", {}).items()))
+            if wanted_pins is not None and got_pins != wanted_pins:
+                continue
+            matches.append(realization)
+    if len(matches) != 1:
+        raise ValueError(f"{destination} resolves {name!r} to {len(matches)} latency rows; exact knobs and pins must select one")
+    timings = {"emmy_us": float(emmy_us)}
+    if tcompile_us:
+        timings["tcompile_us"] = float(tcompile_us)
+    matches[0].setdefault("latency", {})[hardware_id] = timings
+    dump_golden_file(document, destination, overwrite=True, incremental=True)
 
 
 def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingGoldenTarget, rankings: list[dict]) -> None:
@@ -580,7 +601,7 @@ def persist_tune_winner(
         elif not matching:
             config_index, realization_index = target.entry_indexes[0]
             seed = copy.deepcopy(configs[config_index]["realizations"][realization_index])
-            for key in ("knobs", "measurements", "ranking"):
+            for key in ("knobs", "measurements", "ranking", "latency"):
                 seed.pop(key, None)
             seed["knobs"] = winner_knobs
             seed["ranking"] = {**winner_ranking, "tune_winner": True}

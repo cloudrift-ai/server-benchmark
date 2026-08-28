@@ -28,6 +28,7 @@ from emmy.compiler.pipeline.search.working_golden import (
     persist_proposal_rankings,
     persist_tune_winner,
     realized_tuning_knobs,
+    record_latency,
     validate_working_gpu,
 )
 from emmy.compiler.pipeline.strategy import discovered_strategies
@@ -155,6 +156,7 @@ def test_working_file_is_mutually_exclusive_with_direct_input(tmp_path):
 def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp_path):
     path = tmp_path / "working.yaml"
     verified = _matmul("mm", knobs={"TILE": "f2x2"}, emmy_us=9.0, cublas_us=10.0)
+    verified["latency"] = {"old-gpu": {"emmy_us": 9.0, "tcompile_us": 8.0}}
     proposal = _matmul("mm", knobs={"TILE": "f4x2"})
     document = _document(verified, proposal)
     dump_golden_file(document, path)
@@ -189,6 +191,31 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
     assert winner["ranking"]["source"] == "tune"
     assert winner["ranking"]["tune_winner"] is True
     assert "measurements" not in winner
+    assert "latency" not in winner
+
+
+def test_record_latency_selects_the_measured_row_not_its_same_named_sibling(tmp_path):
+    path = tmp_path / "working.yaml"
+    document = _document(
+        _matmul("mm", knobs={"TILE": "f2x2"}),
+        _matmul("mm", knobs={"TILE": "f4x2"}),
+    )
+    dump_golden_file(document, path)
+
+    record_latency(
+        path,
+        document,
+        "mm",
+        hardware_id="test-gpu",
+        emmy_us=7.5,
+        tcompile_us=8.0,
+        knobs={"TILE": "f4x2"},
+        pins={"FAST_MATH": False},
+    )
+
+    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    assert "latency" not in realizations[0]
+    assert realizations[1]["latency"] == {"test-gpu": {"emmy_us": 7.5, "tcompile_us": 8.0}}
 
 
 def test_direct_winner_promotes_matching_proposal(tmp_path):

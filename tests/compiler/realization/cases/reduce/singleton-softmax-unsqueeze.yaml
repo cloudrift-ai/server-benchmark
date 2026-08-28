@@ -1,0 +1,60 @@
+# Reduced from Qwen3-0.6B decode on an RTX 5090: fusion hoists the singleton value outside the max/sum loops.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: softmax_c1
+    op: constant
+    attrs:
+      name: softmax_c1
+      value: -1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[softmax_c1, f32, [1]]]
+  - id: unsqueeze_c1
+    op: constant
+    attrs:
+      name: unsqueeze_c1
+      value: -1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[unsqueeze_c1, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [4]]]
+  - id: unsqueeze
+    op: torch.unsqueeze
+    attrs: {dim: -1}
+    inputs: [x]
+    outputs: [[unsqueeze, f32, [4, 1]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [unsqueeze]
+    outputs: [[softmax, f32, [4, 1]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - softmax
+    - unsqueeze
+  realizations:
+  - name: k_softmax_1f9e62.4ceb434aa323
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 4a36ac14ffe4fc7368a326afe5bfeaccc0df67a4403b456509bf0cff6836e7e5

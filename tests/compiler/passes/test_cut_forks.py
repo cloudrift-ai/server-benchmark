@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from importlib import import_module
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
@@ -15,16 +19,18 @@ from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
+from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _workspace_axes, cuttable_seams
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
-from emmy.compiler.pipeline.search.golden import GoldenRecord, decode_record
+from emmy.compiler.pipeline.search.golden import GoldenRecord, _lifted_target, decode_record, load_golden_file, load_golden_records
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
 from tests.compiler.helpers import requires_cuda
 
 _CTX = Context.from_target((12, 0))
 _OFF = {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}
+_CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
 
 
 def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
@@ -136,6 +142,43 @@ def _lower_cut(graph: Graph, spelling: str) -> Graph:
     return lowered
 
 
+def _nested_attention_cut(pins: dict[str, str]) -> Graph:
+    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-gqa-b-cut.yaml"
+    (record,) = load_golden_records(load_golden_file(case))
+    tile = _lifted_target(record)
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
+    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    with pinned_knobs(pins):
+        result = _CUT.rewrite(match, graph.nodes[tile.name])
+    options = result if isinstance(result, list) else [result]
+    cut = next(option for option in options if "cut" in option.knobs.values())
+    return cut.expand()[0]
+
+
+def _piece_with_seam(fragment: Graph):
+    return next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and cuttable_seams(node.op))
+
+
+def test_cut_workspace_retains_static_unit_axes() -> None:
+    """A unit seam axis remains workspace geometry even when the produced value is invariant in it."""
+    unit, unused, column = Axis("batch", 1), Axis("unused", 8), Axis("n", 64)
+    produced = Fold.projection(
+        body=Body((Load(name="value", input="x", index=(Var("n"),)),)),
+        results=("value",),
+    )
+    seam = CutSite(
+        node=produced,
+        spelling="PLACE",
+        axes=(unit, unused, column),
+        dtypes=(F16,),
+    )
+
+    assert _workspace_axes(seam, produced) == (unit, column)
+
+
 def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:
     with pinned_knobs({"PLACE": "fuse", **_OFF}):
         lowered = Pipeline.build(CUDA_PASSES).run(_computed_operand_graph("a"), ctx=_CTX)
@@ -209,3 +252,35 @@ def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:
     lowered = _lower_cut(_mimo_graph(), cuts[0])
     assert lowered.outputs == ["out0", "out1"]
     assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 2
+
+
+def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
+    fragment = _nested_attention_cut({"PLACE@map.fold.a.fold.b1": "cut"})
+    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+
+    assert pieces and all(node.op.placement_decided for node in pieces)
+    node = _piece_with_seam(fragment)
+    match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({"PLACE@map.fold.a.fold.b1": "cut"}), pytest.raises(RuleSkipped, match="already placed"):
+        _CUT.rewrite(match, node)
+
+
+def test_bare_place_cut_keeps_recursing_on_fresh_pieces() -> None:
+    fragment = _nested_attention_cut({"PLACE": "cut"})
+    node = _piece_with_seam(fragment)
+    match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+
+    assert not node.op.placement_decided
+    with pinned_knobs({"PLACE": "cut"}):
+        fork = _CUT.rewrite(match, node)
+    assert "cut" in fork.knobs.values()
+
+
+def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
+    fragment = _nested_attention_cut({})
+    node = _piece_with_seam(fragment)
+    match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+
+    assert not node.op.placement_decided
+    options = _CUT.rewrite(match, node)
+    assert {"fuse", "cut"} <= {value for option in options for value in option.knobs.values()}

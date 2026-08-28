@@ -316,6 +316,23 @@ def test_exact_full_path_outranks_deeper_subsequence_matches() -> None:
         assert resolve(root, key).node is node, key
 
 
+def test_exact_full_path_uses_the_ordinal_reading_that_matched() -> None:
+    """An axisless placement edge spells its final path segment plus ordinal as one component.
+
+    Once the literal-axis reading fails, exact-path precedence must compare against the effective
+    segment-plus-ordinal reading, not the original literal parse. Otherwise a deeper path that
+    admits the shallow path as a subsequence makes the shallow site's canonical key ambiguous.
+    """
+    head = Site(node=object(), axis="a", segments=("map", "fold"))
+    shallow = Site(node=object(), axis=None, segments=("map", "fold", "a", "fold", "b"))
+    deep = Site(node=object(), axis=None, segments=("map", "fold", "a", "map", "fold", "fold", "b"))
+    all_sites = (head, shallow, deep)
+
+    key = _spellings("PLACE", shallow, all_sites)
+    assert key == "PLACE@map.fold.a.fold.b1"
+    assert resolve(None, key, all_sites=all_sites).node is shallow.node
+
+
 def test_identity_miss_is_loud_never_the_untiled_path() -> None:
     """A copied node (``dataclasses.replace`` — structurally equal, a different object) is NOT a
     site of the tree: addressing a schedule read through it must raise ``UnknownSiteError``, never
@@ -340,3 +357,24 @@ def test_identity_miss_is_loud_never_the_untiled_path() -> None:
     plain = _planar_fold()
     wrapper = Fold.projection(body=Body((Assign(name="o", op="copy", args=(plain.out,)),)), operands=(plain,))
     assert Sched(wrapper, {}).key("TILE", plain) is None  # a real site, family declines — not an identity miss
+
+
+def test_tile_axis_orientation_is_read_once_per_site(monkeypatch) -> None:
+    """Candidate plans share a site's output-axis orientation; the computed cone lowers once."""
+    from emmy.compiler.ir.tile import Placement
+    from emmy.compiler.ir.tile import ops as tile_ops
+
+    root, product, _ = _norm_linear_tree()
+    calls = []
+    original = tile_ops.edge_refs_axis
+
+    def spy(edge, name):
+        calls.append((edge, name))
+        return original(edge, name)
+
+    monkeypatch.setattr(tile_ops, "edge_refs_axis", spy)
+    axes = (Axis("m", 128), Axis("n", 256))
+    sched = tile_ops.Sched(root, {}, place=Placement(free=axes, grid=axes))
+    assert sched._mn_for(product) == axes
+    assert sched._mn_for(product) == axes
+    assert len(calls) == 2

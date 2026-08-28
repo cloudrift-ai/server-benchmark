@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import importlib
 from abc import ABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -80,14 +80,17 @@ class RunStartEvent:
 class SpliceEvent:
     """Emitted by ``Candidate.apply`` BEFORE a ``Graph`` fragment splices in. Fragment op
     identities are stable (pre-splice, pre-id-promotion); ``graph`` is the candidate's graph,
-    still holding the consumed nodes. Strategies may mutate fragment OPS (stamp identity,
-    thread attribution) — never the graph or the cursor."""
+    still holding the consumed nodes. ``knobs`` is the selected fork's delta, which cannot ride
+    the fragment because Graph splices deliberately do not inherit the consumed op's knobs.
+    Strategies may mutate fragment OPS (stamp identity, thread attribution) — never the graph or
+    the cursor."""
 
     match: Match
     fragment: Graph
     root_op: Op
     pass_name: str
     graph: Graph
+    knobs: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

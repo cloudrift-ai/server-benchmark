@@ -79,6 +79,9 @@ STRUCTURAL forks whose chosen side replaces the kernel with fresh unmapped piece
 placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than through the
 codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone, a seam
 whose workspace dtypes stay undetermined).
+A scoped `PLACE@path=cut` pin is one authoritative seam decision: both pieces set `placement_decided` and proceed to
+scheduling rather than applying that path again to a different tree. Unpinned cuts and bare
+`PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
 `040_schedule` maps the free axes and enumerates the schedule. Keys
 use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
 
@@ -401,7 +404,10 @@ that canonical input:
 - **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam. A cut writes one workspace
   per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
-  are not. A contraction's operand edges are seams of the same class: cutting one materializes the cone feeding that
+  are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:
+  an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
+  until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
+  materializes the cone feeding that
   operand into its own kernel and the contraction reads it back as an ordinary load. Such a seam's workspace dtype is
   decided EXPLICITLY — the dtype the consuming contraction's output is stored at (traced through any epilogue to the
   output it feeds, so a sibling output at another width cannot mis-type it), which is the element the fused slab
@@ -415,7 +421,8 @@ that canonical input:
   that seam rather than joining the offer: the raw bits dominate the fed-store workspace on both precision (exact vs
   re-rounded) and footprint (storage width vs store width), so there is no trade for the evidence to decide. Every
   seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
-  disagree. The new producer and consumer are fresh
+  disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
+  them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
   unmapped TileOps, so further legal cuts and schedules use the same ordinary passes; a pinned cut therefore recurses
   exactly until a piece schedules (a scheduled piece is placed and never re-cut). A piece minted by a structural
   apply joins the sweep after `030_cut`'s batch, so it reaches `040_schedule` first — when a pinned schedule REFUSES

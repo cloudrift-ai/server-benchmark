@@ -164,7 +164,7 @@ class Candidate:
         self.apply(match, options[0])
         return None
 
-    def apply(self, match: Match, option: Op | Graph) -> None:
+    def apply(self, match: Match, option: Op | Graph, *, knobs: dict | None = None) -> None:
         """Lazy mode (called by ``LazyCandidate.resolve`` and
         internally by :meth:`try_rewrite` for single-option matches):
         apply the specific ``option`` to this candidate's graph.
@@ -186,7 +186,9 @@ class Candidate:
         skip the replaced op in the chain (and silently disable the
         knob merge, which is idempotent for rules that already merged
         manually). Knobs are NOT merged forward on the ``Graph`` path —
-        fragment kernels carry their own structural identity.
+        fragment kernels carry their own structural identity. The selected
+        fork's delta instead rides ``SpliceEvent.knobs`` for strategies that
+        need the consumed parent's route identity.
 
         What a splice MEANS in any dialect is strategy business, not
         the engine's: ``on_splice`` fires before the splice (fragment
@@ -212,6 +214,7 @@ class Candidate:
                 root_op=self.graph.nodes[match.root_node_id].op,
                 pass_name=pass_name,
                 graph=self.graph,
+                knobs=dict(knobs or {}),
             )
             for strat in strategies:
                 strat.on_splice(event)
@@ -341,7 +344,7 @@ class LazyCandidate:
         assert len(leaves) == 1, f"leaf Fork must expand to a single option, got {len(leaves)}"
         option = leaves[0]
         resolved = Candidate(run=self.inner.run, graph=self.inner.graph.copy(), cursor=self.cursor)
-        resolved.apply(match.remap(resolved.graph), option)
+        resolved.apply(match.remap(resolved.graph), option, knobs=fork.knobs)
         self.resolved_knobs = dict(fork.knobs)
         self.pending = None
         self.inner = resolved

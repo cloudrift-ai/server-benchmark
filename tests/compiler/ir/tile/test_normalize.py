@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole
@@ -7,9 +11,13 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda, M
+from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lambda_equivalent_clusters
+from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline import Pipeline
+from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+from emmy.compiler.pipeline.search.golden import _lifted_target, load_golden_file, load_golden_records
 
 
 def _lift(body: Body) -> TileOp:
@@ -66,6 +74,35 @@ def test_tile_post_init_recovers_an_elided_unit_contraction_row() -> None:
     assert tile.op.role is AxisRole.CONTRACTION
 
 
+@pytest.mark.parametrize(
+    "index",
+    (
+        (Var("n"), Literal(0, "int")),
+        (Literal(0, "int"), Var("n") * 2),
+    ),
+    ids=("varying-coordinate-before-zero", "strided-column"),
+)
+def test_tile_post_init_does_not_infer_a_unit_row_from_a_non_dense_boundary(index) -> None:
+    axis = Axis("k", Dim(16))
+    body = Body(
+        (
+            Load(name="left", input="x", index=(Literal(0, "int"), Var("k"))),
+            Load(name="right", input="w", index=(Var("n"), Var("k"))),
+            Assign(name="product", op="multiply", args=("left", "right")),
+        )
+    )
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    planar = Fold(axis=axis, lift=Lambda(params=("k",), body=body, results=("product",)), init=init, combine=combine)
+
+    tile = TileOp(
+        op=planar,
+        place=Placement(free=(Axis("n", 16),)),
+        output_specs=(OutputSpec(Write(output="out", index=index, value="acc")),),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("n",)
+
+
 def test_contraction_promotes_a_shared_store_sweep_once() -> None:
     n = Axis("n", 16)
     stores = tuple(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=n) for _ in range(2))
@@ -74,6 +111,162 @@ def test_contraction_promotes_a_shared_store_sweep_once() -> None:
 
     assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
     assert all(store.sweep is None for store in tile.output_specs)
+
+
+def test_contraction_promotes_a_shared_store_sweep_after_grid_mapping() -> None:
+    """A scheduled/reloaded tile keeps promotion as a construction invariant."""
+    m, n = Axis("m", 8), Axis("n", 16)
+    normalized = TileOp(op=_planar_matmul(), place=Placement(free=(m, n))).op
+    tile = TileOp(
+        op=normalized,
+        place=Placement(free=(m,), grid=(m,), mapped=True),
+        schedule={"TILE": TilePlan(regs=(2, 2))},
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=n),),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
+    assert tuple(axis.name for axis in tile.place.grid) == ("m", "n")
+    assert tile.place.is_mapped
+    assert tile.schedule["TILE"] == TilePlan(regs=(2, 2))
+    assert tile.output_specs[0].sweep is None
+
+
+def test_nested_contraction_promotes_a_shared_store_sweep() -> None:
+    """A sibling reduction can be the root-most node while a later contraction reads the sweep axis."""
+    m, n = Axis("m", 8), Axis("n", 16)
+    stat_axis = Axis("r", 4)
+    init, combine = M(ElementwiseImpl("add"), names=("stat",))
+    stat = Fold(
+        axis=stat_axis,
+        lift=Lambda(
+            params=("r",),
+            body=Body((Load(name="sample", input="s", index=(Var("m"), Var("r"))),)),
+            results=("sample",),
+        ),
+        init=init,
+        combine=combine,
+    )
+    root = Fold.projection(
+        operands=(stat, _planar_matmul()),
+        body=Body((Assign(name="result", op="add", args=("stat", "acc")),)),
+        results=("result",),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m,)),
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=n),),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
+    assert tile.output_specs[0].sweep is None
+
+
+def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row() -> None:
+    """A nested linear site turns the swept column into grid placement before scheduling."""
+    n, k, r = Axis("n", 16), Axis("k", 32), Axis("r", 4)
+    stat_init, stat_combine = M(ElementwiseImpl("add"), names=("stat",))
+    stat = Fold(
+        axis=r,
+        lift=Lambda(
+            params=("r",),
+            body=Body((Load(name="sample", input="s", index=(Var("r"),)),)),
+            results=("sample",),
+        ),
+        init=stat_init,
+        combine=stat_combine,
+    )
+    linear_init, linear_combine = M(ElementwiseImpl("add"), names=("acc",))
+    linear = Fold(
+        axis=k,
+        lift=Lambda(
+            params=("k",),
+            body=Body(
+                (
+                    Load(name="left", input="x", index=(Literal(0, "int"), Var("k"))),
+                    Load(name="right", input="w", index=(Var("k"), Var("n"))),
+                    Assign(name="product", op="multiply", args=("left", "right")),
+                )
+            ),
+            results=("product",),
+        ),
+        init=linear_init,
+        combine=linear_combine,
+    )
+    root = Fold.projection(
+        operands=(stat, linear),
+        body=Body((Assign(name="result", op="add", args=("stat", "acc")),)),
+        results=("result",),
+    )
+    tile = TileOp(
+        op=root,
+        output_specs=(
+            OutputSpec(
+                write=Write(
+                    output="out",
+                    index=(Literal(0, "int"), Literal(0, "int"), Var("n")),
+                    value="result",
+                ),
+                sweep=n,
+            ),
+        ),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
+    assert tile.output_specs[0].sweep is None
+    assert any(site.node.role is AxisRole.CONTRACTION for site in sites(tile.op))
+    assert TileOp(op=tile.op, place=tile.place, output_specs=tile.output_specs).op is tile.op
+
+
+def test_matvec_recovers_an_implicit_unit_row_through_an_output_reshape() -> None:
+    """A split head/value boundary is still one varying matrix column coordinate."""
+    n, k = Axis("n", 2048), Axis("k", 1024)
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    product = Fold(
+        axis=k,
+        lift=Lambda(
+            params=("k",),
+            body=Body(
+                (
+                    Load(name="left", input="x", index=(Var("k"),)),
+                    Load(name="right", input="w", index=(Var("k"), Var("n"))),
+                    Assign(name="product", op="multiply", args=("left", "right")),
+                )
+            ),
+            results=("product",),
+        ),
+        init=init,
+        combine=combine,
+    )
+    tile = TileOp(
+        op=product,
+        place=Placement(free=(n,)),
+        output_specs=(
+            OutputSpec(
+                write=Write(
+                    output="out",
+                    index=(Literal(0, "int"), Literal(0, "int"), Var("n") / 128, Var("n") % 128),
+                    value="acc",
+                )
+            ),
+        ),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
+    assert isinstance(tile.op, Fold) and tile.op.role is AxisRole.CONTRACTION
+
+
+def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
+    """The reduced Qwen3 target needs its promoted value-width axis to close computed B."""
+    case = Path(__file__).parents[2] / "realization/cases/attention/rmsnorm-gqa-b-cut.yaml"
+    (record,) = load_golden_records(load_golden_file(case))
+
+    tile = _lifted_target(record)
+    reconstructed = TileOp(op=tile.op, name=tile.name, place=tile.place, output_specs=tile.output_specs)
+
+    assert tuple(axis.name for axis in tile.place.free) == ("a0", "a1", "a6")
+    assert all(spec.sweep is None for spec in tile.output_specs)
+    assert reconstructed.op is tile.op
+    assert "PLACE@map.fold.a.fold.b1" in {seam.spelling for seam in cuttable_seams(tile)}
 
 
 def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:

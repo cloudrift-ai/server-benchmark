@@ -858,82 +858,26 @@ def kernel_identity(record: GoldenRecord) -> str | None:
     return identity
 
 
-_PROGRAM_TARGET_CACHE: dict[
-    tuple[int, tuple[int, int], str, tuple[tuple[str, int], ...]],
-    dict[frozenset[str], set[tuple[tuple[str, float], ...]]],
-] = {}
-
-
 def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float], ...]:
-    """Lower one persisted frontend target and recover its unique ``S_*`` row."""
+    """Lower the exact replay target and recover its unique ``S_*`` row."""
     payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
     key = (payload_id, record.target_key, record.compute_cap, record.bindings)
     cached = _STRUCTURAL_CACHE.get(key)
     if cached is not None:
         return cached
 
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
 
-    if record.loop_wire is not None:
-        ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
-        lowered = Pipeline.build(LOOP_PASSES).run(record.target_program, ctx=ctx)
-        output_nodes = {
-            node.id for output in lowered.outputs if (node := lowered.producer(output)) is not None and isinstance(node.op, LoopOp)
-        }
-        signatures = {
-            tuple(
-                sorted(
-                    (name, float(value))
-                    for name, value in (getattr(lowered.nodes[node_id].op, "knobs", {}) or {}).items()
-                    if name.startswith(STRUCT_PREFIX)
-                )
-            )
-            for node_id in output_nodes
-        }
-        signatures.discard(())
-        if len(signatures) != 1:
-            raise ValueError(f"{record.name}: Loop IR target resolves to {len(signatures)} structural targets")
-        result = next(iter(signatures))
-        _STRUCTURAL_CACHE[key] = result
-        return result
-
-    from emmy.compiler import provenance  # noqa: PLC0415
-
-    wanted = set(record.origins)
-    program_key = (id(record.program_wire), record.compute_cap, record.gpu_name, record.bindings)
-    target_index = _PROGRAM_TARGET_CACHE.get(program_key)
-    if target_index is None:
-        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
-
-        graph = specialize_program(record.program, record.binding_map)
-        provenance.seed(graph)
-        ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
-        lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
-        target_index = {}
-        for node_id in lowered.topological_order():
-            node = lowered.nodes[node_id]
-            if not isinstance(node.op, LoopOp):
-                continue
-            origins = frozenset(origin for origin in provenance.get(node) if origin in record.program.nodes)
-            feature_map = {
-                name: float(value) for name, value in (getattr(node.op, "knobs", {}) or {}).items() if name.startswith(STRUCT_PREFIX)
-            }
-            features = tuple(sorted(feature_map.items()))
-            if origins and features:
-                target_index.setdefault(origins, set()).add(features)
-        _PROGRAM_TARGET_CACHE[program_key] = target_index
-
-    signatures = target_index.get(frozenset(wanted), set())
-    if not signatures:
-        raise ValueError(f"{record.name}: provenance target {sorted(wanted)} no longer resolves after lowering")
-    if len(signatures) != 1:
-        raise ValueError(
-            f"{record.name}: provenance target {sorted(wanted)} resolves to {len(signatures)} structural targets; "
-            "the stable target selector is ambiguous"
+    _lowered, nodes = _target_kernel_nodes(record)
+    signatures = {
+        tuple(
+            sorted((name, float(value)) for name, value in (getattr(node.op, "knobs", {}) or {}).items() if name.startswith(STRUCT_PREFIX))
         )
+        for node in nodes
+    }
+    signatures.discard(())
+    if len(signatures) != 1:
+        raise ValueError(f"{record.name}: target resolves to {len(signatures)} structural targets")
     result = next(iter(signatures))
     _STRUCTURAL_CACHE[key] = result
     return result

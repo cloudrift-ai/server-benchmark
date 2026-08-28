@@ -280,7 +280,7 @@ class TuningSearch(Search):
         if not knobs:
             return None
         row = dict(tuning_knob_items(knobs))
-        placement = {key: value for key, value in row.items() if family_of(key) == "PLACE"}
+        placement = {key: value for key, value in row.items() if family_of(key) == "PLACE" and value == "cut"}
         if placement:
             return placement
         work = Workers.parse(row.get("WORK"))

@@ -1,0 +1,52 @@
+# evidence: split-K after a placement cut dropped a unit row and emitted an undefined partition index in the B load.
+compute_cap:
+- 8
+- 0
+programs:
+- inputs: [x0, x1, x2]
+  outputs: [add]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 1, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [64, 64]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [1, 1, 64]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 1, 64]]]
+  - id: add
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [linear, x2]
+    outputs: [[add, f16, [1, 1, 64]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - add
+    - linear
+  realizations:
+  - name: k_linear_da67b3.90f9d0366a1a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+      PLACE: cut
+    knobs:
+      WORK: w2x1
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
+      REDUCE: g2k
+      STAGE: ''
+      RASTER: ''
+      FAST_EXP: 'False'
+      VECTORIZE_LOADS: 'True'
+      VECTORIZE_STORES: 'True'
+      INTERLEAVE_LOADS: 'True'
+      PAIR_LDMATRIX: 'True'
+      LOOPIFY: '0'
+    identity: e5a291968474e3517cdd078c6b0ca9af0a0c1d57220b16cd062b0b341de801f8

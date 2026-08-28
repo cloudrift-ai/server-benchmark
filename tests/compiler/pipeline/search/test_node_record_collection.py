@@ -215,6 +215,21 @@ def test_best_realized_keeps_only_the_routing_row_for_a_placement_cut() -> None:
     assert search.best_realized() == ({"PLACE@a": "cut"}, 6.0, 2, True)
 
 
+def test_best_realized_keeps_the_schedule_row_for_fused_placement() -> None:
+    tree = SearchTree()
+    row = stamp_schedule_families({"WORK": "w1x4", "TILE": "mma_m16n8k16_f16_f32/f4x2/k8", "STAGE": "d1/smem"})
+    route = SearchNode(candidate=SimpleNamespace(resolved_knobs={"PLACE": "fuse"}), parent=tree.root)
+    fast = _ok_leaf(6.0, realized_knobs=row, cuda_ops=1, cuda_knobs=[row])
+    fast.parent = route
+    route.children = [fast]
+    tree.root.children = [route]
+
+    search = TuningSearch.__new__(TuningSearch)
+    search.tree = tree
+
+    assert search.best_realized() == (row, 6.0, 1, False)
+
+
 def test_best_realized_returns_an_ordinary_one_kernel_row() -> None:
     tree = SearchTree()
     tree.root.children = [_ok_leaf(6.0, realized_knobs={"WORK": "t64"}, cuda_ops=1)]

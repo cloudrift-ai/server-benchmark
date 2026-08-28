@@ -755,10 +755,13 @@ class Fold:
         return structural_key(self)
 
     def deps(self) -> tuple[str, ...]:
-        """No SSA read at this level: everything the term consumes is bound by its own ``lift``
-        params, whose values arrive through the ``operands`` edges. The reads a deep walk wants are
-        the children's (:func:`deep_reads` recurses through :meth:`nested` and the edges)."""
-        return ()
+        """SSA names captured by the term rather than supplied through its ``lift`` params."""
+        reads = set(self.lift.free_names())
+        if self.observe is not None:
+            reads.update(self.observe.free_names())
+        for edge in self.operands:
+            reads.update(edge.deps())
+        return tuple(sorted(reads - set(self.lift.params)))
 
     def exprs(self):
         """No index / predicate ``Expr`` of its own — a term's coordinates live on the ``Load``

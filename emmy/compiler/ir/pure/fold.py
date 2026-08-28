@@ -28,8 +28,8 @@ from functools import cached_property
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.pure.algebra import M, component_ops, merge_stmts, rename_combine
-from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge
+from emmy.compiler.ir.pure.algebra import M, component_ops, family_of, merge_stmts, rename_combine
+from emmy.compiler.ir.pure.carrier import exp_merge
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
@@ -211,7 +211,8 @@ def _fold_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     stored parameters, so kernel identity depends on no classified view."""
     lam = fold.lift
     names = fold.combine.results
-    ops = component_ops(fold.combine)
+    family = fold.family
+    ops = None if family.twisted else family.ops
     if _identity_lift(fold):
         if len(fold.operands) == 1 and _composes_state(fold.operands[0], tuple(names), ops):
             # Split-K's inner contraction already updates the shared accumulators directly.
@@ -323,18 +324,17 @@ class Fold:
         bound = tuple(n for e in self.operands for n in _operand_result_names(e))
         assert tuple(lam.params[1:]) == bound, f"lift params {lam.params[1:]} must bind the operand edges {bound} positionally"
         assert len(lam.results) == n, "one lift result per monoid component"
-        if component_ops(self.combine) is not None:
-            return  # DEGENERATE: the componentwise family — nothing further to validate
-        # TWISTED: the family is selected STRUCTURALLY, never stored — the stored combine
-        # must BE the exp/LSE generator's program over these state names (recognition built it
-        # exactly there; a foreign twisted combine has no derivation yet and is rejected loudly).
-        # The state-component ROLE decision is shape-derived off the lift's injected singleton,
-        # no annotation: the pivot is component 0 (its injected term the score), a literal-1
-        # injection is a denominator, a value injection an expectation.
-        names = self.combine.results
-        other = tuple(f"{nm}__o" for nm in names)
-        expected = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
-        assert self.combine == expected, "a twisted Fold's combine must be the generated exp/LSE-family program over its state names"
+        # The FAMILY claim is the formation gate: membership is program equality against the
+        # registry (:func:`family_of`), so a foreign combine — twisted or otherwise — with no
+        # registered derivation is rejected loudly, never stored. The claiming family is memoized
+        # (:attr:`family`) for every downstream family-shaped read.
+        family = self.family
+        assert family is not None, "no registered monoid family claims this Fold's combine — the stored program must be a family generator's exact output"
+        if not family.twisted:
+            return  # the componentwise family — nothing further to validate
+        # TWISTED: the state-component ROLE decision is shape-derived off the lift's injected
+        # singleton, no annotation: the pivot is component 0 (its injected term the score), a
+        # literal-1 injection is a denominator, a value injection an expectation.
         assert isinstance(lam.results[0], str), "the twisted lift's pivot component must inject the score name"
 
     @property
@@ -358,11 +358,20 @@ class Fold:
           unbindable contraction's loads inline in the lift, so there are no edges to bind."""
         if self.axis is None:
             return AxisRole.FREE
-        if component_ops(self.combine) is None:
+        if self.family.twisted:
             return AxisRole.TWISTED
         if self._contraction is not None:
             return AxisRole.CONTRACTION  # the bilinear cell itself — the node kind that was
         return AxisRole.PLANAR
+
+    @cached_property
+    def family(self):
+        """The registered monoid family claiming this fold's combine
+        (:func:`~emmy.compiler.ir.pure.algebra.family_of`) — ``None`` at zero axes (no monoid).
+        Memoized: the term is immutable, and a twisted membership check regenerates the family
+        program. The ONE family-shaped read (the ``TWISTED`` role, the derived-step dispatch,
+        the observer/partition legality gates)."""
+        return family_of(self.combine) if self.combine is not None else None
 
     @cached_property
     def _contraction(self) -> tuple[object, tuple[Channel, ...]] | None:
@@ -596,7 +605,7 @@ class Fold:
         composition (split-K) embeds its one fold operand verbatim. None of those splice
         twice."""
         consumed = {id(s) for s in self.step_stmts()}
-        if component_ops(self.combine) is None and not _identity_lift(self):
+        if self.family.twisted and not _identity_lift(self):
             by_param = _operand_binding(self)
             for term in self.lift.results[1:]:  # EXPECTATION components: a str-injected non-pivot
                 if isinstance(term, str):

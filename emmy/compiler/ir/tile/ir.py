@@ -40,6 +40,7 @@ from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction, operand_body
+from emmy.compiler.ir.pure.normalize import _canonical_body_order
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
@@ -223,6 +224,45 @@ def lower_with_output_specs(op, specs) -> list[Stmt]:
     return apply_output_specs(op.lower(), specs)
 
 
+def _semantic_form(stmts) -> tuple[Stmt, ...]:
+    """``stmts`` with every maximal run of PURE statements put in dependency-canonical order,
+    recursively through ``Loop`` bodies.
+
+    What :func:`extract_output_specs` needs from its reconstruction is that it denotes the same
+    program, not that it is the same text. The two differ because a :class:`ProjectionRegion`
+    carries its body in a ``Lambda``, and ``Lambda`` construction canonically orders that body
+    (``normalize_lambda_body``) — so a region always reads back with its pure members in canonical
+    order, whatever order they were captured in. Textual equality would reject that, and used to.
+
+    The reordering is safe to see through because ``_canonical_body_order`` is a topological sort:
+    a statement is placed only once nothing it reads is still unplaced, so its statement-kind
+    tiebreak can only permute members that are mutually INDEPENDENT, and on a cycle it returns the
+    body untouched. A pure run is an A-normal-form let-chain, so any dependency-respecting order of
+    it denotes the same term. Every ``Lambda`` body in the IR is already canonical for the same
+    reason, so no consumer can be distinguishing two such orders today.
+
+    Impure statements are barriers and never move, so the order of writes to one buffer is still
+    compared exactly — that is the part of the old byte-identity rule that carried meaning.
+    """
+
+    def ordered(members: list[Stmt]) -> list[Stmt]:
+        out: list[Stmt] = []
+        run: list[Stmt] = []
+        for stmt in members:
+            if stmt.pure:
+                run.append(stmt)
+                continue
+            if run:
+                out.extend(_canonical_body_order(Body(tuple(run))))
+                run = []
+            out.append(stmt)
+        if run:
+            out.extend(_canonical_body_order(Body(tuple(run))))
+        return out
+
+    return tuple(ordered([replace(st, body=Body(_semantic_form(st.body))) if isinstance(st, Loop) else st for st in stmts]))
+
+
 def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...]] | None:
     """Split an effectful projection stmt stream into ``(pure stmts, OutputSpec decorations)`` — the
     conversion-side inverse of :func:`apply_output_specs`, valid ONLY when the reconstitution
@@ -244,7 +284,7 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
         if writes and all(s.pure for s in inner):
             stores.extend(OutputSpec(write=write, sweep=loop.axis, unroll=loop.unroll) for write in writes)
             rest = [*rest[:-1], *inner]
-    if all(s.pure for s in rest) and apply_output_specs(rest, stores) == original:
+    if all(s.pure for s in rest) and _semantic_form(apply_output_specs(rest, stores)) == _semantic_form(original):
         return tuple(rest), tuple(stores)
 
     def extract(body: Body) -> tuple[Body, list[OutputSpec], list[OutputSpec]] | None:
@@ -291,7 +331,7 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
     if extracted is None:
         return None
     body, outputs, _ = extracted
-    if apply_output_specs(body, outputs) != original:
+    if _semantic_form(apply_output_specs(body, outputs)) != _semantic_form(original):
         return None
     return tuple(body), tuple(outputs)
 

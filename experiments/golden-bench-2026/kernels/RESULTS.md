@@ -1,5 +1,47 @@
 # Golden-bench kernel corpus
 
+## Affected-kernel qualification after the computed-B cut changes (main @ `6e6181d5`, 2026-08-28)
+
+### Scope
+
+This bounded follow-up re-traced Qwen3-0.6B layer 0 at sequence length 512 and re-tuned the three attention targets
+whose placement or schedule could change after #678: score/statistics (`k_sdpa_mean_reduce_29d3df`), softmax times V
+(`k_sdpa_linear_reduce_c0a378`), and output projection plus residual (`k_linear_sdpa_reduce_e24efe`). The V100 lane
+also rechecked the already incorrect down-projection target. Every lane used the exact `6e6181d5` source, isolated
+tuning state, deployable `-O3`, at most 12 candidates, patience 4, and a per-target wall bound.
+
+A fresh trace on all four cards now produces one maximal whole-layer target,
+`k_sdpa_linear_mean_reduce_ad2ade.060608ea1479`, instead of the checked nine-target inventory. That changes the
+denominator, so the bounded comparison used untrusted copies of the three checked self-contained provenance slices.
+The whole-layer target was recorded but not substituted into the historical comparison. An RTX 4090 control trace at
+the immediate parent `b4efe436` is byte-identical, so the inventory change predates #678.
+
+This is a host-local compiler qualification, not a new `emmy bench` experiment snapshot. No results archive was
+replaced, and none of these numbers is publication evidence.
+
+### Result
+
+| platform | score/statistics | softmax times V | output projection plus residual |
+| --- | --- | --- | --- |
+| V100 | 455,132 µs versus 1,975 µs eager; direct eager check passed, but `torch.compile` was unavailable | strict pass: 457,662 µs versus 531 µs eager and 274 µs `torch.compile` | exact historical pins take about 6.1-6.5 s per first launch and exceed the benchmark watchdog |
+| A100 | the exact three-cut proposal builds, then its main kernel exceeds the 60 s launch watchdog | three bounded candidates take about 3.92 s per main launch | exact historical pins are consumed, but the main kernel takes about 2.15 s and exceeds the benchmark-stage budget |
+| RTX 4090 | one cold candidate and the exact cut proposal each exceed the 60 s launch watchdog | fused and placed candidates take about 1.85 s per launch | strict pass: 1,594,544 µs versus 49 µs eager and 53 µs `torch.compile` |
+| RTX 5090 | one cold candidate and all three current scoped cut proposals exceed the 60 s launch watchdog | three candidates take about 1.30-1.36 s per launch | exact historical pins take about 1.49-1.54 s; eight more variants remain about 0.97-1.99 s |
+
+The V100 down-projection diagnostic remains incorrect: current greedy execution is about 511 µs versus 84 µs eager
+and 76 µs `torch.compile`, with 40 of 524,288 outputs outside tolerance (`max_abs=0.00391`). It was not admitted as a
+performance result.
+
+No realization qualified for promotion. #678 closes the placement legality gap: the scoped computed-B cuts are
+offered, realized, built, and consume their exact pins. It does not yet close the performance gap. On the output
+projection target, generated code recomputes the complete attention expression inside each output-projection
+contraction step; local schedule knobs cannot remove that asymptotic duplication. The score/statistics cuts likewise
+need deployable child schedules after materialization. These are placement and schedule-design gaps, not small
+offered, realized, built, or correctness failures, so this pass made no compiler or canonical-golden change.
+
+`FAST_MATH` was not promoted. None of the affected standard rows reached the performance and strict-correctness gate,
+and changing contraction math cannot remove the duplicated attention work diagnosed above.
+
 ## Host-local exact-card qualification checkpoint (2026-08-28)
 
 ### Question and scope

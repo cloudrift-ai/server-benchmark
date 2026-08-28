@@ -442,15 +442,6 @@ async def measure_proposals(
                 knobs={**ctx.features(), **structural_knobs},
                 captured=True,
             )
-            route_children = search.best_route_children()
-            if route_children is not None and len(route_children) == structural[2]:
-                db.record_structural_route(
-                    ctx.structural_key(),
-                    structural_key,
-                    backend=ctx.backend_name or "cuda",
-                    children=route_children,
-                    parent_latency_us=search.last_stats.median,
-                )
         if prior is not None:
             prior.add_rows(search._collect_rows())
             prior.maybe_refit()

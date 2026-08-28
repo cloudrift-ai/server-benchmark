@@ -21,9 +21,6 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   terminal op the backend measured, or the finalized Loop cache key for a
   directly measured whole-slice structural route. ``backend`` partitions the
   table so the loop interpreter and the CUDA backend can coexist in the same DB.
-- ``structural_route`` — the ordered exact child schedules that earned a
-  directly measured whole-slice structural route. Keyed beside its parent
-  ``perf`` row; greedy replay consults it only after that parent route wins.
 - ``node`` — one row per search-tree node (every partial branch + leaf of a
   per-kernel autotune search), keyed by ``digest(context_key, op_sig,
   tunable-knob set)``. Each row carries the full feature dict passed to the
@@ -130,28 +127,6 @@ class PerfSample:
     knobs: dict
     latency_us: float
     error: str | None = None  # bench_fail failure text (None on ok rows / pre-error-column DBs)
-
-
-@dataclass(frozen=True)
-class RouteChild:
-    """One child of a measured structural route, in launch order."""
-
-    op_key: str
-    op_sig: str
-    knobs: dict
-    latency_us: float
-
-
-@dataclass(frozen=True)
-class StructuralRouteRow:
-    """The ordered child schedule rows that earned one structural parent measurement."""
-
-    context_key: str
-    parent_key: str
-    backend: str
-    children: tuple[RouteChild, ...]
-    parent_latency_us: float
-    measured_at: str
 
 
 @dataclass(frozen=True)
@@ -421,17 +396,6 @@ class SearchDB:
             PRIMARY KEY (context_key, op_key, backend)
         )
         """,
-        """
-        CREATE TABLE IF NOT EXISTS structural_route (
-            context_key  TEXT NOT NULL,
-            parent_key   TEXT NOT NULL,
-            backend      TEXT NOT NULL,
-            children     TEXT NOT NULL,
-            parent_latency_us REAL NOT NULL,
-            measured_at  TEXT NOT NULL,
-            PRIMARY KEY (context_key, parent_key, backend)
-        )
-        """,
         # Content-keyed (``node_key`` folds context + op_sig + knob set), so —
         # unlike ``lowering`` — it is parent-tree-independent and survives a
         # ``_SCHEMA_VERSION`` bump. ``CREATE … IF NOT EXISTS`` auto-creates it on
@@ -540,9 +504,6 @@ class SearchDB:
         # A read-only open of a pre-``node`` DB never ran ``CREATE TABLE IF NOT
         # EXISTS``, so ``SELECT … FROM node`` would raise; readers gate on this.
         return self._conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'node'").fetchone() is not None
-
-    def _has_structural_route_table(self) -> bool:
-        return self._conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'structural_route'").fetchone() is not None
 
     @classmethod
     def open_readonly(cls, path: Path | str) -> SearchDB:
@@ -730,37 +691,6 @@ class SearchDB:
                 error,
             ),
         )
-
-    def record_structural_route(
-        self,
-        context_key: str,
-        parent_key: str,
-        *,
-        backend: str,
-        children: list[RouteChild],
-        parent_latency_us: float,
-    ) -> bool:
-        """Pair ordered child schedules with the matching structural parent measurement.
-
-        The receipt is accepted only while ``perf`` holds the same whole-slice
-        latency. This lets an exact remeasurement backfill an older DB that predates
-        the table, while preventing a slower later terminal from pairing its children
-        with the faster parent measurement already stored.
-        """
-        parent = self.lookup_perf(context_key, parent_key, backend=backend)
-        if parent is None or parent.status != "ok" or parent.stats.median != parent_latency_us:
-            return False
-        payload = json.dumps(
-            [{"op_key": child.op_key, "op_sig": child.op_sig, "knobs": child.knobs, "latency_us": child.latency_us} for child in children],
-            sort_keys=True,
-            default=str,
-        )
-        self._conn.execute(
-            "INSERT OR REPLACE INTO structural_route "
-            "(context_key, parent_key, backend, children, parent_latency_us, measured_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (context_key, parent_key, backend, payload, parent_latency_us, datetime.now(UTC).isoformat()),
-        )
-        return True
 
     # ------------------------------------------------------------------
     # Search-tree nodes — write
@@ -1092,45 +1022,6 @@ class SearchDB:
             (context_key, op_key, backend),
         ).fetchone()
         return _row_to_perf(row) if row else None
-
-    def lookup_structural_route(self, context_key: str, parent_key: str, *, backend: str) -> StructuralRouteRow | None:
-        """Return a measured parent's ordered child schedules, if this DB records them.
-
-        Read-only opens of pre-table DBs degrade to no receipt, just like an untuned parent.
-        """
-        if not self._has_structural_route_table():
-            return None
-        row = self._conn.execute(
-            "SELECT context_key, parent_key, backend, children, parent_latency_us, measured_at FROM structural_route "
-            "WHERE context_key = ? AND parent_key = ? AND backend = ?",
-            (context_key, parent_key, backend),
-        ).fetchone()
-        if row is None:
-            return None
-        parent = self.lookup_perf(context_key, parent_key, backend=backend)
-        if parent is None or parent.status != "ok" or parent.stats.median != row[4]:
-            return None
-        try:
-            payload = json.loads(row[3])
-            children = tuple(
-                RouteChild(
-                    op_key=str(child["op_key"]),
-                    op_sig=str(child["op_sig"]),
-                    knobs=dict(child["knobs"]),
-                    latency_us=float(child["latency_us"]),
-                )
-                for child in payload
-            )
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return None
-        return StructuralRouteRow(
-            context_key=row[0],
-            parent_key=row[1],
-            backend=row[2],
-            children=children,
-            parent_latency_us=float(row[4]),
-            measured_at=row[5],
-        )
 
     def min_latency_for_context(self, context_key: str, *, backend: str | None = None) -> float | None:
         if backend is None:

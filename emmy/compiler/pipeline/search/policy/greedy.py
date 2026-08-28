@@ -38,7 +38,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from contextlib import contextmanager
-from copy import copy
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -48,11 +47,6 @@ from emmy.compiler.pipeline.fork import Fork, flatten_leaves, iter_leaves, leaf_
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
 
 logger = logging.getLogger(__name__)
-
-
-class StructuralRouteReplayError(RuntimeError):
-    """A measured parent route whose recorded child schedule no longer realizes."""
-
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -145,40 +139,6 @@ def _find_decided_leaf(options: list, want: dict) -> object | None:
                     return found
         elif leaf_knobs(o) == want:
             return o
-    return None
-
-
-def _find_exact_schedule(options: list, want: dict) -> object | None:
-    """Descend to the one leaf with the recorded exact schedule-row identity."""
-    from emmy.compiler.pipeline.knob import schedule_row_key, values_equal  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
-
-    target = schedule_row_key(want)
-    for option in options:
-        if _is_structural_option(option):
-            return None
-        if isinstance(option, Fork) and not option.is_leaf:
-            if all(key in want and values_equal(key, want[key], value) for key, value in option.knobs.items()):
-                found = _find_exact_schedule(option.expand(), want)
-                if found is not None:
-                    return found
-            continue
-        if schedule_row_key(leaf_knobs(option)) == target:
-            return option
-    return None
-
-
-def _find_route_child_option(fp: ForkPoint, want: dict) -> object | None:
-    """The exact current-fork decision from one structural route child row."""
-    from emmy.compiler.pipeline.knob import decision_view, values_equal  # noqa: PLC0415
-
-    if any(isinstance(option, Fork) and not option.is_leaf for option in fp.options):
-        return _find_exact_schedule(fp.options, want)
-    root = decision_view(fp.root_op.knobs)
-    for option in fp.options:
-        delta = {key: value for key, value in decision_view(leaf_knobs(option)).items() if root.get(key) != value}
-        if delta and all(key in want and values_equal(key, want[key], value) for key, value in delta.items()):
-            return option
     return None
 
 
@@ -1015,11 +975,6 @@ def greedy_decide(
     db_state: list = [None]
     # Lazily-built per-compile verified-golden identity index — same sentinel convention.
     verified_state: list = [None]
-    # A measured structural parent binds each freshly minted child to the exact
-    # schedule row that earned the parent's whole-slice latency. Keys are the
-    # runtime identities of the fragment ops materialized by the selected splice;
-    # later in-place rewrites preserve them in ``Op.source`` lineage.
-    route_children: dict[int, object] = {}
 
     def db_index() -> dict:
         return db_state[0] or {}
@@ -1032,18 +987,6 @@ def greedy_decide(
             loaded = True
             the_prior = _load_prior_safe()
         dkey = _decision_key(fp, blocked)
-        lineage = fp.root_op.source_chain() if route_children and hasattr(fp.root_op, "source_chain") else ()
-        route_child = next((route_children[id(op)] for op in lineage if id(op) in route_children), None)
-        if route_child is not None:
-            found = _find_route_child_option(fp, route_child.knobs)
-            if found is None:
-                raise StructuralRouteReplayError(
-                    f"measured structural route child {route_child.op_key[:12]} no longer realizes at node {fp.node_id!r}"
-                )
-            fp.score = route_child.latency_us
-            if dkey is not None:
-                decisions[dkey] = (leaf_knobs(found), route_child.latency_us)
-            return found
         if dkey is not None and dkey in decisions:
             want, price = decisions[dkey]
             found = _find_decided_leaf(fp.options, want)
@@ -1079,43 +1022,9 @@ def greedy_decide(
             picked = _direct_measured_pick(fp, blocked, db_index())
             if picked is not None:
                 leaf, row, price = picked
-                if price_structural or not _is_structural_option(leaf):
-                    fp.score = price
-                    decisions[dkey] = (dict(row), price)
-                    if _is_structural_option(leaf) and db is not None:
-                        parent = copy(fp.root_op)
-                        parent.knobs = {**fp.root_op.knobs, **row}
-                        parent_key = parent.cache_key()
-                        backend = fp.ctx.backend_name or "cuda"
-                        receipt = (
-                            db.lookup_structural_route(fp.ctx.structural_key(), parent_key, backend=backend)
-                            if parent_key is not None
-                            else None
-                        )
-                        if receipt is not None:
-                            from emmy.compiler.pipeline.passes.identity import IdentityStrategy  # noqa: PLC0415
-
-                            fragment = _leaf_graph(leaf)
-                            children = [
-                                fragment.nodes[nid].op
-                                for nid in fragment.topological_order()
-                                if fragment.nodes[nid].op.cache_key() is not None
-                            ]
-                            if len(children) != len(receipt.children):
-                                raise StructuralRouteReplayError(
-                                    f"measured structural route {parent_key[:12]} recorded {len(receipt.children)} child schedule(s), "
-                                    f"but the splice now mints {len(children)}"
-                                )
-                            identity = IdentityStrategy()
-                            got_sigs = [identity.op_sig(op, fragment) for op in children]
-                            want_sigs = [child.op_sig for child in receipt.children]
-                            if got_sigs != want_sigs:
-                                raise StructuralRouteReplayError(
-                                    f"measured structural route {parent_key[:12]} child identities no longer match the splice"
-                                )
-                            route_children.update({id(op): child for op, child in zip(children, receipt.children, strict=True)})
-                            return fragment
-                    return leaf
+                fp.score = price
+                decisions[dkey] = (dict(row), price)
+                return leaf
         # Greedy benches nothing, so it must pick the globally best COMPLETE
         # tile, not a partial branch (the prior is blind at a partial ``BM/BN``
         # branch: ``knob_features`` can't compute the tile's area / occupancy

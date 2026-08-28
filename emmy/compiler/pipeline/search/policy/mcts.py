@@ -44,7 +44,7 @@ from emmy.compiler.pipeline.knob import (
     tuning_knob_items,
 )
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
-from emmy.compiler.pipeline.search.db import NodeRow, PerfStats, RouteChild
+from emmy.compiler.pipeline.search.db import NodeRow, PerfStats
 from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.base import Search
 from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async
@@ -82,11 +82,6 @@ class SearchNode:
     # reject a parent row whose ordinary schedule pins describe a different
     # independently tuned child than the terminal actually measured.
     realized_cuda_knobs: list[dict] | None = field(default=None, repr=False)
-    # Ordered exact child rows for a measured structural route. Unlike
-    # ``realized_cuda_knobs``, this keeps each terminal CudaOp's cache key and
-    # latency so persistence can bind the parent total to the children that
-    # earned it.
-    realized_route_children: list[RouteChild] | None = field(default=None, repr=False)
 
 
 class SearchTree:
@@ -220,7 +215,6 @@ class TuningSearch(Search):
         token.realized_knobs = self._realized_knobs(candidate) if candidate is not None else self._node_knobs(token)
         token.realized_cuda_ops = self._realized_cuda_op_count(candidate)
         token.realized_cuda_knobs = [dict(decision_view(knobs)) for knobs, _us, _status in kernels] if kernels is not None else None
-        token.realized_route_children = self._realized_route_children(candidate, kernels)
         token.bench_stats = stats
         token.bench_status = status
         reward = (1.0 / stats.median) if status == "ok" and stats.median > 0 else 0.0
@@ -279,33 +273,6 @@ class TuningSearch(Search):
         if graph is None:
             return None
         return sum(isinstance(node.op, CudaOp) for node in graph.nodes.values())
-
-    @staticmethod
-    def _realized_route_children(candidate: object | None, kernels: list | None) -> list[RouteChild] | None:
-        """The terminal's exact Cuda children paired with their measurements in launch order."""
-        from emmy.compiler.pipeline.passes.identity import IdentityStrategy  # noqa: PLC0415
-
-        graph = getattr(candidate, "graph", None)
-        if graph is None or kernels is None:
-            return None
-        cuda_ops = [graph.nodes[nid].op for nid in graph.topological_order() if isinstance(graph.nodes[nid].op, CudaOp)]
-        if len(cuda_ops) != len(kernels):
-            return None
-        children: list[RouteChild] = []
-        identity = IdentityStrategy()
-        for op, (knobs, latency_us, status) in zip(cuda_ops, kernels, strict=True):
-            op_key = op.cache_key()
-            if status != "ok" or op_key is None:
-                return None
-            children.append(
-                RouteChild(
-                    op_key=op_key,
-                    op_sig=identity.op_sig(op),
-                    knobs=dict(decision_view(knobs)),
-                    latency_us=float(latency_us),
-                )
-            )
-        return children
 
     @staticmethod
     def _structural_row(knobs: dict | None) -> dict[str, str] | None:
@@ -387,13 +354,6 @@ class TuningSearch(Search):
         if node.realized_knobs is None:
             return None
         return dict(node.realized_knobs), float(node.bench_stats.median), node.realized_cuda_ops, False
-
-    def best_route_children(self) -> list[RouteChild] | None:
-        """Ordered exact children of the same directly measured terminal as :meth:`best_realized`."""
-        node = self._best_terminal_node()
-        if node is None or node.realized_route_children is None:
-            return None
-        return list(node.realized_route_children)
 
     def push(self, *cands: LazyCandidate, parent: object | None = None, structural: bool = False) -> None:
         # ``parent`` is the token the spawning candidate was popped with;

@@ -79,7 +79,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 |-------|----------------|------------|--------------|
 | **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/goldens/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1, the verified tier); pinned replay (`run --golden NAME`); `emmy fit` trains the offline prior on them; `emmy eval` datasets |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every deployable-regime training row | greedy compile (tier 2); the online prior's own refits |
-| **`perf` + structural-route tables** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — terminal kernel measurements, validated whole-slice structural routes, and each route's ordered exact child schedules, at the sweep's flags | greedy compile (tier 3); the per-variant and structural-route replay cache |
+| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — terminal kernel measurements plus validated whole-slice structural routes, at the sweep's flags | greedy compile (tier 3); the per-variant replay cache |
 | **`node` table** | the same tune DB | `emmy tune` (every search-tree node) and `run --bench` (rows benched with hand-forced knob values) | `emmy eval` diagnostics — **never** consulted at deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The
@@ -89,7 +89,7 @@ goldens plus the shipped offline prior artifact and nothing else.
 ```
 WRITERS                                STORES                                READERS
 
-emmy tune ─┬─ sweep benches ─────────▶ perf + structural routes (autotune.db) ─▶ greedy compile, tier 3
+emmy tune ─┬─ sweep benches ─────────▶ perf table   (autotune.db) ─────────▶ greedy compile, tier 3
            ├─ every training row ────▶ reservoir    (online.json) ─────────▶ greedy compile, tier 2 (H_opt=3 rows)
            └─ every tree node ───────▶ node table   (autotune.db) ─────────▶ emmy eval only (never a deploy)
 run --bench pinned/golden/--ab rows ─▶ node table   (autotune.db)
@@ -871,13 +871,9 @@ only (`tile → kernel → cuda`), and returns the Σ once ALL Loop kernels are 
 - **A structural winner persists its measured parent route.** A per-inner-run splice watcher joins the consumed
   parent's complete scheduler feature row with `SpliceEvent`'s selected structural knob delta. When the directly
   measured winner changes the kernel set and exactly one parent realizes its route, the whole-slice latency is
-  written under that route-specific parent `Op.cache_key`; a companion row binds it to the ordered exact child
-  schedules and per-child measurements that earned the total. The unpinned Loop row remains derived cost
-  bookkeeping. On cold DB replay, the route row can select `PLACE=cut`, after which those bound child rows decide
-  before separately indexed child evidence. If a stored child identity or exact row no longer realizes, greedy replay
-  retires structural routes for that compile instead of substituting another child's evidence. A remeasurement
-  backfills a pre-companion DB only when its whole-slice latency equals the parent measurement still stored; a slower
-  route can never borrow a faster parent's total.
+  written under that route-specific parent `Op.cache_key`. The unpinned Loop row remains derived cost bookkeeping,
+  while the route row is deploy evidence: a newly opened DB can select `PLACE=cut` before independently choosing
+  schedules for the minted kernels.
 
 **Separability + the structural handoff.** Op-variant forks are separable: every multi-option fork is an in-place `Op`
 rebind that leaves the graph unchanged, so whole-graph time is `Σ_k t_k`. Results key structurally (`Op.cache_key` =
@@ -944,11 +940,10 @@ rows feed the shared prior immediately, so the following MCTS can use their evid
 the exact finalized single Loop's stamped structural identity, even when the working file starts from stable Torch IR.
 At the kernel-set-changing splice it also captures the consumed parent carrying the complete scheduler feature row and
 exact structural route. The proposal's measured whole-slice latency persists under that route-specific parent cache
-key and context, with the ordered exact child schedules in the same structural-route companion used by ordinary
-tuning. This captured evidence can select the route and its measured children again after a cold reload while the
-unpinned Loop key remains the two-level search's cost bookkeeping and the split kernels retain their independent
-terminal measurements. Parent-linked node rows preserve the same proposal for diagnostics and training; they do not
-drive deploy selection. The direct row is written only when the authoritative pins pass
+key and context. This captured perf row is deploy evidence: the measured DB index can select the route again after a
+cold reload while the unpinned Loop key remains the two-level search's cost bookkeeping and the split kernels retain
+their independent terminal measurements. Parent-linked node rows preserve the same proposal for diagnostics and
+training; they do not drive deploy selection. The direct row is written only when the authoritative pins pass
 realized-pin validation, search retains the exact structural route, one consumed parent realizes it, and the terminal
 measurement succeeds. Ranking feedback is flushed to the working file as soon as proposal measurement finishes,
 before MCTS. A multi-CudaOp result records realized knobs only when their union is conflict-free, or when search
@@ -977,9 +972,8 @@ heterogeneous schedules into one row or falls back to a slower monolithic siblin
 winner only when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a
 parent whose pins
 name a different independently tuned child is left unpromoted. `PLACE`-only rows remain routing receipts and do not
-encode child schedules in the user-facing golden. The local tune DB's structural-route companion is what binds a
-measured parent total to its ordered children; without that companion, a routing row makes no claim about a later
-independent child selection. A search number never populates `emmy_us` / `cublas_us`; promotion still requires the
+claim the child schedules. A later greedy deploy replay can select different golden/DB evidence and is never paired
+with that search reward. A search number never populates `emmy_us` / `cublas_us`; promotion still requires the
 separate repeated, correct, deployable A/B gate.
 
 Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either

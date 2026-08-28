@@ -121,7 +121,9 @@ rule matches a `LoopOp` and returns several tile options.
    exceeds the cold-pool budget is ranked over a deterministic drawn subset (seeded uniform descents through the
    lazy tree — legal complete rows, every level covered) instead of walked at full length: the cold pick needs a
    reasonable kernel, and the optimal one comes from the evidence tiers, which descend directly whatever the pool
-   size.
+   size. Drawing has a hard option-check budget while one descent fits inside it. If one complete descent's declared
+   bound is already larger, exactly one descent attempt is the soft-cap exception; an empty sample fails rather than
+   walking the full pool or substituting a partial branch.
 7. Ties at every tier break by `knob.canonical_row_key`, never by the order the rule emitted its options in.
 8. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's
    `Decision.score`, and the resolve moves to the next fork.
@@ -1536,7 +1538,9 @@ enumerator spells each family exactly once, site-local, where a row becomes stor
 **`PLACE`** (STR structural fork, `fuse` or `cut`) — a stored Fold edge's kernel placement, addressed by the same
 tree-path codec as schedule sites. The maximal fused kernel and every semantically closed cut are siblings. A cut is
 consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
-the structural decision trace. Bare `PLACE=cut` selects the primary cut seam, while a scoped key pins one seam.
+the structural decision trace. A scoped cut consumes its authoritative placement decision on both fresh pieces, which
+proceed to scheduling. Bare `PLACE=cut` selects the primary seam but, like an unpinned cut, leaves both pieces able to
+re-enter placement and expose smaller seams.
 
 **`WORK`** (STR codec, stamped by `seal_workers` at option assembly) — the kernel-global **worker inventory**,
 spelled exactly once per row (step 7): `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer

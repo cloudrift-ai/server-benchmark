@@ -15,10 +15,11 @@ Exploration stays in :class:`~.mcts.TuningSearch` (``Pipeline.tune``).
 though it were a complete row. Direct measured and verified rows descend to their exact spelling;
 otherwise greedy scores the complete offered rows and chooses the argmin — streamed off the
 lazy walk in bounded chunks (:func:`_stream_tiers`), so the scan is O(chunk) memory however large
-the pool, and bounded in TIME by the cold-pool budget: a pool whose minted size bound exceeds
-:data:`_POOL_BUDGET` is ranked over a deterministic drawn subset of its complete rows instead of
-walked at full length. Sampling complete rows is not branch substitution — no branch is ever
-scored as a stand-in for the schedules it contains — and the argmin is global again the moment
+the pool, and bounded in descent work by the cold-pool budget except when one complete path itself
+has a larger declared bound: that pool gets exactly one descent attempt. A pool whose minted size
+bound exceeds :data:`_POOL_BUDGET` is ranked over a deterministic drawn subset of its complete rows
+instead of walked at full length. Sampling complete rows is not branch substitution — no branch is
+ever scored as a stand-in for the schedules it contains — and the argmin is global again the moment
 evidence exists, because the verified / measured tiers descend directly whatever the pool size.
 
 **Greedy is ranked by evidence and by nothing else.** Its tiers are recorded
@@ -758,22 +759,28 @@ _POOL_BUDGET = 65_536
 _POOL_DRAW = 2_048
 
 #: Maximum option checks spent drawing one cold pool, including the four-attempt allowance for a
-#: dead or blocklisted descent. A fixed row count is not a work bound for wide, deep terms.
+#: dead or blocklisted descent. A fixed row count is not a work bound for wide, deep terms. When
+#: one descent's declared bound already exceeds this value, exactly one complete-row attempt is
+#: the deliberate soft-cap exception; the Fork interface cannot pause one sibling expansion.
 _POOL_DESCENT_WORK = 262_144
 
 
 def _descent_sample(options, pool_id: str, node_blocked) -> list:
     """Up to :data:`_POOL_DRAW` complete leaves drawn by seeded uniform descents. Dead ends (a
     branch whose expansion is empty — legality killed the subtree) and blocklisted rows retry, up
-    to a bounded attempt count; duplicates are kept (a repeat costs a scoring slot, never a wrong
-    pick). Structural options never appear here — the caller samples only the variant side."""
+    to a bounded attempt count. When one descent is wider than the work budget, make exactly one
+    attempt: completing a legal row is indivisible through the Fork interface. Duplicates are kept
+    (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here —
+    the caller samples only the variant side."""
     import random  # noqa: PLC0415
 
     rng = random.Random(pool_id)
     sample: list = []
     descent_bound = max((getattr(option, "pool_descent_bound", None) or 1 for option in options), default=1)
-    draw = min(_POOL_DRAW, max(1, _POOL_DESCENT_WORK // (4 * descent_bound)))
-    attempts = 4 * draw
+    one_descent_exceeds_budget = descent_bound > _POOL_DESCENT_WORK
+    attempt_budget = max(1, _POOL_DESCENT_WORK // descent_bound)
+    draw = 1 if one_descent_exceeds_budget else min(_POOL_DRAW, max(1, attempt_budget // 4))
+    attempts = 1 if one_descent_exceeds_budget else min(4 * draw, attempt_budget)
     while len(sample) < draw and attempts > 0:
         attempts -= 1
         option = options[rng.randrange(len(options))]
@@ -868,13 +875,16 @@ def _stream_tiers(
     opts = fp.options if options is None else options
     # The cold-pool budget: a pool whose minted bound exceeds _POOL_BUDGET is sampled by seeded
     # descents instead of walked — the tiers below then rank the drawn complete rows exactly as
-    # they would the full pool. An empty draw (legality killed every attempt) falls back to the
-    # full walk: correctness never rides on the sampler.
+    # they would the full pool. An empty draw fails explicitly: walking the full oversized pool
+    # would silently discard the bound, while returning a partial branch would violate the prior's
+    # complete-row contract.
     bound = next((b for o in opts if (b := getattr(o, "pool_bound", None)) is not None), None)
     drawn = None
     if bound is not None and bound > _POOL_BUDGET:
         pid = next((p for o in opts if (p := getattr(o, "pool_id", None)) is not None), "")
-        drawn = _descent_sample(opts, pid, node_blocked) or None
+        drawn = _descent_sample(opts, pid, node_blocked)
+        if not drawn:
+            raise RuntimeError(f"budgeted schedule pool {pid!r} produced no live complete row")
     n_leaves = n_live = 0
     first: object = None
     sample_row: dict | None = None  # one live row — carries the fork's shared ``S_*`` signature

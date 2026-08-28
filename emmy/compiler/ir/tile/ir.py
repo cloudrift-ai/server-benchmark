@@ -44,7 +44,7 @@ from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
 from emmy.compiler.ir.stmt.base import _axis_identity
-from emmy.compiler.ir.stmt.body import _member_reads
+from emmy.compiler.ir.stmt.body import _exposed_defines, _member_reads
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.structural import digest
 
@@ -263,8 +263,17 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
                     return None
                 child_body, child_outputs, child_direct = child
                 results = tuple(dict.fromkeys(value for spec in child_direct for value in spec.write.values))
-                provisional = Lambda(params=(stmt.axis.name,), body=child_body, results=results)
-                captures = tuple(sorted(provisional.free_names()))
+                # Captures are read off the body rather than asked of a lambda over the axis
+                # alone. Such a lambda cannot be built when the loop BROADCASTS — when it writes a
+                # value the enclosing scope defines, so the child body defines none of its own
+                # results — and ``Lambda.__post_init__`` rejects a result its body does not define.
+                # A broadcast result is free in the body exactly like any other name it reads.
+                bound = {stmt.axis.name}
+                reads: set[str] = set()
+                for member in child_body:
+                    bound |= _exposed_defines(member)
+                    reads |= _member_reads(member)
+                captures = tuple(sorted((reads | {r for r in results if isinstance(r, str)}) - bound))
                 region = ProjectionRegion(
                     axis=stmt.axis,
                     lift=Lambda(params=(stmt.axis.name, *captures), body=child_body, results=results),

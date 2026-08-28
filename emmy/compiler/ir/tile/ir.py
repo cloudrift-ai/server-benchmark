@@ -37,7 +37,7 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
@@ -227,13 +227,43 @@ def _projection_results(body) -> set[str]:
     return out
 
 
+def _dense_axis_suffix(index: tuple, name: str) -> bool:
+    """Whether ``index`` is one dense coordinate, directly or split by a row-major reshape."""
+    if not index:
+        return False
+    stride = 1
+    for position in reversed(range(len(index))):
+        expr = index[position]
+        dim = None
+        if position:
+            if not (
+                isinstance(expr, BinaryExpr)
+                and expr.op == "%"
+                and isinstance(expr.right, Literal)
+                and isinstance(expr.right.value, int)
+                and expr.right.value > 0
+            ):
+                return False
+            expr, dim = expr.left, expr.right.value
+        if stride != 1:
+            if not (
+                isinstance(expr, BinaryExpr) and expr.op in ("/", "//") and isinstance(expr.right, Literal) and expr.right.value == stride
+            ):
+                return False
+            expr = expr.left
+        if expr != Var(name):
+            return False
+        if dim is not None:
+            stride *= dim
+    return True
+
+
 def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) -> Axis | None:
-    """Recover an elided matrix row when every boundary write proves ``[0, n]``.
+    """Recover an elided matrix row when every boundary write proves ``[0..., n]``.
 
     The column axis may already be free or may still be the one shared output sweep that
-    contraction canonicalization will promote. A pure reshape of the same column coordinate
-    proves the same boundary: all varying index expressions still read only ``n`` while a
-    literal-zero coordinate carries the elided unit row.
+    contraction canonicalization will promote. The unit coordinates must be a non-empty leading
+    zero prefix, followed by the dense column coordinate directly or through a row-major reshape.
     """
     if not specs:
         return None
@@ -245,8 +275,8 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
         return None
     for spec in specs:
         index = spec.write.index
-        variables = frozenset().union(*(expr.free_vars() for expr in index))
-        if not (n_name in variables and variables <= {n_name} and any(isinstance(expr, Literal) and expr.value == 0 for expr in index)):
+        split = next((position for position, expr in enumerate(index) if not (isinstance(expr, Literal) and expr.value == 0)), len(index))
+        if split == 0 or not _dense_axis_suffix(index[split:], n_name):
             return None
     return Axis("_um", Dim(1))
 

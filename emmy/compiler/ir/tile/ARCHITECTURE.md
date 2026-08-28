@@ -101,11 +101,12 @@ the Fold tree; in either case the coordinate belongs in kernel placement rather 
 Multiple output specifications owned by one projection region reconstitute one loop.
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
-specification writes `[0, n]`, including a pure reshape of `n` into several output coordinates. The `n` coordinate
-may already be free or may still be the one shared output sweep. Post-init restores that proven unit free axis before
-contraction canonicalization, even when a sibling reduction is the root-most Fold and the contraction is nested. The
-rule is boundary-derived and general: it does not recognize a model or operation family, and it does not alter a term
-whose output specifications disagree about the missing coordinate.
+specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or
+split into row-major quotient/remainder coordinates by a pure reshape. The `n` coordinate may already be free or may
+still be the one shared output sweep. Post-init restores that proven unit free axis before contraction canonicalization,
+even when a sibling reduction is the root-most Fold and the contraction is nested. A zero after `n` or a strided `n`
+does not prove a unit matrix row. The rule is boundary-derived and general: it does not recognize a model or operation
+family, and it does not alter a term whose output specifications disagree about the missing coordinate.
 
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that

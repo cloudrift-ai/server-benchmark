@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole
@@ -70,6 +72,35 @@ def test_tile_post_init_recovers_an_elided_unit_contraction_row() -> None:
 
     assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
     assert tile.op.role is AxisRole.CONTRACTION
+
+
+@pytest.mark.parametrize(
+    "index",
+    (
+        (Var("n"), Literal(0, "int")),
+        (Literal(0, "int"), Var("n") * 2),
+    ),
+    ids=("varying-coordinate-before-zero", "strided-column"),
+)
+def test_tile_post_init_does_not_infer_a_unit_row_from_a_non_dense_boundary(index) -> None:
+    axis = Axis("k", Dim(16))
+    body = Body(
+        (
+            Load(name="left", input="x", index=(Literal(0, "int"), Var("k"))),
+            Load(name="right", input="w", index=(Var("n"), Var("k"))),
+            Assign(name="product", op="multiply", args=("left", "right")),
+        )
+    )
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    planar = Fold(axis=axis, lift=Lambda(params=("k",), body=body, results=("product",)), init=init, combine=combine)
+
+    tile = TileOp(
+        op=planar,
+        place=Placement(free=(Axis("n", 16),)),
+        output_specs=(OutputSpec(Write(output="out", index=index, value="acc")),),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("n",)
 
 
 def test_contraction_promotes_a_shared_store_sweep_once() -> None:

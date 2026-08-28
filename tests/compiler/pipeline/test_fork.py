@@ -244,7 +244,8 @@ def test_fork_point_partitions_offers_and_carries_pool_identity():
 
     tree = build_fork_tree(params=[_row(1, 1, 1), _row(1, 2, 1)], levels=_LEVELS, materialize=_stub_materialize)
     splice = Graph()
-    fp = ForkPoint(match=None, options=[splice, tree], root_op=None, ctx=None, structural=True)
+    fp = ForkPoint(match=None, options=[splice, tree], root_op=None, ctx=None)
     assert fp.splices == (splice,)
+    assert fp.structural  # derived from the partition, not a second classification
     assert fp.variants == (tree,)
     assert tree.pool_id is None  # build_fork_tree mints no pool identity — only the scheduler does

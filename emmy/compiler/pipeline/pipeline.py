@@ -615,13 +615,18 @@ class ForkPoint:
     options: list
     root_op: Op
     ctx: Context
-    structural: bool
     score: float | None = None
 
     @property
     def node_id(self) -> str:
         """The graph node this fork is rewriting — the blocklist / trace key."""
         return self.match.root_node_id
+
+    @property
+    def structural(self) -> bool:
+        """Whether this fork can change the kernel SET — derived from the typed partition, so the
+        fact has one definition."""
+        return bool(self.splices)
 
     # The offer's TYPED partition. Structural options are top-level siblings by construction
     # (``_is_structural_option``: schedule-product branches contain only ``TileOp`` leaves), so
@@ -792,7 +797,7 @@ class Run:
                 continue
             match, options, structural = step
             root_op = match.root.op  # read before apply rebinds it
-            fp = ForkPoint(match=match, options=options, root_op=root_op, ctx=self.ctx, structural=structural)
+            fp = ForkPoint(match=match, options=options, root_op=root_op, ctx=self.ctx)
             choice = decide(fp)
             option = _concrete_option(choice)
             if option is None:

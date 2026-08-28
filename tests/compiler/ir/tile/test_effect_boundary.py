@@ -187,3 +187,29 @@ def test_store_repr_round_trips_through_eval() -> None:
 
     st = OutputSpec(write=Write(output="o", index=(Var("m"),), value="y"), sweep=_ax("n"), unroll=True)
     assert _eval_stmt(repr(st)) == st
+
+
+def test_broadcast_sibling_loop_round_trips() -> None:
+    """A sibling output loop may BROADCAST — write a value the enclosing scope computed, so its own
+    body defines nothing and the region carries that value as a capture.
+
+    This used to raise rather than round-trip: the capture set was read by building a lambda that
+    binds the axis alone and asking what it left free, and ``Lambda`` rejects a result its body
+    does not define. The capture set now comes off the body, where a broadcast result is free like
+    any other name the body reads.
+    """
+    n = _ax("n", 16)
+    stmts = [
+        Assign(name="scale", op="copy", args=("x",)),
+        Loop(axis=n, body=Body((Write(output="o", index=(Var("m"), Var("n")), value="scale"),))),
+        Assign(name="tail", op="relu", args=("scale",)),
+        Write(output="p", index=(Var("m"),), value="tail"),
+    ]
+
+    pure, specs = extract_output_specs(stmts)
+
+    region = next(member for member in pure if isinstance(member, ProjectionRegion))
+    assert region.lift.body == Body(()), "a broadcast region computes nothing of its own"
+    assert "scale" in region.lift.params, "the broadcast value must arrive as a capture"
+    assert all(member.pure for member in pure)
+    assert apply_output_specs(pure, specs) == stmts

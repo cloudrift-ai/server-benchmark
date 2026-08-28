@@ -268,15 +268,14 @@ def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_the_block_scaled_cell_takes_an_inlined_quantize_through_the_fill(tmp_path):
-    """Coverage's other half. A linear with ONE consumer keeps its quantize inside the matmul —
-    loop fusion materializes an activation's fan-out point, and there is no fan-out here — so its
-    codes are a register value and no buffer exists to copy into the slab. The codes slab is
-    compute-filled from that same cone instead, and the cell still fires.
+def test_a_one_consumer_block_scaled_linear_reads_its_codes_from_memory(tmp_path):
+    """Coverage's other half. A linear with ONE consumer reaches the same shape as the shared one
+    above: the activation quantize is a kernel of its own writing the packed codes, the matmul
+    copies those codes into its slab, and the cell still fires against the numeric oracle.
 
-    What that buys over the inlined generic reading is where the encode runs: once per slab cell,
-    ``(m, k/2)``, rather than once per ``(m, n, k)`` inside the fold. What it does NOT buy is
-    4-bit traffic on that operand — the fill still reads the 16-bit activation to encode from.
+    Consumer count decides nothing here. Loop fusion stops at a computed packed buffer whether one
+    linear reads it or three, because splicing it away would leave the codes as a value with no
+    stored extent — see ``_packed_readers`` in the merge rule.
     """
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.numpy import NumpyBackend
@@ -291,8 +290,9 @@ def test_the_block_scaled_cell_takes_an_inlined_quantize_through_the_fill(tmp_pa
     compiled = backend.compile(g)
     sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
     native = [s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s]
-    assert native, "the block-scaled cell was never selected on an inlined quantize"
-    assert "emmy_to_f4e2m1" in native[0], "the encode should ride the slab fill, in this same kernel"
+    assert native, "the block-scaled cell was never selected on a one-consumer linear"
+    assert "emmy_to_f4e2m1" not in native[0], "the quantize belongs in its own kernel, not inside the matmul"
+    assert any("emmy_to_f4e2m1" in s for s in sources if s not in native), "no kernel encodes the activation at all"
     assert "EMMY_F4_LUT" not in native[0], "a native cell must not decode either operand through the value table"
 
     got, _ = backend.run(compiled, input_data={**data, "x": x})
@@ -301,3 +301,36 @@ def test_the_block_scaled_cell_takes_an_inlined_quantize_through_the_fill(tmp_pa
     rel = np.abs(c - r) / max(float(np.abs(r).max()), 1e-9)
     assert float(np.median(rel)) < 1e-4, "a systematic shift, not the fused-scale rounding"
     assert float(rel.max()) < 2e-3, "past one fused-scale rounding per side"
+
+
+@pytest.mark.parametrize("consumers", [1, 3])
+def test_the_quantized_activation_survives_loop_fusion_whatever_its_consumer_count(tmp_path, consumers):
+    """The packed activation buffer is a fusion boundary: the merge leaves it standing whether one
+    linear reads it or three, so both reach the block-scaled cell with the codes in memory.
+
+    Structural and deliberately GPU-free — the shape this pins is decided in the loop dialect,
+    long before a kernel exists. ``test_a_one_consumer_block_scaled_linear_reads_its_codes_from_memory``
+    carries the same contract down to emitted CUDA and holds it to the numeric oracle.
+
+    A merge that spliced this buffer away would still compute the declared program. What it would
+    lose is the object the packed dtype describes: the stored byte whose extent is half the
+    logical one. The codes would survive only as a register value, and the consumer's index would
+    name a nibble of one rather than a whole element.
+    """
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+    g = (
+        _w4a4_linear(tmp_path, m=64, n=128, k=128)
+        if consumers == 1
+        else _w4a4_shared_linears(tmp_path, ("q", "kp", "v"), m=64, n=128, k=128)
+    )
+    lowered = Pipeline.build(LOOP_PASSES).run(g, ctx=Context.from_target((12, 0)))
+
+    # The stored weights are packed too, but they arrive as constants; the activation's codes are
+    # the only packed buffer any kernel COMPUTES, so a surviving LoopOp output is exactly the boundary.
+    codes = [t.name for node in lowered.nodes.values() if isinstance(node.op, LoopOp) for t in node.outputs if t.dtype.logical_elems > 1]
+    assert len(codes) == 1, f"expected one computed packed buffer, got {codes} among {sorted(lowered.nodes)}"
+    readers = [nid for nid, node in lowered.nodes.items() if codes[0] in node.inputs]
+    assert len(readers) == consumers, f"every linear should read the one materialized codes buffer, got {readers}"

@@ -104,7 +104,11 @@ kernel-boundary `TileOp.output_specs` are reconstituted at their owning projecti
 (a STREAMED store — one whose values are an observed fold's observer results — rides the recursion down to the leaf
 instead and splices into the reduce loop after the observer stmts), so everything below the peel — the sinks,
 cooperative loop distribution, and split realizers — consumes the identical statement stream that entered total
-lift. The
+lift. An output sweep whose axis the peeled root's cone reads cannot wrap at the peel (the root binds outside the
+projection, so no wrap position encloses it): the serial fold binds the projection UNPEELED so the sweep loop wraps
+operand and projection together, and a cooperative / ILP row — whose lanes the sweep would be distributed across —
+declines via `UnbindableProjection` (`RuleSkipped(reject=True)` at the pass boundary; the greedy retries the next
+row). The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
 node kinds, no algebra, no `Ctx`. That is the decide/realize seam: the tile schedule picks the plan, `_tiling` is

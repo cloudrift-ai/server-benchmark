@@ -53,13 +53,13 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, _unique_edges, is_contraction, operand_body
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, _unique_edges, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
 from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs, observed_result_names
-from emmy.compiler.ir.tile.ops import cone_seam, projection_regions, sched_of
+from emmy.compiler.ir.tile.ops import UnbindableProjection, cone_seam, projection_regions, sched_of
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     clamp_last,
@@ -315,6 +315,23 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         streamed = tuple(spec for spec in root_specs if set(spec.write.values) <= observed)
         streamed_ids = {id(spec) for spec in streamed}
         plain = tuple(spec for spec in root_specs if id(spec) not in streamed_ids)
+        # An output sweep whose axis the peeled root's cone reads cannot wrap here: the peel binds
+        # the root OUTSIDE the projection, so no wrap position inside ``proj`` encloses the reduce
+        # and the sweep coordinate renders as an undefined identifier at nvcc (DeepSeek-V4's fused
+        # ``k_div_36_reduce``, whose per-column mean read the store sweep's column). The serial
+        # fold realizes the shape whole — bind the UNPEELED projection so ``apply_output_specs``
+        # wraps operand and projection together. A cooperative / ILP partition (or an output-tiled
+        # contraction root) has no such realization — the sweep is distributed across the lanes it
+        # would have to re-run on — so the row is declined and the greedy retries the next one.
+        swept = [spec.sweep.name for spec in plain if spec.sweep is not None and edge_refs_axis(root, spec.sweep.name)]
+        if swept:
+            plan = ctx.sched.get("REDUCE", root) if isinstance(root, Fold) and root.axis is not None else None
+            if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (is_contraction(root) and ctx.sched.tile_of(root) is not None):
+                raise UnbindableProjection(
+                    f"the bound reduce's cone reads output sweep axis {swept[0]!r} — a cooperative / ILP "
+                    f"partition cannot re-run the reduce per swept cell"
+                )
+            return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
         if plain:
             proj = apply_output_specs(proj, plain)
         return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store, output_specs=streamed, cell_op=closed_root)

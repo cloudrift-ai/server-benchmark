@@ -703,7 +703,9 @@ def _reduce_catalog(state: _State, extent: int) -> list[ReducePlan]:
 
 def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     """The reduce partitions this fold offers: the serial fold plus every :func:`coop_reduce_moves`
-    band the node admits, or — under a ``REDUCE`` pin — the ONE partition that pin names, read
+    band the node admits — an observed fold (a scan), and a fold whose cone reads a boundary
+    store's sweep axis, offer exactly the serial fold — or, under a ``REDUCE`` pin, the ONE
+    partition that pin names, read
     against the kernel's pinned inventory (the ``coop`` token's width lives in ``WORK``). A pin is
     authoritative over the value; it cannot make a band this node has no geometry for legal, and
     one that names no legal partition raises the refusal instead of silently emptying the
@@ -728,6 +730,21 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
         # fails loudly at the offered oracle, whose membership check sees the pin unsatisfied.
         if pin is not None and ReducePlan.parse(pin, state.work_pin).stages and logger.isEnabledFor(logging.DEBUG):
             logger.debug("REDUCE pin %r names a partition; an observed fold (a scan) realizes the serial fold only", pin)
+        return [ReducePlan()]
+    swept = tuple(spec.sweep.name for spec in state.tile.output_specs if spec.sweep is not None and edge_refs_axis(node, spec.sweep.name))
+    if swept:
+        # The boundary store's output sweep must ENCLOSE this fold — its cone reads the sweep
+        # coordinate, so the whole reduce re-runs per swept cell (the materializer binds the
+        # projection unpeeled). A partitioned combine cannot ride inside the per-lane sweep, so
+        # only the serial fold realizes; deciding it here keeps the greedy off the kernel binder's
+        # decline, which costs a full re-resolve per declined row. A pin naming a partition is a
+        # recorded refusal, never a silent drop.
+        if pin is not None and ReducePlan.parse(pin, state.work_pin).stages:
+            raise PinRefused(
+                f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a partition, but this fold reads output "
+                f"sweep axis {swept[0]!r} — the sweep loop must enclose the whole reduce, so only the "
+                f"serial fold realizes"
+            )
         return [ReducePlan()]
     if pin is None:
         return _reduce_catalog(state, extent)

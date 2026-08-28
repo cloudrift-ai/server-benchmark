@@ -60,6 +60,14 @@ _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
 _AXIS_ORDINAL_RE = re.compile(r"^(.*?)(\d+)$")
 
 
+class UnknownSiteError(Exception):
+    """A node that is NOT a site of the tree was used to address a schedule read/write — an
+    identity miss: the caller holds a copy (``dataclasses.replace``, a rewrite) or a node from a
+    different tree, not the stored object the site walk enumerated. Deliberately not a
+    ``ValueError``: the accessors swallow ``ValueError`` as "family doesn't apply", and an
+    identity miss must never degrade silently into the untiled path."""
+
+
 @dataclass(frozen=True)
 class Site:
     """One schedule-bearing tree position: the node, its schedule-bearing axis (``None`` for a
@@ -341,6 +349,11 @@ def spell(root, family: str, node, *, all_sites: tuple[Site, ...] | None = None)
     for s in fam_sites:
         if s.node is node:
             return _spellings(family, s, fam_sites)
+    if not any(s.node is node for s in all_sites):
+        raise UnknownSiteError(
+            f"{type(node).__name__} is not a site of this tree — the caller holds a copied or "
+            f"rebuilt node, not the stored object the site walk enumerated"
+        )
     raise ValueError(f"node {type(node).__name__} is not a {family} site of this tree")
 
 
@@ -418,4 +431,16 @@ def canonical(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> s
     return spell(root, parse_key(key).family, site.node, all_sites=all_sites)
 
 
-__all__ = ["PATH_FAMILIES", "SLICE_FAMILIES", "Site", "canonical", "family_sites", "parse_key", "primary", "resolve", "sites", "spell"]
+__all__ = [
+    "PATH_FAMILIES",
+    "SLICE_FAMILIES",
+    "Site",
+    "UnknownSiteError",
+    "canonical",
+    "family_sites",
+    "parse_key",
+    "primary",
+    "resolve",
+    "sites",
+    "spell",
+]

@@ -1,0 +1,31 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [cumsum]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [64, 47]]]
+  - id: cumsum
+    op: tensor.scan
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[cumsum, f32, [64, 47]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - cumsum
+  realizations:
+  - name: k_cumsum_reduce.05b16acb6775
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+    identity: 9bcd4d799bcad492728c7bd040fbbf8d52e4d7febcb2ff903c6271ceffe9438e

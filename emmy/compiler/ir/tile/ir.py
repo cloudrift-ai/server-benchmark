@@ -39,7 +39,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction, operand_body
+from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
@@ -133,7 +133,44 @@ def _sweep_start(stmts, axis_name: str) -> int:
     return len(stmts)
 
 
-def apply_output_specs(stmts, specs) -> list[Stmt]:
+def observed_result_names(op) -> frozenset[str]:
+    """Every observer result name on the term's folds — the STREAMED stores' values. A boundary
+    write over one of these is the scan store: it rides each iteration of the observed fold's
+    reduce loop (after the observer stmts) rather than the kernel tail. Derived from the term at
+    each reconstitution site — never stored on the spec (store only what extraction destroyed)."""
+    names: set[str] = set()
+    stack = [op]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, Fold):
+            continue
+        if node.observe is not None:
+            names.update(node.observe.results)
+        stack.extend(node.operands)
+        stack.extend(s for s in node.lift.body if isinstance(s, Fold))
+    return frozenset(names)
+
+
+def _splice_streamed(stmts: list, write: Write) -> bool:
+    """Splice a streamed store into the (deepest) reduce ``Loop`` whose body defines its observed
+    values — at the body end, after the observer stmts the derived step placed last. ``False``
+    when no such loop is present (a term-level stream, where the store stays at its post-node
+    position)."""
+    values = set(write.values)
+    for i, stmt in enumerate(stmts):
+        if not isinstance(stmt, Loop):
+            continue
+        inner = list(stmt.body)
+        if _splice_streamed(inner, write):
+            stmts[i] = stmt.with_bodies((Body(tuple(inner)),))
+            return True
+        if stmt.is_reduce and values <= set().union(*(deep_defines(s) for s in inner)):
+            stmts[i] = stmt.with_bodies((Body((*inner, write)),))
+            return True
+    return False
+
+
+def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> list[Stmt]:
     """Reassemble the EFFECTFUL projection stmt stream from a pure projection body + the
     kernel-boundary output specifications — the ONE reconstitution rule the scheduler's tail gates, the
     materializer's zero-axis ``Fold`` peel and ``035_split_reduce`` share, so the lowered kernels stay
@@ -163,7 +200,11 @@ def apply_output_specs(stmts, specs) -> list[Stmt]:
     while index < len(stores):
         st = stores[index]
         if st.sweep is None:
-            out.append(st.write)
+            # A store over OBSERVED values streams into its reduce loop when the loop is present
+            # (a lowered kernel body); at term level — the fold not yet a ``Loop`` — it keeps its
+            # post-node position, which is also where extraction's round-trip gate expects it.
+            if not (observed and set(st.write.values) <= observed and _splice_streamed(out, st.write)):
+                out.append(st.write)
             index += 1
             continue
         end = index + 1
@@ -219,8 +260,8 @@ def lower_with_output_specs(op, specs) -> list[Stmt]:
     if isinstance(op, Fold) and op.axis is None:
         body = [*(stmt for edge in op.operands for stmt in operand_body(edge)), *lower_body(op.body)]
         root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= _projection_results(op.body))
-        return apply_output_specs(body, root_specs)
-    return apply_output_specs(op.lower(), specs)
+        return apply_output_specs(body, root_specs, observed=observed_result_names(op))
+    return apply_output_specs(op.lower(), specs, observed=observed_result_names(op))
 
 
 def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...]] | None:
@@ -411,6 +452,7 @@ __all__ = [
     "apply_output_specs",
     "extract_output_specs",
     "lower_with_output_specs",
+    "observed_result_names",
 ]
 
 

@@ -74,6 +74,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Elementwise operation** — An operation independently applied to corresponding tensor elements, such as adding
   two tensors.
 - **Reduction** — Combining many values into fewer values, such as summing a row or finding its maximum.
+- **Scan (prefix reduction)** — A reduction that also stores its running state at every step, such as `cumsum`. In
+  Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
+  kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
+  fold only.
+- **Monoid family** — One registered fold algebra: a componentwise monoid, or its conjugation by a bijection (a
+  twist) such as the exp/LSE family behind online softmax. A family claims a stored combine only when its generator
+  would have emitted exactly that program, and it carries the algebra's legality properties (commutative,
+  observable). Registered in `ir/pure/algebra.py`.
 - **Broadcasting** — Reusing a smaller tensor across a larger shape. For example, one weight per column can be
   reused for every row.
 - **Index map** — A description of how output coordinates correspond to input coordinates. Emmy uses index maps for

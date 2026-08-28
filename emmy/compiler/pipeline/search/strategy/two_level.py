@@ -29,7 +29,6 @@ already-measured variants without a bench).
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -179,38 +178,6 @@ class _Work:
     src_graph: Graph  # what the slice is cut from: the fused graph, or the minting fragment
     count: int  # graph multiplicity (0 for enrolled — never a reward term)
     enrolled: bool
-
-
-class _StructuralParentCapture(PipelineStrategy):
-    """Capture route-specific parent identities consumed by kernel-set-changing splices."""
-
-    def __init__(self) -> None:
-        self.structural_parents: list[tuple[dict[str, str], str, dict]] = []
-
-    def on_splice(self, event: SpliceEvent) -> None:
-        parent_knobs = {**(getattr(event.root_op, "knobs", None) or {}), **getattr(event, "knobs", {})}
-        route = TuningSearch._structural_row(parent_knobs)
-        if route is None:
-            return
-        parent = copy.copy(event.root_op)
-        parent.knobs = {**parent_knobs, **route}
-        if not any(key.startswith("S_") for key in parent.knobs):
-            return
-        key = parent.cache_key()
-        if key is None:
-            return
-        receipt = (dict(route), key, dict(parent.knobs))
-        if receipt not in self.structural_parents:
-            self.structural_parents.append(receipt)
-
-    def structural_parent(self, route: dict) -> tuple[str, dict] | None:
-        """The one consumed parent that realized ``route``, or ``None`` if ambiguous."""
-        wanted = TuningSearch._structural_row(route)
-        matches = {(key, tuple(sorted(knobs.items()))) for got, key, knobs in self.structural_parents if got == wanted}
-        if len(matches) != 1:
-            return None
-        key, knob_items = matches.pop()
-        return key, dict(knob_items)
 
 
 class _KernelInventory(PipelineStrategy):

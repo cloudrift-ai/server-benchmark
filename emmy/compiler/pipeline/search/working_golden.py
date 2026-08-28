@@ -20,7 +20,7 @@ from emmy.compiler.pipeline.search.golden import (
     is_repository_golden_path,
     load_golden_file,
 )
-from emmy.compiler.pipeline.search.strategy.two_level import _StructuralParentCapture
+from emmy.compiler.pipeline.strategy import PipelineStrategy
 
 
 @dataclass
@@ -346,12 +346,12 @@ def realized_tuning_knobs(graph) -> dict[str, str] | None:
     return merged
 
 
-class _ProposalLoopIdentity(_StructuralParentCapture):
+class _ProposalLoopIdentity(PipelineStrategy):
     """Capture the finalized Loop target and any measured structural parent."""
 
     def __init__(self) -> None:
-        super().__init__()
         self.value: tuple[str, str, dict] | None = None
+        self.structural_parents: list[tuple[dict[str, str], str, dict]] = []
 
     def _capture(self, graph) -> None:
         if self.value is not None:
@@ -378,7 +378,33 @@ class _ProposalLoopIdentity(_StructuralParentCapture):
 
     def on_splice(self, event) -> None:
         """Capture the consumed parent whose cross-CTA route changes the kernel set."""
-        super().on_splice(event)
+        from emmy.compiler.pipeline import TuningSearch  # noqa: PLC0415
+
+        parent_knobs = {**(getattr(event.root_op, "knobs", None) or {}), **getattr(event, "knobs", {})}
+        route = TuningSearch._structural_row(parent_knobs)
+        if route is None:
+            return
+        parent = copy.copy(event.root_op)
+        parent.knobs = {**parent_knobs, **route}
+        if not any(key.startswith("S_") for key in parent.knobs):
+            return
+        key = parent.cache_key()
+        if key is None:
+            return
+        receipt = (dict(route), key, dict(parent.knobs))
+        if receipt not in self.structural_parents:
+            self.structural_parents.append(receipt)
+
+    def structural_parent(self, route: dict) -> tuple[str, dict] | None:
+        """The one consumed parent that realized ``route``, or ``None`` if ambiguous."""
+        from emmy.compiler.pipeline import TuningSearch  # noqa: PLC0415
+
+        wanted = TuningSearch._structural_row(route)
+        matches = {(key, tuple(sorted(knobs.items()))) for got, key, knobs in self.structural_parents if got == wanted}
+        if len(matches) != 1:
+            return None
+        key, knob_items = matches.pop()
+        return key, dict(knob_items)
 
 
 async def measure_proposals(

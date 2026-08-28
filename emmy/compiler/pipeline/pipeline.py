@@ -29,6 +29,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -127,11 +128,16 @@ class RuleSkipped(Exception):
     DEBUG (visible at ``compile -vv``), and treats the result the same
     as ``return None`` with no in-place mutation. Use this in place of
     a bare ``return None`` whenever the skip reason would help debug
-    why a rule didn't fire on a given match."""
+    why a rule didn't fire on a given match.
 
-    def __init__(self, reason: str):
+    ``reject=True`` marks the skip as this node's LOWERING declining the offered row (the
+    materializer's ``UnbindableProjection`` decline): it is recorded into the run's rejection
+    sink so the greedy blocklist retry moves past the row. An ordinary skip records nothing."""
+
+    def __init__(self, reason: str, *, reject: bool = False):
         super().__init__(reason)
         self.reason = reason
+        self.reject = reject
 
 
 class LoweringError(Exception):
@@ -614,13 +620,32 @@ class ForkPoint:
     options: list
     root_op: Op
     ctx: Context
-    structural: bool
     score: float | None = None
 
     @property
     def node_id(self) -> str:
         """The graph node this fork is rewriting — the blocklist / trace key."""
         return self.match.root_node_id
+
+    @property
+    def structural(self) -> bool:
+        """Whether this fork can change the kernel SET — derived from the typed partition, so the
+        fact has one definition."""
+        return bool(self.splices)
+
+    # The offer's TYPED partition. Structural options are top-level siblings by construction
+    # (``_is_structural_option``: schedule-product branches contain only ``TileOp`` leaves), so
+    # the engine can classify without expanding anything, and consumers read the partition
+    # instead of each re-deriving it from the raw list.
+    @cached_property
+    def splices(self) -> tuple:
+        """The structural (``Graph``-splicing, kernel-set-changing) offers."""
+        return tuple(o for o in self.options if _is_structural_option(o))
+
+    @cached_property
+    def variants(self) -> tuple:
+        """The op-variant offers — the schedule pool this fork ranks in place."""
+        return tuple(o for o in self.options if not _is_structural_option(o))
 
 
 @dataclass(frozen=True)
@@ -777,7 +802,7 @@ class Run:
                 continue
             match, options, structural = step
             root_op = match.root.op  # read before apply rebinds it
-            fp = ForkPoint(match=match, options=options, root_op=root_op, ctx=self.ctx, structural=structural)
+            fp = ForkPoint(match=match, options=options, root_op=root_op, ctx=self.ctx)
             choice = decide(fp)
             option = _concrete_option(choice)
             if option is None:

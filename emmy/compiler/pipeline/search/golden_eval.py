@@ -44,7 +44,7 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
     sample the rows are every kernel's fork rows and ``total`` is ``len(rows)``, so a caller that
     reports both prints today's numbers unchanged."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import Fork, flatten_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import Fork, iter_leaves, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
@@ -68,8 +68,8 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
             seen_pools.update(opened)
             if not opened:
                 return _first(fp.options)
-        for leaf in flatten_leaves(fp.options):
-            row = dict(getattr(leaf, "knobs", None) or {})
+        for leaf in iter_leaves(fp.options):
+            row = leaf_knobs(leaf)
             # A schedule row always spells the kernel-global ``WORK``; a structural arm's knob
             # delta (a cut, the cross-CTA split's g-half or the unsplit receipt) never does — the
             # stated row-identity marker (``_schedule._step``, the tile scheduler architecture).

@@ -109,14 +109,19 @@ rule matches a `LoopOp` and returns several tile options.
 
 1. The engine turns the option list into a lazy fork tree and hands the fork point to `greedy_decide` (Parts 2, 4).
 2. `greedy_decide` first tries to descend directly to a verified or measured complete row. Without direct evidence,
-   it ranks the complete offered rows; no kernel is built until the choice is made (Part 4).
+   it ranks the complete offered rows — streamed off the lazy walk in bounded chunks, so memory stays O(chunk)
+   however large the pool; no kernel is built until the choice is made (Part 4).
 3. Each compared row contains the compile context's `H_*` features (which GPU, which nvcc flags), the `S_*` features
    an earlier pass wrote onto the op (a summary of its body and loop extents), and complete knob values (Part 6).
 4. **The reservoir tier.** The leaf that agrees with the fastest reservoir row of the same op — agreement means
    every knob the leaf has decided has the same value in the row. (The example starts here because this card records
    no golden for the op; the **verified** tier would otherwise decide first. Part 3 numbers the full list.)
 5. **The `perf` tier.** Otherwise: measured rows for this exact op, under this compile's own context key.
-6. **The prior.** Otherwise: the `mean_scores` argmin over complete offered rows.
+6. **The prior.** Otherwise: the `mean_scores` argmin over complete offered rows. A pool whose minted size bound
+   exceeds the cold-pool budget is ranked over a deterministic drawn subset (seeded uniform descents through the
+   lazy tree — legal complete rows, every level covered) instead of walked at full length: the cold pick needs a
+   reasonable kernel, and the optimal one comes from the evidence tiers, which descend directly whatever the pool
+   size.
 7. Ties at every tier break by `knob.canonical_row_key`, never by the order the rule emitted its options in.
 8. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's
    `Decision.score`, and the resolve moves to the next fork.
@@ -742,15 +747,20 @@ Pinned by `tests/compiler/pipeline/search/policy/test_deploy_pick_determinism.py
 bytes are independently pinned across fresh interpreters by `test_source_determinism.py`.
 
 **Structural options are priced, never raw-scored.** A `Graph` leaf carries no knob row, so the per-op prior cannot
-score it; `greedy_decide`'s `_priced_pick` asks the same evidence a different way instead. It prices EVERY leaf of a
-structural fork — the cut fragments and the keep-fused side alike — by a nested `resolve` per kernel over a
-`lowering/tile`-only pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized
-per `Op.cache_key`, and takes the argmin. So an unpinned compile deploys the splits `tune` measured best. The nested
-resolve carries the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a knob pick
-(the reservoir, then the tune DB's measured rows, model prediction only where unmeasured) — a pure
+score it; `greedy_decide` asks the same evidence a different way instead. The splices (top-level siblings by
+construction) are each priced by a nested `resolve` per fragment kernel over a `lowering/tile`-only pipeline, the
+price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per `Op.cache_key` with the
+compile's decision memo shared into the nested resolves; the keep-fused side prices by ONE nested resolve of the
+streamed scan's winning leaf (the scan already found the best row, so pricing is one resolve, not one per enumerated
+leaf), and the argmin across the two decides. One price definition holds throughout: a price is the Σ of a
+resolution's trace, never a fork-local score — so the two sides of a kernel-set comparison are always the same
+quantity. So an unpinned compile deploys the splits `tune` measured
+best. The nested resolve carries the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a
+knob pick (the reservoir, then the tune DB's measured rows, model prediction only where unmeasured) — a pure
 sum-of-predictions comparison would be exposed to the model's absolute-µs error, which doesn't cancel across
-different kernel families, and that is a fitting requirement on the prior. When some leaf cannot be priced at all,
-the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking. **No leaf is
+different kernel families, and that is a fitting requirement on the prior. When a splice cannot be priced at all,
+the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking
+(`_priced_pick`, the flat-list form kept for exactly these corners). **No leaf is
 withheld to keep a kernel set unchanged.** The one thing that does withdraw the splices is `price_structural=False`,
 which is not about speed: it is how `GreedyStrategy` retires a structural pick whose fragment kernel failed to LOWER
 (the splice minted fresh node ids, so it cannot be blocklisted at the fork site), and how a nested price probe

@@ -12,8 +12,10 @@ env plumbing stays in :mod:`~emmy.compiler.pipeline.knob`.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
+from types import MappingProxyType
 
 from emmy.compiler.pipeline.knob import (
     _AXIS_FAMILIES,
@@ -214,15 +216,56 @@ _NODE_STRUCT_BASES = (
 )
 
 
-def _node_axes(knobs: dict) -> list[str | None]:
-    """The schedule-bearing nodes' axes, in first-seen order — one per distinct ``@<axis>`` element
-    across the per-node schedule families (``TILE`` / ``REDUCE`` / ``STAGE``). ``[None]`` (one bare
-    node) when the schedule families are ALL bare (goldens / single-node canonical rows); a MIXED
-    row — the phase-3 canonical flash spelling: ``TILE@dd`` / ``TILE@pj`` beside bare ``REDUCE`` /
-    ``STAGE`` for the primary stream — appends the ``""`` bare-remainder group so the primary
-    node's slices keep contributing to the sum-pool (byte-identical to the retired ``@kv``
-    spelling's own group). ``[]`` when the kernel carries no schedule codec at all (a pure
-    pointwise zero-axis fold)."""
+class NodeSlice(Mapping):
+    """One schedule-bearing node's geometry inputs — THE input type of
+    :func:`_schedule_node_features` and, as the same object, its memo key. The block is a pure
+    function of this mapping, so "what the featurizer may read" and "what the memo keys on" are
+    one thing by construction and cannot drift: a featurizer that needs a new field must widen
+    :func:`node_slices`, which widens the key automatically. Hashable on its item set; an
+    unhashable value surfaces at the memo lookup (compute uncached), never as a wrong share."""
+
+    __slots__ = ("_items", "_hash")
+
+    def __init__(self, items: dict):
+        self._items = items
+        self._hash: int | None = None
+
+    def __getitem__(self, key):
+        return self._items[key]
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
+
+    def __hash__(self):
+        if self._hash is None:
+            self._hash = hash(frozenset(self._items.items()))
+        return self._hash
+
+    def __eq__(self, other):
+        if isinstance(other, NodeSlice):
+            return self._items == other._items
+        return NotImplemented
+
+
+def node_slices(knobs: dict) -> tuple[NodeSlice, ...]:
+    """The row's schedule-bearing node slices, in sum-pool order — one :class:`NodeSlice` per
+    distinct ``@<axis>`` element across the per-node schedule families (``TILE`` / ``REDUCE`` /
+    ``STAGE``), in first-seen order, then the bare-remainder group when bare families ride beside
+    suffixed ones (the phase-3 mixed flash spelling), or one slice for an all-bare row. ``()``
+    when the kernel carries no schedule codec at all (a pure pointwise zero-axis fold).
+
+    Each slice is that node's ``FAMILY[@<axis>]`` codecs plus the shared bare ``S_*`` / ``H_*``
+    context, with any addressed per-node structural feature (``S_ext_reduce_prod@<axis>``)
+    substituted in bare so ``_geom_feats`` reads the node's own extents. The kernel-global
+    ``WORK`` inventory rides a named-axis slice only where the node's own values need it — a
+    non-empty site TILE (its units) or a coop REDUCE (its width): an empty-TILE node beside
+    another node's thread inventory must NOT read it as a tile (the flash coop row's dd/pj slices
+    would otherwise featurize a phantom thread tile). The all-bare slice is the whole row's
+    geometry projection — the geometry block reads nothing outside it, which the featurizer test
+    pins against the full-row reference."""
     axes: list[str] = []
     seen: set[str] = set()
     has_bare = False
@@ -235,47 +278,40 @@ def _node_axes(knobs: dict) -> list[str | None]:
         elif ax not in seen:
             seen.add(ax)
             axes.append(ax)
-    if axes:
-        return [*axes, ""] if has_bare else list(axes)
-    return [None] if has_bare else []
+    if not axes and not has_bare:
+        return ()
+    context = {k: v for k, v in knobs.items() if k.startswith((STRUCT_PREFIX, CTX_PREFIX)) and "@" not in k}
 
-
-def _node_slice(knobs: dict, axis: str | None) -> dict:
-    """The single-node ``knobs`` sub-dict the geometry featurizers see for the node keyed ``axis``:
-    that node's ``FAMILY@<axis>`` schedule codecs plus the shared ``S_*`` / ``H_*`` context,
-    with any addressed per-node structural feature (``S_ext_reduce_prod@<axis>``) substituted in bare so
-    ``_geom_feats`` reads the node's own extents. ``axis is None`` (the bare single node) returns
-    ``knobs`` unchanged — the whole dict is that one node (byte-identical to the pre-loop
-    featurizer); ``axis == ""`` is the mixed row's bare-remainder group — the BARE schedule
-    families (the phase-3 primary node) plus the context."""
-    if axis is None:
-        return knobs
-    # The shared structural / regime context (bare ``S_*`` / ``H_*``).
-    sub: dict = {k: v for k, v in knobs.items() if k.startswith((STRUCT_PREFIX, CTX_PREFIX)) and "@" not in k}
-    if axis == "":
+    def bare_slice(work_by_presence: bool) -> NodeSlice:
+        sub = dict(context)
         for fam in _AXIS_FAMILIES:
             if fam in knobs:
                 sub[fam] = knobs[fam]
-        if knobs.get("WORK"):
-            # The bare group carries the bare REDUCE, so ``resolve_site_tile``'s coop-vs-tile
-            # disambiguation of an empty TILE beside a thread inventory works on the slice.
+        # The bare group carries the bare REDUCE, so ``resolve_site_tile``'s coop-vs-tile
+        # disambiguation of an empty TILE beside a thread inventory works on the slice.
+        if knobs.get("WORK") or (work_by_presence and "WORK" in knobs):
             sub["WORK"] = knobs["WORK"]
-        return sub
-    for fam in _AXIS_FAMILIES:
-        key = f"{fam}@{axis}"
-        if key in knobs:
-            sub[key] = knobs[key]
-    # The kernel-global WORK inventory rides the slice only where this node's own values need
-    # it — a non-empty site TILE (its units) or a coop REDUCE (its width). An empty-TILE node
-    # beside another node's thread inventory must NOT read it as a tile (the flash coop row's
-    # dd/pj slices would otherwise featurize a phantom thread tile).
-    if knobs.get("WORK") and (sub.get(f"TILE@{axis}") or "coop" in str(sub.get(f"REDUCE@{axis}", ""))):
-        sub["WORK"] = knobs["WORK"]
-    for base in _NODE_STRUCT_BASES:  # addressed per-node override; bare fallback already copied above
-        addressed = knobs.get(f"{base}@{axis}")
-        if addressed is not None:
-            sub[base] = addressed
-    return sub
+        return NodeSlice(sub)
+
+    if not axes:  # one all-bare node: the whole row's geometry projection
+        return (bare_slice(work_by_presence=True),)
+    out: list[NodeSlice] = []
+    for axis in axes:
+        sub = dict(context)
+        for fam in _AXIS_FAMILIES:
+            key = f"{fam}@{axis}"
+            if key in knobs:
+                sub[key] = knobs[key]
+        if knobs.get("WORK") and (sub.get(f"TILE@{axis}") or "coop" in str(sub.get(f"REDUCE@{axis}", ""))):
+            sub["WORK"] = knobs["WORK"]
+        for base in _NODE_STRUCT_BASES:  # addressed per-node override; bare fallback already copied above
+            addressed = knobs.get(f"{base}@{axis}")
+            if addressed is not None:
+                sub[base] = addressed
+        out.append(NodeSlice(sub))
+    if has_bare:
+        out.append(bare_slice(work_by_presence=False))
+    return tuple(out)
 
 
 def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
@@ -325,6 +361,30 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
     return feats
 
 
+#: slice → its memoized geometry feature block, read-only (``MappingProxyType``): the blocks are
+#: SHARED across hits and sum-pooled by callers, so mutation must raise rather than corrupt a
+#: sibling row. Bounded by wholesale clear — the key space is small (distinct slices per pool),
+#: so the bound is a leak guard, not an eviction policy.
+_GEOMETRY_MEMO: dict[NodeSlice, Mapping] = {}
+
+
+def _node_geometry(sl: NodeSlice) -> Mapping:
+    """The memoized front door onto :func:`_schedule_node_features`. The slice object is the memo
+    key (see :class:`NodeSlice` — input and key are one thing, so the memo cannot drift from what
+    the block reads). The parses under the block are already memoized per spelling
+    (:func:`_resolved_tile`); this memoizes the whole derived feature dict, which is what
+    dominates per-row featurization on a large candidate pool."""
+    try:
+        block = _GEOMETRY_MEMO.get(sl)
+    except TypeError:  # an unhashable knob value — compute uncached
+        return _schedule_node_features(sl)
+    if block is None:
+        if len(_GEOMETRY_MEMO) >= 65536:
+            _GEOMETRY_MEMO.clear()
+        block = _GEOMETRY_MEMO[sl] = MappingProxyType(_schedule_node_features(sl))
+    return block
+
+
 def knob_features(knobs: dict) -> dict[str, float]:
     """Convert a knob dict into a flat numeric feature vector for the planner priors — the single
     featurizer over the whole dict.
@@ -340,8 +400,7 @@ def knob_features(knobs: dict) -> dict[str, float]:
       when non-numeric); other ``STR`` knobs have no generic encoding.
 
     The schedule-geometry block (``D_*`` / ``MMA_*``) is featurized **per node** and **sum-pooled**: a
-    multi-node kernel (flash) groups its ``FAMILY@<axis>`` codecs by axis (:func:`_node_axes`), slices
-    each node's schedule + own structural extents (:func:`_node_slice`), featurizes it
+    multi-node kernel (flash) groups its ``FAMILY@<axis>`` codecs by axis into :func:`node_slices`, featurizes each
     (:func:`_schedule_node_features`), and sums the blocks into the fixed-width vector. A single-node
     kernel has one group, so the sum is that one node's block — **byte-identical** to the pre-loop
     singleton featurizer (the migration is invisible until a kernel actually has two nodes). Per-node
@@ -374,8 +433,8 @@ def knob_features(knobs: dict) -> dict[str, float]:
             feats[f"{name}_frac"] = pop / len(s) if s else 0.0
         # STR knobs with no custom featurizer: no generic numeric encoding.
     # Per-node schedule geometry: featurize each schedule-bearing node's slice and sum-pool the blocks.
-    for axis in _node_axes(knobs):
-        for name, val in _schedule_node_features(_node_slice(knobs, axis)).items():
+    for sl in node_slices(knobs):
+        for name, val in _node_geometry(sl).items():
             feats[name] = feats.get(name, 0.0) + val
     feats.setdefault("MMA_tier", 0.0)  # scalar tier / no schedule node = no warp atom
     return feats

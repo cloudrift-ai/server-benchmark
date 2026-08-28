@@ -236,6 +236,25 @@ def test_digit_suffixed_axis_round_trips_with_an_ordinal() -> None:
     assert resolve(root, "REDUCE@map.fold.a22").node is f2
 
 
+def test_ordinal_spelling_escapes_a_literal_axis_capture() -> None:
+    """The round-trip law under collision: two identical-path ``a13`` folds beside a literal
+    ``a131`` axis — the concatenated ordinal form (``a13`` + 1 → ``a131``) would resolve to the
+    literal-axis site (resolve reads a final component as a literal axis first, by design), so
+    the ordinal arm mints the explicit dotted form, and every site round-trips to itself."""
+    f1 = _planar_fold("a13", acc="s0", val="v1", load="x")
+    f2 = _planar_fold("a13", acc="t0", val="w1", load="z")
+    f3 = _planar_fold("a131", acc="u0", val="q1", load="y")
+    root = Fold.projection(
+        body=Body((Assign(name="o", op="add", args=(f1.out, f2.out)), Assign(name="p", op="add", args=("o", f3.out)))),
+        operands=(f1, f2, f3),
+    )
+    for node in (f1, f2, f3):
+        key = spell(root, "REDUCE", node)
+        assert resolve(root, key).node is node, key
+    assert spell(root, "REDUCE", f1) == "REDUCE@map.fold.a13.1"  # a13 + 1 would be captured by the a131 axis
+    assert spell(root, "REDUCE", f2) == "REDUCE@map.fold.a132"  # a13 + 2 collides with nothing — concat stays canonical
+
+
 # ---- reserved grammar ---------------------------------------------------------------------------- #
 
 
@@ -277,3 +296,21 @@ def test_family_sites_and_primary() -> None:
 def test_site_is_a_frozen_value() -> None:
     s = Site(node=None, axis="k", segments=("fold",))
     assert s.depth == 1 and s.ordinal == 1
+
+
+def test_exact_full_path_outranks_deeper_subsequence_matches() -> None:
+    """A shallow site's full path is an anchored subsequence of every deeper same-axis path, so
+    its canonical full-path + ordinal spelling admits the deeper sites too — the exact-path
+    preference at the ambiguity point is what lets the spelling name its own site (the quant
+    cone's nested a1 reduce chain)."""
+    shallow1 = _planar_fold("a1", acc="s0", val="v1", load="x")
+    shallow2 = _planar_fold("a1", acc="t0", val="w1", load="z")
+    deep_inner = _planar_fold("a1", acc="u0", val="q1", load="y")
+    deep = Fold.projection(body=Body((Assign(name="d", op="add", args=(deep_inner.out, "one")),)), operands=(deep_inner,))
+    root = Fold.projection(
+        body=Body((Assign(name="o", op="add", args=(shallow1.out, shallow2.out)), Assign(name="p", op="add", args=("o", "d")))),
+        operands=(shallow1, shallow2, deep),
+    )
+    for node in (shallow1, shallow2, deep_inner):
+        key = spell(root, "REDUCE", node)
+        assert resolve(root, key).node is node, key

@@ -185,24 +185,29 @@ class LinearModel:
         same batched call; the tree model's version is where batching actually buys something."""
         return [self.mean_score_features(f) for f in feats_list]
 
-    def explain_features(self, feats: dict) -> dict[str, float]:
-        """EXACT per-term decomposition of :meth:`quality` (higher = predicted faster): each nonzero linear term
-        by its feature name, plus the atomic-free interaction as a ``gate:*`` pseudo-term. A two-row term diff is
-        therefore the model's exact preference gap. (The float-safety clip is ignored here — it exists for
-        finiteness, never inside the live range.)
-
-        This is THE definition of what the score is made of — :meth:`quality` is its total, so the decomposition
-        and the number it decomposes are one thing rather than two that have to be kept in step. Terms that would
-        be ``±0.0`` (an absent or zero feature, or the gate on a row with no finalize kernel) are dropped: they
-        are neutral in the total and would only pad the explanation."""
+    def _terms(self, feats: dict):
+        """The score's ``(name, term)`` pairs, in the ONE scoring order — each nonzero linear term by its
+        feature name, plus the atomic-free interaction as a ``gate:*`` pseudo-term. :meth:`quality` sums the
+        terms and :meth:`explain_features` names them, off this one generator, so the decomposition and the
+        number it decomposes cannot drift. Terms that would be ``±0.0`` (an absent or zero feature, or the
+        gate on a row with no finalize kernel) are dropped: they are neutral in the total and would only pad
+        the explanation."""
         w_set = self.weight_set(is_dynamic_row(feats))
-        terms = {k: w * feats[k] for k, w in w_set.items() if feats.get(k, 0.0)}
+        for k, w in w_set.items():
+            if feats.get(k, 0.0):
+                yield k, w * feats[k]
         finalize, splitk = gate_values(feats)  # splitk is the split-K count (REDUCE@<k>.cta)
         if finalize:
-            terms["gate:atomic_free"] = atomic_free_term(
-                finalize, splitk, weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold
+            yield (
+                "gate:atomic_free",
+                atomic_free_term(finalize, splitk, weight=self.atomic_free_weight, threshold=self.atomic_free_split_threshold),
             )
-        return terms
+
+    def explain_features(self, feats: dict) -> dict[str, float]:
+        """EXACT per-term decomposition of :meth:`quality` (higher = predicted faster) — see :meth:`_terms`.
+        A two-row term diff is therefore the model's exact preference gap. (The float-safety clip is ignored
+        here — it exists for finiteness, never inside the live range.)"""
+        return dict(self._terms(feats))
 
     # --- linear-only: the quantity the fit optimizes -----------------------------------------------------
 
@@ -211,11 +216,12 @@ class LinearModel:
         the linear weights over ``feats`` plus the atomic-free interaction. Routes itself on the row's stamp —
         a live candidate always carries the full featurization.
 
-        The total of :meth:`explain_features`, so "what the score is" is written once. The alternative — summing
-        the linear part and adding the gate after it — differs in the last bit, because ``sum`` over floats is
-        compensated (Neumaier) and that changes where the compensation lands. Two candidates an ULP apart are a
-        tie either way, and the fit's own descent scores through :func:`quality_columns`, not this path."""
-        return sum(self.explain_features(feats).values())
+        The total of :meth:`_terms` (the one definition of the score's terms — :meth:`explain_features` names
+        the same pairs). The terms are summed with ``sum`` in term order, never re-associated: ``sum`` over
+        floats is compensated (Neumaier) and re-grouping would change where the compensation lands. Two
+        candidates an ULP apart are a tie either way, and the fit's own descent scores through
+        :func:`quality_columns`, not this path."""
+        return sum(t for _, t in self._terms(feats))
 
     def quality_rows(self, mat: np.ndarray, names, *, dynamic: bool) -> np.ndarray:
         """:meth:`quality` over a whole packed pool — column ``j`` of ``mat`` is feature ``names[j]``.

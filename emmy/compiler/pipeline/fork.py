@@ -70,6 +70,15 @@ class Fork(ABC):
     knobs: dict
     is_leaf: bool = False
     structural: bool = False
+    #: The enumeration's minted pool identity, carried by every node of a schedule tree
+    #: (``_schedule._State.pool_id`` — the session memo's own cache digest: ``pool_key`` + pins +
+    #: split receipt + spelled key vocabulary). ``None`` for forks outside a schedule enumeration.
+    #: Consumers key memoized decisions on THIS, never on a re-derived identity.
+    pool_id: str | None = None
+    #: Upper bound on the enumeration's leaf count (Π of the per-node option tuples × the RASTER
+    #: fan-out — legality only shrinks it), carried the same way. ``None`` outside a schedule
+    #: enumeration. The greedy cold-pool budget triggers on this without walking anything.
+    pool_bound: int | None = None
 
     @abstractmethod
     def expand(self) -> list[Op | Graph | Fork]: ...
@@ -134,6 +143,17 @@ def flatten_leaves(options: Sequence[Op | Graph | Fork]) -> list[Op | Graph | Fo
     small non-schedule forks whose alternatives must be compared together;
     schedule spaces instead retain this hierarchy during greedy descent."""
     return list(iter_leaves(options))
+
+
+def leaf_knobs(leaf: Op | Graph | Fork) -> dict:
+    """A leaf's complete knob row: a leaf ``Fork`` carries it as ``knobs``; a concrete ``Op``
+    carries its own; a ``Graph`` splice has no single row (scored structurally, never by knobs) —
+    empty, matching how ``LazyCandidate.from_option`` treats it during the tuning search."""
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
+
+    if isinstance(leaf, Fork):
+        return dict(leaf.knobs)
+    return dict(getattr(leaf, "knobs", None) or {}) if not isinstance(leaf, Graph) else {}
 
 
 # ---------------------------------------------------------------------------

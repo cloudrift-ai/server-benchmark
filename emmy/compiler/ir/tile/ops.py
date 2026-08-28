@@ -370,12 +370,21 @@ def projection_tail(tile) -> list[Stmt]:
     return apply_output_specs(body, tile.output_specs)
 
 
+class UnbindableProjection(ValueError):
+    """The projection's outputs do not partition by producing root, so the multi-root binding has
+    no realization for this row — a legality fact about the OFFERED row, not a malformed tree.
+    Typed so the materializer can decline the row (``RuleSkipped`` → the greedy blocklist retry
+    moves to the next one) without masking genuinely malformed input, which stays a plain
+    ``ValueError``."""
+
+
 def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tuple], ...]:
     """Partition an independent projection's pure body and output specifications by producing Fold.
 
     Each output specification must read exactly one root, the roots' backward cones must be disjoint,
     and together those cones must cover the projection body. This is the structural ownership
     rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh pieces.
+    Refusals raise :class:`UnbindableProjection`.
     """
     roots = tuple(edge for edge in op.operands if isinstance(edge, Fold))
     by_name = {name: root for root in roots for name in root.defines()}
@@ -385,16 +394,16 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body,
         cone = op.body.backward_cone((spec.write.value,))
         used = {id(by_name[name]) for name in cone.external_reads if name in by_name}
         if len(used) != 1:
-            raise ValueError("an output-tiled root must own each output specification independently")
+            raise UnbindableProjection("an output-tiled root must own each output specification independently")
         owner = used.pop()
         members[owner].update(cone.members)
         grouped[owner].append(spec)
 
     claimed: set = set().union(*members.values()) if members else set()
     if claimed != set(op.body) or any(not grouped[id(root)] for root in roots):
-        raise ValueError("an output-tiled root forest must cover the complete projection")
+        raise UnbindableProjection("an output-tiled root forest must cover the complete projection")
     if any(members[id(left)] & members[id(right)] for i, left in enumerate(roots) for right in roots[i + 1 :]):
-        raise ValueError("output-tiled root projections may not share tail statements")
+        raise UnbindableProjection("output-tiled root projections may not share tail statements")
     return tuple((root, Body(stmt for stmt in op.body if stmt in members[id(root)]), tuple(grouped[id(root)])) for root in roots)
 
 

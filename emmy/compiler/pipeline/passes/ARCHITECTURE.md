@@ -331,6 +331,22 @@ Consumer count decides nothing. One consumer or three reach the same shape: the 
 the codes sit in memory. The buffer's readers leave the region together with everything downstream of them, so the
 remainder keeps no holes — a hole would make the merged node depend on a node that depends on it.
 
+Whatever is left feeding only what departed leaves with it. A cut materializes every buffer crossing it, so a survivor
+whose entire readership is on the far side buys nothing: its value is stored once and read once, and it is stored at
+whatever shape it happens to have. The quantized activation's scale is the case that shows why this matters. Its
+per-consumer reconstruction multiplies the block scale by the per-tensor one, rounds the product to f16 and broadcasts
+it across the block; left on the producer's side, that broadcast is what the boundary stores — one value per logical
+element where its source held one per block. Released, the reconstruction sits beside its matmul and the boundary falls
+on the raw block scales instead, which is the narrower buffer and the one a consumer can index block-wise. Two nodes
+never leave this way: one writing the packed buffer itself, since that buffer is the boundary the refusal exists to
+place, and one read from outside the region, whose value has to be stored for those readers regardless.
+
+That is a boundary-placement rule, not a lowering-driven exception. It asks only which side a value's readers are on,
+and it is what lets a contraction see a packed operand's two scale levels — the raw per-block byte and the k-invariant
+per-tensor factor — as separate loads, the shape `lowering/tile/_packed.py` reads and the block-scaled tensor-core cell
+requires. Materializing the fused product instead does not merely cost bytes; it erases the block structure from the
+consumer's index, and a reading that cannot prove k-block invariance declines.
+
 There is one fusion pass and one fixpoint. One rewrite takes the maximal downstream Loop region: non-reconvergent
 consumers become output ports of one multi-output `LoopOp`, and all terminal Writes seed one splicer worklist. The
 worklist's shared binding table emits an equal upstream demand once across every port, so fusion order cannot duplicate

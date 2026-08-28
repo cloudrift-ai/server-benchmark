@@ -62,6 +62,27 @@ def _packed_readers(graph: Graph, region: set[str]) -> set[str]:
             continue
         dropped.add(nid)
         pending.extend(user for user in graph.users(nid) if user in region)
+    # Whatever is left feeding ONLY what departed leaves with it. A cut materializes every buffer
+    # crossing it, so a survivor whose entire readership is on the far side buys nothing: its value
+    # is stored once and read once, and it is stored at whatever shape it happens to have — a
+    # broadcast left behind this way writes one value per logical element where its source held one
+    # per block. Releasing it puts the computation back beside its single reader and moves the
+    # boundary onto the source, which is the narrower buffer and the one the reader can index.
+    #
+    # A node writing the PACKED buffer itself never leaves: that buffer is the boundary this
+    # function exists to place, and releasing it would dissolve the extent the whole refusal
+    # protects. A node read from outside the region also stays — its value has to be stored for
+    # those readers whatever happens here.
+    changed = True
+    while changed:
+        changed = False
+        for nid in region - dropped:
+            if packed & set(graph.nodes[nid].buffer_names()):
+                continue
+            users = graph.users(nid)
+            if users and all(user in dropped for user in users):
+                dropped.add(nid)
+                changed = True
     return dropped
 
 

@@ -238,15 +238,14 @@ def test_the_marked_matmul_binds_one_contraction_per_linear_over_plain_operand_e
         assert weight.block == 16
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the activation's block scale and tensor scale are fused into one f16 tensor and broadcast across the full "
-    "k axis, so no raw e4m3 block scale reaches the matmul and the k-block reading declines; spelling the two levels "
-    "separately on this path is a pending decision, because it trades the exact oracle for tolerance windows",
-)
 def test_the_marked_matmul_binds_its_activation_edge_as_a_packed_decode_chain(tmp_path):
-    """The other half, and the one gap between here and the block-scaled cell: the ACTIVATION edge
-    reading as a packed-pair decode chain over the same 16-element blocks as the weight."""
+    """The other half, and what the block-scaled cell waits on: the ACTIVATION edge reading as a
+    packed-pair decode chain over the same 16-element blocks as the weight.
+
+    It reads that way because the fusion boundary leaves the activation's raw e4m3 block scales
+    standing and puts the per-consumer decode beside its matmul. Materializing the fused f16 scale
+    instead — one value per logical element rather than one per block — is what used to hide the
+    block structure from this reading."""
     bound = _bound_contractions(tmp_path)
     assert bound, "no marked matmul bound as a contraction"
     for tile, con in bound:

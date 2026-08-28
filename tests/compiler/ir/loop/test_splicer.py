@@ -1061,3 +1061,58 @@ def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(mon
 
 
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Construction bound — a recurrence-shaped chain must be declined, not built
+# ---------------------------------------------------------------------------
+
+
+def _affine_recurrence_chain(depth: int) -> tuple[dict[str, LoopOp], dict, tuple]:
+    """A chain whose σs compose into exponentially many distinct bindings.
+
+    Stage ``k`` reads stage ``k-1`` at ``2·i + 1`` and at ``3·i + 2``: two non-commuting affine
+    maps generate a free monoid, so every path through ``depth`` stages composes to a DISTINCT
+    map and stage 0's statements are demanded under ``2^(depth-1)`` different σs. This is the
+    DeepSeek-V4 Sinkhorn shape minimized — the merge that made 4.5M distinct bindings from 2,287
+    input statements and never finished constructing.
+    """
+    axis = Axis("i", 8)
+    loops: dict[str, LoopOp] = {}
+    edges: dict = {}
+    for k in range(depth):
+        src = "b0" if k == 0 else f"s{k - 1}"
+        left = BinaryExpr("+", BinaryExpr("*", Literal(2, "int"), Var("i")), Literal(1, "int"))
+        right = BinaryExpr("+", BinaryExpr("*", Literal(3, "int"), Var("i")), Literal(2, "int"))
+        loops[f"s{k}"] = LoopOp(
+            body=(
+                Loop(
+                    axis=axis,
+                    body=(
+                        Load(name=f"x{k}", input=src, index=(left,)),
+                        Load(name=f"y{k}", input=src, index=(right,)),
+                        Assign(name=f"v{k}", op="add", args=(f"x{k}", f"y{k}")),
+                        Write(output=f"s{k}", index=(Var("i"),), value=f"v{k}"),
+                    ),
+                ),
+            ),
+        )
+        if k:
+            edges[(f"s{k}", f"s{k - 1}")] = (f"s{k - 1}", f"s{k - 1}")
+    roots = ((f"s{depth - 1}", f"s{depth - 1}"),)
+    return loops, edges, roots
+
+
+def test_shallow_affine_recurrence_still_fuses():
+    """Depth 4 → at most 8 distinct bindings per stage-0 stmt — the suite-wide legitimate maximum."""
+    loops, edges, roots = _affine_recurrence_chain(4)
+    merged = splice_loops(loops=loops, splice_edges=edges, roots=roots)
+    assert merged is not None
+    assert _count_kind(merged, Write) == 1  # one root — every stage inlined
+
+
+def test_deep_affine_recurrence_is_declined_by_the_binding_cap():
+    """Depth 12 → 2048 bindings per stage-0 stmt: constructing the merge is hopeless, so the
+    splicer must refuse (the region stays unfused) instead of multiplying bindings without end."""
+    loops, edges, roots = _affine_recurrence_chain(12)
+    assert splice_loops(loops=loops, splice_edges=edges, roots=roots) is None

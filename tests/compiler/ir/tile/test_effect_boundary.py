@@ -187,3 +187,73 @@ def test_store_repr_round_trips_through_eval() -> None:
 
     st = OutputSpec(write=Write(output="o", index=(Var("m"),), value="y"), sweep=_ax("n"), unroll=True)
     assert _eval_stmt(repr(st)) == st
+
+
+# --- the gate compares under construction normalization ------------------------------------------ #
+
+
+def test_sweep_body_out_of_canonical_order_still_extracts() -> None:
+    """A free sweep whose pure prefix is not in canonical statement order must still extract.
+
+    ``ProjectionRegion`` stores its body in a ``Lambda``, whose construction canonicalizes
+    statement order — so reconstitution returns the NORMALIZED spelling. Gating on byte-identity
+    with the RAW stream rejected any sweep the normalization reorders (two independent computes
+    given in reverse-canonical order below), and the reject surfaced as a hard "cannot be
+    represented" compile failure on DeepSeek-V4's fused post block. The gate's target is the
+    stream as reconstitution will spell it.
+    """
+    first = Loop(
+        axis=_ax("a2", 8),
+        body=Body(
+            (
+                Load(name="x", input="src", index=(Var("a2"),)),
+                Assign(name="y", op="relu", args=("x",)),
+                Write(output="o1", index=(Var("a2"),), value="y"),
+            )
+        ),
+    )
+    second = Loop(
+        axis=_ax("a3", 4),
+        body=Body(
+            (
+                Load(name="w", input="src2", index=(Var("a3"),)),
+                # reverse-canonical: "sigmoid" orders after "negative", yet the stmts are independent
+                Assign(name="s", op="sigmoid", args=("w",)),
+                Assign(name="n", op="negative", args=("w",)),
+                Assign(name="z", op="add", args=("s", "n")),
+                Write(output="o2", index=(Var("a3"),), value="z"),
+            )
+        ),
+    )
+    split = extract_output_specs([first, second])
+    assert split is not None, "a semantics-preserving reorder must not make the stream unrepresentable"
+    pure, stores = split
+    assert [type(stmt).__name__ for stmt in pure] == ["ProjectionRegion", "ProjectionRegion"]
+    assert [store.write.output for store in stores] == ["o1", "o2"]
+    # The round trip agrees with itself: reconstitution of the extraction is a fixpoint.
+    rebuilt = apply_output_specs(pure, stores)
+    assert extract_output_specs(rebuilt) is not None
+
+
+def test_sweep_write_of_a_captured_accumulator_declines_cleanly() -> None:
+    """A sweep may store an enclosing scope's value unchanged — ``o[j] = acc`` broadcasting an
+    already-reduced accumulator. The result is not a body def; spelling it as a captured param
+    produced a kernel reading a free axis under its pre-canonicalization name (an undefined
+    identifier at nvcc), so the shape is DECLINED — a clean ``None`` the fusion preflight turns
+    into "leave the region unfused", not the Lambda formation crash probing it used to raise
+    ("Lambda results ['acc'] are not defined")."""
+    first = Loop(
+        axis=_ax("a1", 8),
+        body=Body(
+            (
+                Load(name="x", input="src", index=(Var("a1"),)),
+                Assign(name="y", op="relu", args=("x",)),
+                Write(output="o1", index=(Var("a1"),), value="y"),
+            )
+        ),
+    )
+    second = Loop(
+        axis=_ax("a2", 4),
+        body=Body((Write(output="o2", index=(Var("a2"),), value="acc"),)),
+    )
+    assert extract_output_specs([first, second]) is None

@@ -40,6 +40,7 @@ from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
+from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
@@ -347,8 +348,16 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
                     return None
                 child_body, child_outputs, child_direct = child
                 results = tuple(dict.fromkeys(value for spec in child_direct for value in spec.write.values))
-                provisional = Lambda(params=(stmt.axis.name,), body=child_body, results=results)
-                captures = tuple(sorted(provisional.free_names()))
+                # A write may store a value captured from the enclosing scope unchanged (a sweep
+                # broadcasting an already-reduced accumulator, ``o[j] = acc``). Such a result is
+                # not a body def; spelling it as a captured param produced a kernel whose reduce
+                # body read a free axis under its pre-canonicalization name (an undefined
+                # identifier at nvcc), so the shape is DECLINED — a clean ``None`` (the merge
+                # stays unfused), not the Lambda formation crash probing it used to raise.
+                probe = Lambda(params=(stmt.axis.name,), body=child_body, results=())
+                if any(value not in probe.defined for value in results):
+                    return None
+                captures = tuple(sorted(probe.free_names()))
                 region = ProjectionRegion(
                     axis=stmt.axis,
                     lift=Lambda(params=(stmt.axis.name, *captures), body=child_body, results=results),
@@ -366,9 +375,30 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
     if extracted is None:
         return None
     body, outputs, _ = extracted
-    if apply_output_specs(body, outputs) != original:
+    if _construction_normalized(apply_output_specs(body, outputs)) != _construction_normalized(original):
         return None
     return tuple(body), tuple(outputs)
+
+
+def _construction_normalized(stmts) -> list[Stmt]:
+    """Both sides of the round-trip gate, under the construction canonicalization — a COMPARATOR.
+
+    A :class:`ProjectionRegion` stores its body in a ``Lambda``, whose construction canonicalizes
+    statement order and commutative arguments (``normalize_lambda_body``), so reconstitution
+    returns the canonical spelling while the captured stream is raw. Gating on byte-identity with
+    the raw stream rejected any input the canonicalization reorders — a semantics-preserving
+    reorder, surfacing as a hard "cannot be represented" compile failure. The gate instead maps
+    BOTH streams through the same canonicalization, recursively into every loop body: the order
+    is dependency-respecting and canonical (not input-stable), so two spellings of one stream
+    converge, and two genuinely different streams still differ. A stream already in canonical
+    form maps to itself, so byte-identity holds exactly where it held before."""
+    out: list[Stmt] = []
+    for stmt in normalize_lambda_body(Body.coerce(tuple(stmts))):
+        bodies = stmt.nested()
+        if bodies and isinstance(stmt, Loop):
+            stmt = replace(stmt, body=Body(tuple(_construction_normalized(stmt.body))))
+        out.append(stmt)
+    return out
 
 
 @dataclass

@@ -531,6 +531,16 @@ consumer fragment already mixes origins: it is absent from the ultimate frontend
 or unrelated source chains preserve the conversion. Equal-dtype reductions and non-`Accum` producers keep the
 ordinary untyped alias, so fusion does not duplicate a conversion already carried by the defining statement.
 
+Construction is bounded per statement: the dedup table shares each `(stmt, emit scope, σ)` binding, and in
+every legitimate splice no single statement takes more than a handful of distinct bindings. A recurrence-shaped
+region — each stage re-demanded under compositions of σs, DeepSeek-V4's 20-iteration Sinkhorn chain being the live
+case — multiplies bindings per stage instead of deduplicating, and such a merge cannot be constructed at any budget.
+The first statement past the cap stops the splice. The doom is structured (`UnfusableStmt` names the offending
+loop) and surfaced to the fusion pass on request, which drops that loop plus its downstream closure from the region
+and retries — so one doomed chain costs only itself, not every other merge in its region. This is a termination
+bound, not a fusion-quality gate: placement still owns every cut on a merge that CAN be built, and the refusal must
+stay cheap because the greedy policy re-runs fusion on every candidate graph it prices.
+
 Each splice memoizes `Expr.free_vars()` by expression identity while placing dependencies. Sigma expressions remain
 live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing a
 global cache would require; the memo is discarded with the splicer.
@@ -551,9 +561,12 @@ like any pre-fusion graph.
 ### `loop/builder.py` — fluent construction
 
 `LoopBuilder` constructs merged `LoopOp` bodies for the fusion splicer without spelling out every `Loop(Axis(…))`
-nest. Fresh SSA names retain the lowest available deterministic suffix while a per-hint monotonic cursor ensures each
-occupied suffix is tested at most once; the used-name set remains authoritative when another hint claims a future
-suffix.
+nest. Construction is mutable — descent is a dict lookup per scope level and a prepend is an append to a
+reverse-ordered list — and the immutable body is materialized once by `finish()`. Rebuilding the tuple tree per
+insert is quadratic in program size and re-runs each level's `Loop` construction normalization per insert, which is
+invisible on small graphs and decisive on large ones. Fresh SSA names retain the lowest available deterministic
+suffix while a per-hint monotonic cursor ensures each occupied suffix is tested at most once; the used-name set
+remains authoritative when another hint claims a future suffix.
 
 ## `tile/`
 

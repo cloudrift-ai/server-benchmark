@@ -68,6 +68,8 @@ single. A semiring without one shared product argument remains a general planar 
 An output sweep used by any nested contraction operand is promoted into the Tile's free-axis placement. Promotion
 expands the enclosing-axis context, so construction normalizes the Fold tree once more under that final scope; one
 construction and a reconstruction therefore expose the same closed operand edges and placement seams.
+The invariant also applies when a schedule row constructs or reloads an already-mapped Tile: promotion extends the
+grid in lockstep with the free axes, so per-cell replication never mistakes the swept coordinate for an SSA name.
 
 **Storage-decode factors hoist to the epilogue.** A product operand whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold

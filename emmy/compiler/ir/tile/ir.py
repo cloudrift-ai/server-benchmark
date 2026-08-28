@@ -415,8 +415,6 @@ class TileOp(Op):
         if self.schedule and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
         self.op = normalized
-        if self.place.is_mapped:
-            return
 
         contractions = tuple(site.node for site in sites(normalized) if is_contraction(site.node))
         promoted = {
@@ -436,7 +434,12 @@ class TileOp(Op):
             }.values()
         )
         if extra:
-            self.place = Placement(free=(*self.place.free, *extra))
+            free = (*self.place.free, *extra)
+            if self.place.is_mapped:
+                grid = self.place.grid or self.place.free
+                self.place = replace(self.place, free=free, grid=(*grid, *extra), mapped=True)
+            else:
+                self.place = replace(self.place, free=free)
         self.output_specs = tuple(
             replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store for store in self.output_specs
         )

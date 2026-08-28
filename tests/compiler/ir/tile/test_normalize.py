@@ -9,6 +9,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda, M
+from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lambda_equivalent_clusters
 from emmy.compiler.ir.tile.path import sites
@@ -79,6 +80,24 @@ def test_contraction_promotes_a_shared_store_sweep_once() -> None:
 
     assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
     assert all(store.sweep is None for store in tile.output_specs)
+
+
+def test_contraction_promotes_a_shared_store_sweep_after_grid_mapping() -> None:
+    """A scheduled/reloaded tile keeps promotion as a construction invariant."""
+    m, n = Axis("m", 8), Axis("n", 16)
+    normalized = TileOp(op=_planar_matmul(), place=Placement(free=(m, n))).op
+    tile = TileOp(
+        op=normalized,
+        place=Placement(free=(m,), grid=(m,), mapped=True),
+        schedule={"TILE": TilePlan(regs=(2, 2))},
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=n),),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
+    assert tuple(axis.name for axis in tile.place.grid) == ("m", "n")
+    assert tile.place.is_mapped
+    assert tile.schedule["TILE"] == TilePlan(regs=(2, 2))
+    assert tile.output_specs[0].sweep is None
 
 
 def test_nested_contraction_promotes_a_shared_store_sweep() -> None:

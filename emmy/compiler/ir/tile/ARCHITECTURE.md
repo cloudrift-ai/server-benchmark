@@ -112,7 +112,11 @@ as a supported slow path.
 Canonicalization runs entirely in `TileOp.__post_init__`, including the legacy output-sweep-to-free-axis adjustment
 whenever a contraction operand reads the sweep axis. The contraction may be the root compute node or a later site in
 the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute output loop.
-Multiple output specifications owned by one projection region reconstitute one loop.
+Multiple output specifications owned by one projection region reconstitute one loop. The extraction round-trip gate
+compares the reconstruction against the stream **as reconstitution will spell it**: a `ProjectionRegion` stores its
+body in a `Lambda`, whose construction canonicalizes statement order and commutative arguments, so a raw stream that
+normalization reorders is still representable — the gate normalizes both sides the same way. A stream already in
+canonical form is gated on byte-identity exactly as before.
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
 specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or

@@ -40,6 +40,7 @@ from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
+from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
@@ -366,9 +367,33 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
     if extracted is None:
         return None
     body, outputs, _ = extracted
-    if apply_output_specs(body, outputs) != original:
+    if apply_output_specs(body, outputs) != _construction_normalized(original):
         return None
     return tuple(body), tuple(outputs)
+
+
+def _construction_normalized(stmts) -> list[Stmt]:
+    """The effectful stream as reconstitution will spell it — the round-trip gate's honest target.
+
+    A :class:`ProjectionRegion` stores its body in a ``Lambda``, whose construction canonicalizes
+    statement order and commutative arguments (``normalize_lambda_body``). Reconstitution therefore
+    returns the NORMALIZED body, and comparing it against the raw stream would reject any input the
+    normalization reorders — a semantics-preserving reorder, so a hard compile failure over spelling.
+    Mirror the exact treatment here: within each free sweep, the pure prefix is normalized and the
+    writes keep their relative order at the tail (where ``apply_output_specs`` re-appends them).
+    A stream already in canonical form maps to itself, so byte-identity is preserved exactly where
+    it held before.
+    """
+    out: list[Stmt] = []
+    for stmt in stmts:
+        if isinstance(stmt, Loop) and not stmt.is_reduce:
+            inner = _construction_normalized(stmt.body)
+            pure = [child for child in inner if child.pure]
+            effects = [child for child in inner if not child.pure]
+            out.append(replace(stmt, body=Body((*normalize_lambda_body(Body(pure)), *effects))))
+        else:
+            out.append(stmt)
+    return out
 
 
 @dataclass

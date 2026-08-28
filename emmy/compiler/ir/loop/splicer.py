@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -526,6 +526,24 @@ class _Splicer(LoopBuilder):
         # dependency placement does not recursively walk the same large coordinate tree, while
         # avoiding structural hashing (which would perform another recursive tree walk).
         self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
+        # Construction bound: how many DISTINCT bindings one statement may take. The dedup table
+        # shares each (stmt, emit scope, σ) binding, and in every successful splice across the
+        # compiler suite no single statement ever takes more than 8 (2,315 splices measured; the
+        # aggregate never exceeds ~1 binding per input statement). A recurrence-shaped region
+        # breaks that sharing — each stage is re-demanded under COMPOSITIONS of σs, so bindings
+        # multiply per stage instead of deduplicating (DeepSeek-V4's 20-iteration Sinkhorn chain
+        # drove 4.5M distinct bindings from 2,287 input statements and never finished). Such a
+        # merge cannot be constructed, so the first statement past the cap stops the splice and
+        # the region stays unfused — a termination bound, not a fusion-quality gate: placement
+        # still owns every cut on a merge that CAN be built. Per-stmt (not aggregate) so the
+        # refusal costs milliseconds: the blowup concentrates on the chain's statements long
+        # before the aggregate count is large.
+        self._bindings_per_stmt: Counter[tuple[str, str]] = Counter()
+
+    # 2× the suite-wide observed maximum of 8. Kept tight because the refusal is paid REPEATEDLY:
+    # the greedy policy re-runs the fusion pass on every candidate graph it prices, so a doomed
+    # region is re-rejected on each priced compile — the cap is the whole cost of that.
+    _STMT_BINDING_CAP = 16
 
     def run(self) -> LoopOp:
         self._seed()
@@ -597,6 +615,13 @@ class _Splicer(LoopBuilder):
         existing = self._binding.get(key)
         if existing is not None:
             return existing
+        self._bindings_per_stmt[(origin, name)] += 1
+        if self._bindings_per_stmt[(origin, name)] > self._STMT_BINDING_CAP:
+            raise _NotSupported(
+                f"stmt {name!r} of loop {origin!r} takes over {self._STMT_BINDING_CAP} distinct bindings — "
+                f"the region's σ-bindings multiply instead of deduplicating (a recurrence-shaped chain); "
+                f"it stays unfused"
+            )
         bound = self.fresh(name)
         self._binding[key] = bound
         self._pending.append(_Demand(name=name, origin=origin, sigma=sigma, demand_scope=emit_scope, bound_as=bound))

@@ -231,7 +231,15 @@ def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_
 
 
 def sync_stat_fill(
-    *, stats: tuple[str, ...], slab_of, row_axis: Axis, row_body: list[Stmt], cta: CtaTile, stat=None, dtype: str = "float"
+    *,
+    stats: tuple[str, ...],
+    slab_of,
+    row_axis: Axis,
+    row_body: list[Stmt],
+    cta: CtaTile,
+    stat=None,
+    dtype: str = "float",
+    dtypes: dict[str, str] | None = None,
 ) -> list[Stmt]:
     """The ``smem`` compute fill's per-row STATISTIC prologue — the fused norm→linear warp edge's
     cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
@@ -241,8 +249,14 @@ def sync_stat_fill(
     broadcasts to every lane), each lane then runs the scalar epilogue redundantly and lane 0
     writes each bridged ``stats`` value into its length-``rows`` smem row (``slab_of(name)``); one
     CTA barrier publishes them to the A compute-fill. A ``row_body`` with no foldable reduce
-    ``Loop`` (or a sub-warp CTA) falls back to the serial one-row-per-THREAD stripe."""
-    decls: list[Stmt] = [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=dtype) for nm in stats]
+    ``Loop`` (or a sub-warp CTA) falls back to the serial one-row-per-THREAD stripe.
+
+    A row is declared at its OWN bridged value's C type (``dtypes``, name → C type; ``dtype`` for
+    anything absent). The declaration is where a bridged value's dtype is stated — ``Smem.render``
+    registers it and the cell's read picks it up — so a row declared float would put the cell's
+    arithmetic in f32 whatever crossed it, and the bit operations have no f32 spelling."""
+    per = dtypes or {}
+    decls: list[Stmt] = [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=per.get(nm, dtype)) for nm in stats]
     writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats)
     rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.role.is_reduce), None)
     if rl_i is None or stat is None or cta.n_threads % 32 or cta.n_threads < 32:

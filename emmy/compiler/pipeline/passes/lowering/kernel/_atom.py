@@ -56,7 +56,7 @@ from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_bo
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile.ops import make_cone
+from emmy.compiler.ir.tile.ops import cone_stat_dtypes, make_cone
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate
@@ -837,7 +837,7 @@ def _child_contraction_block(
     return ops, cells, offset, tile.mn, [*decls, *region], frags
 
 
-def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_coord, k_coord, k_ext):
+def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_coord, k_coord, k_ext, inputs=None):
     """The A slab's operand, plus any statistic prologue it needs.
 
     A is COPIED when it is a materialized ``Load`` and COMPUTE-FILLED when it is a producer cone —
@@ -882,7 +882,13 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
         sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
         row_body = [s.rewrite(lambda nm: nm, sigma) for s in pro]
         prologue = sync_stat_fill(
-            stats=stats, slab_of=_stat_slab, row_axis=row_axis, row_body=row_body, cta=cta, stat=Reduction.of_cone_stat(c.a)
+            stats=stats,
+            slab_of=_stat_slab,
+            row_axis=row_axis,
+            row_body=row_body,
+            cta=cta,
+            stat=Reduction.of_cone_stat(c.a),
+            dtypes={nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(pro, stats, inputs).items()},
         )
     return SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzle), False, prologue
 
@@ -895,6 +901,7 @@ def _sync_operands(
     swizzles: tuple[str, str] = ("NONE", "NONE"),
     channels=(),
     seam: tuple = ((), (), ()),
+    inputs=None,
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The ``smem`` compute fill's drain-ordered, computed, copied, and prologue operands.
 
@@ -943,6 +950,7 @@ def _sync_operands(
         m_coord=m_coord,
         k_coord=k_coord,
         k_ext=k_ext,
+        inputs=inputs,
     )
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
@@ -993,7 +1001,17 @@ def _sync_operands(
 
 
 def _packed_operands(
-    c: Fold, packed, bk_elems: int, mn: tuple[Side, Side], a_swizzle: str, bits_dtype, *, pad: int, cta: CtaTile, seam: tuple = ((), (), ())
+    c: Fold,
+    packed,
+    bk_elems: int,
+    mn: tuple[Side, Side],
+    a_swizzle: str,
+    bits_dtype,
+    *,
+    pad: int,
+    cta: CtaTile,
+    seam: tuple = ((), (), ()),
+    inputs=None,
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The staged operands of a PACKED-PAIR B contraction — the NVFP4 weight's byte-slab form.
 
@@ -1052,6 +1070,7 @@ def _packed_operands(
         m_coord=m_coord,
         k_coord=k_coord,
         k_ext=k_ext,
+        inputs=inputs,
     )
 
     # Just the scale factor's own stmts, not the whole decode cone: the bits copy verbatim, so the
@@ -1279,6 +1298,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             pad=0 if tma else BYTE_SLAB_PAD,
             cta=cta,
             seam=ops.cone,
+            inputs=ops.inputs,
         )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         if tma:
@@ -1307,7 +1327,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # that work — with ``cp.async``, or with the blocking vector copy on an atom whose target
         # has none. A term with no inline edge at all lands here too: then it is only the copy.
         operands, sync_ops, copy_ops, stat_pro = _sync_operands(
-            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone
+            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone, ops.inputs
         )
         transport = SyncTransport(
             operands=sync_ops,

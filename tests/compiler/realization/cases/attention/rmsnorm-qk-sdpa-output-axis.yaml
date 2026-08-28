@@ -1,4 +1,5 @@
-# evidence: PLACE=fuse builds the same graph; materializing a closed RMSNorm statistic only changes storage placement.
+# evidence: the same Qwen3 attention slice builds when the value-width output axis is in the kernel placement;
+# the scalar t128/cooperative schedule uses no architecture-gated feature.
 compute_cap:
 - 12
 - 0
@@ -48,11 +49,12 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-      PLACE: cut
+      PLACE: fuse
     knobs:
       TILE: ''
-      WORK: t256
-      REDUCE: ''
+      WORK: t128
+      REDUCE: coop
+      REDUCE@a7: ''
       STAGE: ''
       RASTER: ''
     identity: 59865c58e9549dec416b8962d73ec876ab7d5a15a2a4b05d594a70bc416c46ad

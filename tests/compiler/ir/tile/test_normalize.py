@@ -76,6 +76,36 @@ def test_contraction_promotes_a_shared_store_sweep_once() -> None:
     assert all(store.sweep is None for store in tile.output_specs)
 
 
+def test_nested_contraction_promotes_a_shared_store_sweep() -> None:
+    """A sibling reduction can be the root-most node while a later contraction reads the sweep axis."""
+    m, n = Axis("m", 8), Axis("n", 16)
+    stat_axis = Axis("r", 4)
+    init, combine = M(ElementwiseImpl("add"), names=("stat",))
+    stat = Fold(
+        axis=stat_axis,
+        lift=Lambda(
+            params=("r",),
+            body=Body((Load(name="sample", input="s", index=(Var("m"), Var("r"))),)),
+            results=("sample",),
+        ),
+        init=init,
+        combine=combine,
+    )
+    root = Fold.projection(
+        operands=(stat, _planar_matmul()),
+        body=Body((Assign(name="result", op="add", args=("stat", "acc")),)),
+        results=("result",),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m,)),
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=n),),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
+    assert tile.output_specs[0].sweep is None
+
+
 def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
     axis = Axis("k", Dim(32))
     body = Body(

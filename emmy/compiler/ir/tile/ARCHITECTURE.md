@@ -90,8 +90,9 @@ and only the measurement moves. Treat a contraction that canonicalizes to PLANAR
 as a supported slow path.
 
 Canonicalization runs entirely in `TileOp.__post_init__`, including the legacy output-sweep-to-free-axis adjustment
-exposed when factoring makes a contraction the root compute node. Multiple output specifications owned by one
-projection region reconstitute one loop.
+whenever a contraction operand reads the sweep axis. The contraction may be the root compute node or a later site in
+the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute output loop.
+Multiple output specifications owned by one projection region reconstitute one loop.
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
 specification writes `[0, n]`. Post-init restores that proven unit free axis before contraction canonicalization. The

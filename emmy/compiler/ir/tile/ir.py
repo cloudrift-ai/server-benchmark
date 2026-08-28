@@ -46,6 +46,7 @@ from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
 from emmy.compiler.ir.stmt.base import _axis_identity
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
+from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.structural import digest
 
 
@@ -405,11 +406,12 @@ class TileOp(Op):
         if self.place.is_mapped:
             return
 
-        node = head(normalized)
+        contractions = tuple(site.node for site in sites(normalized) if is_contraction(site.node))
         promoted = {
             store.sweep.name
             for store in self.output_specs
-            if store.sweep is not None and is_contraction(node) and any(edge_refs_axis(edge, store.sweep.name) for edge in node.operands)
+            if store.sweep is not None
+            and any(any(edge_refs_axis(edge, store.sweep.name) for edge in contraction.operands) for contraction in contractions)
         }
         if not promoted:
             return

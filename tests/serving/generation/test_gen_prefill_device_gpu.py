@@ -16,10 +16,11 @@ pytestmark = [pytest.mark.xdist_group("cuda")]
 
 
 @pytest.mark.skip(
-    reason="greedy now streams the pool scan (bounded ~1.1 GB RSS, one walk + one scoring pass), but the compile is "
-    "still >35 min: the lazy walk's own per-branch spelling (Ctx.extend dict work) and the nested structural pricing "
-    "resolves dominate (2026-08-28, RTX 5090 box); revives when greedy enumerates rows off the prescan memo instead "
-    "of live expand()"
+    reason="greedy now streams the pool scan (bounded ~1.1 GB RSS, one walk, chunked scoring at ~74k rows/s) and the "
+    "structural forks price the fused side off one scan, but the compile still overruns 30 min: the fused attention "
+    "term's pool runs to millions of leaves and the walk must visit each one (288k leaves = ~46s; 2026-08-28, RTX "
+    "5090 box). Revives when cold deploys stop walking such pools at full length (a budgeted/sampled scan, a policy "
+    "question) or the pools shrink",
 )
 def test_run_device_sym_matches_host_path():
     pytest.importorskip("cupy")

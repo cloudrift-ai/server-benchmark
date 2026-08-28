@@ -693,17 +693,17 @@ def test_knob_features_geometry_memo_is_invisible():
         {"TILE": "f2x4", "WORK": "t32x8", "BN": 64, "unrelated": 3},
         {"S_n_load": 3.0, "S_ext_free_prod": 512.0},
     ]
-    features_mod._geometry_block.cache_clear()
+    features_mod._GEOMETRY_MEMO.clear()
     memoized = [knob_features(r) for r in rows]
     repeat = [knob_features(r) for r in rows]  # second pass = all cache hits
     uncached = []
     for r in rows:  # force the uncached path through the same front door
-        orig = features_mod._geometry_key
-        features_mod._geometry_key = lambda _slice: None
+        orig = features_mod._geometry_keys
+        features_mod._geometry_keys = lambda _knobs: None
         try:
             uncached.append(knob_features(r))
         finally:
-            features_mod._geometry_key = orig
+            features_mod._geometry_keys = orig
     assert memoized == uncached == repeat
     # The key must separate rows differing only in a structural extent the block reads.
     a = knob_features({"TILE": "f2x4", "WORK": "t32x8", "S_ext_free_prod": 512.0, "H_sm_count": 128.0})

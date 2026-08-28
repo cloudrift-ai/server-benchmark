@@ -797,7 +797,7 @@ def _candidate_row_keys(record: GoldenRecord) -> frozenset:
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import flatten_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import flatten_leaves, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
@@ -816,7 +816,7 @@ def _candidate_row_keys(record: GoldenRecord) -> frozenset:
         leaves = flatten_leaves(fp.options)
         ops = [o for o in leaves if not _is_structural_option(o)]
         for leaf in ops:
-            row = dict(getattr(leaf, "knobs", None) or {})
+            row = leaf_knobs(leaf)
             if row:
                 keys.add(schedule_row_key(row))
         return ops[0] if ops else leaves[0]

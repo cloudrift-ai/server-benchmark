@@ -109,7 +109,8 @@ rule matches a `LoopOp` and returns several tile options.
 
 1. The engine turns the option list into a lazy fork tree and hands the fork point to `greedy_decide` (Parts 2, 4).
 2. `greedy_decide` first tries to descend directly to a verified or measured complete row. Without direct evidence,
-   it ranks the complete offered rows; no kernel is built until the choice is made (Part 4).
+   it ranks the complete offered rows — streamed off the lazy walk in bounded chunks, so memory stays O(chunk)
+   however large the pool; no kernel is built until the choice is made (Part 4).
 3. Each compared row contains the compile context's `H_*` features (which GPU, which nvcc flags), the `S_*` features
    an earlier pass wrote onto the op (a summary of its body and loop extents), and complete knob values (Part 6).
 4. **The reservoir tier.** The leaf that agrees with the fastest reservoir row of the same op — agreement means
@@ -742,15 +743,18 @@ Pinned by `tests/compiler/pipeline/search/policy/test_deploy_pick_determinism.py
 bytes are independently pinned across fresh interpreters by `test_source_determinism.py`.
 
 **Structural options are priced, never raw-scored.** A `Graph` leaf carries no knob row, so the per-op prior cannot
-score it; `greedy_decide`'s `_priced_pick` asks the same evidence a different way instead. It prices EVERY leaf of a
-structural fork — the cut fragments and the keep-fused side alike — by a nested `resolve` per kernel over a
-`lowering/tile`-only pipeline, the price being the `score` of the slice-resolve's partition-fork `Decision`, memoized
-per `Op.cache_key`, and takes the argmin. So an unpinned compile deploys the splits `tune` measured best. The nested
-resolve carries the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a knob pick
-(the reservoir, then the tune DB's measured rows, model prediction only where unmeasured) — a pure
+score it; `greedy_decide` asks the same evidence a different way instead. The splices (top-level siblings by
+construction) are each priced by a nested `resolve` per fragment kernel over a `lowering/tile`-only pipeline, the
+price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per `Op.cache_key` with the
+compile's decision memo shared into the nested resolves; the keep-fused side's price is its own streamed scan's best
+(the identical quantity — the deploy evidence hierarchy's best at that kernel's fork — without a nested compile per
+enumerated leaf), and the argmin across the two decides. So an unpinned compile deploys the splits `tune` measured
+best. The nested resolve carries the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a
+knob pick (the reservoir, then the tune DB's measured rows, model prediction only where unmeasured) — a pure
 sum-of-predictions comparison would be exposed to the model's absolute-µs error, which doesn't cancel across
-different kernel families, and that is a fitting requirement on the prior. When some leaf cannot be priced at all,
-the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking. **No leaf is
+different kernel families, and that is a fitting requirement on the prior. When a splice cannot be priced at all,
+the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking
+(`_priced_pick`, the flat-list form kept for exactly these corners). **No leaf is
 withheld to keep a kernel set unchanged.** The one thing that does withdraw the splices is `price_structural=False`,
 which is not about speed: it is how `GreedyStrategy` retires a structural pick whose fragment kernel failed to LOWER
 (the splice minted fresh node ids, so it cannot be blocklisted at the fork site), and how a nested price probe

@@ -2,10 +2,10 @@
 
 from types import SimpleNamespace
 
-from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves
+from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key
 from emmy.compiler.pipeline.search.policy import greedy
-from emmy.compiler.pipeline.search.policy.greedy import _direct_measured_pick, _leaf_knobs, _stream_tiers, tile_identity
+from emmy.compiler.pipeline.search.policy.greedy import _direct_measured_pick, _stream_tiers, tile_identity
 
 
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
@@ -95,13 +95,13 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     leaf, knobs, price = got
 
     base = {"H_opt": 3.0, "S_shape": 128}
-    flat = [(o, _leaf_knobs(o)) for o in flatten_leaves(point.options)]
+    flat = [(o, leaf_knobs(o)) for o in flatten_leaves(point.options)]
     rows = [{**base, **k} for _, k in flat]
     scores = _BarePrior().mean_scores(rows)
     best_i = min(range(len(rows)), key=lambda i: (scores[i], canonical_row_key(rows[i])))
     assert knobs == flat[best_i][1]
     # The lazy walk mints fresh (content-equal) leaf objects per expansion, so identity is by row.
-    assert _leaf_knobs(leaf) == flat[best_i][1]
+    assert leaf_knobs(leaf) == flat[best_i][1]
     assert price == scores[best_i]
 
 
@@ -138,14 +138,14 @@ def test_streamed_degenerate_pools() -> None:
     point = _point([{"TILE": "0", "STAGE": "0"}])
     leaf, knobs, price = _stream_tiers(point, _BarePrior(), None, {})
     assert knobs is None and price is None
-    assert _leaf_knobs(leaf) == {"TILE": "0", "STAGE": "0"}
+    assert leaf_knobs(leaf) == {"TILE": "0", "STAGE": "0"}
     # Every leaf blocklisted: plain return of the first leaf.
     rows = _rows(3, 2)
     point = _point(rows)
     blocked = {tile_identity(dict(r)) for r in rows}
     leaf, knobs, price = _stream_tiers(point, _BarePrior(), blocked, {})
     assert knobs is None and price is None
-    assert _leaf_knobs(leaf) == rows[0]
+    assert leaf_knobs(leaf) == rows[0]
 
 
 def test_streamed_scan_defers_structural_forks_to_the_flatten_path() -> None:

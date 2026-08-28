@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from types import MappingProxyType
 
 from emmy.compiler.dim import Dim
@@ -1191,18 +1192,26 @@ class Ctx:
     seam: dict = field(default_factory=dict)
 
     def extend(self, option: _Option) -> Ctx | None:
-        """This context with ``option`` folded in, or ``None`` when the option contradicts it."""
-        if any(self.decided.get(k, v) != v for k, v in option.knobs.items()):
-            return None
+        """This context with ``option`` folded in, or ``None`` when the option contradicts it.
+
+        The hot inner loop of the walk (one call per option per branch level), so the untouched
+        halves share the parent's maps instead of copying: ``decided`` / ``axes`` / ``seam`` are
+        read only here and every mutation below is on a fresh copy, so sharing is safe."""
+        decided = self.decided
+        for k, v in option.knobs.items():
+            if decided.get(k, v) != v:
+                return None
         work = self.work
         if option.work is not None:
-            if work not in (None, option.work):
+            if work is not None and work != option.work:
                 return None
             work = option.work
-        axes = dict(self.axes)
-        for side in option.tile.mn if option.tile is not None else ():
-            if axes.setdefault(side.axis.name, (side.tile, side.units)) != (side.tile, side.units):
-                return None
+        axes = self.axes
+        if option.tile is not None:
+            axes = dict(axes)
+            for side in option.tile.mn:
+                if axes.setdefault(side.axis.name, (side.tile, side.units)) != (side.tile, side.units):
+                    return None
         seam = self.seam
         if option.seam:
             seam = dict(seam)
@@ -1214,7 +1223,7 @@ class Ctx:
                     need, offer = (value, other) if role == "need" else (other, value)
                     if not _seam_ok(need, offer):
                         return None
-        return Ctx(work, axes, {**self.decided, **option.knobs}, seam)
+        return Ctx(work, axes, {**decided, **option.knobs} if option.knobs else decided, seam)
 
 
 # ---- the walk, reified as the fork tree ---------------------------------------------------------- #
@@ -1296,13 +1305,20 @@ def _raster_values(state: _State) -> tuple[str, ...]:
     return ("",)
 
 
+@lru_cache(maxsize=1024)
+def _work_spelling(work: Workers) -> str:
+    """``Workers.spell`` memoized per (frozen, hashable) inventory — the walk re-spells the same
+    few inventories once per branch level otherwise."""
+    return work.spell()
+
+
 def _spelled(knobs: dict, option: _Option, ctx: Ctx) -> dict:
     """The row prefix one decision leaves behind: what the option spells, plus the inventory as
     soon as any option claims it — :meth:`Ctx.extend` refuses a second one, so a prefix that
     carries ``WORK`` already carries its final value."""
     out = {**knobs, **option.knobs}
     if ctx.work is not None:
-        out[WORK.name] = ctx.work.spell()
+        out[WORK.name] = _work_spelling(ctx.work)
     return out
 
 
@@ -1332,7 +1348,7 @@ def _step(state: _State, stack: tuple, ctx: Ctx, knobs: dict) -> list[Fork]:
         return [_Branch(state, children, below, _spelled(knobs, o, below)) for o, below in offers]
     if not state.honors_work_pin(ctx.work):
         return []  # the walk finished without ever claiming the pinned inventory
-    return [_Leaf(state, {**state.off, **knobs, WORK.name: ctx.work.spell() if ctx.work is not None else ""})]
+    return [_Leaf(state, {**state.off, **knobs, WORK.name: _work_spelling(ctx.work) if ctx.work is not None else ""})]
 
 
 @dataclass(frozen=True)

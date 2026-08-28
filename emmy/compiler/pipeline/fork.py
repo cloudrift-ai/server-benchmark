@@ -136,6 +136,17 @@ def flatten_leaves(options: Sequence[Op | Graph | Fork]) -> list[Op | Graph | Fo
     return list(iter_leaves(options))
 
 
+def leaf_knobs(leaf: Op | Graph | Fork) -> dict:
+    """A leaf's complete knob row: a leaf ``Fork`` carries it as ``knobs``; a concrete ``Op``
+    carries its own; a ``Graph`` splice has no single row (scored structurally, never by knobs) —
+    empty, matching how ``LazyCandidate.from_option`` treats it during the tuning search."""
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
+
+    if isinstance(leaf, Fork):
+        return dict(leaf.knobs)
+    return dict(getattr(leaf, "knobs", None) or {}) if not isinstance(leaf, Graph) else {}
+
+
 # ---------------------------------------------------------------------------
 # Hierarchical Fork-tree builder (``Level`` + ``build_fork_tree``).
 # ---------------------------------------------------------------------------

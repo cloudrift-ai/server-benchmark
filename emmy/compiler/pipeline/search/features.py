@@ -325,39 +325,55 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
     return feats
 
 
-def _geometry_key(node_knobs: dict) -> frozenset | None:
-    """The memo key for one node slice's geometry block: the slice restricted to what
-    :func:`_schedule_node_features` actually reads — the per-node schedule codecs (bare or
-    ``@<axis>``-suffixed), the ``WORK`` inventory, and the ``S_*`` / ``H_*`` context. A pool's
-    rows differ mostly in knobs OUTSIDE this projection (a 486k-row enumeration spells a few
-    hundred distinct geometry keys), which is what makes the memo collapse a scoring pass.
-    ``None`` (compute uncached) on an unhashable value."""
+def _geometry_keys(knobs: dict) -> tuple[dict[str, frozenset], frozenset] | None:
+    """ONE pass over a row's knobs: the per-axis geometry memo keys (``""`` collects the bare
+    families) beside the shared context key. Each axis key determines that axis's
+    :func:`_node_slice` exactly — it carries every item the slice is a function of: the bare
+    ``S_*`` / ``H_*`` context, ``WORK``, the axis's schedule codecs and its addressed structural
+    overrides, all as spelled — so equal keys mean equal slices and sharing the memoized block is
+    safe (the key is finer than the slice where it keeps ``WORK`` or an addressed spelling the
+    slice would drop or re-key: over-splitting only costs a miss). A pool's rows differ mostly in
+    knobs outside these keys (a 486k-row enumeration spells a few hundred distinct geometry
+    slices), which is what makes the memo collapse a scoring pass. ``None`` (compute uncached) on
+    an unhashable value."""
     try:
-        return frozenset(
-            (k, v)
-            for k, v in node_knobs.items()
-            if k.startswith((STRUCT_PREFIX, CTX_PREFIX)) or family_of(k) in _AXIS_FAMILIES or family_of(k) == "WORK"
-        )
+        context: list = []
+        per_axis: dict[str, list] = {}
+        for k, v in knobs.items():
+            if "@" in k:
+                fam, ax = k.split("@", 1)
+                if fam in _AXIS_FAMILIES or fam in _NODE_STRUCT_BASES:
+                    per_axis.setdefault(ax, []).append((k, v))
+            elif k.startswith((STRUCT_PREFIX, CTX_PREFIX)) or k == "WORK":
+                context.append((k, v))
+            elif k in _AXIS_FAMILIES:
+                per_axis.setdefault("", []).append((k, v))
+        base = frozenset(context)
+        return {ax: base | frozenset(items) for ax, items in per_axis.items()}, base
     except TypeError:
         return None
 
 
-@lru_cache(maxsize=65536)
-def _geometry_block(key: frozenset) -> dict[str, float]:
-    """:func:`_schedule_node_features` memoized on :func:`_geometry_key` — the block is a pure
-    function of that projection. The returned dict is SHARED across hits: callers sum-pool it and
-    must never mutate it."""
-    return _schedule_node_features(dict(key))
+#: axis key → its memoized geometry feature block. The dicts are SHARED across hits: callers
+#: sum-pool them and must never mutate one. Bounded by wholesale clear — the key space is small
+#: (distinct slices per pool), so the bound is a leak guard, not an eviction policy.
+_GEOMETRY_MEMO: dict[frozenset, dict[str, float]] = {}
 
 
-def _node_geometry(node_knobs: dict) -> dict[str, float]:
-    """The memoized front door onto :func:`_schedule_node_features`. The parses under the block
-    are already memoized per spelling (:func:`_resolved_tile`); this memoizes the whole derived
-    feature dict, which is what dominates per-row featurization on a large candidate pool."""
-    key = _geometry_key(node_knobs)
+def _node_geometry(knobs: dict, axis: str | None, key: frozenset | None) -> dict[str, float]:
+    """The memoized front door onto :func:`_schedule_node_features`. A miss computes from the
+    REAL slice (:func:`_node_slice` stays the one implementation); the memo only decides whether
+    to recompute. The parses under the block are already memoized per spelling
+    (:func:`_resolved_tile`); this memoizes the whole derived feature dict, which is what
+    dominates per-row featurization on a large candidate pool."""
     if key is None:
-        return _schedule_node_features(node_knobs)
-    return _geometry_block(key)
+        return _schedule_node_features(_node_slice(knobs, axis))
+    block = _GEOMETRY_MEMO.get(key)
+    if block is None:
+        if len(_GEOMETRY_MEMO) >= 65536:
+            _GEOMETRY_MEMO.clear()
+        block = _GEOMETRY_MEMO[key] = _schedule_node_features(_node_slice(knobs, axis))
+    return block
 
 
 def knob_features(knobs: dict) -> dict[str, float]:
@@ -409,8 +425,10 @@ def knob_features(knobs: dict) -> dict[str, float]:
             feats[f"{name}_frac"] = pop / len(s) if s else 0.0
         # STR knobs with no custom featurizer: no generic numeric encoding.
     # Per-node schedule geometry: featurize each schedule-bearing node's slice and sum-pool the blocks.
+    keys = _geometry_keys(knobs)
     for axis in _node_axes(knobs):
-        for name, val in _node_geometry(_node_slice(knobs, axis)).items():
+        key = None if keys is None else keys[0].get("" if axis is None else axis, keys[1])
+        for name, val in _node_geometry(knobs, axis, key).items():
             feats[name] = feats.get(name, 0.0) + val
     feats.setdefault("MMA_tier", 0.0)  # scalar tier / no schedule node = no warp atom
     return feats

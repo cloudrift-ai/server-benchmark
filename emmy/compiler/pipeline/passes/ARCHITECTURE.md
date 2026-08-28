@@ -79,8 +79,16 @@ STRUCTURAL forks whose chosen side replaces the kernel with fresh unmapped piece
 placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than through the
 codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone, a seam
 whose workspace dtypes stay undetermined).
-A scoped `PLACE@path=cut` pin is one authoritative seam decision: both pieces set `placement_decided` and proceed to
-scheduling rather than applying that path again to a different tree. Unpinned cuts and bare
+A contraction-operand seam stands for a VALUE, not only an object: closed cones that are alpha-equivalent up to
+their captured axis names (attention's normalized K cone, once per score contraction) fold into one seam, each
+duplicate carried as a sibling with its capture correspondence, and the cut replaces every one with workspace loads
+spelled through its own axes. Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
+one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
+workspace when its value nests inside (attention's statistics cone contains the score dots whose operand cones are
+cut beside it) — and all pieces set `placement_decided` and proceed to scheduling. A scoped pin whose site path does
+not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
+so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
+realizes is an addressing error. Unpinned cuts and bare
 `PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
 `040_schedule` maps the free axes and enumerates the schedule. Keys
 use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.

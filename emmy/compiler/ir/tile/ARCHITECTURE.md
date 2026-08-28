@@ -74,6 +74,11 @@ inside the edge is not a capture and an already-closed edge never re-fires the r
 what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
 vector) becomes materializable once per key instead of recomputed per query row.
 
+An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
+projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
+computation compare unequal, and the placement fork's value clustering (`lowering/tile/_cut.py`) relies on
+alpha-equivalent cones converging to one canonical shape.
+
 An output sweep used by any nested contraction operand is promoted into the Tile's free-axis placement. Promotion
 expands the enclosing-axis context, so construction normalizes the Fold tree once more under that final scope; one
 construction and a reconstruction therefore expose the same closed operand edges and placement seams.

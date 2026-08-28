@@ -357,10 +357,22 @@ def _hoist_closed_folds(root: Fold, axes: tuple[str, ...]) -> Fold:
         return root
     candidate_ids = {id(candidate) for candidate in candidates}
     remaining = Body(stmt for stmt in root.body if id(stmt) not in candidate_ids)
-    operands = (*root.operands, *candidates)
-    if not root.operands and len(candidates) == 1 and not remaining and root.lift.results == candidates[0].defines():
-        return candidates[0]
-    return Fold.projection(operands=operands, body=remaining, results=root.lift.results)
+    hoisted = Fold.projection(operands=(*root.operands, *candidates), body=remaining, results=root.lift.results)
+    return _passthrough(hoisted) or hoisted
+
+
+def _passthrough(node: Fold) -> Fold | None:
+    """The single operand an identity projection merely re-exposes, or ``None``.
+
+    A pass-through is shape noise — a closing rewrite can leave one behind — and it is what makes
+    two occurrences of the same computation compare unequal, so normalization dissolves it
+    wherever a projection is formed or revisited."""
+    if node.axis is not None or node.lift.body or len(node.operands) != 1:
+        return None
+    (operand,) = node.operands
+    if isinstance(operand, Fold) and tuple(node.lift.results) == _operand_result_names(operand):
+        return operand
+    return None
 
 
 def _edge_free_names(edge) -> frozenset[str]:
@@ -397,7 +409,8 @@ def _close_projection(root: Fold, axes: tuple[str, ...]) -> Fold:
             return None
         moved_members.update(id(stmt) for stmt in cone.members)
         moved_edges.update(id(edge) for edge in edges)
-        return _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names), axes)
+        hoisted = _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names), axes)
+        return _passthrough(hoisted) or hoisted
 
     def close(node: Fold) -> Fold:
         operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in node.operands)
@@ -701,6 +714,8 @@ def _hoist_decode_operands(root: Fold) -> Fold:
 def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str]) -> Fold:
     operands = tuple(_normalize_fold(edge, axes, implicit_axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
     node = replace(fold, operands=operands) if operands != fold.operands else fold
+    if node.axis is None and (collapsed := _passthrough(node)) is not None:
+        return collapsed
     body_axes = (*axes, node.axis.name) if node.axis is not None else axes
     body = _normalize_body(node.lift.body, body_axes, implicit_axes)
     if body != node.lift.body:

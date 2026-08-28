@@ -22,6 +22,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines, deep_reads, is_contraction
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile.normalize import _operand_lambda, lambda_equivalent_clusters
 from emmy.compiler.ir.tile.ops import edge_dtypes
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
@@ -43,6 +44,13 @@ class CutSite:
     axes: tuple
     dtypes: tuple
     frontier: Frontier | None = None
+    #: Duplicate cones this seam ALSO stands for — alpha-equivalent up to their captured axis
+    #: names (contraction-operand seams only): each sibling is
+    #: ``(node, ((rep axis name, sibling axis name), …))`` — the positional capture correspondence
+    #: the clustering proved. One placement decision materializes the value once; the realization
+    #: replaces every sibling with workspace loads spelled through its own axes. Object sharing is
+    #: the degenerate case (identity, with the identity correspondence).
+    siblings: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -223,27 +231,76 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         out.append(
             CutSite(node=node, spelling=spell(tile.op, "PLACE", node, all_sites=all_sites), axes=axes, dtypes=dtypes, frontier=frontier)
         )
-    return tuple(out)
+    return _cluster_value_seams(out, {id(seam.node): seam.frontier is None and contraction_operands.get(id(seam.node)) for seam in out})
 
 
-def _replace_member(member, target: Fold, loads: tuple[Load, ...]):
-    if member is target:
-        return loads
+def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) -> tuple[CutSite, ...]:
+    """Fold duplicate operand cones — alpha-equivalent up to captured axis names — into ONE seam per value.
+
+    Object sharing groups occurrences of one stored node; a traced graph can also hold several
+    ALPHA-EQUIVALENT copies of the same computation captured under different axis names —
+    attention's normalized K cone appears once per score contraction. Those copies are one VALUE:
+    the cluster's first seam becomes the decision for all of them, carrying each duplicate as a
+    sibling with its positional capture correspondence (:class:`CutSite`). Membership reuses the
+    scoped lambda alpha-equivalence the semiring canonicalization already trusts
+    (:func:`lambda_equivalent_clusters`); a member joins only when its paired axes agree on
+    extent and window, its workspace dtypes match, and every workspace axis is a mapped capture —
+    otherwise it stays its own seam."""
+    eligible = [index for index, seam in enumerate(seams) if operand_of.get(id(seam.node))]
+    if len(eligible) < 2:
+        return tuple(seams)
+    scoped = {index: _operand_lambda(seams[index].node, tuple(axis.name for axis in seams[index].axes)) for index in eligible}
+    drop: set[int] = set()
+    merged: dict[int, CutSite] = {}
+    for cluster in lambda_equivalent_clusters(scoped[index] for index in eligible):
+        rep_index, *rest = (eligible[position] for position in cluster)
+        if not rest:
+            continue
+        rep = seams[rep_index]
+        rep_params = scoped[rep_index][1]
+        rep_axes = {axis.name: axis for axis in rep.axes}
+        if {axis.name for axis in _workspace_axes(rep, rep.node)} - set(rep_params):
+            continue  # a workspace axis with no capture to map has no sibling spelling
+        siblings = []
+        for member_index in rest:
+            member = seams[member_index]
+            member_params = scoped[member_index][1]
+            member_axes = {axis.name: axis for axis in member.axes}
+            aligned = member.dtypes == rep.dtypes and all(
+                (a := rep_axes[rn]).extent == (b := member_axes[mn]).extent and a.window == b.window
+                for rn, mn in zip(rep_params, member_params, strict=True)
+            )
+            if not aligned:
+                continue
+            siblings.append((member.node, tuple(zip(rep_params, member_params, strict=True))))
+            drop.add(member_index)
+        if siblings:
+            merged[rep_index] = replace(rep, siblings=tuple(siblings))
+    return tuple(merged.get(index, seam) for index, seam in enumerate(seams) if index not in drop)
+
+
+def _replace_member(member, targets: dict[int, tuple]):
+    if id(member) in targets:
+        return targets[id(member)]
     if isinstance(member, Fold):
-        return (_replace_fold(member, target, loads),)
+        return (_replace_fold(member, targets),)
     nested = member.nested()
     if not nested:
         return (member,)
     bodies = []
     for body in nested:
-        replaced = tuple(piece for child in body for piece in _replace_member(child, target, loads))
+        replaced = tuple(piece for child in body for piece in _replace_member(child, targets))
         bodies.append(Body(replaced))
     return (member.with_bodies(tuple(bodies)),)
 
 
-def _replace_fold(node: Fold, target: Fold, loads: tuple[Load, ...]) -> Fold:
-    operands = tuple(piece for edge in node.operands for piece in _replace_member(edge, target, loads))
-    body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, target, loads))
+def _replace_fold(node: Fold, targets: dict[int, tuple]) -> Fold:
+    """Replace every stored occurrence of the target Folds in ONE walk — ``targets`` maps
+    ``id(node)`` to its replacement stmts. One walk, because the rebuild copies every node on the
+    way down: a second walk's target objects no longer exist in the first walk's output, so
+    sequential replacement silently loses every decision after the first."""
+    operands = tuple(piece for edge in node.operands for piece in _replace_member(edge, targets))
+    body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets))
     return replace(node, operands=operands, lift=replace(node.lift, body=Body(body)))
 
 
@@ -278,50 +335,94 @@ def output_map(root: Node) -> dict[str, str]:
 def realize(
     match: Match,
     root: Node,
-    seam: CutSite,
+    seams,
     renamed_outputs: dict[str, str],
     *,
     placement_decided: bool = False,
 ) -> Graph:
-    """Build the two-kernel fragment for ``seam``. A frontier seam cuts at the cone's storage
-    waypoint: the producer computes the encode prefix, the workspace holds the raw bits, and the
-    consumer keeps the decode + factor residue as its operand cone (which normalization then binds
-    as a raw storage-dtype load with the factors hoisted onto the accumulator epilogue).
+    """Build the cut fragment for ``seams`` — one producer kernel per seam plus the ONE consumer
+    reading every workspace back. A single seam is the two-kernel cut; several seams are one
+    COMPOSED placement decision (a pinned compile consumes every scoped PLACE pin that resolves
+    on this kernel at once, so the pieces stay decided and the knob row records every spelling).
+    A frontier seam cuts at the cone's storage waypoint: the producer computes the encode prefix,
+    the workspace holds the raw bits, and the consumer keeps the decode + factor residue as its
+    operand cone (which normalization then binds as a raw storage-dtype load with the factors
+    hoisted onto the accumulator epilogue).
 
-    ``placement_decided`` consumes one authoritative scoped PLACE pin on both pieces. Bare and
+    ``placement_decided`` consumes the authoritative scoped PLACE pins on every piece. Bare and
     unpinned cuts leave it false so the fresh pieces can expose and decide smaller seams."""
     tile: TileOp = root.op
-    child = seam.node
-    front = seam.frontier
-    if front is not None:
-        names = (front.name,)
-        produced = Fold.projection(body=Body(front.producer), results=names)
-    else:
-        names = _operand_result_names(child)
-        produced = child
-    axes = _workspace_axes(seam, produced)
-    shape = tuple(axis.extent for axis in axes)
-    index = tuple(Var(axis.name) for axis in axes)
-    token = digest(tile.structural_key(), seam.spelling)[:10]
-    buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
+    pieces = []
+    for seam in seams:
+        child = seam.node
+        front = seam.frontier
+        if front is not None:
+            names = (front.name,)
+            produced = Fold.projection(body=Body(front.producer), results=names)
+        else:
+            names = _operand_result_names(child)
+            produced = child
+        axes = _workspace_axes(seam, produced)
+        index = tuple(Var(axis.name) for axis in axes)
+        token = digest(tile.structural_key(), seam.spelling)[:10]
+        buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
 
-    loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))
-    if front is not None:
-        raw = replace(loads[0], dtype=front.dtype)
-        loads = (Fold.projection(body=Body((raw, *front.residue)), results=child.lift.results),)
-    parent_fold = _replace_fold(tile.op, child, loads)
+        loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))
+        if front is not None:
+            raw = replace(loads[0], dtype=front.dtype)
+            loads = (Fold.projection(body=Body((raw, *front.residue)), results=child.lift.results),)
+        replacements = {id(child): loads}
+        for sibling, pairs in seam.siblings:
+            # A clustered duplicate reads the SAME workspace, spelled through its own captured
+            # axes via the correspondence the clustering proved.
+            mapping = dict(pairs)
+            sibling_index = tuple(Var(mapping[axis.name]) for axis in axes)
+            replacements[id(sibling)] = tuple(
+                Load(name=name, input=buffer, index=sibling_index)
+                for name, buffer in zip(_operand_result_names(sibling), buffers, strict=True)
+            )
+        pieces.append((seam, produced, axes, index, token, names, buffers, replacements))
 
-    producer = TileOp(
-        op=produced,
-        # The seam token keeps recursive pieces' kernel names distinct — the one-name-one-source
-        # launch rule stated beside ``nvcc.load_cubin_function``: two same-named producers from
-        # different cut levels would launch one kernel twice.
-        name=f"{tile.name}__place_{token}",
-        place=Placement(free=axes),
-        output_specs=tuple(OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)),
-        placement_decided=placement_decided,
-    )
-    producer.knobs = consume_kernel_row(producer.knobs)
+    # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
+    # composed decision may cut a cone nested inside another seam's value (attention's statistics
+    # cone contains the score dots whose operand cones are cut beside it), and that producer must
+    # read the workspace like any other consumer. Containment is strict, so order is free.
+    everything = {target: loads for *_, replacements in pieces for target, loads in replacements.items()}
+    parent_fold = _replace_fold(tile.op, everything)
+    produced_pieces = []
+    for seam, produced, axes, index, token, names, buffers, replacements in pieces:
+        others = {target: loads for target, loads in everything.items() if target not in replacements}
+        produced_pieces.append((seam, _replace_fold(produced, others) if others else produced, axes, index, token, names, buffers))
+
+    fragment = _input_fragment(match, root)
+    all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
+    # A producer reading another seam's workspace must follow the node that writes it, so pieces
+    # are added in dependency order (containment is strict, so the order exists).
+    produced_pieces.sort(key=lambda piece: len({load.input for load in Body.coerce(piece[1].lower()).loads} & set(all_buffers)))
+    for seam, produced, axes, index, token, names, buffers in produced_pieces:
+        producer = TileOp(
+            op=produced,
+            # The seam token keeps recursive pieces' kernel names distinct — the one-name-one-source
+            # launch rule stated beside ``nvcc.load_cubin_function``: two same-named producers from
+            # different cut levels would launch one kernel twice.
+            name=f"{tile.name}__place_{token}",
+            place=Placement(free=axes),
+            output_specs=tuple(
+                OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)
+            ),
+            placement_decided=placement_decided,
+        )
+        producer.knobs = consume_kernel_row(producer.knobs)
+        shape = tuple(axis.extent for axis in axes)
+        workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
+        reads = {load.input for load in Body.coerce(produced.lower()).loads}
+        fragment.add_node(
+            op=producer,
+            inputs=_piece_inputs(root, produced, tuple(buffer for buffer in all_buffers if buffer in reads)),
+            outputs=workspace_tensors,
+            node_id=buffers[0],
+        )
+
     parent_stores = tuple(
         replace(store, write=replace(store.write, output=renamed_outputs.get(store.write.output, store.write.output)))
         for store in tile.output_specs
@@ -334,22 +435,14 @@ def realize(
         placement_decided=placement_decided,
     )
     consumer.knobs = consume_kernel_row(consumer.knobs)
-
-    fragment = _input_fragment(match, root)
-    workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
-    fragment.add_node(
-        op=producer,
-        inputs=_piece_inputs(root, produced),
-        outputs=workspace_tensors,
-        node_id=buffers[0],
-    )
     output_tensors = (
         replace(root.outputs[0], name=root.outputs[0].name),
         *(replace(tensor, name=renamed_outputs[name]) for name, tensor in zip(root.buffer_names()[1:], root.outputs[1:], strict=True)),
     )
+    all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
     fragment.add_node(
         op=consumer,
-        inputs=_piece_inputs(root, parent_fold, buffers),
+        inputs=_piece_inputs(root, parent_fold, all_buffers),
         outputs=output_tensors,
         node_id=renamed_outputs[root.id],
     )

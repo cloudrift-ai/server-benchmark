@@ -60,6 +60,13 @@ _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
 _AXIS_ORDINAL_RE = re.compile(r"^(.*?)(\d+)$")
 
 
+class MissingSiteError(ValueError):
+    """A suffixed knob key that names NO site on this tree. A ``ValueError`` so every existing
+    handler still reads it as a broken stored key failing loudly; its own type so a caller
+    holding GRAPH-scoped pins (the placement rule) can tell "this key addresses another kernel"
+    apart from an ambiguity, which stays a plain ``ValueError``."""
+
+
 class UnknownSiteError(Exception):
     """A node that is NOT a site of the tree was used to address a schedule read/write — an
     identity miss: the caller holds a copy (``dataclasses.replace``, a rewrite) or a node from a
@@ -404,7 +411,7 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
                 if matches:
                     break
     if not matches:
-        raise ValueError(f"knob key {key!r} names no site on this tree (a structural change broke a stored key?)")
+        raise MissingSiteError(f"knob key {key!r} names no site on this tree (a structural change broke a stored key?)")
     if len({id(s.node) for s in matches}) > 1:
         # An EXACT full-path match outranks subsequence admissions: a shallow site's full path is
         # an anchored subsequence of every deeper same-axis path, so without this preference the
@@ -436,6 +443,7 @@ def canonical(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> s
 __all__ = [
     "PATH_FAMILIES",
     "SLICE_FAMILIES",
+    "MissingSiteError",
     "Site",
     "UnknownSiteError",
     "canonical",

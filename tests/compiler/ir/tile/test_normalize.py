@@ -14,7 +14,7 @@ from emmy.compiler.ir.pure import Channel, Fold, Lambda, M, is_contraction
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lambda_equivalent_clusters
-from emmy.compiler.ir.tile.path import family_sites, sites
+from emmy.compiler.ir.tile.path import family_sites, resolve, sites
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
 from emmy.compiler.pipeline.search.golden import _lifted_target, load_golden_file, load_golden_records
@@ -266,7 +266,11 @@ def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -
     assert tuple(axis.name for axis in tile.place.free) == ("a0", "a1", "a6")
     assert all(spec.sweep is None for spec in tile.output_specs)
     assert reconstructed.op is tile.op
-    assert "PLACE@map.fold.a.fold.b1" in {seam.spelling for seam in cuttable_seams(tile)}
+    # The previously offered edge is still addressable: its cone folded into the value cluster,
+    # so the seam that covers it names it among the representative's siblings.
+    site = resolve(tile.op, "PLACE@map.fold.a.fold.b1")
+    covered = {id(node) for seam in cuttable_seams(tile) for node in (seam.node, *(sibling for sibling, _ in seam.siblings))}
+    assert site is not None and id(site.node) in covered
 
 
 def _key_swept_score(shared_reader: bool = False) -> TileOp:
@@ -349,8 +353,14 @@ def test_reduced_qk_attention_offers_the_statistic_arm_b_seams_idempotently() ->
     (record,) = load_golden_records(load_golden_file(case))
 
     tile = _lifted_target(record)
-    spellings = {seam.spelling for seam in cuttable_seams(tile)}
-    assert {"PLACE@map.fold.a.map.fold.fold.b1", "PLACE@map.fold.a.map.fold.fold.b2"} <= spellings
+    seams = {seam.spelling: seam for seam in cuttable_seams(tile)}
+    seam = seams["PLACE@map.fold.a.map.fold.fold.b1"]
+    # The score contractions' K cones are one VALUE: the sigma-equivalent duplicates — the sum
+    # arm, the softmax-V arm, and the second-path copies of both statistic arms — ride the
+    # representative seam as siblings, each with its capture correspondence.
+    assert len(seam.siblings) == 4
+    assert all(dict(pairs).keys() == dict(seam.siblings[0][1]).keys() for _, pairs in seam.siblings)
+    assert "PLACE@map.fold.a.map.fold.fold.b2" not in seams
     assert TileOp(op=tile.op, name=tile.name, place=tile.place, output_specs=tile.output_specs).op is tile.op
 
 

@@ -418,7 +418,8 @@ that canonical input:
   that seam rather than joining the offer: the raw bits dominate the fed-store workspace on both precision (exact vs
   re-rounded) and footprint (storage width vs store width), so there is no trade for the evidence to decide. Every
   seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
-  disagree. The new producer and consumer are fresh
+  disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
+  them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
   unmapped TileOps, so further legal cuts and schedules use the same ordinary passes; a pinned cut therefore recurses
   exactly until a piece schedules (a scheduled piece is placed and never re-cut). A piece minted by a structural
   apply joins the sweep after `030_cut`'s batch, so it reaches `040_schedule` first — when a pinned schedule REFUSES

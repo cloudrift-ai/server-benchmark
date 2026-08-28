@@ -248,9 +248,13 @@ def _replace_fold(node: Fold, target: Fold, loads: tuple[Load, ...]) -> Fold:
 
 def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     """The seam axes the PRODUCED piece actually sweeps — its workspace dimensions. ``produced``
-    is the seam node, or the frontier prefix when the seam materializes at a storage waypoint."""
+    is the seam node, or the frontier prefix when the seam materializes at a storage waypoint.
+
+    Static unit axes consume no additional storage, but retain the producer's schedule geometry.
+    Dropping one lets a later split axis take its place as a contraction fragment axis even though
+    operand indices still read it as the outer partition coordinate."""
     captures = _external_reads(produced)
-    return tuple(axis for axis in seam.axes if axis.name in captures)
+    return tuple(axis for axis in seam.axes if axis.name in captures or (axis.extent.is_static and axis.extent.as_static() == 1))
 
 
 def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = ()) -> list[str]:

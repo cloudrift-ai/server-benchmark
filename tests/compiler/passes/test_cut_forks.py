@@ -7,6 +7,7 @@ import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
@@ -17,6 +18,7 @@ from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import Fork
+from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _workspace_axes
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import GoldenRecord, decode_record
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -134,6 +136,23 @@ def _lower_cut(graph: Graph, spelling: str) -> Graph:
         lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=_CTX)
     lowered.validate()
     return lowered
+
+
+def test_cut_workspace_retains_static_unit_axes() -> None:
+    """A unit seam axis remains workspace geometry even when the produced value is invariant in it."""
+    unit, unused, column = Axis("batch", 1), Axis("unused", 8), Axis("n", 64)
+    produced = Fold.projection(
+        body=Body((Load(name="value", input="x", index=(Var("n"),)),)),
+        results=("value",),
+    )
+    seam = CutSite(
+        node=produced,
+        spelling="PLACE",
+        axes=(unit, unused, column),
+        dtypes=(F16,),
+    )
+
+    assert _workspace_axes(seam, produced) == (unit, column)
 
 
 def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:

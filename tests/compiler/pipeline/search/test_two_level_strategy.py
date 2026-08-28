@@ -26,6 +26,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.slice import single_node_graph
@@ -72,6 +73,20 @@ class _CountingBackend:
     async def benchmark_async(self, graph, num_iters="auto", warmup=5) -> BenchmarkResult:
         del warmup
         return self.benchmark(graph, num_iters=num_iters)
+
+
+class _RouteBackend(_CountingBackend):
+    """Make a two-kernel placement route faster than either independently measured piece."""
+
+    def benchmark(self, graph, num_iters="auto") -> BenchmarkResult:  # noqa: ARG002
+        self.calls += 1
+        cuda = [n for n in graph.nodes.values() if isinstance(n.op, CudaOp)]
+        us = 1.0 if len(cuda) > 1 else 100.0
+        per = [
+            LaunchTime(idx=i, kernel_name=getattr(node.op, "kernel_name", "k"), time_ms=us / 1000.0, samples=(us / 1000.0,))
+            for i, node in enumerate(cuda)
+        ]
+        return BenchmarkResult(time_ms=sum(item.time_ms for item in per), num_launches=len(per), per_launch=per)
 
 
 def _matmul(g: Graph, prefix: str, M: int, K: int, N: int) -> str:
@@ -169,6 +184,42 @@ def test_run_drives_outer_scores_separably_and_assembles() -> None:
     assert result.best_reward is not None and result.best_reward.ok
     assert result.assembled is not None
     assert any(isinstance(n.op, CudaOp) for n in result.assembled.nodes.values())
+
+
+def test_placement_route_replays_from_a_cold_db(monkeypatch, tmp_path) -> None:
+    """The measured structural parent, not either independently tuned child, replays the cut."""
+    from emmy.compiler.pipeline.search.golden import records_override
+
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    graph = _graph(("x", 64, 128, 48))
+    graph.add_node(InputOp(), [], Tensor("residual", (64, 48)), node_id="residual")
+    graph.add_node(ElementwiseOp("add"), ["xc", "residual"], Tensor("out", (64, 48)), node_id="out")
+    graph.inputs.append("residual")
+    graph.outputs = ["out"]
+    ctx = Context.from_target((8, 0))
+    path = tmp_path / "route.db"
+    db = SearchDB(path)
+    result = run_two_level(
+        graph,
+        ctx=ctx,
+        db=db,
+        backend=_RouteBackend(),
+        patience=_PATIENCE,
+        prior=None,
+        manage_prior=False,
+    )
+    assert result.best_reward is not None
+    assert result.best_reward.searched_winner() == ({"PLACE": "cut"}, 2.0)
+    route_rows = [row for row in db.iter_perf(ctx.structural_key(), backend="cuda") if row.knobs.get("PLACE") == "cut"]
+    assert len(route_rows) == 1
+    assert route_rows[0].stats.median == pytest.approx(2.0)
+    db.close()
+
+    reloaded = SearchDB.open_readonly(path)
+    with records_override([]):
+        replayed = Pipeline.build(CUDA_PASSES).run(graph.copy(), ctx=ctx, db=reloaded)
+    reloaded.close()
+    assert sum(isinstance(node.op, CudaOp) for node in replayed.nodes.values()) == 2
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:

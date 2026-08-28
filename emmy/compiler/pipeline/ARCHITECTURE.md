@@ -227,10 +227,12 @@ ABC, told apart by what the loop is doing when they act:
 The composition chain for a tune: a `SearchStrategy` constructs runs with a `Search` policy inside; the loop emits
 events that `PipelineStrategy` instances act on. Each layer only knows the one below it. Every cross-cutting
 concern is a `PipelineStrategy` implementing the event methods it cares about; extension is a new strategy over
-the existing events (or a new event field), never a new engine parameter. The events, each a payload object: `RunStartEvent` (a loop starts driving a graph),
-`SpliceEvent` (before a `Graph` fragment splices in — op identities stable; strategies may mutate fragment OPS,
-never the graph or cursor), `SplicedEvent` (after the splice, carrying its `SpliceReceipt` — `Graph.splice` is pure
-surgery and hands back what it did), and `PassEndEvent` (a named pass completed a quiescent scan).
+the existing events (or a new event field), never a new engine parameter. The events, each a payload object:
+`RunStartEvent` (a loop starts driving a graph), `SpliceEvent` (before a `Graph` fragment splices in — op identities
+stable; it carries the selected fork's knob delta because a fragment does not inherit the consumed op's knobs;
+strategies may mutate fragment OPS, never the graph or cursor), `SplicedEvent` (after the splice, carrying its
+`SpliceReceipt` — `Graph.splice` is pure surgery and hands back what it did), and `PassEndEvent` (a named pass
+completed a quiescent scan).
 
 Two binding scopes share the protocol:
 
@@ -864,6 +866,12 @@ only (`tile → kernel → cuda`), and returns the Σ once ALL Loop kernels are 
   may mint further pieces, which the same inventory catches for the next wave (waves terminate: cut/split trees
   strictly shrink and the seen-set dedups). Enrolled kernels are evidence, never reward terms — the parent
   slice's Σ already priced them, so they stay out of `per_op` / `total_us` and out of `searched_winner()`.
+- **A structural winner persists its measured parent route.** A per-inner-run splice watcher joins the consumed
+  parent's complete scheduler feature row with `SpliceEvent`'s selected structural knob delta. When the directly
+  measured winner changes the kernel set and exactly one parent realizes its route, the whole-slice latency is
+  written under that route-specific parent `Op.cache_key`. The unpinned Loop row remains derived cost bookkeeping,
+  while the route row is deploy evidence: a newly opened DB can select `PLACE=cut` before independently choosing
+  schedules for the minted kernels.
 
 **Separability + the structural handoff.** Op-variant forks are separable: every multi-option fork is an in-place `Op`
 rebind that leaves the graph unchanged, so whole-graph time is `Σ_k t_k`. Results key structurally (`Op.cache_key` =

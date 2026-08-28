@@ -29,6 +29,7 @@ already-measured variants without a bench).
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -178,6 +179,38 @@ class _Work:
     src_graph: Graph  # what the slice is cut from: the fused graph, or the minting fragment
     count: int  # graph multiplicity (0 for enrolled — never a reward term)
     enrolled: bool
+
+
+class _StructuralParentCapture(PipelineStrategy):
+    """Capture route-specific parent identities consumed by kernel-set-changing splices."""
+
+    def __init__(self) -> None:
+        self.structural_parents: list[tuple[dict[str, str], str, dict]] = []
+
+    def on_splice(self, event: SpliceEvent) -> None:
+        parent_knobs = {**(getattr(event.root_op, "knobs", None) or {}), **getattr(event, "knobs", {})}
+        route = TuningSearch._structural_row(parent_knobs)
+        if route is None:
+            return
+        parent = copy.copy(event.root_op)
+        parent.knobs = {**parent_knobs, **route}
+        if not any(key.startswith("S_") for key in parent.knobs):
+            return
+        key = parent.cache_key()
+        if key is None:
+            return
+        receipt = (dict(route), key, dict(parent.knobs))
+        if receipt not in self.structural_parents:
+            self.structural_parents.append(receipt)
+
+    def structural_parent(self, route: dict) -> tuple[str, dict] | None:
+        """The one consumed parent that realized ``route``, or ``None`` if ambiguous."""
+        wanted = TuningSearch._structural_row(route)
+        matches = {(key, tuple(sorted(knobs.items()))) for got, key, knobs in self.structural_parents if got == wanted}
+        if len(matches) != 1:
+            return None
+        key, knob_items = matches.pop()
+        return key, dict(knob_items)
 
 
 class _KernelInventory(PipelineStrategy):
@@ -402,7 +435,8 @@ class TwoLevelStrategy(SearchStrategy):
                     prior_model=prior,
                     base_knobs=base_knobs,
                 )
-                inner_pipeline = Pipeline.build(LOWERING_PASSES).with_strategies(inventory)
+                structural_parents = _StructuralParentCapture()
+                inner_pipeline = Pipeline.build(LOWERING_PASSES).with_strategies(inventory, structural_parents)
                 async for cand in inner_pipeline.tune_async(sub, search=inner, ctx=ctx, backend=backend, db=db):
                     if progress is not None and not work.enrolled:
                         st = inner.last_stats
@@ -421,6 +455,18 @@ class TwoLevelStrategy(SearchStrategy):
                 # per-op cost.
                 best_total = 1.0 / inner.tree.best_reward if inner.tree.best_reward > 0 else None
                 searched = inner.best_realized()
+                structural_parent = structural_parents.structural_parent(searched[0]) if searched is not None and searched[3] else None
+                if structural_parent is not None and (searched[2] or 0) > 1:
+                    structural_key, structural_knobs = structural_parent
+                    db.record_perf(
+                        ctx_key,
+                        structural_key,
+                        backend=backend_name,
+                        status="ok",
+                        stats=_point_stats(searched[1]),
+                        knobs={**ctx.features(), **structural_knobs},
+                        captured=True,
+                    )
                 if best_total is not None:
                     # captured=True: the sweep benches under graph capture by default, so this
                     # Σ-best bookkeeping row derives from captured measurements.

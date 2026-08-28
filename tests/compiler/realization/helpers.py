@@ -284,9 +284,14 @@ def _unstamped_families(knobs: dict, rows: list[dict]) -> set[str]:
 def built(case: Case):
     """Stage 3 — nvcc accepts the pinned kernel. Returns the compiled graph, raising on refusal."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+    from emmy.compiler.backend.cuda.program import CompiledProgram  # noqa: PLC0415
+    from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
 
     with pinned_knobs(case.pinned):
-        return CudaBackend().compile(case.record.target_program.copy())
+        lowered = CudaBackend().compile(case.record.target_program.copy())
+        with gpu_lock():
+            CompiledProgram.build(lowered, seeded_inputs(case.record.target_program))
+    return lowered
 
 
 def correct(case: Case, compiled) -> None:

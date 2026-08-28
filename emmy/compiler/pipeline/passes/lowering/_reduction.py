@@ -87,12 +87,29 @@ class Reduction:
 
     @classmethod
     def of_cone_stat(cls, cone) -> Reduction | None:
-        """The :class:`Reduction` of a computed-A cone's per-row statistic — the fold at the head
-        of the cone's prologue node (``Fold.projection(body=cell, operands=(prologue,))``; the prologue itself
-        a zero-axis ``Fold`` over the stat ``Fold``, or the bare fold). ``None`` when the cone carries no
-        prologue (a gmem-``Load`` A) — the caller's serial fallback."""
+        """The :class:`Reduction` of a computed-A cone's per-row statistic — the fold that lowers
+        to the first top-level reduce ``Loop`` in the cone prologue. The prologue may carry that
+        fold as an operand (norm→linear) or directly in a zero-axis projection body (attention).
+        ``None`` when the cone carries no such prologue — the caller's serial fallback."""
         from emmy.compiler.ir.pure.fold import Fold  # noqa: PLC0415 — avoid an import cycle
+        from emmy.compiler.ir.stmt import Loop  # noqa: PLC0415 — avoid an import cycle
 
         pro = cone.operands[0] if (isinstance(cone, Fold) and cone.axis is None) and cone.operands else None
-        head = pro.operands[0] if (isinstance(pro, Fold) and pro.axis is None) and pro.operands else pro
-        return cls(head) if isinstance(head, Fold) else None
+        if not isinstance(pro, Fold):
+            return None
+        first = next((stmt for stmt in pro.lower() if isinstance(stmt, Loop) and stmt.role.is_reduce), None)
+        if first is None:
+            return None
+
+        def folds(node):
+            if not isinstance(node, Fold):
+                return
+            if node.axis is not None:
+                yield node
+            for operand in node.operands:
+                yield from folds(operand)
+            for stmt in node.body:
+                yield from folds(stmt)
+
+        fold = next((candidate for candidate in folds(pro) if candidate.loop == first), None)
+        return cls(fold) if fold is not None else None

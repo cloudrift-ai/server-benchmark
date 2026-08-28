@@ -65,6 +65,10 @@ cone into a zero-axis Fold edge. Alpha-equivalent product arguments coalesce to 
 source cones overlap; other overlapping cones become one multi-result operand edge so shared computation remains
 single. A semiring without one shared product argument remains a general planar Fold.
 
+An output sweep used by any nested contraction operand is promoted into the Tile's free-axis placement. Promotion
+expands the enclosing-axis context, so construction normalizes the Fold tree once more under that final scope; one
+construction and a reconstruction therefore expose the same closed operand edges and placement seams.
+
 **Storage-decode factors hoist to the epilogue.** A product operand whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
 axis is not left as a computed cone. The decode is absorbed by the raw load's storage dtype, since every
@@ -95,9 +99,11 @@ the Fold tree; in either case the coordinate belongs in kernel placement rather 
 Multiple output specifications owned by one projection region reconstitute one loop.
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
-specification writes `[0, n]`. Post-init restores that proven unit free axis before contraction canonicalization. The
-rule is boundary-derived and general: it does not recognize a model or operation family, and it does not alter a term
-whose output specifications disagree about the missing coordinate.
+specification writes `[0, n]`. The `n` coordinate may already be free or may still be the one shared output sweep.
+Post-init restores that proven unit free axis before contraction canonicalization, even when a sibling reduction is
+the root-most Fold and the contraction is nested. The rule is boundary-derived and general: it does not recognize a
+model or operation family, and it does not alter a term whose output specifications disagree about the missing
+coordinate.
 
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that

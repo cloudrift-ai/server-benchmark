@@ -228,10 +228,19 @@ def _projection_results(body) -> set[str]:
 
 
 def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) -> Axis | None:
-    """Recover an elided matrix row when every boundary write proves ``[0, n]``."""
-    if len(free) != 1 or not specs or any(spec.sweep is not None for spec in specs):
+    """Recover an elided matrix row when every boundary write proves ``[0, n]``.
+
+    The column axis may already be free or may still be the one shared output sweep that
+    contraction canonicalization will promote.
+    """
+    if not specs:
         return None
-    n_name = free[0].name
+    if len(free) == 1 and all(spec.sweep is None for spec in specs):
+        n_name = free[0].name
+    elif not free and all(spec.sweep is not None for spec in specs) and len({spec.sweep.name for spec in specs}) == 1:
+        n_name = specs[0].sweep.name
+    else:
+        return None
     for spec in specs:
         index = spec.write.index
         if not (len(index) >= 2 and index[-1] == Var(n_name) and isinstance(index[-2], Literal) and index[-2].value == 0):
@@ -387,17 +396,16 @@ class TileOp(Op):
     split_consumed: bool = False
 
     def __post_init__(self) -> None:
-        from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415 — ops imports TileOp
-
         scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
         axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
         normalized = normalize_fold_tree(self.op, axes)
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
         if unit_row is not None:
             candidate_free = (unit_row, *self.place.free)
-            candidate_axes = tuple(axis.name for axis in candidate_free)
+            candidate_scope = (*candidate_free, *(store.sweep for store in self.output_specs if store.sweep is not None))
+            candidate_axes = tuple(dict.fromkeys(axis.name for axis in candidate_scope))
             candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,))
-            if is_contraction(head(candidate)):
+            if any(is_contraction(site.node) for site in sites(candidate)):
                 normalized = candidate
                 self.place = replace(self.place, free=candidate_free)
         if self.schedule and normalized != self.op:
@@ -428,6 +436,15 @@ class TileOp(Op):
         self.output_specs = tuple(
             replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store for store in self.output_specs
         )
+        # Promotion changes the enclosing-axis context that closes computed contraction operands.
+        # Normalize once under the final scope so reconstructing this TileOp cannot expose a
+        # different Fold tree or placement seam.
+        scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
+        final_axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
+        renormalized = normalize_fold_tree(self.op, final_axes)
+        if self.schedule and renormalized != self.op:
+            raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
+        self.op = renormalized
 
     def pretty_body(self) -> str:
         """The structural dump — delegated to :mod:`~emmy.compiler.ir.tile._dump`, which owns

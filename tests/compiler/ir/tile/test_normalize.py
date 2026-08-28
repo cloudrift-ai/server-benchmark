@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole
@@ -9,7 +11,10 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda, M
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lambda_equivalent_clusters
+from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline import Pipeline
+from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+from emmy.compiler.pipeline.search.golden import _lifted_target, load_golden_file, load_golden_records
 
 
 def _lift(body: Body) -> TileOp:
@@ -104,6 +109,76 @@ def test_nested_contraction_promotes_a_shared_store_sweep() -> None:
 
     assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
     assert tile.output_specs[0].sweep is None
+
+
+def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row() -> None:
+    """A nested linear site turns the swept column into grid placement before scheduling."""
+    n, k, r = Axis("n", 16), Axis("k", 32), Axis("r", 4)
+    stat_init, stat_combine = M(ElementwiseImpl("add"), names=("stat",))
+    stat = Fold(
+        axis=r,
+        lift=Lambda(
+            params=("r",),
+            body=Body((Load(name="sample", input="s", index=(Var("r"),)),)),
+            results=("sample",),
+        ),
+        init=stat_init,
+        combine=stat_combine,
+    )
+    linear_init, linear_combine = M(ElementwiseImpl("add"), names=("acc",))
+    linear = Fold(
+        axis=k,
+        lift=Lambda(
+            params=("k",),
+            body=Body(
+                (
+                    Load(name="left", input="x", index=(Literal(0, "int"), Var("k"))),
+                    Load(name="right", input="w", index=(Var("k"), Var("n"))),
+                    Assign(name="product", op="multiply", args=("left", "right")),
+                )
+            ),
+            results=("product",),
+        ),
+        init=linear_init,
+        combine=linear_combine,
+    )
+    root = Fold.projection(
+        operands=(stat, linear),
+        body=Body((Assign(name="result", op="add", args=("stat", "acc")),)),
+        results=("result",),
+    )
+    tile = TileOp(
+        op=root,
+        output_specs=(
+            OutputSpec(
+                write=Write(
+                    output="out",
+                    index=(Literal(0, "int"), Literal(0, "int"), Var("n")),
+                    value="result",
+                ),
+                sweep=n,
+            ),
+        ),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
+    assert tile.output_specs[0].sweep is None
+    assert any(site.node.role is AxisRole.CONTRACTION for site in sites(tile.op))
+    assert TileOp(op=tile.op, place=tile.place, output_specs=tile.output_specs).op is tile.op
+
+
+def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
+    """The reduced Qwen3 target needs its promoted value-width axis to close computed B."""
+    case = Path(__file__).parents[2] / "realization/cases/attention/rmsnorm-gqa-b-cut_xfail_offered.yaml"
+    (record,) = load_golden_records(load_golden_file(case))
+
+    tile = _lifted_target(record)
+    reconstructed = TileOp(op=tile.op, name=tile.name, place=tile.place, output_specs=tile.output_specs)
+
+    assert tuple(axis.name for axis in tile.place.free) == ("a0", "a1", "a6")
+    assert all(spec.sweep is None for spec in tile.output_specs)
+    assert reconstructed.op is tile.op
+    assert "PLACE@map.fold.a.fold.b1" in {seam.spelling for seam in cuttable_seams(tile)}
 
 
 def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:

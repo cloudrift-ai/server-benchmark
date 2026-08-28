@@ -316,6 +316,23 @@ def test_exact_full_path_outranks_deeper_subsequence_matches() -> None:
         assert resolve(root, key).node is node, key
 
 
+def test_exact_full_path_uses_the_ordinal_reading_that_matched() -> None:
+    """An axisless placement edge spells its final path segment plus ordinal as one component.
+
+    Once the literal-axis reading fails, exact-path precedence must compare against the effective
+    segment-plus-ordinal reading, not the original literal parse. Otherwise a deeper path that
+    admits the shallow path as a subsequence makes the shallow site's canonical key ambiguous.
+    """
+    head = Site(node=object(), axis="a", segments=("map", "fold"))
+    shallow = Site(node=object(), axis=None, segments=("map", "fold", "a", "fold", "b"))
+    deep = Site(node=object(), axis=None, segments=("map", "fold", "a", "map", "fold", "fold", "b"))
+    all_sites = (head, shallow, deep)
+
+    key = _spellings("PLACE", shallow, all_sites)
+    assert key == "PLACE@map.fold.a.fold.b1"
+    assert resolve(None, key, all_sites=all_sites).node is shallow.node
+
+
 def test_identity_miss_is_loud_never_the_untiled_path() -> None:
     """A copied node (``dataclasses.replace`` — structurally equal, a different object) is NOT a
     site of the tree: addressing a schedule read through it must raise ``UnknownSiteError``, never

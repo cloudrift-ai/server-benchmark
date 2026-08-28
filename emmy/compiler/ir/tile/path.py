@@ -371,6 +371,7 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
     carries that axis is it retried as ``<axis><ordinal>`` (so an axis named ``k2`` never loses to
     an ordinal reading)."""
     parsed = parse_key(key)
+    matched_key = parsed
     all_sites = sites(root) if all_sites is None else all_sites
     fam_sites = family_sites(parsed.family, all_sites)
     if parsed.bare:
@@ -398,6 +399,7 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
                 for retry in readings:
                     matches = _match(retry, fam_sites)
                     if matches:
+                        matched_key = retry
                         break
                 if matches:
                     break
@@ -408,7 +410,7 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
         # an anchored subsequence of every deeper same-axis path, so without this preference the
         # canonical full-path spelling (the ordinal arm's fallback) could never name the shallow
         # site at all. Only consulted at the ambiguity point — sugar that was unique stays unique.
-        exact = [s for s in matches if s.segments == parsed.segments]
+        exact = [s for s in matches if s.segments == matched_key.segments]
         if len({id(s.node) for s in exact}) == 1:
             return exact[0]
         cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in matches))

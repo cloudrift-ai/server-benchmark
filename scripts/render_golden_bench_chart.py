@@ -1,15 +1,21 @@
-"""Render the gemma blog's per-kernel chart from a ``bench_golden_set.py`` JSON.
+"""Render the gemma blog's per-kernel chart from ``emmy run --bench --json`` records.
 
-Reads a ``golden_bench.json`` (per-golden-case latencies for Eager PyTorch / torch.compile /
-Emmy) and writes a self-contained echarts HTML — one horizontal bar row per case, emmy and
-torch.compile speedups vs the eager baseline, sorted winners-first by the emmy ratio — plus a
-``.csv`` of the plotted values. This is the scripted generator for the per-kernel figures in
-the "Optimizing Gemma4 12B for RTX GPUs" article.
+Reads the directory of per-target JSON records a multi-target golden run writes and produces a
+self-contained echarts HTML — one horizontal bar row per case, emmy and torch.compile speedups
+vs the eager baseline, sorted winners-first by the emmy ratio — plus a ``.csv`` of the plotted
+values. This is the scripted generator for the per-kernel figures in the "Optimizing Gemma4 12B
+for RTX GPUs" article.
 
-Usage::
+The input is the record ``--json`` already emits; there is no separate benchmark harness to run
+first. Produce it with::
+
+    ./venv/bin/emmy run --golden-file <working.yaml> --bench --bench-backends eager,tcompile,emmy \\
+        --json _tune/golden-bench/records
+
+then::
 
     ./venv/bin/python scripts/render_golden_bench_chart.py \\
-        _tune/golden-bench/golden_bench.json \\
+        _tune/golden-bench/records \\
         --title "gemma-4-12B per-kernel speedup vs PyTorch eager — RTX 5090" \\
         --out /path/to/blog/public/gemma4_12b_rtx5090_per_kernel.html
 """
@@ -33,17 +39,33 @@ FM_COLOR = "#ffb454"
 TCOMPILE_COLOR = "#7dd3fc"
 
 
+def _read_records(directory: Path) -> dict[str, dict[str, float]]:
+    """Collapse a run's per-target records into ``{target: {backend: latency_us}}``.
+
+    One record shape serves every consumer: ``--json`` was built to retire the stdout parsing this
+    chart's predecessor did, and reading it here is what let that predecessor go away.
+    """
+    results: dict[str, dict[str, float]] = {}
+    for record_path in sorted(directory.glob("*.json")):
+        record = json.loads(record_path.read_text())
+        name = record.get("golden") or record_path.stem
+        row = {backend: float(values["latency_us"]) for backend, values in record.get("backends", {}).items() if values.get("latency_us")}
+        if row:
+            results[name] = row
+    return results
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("json_path", help="golden_bench.json from scripts/bench_golden_set.py (standard lane)")
-    ap.add_argument("--fm-json", default=None, help="optional fast-math-lane golden_bench.json (adds a third bar)")
+    ap.add_argument("json_path", help="directory of `emmy run --bench --json` records (standard lane)")
+    ap.add_argument("--fm-json", default=None, help="optional fast-math-lane record directory (adds a third bar)")
     ap.add_argument("--title", default="per-kernel speedup vs PyTorch eager")
     ap.add_argument("--subtitle", default="ratio > 1 = faster than eager; dashed line = eager parity")
     ap.add_argument("--out", required=True, help="output .html path (a sibling .csv is written too)")
     args = ap.parse_args()
 
-    results = json.loads(Path(args.json_path).read_text())
-    fm = json.loads(Path(args.fm_json).read_text()) if args.fm_json else {}
+    results = _read_records(Path(args.json_path))
+    fm = _read_records(Path(args.fm_json)) if args.fm_json else {}
     rows = []
     for name, r in results.items():
         if not isinstance(r, dict) or "Emmy" not in r:

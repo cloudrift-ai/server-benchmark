@@ -1,0 +1,46 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: softmax_c1
+    op: constant
+    attrs:
+      name: softmax_c1
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[softmax_c1, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, {sym: seq_len, hint: 512}]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: 1}
+    inputs: [x]
+    outputs: [[softmax, f32, [4, {sym: seq_len, hint: 512}]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: k_softmax_5a8845.c2d592c3db3b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: coop
+      WORK: t128
+    identity: ee439d1be371b64b1057c9f64aae8f6149f5653a93e002d4653bd54e06b88641
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 1.3174880934893929
+        tcompile_us: 2.050113646483327

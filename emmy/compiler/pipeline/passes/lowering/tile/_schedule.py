@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from types import MappingProxyType
 
 from emmy.compiler.dim import Dim
@@ -733,6 +734,16 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
       the kernel's pinned inventory over a fold as narrow as the split width."""
     extent = hint_extent(node.axis)
     pin = _pin(REDUCE, key)
+    if node.observed:
+        # An observer makes the stream order-visible: every partitioned combine — cooperative
+        # band, ILP register partials, the cross-CTA split — changes which prefixes exist, so a
+        # scan offers exactly the serial fold. A pin naming a partition DROPS to serial (the same
+        # adaptation as the consumed ``g``-half strip: an ambient pin fans out to every kernel,
+        # and refusing here would fail whole-model sweeps on any scan); a pinned replay still
+        # fails loudly at the offered oracle, whose membership check sees the pin unsatisfied.
+        if pin is not None and ReducePlan.parse(pin, state.work_pin).stages and logger.isEnabledFor(logging.DEBUG):
+            logger.debug("REDUCE pin %r names a partition; an observed fold (a scan) realizes the serial fold only", pin)
+        return [ReducePlan()]
     if pin is None:
         return [ReducePlan(), *(p for p in coop_reduce_moves() if _band_refusal(p, extent, state.transposed_ok) is None)]
     return [_parsed_reduce_pin(state, pin, key)]
@@ -776,6 +787,10 @@ def _contraction_reduces(state: _State, node, key: str | None, tiled: bool) -> l
     RAISES when no plan honors the pin (``REDUCE`` has no choice of tier, so there is no drop
     layer) — while a serial pin keeps every plan on the serial fold."""
     pin = _pin(REDUCE, key)
+    if node.observed:
+        # Same stream-order gate as the plain fold's (:func:`_reduce_moves`) — defensive here:
+        # nothing builds an observed contraction yet.
+        return [ReducePlan()]
     if pin is not None:
         pinned = _parsed_reduce_pin(state, pin, key)
         if pinned.coop > 1 or pinned.reg > 1:
@@ -1275,18 +1290,26 @@ class Ctx:
     seam: dict = field(default_factory=dict)
 
     def extend(self, option: _Option) -> Ctx | None:
-        """This context with ``option`` folded in, or ``None`` when the option contradicts it."""
-        if any(self.decided.get(k, v) != v for k, v in option.knobs.items()):
-            return None
+        """This context with ``option`` folded in, or ``None`` when the option contradicts it.
+
+        The hot inner loop of the walk (one call per option per branch level), so the untouched
+        halves share the parent's maps instead of copying: ``decided`` / ``axes`` / ``seam`` are
+        read only here and every mutation below is on a fresh copy, so sharing is safe."""
+        decided = self.decided
+        for k, v in option.knobs.items():
+            if decided.get(k, v) != v:
+                return None
         work = self.work
         if option.work is not None:
-            if work not in (None, option.work):
+            if work is not None and work != option.work:
                 return None
             work = option.work
-        axes = dict(self.axes)
-        for side in option.tile.mn if option.tile is not None else ():
-            if axes.setdefault(side.axis.name, (side.tile, side.units)) != (side.tile, side.units):
-                return None
+        axes = self.axes
+        if option.tile is not None:
+            axes = dict(axes)
+            for side in option.tile.mn:
+                if axes.setdefault(side.axis.name, (side.tile, side.units)) != (side.tile, side.units):
+                    return None
         seam = self.seam
         if option.seam:
             seam = dict(seam)
@@ -1298,7 +1321,7 @@ class Ctx:
                     need, offer = (value, other) if role == "need" else (other, value)
                     if not _seam_ok(need, offer):
                         return None
-        return Ctx(work, axes, {**self.decided, **option.knobs}, seam)
+        return Ctx(work, axes, {**decided, **option.knobs} if option.knobs else decided, seam)
 
 
 # ---- the walk, reified as the fork tree ---------------------------------------------------------- #
@@ -1331,12 +1354,37 @@ class _State:
     #: the same purity is what lets the prescan ride the session memo (:class:`_Pool`) across
     #: same-pool kernels and tune trajectories.
     options: dict = field(default_factory=dict)
+    #: The pool's minted identity — the SAME digest the session memo caches under (``pool_key`` +
+    #: pins + the split receipt + the spelled key vocabulary + the sample identity). Minted once
+    #: here, at the one place that knows every enumeration input, and carried by every Fork of the
+    #: tree (:attr:`Fork.pool_id`) so consumers (the greedy decision memo) key on the stamped
+    #: identity instead of re-deriving a weaker one.
+    pool_id: str = ""
+
+    @property
+    def pool_bound(self) -> int:
+        """Upper bound on the pool's leaf count — Π over the per-node option tuples × the RASTER
+        fan-out, before ``Ctx`` legality prunes (legality only shrinks). Derived from the prescan
+        rather than stored, so it cannot go stale against ``options``; carried by every Fork of
+        the tree (:attr:`Fork.pool_bound`) so a consumer can ask "roughly how large is this pool"
+        without walking it — the greedy cold-pool budget trigger."""
+        bound = len(_raster_values(self))
+        for opts in self.options.values():
+            bound *= len(opts)
+        return bound
 
     def honors_work_pin(self, work: Workers | None) -> bool:
         """Whether ``work`` is the inventory the live ``WORK`` pin named (vacuously true unpinned).
         Compared as parsed :class:`Workers`, never as spellings — ``t16x1`` and ``t16`` are one
         inventory."""
         return not self.work_pinned or work == self.work_pin
+
+    @property
+    def observed(self) -> bool:
+        """Whether this kernel's tree holds an observed fold — a scan. Its one row is the serial
+        fold, so an ambient ``WORK``/``REDUCE`` pin fanning out over the graph cannot mean it: the
+        leaf keeps the decided-empty row instead of dropping the kernel to unmapped."""
+        return any(isinstance(s.node, Fold) and s.node.axis is not None and s.node.observed for s in self.sched._all_sites())
 
 
 def _off(sched: Sched, root) -> dict:
@@ -1380,13 +1428,20 @@ def _raster_values(state: _State) -> tuple[str, ...]:
     return ("",)
 
 
+@lru_cache(maxsize=1024)
+def _work_spelling(work: Workers) -> str:
+    """``Workers.spell`` memoized per (frozen, hashable) inventory — the walk re-spells the same
+    few inventories once per branch level otherwise."""
+    return work.spell()
+
+
 def _spelled(knobs: dict, option: _Option, ctx: Ctx) -> dict:
     """The row prefix one decision leaves behind: what the option spells, plus the inventory as
     soon as any option claims it — :meth:`Ctx.extend` refuses a second one, so a prefix that
     carries ``WORK`` already carries its final value."""
     out = {**knobs, **option.knobs}
     if ctx.work is not None:
-        out[WORK.name] = ctx.work.spell()
+        out[WORK.name] = _work_spelling(ctx.work)
     return out
 
 
@@ -1414,9 +1469,9 @@ def _step(state: _State, stack: tuple, ctx: Ctx, knobs: dict) -> list[Fork]:
             knobs, stack = _spelled(knobs, option, ctx), children
             continue  # a level with one option is no choice at all — collapse it
         return [_Branch(state, children, below, _spelled(knobs, o, below)) for o, below in offers]
-    if not state.honors_work_pin(ctx.work):
+    if not state.honors_work_pin(ctx.work) and not state.observed:
         return []  # the walk finished without ever claiming the pinned inventory
-    return [_Leaf(state, {**state.off, **knobs, WORK.name: ctx.work.spell() if ctx.work is not None else ""})]
+    return [_Leaf(state, {**state.off, **knobs, WORK.name: _work_spelling(ctx.work) if ctx.work is not None else ""})]
 
 
 @dataclass(frozen=True)
@@ -1430,6 +1485,14 @@ class _Branch(Fork):
     knobs: dict
     is_leaf = False
 
+    @property
+    def pool_id(self) -> str:
+        return self.state.pool_id
+
+    @property
+    def pool_bound(self) -> int:
+        return self.state.pool_bound
+
     def expand(self) -> list[Fork]:
         return _step(self.state, self.stack, self.ctx, self.knobs)
 
@@ -1441,6 +1504,14 @@ class _Leaf(Fork):
     state: _State
     knobs: dict
     is_leaf = True
+
+    @property
+    def pool_id(self) -> str:
+        return self.state.pool_id
+
+    @property
+    def pool_bound(self) -> int:
+        return self.state.pool_bound
 
     def expand(self) -> list[TileOp]:
         return [_materialize(self.state, self.knobs)]
@@ -1561,23 +1632,36 @@ def _state(tile: TileOp, name: str, knobs: dict, ctx) -> _State:
     transposed_ok = _inner_free(tile) is not None and not any(isinstance(s, Loop) for s in tail) and not has_contraction_tail(tail)
     facts = _site_facts(tile, ctx, sched, tail, frag_ok)
     raw = WORK.raw()
+    off = _off(sched, tile.op)
+    # The IR receipt (the sliced axis's partition Window), or the flag receipt a piece with no
+    # sliced axis carries (a realized split's independent projection sibling —
+    # ``split_consumed``): both mean the kernel-set decision was consumed, so a ``REDUCE``
+    # pin's ``g`` half strips.
+    partition = carries_partition(tile.op) or tile.split_consumed
+    # The pool identity, minted unconditionally: it keys the session memo AND stamps every Fork of
+    # this tree (``_State.pool_id``), so the two cannot key differently. The sample is part of the
+    # key rather than of the Context, because ``dataclasses.replace`` SHARES the session cache — a
+    # sampled Context and the live one it came from sit on one memo, and a Context-only flag would
+    # serve a sampled pool to a live compile. The split receipt and the spelled key vocabulary are
+    # explicit key terms beside ``pool_key``: a receipt-free twin must miss where the partial
+    # memoized its stripped ``g``-pin options, and an alpha-renamed twin must enumerate its own
+    # spellings.
+    sample = getattr(ctx, "pool_sample", None)
+    key = digest(pool_key(tile, pins=schedule_pin_fingerprint()), sample.key if sample is not None else "", partition, tuple(off))
     return _State(
         tile,
         sched,
         ctx,
         name,
         knobs,
-        _off(sched, tile.op),
+        off,
         facts,
         frozenset(f.need for f in facts.values() if f.need is not None),
         transposed_ok,
-        # The IR receipt (the sliced axis's partition Window), or the flag receipt a piece with no
-        # sliced axis carries (a realized split's independent projection sibling —
-        # ``split_consumed``): both mean the kernel-set decision was consumed, so a ``REDUCE``
-        # pin's ``g`` half strips.
-        carries_partition=carries_partition(tile.op) or tile.split_consumed,
+        carries_partition=partition,
         work_pin=Workers.parse(raw) if raw is not None else None,
         work_pinned=raw is not None,
+        pool_id=key,
     )
 
 
@@ -1603,19 +1687,10 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     the walk's leaf stream is reservoir-sampled (:meth:`~…search.pool.PoolSample.take`), the pool's
     exact size is reported through ``sample.totals``, and the drawn rows come back as leaf forks."""
     state = _state(tile, name, knobs, ctx)
-    facts, off, partition = state.facts, state.off, state.carries_partition
-    nodes = tuple(_nodes(tile.op))
+    facts, key = state.facts, state.pool_id
     cache = getattr(ctx, "session_cache", None)
     sample = getattr(ctx, "pool_sample", None)
-    key = None
-    if cache is not None or sample is not None:
-        # The sample is part of the KEY, not merely of the Context: ``dataclasses.replace`` SHARES
-        # the session cache, so a sampled Context and the live one it came from sit on one memo and
-        # a Context-only flag would serve a sampled pool to a live compile. The split receipt
-        # and the spelled key vocabulary are explicit key terms beside ``pool_key`` (see
-        # :class:`_Pool`): a receipt-free twin must miss and raise where the partial memoized its
-        # stripped ``g``-pin options, and an α-renamed twin must enumerate its own spellings.
-        key = digest(pool_key(tile, pins=schedule_pin_fingerprint()), sample.key if sample is not None else "", partition, tuple(off))
+    nodes = tuple(_nodes(tile.op))
     pool = cache.get(key) if cache is not None else None
     if isinstance(pool, _Draw):
         sample.totals[key] = pool.total  # the drawn rows cannot carry it; the caller reads it here

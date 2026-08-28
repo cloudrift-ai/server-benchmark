@@ -198,6 +198,8 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
     node = head(tile.op)
     if node is None or node.axis is None or node.combine is None:
         return None
+    if node.observed:
+        return None  # a scan preserves its stream order — there is no split question to decide
     if carries_partition(tile.op):
         return None  # a piece of a realized split — the partition was consumed
     key = Sched(tile.op, {}).key("REDUCE", node) or "REDUCE"

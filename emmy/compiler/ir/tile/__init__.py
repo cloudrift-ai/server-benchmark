@@ -17,6 +17,7 @@ from emmy.compiler.ir.tile.ir import (
     apply_output_specs,
     extract_output_specs,
     lower_with_output_specs,
+    observed_result_names,
 )
 from emmy.compiler.ir.tile.normalize import lambda_equivalent_clusters, normalize_fold_tree
 
@@ -34,6 +35,7 @@ __all__ = [
     "apply_output_specs",
     "lambda_equivalent_clusters",
     "lower_with_output_specs",
+    "observed_result_names",
     "normalize_fold_tree",
     "extract_output_specs",
 ]

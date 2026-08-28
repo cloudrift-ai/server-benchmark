@@ -202,6 +202,10 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         scopes = occurrence_axes.get(id(node), ())
         if not isinstance(node, Fold) or id(node) in seen or not scopes or not all(_closed_at(node, scope) for scope in scopes):
             continue
+        if node.observed:
+            # An observed fold's per-step results exist only inside its stream — a cut would
+            # separate the scan from its streamed boundary store, which no piece can then spell.
+            continue
         consumer = contraction_operands.get(id(node))
         # A frontier REPLACES the fed-store realization at this seam rather than joining the
         # offer: the raw bits dominate the fed-store workspace on both precision (exact vs

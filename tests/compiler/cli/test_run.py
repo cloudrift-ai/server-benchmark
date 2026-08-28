@@ -892,41 +892,34 @@ def test_run_code_matmul_blockify(run_cli, dtype):
 
 
 @requires_cuda
-@pytest.mark.parametrize("fk", [2, 4, 8])
-@pytest.mark.parametrize("br", [None, 1])
-def test_run_code_rmsnorm_fk_accuracy(run_cli, monkeypatch, fk, br):
-    """FK register-tiles the reduce axis into ``fk`` independent accumulators +
-    a cross-accumulator fold. Pin FK
-    (and optionally BR=1 for the pure-serial scope) and confirm the folded
-    reduction still matches eager — ``rc == 0`` is the accuracy assertion."""
-    monkeypatch.setenv("EMMY_FK", str(fk))
-    if br is not None:
-        monkeypatch.setenv("EMMY_BR", str(br))
+def test_run_code_wide_rmsnorm_accuracy(run_cli):
+    """A whole-command smoke over a 2048-wide RMS-norm reduce, where the partition matters.
+
+    This used to sweep ``EMMY_FK`` x ``EMMY_BR`` for the register-tiled reduce. Neither name is a
+    registered knob any more — the reduce partition is spelled by ``REDUCE`` — so all six cells ran
+    the identical greedy compile. The partition variants are covered as data, per schedule, in
+    ``tests/compiler/realization/cases/reduce/``."""
     rc, _, stderr = run_cli("run", "--code", "torch.nn.RMSNorm(2048)(torch.randn(4,32,2048))")
     assert rc == 0, f"stderr: {stderr}"
 
 
 @requires_cuda
-@pytest.mark.parametrize("fk", [2, 4, 8])
-def test_run_code_fp16_matmul_window_accuracy(run_cli, monkeypatch, fk):
-    """fp16 scalar matmul half2 accumulation window:
-    pin MMA off + an even FK window and confirm the windowed half2 accumulate +
-    fp32 flush matches eager within fp16 tolerance — ``rc == 0`` asserts it."""
-    monkeypatch.setenv("EMMY_MMA", "0")
-    monkeypatch.setenv("EMMY_FK", str(fk))
+def test_run_code_fp16_matmul_accuracy(run_cli):
+    """A whole-command smoke over an fp16 matmul: ``rc == 0`` asserts it matches eager.
+
+    This used to pin ``EMMY_MMA=0`` plus an ``EMMY_FK`` window; neither is a registered knob any
+    more (the tier and its register tile are both spelled by ``TILE``), so all three cells ran the
+    same greedy compile. The scalar fp16 tier is a corpus case."""
     rc, _, stderr = run_cli("run", "--code", "torch.randn(256,256,dtype=torch.float16) @ torch.randn(256,256,dtype=torch.float16)")
     assert rc == 0, f"stderr: {stderr}"
 
 
 @requires_cuda
-@pytest.mark.parametrize("br", [None, 1])
-def test_run_code_softmax_fk_accuracy(run_cli, monkeypatch, br):
-    """Softmax carries both a ``max`` and a ``sum`` reduce, so FK exercises the
-    ``fmaxf`` and ``+`` cross-accumulator folds together. ``rc == 0`` asserts
-    the pinned-FK kernel matches eager."""
-    monkeypatch.setenv("EMMY_FK", "4")
-    if br is not None:
-        monkeypatch.setenv("EMMY_BR", str(br))
+def test_run_code_softmax_accuracy(run_cli):
+    """A whole-command smoke over softmax, which carries both a ``max`` and a ``sum`` reduce.
+
+    Same dead-pin story as the RMS-norm smoke above: the ``EMMY_FK`` / ``EMMY_BR`` sweep it used to
+    carry pinned nothing. The cross-accumulator folds are covered per schedule in the corpus."""
     rc, _, stderr = run_cli("run", "--code", "torch.softmax(torch.randn(4,32,2048), dim=-1)")
     assert rc == 0, f"stderr: {stderr}"
 

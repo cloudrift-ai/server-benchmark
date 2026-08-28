@@ -1,0 +1,67 @@
+# Two contraction channels that do NOT share an A value — each projection reads its own
+# activation, the NVFP4 gate/up shape where each channel carries its own quantized input.
+# The pin is OFFERED (242 enumerated rows carry it) and then refused at lowering with
+# 'an output-tiled root must own each output specification independently'.
+#
+# evidence: gate-up-shared-a.yaml is the same program, same shapes, same dtype and the same
+# pin, differing only in that both channels read one activation — and it realizes, builds and
+# runs. The tier is available to this shape; it is lost to the second A value alone. An
+# unpinned enumeration additionally offers no tile tier at all for the distinct-A form, at
+# any capability, so a cold compile lands on a per-cell row.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x, wg, wu, x2]
+  outputs: [o]
+  nodes:
+  - id: wg
+    op: input
+    outputs: [[wg, f16, [512, 512]]]
+  - id: wu
+    op: input
+    outputs: [[wu, f16, [512, 512]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [128, 512]]]
+  - id: gate
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x, wg]
+    outputs: [[gate, f16, [128, 512]]]
+  - id: sg
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: silu}}
+    inputs: [gate]
+    outputs: [[sg, f16, [128, 512]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [128, 512]]]
+  - id: up
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x2, wu]
+    outputs: [[up, f16, [128, 512]]]
+  - id: o
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [sg, up]
+    outputs: [[o, f16, [128, 512]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - gate
+    - o
+    - sg
+    - up
+  realizations:
+  - name: k_linear_reduce_e6d376.dcfef1a9b9c8
+    bindings: {}
+    pins:
+      FAST_MATH: false
+      PLACE: fuse
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+    identity: c1c5e4f2e252739223679856d774744278596955b42b18202a6463e4ec28cd85

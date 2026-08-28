@@ -674,3 +674,68 @@ def test_platform_update_preserves_other_platform_snapshot(tmp_path):
     assert other_archive.read_bytes() == b"preserve archive"
     assert other_record.read_text() == "preserve record\n"
     assert old_record_path in staged
+
+
+# --- realization corpus cases --------------------------------------------------------------
+#
+# A case is evidence, not code: it lives under ``tests/`` but records a compiler gap the run
+# measured. Three contracts make it committable without weakening the small-fix budget.
+
+
+def _corpus_case(workspace, name):
+    path = workspace / onboarding_artifacts.CORPUS_CASE_DIR / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("compute_cap: [12, 0]\n")
+    return path.relative_to(workspace)
+
+
+def test_corpus_case_is_an_allowed_artifact(tmp_path):
+    """A ``.yaml`` under the corpus is allowed even though ``tests/`` otherwise takes only Python."""
+    _corpus_case(tmp_path, "matmul/f16-warp-splitk.yaml")
+
+    resolved = onboarding_artifacts._relative_artifact(tmp_path, "tests/compiler/realization/cases/matmul/f16-warp-splitk.yaml")
+
+    assert resolved == Path("tests/compiler/realization/cases/matmul/f16-warp-splitk.yaml")
+
+
+def test_corpus_case_rejects_an_unknown_expected_failure_stage(tmp_path):
+    """The filename is semantic, so a typo must not quietly become a closed case."""
+    _corpus_case(tmp_path, "matmul/lockout_xfail_offerd.yaml")
+
+    with pytest.raises(ValueError, match="unknown expected-failure stage"):
+        onboarding_artifacts._relative_artifact(tmp_path, "tests/compiler/realization/cases/matmul/lockout_xfail_offerd.yaml")
+
+
+def test_non_corpus_yaml_under_tests_is_still_rejected(tmp_path):
+    path = tmp_path / "tests" / "compiler" / "fixture.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text("x: 1\n")
+
+    with pytest.raises(ValueError, match="outside the allowed onboarding areas"):
+        onboarding_artifacts._relative_artifact(tmp_path, "tests/compiler/fixture.yaml")
+
+
+def test_corpus_cases_are_the_focused_test_for_a_compiler_fix(tmp_path):
+    """Recording the reproducer that proves a lockout closed IS the focused test change."""
+    _init_repo(tmp_path)
+    implementation = tmp_path / "emmy" / "compatibility.py"
+    implementation.parent.mkdir()
+    implementation.write_text("VALUE = 'before'\n")
+    subprocess.run(["git", "add", "emmy/compatibility.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+    implementation.write_text("VALUE = 'after'\n")
+    case = _corpus_case(tmp_path, "matmul/lockout.yaml")
+
+    onboarding_artifacts.stage_artifacts(tmp_path, [Path("emmy/compatibility.py"), case])
+
+
+def test_corpus_cases_do_not_consume_the_small_fix_budget(tmp_path):
+    """The budget bounds code churn; a run that records several gaps changes no code at all."""
+    _init_repo(tmp_path)
+    baseline = tmp_path / "README.md"
+    baseline.write_text("baseline\n")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
+    cases = [_corpus_case(tmp_path, f"matmul/case_{index}.yaml") for index in range(onboarding_artifacts.MAX_IMPLEMENTATION_FILES + 3)]
+
+    onboarding_artifacts.stage_artifacts(tmp_path, cases)

@@ -44,7 +44,7 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
     sample the rows are every kernel's fork rows and ``total`` is ``len(rows)``, so a caller that
     reports both prints today's numbers unchanged."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import Fork, flatten_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import Fork, iter_leaves, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
@@ -68,8 +68,8 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
             seen_pools.update(opened)
             if not opened:
                 return _first(fp.options)
-        for leaf in flatten_leaves(fp.options):
-            row = dict(getattr(leaf, "knobs", None) or {})
+        for leaf in iter_leaves(fp.options):
+            row = leaf_knobs(leaf)
             # A schedule row always spells the kernel-global ``WORK``; a structural arm's knob
             # delta (a cut, the cross-CTA split's g-half or the unsplit receipt) never does — the
             # stated row-identity marker (``_schedule._step``, the tile scheduler architecture).
@@ -80,9 +80,18 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
         return _first(fp.options)
 
     def _first(options):
+        # A pin that admits nothing at this fork leaves no option to walk into. Say so: the bare
+        # `IndexError` this used to raise names neither the pin nor the fork, and it reaches
+        # callers that are asking a perfectly ordinary question — "is this schedule offered?" —
+        # for which "no" is a legitimate answer rather than a crash.
+        if not options:
+            raise ValueError("the live pins admit no option at this fork, so no candidate row can be enumerated")
         option = options[0]
         while isinstance(option, Fork) and not option.is_leaf:
-            option = option.expand()[0]
+            expanded = option.expand()
+            if not expanded:
+                raise ValueError("the live pins admit no option at this fork, so no candidate row can be enumerated")
+            option = expanded[0]
         return option
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)

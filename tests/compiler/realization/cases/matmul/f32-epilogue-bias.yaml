@@ -1,0 +1,47 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b, bias]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f32, [1, 64, 64]]]
+  - id: b
+    op: input
+    outputs: [[b, f32, [64, 64]]]
+  - id: ab
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[ab, f32, [1, 64, 64]]]
+  - id: bias
+    op: input
+    outputs: [[bias, f32, [64]]]
+  - id: o
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [ab, bias]
+    outputs: [[o, f32, [1, 64, 64]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - ab
+    - o
+  realizations:
+  - name: k_matmul_b0cecb.aed65d192029
+    bindings: {}
+    pins:
+      FAST_MATH: false
+      PLACE: fuse
+    knobs:
+      TILE: f2x2
+      WORK: t16x16
+      REDUCE: ''
+    identity: c93922e3cb1e210caf49b13ed013262c77ac72f3a8b121840f97839f5ab5ab38
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 2.098621816194358
+        tcompile_us: 4.087922353188969

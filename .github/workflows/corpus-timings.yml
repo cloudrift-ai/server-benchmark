@@ -1,0 +1,425 @@
+# Fill the realization corpus's per-card `latency:` blocks.
+#
+# Stage 5 only bites where a timing exists, and a timing can only be produced on the card it
+# describes. `onboard-model` fills them opportunistically, on whatever card a run happened to rent;
+# this closes the rest by renting one GPU, recording that card's timings for every case it can run,
+# and accumulating the result on a rolling pull request.
+#
+# It reuses the two existing workflows rather than inventing a third shape: the rolling-branch
+# machinery is `discover-model.yml`'s, and the rental, retry and teardown machinery is
+# `onboard-model.yml`'s.
+name: Corpus timings
+
+on:
+  schedule:
+    # Weekly. A single-GPU rental is cheap, but the cadence sets the rate at which cards accumulate
+    # coverage against a recurring bill; weekly keeps ahead of how fast the corpus grows.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: corpus-timings
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    runs-on:
+      group: agent-runners
+      labels: agents
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      GH_REPO: ${{ github.repository }}
+      WORKFLOW_SOURCE: /tmp/emmy-corpus-source-${{ github.run_id }}-${{ github.run_attempt }}
+      SSH_KEY: /tmp/emmy-corpus-key-${{ github.run_id }}-${{ github.run_attempt }}
+      PROVIDER_CONFIG: /tmp/emmy-corpus-provider-${{ github.run_id }}-${{ github.run_attempt }}.yaml
+      VM_LEASE: /tmp/emmy-corpus-lease-${{ github.run_id }}-${{ github.run_attempt }}.json
+      PR_SUMMARY: /tmp/emmy-corpus-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
+      RUN_OWNER: corpus-timings-${{ github.run_id }}-${{ github.run_attempt }}
+      EMMY_RENTAL_TAGS: emmy,workflow:corpus-timings,gh-job:${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+      CLOUDRIFT_TEAM_ID: ${{ vars.CLOUDRIFT_TEAM_ID }}
+      # Record what fits and name what did not. A silent cap reads as "this card is fully covered"
+      # when it is not.
+      MEASURE_BUDGET_MINUTES: "150"
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Find rolling corpus-timings pull request
+        id: rolling
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          retry_gh() {
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+              sleep "$attempt"
+            done
+          }
+          matches=$(retry_gh gh pr list --state open --limit 100 \
+            --json number,headRefName,isCrossRepository,labels \
+            --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("corpus-timings")) or (.headRefName | startswith("agents/corpus-timings-"))))]')
+          count=$(jq length <<< "$matches")
+          if [ "$count" -gt 1 ]; then
+            echo "Expected at most one rolling corpus timings PR, found $count" >&2
+            exit 1
+          fi
+          number=$(jq -r '.[0].number // empty' <<< "$matches")
+          branch=$(jq -r '.[0].headRefName // empty' <<< "$matches")
+          if [ -n "$number" ]; then
+            echo "Updating rolling corpus timings PR #$number from $branch"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            orphan_output=$(retry_gh gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/agents/corpus-timings-" \
+              --jq '.[].ref | sub("^refs/heads/"; "")')
+            mapfile -t orphan_branches < <(printf '%s' "$orphan_output" | sort)
+            if [ "${#orphan_branches[@]}" -gt 1 ]; then
+              echo "Expected at most one unpaired corpus timings branch, found ${#orphan_branches[@]}" >&2
+              exit 1
+            fi
+            branch="${orphan_branches[0]:-}"
+            if [ -n "$branch" ]; then
+              echo "Adopting unpaired corpus timings branch $branch"
+            fi
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.rolling.outputs.branch || github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebase existing timings branch on latest main
+        id: rebase
+        if: steps.rolling.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
+        run: |
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          gh auth setup-git
+          git fetch origin \
+            "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" \
+            "+refs/heads/$EXISTING_BRANCH:refs/remotes/origin/$EXISTING_BRANCH"
+          original_head="$(git rev-parse HEAD)"
+          remote_head="$(git rev-parse "origin/$EXISTING_BRANCH")"
+          if [ "$original_head" != "$remote_head" ]; then
+            echo "Timings branch changed after it was selected; refusing to overwrite $remote_head" >&2
+            exit 1
+          fi
+          git rebase "origin/$BASE_BRANCH"
+          echo "expected_head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Load exact workflow source
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          GIT_LFS_SKIP_SMUDGE: "1"
+        run: |
+          if ! git cat-file -e "$WORKFLOW_SHA^{commit}"; then
+            git fetch --depth=1 origin "$WORKFLOW_SHA"
+          fi
+          mkdir -p "$WORKFLOW_SOURCE"
+          git archive "$WORKFLOW_SHA" | tar -x -C "$WORKFLOW_SOURCE"
+
+      - name: Install controller dependencies
+        run: |
+          python3.12 -m venv venv
+          ./venv/bin/pip install --quiet -e ".[compile]"
+
+      - name: Choose a card and rent it
+        id: vm
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+        run: |
+          cleanup_tags() {
+            ./venv/bin/python - <<'PY'
+          import asyncio
+          import os
+
+          from emmy.provisioning.cloudrift import terminate_instances_by_tags
+
+          tags = [tag for tag in os.environ["EMMY_RENTAL_TAGS"].split(",") if tag]
+          asyncio.run(terminate_instances_by_tags(os.environ["CLOUDRIFT_API_KEY"], tags))
+          PY
+          }
+
+          printf 'providers:\n  cloudrift:\n    team_id: "%s"\n    with_public_ip: true\n' \
+            "$CLOUDRIFT_TEAM_ID" > "$PROVIDER_CONFIG"
+          chmod 600 "$PROVIDER_CONFIG"
+          ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
+
+          # Uniformly at random from the cards CloudRift currently offers at a single-GPU instance
+          # type, seeded by the run id so the choice is reproducible from the log. One GPU: this
+          # measures kernels, and there is no reason to hold an eight-GPU node to do it.
+          ./venv/bin/python - > /tmp/available.json <<'PY'
+          import asyncio
+          import json
+          import os
+
+          from emmy.provisioning.cloudrift import list_available_instance_types
+
+          print(json.dumps(sorted(asyncio.run(list_available_instance_types(os.environ["CLOUDRIFT_API_KEY"])))))
+          PY
+          card=$(./venv/bin/python "$WORKFLOW_SOURCE/.github/scripts/corpus_timings.py" \
+            choose --seed "$GITHUB_RUN_ID" < /tmp/available.json)
+          echo "Selected $card (seed $GITHUB_RUN_ID)"
+          echo "card=$card" >> "$GITHUB_OUTPUT"
+
+          for attempt in 1 2 3; do
+            rm -f -- "$VM_LEASE"
+            if ./venv/bin/emmy vm create gpu \
+              --gpu "$card" \
+              --gpu-count 1 \
+              --exact-gpu-count \
+              --provider cloudrift \
+              --config "$PROVIDER_CONFIG" \
+              --ssh-key "$SSH_KEY" \
+              --name "corpus-timings-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+              --lease "$VM_LEASE" \
+              --owner "$RUN_OWNER" \
+              --json; then
+              break
+            fi
+            cleanup_tags
+            if [ "$attempt" -eq 3 ]; then
+              echo "CloudRift rental failed after three attempts" >&2
+              exit 1
+            fi
+          done
+          ./venv/bin/python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          lease = json.load(open(os.environ["VM_LEASE"]))
+          for key in ("ssh_host", "ssh_port", "ssh_user", "ssh_target"):
+              print(f"{key}={lease[key]}")
+          PY
+
+      - name: Record this card's timings
+        id: measure
+        if: steps.vm.outcome == 'success'
+        timeout-minutes: 200
+        env:
+          SSH_HOST: ${{ steps.vm.outputs.ssh_host }}
+          SSH_PORT: ${{ steps.vm.outputs.ssh_port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh_user }}
+        run: |
+          ssh_args=(
+            ssh -i "$SSH_KEY" -p "$SSH_PORT"
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+          )
+          rsync -az --delete -e "${ssh_args[*]}" --exclude venv --exclude .git ./ "$SSH_USER@$SSH_HOST:emmy/"
+          "${ssh_args[@]}" "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE' > /tmp/measured.log
+          set -euo pipefail
+          cd emmy
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git make python3.12-venv rsync
+          make setup
+
+          # The capability is discovered ON THE HOST rather than mapped from the card's name:
+          # nothing in the tree maps a name to a capability, and a table would be a second thing to
+          # maintain and get wrong. A card with no matching cases is a clean no-op.
+          cap=$(./venv/bin/python -c "import cupy; c=str(cupy.cuda.Device().compute_capability); print(f'{c[:-1]}.{c[-1]}')")
+          echo "live compute capability sm_${cap/./}"
+          mapfile -t cases < <(./venv/bin/python .github/scripts/corpus_timings.py select --compute-cap "$cap")
+          echo "${#cases[@]} case(s) match this card"
+          if [ "${#cases[@]}" -eq 0 ]; then
+            exit 0
+          fi
+
+          # A schedule that stopped realizing is a finding, not a timing to refresh: verify the
+          # GPU-free half before measuring anything, and record nothing if it moved.
+          ./venv/bin/pytest tests/compiler/realization -q -p no:randomly
+
+          deadline=$(( $(date +%s) + ${MEASURE_BUDGET_MINUTES:-150} * 60 ))
+          for case in "${cases[@]}"; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "SKIPPED (budget) $case"
+              continue
+            fi
+            name=$(./venv/bin/python -c "
+          import sys, yaml
+          d = yaml.safe_load(open(sys.argv[1]))
+          print(d['configs'][0]['realizations'][0]['name'])" "$case")
+            row=$(./venv/bin/python -c "
+          import sys, yaml
+          d = yaml.safe_load(open(sys.argv[1]))
+          k = d['configs'][0]['realizations'][0]['knobs']
+          print(','.join(f'{a}={b}' for a, b in k.items()))" "$case")
+            EMMY_NVCC_FLAGS= ./venv/bin/emmy run --golden-file "$case" --golden "$name" \
+              --bench --bench-backends eager,tcompile,emmy --ab "$row" --record \
+              || echo "FAILED $case"
+          done
+          REMOTE
+          rsync -az -e "${ssh_args[*]}" \
+            "$SSH_USER@$SSH_HOST:emmy/tests/compiler/realization/cases/" \
+            tests/compiler/realization/cases/
+          sed -n 's/^SKIPPED (budget) //p' /tmp/measured.log > /tmp/skipped.txt || true
+
+      - name: Delete workflow-owned CloudRift VMs
+        if: always() && steps.vm.outcome == 'success'
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+        run: |
+          set +e
+          ./venv/bin/python - <<'PY'
+          import asyncio
+          import os
+
+          from emmy.provisioning.cloudrift import terminate_instances_by_tags
+
+          tags = [tag for tag in os.environ["EMMY_RENTAL_TAGS"].split(",") if tag]
+          asyncio.run(terminate_instances_by_tags(os.environ["CLOUDRIFT_API_KEY"], tags, audit_attempts=18, audit_delay=5))
+          PY
+          tag_status=$?
+          lease_status=0
+          if [ -f "$VM_LEASE" ]; then
+            ./venv/bin/emmy vm delete lease "$VM_LEASE" --owner "$RUN_OWNER" --retries 1 --audit-attempts 3 --audit-delay 5 || lease_status=$?
+            ./venv/bin/emmy vm audit lease "$VM_LEASE" --owner "$RUN_OWNER" || lease_status=$?
+          fi
+          set -e
+          if [ "$lease_status" -ne 0 ] || [ "$tag_status" -ne 0 ]; then
+            echo "CloudRift cleanup or audit failed" >&2
+            exit 1
+          fi
+
+      - name: Validate and stage the measured timings
+        id: stage
+        if: steps.measure.outcome == 'success'
+        run: |
+          changed=$(./venv/bin/python "$WORKFLOW_SOURCE/.github/scripts/corpus_timings.py" validate)
+          if [ -z "$changed" ]; then
+            echo "no timings recorded"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$changed"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "Recorded \`${{ steps.vm.outputs.card }}\` timings for the realization corpus."
+            echo
+            echo "Every changed file is a \`latency:\` entry for this card; the validator refuses a run"
+            echo "that touched a program wire, a realization name, an identity stamp or a knob."
+            echo
+            echo "A slower case is proposed here, never absorbed silently: merging accepts the new"
+            echo "baseline, declining keeps the finding open."
+            echo
+            echo '```'
+            echo "$changed"
+            echo '```'
+            if [ -s /tmp/skipped.txt ]; then
+              echo
+              echo "Not measured within the ${MEASURE_BUDGET_MINUTES}-minute budget:"
+              echo
+              echo '```'
+              cat /tmp/skipped.txt
+              echo '```'
+            fi
+          } > "$PR_SUMMARY"
+
+      - name: Refresh GitHub App token
+        if: steps.stage.outputs.changed == 'true'
+        id: app-token-refresh
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Commit and push the rolling timings update
+        id: branch
+        if: steps.stage.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
+          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
+          EXPECTED_HEAD: ${{ steps.rebase.outputs.expected_head }}
+        run: |
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          gh auth setup-git
+          branch="$EXISTING_BRANCH"
+          if [ -n "$branch" ]; then
+            git switch -C "$branch"
+          else
+            branch="agents/corpus-timings-${GITHUB_RUN_ID}"
+            git switch -c "$branch"
+          fi
+          git add --all -- tests/compiler/realization/cases
+          git diff --cached --check
+          git commit -m "corpus: record ${{ steps.vm.outputs.card }} timings"
+          push_args=(origin "$branch")
+          if [ -n "$EXPECTED_HEAD" ]; then
+            push_args=(--force-with-lease="refs/heads/$branch:$EXPECTED_HEAD" "${push_args[@]}")
+          fi
+          for attempt in 1 2 3; do
+            git push "${push_args[@]}" && break
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$attempt"
+          done
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update the rolling timings pull request
+        if: steps.stage.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
+          PR_NUMBER: ${{ steps.rolling.outputs.number }}
+          TIMINGS_BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          retry_gh() {
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+              sleep "$attempt"
+            done
+          }
+          retry_gh gh label create corpus-timings \
+            --description "Automated realization-corpus latency refresh" \
+            --color 0E8A16 --force
+          if [ -n "$PR_NUMBER" ]; then
+            retry_gh gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              -f title="Refresh realization corpus timings" \
+              -F body=@"$PR_SUMMARY" >/dev/null
+          else
+            PR_NUMBER=$(retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" \
+              -f head="$TIMINGS_BRANCH" \
+              -f base="${{ github.event.repository.default_branch }}" \
+              -f title="Refresh realization corpus timings" \
+              -F body=@"$PR_SUMMARY" \
+              -F draft=true \
+              --jq .number)
+          fi
+          retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
+            -f 'labels[]=corpus-timings' >/dev/null
+
+      - name: Cleanup credentials and output
+        if: always()
+        run: |
+          rm -f "$SSH_KEY" "$SSH_KEY.pub" "$PROVIDER_CONFIG" "$VM_LEASE" "$PR_SUMMARY" /tmp/available.json
+          case "$WORKFLOW_SOURCE" in
+            /tmp/emmy-corpus-source-*) rm -rf -- "$WORKFLOW_SOURCE" ;;
+            *) echo "Refusing to remove unexpected workflow source path: $WORKFLOW_SOURCE" >&2; exit 1 ;;
+          esac
+          git config --unset-all credential.helper || true

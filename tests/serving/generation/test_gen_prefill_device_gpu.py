@@ -16,9 +16,10 @@ pytestmark = [pytest.mark.xdist_group("cuda")]
 
 
 @pytest.mark.skip(
-    reason="greedy still flattens + featurizes every schedule row (~12k rows/s over ~500k-row pools, several kernels x "
-    "2-3 scoring passes), so this layer compile went 11.9 s -> >15 min when the full schedule families returned "
-    "(2026-08-27, RTX 5090 box); revives when greedy consumes the walk's lazy fork tree instead of flatten_leaves"
+    reason="the cold-pool budget bounds the compile (~3 min, was >30 min), but a drawn schedule row exposes a latent "
+    "tile->kernel seam bug: 010_materialize's projection binding rejects the realized form with 'an output-tiled "
+    "root must own each output specification independently' (2026-08-28, RTX 5090). The row is walk-legal, so the "
+    "enumeration and the kernel binder disagree about legality — fix the seam, then un-skip; repro is this test"
 )
 def test_run_device_sym_matches_host_path():
     pytest.importorskip("cupy")

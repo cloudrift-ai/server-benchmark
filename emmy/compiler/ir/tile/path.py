@@ -60,6 +60,14 @@ _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
 _AXIS_ORDINAL_RE = re.compile(r"^(.*?)(\d+)$")
 
 
+class UnknownSiteError(Exception):
+    """A node that is NOT a site of the tree was used to address a schedule read/write — an
+    identity miss: the caller holds a copy (``dataclasses.replace``, a rewrite) or a node from a
+    different tree, not the stored object the site walk enumerated. Deliberately not a
+    ``ValueError``: the accessors swallow ``ValueError`` as "family doesn't apply", and an
+    identity miss must never degrade silently into the untiled path."""
+
+
 @dataclass(frozen=True)
 class Site:
     """One schedule-bearing tree position: the node, its schedule-bearing axis (``None`` for a
@@ -227,6 +235,14 @@ def parse_key(key: str) -> _Key:
     segments: list[str] = []
     axis: str | None = None
     ordinal: int | None = None
+    if len(comps) > 1 and comps[-1].isdigit():
+        # The EXPLICIT ordinal component — the collision-proof spelling :func:`_spellings` mints
+        # when the concatenated ``<axis><n>`` form would be captured by a literal axis name
+        # (``a13`` + 1 → ``a131`` beside a real ``a131`` axis). Unambiguous by construction:
+        # segment tokens and axis names are letter-led, so an all-digit component can only be an
+        # ordinal.
+        ordinal = int(comps[-1])
+        comps = comps[:-1]
     for i, comp in enumerate(comps):
         last = i == len(comps) - 1
         if not comp:
@@ -282,7 +298,7 @@ def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
     if len(identical) > 1:
         # No subsequence can distinguish identical full paths.  Skip the exponential search and
         # use the ordinal arm directly; this is precisely the arm ordinals exist for.
-        return f"{family}@{'.'.join(site.segments)}{axis_part}{site.ordinal}"
+        return _ordinal_spelling(family, site, fam_sites)
     # Path forms: shortest anchored subsequence unique among the family's sites; among equal-length
     # candidates prefer EDGE LABELS, then the deepest anchors (``a.fold`` over ``fold.fold`` /
     # ``map.fold`` for the cone stat — the label names the seam a reader recognizes).
@@ -300,6 +316,19 @@ def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
         if best is not None:
             return f"{family}@{'.'.join(best[1])}{axis_part}"
     # True same-path collision: the full path + axis still names several sites — spell the ordinal.
+    return _ordinal_spelling(family, site, fam_sites)
+
+
+def _ordinal_spelling(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
+    """The ordinal arm's spelling, honoring the round-trip law: the concatenated ``<axis><n>``
+    form is canonical, but ``resolve`` reads a final component as a LITERAL axis first (so an axis
+    named ``k2`` never loses to ``k`` + ordinal 2) — so when any sibling site's axis equals the
+    concatenation, the concat form would be captured (mis-resolving silently with one such site,
+    ambiguous with several) and the explicit dotted ordinal is minted instead."""
+    axis_part = f".{site.axis}" if site.axis is not None else ""
+    captured = f"{site.axis if site.axis is not None else site.segments[-1]}{site.ordinal}"
+    if any(s.axis == captured for s in fam_sites):
+        return f"{family}@{'.'.join(site.segments)}{axis_part}.{site.ordinal}"
     return f"{family}@{'.'.join(site.segments)}{axis_part}{site.ordinal}"
 
 
@@ -320,6 +349,11 @@ def spell(root, family: str, node, *, all_sites: tuple[Site, ...] | None = None)
     for s in fam_sites:
         if s.node is node:
             return _spellings(family, s, fam_sites)
+    if not any(s.node is node for s in all_sites):
+        raise UnknownSiteError(
+            f"{type(node).__name__} is not a site of this tree — the caller holds a copied or "
+            f"rebuilt node, not the stored object the site walk enumerated"
+        )
     raise ValueError(f"node {type(node).__name__} is not a {family} site of this tree")
 
 
@@ -370,6 +404,13 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
     if not matches:
         raise ValueError(f"knob key {key!r} names no site on this tree (a structural change broke a stored key?)")
     if len({id(s.node) for s in matches}) > 1:
+        # An EXACT full-path match outranks subsequence admissions: a shallow site's full path is
+        # an anchored subsequence of every deeper same-axis path, so without this preference the
+        # canonical full-path spelling (the ordinal arm's fallback) could never name the shallow
+        # site at all. Only consulted at the ambiguity point — sugar that was unique stays unique.
+        exact = [s for s in matches if s.segments == parsed.segments]
+        if len({id(s.node) for s in exact}) == 1:
+            return exact[0]
         cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in matches))
         raise ValueError(f"knob key {key!r} is ambiguous: use {cands}")
     # Several matches that are ONE node are not ambiguous: a shared subtree is a site at each path
@@ -390,4 +431,16 @@ def canonical(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> s
     return spell(root, parse_key(key).family, site.node, all_sites=all_sites)
 
 
-__all__ = ["PATH_FAMILIES", "SLICE_FAMILIES", "Site", "canonical", "family_sites", "parse_key", "primary", "resolve", "sites", "spell"]
+__all__ = [
+    "PATH_FAMILIES",
+    "SLICE_FAMILIES",
+    "Site",
+    "UnknownSiteError",
+    "canonical",
+    "family_sites",
+    "parse_key",
+    "primary",
+    "resolve",
+    "sites",
+    "spell",
+]

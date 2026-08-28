@@ -13,7 +13,7 @@ from dataclasses import replace
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda, M
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 
 
@@ -41,17 +41,31 @@ def lift_body(body) -> Body:
             out.append(stmt)
             continue
         if stmt.is_reduce:
-            fold = fold_from_loop(stmt)
+            fold, trailing = scan_from_loop(stmt)
             seeds = set(fold.combine.results)
             out = [s for s in out if not (isinstance(s, Init) and s.name in seeds)]
             out.append(fold)
+            out.extend(trailing)
             continue
         out.append(replace(stmt, body=lift_body(stmt.body)))
     return Body(tuple(out))
 
 
 def fold_from_loop(loop: Loop) -> Fold:
-    """Lift one reduction from its explicit ``Accum`` statements."""
+    """Lift one PURE reduction from its explicit ``Accum`` statements."""
+    fold, trailing = scan_from_loop(loop)
+    if trailing:
+        raise ValueError(f"reduce loop {loop.axis.name!r} carries per-step stores — a scan, not a pure reduction")
+    return fold
+
+
+def scan_from_loop(loop: Loop) -> tuple[Fold, tuple[Write, ...]]:
+    """Lift one reduction from its explicit ``Accum`` statements. A per-step ``Write`` makes it a
+    SCAN: the store observes the carried state, so the fold gains an observer — a pure per-step
+    tap binding fresh ``<state>__obs`` names — and each store returns rewritten to read the
+    observed name. The rewritten stores ride the stream position after the node (the observed
+    names are the fold's extra ``defines``), where boundary extraction claims them as ordinary
+    ``OutputSpec``\\ s and reconstitution splices them back into the loop."""
     loop = _stamp_axes(loop)
     body = lift_body(loop.body)
     accums = tuple(stmt for stmt in body if isinstance(stmt, Accum))
@@ -59,11 +73,25 @@ def fold_from_loop(loop: Loop) -> Fold:
         raise ValueError(f"reduce loop {loop.axis.name!r} has no Accum")
     if any(stmt.base is not None or stmt.dtype is not None for stmt in accums):
         raise ValueError(f"reduce loop {loop.axis.name!r} is not in canonical Loop IR")
-    step = Body(stmt for stmt in body if not isinstance(stmt, Accum))
+    writes = tuple(stmt for stmt in body if isinstance(stmt, Write))
+    write_ids = {id(stmt) for stmt in writes}
+    step = Body(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
     names = tuple(stmt.name for stmt in accums)
     lift = Lambda(params=(loop.axis.name,), body=step, results=tuple(stmt.value for stmt in accums))
     init, combine = M(*(stmt.op for stmt in accums), names=names)
-    return Fold(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine)
+    if not writes:
+        return Fold(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine), ()
+    stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))
+    if any(value not in names for value in stored):
+        raise ValueError(f"reduce loop {loop.axis.name!r}: a per-step store may only observe the carried state {names}")
+    observe = Lambda(
+        params=(loop.axis.name, *names),
+        body=Body(tuple(Assign(name=f"{value}__obs", op="copy", args=(value,)) for value in stored)),
+        results=tuple(f"{value}__obs" for value in stored),
+    )
+    fold = Fold(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine, observe=observe)
+    renamed = tuple(replace(stmt, values=tuple(f"{value}__obs" for value in stmt.values)) for stmt in writes)
+    return fold, renamed
 
 
 def _peel(body: Body) -> tuple[list, list[Stmt]]:

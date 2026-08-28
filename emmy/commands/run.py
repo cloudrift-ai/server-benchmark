@@ -67,14 +67,29 @@ def register_run_command(subparsers):
     )
     parser.add_argument(
         "--golden",
-        metavar="PATH",
-        help="Run every embedded target in this working golden YAML. Mutually exclusive with other inputs.",
+        metavar="NAME",
+        help=(
+            "Run the embedded Torch IR program for a golden record. NAME is an exact golden name OR a name "
+            "substring, resolved against --golden-file when given and against the live card's corpus otherwise. "
+            "Mutually exclusive with --code / positional input / --ir."
+        ),
     )
     parser.add_argument(
-        "--target",
-        dest="golden_target",
-        metavar="NAME",
-        help="Run only the matching target from --golden instead of every target.",
+        "--golden-file",
+        metavar="PATH",
+        help=(
+            "Resolve --golden NAME from this explicit working YAML instead of the canonical live-GPU corpus. "
+            "Alone, without --golden, runs every target in the file."
+        ),
+    )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help=(
+            "With --golden-file --bench, write each benched target's emmy and torch.compile timings back into the "
+            "file as a `latency:` entry keyed by this card's hardware id. Recording is always deliberate: nothing "
+            "else writes that block, so a suite run can never quietly rewrite checked-in data."
+        ),
     )
     parser.add_argument(
         "--layer",
@@ -208,10 +223,10 @@ def handle_run(args):
     else:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if args.golden_target and not args.golden:
-        logger.error("--target requires --golden PATH")
+    if args.record and not (args.golden_file and args.bench):
+        logger.error("--record requires --golden-file and --bench")
         sys.exit(2)
-    if args.golden:
+    if args.golden_file and not args.golden:
         _run_golden_targets(args)
         return
 
@@ -229,7 +244,7 @@ def _handle_run_once(args):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.dump import CompilerDump
 
-    if getattr(args, "golden_file", None):
+    if args.golden_file or args.golden:
         resolve_golden_arg(args)
     else:
         args.golden_configs = []
@@ -472,24 +487,89 @@ def _handle_run_once(args):
         sys.exit(1)  # every row is reported above; any failed row (greedy or pinned) exits non-zero
 
 
+def _bench_total_us(bench) -> tuple[float | None, str | None]:
+    """One benchmark's headline microseconds and the semantics they carry.
+
+    A whole-program end-to-end minimum when the run captured one; otherwise the kernel minimum,
+    summed across launches. Shared by the ``--json`` record and ``--record`` so a stored latency
+    and a reported one are the same number.
+    """
+    if bench is None:
+        return None, None
+    e2e_min_ms = getattr(bench, "e2e_min_ms", None)
+    if e2e_min_ms is not None:
+        return e2e_min_ms * 1000, "whole_program_e2e"
+    num_launches = getattr(bench, "num_launches", 0) or len(bench.per_launch or [])
+    total_ms = bench.min_ms if bench.min_ms is not None else bench.time_ms
+    return total_ms * 1000, "single_launch" if num_launches <= 1 else "per_launch_sum"
+
+
+def _record_golden_latency(args, results: dict, golden_benches) -> None:
+    """Write this card's emmy / torch.compile timings back into the benched working golden.
+
+    The emmy number is the PINNED row's when one was measured, not the greedy pick's: a corpus
+    case names a schedule, and recording whatever the prior happened to choose would store a
+    timing for a different kernel than the one the file describes.
+    """
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.working_golden import record_latency  # noqa: PLC0415
+
+    measured = [gb for gb in golden_benches or [] if gb.status == "ok" and gb.bench is not None]
+    if len(measured) > 1:
+        logger.error("--record needs exactly one pinned row to attribute the timing to, measured %d", len(measured))
+        sys.exit(2)
+    emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
+    tcompile_us = results.get("torch.compile")
+    if not emmy_us:
+        logger.error("--record measured no Emmy timing for %s", args.golden)
+        sys.exit(2)
+    if not tcompile_us:
+        # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
+        logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", args.golden)
+    document = getattr(args, "_golden_document", None)
+    if document is None:
+        from emmy.compiler.pipeline.search.golden import load_golden_file  # noqa: PLC0415
+
+        document = load_golden_file(args.golden_file)
+    record_latency(
+        args.golden_file,
+        document,
+        args.golden,
+        hardware_id=Context.probe().hardware_id(),
+        emmy_us=emmy_us,
+        tcompile_us=tcompile_us,
+    )
+    logger.info(
+        "recorded %s: emmy %.2f us (%s)%s",
+        args.golden,
+        emmy_us,
+        "pinned row" if measured else "greedy pick",
+        f", torch.compile {tcompile_us:.2f} us" if tcompile_us else "",
+    )
+
+
 def _run_golden_targets(args) -> None:
-    """Run a working golden's selected targets sequentially in this process."""
+    """Run every target of a working golden sequentially in this process.
+
+    Reached only by a bare ``--golden-file``; naming one target with ``--golden NAME`` goes
+    straight down the single-run path, which already thinks in the (file, name) pair.
+    """
     from copy import copy  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
-        logger.error("--golden is mutually exclusive with positional input / --code / --ir")
+        logger.error("--golden-file is mutually exclusive with positional input / --code / --ir")
         sys.exit(2)
     try:
-        document = load_golden_file(args.golden)
+        document = load_golden_file(args.golden_file)
         records = load_golden_records(document)
     except (OSError, ValueError) as exc:
-        logger.error("cannot load --golden %s: %s", args.golden, exc)
+        logger.error("cannot load --golden-file %s: %s", args.golden_file, exc)
         sys.exit(2)
-    names = [args.golden_target] if args.golden_target else list(dict.fromkeys(record.name for record in records))
+    names = list(dict.fromkeys(record.name for record in records))
     if not names:
-        logger.error("--golden contains no targets: %s", args.golden)
+        logger.error("--golden-file contains no targets: %s", args.golden_file)
         sys.exit(2)
 
     output_dir = None
@@ -502,10 +582,8 @@ def _run_golden_targets(args) -> None:
 
     for index, name in enumerate(names):
         target_args = copy(args)
-        target_args.golden_file = args.golden
         target_args._golden_document = document
         target_args.golden = name
-        target_args.golden_target = None
         if output_dir is not None:
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._") or "target"
             target_args.json = str(output_dir / f"{index:03d}-{safe_name}.json")
@@ -1332,15 +1410,9 @@ def _write_ab_json(
             return {"total_us": None, "timing_semantics": None, "captured": None, "num_launches": 0}
         per_launch = b.per_launch or []
         num_launches = getattr(b, "num_launches", 0) or len(per_launch)
-        e2e_min_ms = getattr(b, "e2e_min_ms", None)
-        if e2e_min_ms is not None:
-            total_ms = e2e_min_ms
-            semantics = "whole_program_e2e"
-        else:
-            total_ms = b.min_ms if b.min_ms is not None else b.time_ms
-            semantics = "single_launch" if num_launches <= 1 else "per_launch_sum"
+        total_us, semantics = _bench_total_us(b)
         return {
-            "total_us": total_ms * 1000,
+            "total_us": total_us,
             "timing_semantics": semantics,
             "captured": bool(getattr(b, "captured", False)),
             "num_launches": num_launches,
@@ -1559,8 +1631,10 @@ def _run_ncu_profile(args, *, dump_dir=None):
         "emmy.emmy",
         "run",
     ]
-    if getattr(args, "golden_file", None):
-        cmd.extend(["--golden", args.golden_file, "--target", args.golden])
+    if args.golden_file or args.golden:
+        cmd.extend(["--golden", args.golden])
+        if args.golden_file:
+            cmd.extend(["--golden-file", args.golden_file])
     elif args.code is not None:
         cmd.extend(["--code", args.code])
     elif args.ir is not None:
@@ -2380,6 +2454,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             correctness=correctness,
             strict_errors=strict_errors,
         )
+    if getattr(args, "record", False):
+        _record_golden_latency(args, results or {}, ab_benches)
     for error in strict_errors or []:
         logger.error("strict: %s", error)
     if args.profile and greedy_fail is None:

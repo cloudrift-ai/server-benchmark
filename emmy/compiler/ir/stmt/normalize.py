@@ -636,7 +636,13 @@ def dedup_loads(stmts: Body) -> Body:
     name. Operates per-scope: a Load at an outer scope is reused by
     inner siblings (their identical ``index`` doesn't reference any
     inner-axis Var, so the values are equal). Loads inside a nested
-    scope are not visible to outer / sibling scopes."""
+    scope are not visible to outer / sibling scopes.
+
+    Hygienic: an inner scope that re-binds a name the outer scope
+    deduped keeps its own binding — those are different variables
+    (see :func:`~emmy.compiler.ir.stmt.passes.rename_free`)."""
+    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
+
     stmts = Body.coerce(stmts)
 
     def walk(
@@ -649,6 +655,18 @@ def dedup_loads(stmts: Body) -> Body:
 
         def rename(n: str) -> str:
             return alias.get(n, n)
+
+        def descend(inner: Body) -> Body:
+            """Enter ``inner``'s scope, dropping every alias / kept name whose spelling ``inner``
+            re-binds. SSA names bound inside a Loop / Cond body are scoped to it, so such a name is
+            a DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
+            value and redeclare the survivor."""
+            shadowed = _all_ssa_defs(inner)
+            return walk(
+                inner,
+                {k: v for k, v in local.items() if v not in shadowed},
+                {k: v for k, v in alias.items() if k not in shadowed},
+            )
 
         out: list[Stmt] = []
         for s in body:
@@ -665,14 +683,14 @@ def dedup_loads(stmts: Body) -> Body:
                     continue
                 local[key] = s.name
                 out.append(s)
-            elif isinstance(s, Loop):
-                out.append(replace(s, body=walk(s.body, local, alias)))
-            elif isinstance(s, StridedLoop):
-                out.append(replace(s, body=walk(s.body, local, alias)))
+            elif isinstance(s, Loop | StridedLoop):
+                out.append(replace(s, body=descend(s.body)))
             elif isinstance(s, Cond):
-                out.append(Cond(cond=s.cond, body=walk(s.body, local, alias), else_body=walk(s.else_body, local, alias)))
+                out.append(Cond(cond=s.cond, body=descend(s.body), else_body=descend(s.else_body)))
             else:
-                out.append(s.rewrite(rename))
+                # ``rename_free``, not ``rewrite``: identical for a leaf, but a block stmt the
+                # ladder above doesn't name (``Tile``) carries scopes the alias must stop at.
+                out.append(rename_free(s, alias))
         return tuple(out)
 
     return walk(stmts, {}, {})

@@ -35,7 +35,7 @@ from emmy.compiler.ir.schedule import ReducePlan, derive_inventory
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
-from emmy.compiler.ir.tile.path import resolve, sites, spell
+from emmy.compiler.ir.tile.path import UnknownSiteError, resolve, sites, spell
 
 
 def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -223,11 +223,31 @@ class Sched:
         #: not at each reader (:meth:`tile_of`).
         self.place = place
         self._sites = None
+        self._site_by_id = None
 
     def _all_sites(self):
         if self._sites is None:
             self._sites = sites(self.root)
         return self._sites
+
+    def site_of(self, node):
+        """The :class:`~emmy.compiler.ir.tile.path.Site` of ``node`` on this tree — how a consumer
+        holding a node learns its own address. A shared subtree keeps its FIRST site (one node,
+        one schedule, however many paths reach it). A node that is not a site RAISES
+        :class:`~emmy.compiler.ir.tile.path.UnknownSiteError` — an identity miss (a copied or
+        rebuilt node) must be loud, never a silent fall-through to the untiled path."""
+        if self._site_by_id is None:
+            by_id = {}
+            for s in self._all_sites():
+                by_id.setdefault(id(s.node), s)
+            self._site_by_id = by_id
+        site = self._site_by_id.get(id(node))
+        if site is None:
+            raise UnknownSiteError(
+                f"{type(node).__name__} is not a site of this tree — the caller holds a copied or "
+                f"rebuilt node, not the stored object the site walk enumerated"
+            )
+        return site
 
     def key(self, family: str, node) -> str | None:
         """The canonical codec key addressing ``node`` under ``family`` — ``None`` when the node
@@ -288,9 +308,7 @@ class Sched:
           the fragment clamps were built against.
         """
         free = tuple(self.place.free)
-        site = next((s for s in self._all_sites() if s.node is node), None)
-        if site is None:
-            return None
+        site = self.site_of(node)
         ancestors = tuple(
             candidate
             for candidate in self._all_sites()
@@ -396,12 +414,21 @@ def projection_tail(tile) -> list[Stmt]:
     return apply_output_specs(body, tile.output_specs)
 
 
+class UnbindableProjection(ValueError):
+    """The projection's outputs do not partition by producing root, so the multi-root binding has
+    no realization for this row — a legality fact about the OFFERED row, not a malformed tree.
+    Typed so the materializer can decline the row (``RuleSkipped`` → the greedy blocklist retry
+    moves to the next one) without masking genuinely malformed input, which stays a plain
+    ``ValueError``."""
+
+
 def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tuple], ...]:
     """Partition an independent projection's pure body and output specifications by producing Fold.
 
     Each output specification must read exactly one root, the roots' backward cones must be disjoint,
     and together those cones must cover the projection body. This is the structural ownership
     rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh pieces.
+    Refusals raise :class:`UnbindableProjection`.
     """
     roots = tuple(edge for edge in op.operands if isinstance(edge, Fold))
     by_name = {name: root for root in roots for name in root.defines()}
@@ -411,16 +438,16 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body,
         cone = op.body.backward_cone((spec.write.value,))
         used = {id(by_name[name]) for name in cone.external_reads if name in by_name}
         if len(used) != 1:
-            raise ValueError("an output-tiled root must own each output specification independently")
+            raise UnbindableProjection("an output-tiled root must own each output specification independently")
         owner = used.pop()
         members[owner].update(cone.members)
         grouped[owner].append(spec)
 
     claimed: set = set().union(*members.values()) if members else set()
     if claimed != set(op.body) or any(not grouped[id(root)] for root in roots):
-        raise ValueError("an output-tiled root forest must cover the complete projection")
+        raise UnbindableProjection("an output-tiled root forest must cover the complete projection")
     if any(members[id(left)] & members[id(right)] for i, left in enumerate(roots) for right in roots[i + 1 :]):
-        raise ValueError("output-tiled root projections may not share tail statements")
+        raise UnbindableProjection("output-tiled root projections may not share tail statements")
     return tuple((root, Body(stmt for stmt in op.body if stmt in members[id(root)]), tuple(grouped[id(root)])) for root in roots)
 
 

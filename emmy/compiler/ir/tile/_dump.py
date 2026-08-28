@@ -196,6 +196,8 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     items.append((f"lift: {_lam_sig(node.lift, ctx)}", _stmts(node.lift.body, ctx)))
     if node.combine is not None:
         items.append((f"combine: {_lam_sig(node.combine, ctx)}", _stmts(node.combine.body, ctx)))
+    if node.observe is not None:
+        items.append((f"observe: {_lam_sig(node.observe, ctx)}", _stmts(node.observe.body, ctx)))
     return items
 
 

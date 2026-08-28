@@ -511,7 +511,7 @@ def test_multinode_flash_keys_apart_and_pools_per_node():
     (REDUCE@sk); the two ``TILE`` keys are distinct flat entries (no collision), and the schedule
     geometry featurizes **per node** and sum-pools — ``D_threads`` = QK threads + PV threads, and
     ``MMA_tier`` = 2.0 over the two warp nodes. This is the case the flat one-key schema can't express."""
-    from emmy.compiler.pipeline.search.features import _node_axes, _node_slice, _schedule_node_features
+    from emmy.compiler.pipeline.search.features import _schedule_node_features, node_slices
 
     qk_tile = "mma_m16n8k16_f16_f32/f2x2/k2"  # over the shared w4x1 inventory: 128 threads
     pv_tile = "mma_m16n8k16_f16_f32/f4x1/k2"  # the same inventory, its own register tile
@@ -525,9 +525,13 @@ def test_multinode_flash_keys_apart_and_pools_per_node():
         "S_ext_free_prod": 4096.0,
     }
     assert knobs["TILE@d"] != knobs["TILE@sk"]  # the two tiles key apart in the flat dict
-    assert _node_axes(knobs) == ["d", "sk"]
-    qk = _schedule_node_features(_node_slice(knobs, "d"))
-    pv = _schedule_node_features(_node_slice(knobs, "sk"))
+    slices = node_slices(knobs)
+    assert [sorted(k for k in sl if "@" in k) for sl in slices] == [
+        ["STAGE@d", "TILE@d"],
+        ["REDUCE@sk", "STAGE@sk", "TILE@sk"],
+    ]
+    qk = _schedule_node_features(slices[0])
+    pv = _schedule_node_features(slices[1])
     feats = knob_features(knobs)
     assert feats["D_threads"] == qk["D_threads"] + pv["D_threads"] == 256.0
     assert feats["MMA_tier"] == 2.0  # both nodes are warp-tier → pooled tier count
@@ -537,13 +541,15 @@ def test_node_slice_addresses_per_node_struct():
     """Each node reads its OWN reduce extent: an addressed ``S_ext_reduce_prod@<axis>`` overrides the
     shared bare value in that node's slice (so QK@d and PV@sk featurize with different K depths), while
     a one-node kernel with a bare ``S_ext_reduce_prod`` featurizes byte-identically (bare fallback)."""
-    from emmy.compiler.pipeline.search.features import _node_slice
+    from emmy.compiler.pipeline.search.features import node_slices
 
     knobs = {"TILE@d": "f2", "TILE@sk": "f4", "S_ext_reduce_prod": 8.0, "S_ext_reduce_prod@sk": 512.0}
-    assert _node_slice(knobs, "d")["S_ext_reduce_prod"] == 8.0  # no @d override → bare fallback
-    assert _node_slice(knobs, "sk")["S_ext_reduce_prod"] == 512.0  # addressed override wins
-    # One-node bare stamp: the slice for the sole node is the whole dict (byte-identical featurizer).
-    assert _node_slice({"TILE": "f2", "S_ext_reduce_prod": 8.0}, None) == {"TILE": "f2", "S_ext_reduce_prod": 8.0}
+    d_slice, sk_slice = node_slices(knobs)
+    assert d_slice["S_ext_reduce_prod"] == 8.0  # no @d override → bare fallback
+    assert sk_slice["S_ext_reduce_prod"] == 512.0  # addressed override wins
+    # One-node bare stamp: the sole node's slice carries the whole row's geometry projection.
+    (bare,) = node_slices({"TILE": "f2", "S_ext_reduce_prod": 8.0})
+    assert dict(bare) == {"TILE": "f2", "S_ext_reduce_prod": 8.0}
 
 
 def test_precision_pin_precedence(monkeypatch):
@@ -673,3 +679,44 @@ def test_stamp_schedule_families_fills_absent_families_with_off():
     declined_only = stamp_schedule_families({"STAGE@a1": "", "REDUCE@a1": "", "WORK": "w1x16"})
     assert declined_only["STAGE"] == "" and declined_only["REDUCE"] == ""
     assert not any("@" in key for key in declined_only)
+
+
+def test_knob_features_geometry_memo_is_invisible():
+    """The geometry memo (``features._GEOMETRY_MEMO``, keyed on the :class:`NodeSlice` the block
+    is computed FROM — input and key are one object) must be byte-invisible, and the slices must
+    carry everything the block reads: each row's per-slice blocks equal the block computed from
+    the FULL row dict (the retired pre-slice contract) for the all-bare rows, and repeat passes
+    (all memo hits) equal the first."""
+    import emmy.compiler.pipeline.search.features as features_mod
+    from emmy.compiler.pipeline.search.features import node_slices
+
+    rows = [
+        {"TILE": "f2x4", "WORK": "t32x8"},
+        {"TILE": "f2x4", "WORK": "t32x8", "S_ext_free_prod": 2048.0, "H_sm_count": 128.0},
+        {"TILE": "f2x4", "WORK": "t32x8", "S_masked_m": 1.0, "S_ext_free_prod": 2048.0, "H_sm_count": 84.0},
+        {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "S_ext_free_prod": 2048.0 * 2048.0, "H_sm_count": 128.0},
+        {"TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "coop", "STAGE": "d2/smem-async", "WORK": "w4x2"},
+        {"STAGE": "d3/smem-tma"},
+        {"TILE@dd": "f2", "TILE@pj": "f4", "REDUCE": "coop", "WORK": "t32x8", "S_ext_free_prod": 64.0, "H_sm_count": 128.0},
+        {"TILE": "f2x4", "WORK": "t32x8", "BN": 64, "unrelated": 3},
+        {"S_n_load": 3.0, "S_ext_free_prod": 512.0},
+    ]
+    features_mod._GEOMETRY_MEMO.clear()
+    memoized = [knob_features(r) for r in rows]
+    repeat = [knob_features(r) for r in rows]  # second pass = all cache hits
+    assert memoized == repeat
+    # Slice completeness: an ALL-BARE row's single slice must featurize identically to the whole
+    # row dict — the geometry block reads nothing the slice projects away.
+    for r in rows:
+        slices = node_slices(r)
+        if len(slices) == 1:
+            assert dict(features_mod._schedule_node_features(slices[0])) == dict(features_mod._schedule_node_features(r))
+    # Memoized blocks are read-only: a consumer mutating a shared block must raise, not corrupt.
+    sl = node_slices(rows[0])[0]
+    block = features_mod._node_geometry(sl)
+    with pytest.raises(TypeError):
+        block["D_threads"] = 0.0  # type: ignore[index]
+    # The key must separate rows differing only in a structural extent the block reads.
+    a = knob_features({"TILE": "f2x4", "WORK": "t32x8", "S_ext_free_prod": 512.0, "H_sm_count": 128.0})
+    b = knob_features({"TILE": "f2x4", "WORK": "t32x8", "S_ext_free_prod": 2048.0, "H_sm_count": 128.0})
+    assert any(a.get(k) != b.get(k) for k in a if k.startswith("D_"))

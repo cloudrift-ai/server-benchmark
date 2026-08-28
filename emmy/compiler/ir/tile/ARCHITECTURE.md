@@ -19,11 +19,22 @@ an `OutputSpec` owned by the `TileOp`. Any other surviving loop is a formation e
 | `lift` | pure per-element `Lambda`; nested reductions occupy their original structural position here |
 | `init` / `combine` | componentwise monoid read mechanically from the loop's `Accum` statements |
 | `operands` | explicit materialized or computed inputs used by later transforms |
+| `observe` | optional per-step observer — the scan spelling: a pure `λ(k, state…)` evaluated after each combine |
 
 `Fold.defines()` exposes the fold results to its containing lambda. This is what lets later statements in an SDPA
 cell read the maximum, denominator, or nested QK result without extracting or relocating any subtree.
 
 `Fold.loop` is the inverse spelling used by materialization. The term itself carries no placement or schedule.
+
+Every stored `combine` is claimed by a registered **monoid family** (`ir/pure/algebra.py` — componentwise, or a
+twisted entry such as exp/LSE; membership is generator-output equality, never an annotation), and the claiming family
+answers the family-shaped reads: the `TWISTED` role, the cross-partition merge realization, the rename regeneration,
+and the legality properties (`commutative`, `observable`).
+
+A fold with an `observe` is a **scan**: the observer binds `(axis, *state)` positionally, its results are fresh names
+only kernel-boundary `OutputSpec` writes consume, and the streamed store reconstitutes inside the reduce loop after
+the observer stmts (`observed_result_names` + the `observed=` reconstitution arm). An observed fold makes the stream
+order-visible, so the schedule offers exactly the serial reduce plan and the cross-CTA split fork declines it.
 
 ## Total lift
 
@@ -31,7 +42,10 @@ cell read the maximum, denominator, or nested QK result without extracting or re
 
 1. recursively lift nested reductions in place;
 2. remove the current loop's `Accum` statements from its step body;
-3. build the `lift`, `init`, and `combine` directly from those accumulators.
+3. build the `lift`, `init`, and `combine` directly from those accumulators;
+4. a per-step `Write` over the carried state (the `025_lift_scan` shape) peels into an observer — the fold gains
+   `observe` with fresh `<state>__obs` results, and the store, rewritten to read the observed name, rides the stream
+   position after the node, where output-spec extraction claims it as an ordinary boundary write.
 
 There is no SDPA matching, byte-identity recognition gate, softmax pairing, fused view, or raw-loop fallback at this
 boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a later fork over this complete tree.
@@ -152,3 +166,8 @@ output tile remains at the child site. Local catalogs compose lazily through one
 on any shared physical axes. The same rule combines independent roots, including roots whose algebraic M/N readings
 reverse the same physical axes. A shape with no legal row remains unmapped, and scheduling never replaces or
 annotates the Fold tree.
+
+A consumer holding a node learns its own address through `Sched.site_of` — one identity-keyed lookup against the
+site walk. A node that is a site but not of the asked family reads as "family doesn't apply"; a node that is not a
+site of the tree at all (a copied or rebuilt object) raises `UnknownSiteError`, which no accessor swallows — an
+identity miss is never the silent untiled path.

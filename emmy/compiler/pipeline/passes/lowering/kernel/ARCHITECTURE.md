@@ -7,9 +7,20 @@ afterwards.
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 
 `010_materialize` is a thin wrapper: after the split-survivor assert it makes **one** call to
-`_factor.factorize(tile, root)`, the entry to the recursive emitter. `factorize` builds the ambient `Ctx` and dispatches
-`tile.op` through `_factorize`, which peels projecting zero-axis `Fold`s and binds each leaf via the ONE root-binding
-pipeline (`_factor._bind`) — its form is read off the node's SCHEDULE (which axes are tiled), never a kernel kind, and
+`_factor.factorize(tile, root)`, the entry to the recursive emitter, then passes the finished body through
+`_drop_repeated_declarations` — the emitted body's one legality guard. Operand cones splice INDEPENDENTLY
+(`Fold.spliced_step`), so two sibling cones reading one shared broadcast constant each carry their own copy of its
+`buf[0]` `Load`, under the same SSA name and at the same address; flattened into one loop body that is two C
+declarations of one name, which nvcc rejects (*already declared in the current scope*). The repeat binds nothing new,
+so it is dropped with NO rewrite — which is what keeps the guard narrow enough to run over a WHOLE kernel body. The
+renaming forms (`_atom._dedup_loads`, `stmt.dedup_loads`) collapse two DIFFERENT names at one address, which needs a
+memory-effect reading neither has: a `Write` or an async fill between two identical loads of a staged buffer makes the
+second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
+illegal. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
+
+`factorize` builds the ambient `Ctx` and dispatches `tile.op` through `_factorize`, which peels projecting zero-axis
+`Fold`s and binds each leaf via the ONE root-binding pipeline (`_factor._bind`) — its form is read off the node's
+SCHEDULE (which axes are tiled), never a kernel kind, and
 it seals through the one `grid_tile` finalizer (the article's "schedule separate from combine" thesis — the op tree +
 `ir/tile` `Fold.lower` are shared across kinds; only the partition changes). Its arms are points of one
 `(output-tiling) × (reduce-folding)` space:
@@ -89,9 +100,11 @@ loop under the one name; anything else tiles nothing and folds serially one thre
 output cell (the degenerate `_emit(op)` + `with_store`) — there is **no** separate "scalar tier" branch, and no
 per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
 (`out_val`, the root node's produced `Handle`) are threaded down the recursion, so `with_store` is node-agnostic. The
-kernel-boundary `TileOp.output_specs` are reconstituted at their owning projection region or the zero-axis Fold peel,
-so everything below the peel — the sinks, cooperative loop distribution, and split realizers — consumes the
-identical statement stream that entered total lift. The
+kernel-boundary `TileOp.output_specs` are reconstituted at their owning projection region or the zero-axis Fold peel
+(a STREAMED store — one whose values are an observed fold's observer results — rides the recursion down to the leaf
+instead and splices into the reduce loop after the observer stmts), so everything below the peel — the sinks,
+cooperative loop distribution, and split realizers — consumes the identical statement stream that entered total
+lift. The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
 node kinds, no algebra, no `Ctx`. That is the decide/realize seam: the tile schedule picks the plan, `_tiling` is

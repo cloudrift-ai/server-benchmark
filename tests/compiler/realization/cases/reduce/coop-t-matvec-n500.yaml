@@ -1,0 +1,36 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x0, x1]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [1, 256]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [500, 256]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f32, [1, 500]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - linear
+  realizations:
+  - name: k_linear_7ddd44.fdd34b80fe94
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop-t
+    identity: 3e3e5d7b1e904f1d35d2953b51bcaa65a80bacccd241213b305aa592cf61caf2
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 4.784688995215311
+        tcompile_us: 2.0489744268930874

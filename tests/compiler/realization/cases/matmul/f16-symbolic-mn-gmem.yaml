@@ -1,0 +1,38 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [q, kT]
+  outputs: [o]
+  nodes:
+  - id: kT
+    op: input
+    outputs: [[kT, f16, [128, {sym: seq_len, hint: 512}]]]
+  - id: q
+    op: input
+    outputs: [[q, f16, [{sym: seq_len, hint: 512}, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [q, kT]
+    outputs: [[o, f16, [{sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_matmul_7b0747.6937e053d32f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      WORK: w2x2
+      STAGE: ''
+      REDUCE: ''
+    identity: 6331b8bfbf3ea01458b6515558c8766e64e0ff3bb6ce41399744b11fdfe5648d
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 5.161948154627351
+        tcompile_us: 4.06400001410282

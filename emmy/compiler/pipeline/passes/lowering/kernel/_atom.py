@@ -56,6 +56,7 @@ from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_bo
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat_dtypes, make_cone
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
@@ -1432,7 +1433,12 @@ def _cell_varying(body, side: Side | None) -> bool:
 def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
     """Collapse syntactically-identical scalar ``Load``s (same buffer + index) to one binding,
     rewriting the dropped names to the survivor — the operand reuse a register tile exists for (a
-    load not referencing the ``m`` cell axis is shared across the ``n`` cells, and vice versa)."""
+    load not referencing the ``m`` cell axis is shared across the ``n`` cells, and vice versa).
+
+    Dedup itself is per-``stmts`` (this list only); the rewrite reaches nested scopes, since an
+    epilogue cell's output sweep consumes the loads hoisted above it. It goes through
+    :func:`~emmy.compiler.ir.stmt.passes.rename_free` so a nested scope re-binding a dropped
+    name keeps its own binding."""
     seen: dict = {}
     rename: dict[str, str] = {}
     kept: list[Stmt] = []
@@ -1445,7 +1451,7 @@ def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
             seen[sig] = s.names[0]
         kept.append(s)
     if rename:
-        kept = [s.rewrite(lambda nm: rename.get(nm, nm)) for s in kept]
+        kept = [rename_free(s, rename) for s in kept]
     return kept
 
 

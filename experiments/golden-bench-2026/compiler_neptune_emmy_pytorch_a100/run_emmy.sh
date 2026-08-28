@@ -2,7 +2,7 @@
 # Comparison lane: bench one common attention operator's sequence sweep as
 # eager PyTorch / torch.compile / Emmy. Two arms per setup:
 #
-#   replay     `emmy run --golden` re-measures the setup's committed tuned schedules twice at -O3.
+#   replay     `emmy run --golden-file` re-measures the setup's committed tuned schedules twice at -O3.
 #              `emmy trace --code` stores a single-op program's post-fusion targets as Loop IR
 #              (every kernel shares one provenance selector), and a Loop IR target has no torch
 #              twin, so each replay checks exact pins against same-input greedy Emmy. It is not a
@@ -52,7 +52,7 @@ for sequence_length in "${SEQUENCE_LENGTHS[@]}"; do
     # --json takes a path per target: a file for a single-target golden, a directory when the
     # traced program lowered to several post-fusion kernels.
     if EMMY_NVCC_FLAGS= timeout --signal=TERM --kill-after=30s 600s \
-      "$emmy" run --golden "$golden" --bench --bench-backends emmy \
+      "$emmy" run --golden-file "$golden" --bench --bench-backends emmy \
       --warmup 1 --iters 15 --no-record-nodes \
       --json "$results/json/$setup.replay-$repetition" --dump-dir "$results/dumps/$setup.replay-$repetition" \
       2>&1 | tee "$results/logs/$setup.replay-$repetition.log"; then

@@ -252,6 +252,9 @@ immutable and op-independent — frozen options over read-only knob mappings; op
 and the live pins — so a hit replays the walk over the memo, and every leaf row is a fresh dict the CURRENT
 kernel's own materialization decodes. The memo sits below the search policies — greedy and MCTS hit it alike —
 and holds no ranking and consults no evidence; a prescan that raises (a pin naming nothing) is never memoized.
+The composed digest is also the pool's MINTED identity: `schedule()` stamps it on the shared walk state, every
+Fork of the tree exposes it as `pool_id`, and consumers (the greedy decision memo) key on the stamp instead of
+re-deriving a weaker identity — one minting site, so a decision memo and this pool memo cannot key differently.
 Offline sampling (`emmy fit`, via `ctx.pool_sample`) is the one path that does not return the lazy fork: the
 walk's leaf stream is sampled by single-pass reservoir sampling (`search/pool.py` — nothing proportional to the
 pool is ever retained, and the exact pool size is known when the stream ends), and the drawn complete rows ride

@@ -1,0 +1,32 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x]
+  outputs: [mean]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, 1024]]]
+  - id: mean
+    op: torch.mean
+    attrs: {axis: 1}
+    inputs: [x]
+    outputs: [[mean, f32, [4, 1]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - mean
+  realizations:
+  - name: k_mean_f402e0.a48a23de33c7
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: r4
+    identity: d2b89b8bb0f6fc3ccef93faa749356b462e641ac9644dd99251733ffdcc6481b
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 8.980180229152646
+        tcompile_us: 2.051223792246918

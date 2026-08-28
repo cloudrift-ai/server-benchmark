@@ -21,9 +21,21 @@ kernel-level partition helpers live in ``pipeline/passes/lowering/_reduction``. 
 ``Monoid`` / ``Semiring`` node wrappers, the ψ-conjugation apparatus (``Carrier`` / ``Twist`` /
 ``State``) and the loop-annotation ``Algebra`` bundle are all retired: the node's stored combine
 is the single spelling of ⊕.
+
+The FAMILY REGISTRY (:func:`family_of`, :class:`Componentwise`, :class:`ExpFamily`) is the one
+dispatch over that spelling. A family claims a stored combine iff its generator would have
+emitted exactly that program — membership is program equality, never an annotation — and the
+claiming family answers every family-shaped question (the twist read behind ``AxisRole.TWISTED``,
+the cross-partition merge realization, the rename regeneration, the per-family legality
+properties). Associativity is proven at family-AUTHORING time by transport of structure (a
+bijection ψ on the carrier makes the conjugated combine associative for free) and pinned by the
+property tests; nothing algebraic runs at compile time. A new family — the affine recurrence, the
+Welford carrier — is a new registered entry, not a formation change.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -94,6 +106,87 @@ def degenerate(combine: Lambda) -> bool:
     return component_ops(combine) is not None
 
 
+# --------------------------------------------------------------------------------------------
+# The MONOID-FAMILY registry — the one dispatch over a stored combine. A family is a base
+# componentwise monoid, or its conjugation by a twist ψ (transport of structure: ψ a bijection
+# on the carrier ⇒ the twisted combine is associative by construction). Membership is PROGRAM
+# EQUALITY — a family claims a combine iff its generator would have emitted exactly it — so the
+# family is derived, never stored, and no annotation can lie. Registering a new family (the
+# affine recurrence, the Welford carrier) is a new entry in ``_TWISTED_FAMILIES`` plus its
+# property-test rows; formation code does not change.
+# --------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Componentwise:
+    """The untwisted family — one independent ⊕ᵢ per state component, exactly what :func:`M`
+    constructs. Parametrized by its op vector, so the instance IS the family's payload (the
+    per-component handles the trait/legality queries consume)."""
+
+    ops: tuple[ElementwiseImpl, ...]
+    name = "componentwise"
+    twisted = False
+    #: A per-step observer is meaningful: the serial stream visits elements in axis order, so the
+    #: running state at step k is the k-prefix reduction (a scan).
+    observable = True
+
+    @property
+    def commutative(self) -> bool:
+        """Whether the ⊕ reorders freely — what every order-scrambling combine move (the SHFL
+        butterfly, the cross-CTA atomic finalize) requires of the algebra."""
+        return all(op.commutative for op in self.ops)
+
+    def program(self, names: tuple[str, ...]) -> Lambda:
+        """The canonical ``S × S → S`` combine for these state names — :func:`M`'s program."""
+        return M(*self.ops, names=names)[1]
+
+    def merge(self, names: tuple[str, ...], other: tuple[str, ...], *, dtype=F32) -> tuple[Stmt, ...]:
+        return tuple(Accum(name=n, value=o, op=op, dtype=dtype) for n, op, o in zip(names, self.ops, other, strict=True))
+
+
+@dataclass(frozen=True)
+class ExpFamily:
+    """The exp/LSE twisted family — the base ``(max, +, +, …)`` monoid conjugated by
+    ψ(m, D, O…) = (m, D·e⁻ᵐ, O·e⁻ᵐ…), generated + stabilized by
+    :mod:`~emmy.compiler.ir.pure.carrier` (whose ``EXP_FAMILY`` table is the op vocabulary the
+    recognizer shares). Covers online softmax and flash attention — they differ only in channel
+    count."""
+
+    name = "exp"
+    twisted = True
+    #: The symmetric merge reorders freely (``max`` commutes, the rescaled adds commute).
+    commutative = True
+    #: No observer support yet: the per-step state is well-defined, but no customer exists and
+    #: the smaller supported surface keeps the formation gate meaningful.
+    observable = False
+
+    def program(self, names: tuple[str, ...]) -> Lambda:
+        other = tuple(f"{n}__o" for n in names)
+        return Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+
+    def merge(self, names: tuple[str, ...], other: tuple[str, ...], *, dtype=F32) -> tuple[Stmt, ...]:
+        return exp_combine_states(names, other, key=other[0], accum=True, dtype=dtype)
+
+
+#: The registered twisted entries, tried in order after the componentwise fast path.
+_TWISTED_FAMILIES = (ExpFamily(),)
+
+
+def family_of(combine: Lambda):
+    """The registered family claiming ``combine`` — :class:`Componentwise` over its op vector,
+    a twisted entry whose generated program equals the stored one, or ``None`` (no registered
+    family; formation rejects). The ONE family read behind ``AxisRole.TWISTED``, the merge
+    realization, the rename regeneration and the observer/partition legality gates."""
+    ops = component_ops(combine)
+    if ops is not None:
+        return Componentwise(ops)
+    names = tuple(r for r in combine.results if isinstance(r, str))
+    for family in _TWISTED_FAMILIES:
+        if combine == family.program(names):
+            return family
+    return None
+
+
 def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
     """A copy of a stored ``combine`` with every state/temp name mapped through ``rename_ssa`` —
     the lockstep the ``Fold`` rewrite applies so the stored algebra tracks its fold's SSA renames.
@@ -109,14 +202,10 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
             return f"{rename_ssa(name[:-3])}__o"
         return rename_ssa(name)
 
-    if component_ops(combine) is None:
+    family = family_of(combine)
+    if family is not None and family.twisted:
         old = tuple(r for r in combine.results if isinstance(r, str))
-        old_other = tuple(f"{n}__o" for n in old)
-        expected = Lambda(params=old + old_other, body=Body(exp_combine_states(old, old_other)), results=old)
-        if combine == expected:
-            names = tuple(rename_ssa(n) for n in old)
-            other = tuple(f"{n}__o" for n in names)
-            return Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+        return family.program(tuple(rename_ssa(n) for n in old))
     return Lambda(
         params=tuple(rn(p) for p in combine.params),
         body=Body(tuple(st.rewrite(rn) for st in combine.body)),
@@ -148,10 +237,10 @@ def merge_stmts(combine: Lambda, other: tuple[str, ...], *, dtype=F32) -> tuple[
     the deterministic function of its state names. ``dtype=None`` produces canonical Loop IR;
     kernel-level consumers keep the default f32 accumulator stamp."""
     names = tuple(r for r in combine.results if isinstance(r, str))
-    ops = component_ops(combine)
-    if ops is None:
-        return exp_combine_states(names, other, key=other[0], accum=True, dtype=dtype)
-    return tuple(Accum(name=n, value=o, op=op, dtype=dtype) for n, op, o in zip(names, ops, other, strict=True))
+    family = family_of(combine)
+    if family is None:
+        raise ValueError("merge_stmts: no registered monoid family claims this combine")
+    return family.merge(names, other, dtype=dtype)
 
 
 # --------------------------------------------------------------------------------------------
@@ -215,4 +304,16 @@ def product_spine(defs: dict, name: str, *, divide: bool = False):
     return (tuple(leaves), tuple(spine)) if walk(name) else None
 
 
-__all__ = ["M", "component_ops", "degenerate", "eval_lambda", "foldmap_eval", "merge_stmts", "product_spine", "rename_combine"]
+__all__ = [
+    "Componentwise",
+    "ExpFamily",
+    "M",
+    "component_ops",
+    "degenerate",
+    "eval_lambda",
+    "family_of",
+    "foldmap_eval",
+    "merge_stmts",
+    "product_spine",
+    "rename_combine",
+]

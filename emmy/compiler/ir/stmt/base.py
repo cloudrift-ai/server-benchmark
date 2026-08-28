@@ -681,7 +681,11 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
     with ``extra_names`` populated before render. This function's only
     pre-walk responsibility is registering literal-constant Loads so
     their ``Var(name)`` uses inline as float literals instead of
-    materializing a named local.
+    materializing a named local. An INTEGER constant is left out of that
+    inlining: the map holds floats and every use site renders them as
+    float literals, which would put a shift amount or a nibble mask into
+    f32 arithmetic that has no spelling for the bit operation reading it.
+    Those keep their named local, at their own dtype.
     """
     from emmy.compiler.ir.stmt.leaves import Load  # local — avoid cycle
 
@@ -696,7 +700,7 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
         for s in body:
             # Literal-const Loads are always scalar (the vectorize pass
             # excludes literal-const buffers from its widening logic).
-            if isinstance(s, Load) and s.is_scalar and s.is_literal(ctx.literal_constants):
+            if isinstance(s, Load) and s.is_scalar and s.is_literal(ctx.literal_constants) and not _integer_load(s):
                 new_map[s.name] = ctx.literal_constants[s.input]
                 changed = True
         if changed:
@@ -770,11 +774,17 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
     out: list[str] = []
     for s in body:
         if isinstance(s, Load) and s.is_scalar and s.name in ctx.literal_ssa and s.is_literal(ctx.literal_constants):
-            continue
+            continue  # its value inlines at every use site
         if isinstance(s, Assign) and s.name in inlined:
             continue  # folded into its consumer
         out.extend(s.render(ctx))
     return out
+
+
+def _integer_load(load) -> bool:
+    """Whether a Load reads an integer buffer — asked of the literal-constant fold, which renders
+    its values as float literals."""
+    return load.dtype is not None and load.dtype.name in _INTEGER_DTYPES
 
 
 def _readable() -> bool:

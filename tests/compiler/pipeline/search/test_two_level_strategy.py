@@ -76,12 +76,26 @@ class _CountingBackend:
 
 
 class _RouteBackend(_CountingBackend):
-    """Make a two-kernel placement route faster than either independently measured piece."""
+    """Price one exact child schedule tree as the winning placement route."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.measured_route: tuple[str, ...] | None = None
 
     def benchmark(self, graph, num_iters="auto") -> BenchmarkResult:  # noqa: ARG002
         self.calls += 1
         cuda = [n for n in graph.nodes.values() if isinstance(n.op, CudaOp)]
-        us = 1.0 if len(cuda) > 1 else 100.0
+        if len(cuda) > 1:
+            route = tuple(node.op.cache_key() for node in cuda)
+            first = cuda[0].op.knobs
+            fast_route = first.get("WORK") == "t16x8" and first.get("STAGE") == "d1/smem-async"
+            if fast_route:
+                self.measured_route = route
+            us = 1.0 if fast_route else 20.0
+        else:
+            knobs = cuda[0].op.knobs
+            fused = knobs.get("S_n_accum") == 1.0 and knobs.get("S_pw_add") == 1.0
+            us = 100.0 if fused else (0.25 if knobs.get("WORK") == "" and knobs.get("STAGE") == "" else 10.0)
         per = [
             LaunchTime(idx=i, kernel_name=getattr(node.op, "kernel_name", "k"), time_ms=us / 1000.0, samples=(us / 1000.0,))
             for i, node in enumerate(cuda)
@@ -186,8 +200,15 @@ def test_run_drives_outer_scores_separably_and_assembles() -> None:
     assert any(isinstance(n.op, CudaOp) for n in result.assembled.nodes.values())
 
 
-def test_placement_route_replays_from_a_cold_db(monkeypatch, tmp_path) -> None:
-    """The measured structural parent, not either independently tuned child, replays the cut."""
+@pytest.mark.xfail(
+    strict=True,
+    reason="PLACE routing receipts lack a parent-route → ordered exact child-schedule persistence contract",
+)
+def test_placement_route_cold_replay_preserves_measured_child_schedule_tree(monkeypatch, tmp_path) -> None:
+    """A measured structural parent must cold-replay its exact child schedule tree.
+
+    Separately indexed child evidence must not replace a child of the measured route.
+    """
     from emmy.compiler.pipeline.search.golden import records_override
 
     monkeypatch.setenv("EMMY_REDUCE", "")
@@ -199,17 +220,19 @@ def test_placement_route_replays_from_a_cold_db(monkeypatch, tmp_path) -> None:
     ctx = Context.from_target((8, 0))
     path = tmp_path / "route.db"
     db = SearchDB(path)
+    backend = _RouteBackend()
     result = run_two_level(
         graph,
         ctx=ctx,
         db=db,
-        backend=_RouteBackend(),
+        backend=backend,
         patience=_PATIENCE,
         prior=None,
         manage_prior=False,
     )
     assert result.best_reward is not None
     assert result.best_reward.searched_winner() == ({"PLACE": "cut"}, 2.0)
+    assert backend.measured_route is not None
     route_rows = [row for row in db.iter_perf(ctx.structural_key(), backend="cuda") if row.knobs.get("PLACE") == "cut"]
     assert len(route_rows) == 1
     assert route_rows[0].stats.median == pytest.approx(2.0)
@@ -218,8 +241,12 @@ def test_placement_route_replays_from_a_cold_db(monkeypatch, tmp_path) -> None:
     reloaded = SearchDB.open_readonly(path)
     with records_override([]):
         replayed = Pipeline.build(CUDA_PASSES).run(graph.copy(), ctx=ctx, db=reloaded)
+    replayed_route = tuple(node.op.cache_key() for node in replayed.nodes.values() if isinstance(node.op, CudaOp))
+    replayed_child = reloaded.lookup_perf(ctx.structural_key(), replayed_route[0], backend="cuda")
     reloaded.close()
-    assert sum(isinstance(node.op, CudaOp) for node in replayed.nodes.values()) == 2
+    assert len(replayed_route) == 2
+    assert replayed_child is not None
+    assert replayed_route == backend.measured_route
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:

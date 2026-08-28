@@ -406,9 +406,7 @@ def test_fold_formation_rejects_a_family_less_combine() -> None:
 def test_declared_commutativity_holds_on_random_states() -> None:
     """Each registered entry's ``commutative`` claim, checked against the executable spec — the
     same discipline as the associativity certificate above."""
-    from emmy.compiler.ir.pure.algebra import family_of
-
-    from emmy.compiler.ir.pure.algebra import ExpFamily
+    from emmy.compiler.ir.pure.algebra import ExpFamily, family_of
 
     rng = np.random.default_rng(11)
     entries = (
@@ -421,9 +419,7 @@ def test_declared_commutativity_holds_on_random_states() -> None:
         assert family is not None and family.commutative
         for _ in range(25):
             a, b = (tuple(rng.normal(size=n) * 3.0) for _ in range(2))
-            np.testing.assert_allclose(
-                eval_lambda(combine, (*a, *b)), eval_lambda(combine, (*b, *a)), rtol=1e-12, atol=1e-12
-            )
+            np.testing.assert_allclose(eval_lambda(combine, (*a, *b)), eval_lambda(combine, (*b, *a)), rtol=1e-12, atol=1e-12)
 
 
 def test_family_merge_matches_the_retired_merge_arms() -> None:

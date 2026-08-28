@@ -916,6 +916,10 @@ sidecar writes, target/candidate reconstruction, exact proposal measurement, and
 `search/pins.py` owns the scoped knob environment and realized-pin validation shared with `run`; neither reusable
 service belongs to the CLI layer.
 
+A frontend-origin target derives its structural features from the same disposable standalone slice that replay and
+tuning compile. Maximal fusion in the complete stored program may absorb that origin set into a larger region, but it
+cannot make an otherwise replayable fixed-denominator target fail before its exact slice is lowered.
+
 For `tune --golden-file`, each realization specializes its parent symbolic program with its `bindings` and applies
 its registered input `pins` before enumeration. Every realization with an explicit `knobs` mapping (including `{}`
 for a forkless anchor) is compiled with scoped authoritative pins and measured through

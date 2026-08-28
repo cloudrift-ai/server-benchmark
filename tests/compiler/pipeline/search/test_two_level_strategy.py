@@ -200,14 +200,19 @@ def test_run_drives_outer_scores_separably_and_assembles() -> None:
     assert any(isinstance(n.op, CudaOp) for n in result.assembled.nodes.values())
 
 
-def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt(monkeypatch, tmp_path) -> None:
-    """A measured route stays search evidence until its exact child tree can replay."""
-    monkeypatch.setenv("EMMY_REDUCE", "")
+def _placement_route_graph() -> Graph:
     graph = _graph(("x", 64, 128, 48))
     graph.add_node(InputOp(), [], Tensor("residual", (64, 48)), node_id="residual")
     graph.add_node(ElementwiseOp("add"), ["xc", "residual"], Tensor("out", (64, 48)), node_id="out")
     graph.inputs.append("residual")
     graph.outputs = ["out"]
+    return graph
+
+
+def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt(monkeypatch, tmp_path) -> None:
+    """A measured route stays search evidence until its exact child tree can replay."""
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    graph = _placement_route_graph()
     ctx = Context.from_target((8, 0))
     path = tmp_path / "route.db"
     db = SearchDB(path)
@@ -227,6 +232,32 @@ def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt
     route_rows = [row for row in db.iter_perf(ctx.structural_key(), backend="cuda") if row.knobs.get("PLACE") == "cut"]
     assert route_rows == []
     db.close()
+
+
+def test_pinned_placement_route_tunes_and_assembles_child_schedules(monkeypatch, caplog) -> None:
+    """A pinned cut freezes the kernel set; every minted child is then tuned independently and
+    the assembled route reads each child's own schedule evidence."""
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    backend = _RouteBackend()
+    with caplog.at_level(logging.INFO, logger="emmy.compiler.pipeline.search.strategy.two_level"):
+        with pinned_knobs({"PLACE": "cut"}):
+            result = run_two_level(
+                _placement_route_graph(),
+                ctx=Context.from_target((8, 0)),
+                db=SearchDB(),
+                backend=backend,
+                patience=_PATIENCE,
+                prior=None,
+                manage_prior=False,
+            )
+
+    assembled = [node.op for node in result.assembled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(assembled) == 2
+    assert sum("enrolled minted kernel" in record.message for record in caplog.records) >= 2
+    assert assembled[0].knobs["WORK"] == "t16x8" and assembled[0].knobs["STAGE"] == "d1/smem-async"
+    assert assembled[1].knobs["WORK"] == assembled[1].knobs["STAGE"] == ""
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:

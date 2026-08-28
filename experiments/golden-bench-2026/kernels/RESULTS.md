@@ -1,46 +1,58 @@
 # Golden-bench kernel corpus
 
-## Affected-kernel qualification after the computed-B cut changes (main @ `6e6181d5`, 2026-08-28)
+## Cut-pinned attention qualification after the computed-B changes (main @ `6e6181d5`, 2026-08-28)
 
-### Scope
+### Corrected protocol
 
-This bounded follow-up re-traced Qwen3-0.6B layer 0 at sequence length 512 and re-tuned the three attention targets
-whose placement or schedule could change after #678: score/statistics (`k_sdpa_mean_reduce_29d3df`), softmax times V
-(`k_sdpa_linear_reduce_c0a378`), and output projection plus residual (`k_linear_sdpa_reduce_e24efe`). The V100 lane
-also rechecked the already incorrect down-projection target. Every lane used the exact `6e6181d5` source, isolated
-tuning state, deployable `-O3`, at most 12 candidates, patience 4, and a per-target wall bound.
+The first screen put `PLACE` choices in proposal `knobs`. That measured one structural candidate whose new kernels
+kept greedy schedules; it did not test the route the compiler is designed to tune. This follow-up instead froze the
+kernel set in realization `pins`, ran the normal two-level tuner on every minted kernel identity, and replayed the
+assembled route from the same isolated evidence state. A CPU regression test now protects that exact contract: a
+pinned placement cut enrolls both children and the assembly replays different `WORK` and `STAGE` rows.
 
-A fresh trace on all four cards now produces one maximal whole-layer target,
-`k_sdpa_linear_mean_reduce_ad2ade.060608ea1479`, instead of the checked nine-target inventory. That changes the
-denominator, so the bounded comparison used untrusted copies of the three checked self-contained provenance slices.
-The whole-layer target was recorded but not substituted into the historical comparison. An RTX 4090 control trace at
-the immediate parent `b4efe436` is byte-identical, so the inventory change predates #678.
+The full route has four distinct value seams: shared statistics (`PLACE@map.fold.a21`), Q
+(`PLACE@a.map.a`), K (`PLACE@a.map.b`), and softmax weight (`PLACE@map.fold.a1`). The three previously tested K
+spellings resolve to three different Fold occurrences, but value clustering groups them into one K-value `CutSite`;
+pinning any occurrence replaces all three. They are one cut, not three composed cuts.
 
-This is a host-local compiler qualification, not a new `emmy bench` experiment snapshot. No results archive was
-replaced, and none of these numbers is publication evidence.
+Every lane used exact `6e6181d5` source, deployable `-O3`, isolated tuning state, seed 0, at most 12 candidates per
+independent kernel, patience 4, and an outer wall bound. A fresh trace still produces one maximal whole-layer target,
+so these diagnostics use untrusted copies of the checked self-contained score/statistics slice. They are host-local
+compiler qualification, not replacement publication evidence; no results archive was changed.
 
-### Result
+### Hardware result
 
-| platform | score/statistics | softmax times V | output projection plus residual |
-| --- | --- | --- | --- |
-| V100 | 455,132 µs versus 1,975 µs eager; direct eager check passed, but `torch.compile` was unavailable | strict pass: 457,662 µs versus 531 µs eager and 274 µs `torch.compile` | exact historical pins take about 6.1-6.5 s per first launch and exceed the benchmark watchdog |
-| A100 | the exact three-cut proposal builds, then its main kernel exceeds the 60 s launch watchdog | three bounded candidates take about 3.92 s per main launch | exact historical pins are consumed, but the main kernel takes about 2.15 s and exceeds the benchmark-stage budget |
-| RTX 4090 | one cold candidate and the exact cut proposal each exceed the 60 s launch watchdog | fused and placed candidates take about 1.85 s per launch | strict pass: 1,594,544 µs versus 49 µs eager and 53 µs `torch.compile` |
-| RTX 5090 | one cold candidate and all three current scoped cut proposals exceed the 60 s launch watchdog | three candidates take about 1.30-1.36 s per launch | exact historical pins take about 1.49-1.54 s; eight more variants remain about 0.97-1.99 s |
+| platform | frozen route | result |
+| --- | --- | --- |
+| V100 | K-value cut; two children | Correct replay: 595,101 µs versus 1,920 µs eager. No child candidate finished inside the bounded search, so replay correctly used the offline fallback. |
+| A100 | statistics + Q + K + softmax weight; five primary children plus one recursive statistics split | 67 clean benches in 219 s. Best children were 7-37 µs except the softmax-weight producer at 110,744 µs; tuned route 110,882 µs. Fresh replay was 110,723 µs versus 758 µs eager and passed direct correctness. |
+| RTX 4090 | statistics + Q + K; four launches | Per-identity DB replay used different child schedules: 4,561 µs versus 494 µs eager, direct correctness passed. The remaining consumer was 4,396 µs. |
+| RTX 4090 | add softmax weight; five launches | The consumer fell to 19-31 µs, but the new producer's best row was 100,416 µs; replay was 101,233 µs versus 504 µs eager and passed direct correctness. |
+| RTX 5090 | statistics + Q + K + softmax weight; structural replay only | Exact lowering produced the expected five children. Timing was deferred because an unrelated task owned the host's only compatible GPU; it was not interrupted. |
 
-The V100 down-projection diagnostic remains incorrect: current greedy execution is about 511 µs versus 84 µs eager
-and 76 µs `torch.compile`, with 40 of 524,288 outputs outside tolerance (`max_abs=0.00391`). It was not admitted as a
-performance result.
+`torch.compile` produced no positive latency for these score/statistics strict replays, so no parity ratio is claimed.
+The earlier output-projection strict result remains a valid separate finding: 1,594,544 µs for Emmy versus 52.6 µs
+for `torch.compile` on RTX 4090. The V100 down-projection also remains a direct correctness failure and was not
+admitted as a performance result.
 
-No realization qualified for promotion. #678 closes the placement legality gap: the scoped computed-B cuts are
-offered, realized, built, and consume their exact pins. It does not yet close the performance gap. On the output
-projection target, generated code recomputes the complete attention expression inside each output-projection
-contraction step; local schedule knobs cannot remove that asymptotic duplication. The score/statistics cuts likewise
-need deployable child schedules after materialization. These are placement and schedule-design gaps, not small
-offered, realized, built, or correctness failures, so this pass made no compiler or canonical-golden change.
+### Bottleneck and replay gap
 
-`FAST_MATH` was not promoted. None of the affected standard rows reached the performance and strict-correctness gate,
-and changing contraction math cannot remove the duplicated attention work diagnosed above.
+The correction changes the diagnosis. Placement works, and resulting kernels are independently schedulable. On A100
+and RTX 4090, four children tune into the tens-of-microseconds range; materializing the softmax weight isolates one
+producer that remains about 100-111 ms. On V100, even the cut consumer did not complete a candidate inside the search
+wall. These are child-kernel schedule/code-generation gaps, not evidence that the cut route must keep one shared
+schedule.
+
+Exact portability is a second, independent gap. The tuning DB can key schedules by child structural identity, and the
+RTX 4090 assembly replayed those rows. A realization has only one flat `knobs` map, however, so it cannot serialize
+conflicting child-global `WORK`, `TILE`, `REDUCE`, `STAGE`, or `RASTER` values. The A100 cold replay also found two
+stored child rows whose keys no longer intersected the currently offered candidates and fell back to the model. A
+durable golden therefore needs an ordered child-identity schedule receipt; copying the rows into the parent flat map
+would be ambiguous.
+
+No realization was promoted. Offered, realized, built, and correctness stages are closed for the composed route, so
+there was no small compiler failure or new realization-corpus gap to patch. `FAST_MATH` was not promoted because the
+standard route remained far behind eager and changing contraction math does not remove the isolated producer cost.
 
 ## Host-local exact-card qualification checkpoint (2026-08-28)
 

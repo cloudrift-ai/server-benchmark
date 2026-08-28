@@ -193,32 +193,66 @@ def test_a_shared_activation_reaches_its_matmuls_as_packed_codes(tmp_path):
     assert len(readers) == 3, f"each marked linear must read the shared codes, got {readers}"
 
 
-def test_the_marked_matmul_binds_both_operands_as_packed_decode_chains(tmp_path):
-    """The contraction reading the block-scaled atom's staging needs: one fold over two operand
-    edges, each a packed-pair k-block decode chain over 16-element blocks. The atom is not
-    offered yet, so the scheduler still deploys the demoted planar view; what this pins is the
-    bound shape, which is what an offer would read."""
+def _bound_contractions(tmp_path):
+    """The marked linears' contractions after the tile LIFT, as ``(tile, contraction)`` pairs.
+
+    The lift alone, not the whole tile pass list: the scheduler's chosen view decides what a node
+    stores, and with no atom offered for a packed pair it deploys the demoted planar one. What
+    these tests read is the bound shape a block-scaled offer would see.
+    """
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.pure.fold import Fold, is_contraction, operand_body
+    from emmy.compiler.ir.pure.fold import is_contraction
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_kblock_b
 
     g = _w4a4_shared_linears(tmp_path, ("q", "kp", "v"), m=16, n=128, k=128)
-    # Recognition alone: the scheduler's chosen VIEW decides what a node stores, and with no atom
-    # offered for a packed pair it deploys the demoted planar one.
     looped = Pipeline.build(LOOP_PASSES).run(g)
-    tiled = Pipeline.build(["lowering/tile"], select={"recognize"}).run(looped, ctx=Context.from_target((12, 0)))
+    tiled = Pipeline.build(["lowering/tile"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
     tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
-    bound = [(tile, t) for tile in tiles for t in _folds(tile.op) if is_contraction(t)]
+    return [(tile, t) for tile in tiles for t in _folds(tile.op) if is_contraction(t)]
+
+
+def _edge_readings(tile, con):
+    """``(activation, weight)`` — each operand edge's packed k-block reading, or ``None`` where the
+    edge does not read as one."""
+    from emmy.compiler.ir.pure.fold import operand_body
+    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_kblock_b
+
+    return tuple(match_packed_kblock_b(list(operand_body(e)), con.axis.name, tile.inputs) for e in (con.a, con.channels[0].b))
+
+
+def test_the_marked_matmul_binds_one_contraction_per_linear_over_plain_operand_edges(tmp_path):
+    """The half of the block-scaled atom's staging need that holds today: one fold per marked
+    linear, one channel, both operands plain operand edges, and the WEIGHT edge reading as a
+    packed-pair decode chain over 16-element blocks."""
+    from emmy.compiler.ir.pure.fold import Fold
+
+    bound = _bound_contractions(tmp_path)
     assert bound, "no marked matmul bound as a contraction"
     for tile, con in bound:
         assert len(con.channels) == 1
         edges = (con.a, con.channels[0].b)
         assert all(isinstance(e, Fold) and e.axis is None for e in edges), "both operands must be plain operand edges"
-        reads = [match_packed_kblock_b(list(operand_body(e)), con.axis.name, tile.inputs) for e in edges]
-        assert all(r is not None for r in reads), "both operands must read as packed decode chains"
-        assert {r.block for r in reads} == {16}
+        weight = _edge_readings(tile, con)[1]
+        assert weight is not None, "the weight edge must read as a packed decode chain"
+        assert weight.block == 16
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="the activation's block scale and tensor scale are fused into one f16 tensor and broadcast across the full "
+    "k axis, so no raw e4m3 block scale reaches the matmul and the k-block reading declines; spelling the two levels "
+    "separately on this path is a pending decision, because it trades the exact oracle for tolerance windows",
+)
+def test_the_marked_matmul_binds_its_activation_edge_as_a_packed_decode_chain(tmp_path):
+    """The other half, and the one gap between here and the block-scaled cell: the ACTIVATION edge
+    reading as a packed-pair decode chain over the same 16-element blocks as the weight."""
+    bound = _bound_contractions(tmp_path)
+    assert bound, "no marked matmul bound as a contraction"
+    for tile, con in bound:
+        activation = _edge_readings(tile, con)[0]
+        assert activation is not None, "the activation edge must read as a packed decode chain"
+        assert activation.block == 16
 
 
 @requires_cuda

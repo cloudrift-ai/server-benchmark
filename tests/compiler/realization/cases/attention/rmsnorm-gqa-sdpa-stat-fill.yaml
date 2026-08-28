@@ -56,36 +56,24 @@ configs:
       RASTER: ''
       TILE: mma_m16n8k16_f16_f32/f1x1
       TILE@a.fold.a4: mma_m16n8k16_f16_f32/f1x1
-      TILE@a.fold.a5: mma_m16n8k16_f16_f32/f1x1
       TILE@a8: ''
-      TILE@map.fold.fold.a42: mma_m16n8k16_f16_f32/f1x1
-      TILE@map.fold.fold.a52: mma_m16n8k16_f16_f32/f1x1
+      TILE@map.fold.fold.a41: mma_m16n8k16_f16_f32/f1x1
       REDUCE@map.fold.a21: ''
       REDUCE@a7: ''
-      REDUCE@map.fold.a.map.fold.a31: ''
+      REDUCE@a.fold.a3: ''
       REDUCE@map.fold.a.map.fold.fold.a41: ''
-      REDUCE@map.fold.a.map.fold.fold.a42: ''
-      REDUCE@map.fold.a.map.fold.a32: ''
-      REDUCE@map.fold.a.map.fold.fold.a51: ''
-      REDUCE@map.fold.a.map.fold.fold.a52: ''
+      REDUCE@a.b.fold.a4: ''
       REDUCE@map.fold.a.fold.a81: ''
       REDUCE@b.fold.a8: ''
       REDUCE@map.fold.a31: ''
-      REDUCE@map.fold.fold.a42: ''
-      REDUCE@map.fold.a32: ''
-      REDUCE@map.fold.fold.a52: ''
+      REDUCE@map.fold.fold.a41: ''
       STAGE@map.fold.a21: ''
       STAGE@a7: d1/smem
-      STAGE@map.fold.a.map.fold.a31: ''
-      STAGE@map.fold.a.map.fold.fold.a41: ''
-      STAGE@map.fold.a.map.fold.fold.a42: d1/smem
-      STAGE@map.fold.a.map.fold.a32: ''
-      STAGE@map.fold.a.map.fold.fold.a51: ''
-      STAGE@map.fold.a.map.fold.fold.a52: d1/smem
+      STAGE@a.fold.a3: ''
+      STAGE@map.fold.a.map.fold.fold.a41: d1/smem
+      STAGE@a.b.fold.a4: ''
       STAGE@map.fold.a.fold.a81: ''
       STAGE@b.fold.a8: ''
       STAGE@map.fold.a31: ''
-      STAGE@map.fold.fold.a42: d1/smem
-      STAGE@map.fold.a32: ''
-      STAGE@map.fold.fold.a52: d1/smem
-    identity: c2d34b0c33b878eefd2b718a27daa9f1f0f2c74f3b4dc8c96fa7ab492c9e0cd5
+      STAGE@map.fold.fold.a41: d1/smem
+    identity: da8d79167d2ef3a40c12d088b7a3a9cd51a9de3b899f952304f00013b959efd7

@@ -1,4 +1,7 @@
-# evidence: PLACE=fuse builds the same graph; materializing a closed RMSNorm statistic only changes storage placement.
+# evidence: the same reduced q/k RMSNorm -> causal SDPA tree offers PLACE@map.fold.a.fold.b1 (the
+# softmax-V arm's computed B operand, corpus case rmsnorm-gqa-b-cut) and cuts it correctly; the
+# statistic arm's score contraction carries the alpha-equivalent computed K operand cone, closed
+# against the key sweep's body by normalization, so its seam must offer and realize the same way.
 compute_cap:
 - 12
 - 0
@@ -48,11 +51,11 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-      PLACE: cut
+      PLACE@map.fold.a.map.fold.fold.b1: cut
     knobs:
       TILE: ''
-      WORK: t256
-      REDUCE: ''
+      WORK: t16
+      REDUCE: coop
       STAGE: ''
       RASTER: ''
     identity: 258083559c503101804b2a66846e53ff9d773aee0ee923a1871683230a689f81

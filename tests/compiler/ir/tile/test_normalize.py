@@ -10,11 +10,11 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.pure import Fold, Lambda, M
+from emmy.compiler.ir.pure import Channel, Fold, Lambda, M, is_contraction
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lambda_equivalent_clusters
-from emmy.compiler.ir.tile.path import sites
+from emmy.compiler.ir.tile.path import family_sites, sites
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
 from emmy.compiler.pipeline.search.golden import _lifted_target, load_golden_file, load_golden_records
@@ -267,6 +267,91 @@ def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -
     assert all(spec.sweep is None for spec in tile.output_specs)
     assert reconstructed.op is tile.op
     assert "PLACE@map.fold.a.fold.b1" in {seam.spelling for seam in cuttable_seams(tile)}
+
+
+def _key_swept_score(shared_reader: bool = False) -> TileOp:
+    """A reduced attention shape: a key sweep whose body computes the per-key statistic and rsqrt
+    feeding the score contraction's computed B operand cone. With ``shared_reader`` the sweep's
+    own result also reads the rsqrt, so the chain does not die into the edge."""
+    d, t = Axis("d", Dim(16)), Axis("t", Dim(8))
+    stat_init, stat_combine = M(ElementwiseImpl("add"), names=("ss",))
+    stat = Fold(
+        axis=d,
+        lift=Lambda(
+            params=("d",),
+            body=Body(
+                (
+                    Load(name="ksq", input="k", index=(Var("t"), Var("d"))),
+                    Assign(name="sq", op="multiply", args=("ksq", "ksq")),
+                )
+            ),
+            results=("sq",),
+        ),
+        init=stat_init,
+        combine=stat_combine,
+    )
+    b_cone = Fold.projection(
+        body=Body(
+            (
+                Load(name="kv", input="k", index=(Var("t"), Var("d"))),
+                Assign(name="kn", op="multiply", args=("kv", "inv")),
+            )
+        ),
+        results=("kn",),
+    )
+    a_edge = Load(name="qv", input="q", index=(Var("m"), Var("d")))
+    score = Fold.contraction(k_axis=Axis("d", Dim(16)), a=a_edge, channels=(Channel(b=b_cone, acc="acc"),))
+    result = Assign(name="mixed", op="multiply", args=("acc", "inv"))
+    sweep_init, sweep_combine = M(ElementwiseImpl("maximum"), names=("mx",))
+    sweep = Fold(
+        axis=t,
+        lift=Lambda(
+            params=("t",),
+            body=Body((stat, Assign(name="inv", op="rsqrt", args=("ss",)), score, *((result,) if shared_reader else ()))),
+            results=("mixed",) if shared_reader else ("acc",),
+        ),
+        init=sweep_init,
+        combine=sweep_combine,
+    )
+    return TileOp(op=Fold.projection(body=Body((sweep,))), place=Placement(free=(Axis("m", 4),)))
+
+
+def test_key_swept_statistic_closes_the_computed_b_operand() -> None:
+    """The chain feeding only the score's B cone moves onto the edge, closing it at its axes."""
+    tile = _key_swept_score()
+
+    sweep = tile.op if tile.op.axis is not None else tile.op.operands[0]
+    (score,) = (stmt for stmt in sweep.lift.body if isinstance(stmt, Fold))
+    assert score.role is AxisRole.CONTRACTION
+    b = score.b
+    assert isinstance(b, Fold) and frozenset(b.deps()) <= {"m", "t", "d"}
+    assert any(site.node.axis is not None for site in sites(b) if isinstance(site.node, Fold))
+    assert TileOp(op=tile.op, place=tile.place).op is tile.op
+    # A synthetic TileOp carries no graph output tensors, so the workspace dtype rule cannot
+    # resolve a cuttable seam here; the reduced-target test below asserts the offered seam.
+    assert id(b) in {id(site.node) for site in family_sites("PLACE", sites(tile.op))}
+
+
+def test_key_swept_statistic_stays_when_a_sibling_reads_it() -> None:
+    """A chain the sweep's own result also reads is not moved — the step's work is never duplicated."""
+    tile = _key_swept_score(shared_reader=True)
+
+    sweep = tile.op if tile.op.axis is not None else tile.op.operands[0]
+    assert any(isinstance(stmt, Assign) and stmt.name == "inv" for stmt in sweep.lift.body)
+    (score,) = (stmt for stmt in sweep.lift.body if isinstance(stmt, Fold) and is_contraction(stmt))
+    assert "inv" in score.b.deps()
+    assert id(score.b) not in {id(seam.node) for seam in cuttable_seams(tile)}
+
+
+def test_reduced_qk_attention_offers_the_statistic_arm_b_seams_idempotently() -> None:
+    """The reduced Qwen3 q/k-norm SDPA target offers the score contractions' K operand cones."""
+    case = Path(__file__).parents[2] / "realization/cases/attention/rmsnorm-qk-sdpa-stat-b-cut.yaml"
+    (record,) = load_golden_records(load_golden_file(case))
+
+    tile = _lifted_target(record)
+    spellings = {seam.spelling for seam in cuttable_seams(tile)}
+    assert {"PLACE@map.fold.a.map.fold.fold.b1", "PLACE@map.fold.a.map.fold.fold.b2"} <= spellings
+    assert TileOp(op=tile.op, name=tile.name, place=tile.place, output_specs=tile.output_specs).op is tile.op
 
 
 def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:

@@ -65,6 +65,15 @@ cone into a zero-axis Fold edge. Alpha-equivalent product arguments coalesce to 
 source cones overlap; other overlapping cones become one multi-result operand edge so shared computation remains
 single. A semiring without one shared product argument remains a general planar Fold.
 
+Closing runs at both scope kinds. A zero-axis root moves its body dependencies onto captured contraction operands;
+a REDUCING fold does the same for a chain that depends on its own iteration axis and so lives in its lift body —
+attention's per-key statistic and rsqrt ahead of the score dot's computed B cone. The reduce-body move is gated on
+exclusive consumption (every moved definition dies into the closed edges), so the step's work is repackaged, never
+duplicated. Both rules measure an edge's captures with `Fold.deps` — scope-aware, so a name a sibling operand binds
+inside the edge is not a capture and an already-closed edge never re-fires the rewrite. A cone closed at its axes is
+what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
+vector) becomes materializable once per key instead of recomputed per query row.
+
 An output sweep used by any nested contraction operand is promoted into the Tile's free-axis placement. Promotion
 expands the enclosing-axis context, so construction normalizes the Fold tree once more under that final scope; one
 construction and a reconstruction therefore expose the same closed operand edges and placement seams.

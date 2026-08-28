@@ -296,3 +296,21 @@ def test_family_sites_and_primary() -> None:
 def test_site_is_a_frozen_value() -> None:
     s = Site(node=None, axis="k", segments=("fold",))
     assert s.depth == 1 and s.ordinal == 1
+
+
+def test_exact_full_path_outranks_deeper_subsequence_matches() -> None:
+    """A shallow site's full path is an anchored subsequence of every deeper same-axis path, so
+    its canonical full-path + ordinal spelling admits the deeper sites too — the exact-path
+    preference at the ambiguity point is what lets the spelling name its own site (the quant
+    cone's nested a1 reduce chain)."""
+    shallow1 = _planar_fold("a1", acc="s0", val="v1", load="x")
+    shallow2 = _planar_fold("a1", acc="t0", val="w1", load="z")
+    deep_inner = _planar_fold("a1", acc="u0", val="q1", load="y")
+    deep = Fold.projection(body=Body((Assign(name="d", op="add", args=(deep_inner.out, "one")),)), operands=(deep_inner,))
+    root = Fold.projection(
+        body=Body((Assign(name="o", op="add", args=(shallow1.out, shallow2.out)), Assign(name="p", op="add", args=("o", "d")))),
+        operands=(shallow1, shallow2, deep),
+    )
+    for node in (shallow1, shallow2, deep_inner):
+        key = spell(root, "REDUCE", node)
+        assert resolve(root, key).node is node, key

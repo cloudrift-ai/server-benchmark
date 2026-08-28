@@ -128,11 +128,16 @@ class RuleSkipped(Exception):
     DEBUG (visible at ``compile -vv``), and treats the result the same
     as ``return None`` with no in-place mutation. Use this in place of
     a bare ``return None`` whenever the skip reason would help debug
-    why a rule didn't fire on a given match."""
+    why a rule didn't fire on a given match.
 
-    def __init__(self, reason: str):
+    ``reject=True`` marks the skip as this node's LOWERING declining the offered row (the
+    materializer's ``UnbindableProjection`` decline): it is recorded into the run's rejection
+    sink so the greedy blocklist retry moves past the row. An ordinary skip records nothing."""
+
+    def __init__(self, reason: str, *, reject: bool = False):
         super().__init__(reason)
         self.reason = reason
+        self.reject = reject
 
 
 class LoweringError(Exception):

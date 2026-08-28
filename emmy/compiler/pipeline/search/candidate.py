@@ -106,6 +106,15 @@ class Candidate:
         except RuleSkipped as exc:
             if _logger.isEnabledFor(logging.DEBUG):
                 emit(format_skipped(display_name(rule.pass_.name if rule.pass_ else None, rule.name), match.root_node_id, exc.reason))
+            # A REJECTING skip — the node's lowering declining the offered row (the
+            # materializer's ``UnbindableProjection`` decline) — records into the run's rejection
+            # sink like the all-options-filtered case below, so the greedy blocklist retry moves
+            # past the row instead of dying downstream. Ordinary skips record nothing: passes
+            # skip benignly on nodes that legitimately outlive them.
+            if exc.reject and self.run.rejections is not None:
+                self.run.rejections.append(
+                    (match.root_node_id, display_name(rule.pass_.name if rule.pass_ else None, rule.name), exc.reason)
+                )
             self._advance_if_last(match)
             return None
         raw_options = list(result) if isinstance(result, (list, tuple)) else [result]

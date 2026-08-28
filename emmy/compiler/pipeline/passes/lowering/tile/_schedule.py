@@ -191,11 +191,7 @@ def _options(state: _State, node) -> list[_Option]:
     if not isinstance(node, Fold) or node.axis is None:
         return _strip_options(state, node)  # the root map cell's register strip; else no decision
     if is_contraction(node):
-        opts = _contraction_options(state, node)
-        marker = sched.key("TILE", node)
-        if marker in state.mimo_exclusive:
-            opts = [replace(o, seam=(*o.seam, ("own", "mimo_root", marker))) if o.tile is not None and o.tile.is_tiled else o for o in opts]
-        return _claimable(state, opts)
+        return _claimable(state, _contraction_options(state, node))
     key = sched.key("REDUCE", node)
     opts = [_Option({key: p.spell()} if key else {}, derive_inventory((), coop=p.coop)) for p in _reduce_moves(state, node, key)]
     return _claimable(state, opts)
@@ -1254,12 +1250,6 @@ class _State:
     carries_partition: bool = False
     work_pin: Workers | None = None  # the parsed EMMY_WORK pin — a FACT, read once, compared as Workers
     work_pinned: bool = False
-    #: TILE keys of the root projection's contraction operands whose output specifications do NOT
-    #: partition by root: the kernel binder can bind at most ONE of them tiled on a row (the rest
-    #: emit as sibling statements), so their tiled options stake an exclusive seam claim and
-    #: ``Ctx.extend`` refuses a second. The fact is CONSULTED off the binder's own ownership rule
-    #: (``projection_regions``), never mirrored — one legality definition for both layers.
-    mimo_exclusive: frozenset = frozenset()
     #: id(node) -> its option tuple, computed ONCE by :func:`schedule`'s prescan. Options are a
     #: pure function of the node and the live pins, so this is a per-kernel FACT the walk reads —
     #: a branch expansion re-asks per node, and re-resolving every stage there is pure waste — and
@@ -1573,17 +1563,6 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     # Minted unconditionally: the digest is also the pool identity every Fork of this tree
     # carries (``_State.pool_id``), whether or not a session cache is consulted.
     key = digest(pool_key(tile, pins=schedule_pin_fingerprint()), sample.key if sample is not None else "", partition, tuple(off))
-    exclusive: frozenset = frozenset()
-    root_folds = [e for e in (tile.op.operands if isinstance(tile.op, Fold) and tile.op.axis is None else ()) if isinstance(e, Fold)]
-    if len(root_folds) > 1 and tile.output_specs:
-        from emmy.compiler.ir.tile.ops import projection_regions  # noqa: PLC0415
-
-        try:
-            projection_regions(tile.op, tile.output_specs)
-        except ValueError:
-            # An output specification's cone reads more than one root: rows tiling two of these
-            # operands cannot realize (the binder's sibling path needs all but one untiled).
-            exclusive = frozenset(k for e in root_folds if is_contraction(e) and (k := sched.key("TILE", e)) is not None)
     state = _State(
         tile,
         sched,
@@ -1598,7 +1577,6 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         work_pin=Workers.parse(raw) if raw is not None else None,
         work_pinned=raw is not None,
         pool_id=key,
-        mimo_exclusive=exclusive,
     )
     nodes = tuple(_nodes(tile.op))
     pool = cache.get(key) if cache is not None else None

@@ -391,6 +391,13 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
     if not matches:
         raise ValueError(f"knob key {key!r} names no site on this tree (a structural change broke a stored key?)")
     if len({id(s.node) for s in matches}) > 1:
+        # An EXACT full-path match outranks subsequence admissions: a shallow site's full path is
+        # an anchored subsequence of every deeper same-axis path, so without this preference the
+        # canonical full-path spelling (the ordinal arm's fallback) could never name the shallow
+        # site at all. Only consulted at the ambiguity point — sugar that was unique stays unique.
+        exact = [s for s in matches if s.segments == parsed.segments]
+        if len({id(s.node) for s in exact}) == 1:
+            return exact[0]
         cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in matches))
         raise ValueError(f"knob key {key!r} is ambiguous: use {cands}")
     # Several matches that are ONE node are not ambiguous: a shared subtree is a site at each path

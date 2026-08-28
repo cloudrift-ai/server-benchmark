@@ -25,8 +25,8 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import reduce_plan
-from emmy.compiler.pipeline import Match, Pattern
+from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan
+from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 
 PATTERN = [Pattern("root", TileOp)]
@@ -40,4 +40,11 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
     # request is a bug — the materializer only lowers single-launch kernels.
     rplan = reduce_plan(tile) if tile.op is not None else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 035_split_reduce"
-    return KernelOp(body=Body((factorize(tile, root),)), name=tile.name)
+    try:
+        return KernelOp(body=Body((factorize(tile, root),)), name=tile.name)
+    except UnbindableProjection as exc:
+        # The offered row has no multi-root binding (e.g. it tiles two contraction operands of a
+        # projection whose outputs do not partition by root). The row stays OFFERED — the
+        # realization corpus pins that — and the compile declines it here: the skip is recorded,
+        # the node stays a TileOp, and the greedy blocklist retry resolves onto the next row.
+        raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc

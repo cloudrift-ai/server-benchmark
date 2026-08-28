@@ -116,7 +116,6 @@ def test_reduce_sum():
     assert any(lb.op.name == "add" for lb in loop.body.accums)
 
 
-@pytest.mark.skip(reason="scan lowering needs the planned pure Fold observer representation")
 def test_scan_sum_lifts_and_preserves_prefix_values():
     def make_graph():
         graph = Graph()
@@ -139,7 +138,6 @@ def test_scan_sum_lifts_and_preserves_prefix_values():
     assert source.index("+=") < source.index("out[")
 
 
-@pytest.mark.skip(reason="scan lowering needs the planned pure Fold observer representation")
 def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
     """Fusion must not rebuild an ordered prefix as one full reduce plus an output sweep."""
 
@@ -180,7 +178,9 @@ def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
     )
     lines = source.splitlines()
     update = next(i for i, line in enumerate(lines) if "acc0 +=" in line)
-    write = next(i for i, line in enumerate(lines) if "out[a0 * 4 + a1] = acc0;" in line)
+    # The stored value is the observer's fresh name (``acc0__obs``), never the raw accumulator —
+    # the boundary distinguishes a streamed store from a post-fold store by exactly that name.
+    write = next(i for i, line in enumerate(lines) if "out[a0 * 4 + a1] = acc0__obs;" in line)
     loop_open = max(i for i in range(update) if lines[i].lstrip().startswith("for ("))
     loop_indent = len(lines[loop_open]) - len(lines[loop_open].lstrip())
     loop_close = next(

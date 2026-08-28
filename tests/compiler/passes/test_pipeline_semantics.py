@@ -12,7 +12,6 @@ preserves semantics without needing a GPU.
 """
 
 import numpy as np
-import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.context import Context

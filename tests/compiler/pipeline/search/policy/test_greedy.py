@@ -152,3 +152,46 @@ def test_streamed_scan_defers_structural_forks_to_the_flatten_path() -> None:
     point = _point(_rows(2, 2))
     point.options = [*point.options, DeferredFork(materialize=lambda: None, structural=True)]
     assert _stream_tiers(point, _BarePrior(), None, {}) is None
+
+
+def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
+    """Above the cold-pool budget the scan ranks seeded descents instead of walking: the pick is
+    a legal complete row, identical across calls (the RNG seeds from the pool identity), and the
+    model scores at most the draw, never the pool."""
+    from dataclasses import dataclass, field
+
+    from emmy.compiler.pipeline.fork import Fork
+
+    @dataclass(frozen=True)
+    class _BoundedFork(Fork):
+        inner: Fork = None
+        knobs: dict = field(default_factory=dict)
+        pool_bound = 10**9
+        pool_id = "test-pool"
+        is_leaf = False
+
+        def expand(self):
+            return self.inner.expand()
+
+    class _CountingPrior(_BarePrior):
+        def __init__(self):
+            self.scored = 0
+
+        def mean_scores(self, rows):
+            self.scored += len(rows)
+            return super().mean_scores(rows)
+
+    monkeypatch.setattr(greedy, "_POOL_DRAW", 64)
+    rows = _rows(30, 20)  # 600 leaves ≫ the draw
+    all_rows = {(r["TILE"], r["STAGE"]) for r in rows}
+    point = _point(rows)
+    point.options = [_BoundedFork(inner=point.options[0])]
+    prior = _CountingPrior()
+    got = _stream_tiers(point, prior, None, {})
+    assert got is not None
+    leaf, knobs, price = got
+    assert (knobs["TILE"], knobs["STAGE"]) in all_rows  # a legal complete row off the real tree
+    assert prior.scored <= 64  # the draw, never the pool
+    prior2 = _CountingPrior()
+    again = _stream_tiers(point, prior2, None, {})
+    assert again[1] == knobs and again[2] == price  # seeded off the pool identity → reproducible

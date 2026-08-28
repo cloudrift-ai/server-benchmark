@@ -13,11 +13,13 @@ Exploration stays in :class:`~.mcts.TuningSearch` (``Pipeline.tune``).
 
 **Evaluate complete rows.** A branch carries only a partial schedule, so a prior cannot score it as
 though it were a complete row. Direct measured and verified rows descend to their exact spelling;
-otherwise greedy scores the complete offered rows and chooses the global argmin — streamed off the
+otherwise greedy scores the complete offered rows and chooses the argmin — streamed off the
 lazy walk in bounded chunks (:func:`_stream_tiers`), so the scan is O(chunk) memory however large
-the pool. The scan can still be time-expensive until every schedule-space operation is factorized,
-but it does not substitute the first descendant of each branch for the schedules that branch
-actually contains.
+the pool, and bounded in TIME by the cold-pool budget: a pool whose minted size bound exceeds
+:data:`_POOL_BUDGET` is ranked over a deterministic drawn subset of its complete rows instead of
+walked at full length. Sampling complete rows is not branch substitution — no branch is ever
+scored as a stand-in for the schedules it contains — and the argmin is global again the moment
+evidence exists, because the verified / measured tiers descend directly whatever the pool size.
 
 **Greedy is ranked by evidence and by nothing else.** Its tiers are recorded
 goldens, then measurements, then the fitted prior — every one of them a
@@ -742,6 +744,50 @@ def _direct_measured_pick(fp: ForkPoint, blocked, db_index: dict) -> tuple[objec
 #: transient row dicts stay bounded — the flat 486k-row pools this replaces held ~GBs of them at once.
 _CHUNK = 4096
 
+#: The cold-pool budget: a pool whose minted size bound (``Fork.pool_bound`` — Π of the per-node
+#: option tuples, legality only shrinks it) exceeds this is not walked at full length on a cold
+#: deploy. The research-class fused terms enumerate millions of legal schedules, and a model-tier
+#: argmin over all of them buys nothing a bounded sample doesn't: the cold pick only needs a
+#: REASONABLE kernel — the optimal one comes from evidence (a tune, a recorded golden), which the
+#: verified / measured tiers deploy by direct descent regardless of pool size.
+_POOL_BUDGET = 65_536
+
+#: Complete rows drawn for a budgeted pool: seeded uniform descents through the lazy tree — each
+#: descent picks one option per level, so the draw covers every level's values (an emission-order
+#: prefix would freeze the leading levels at option-0 and sweep only the deepest), costs
+#: O(depth × siblings) per row however large the pool, and yields only LEGAL complete rows (the
+#: walk's own ``Ctx`` reconciliation runs as usual). Deterministic: the RNG seeds from the pool's
+#: minted identity, so one pool draws one sample on every boot.
+_POOL_DRAW = 2_048
+
+
+def _descent_sample(options, pool_id: str, node_blocked) -> list:
+    """Up to :data:`_POOL_DRAW` complete leaves drawn by seeded uniform descents. Dead ends (a
+    branch whose expansion is empty — legality killed the subtree) and blocklisted rows retry, up
+    to a bounded attempt count; duplicates are kept (a repeat costs a scoring slot, never a wrong
+    pick). Structural options never appear here — the caller samples only the variant side."""
+    import random  # noqa: PLC0415
+
+    rng = random.Random(pool_id)
+    sample: list = []
+    attempts = 4 * _POOL_DRAW
+    while len(sample) < _POOL_DRAW and attempts > 0:
+        attempts -= 1
+        option = options[rng.randrange(len(options))]
+        dead = False
+        while isinstance(option, Fork) and not option.is_leaf:
+            kids = option.expand()
+            if not kids:
+                dead = True
+                break
+            option = kids[rng.randrange(len(kids))]
+        if dead:
+            continue
+        if node_blocked is not None and _tile_blocked(leaf_knobs(option), node_blocked):
+            continue
+        sample.append(option)
+    return sample
+
 
 def _stream_tiers(
     fp: ForkPoint, the_prior, node_blocked, db_idx: dict, options: list | None = None
@@ -759,6 +805,13 @@ def _stream_tiers(
     direct-measured descents, never here. The pick is EXACTLY the flattened argmin: every tier
     breaks ties by candidate content (``canonical_row_key``), never enumeration order, so
     per-chunk winners folded through a running ``(price, key)`` min are chunk-invariant.
+
+    A pool whose minted size bound exceeds :data:`_POOL_BUDGET` is not walked: the scan ranks a
+    deterministic drawn subset instead (:func:`_descent_sample` — seeded uniform descents, legal
+    complete rows only). Above the budget the pick is the argmin over the draw, not the pool —
+    the accepted cold-deploy trade: a reasonable kernel now, the optimal one from evidence (the
+    verified / measured tiers descend directly whatever the pool size, and a bad cold pick is
+    fixed by measuring, as ever).
 
     Returns ``None`` when a structural (``Graph``-splicing) option is present — those forks carry
     a handful of options and keep the flatten path, where :func:`_priced_pick` needs the whole
@@ -810,11 +863,20 @@ def _stream_tiers(
             best_model = fold(best_model, chunk, picker(rows))
 
     opts = fp.options if options is None else options
+    # The cold-pool budget: a pool whose minted bound exceeds _POOL_BUDGET is sampled by seeded
+    # descents instead of walked — the tiers below then rank the drawn complete rows exactly as
+    # they would the full pool. An empty draw (legality killed every attempt) falls back to the
+    # full walk: correctness never rides on the sampler.
+    bound = next((b for o in opts if (b := getattr(o, "pool_bound", None)) is not None), None)
+    drawn = None
+    if bound is not None and bound > _POOL_BUDGET:
+        pid = next((p for o in opts if (p := getattr(o, "pool_id", None)) is not None), "")
+        drawn = _descent_sample(opts, pid, node_blocked) or None
     n_leaves = n_live = 0
     first: object = None
     sample_row: dict | None = None  # one live row — carries the fork's shared ``S_*`` signature
     chunk: list = []
-    for leaf in iter_leaves(opts):
+    for leaf in drawn if drawn is not None else iter_leaves(opts):
         if _is_structural_option(leaf):
             return None
         n_leaves += 1

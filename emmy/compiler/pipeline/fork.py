@@ -75,6 +75,10 @@ class Fork(ABC):
     #: split receipt + spelled key vocabulary). ``None`` for forks outside a schedule enumeration.
     #: Consumers key memoized decisions on THIS, never on a re-derived identity.
     pool_id: str | None = None
+    #: Upper bound on the enumeration's leaf count (Π of the per-node option tuples × the RASTER
+    #: fan-out — legality only shrinks it), carried the same way. ``None`` outside a schedule
+    #: enumeration. The greedy cold-pool budget triggers on this without walking anything.
+    pool_bound: int | None = None
 
     @abstractmethod
     def expand(self) -> list[Op | Graph | Fork]: ...

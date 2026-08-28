@@ -16,11 +16,10 @@ pytestmark = [pytest.mark.xdist_group("cuda")]
 
 
 @pytest.mark.skip(
-    reason="greedy now streams the pool scan (bounded ~1.1 GB RSS, one walk, chunked scoring at ~74k rows/s) and the "
-    "structural forks price the fused side off one scan, but the compile still overruns 30 min: the fused attention "
-    "term's pool runs to millions of leaves and the walk must visit each one (288k leaves = ~46s; 2026-08-28, RTX "
-    "5090 box). Revives when cold deploys stop walking such pools at full length (a budgeted/sampled scan, a policy "
-    "question) or the pools shrink",
+    reason="the cold-pool budget bounds the compile (~3 min, was >30 min), but a drawn schedule row exposes a latent "
+    "tile->kernel seam bug: 010_materialize's projection binding rejects the realized form with 'an output-tiled "
+    "root must own each output specification independently' (2026-08-28, RTX 5090). The row is walk-legal, so the "
+    "enumeration and the kernel binder disagree about legality — fix the seam, then un-skip; repro is this test"
 )
 def test_run_device_sym_matches_host_path():
     pytest.importorskip("cupy")

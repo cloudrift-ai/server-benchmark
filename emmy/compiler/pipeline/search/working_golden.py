@@ -425,23 +425,6 @@ async def measure_proposals(
         structural_parent = loop_identity.structural_parent(structural[0]) if structural is not None else None
         if structural_parent is not None:
             search._base_knobs.update({key: value for key, value in structural_parent[1].items() if key.startswith("S_")})
-        if (
-            pin_error is None
-            and structural_parent is not None
-            and (structural[2] or 0) > 1
-            and search.last_status == "ok"
-            and search.last_stats is not None
-        ):
-            structural_key, structural_knobs = structural_parent
-            db.record_perf(
-                ctx.structural_key(),
-                structural_key,
-                backend=ctx.backend_name or "cuda",
-                status="ok",
-                stats=search.last_stats,
-                knobs={**ctx.features(), **structural_knobs},
-                captured=True,
-            )
         if prior is not None:
             prior.add_rows(search._collect_rows())
             prior.maybe_refit()

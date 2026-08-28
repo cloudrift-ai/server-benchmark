@@ -79,7 +79,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 |-------|----------------|------------|--------------|
 | **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/goldens/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile (tier 1, the verified tier); pinned replay (`run --golden NAME`); `emmy fit` trains the offline prior on them; `emmy eval` datasets |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every deployable-regime training row | greedy compile (tier 2); the online prior's own refits |
-| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — terminal kernel measurements plus validated whole-slice structural routes, at the sweep's flags | greedy compile (tier 3); the per-variant replay cache |
+| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`) | `emmy tune` — terminal kernel measurements plus derived whole-slice cost bookkeeping, at the sweep's flags | greedy compile (tier 3); the per-variant replay cache |
 | **`node` table** | the same tune DB | `emmy tune` (every search-tree node) and `run --bench` (rows benched with hand-forced knob values) | `emmy eval` diagnostics — **never** consulted at deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The
@@ -513,8 +513,8 @@ prior, never a preference written into a pass or into this policy.
    derived record-side through the shared total lift (`_fromloop.lift_loop_op`) — equals the
    fork's, and whose spelled row (`knob.schedule_row_key`, the recording canonicalizer restricted to the schedule
    families) equals EXACTLY one enumerated leaf. Fastest matching record first; a record that matches the identity
-   but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). A standalone `PLACE` routing record
-   instead decodes against the legal closed Fold seams of the same lifted tree.
+   but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). A row containing `PLACE` is an exact
+   replay input, not implicit deploy evidence, until a durable receipt can bind its ordered child schedule tree.
    The tier needs no prior, applies only at deployable
    `-O3` flags, and scopes records to the live card and the exact live pin regime;
 2. measured **reservoir** evidence (`Prior.evidence_pick`): the candidate that agrees with the fastest reservoir row
@@ -555,6 +555,10 @@ Three definitions the list leans on:
   "Featurizer versioning" — deletes this evidence tier along with the model, and the machine's deploys drop to DB
   rows → the offline prior. The SQLite `perf` rows (tier 3) survive such a bump: the DB is keyed by content, and
   the join that matches rows to candidates tolerates feature-set changes, so old rows stay usable.
+- **Placement rows train but do not deploy implicitly.** Any reservoir or DB row containing `PLACE` remains useful
+  model-training data, but the measured-evidence indexes exclude it. Its whole-slice latency belongs to the exact
+  ordered child schedule tree that ran, which neither flat row can bind. The independently measured child kernels
+  retain their ordinary evidence rows.
 - **Which compile flags each tier applies under**: all of them apply to the deployable regime, and that is the only
   regime anything is measured in. `H_opt` is read from the `-O<n>` in the compile flags; flags with no `-O<n>` at all
   — the default everywhere — count as 3, so an ordinary compile is always deployable. The identity a measurement is
@@ -868,12 +872,11 @@ only (`tile → kernel → cuda`), and returns the Σ once ALL Loop kernels are 
   may mint further pieces, which the same inventory catches for the next wave (waves terminate: cut/split trees
   strictly shrink and the seen-set dedups). Enrolled kernels are evidence, never reward terms — the parent
   slice's Σ already priced them, so they stay out of `per_op` / `total_us` and out of `searched_winner()`.
-- **A structural winner persists its measured parent route.** A per-inner-run splice watcher joins the consumed
-  parent's complete scheduler feature row with `SpliceEvent`'s selected structural knob delta. When the directly
-  measured winner changes the kernel set and exactly one parent realizes its route, the whole-slice latency is
-  written under that route-specific parent `Op.cache_key`. The unpinned Loop row remains derived cost bookkeeping,
-  while the route row is deploy evidence: a newly opened DB can select `PLACE=cut` before independently choosing
-  schedules for the minted kernels.
+- **A structural total is not deploy evidence.** A placement cut's measured whole-slice latency belongs to the exact
+  ordered child schedule tree that ran. The flat `perf` schema cannot bind that tree, so neither ordinary tuning nor
+  proposal measurement writes a `PLACE` parent perf row. Existing `PLACE` rows in a DB or online reservoir are
+  ignored by the measured-evidence tiers. The search may retain its route branch for model training, working-file
+  ranking, and parent-linked node diagnostics; independently measured child kernels keep their ordinary perf rows.
 
 **Separability + the structural handoff.** Op-variant forks are separable: every multi-option fork is an in-place `Op`
 rebind that leaves the graph unchanged, so whole-graph time is `Σ_k t_k`. Results key structurally (`Op.cache_key` =
@@ -939,15 +942,11 @@ unoffered proposal `pin_unmatched` instead of attributing the planner's fallback
 rows feed the shared prior immediately, so the following MCTS can use their evidence. The measured pipeline captures
 the exact finalized single Loop's stamped structural identity, even when the working file starts from stable Torch IR.
 At the kernel-set-changing splice it also captures the consumed parent carrying the complete scheduler feature row and
-exact structural route. The proposal's measured whole-slice latency persists under that route-specific parent cache
-key and context. This captured perf row is deploy evidence: the measured DB index can select the route again after a
-cold reload while the unpinned Loop key remains the two-level search's cost bookkeeping and the split kernels retain
-their independent terminal measurements. Parent-linked node rows preserve the same proposal for diagnostics and
-training; they do not drive deploy selection. The direct row is written only when the authoritative pins pass
-realized-pin validation, search retains the exact structural route, one consumed parent realizes it, and the terminal
-measurement succeeds. Ranking feedback is flushed to the working file as soon as proposal measurement finishes,
-before MCTS. A multi-CudaOp result records realized knobs only when their union is conflict-free, or when search
-retained that exact structural replay row; otherwise the ranking is explicitly ambiguous.
+exact structural route. That identity enriches the proposal's parent-linked node rows for diagnostics and training;
+the measured whole-slice latency stays in working-file ranking feedback and is not written as parent perf evidence.
+Ranking feedback is flushed as soon as proposal measurement finishes, before MCTS. A multi-CudaOp result records
+realized knobs only when their union is conflict-free, or when search retained that exact structural replay row;
+otherwise the ranking is explicitly ambiguous.
 
 Each of those per-target persists rewrites the whole file, so its cost is the size of the inventory rather than of
 the entry that changed, and a whole-model sweep pays it once per target. They are written **incrementally**: the
@@ -967,14 +966,16 @@ proposal feedback to a direct tune winner so strict replay can use it as an auto
 searched terminal changes the kernel set, the winner is its
 first exact structural replay row: a `PLACE`-only routing row for a placement cut, or the complete pre-split schedule
 row for a cross-CTA reduction. `PLACE=fuse` does not change the kernel set, so it retains the terminal's complete
-schedule row instead of truncating the winner to a routing receipt. The pieces remain independent tuning targets; promotion never fabricates their
-heterogeneous schedules into one row or falls back to a slower monolithic sibling. A cross-CTA parent becomes a tune
+schedule row instead of truncating the winner to a routing receipt. The pieces remain independent tuning targets;
+promotion never fabricates their heterogeneous schedules into one row or falls back to a slower monolithic sibling. A
+cross-CTA parent becomes a tune
 winner only when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a
 parent whose pins
 name a different independently tuned child is left unpromoted. `PLACE`-only rows remain routing receipts and do not
-claim the child schedules. A later greedy deploy replay can select different golden/DB evidence and is never paired
-with that search reward. A search number never populates `emmy_us` / `cublas_us`; promotion still requires the
-separate repeated, correct, deployable A/B gate.
+claim the child schedules. They may be explicit working-file proposals or pinned replay inputs, but the implicit
+verified and measured-evidence tiers ignore them until a durable receipt can bind the ordered exact child schedules.
+A search number never populates `emmy_us` / `cublas_us`; promotion still requires the separate repeated, correct,
+deployable A/B gate.
 
 Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either
 proposal set. Canonical repository goldens remain the common implicit deploy context for both runs.

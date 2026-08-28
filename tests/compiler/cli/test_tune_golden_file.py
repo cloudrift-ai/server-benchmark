@@ -319,7 +319,7 @@ def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
     }
 
 
-def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(tmp_path, monkeypatch):
+def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_perf(tmp_path, monkeypatch):
     from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index, _db_measured_pick
 
     route = {
@@ -434,17 +434,13 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     route_parent = TileOp(knobs={**live_features, **route})
     assert route_parent.cache_key() != original_loop.cache_key()
     perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.cache_key(), backend="cuda")
-    assert perf is not None
-    assert perf.status == "ok"
-    assert perf.stats == PerfStats(median=59.61, min=59.61, max=59.61, mean=59.61, variance=0.0, n_samples=1)
-    assert perf.captured is True
-    assert perf.knobs == {**ctx.features(), **live_features, **route}
+    assert perf is None
     assert reloaded_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
     reloaded_db.close()
 
     # A later ordinary search keeps its own whole-slice bookkeeping and lowering
-    # evidence under the unpinned Loop key. Neither may replace or hide the exact
-    # structural parent measured by the proposal.
+    # evidence under the unpinned Loop key. Neither may fabricate deploy evidence
+    # for the structural parent captured by the proposal's node lineage.
     db = SearchDB(db_path)
     bookkeeping = PerfStats(median=106.95, min=106.95, max=106.95, mean=106.95, variance=0.0, n_samples=1)
     monolithic = PerfStats(median=153.45, min=153.45, max=153.45, mean=153.45, variance=0.0, n_samples=1)
@@ -472,12 +468,12 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     reloaded_db = SearchDB.open_readonly(db_path)
     route_perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.cache_key(), backend="cuda")
     loop_perf = reloaded_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda")
-    assert route_perf is not None and route_perf.stats.median == pytest.approx(59.61)
+    assert route_perf is None
     assert loop_perf is not None and loop_perf.stats.median == pytest.approx(106.95)
     lowering = reloaded_db.lookup_lowering(original_loop.cache_key())
     assert lowering is not None and lowering.child_key == fallback_key
     candidates = [{**live_features, **fallback}, {**live_features, **route}]
-    assert _db_measured_pick(_db_measured_index(reloaded_db, ctx), candidates) == (1, 59.61)
+    assert _db_measured_pick(_db_measured_index(reloaded_db, ctx), candidates) == (0, 153.45)
     reloaded_db.close()
     persist_proposal_rankings(path, document, targets[0], rankings)
     reloaded, reloaded_targets = load_working_targets(path)

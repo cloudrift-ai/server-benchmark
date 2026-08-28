@@ -311,6 +311,11 @@ class Prior(ABC):
                     continue
                 sig = frozenset((k, v) for k, v in knobs.items() if k.startswith("S_"))
                 tun = {k: v for k, v in knobs.items() if not k.startswith(("S_", "H_"))}
+                # Keep structural rows in the reservoir for model training, but never treat a
+                # PLACE-bearing whole-slice latency as exact deploy evidence: the row does not bind
+                # the ordered child schedules that earned it.
+                if any(key.split("@", 1)[0] == "PLACE" for key in tun):
+                    continue
                 index.setdefault(sig, []).append((tun, float(us)))
             self._ev_index = index
             self._ev_fp = fp

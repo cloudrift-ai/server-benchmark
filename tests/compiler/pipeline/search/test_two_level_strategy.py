@@ -200,17 +200,8 @@ def test_run_drives_outer_scores_separably_and_assembles() -> None:
     assert any(isinstance(n.op, CudaOp) for n in result.assembled.nodes.values())
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="PLACE routing receipts lack a parent-route → ordered exact child-schedule persistence contract",
-)
-def test_placement_route_cold_replay_preserves_measured_child_schedule_tree(monkeypatch, tmp_path) -> None:
-    """A measured structural parent must cold-replay its exact child schedule tree.
-
-    Separately indexed child evidence must not replace a child of the measured route.
-    """
-    from emmy.compiler.pipeline.search.golden import records_override
-
+def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt(monkeypatch, tmp_path) -> None:
+    """A measured route stays search evidence until its exact child tree can replay."""
     monkeypatch.setenv("EMMY_REDUCE", "")
     graph = _graph(("x", 64, 128, 48))
     graph.add_node(InputOp(), [], Tensor("residual", (64, 48)), node_id="residual")
@@ -234,19 +225,8 @@ def test_placement_route_cold_replay_preserves_measured_child_schedule_tree(monk
     assert result.best_reward.searched_winner() == ({"PLACE": "cut"}, 2.0)
     assert backend.measured_route is not None
     route_rows = [row for row in db.iter_perf(ctx.structural_key(), backend="cuda") if row.knobs.get("PLACE") == "cut"]
-    assert len(route_rows) == 1
-    assert route_rows[0].stats.median == pytest.approx(2.0)
+    assert route_rows == []
     db.close()
-
-    reloaded = SearchDB.open_readonly(path)
-    with records_override([]):
-        replayed = Pipeline.build(CUDA_PASSES).run(graph.copy(), ctx=ctx, db=reloaded)
-    replayed_route = tuple(node.op.cache_key() for node in replayed.nodes.values() if isinstance(node.op, CudaOp))
-    replayed_child = reloaded.lookup_perf(ctx.structural_key(), replayed_route[0], backend="cuda")
-    reloaded.close()
-    assert len(replayed_route) == 2
-    assert replayed_child is not None
-    assert replayed_route == backend.measured_route
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:

@@ -386,6 +386,11 @@ def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float]
                 continue
             sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
             tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
+            # A placement route's latency belongs to the exact ordered child schedule tree that
+            # ran. The perf schema carries no such receipt, so legacy route rows cannot be direct
+            # deploy evidence; independently selected children would be a different measurement.
+            if any(key.split("@", 1)[0] == "PLACE" for key in tun):
+                continue
             index.setdefault(sig, []).append((tun, float(row.stats.median)))
     except Exception:  # noqa: BLE001 — a DB consult failure must never break compile
         return {}

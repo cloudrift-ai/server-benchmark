@@ -435,8 +435,7 @@ class TwoLevelStrategy(SearchStrategy):
                     prior_model=prior,
                     base_knobs=base_knobs,
                 )
-                structural_parents = _StructuralParentCapture()
-                inner_pipeline = Pipeline.build(LOWERING_PASSES).with_strategies(inventory, structural_parents)
+                inner_pipeline = Pipeline.build(LOWERING_PASSES).with_strategies(inventory)
                 async for cand in inner_pipeline.tune_async(sub, search=inner, ctx=ctx, backend=backend, db=db):
                     if progress is not None and not work.enrolled:
                         st = inner.last_stats
@@ -455,18 +454,6 @@ class TwoLevelStrategy(SearchStrategy):
                 # per-op cost.
                 best_total = 1.0 / inner.tree.best_reward if inner.tree.best_reward > 0 else None
                 searched = inner.best_realized()
-                structural_parent = structural_parents.structural_parent(searched[0]) if searched is not None and searched[3] else None
-                if structural_parent is not None and (searched[2] or 0) > 1:
-                    structural_key, structural_knobs = structural_parent
-                    db.record_perf(
-                        ctx_key,
-                        structural_key,
-                        backend=backend_name,
-                        status="ok",
-                        stats=_point_stats(searched[1]),
-                        knobs={**ctx.features(), **structural_knobs},
-                        captured=True,
-                    )
                 if best_total is not None:
                     # captured=True: the sweep benches under graph capture by default, so this
                     # Σ-best bookkeeping row derives from captured measurements.

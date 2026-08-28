@@ -183,13 +183,11 @@ remaining live-measurement slot. A traced target normally maps to one post-fusio
 several CudaOps. A conflicting multi-CudaOp proposal is replayable only when search retains the original exact
 structural row that minted the pieces; otherwise it is reported as ambiguous instead of being assigned an invented
 winner. The measured CUDA pipeline captures the finalized single Loop identity even when the working target starts
-from stable Torch IR, then captures the consumed parent at the kernel-set-changing splice. An authoritative structural
-proposal whose realized-pin check passes therefore persists one captured whole-slice perf row under that exact
-route-specific parent cache key and context, carrying the complete scheduler feature row and route. The unpinned Loop
-key remains two-level cost bookkeeping. The measured DB index consumes the route row after a cold reload;
-parent-linked node rows remain diagnostic and training evidence. Proposal feedback is written immediately after
-measurement, before MCTS, so an interruption
-preserves it.
+from stable Torch IR, then captures the consumed parent at the kernel-set-changing splice. That identity enriches the
+parent-linked node rows used for diagnostics and training. A structural whole-slice latency stays in working ranking
+feedback rather than entering `perf`: without an ordered exact child-schedule receipt, the flat parent row would price
+a different assembly after cold reload. Proposal feedback is written immediately after measurement, before MCTS, so
+an interruption preserves it.
 The final winner annotation is emitted only when one directly searched observation supplies both the knobs and cost;
 the later greedy deploy replay cannot be paired with the search reward. The ranking pass stays at tune's fast compile
 flags and never writes the trusted

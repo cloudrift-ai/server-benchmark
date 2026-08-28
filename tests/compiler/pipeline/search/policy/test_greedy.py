@@ -7,7 +7,20 @@ import pytest
 from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key
 from emmy.compiler.pipeline.search.policy import greedy
-from emmy.compiler.pipeline.search.policy.greedy import _direct_measured_pick, _stream_tiers, tile_identity
+from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index_build, _direct_measured_pick, _stream_tiers, tile_identity
+
+
+@pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@a": "cut"}, {"PLACE@a": "cut", "WORK": "t32"}))
+def test_db_measured_index_excludes_placement_route_totals(route) -> None:
+    signature = frozenset({("S_shape", "128")})
+    rows = [
+        SimpleNamespace(status="ok", stats=SimpleNamespace(median=1.0), knobs={"S_shape": 128, **route}),
+        SimpleNamespace(status="ok", stats=SimpleNamespace(median=7.0), knobs={"S_shape": 128, "WORK": "t64"}),
+    ]
+    db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
+    ctx = SimpleNamespace(structural_key=lambda: "ctx")
+
+    assert _db_measured_index_build(db, ctx) == {signature: [({"WORK": "t64"}, 7.0)]}
 
 
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:

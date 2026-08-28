@@ -683,13 +683,12 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     if node.observed:
         # An observer makes the stream order-visible: every partitioned combine — cooperative
         # band, ILP register partials, the cross-CTA split — changes which prefixes exist, so a
-        # scan offers exactly the serial fold. A pin naming a partition is a recorded refusal,
-        # never a silent drop.
-        if pin is not None and ReducePlan.parse(pin, state.work_pin).stages:
-            raise PinRefused(
-                f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a partition, but an observed fold "
-                f"(a scan) preserves its stream order — only the serial fold realizes"
-            )
+        # scan offers exactly the serial fold. A pin naming a partition DROPS to serial (the same
+        # adaptation as the consumed ``g``-half strip: an ambient pin fans out to every kernel,
+        # and refusing here would fail whole-model sweeps on any scan); a pinned replay still
+        # fails loudly at the offered oracle, whose membership check sees the pin unsatisfied.
+        if pin is not None and ReducePlan.parse(pin, state.work_pin).stages and logger.isEnabledFor(logging.DEBUG):
+            logger.debug("REDUCE pin %r names a partition; an observed fold (a scan) realizes the serial fold only", pin)
         return [ReducePlan()]
     if pin is None:
         return [ReducePlan(), *(p for p in coop_reduce_moves() if _band_refusal(p, extent, state.transposed_ok) is None)]
@@ -737,11 +736,6 @@ def _contraction_reduces(state: _State, node, key: str | None, tiled: bool) -> l
     if node.observed:
         # Same stream-order gate as the plain fold's (:func:`_reduce_moves`) — defensive here:
         # nothing builds an observed contraction yet.
-        if pin is not None and ReducePlan.parse(pin, state.work_pin).stages:
-            raise PinRefused(
-                f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a partition, but an observed fold "
-                f"(a scan) preserves its stream order — only the serial fold realizes"
-            )
         return [ReducePlan()]
     if pin is not None:
         pinned = _parsed_reduce_pin(state, pin, key)
@@ -1301,6 +1295,13 @@ class _State:
         inventory."""
         return not self.work_pinned or work == self.work_pin
 
+    @property
+    def observed(self) -> bool:
+        """Whether this kernel's tree holds an observed fold — a scan. Its one row is the serial
+        fold, so an ambient ``WORK``/``REDUCE`` pin fanning out over the graph cannot mean it: the
+        leaf keeps the decided-empty row instead of dropping the kernel to unmapped."""
+        return any(isinstance(s.node, Fold) and s.node.axis is not None and s.node.observed for s in self.sched._all_sites())
+
 
 def _off(sched: Sched, root) -> dict:
     """Every slice key the stored tree spells, at the codec families' declared OFF — the empty
@@ -1384,7 +1385,7 @@ def _step(state: _State, stack: tuple, ctx: Ctx, knobs: dict) -> list[Fork]:
             knobs, stack = _spelled(knobs, option, ctx), children
             continue  # a level with one option is no choice at all — collapse it
         return [_Branch(state, children, below, _spelled(knobs, o, below)) for o, below in offers]
-    if not state.honors_work_pin(ctx.work):
+    if not state.honors_work_pin(ctx.work) and not state.observed:
         return []  # the walk finished without ever claiming the pinned inventory
     return [_Leaf(state, {**state.off, **knobs, WORK.name: _work_spelling(ctx.work) if ctx.work is not None else ""})]
 

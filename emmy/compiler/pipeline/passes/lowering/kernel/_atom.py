@@ -411,15 +411,21 @@ def _staged_inner_atom_loop(
             swizzles[0],
             byte_slabs[0],
             scales[0],
+            lambda x: f"_sfa{x}",
         )
     ]
     for f, bs in enumerate(b_slabs):
         frag_of = (lambda ff: lambda x: _fold_frag(f"{frag_ns}_b{x}", ff))(f)
+        # The block-scale fragment is named PER CHANNEL, exactly as the data fragment is: with one
+        # name for every channel the second channel would read the first channel's scales, which
+        # is wrong by a per-block factor and invisible in the emitted source. The A side keeps one
+        # name because it is genuinely shared.
+        sf_of = (lambda ff: lambda x: _fold_frag(f"_sfb{x}", ff))(f)
         tr, sc = trans[1 + f], scales[1 + f]
         # A packed-pair slab's K columns are BYTE columns — half as many as the chunk's logical K.
         k_cols = bk_elems // 2 if sc is not None else bk_elems
         ldm_b = (k_cols if tr else n.tile) + pads[1 + f]
-        specs.append((frag_of, "b", bs, ldm_b, tr, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f], byte_slabs[1 + f], sc))
+        specs.append((frag_of, "b", bs, ldm_b, tr, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f], byte_slabs[1 + f], sc, sf_of))
 
     # The BLOCK-SCALED cell (both multiplicands packed pairs): its scales do not fold into the
     # fragments — the instruction takes them as two more register operands and applies them
@@ -429,7 +435,7 @@ def _staged_inner_atom_loop(
 
     def ldms(kexpr, suffix):  # every operand's ldmatrix reads at K position `kexpr`, into fragment slot `suffix`
         reads: list[Stmt] = []
-        for frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz, b8, sc in specs:
+        for frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz, b8, sc, sf_of in specs:
             assert not (b8 and swz != "NONE"), "a byte slab stays NONE-swizzle (the ldmatrix XOR is b16-indexed)"
             for x in range(reg):  # within-tile coord for register cell x: warp·(reg·adim) + x·adim
                 prim = BinaryExpr("+", BinaryExpr("*", Var(unit), Literal(reg * adim, "int")), Literal(x * adim, "int"))
@@ -450,7 +456,7 @@ def _staged_inner_atom_loop(
                     if block_scaled:
                         reads.append(
                             BlockScaleLoad(
-                                frag=f"_sf{role}{x}{suffix}",
+                                frag=f"{sf_of(x)}{suffix}",
                                 src_buffer=scale_slab,
                                 src_index=scale_index,
                                 role=role,
@@ -490,7 +496,7 @@ def _staged_inner_atom_loop(
                 ab_dtype=atom.ab_dtype,
                 c_dtype=atom.operand_dtype("c").name,
                 sfa_frag=f"_sfa{i}{suffix}" if block_scaled else None,
-                sfb_frag=f"_sfb{j}{suffix}" if block_scaled else None,
+                sfb_frag=f"{_fold_frag(f'_sfb{j}', f)}{suffix}" if block_scaled else None,
             )
             for f in range(len(b_slabs))
             for i in range(m.reg)
@@ -1127,9 +1133,11 @@ def _packed_operands(
 def _block_scaled_operands(
     c: Fold, pair, bk_elems: int, mn: tuple[Side, Side], bits_dtype, scale_dtype, *, pad: int
 ) -> tuple[tuple, tuple[Operand, ...], tuple[SyncOperand, ...]]:
-    """The staged operands of a BLOCK-SCALED packed pair — the native fp4 cell's four slabs.
+    """The staged operands of a BLOCK-SCALED packed pair — the native fp4 cell's ``2 + 2N`` slabs.
 
-    Four where the packed byte-slab stage next door has two-and-a-fill, and all four are verbatim
+    The shared A contributes its codes and its raw block scales; each of the N product channels
+    adds its own two, so a plain matmul stages four and a fused gate⊗up MLP edge stages six. Where
+    the packed byte-slab stage next door has two-and-a-fill, these are verbatim
     copies: both operands' codes and both operands' raw e4m3 block scales are stored bytes. The
     instruction applies the scales itself, so the fill that stage needs to evaluate a fused scale
     has nothing left to compute, and the drain never materializes a decoded value on either side.
@@ -1197,16 +1205,24 @@ def _block_scaled_operands(
     # The scale slabs are built first: each data operand names its own as the drain's second
     # source, exactly as the packed byte-slab drain names its compute-filled one.
     a_scale = build(m, n, row_base, pair.a.scale, "as", cols=bk_elems // block, step=block, dtype=scale_dtype, trans=False, pad=0)
-    b_scale = build(n, m, col_base, pair.b.scale, "bs", cols=bk_elems // block, step=block, dtype=scale_dtype, trans=True, pad=0)
     a_bits = (
         filled(m, n, row_base, pair.a.codes, pair.a.cone, "a", scale=(a_scale.slab, block))
         if pair.a.bits is None
         else build(m, n, row_base, pair.a.bits, "a", cols=bk_elems // 2, step=2, dtype=bits_dtype, trans=False, scale=(a_scale.slab, block))
     )
-    b_bits = build(n, m, col_base, pair.b.bits, "b", cols=bk_elems // 2, step=2, dtype=bits_dtype, trans=True, scale=(b_scale.slab, block))
-    copies = tuple(op for op in (a_bits, b_bits, a_scale, b_scale) if isinstance(op, Operand))
+    # One codes + one scales slab per channel, over the shared A pair. Channel 0 keeps the bare
+    # ``b`` / ``bs`` tags so a single-channel cell stages byte-identical slabs to before.
+    b_scales, b_bits = [], []
+    for i, side in enumerate(pair.b):
+        tag = "b" if i == 0 else f"b{i}"
+        scale = build(n, m, col_base, side.scale, f"{tag}s", cols=bk_elems // block, step=block, dtype=scale_dtype, trans=True, pad=0)
+        b_scales.append(scale)
+        b_bits.append(
+            build(n, m, col_base, side.bits, tag, cols=bk_elems // 2, step=2, dtype=bits_dtype, trans=True, scale=(scale.slab, block))
+        )
+    copies = tuple(op for op in (a_bits, *b_bits, a_scale, *b_scales) if isinstance(op, Operand))
     fills = tuple(op for op in (a_bits,) if isinstance(op, SyncOperand))
-    return (a_bits, b_bits), copies, fills
+    return (a_bits, *b_bits), copies, fills
 
 
 def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
@@ -1240,13 +1256,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     copy_transport = stage.transport in ("smem-async", "smem-tma")
     packed = None if bs_pair is not None else (match_packed_b_node(c, ops.inputs) if copy_transport else None)
     if bs_pair is not None:
-        assert len(ops.channels) == 1, "the block-scaled cell reads one channel (match_packed_pair_node enforces it)"
         operands, copies, fills = _block_scaled_operands(
             c,
             bs_pair,
             stage.bk_elems,
             mn,
-            ops.inputs[bs_pair.b.bits.input].dtype,
+            ops.inputs[bs_pair.b[0].bits.input].dtype,
             ops.inputs[bs_pair.a.scale.input].dtype,
             pad=BYTE_SLAB_PAD,
         )
@@ -1265,20 +1280,29 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # epilogue at the tile layer names it. The emitted cell is therefore not a
         # rounding-for-rounding account of the declared program, and its parity is a tolerance
         # rather than the exact oracle.
+        # One residue chain PER CHANNEL: the A-side factors are shared, each channel's weight-side
+        # factors are its own. Folding them all into a single product would apply one channel's
+        # per-tensor scale to the other, which is wrong by a scalar and invisible in the emitted
+        # source — only numerical parity catches it.
         alpha_stmts: list[Stmt] = []
-        alpha = ""
-        for i, ld in enumerate((*bs_pair.a.alpha, *bs_pair.b.alpha)):
-            leaf = f"_bs_alpha_l{i}"
-            alpha_stmts.append(Load(name=leaf, input=ld.input, index=ld.index, dtype=ld.dtype))
-            step = f"_bs_alpha{i}"
-            alpha_stmts.append(
-                Assign(name=step, op="copy", args=(leaf,)) if not alpha else Assign(name=step, op="multiply", args=(alpha, leaf))
-            )
-            alpha = step
+        alpha_of: list[str] = []
+        counter = 0
+        for side in bs_pair.b:
+            alpha = ""
+            for ld in (*bs_pair.a.alpha, *side.alpha):
+                leaf = f"_bs_alpha_l{counter}"
+                alpha_stmts.append(Load(name=leaf, input=ld.input, index=ld.index, dtype=ld.dtype))
+                step = f"_bs_alpha{counter}"
+                alpha_stmts.append(
+                    Assign(name=step, op="copy", args=(leaf,)) if not alpha else Assign(name=step, op="multiply", args=(alpha, leaf))
+                )
+                alpha = step
+                counter += 1
+            alpha_of.append(alpha)
         finalize = [
             *alpha_stmts,
             *(
-                FragmentApply(out=cf, op=ElementwiseImpl("multiply"), args=(cf, alpha), kinds=(FRAG, UNIFORM), in_place=True)
+                FragmentApply(out=cf, op=ElementwiseImpl("multiply"), args=(cf, alpha_of[f]), kinds=(FRAG, UNIFORM), in_place=True)
                 for f in range(len(ops.channels))
                 for i in range(mn[0].reg)
                 for j in range(mn[1].reg)

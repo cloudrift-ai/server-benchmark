@@ -196,7 +196,7 @@ def _block_scaled_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int,
     so that fill has nothing left to evaluate. Both sides' scales and every stored side's codes are
     therefore verbatim copies. The one slab still filled is an activation whose codes this very
     matmul computes — its quantize fused in, leaving no buffer to copy from. The weight side is
-    always stored, which is what the ``pair.b.bits`` check below requires.
+    always stored, which is what the ``pair.b`` check below requires of every channel.
 
     The scoped shape: cp.async (the four-descriptor TMA box copy is not built — a missing-code
     fact, stated where the code would live), a k64 cell over 16-element blocks, both code
@@ -216,10 +216,12 @@ def _block_scaled_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int,
         return None
     if not c.axis.extent.is_static or tile.n.mask:
         return None  # an N tile the copy would clamp element-by-element along the contiguous span
-    if pair.b.bits is None:
+    if any(op.bits is None for op in pair.b):
         return None  # only the ACTIVATION side's codes are ever computed here; a weight is stored
     k, bk_elems, block = c.axis.extent.as_static(), tile.bk * atom.atom_k, pair.block
-    for side, tile_side, atom_dim in ((pair.a, tile.m, 0), (pair.b, tile.n, 1)):
+    # Every channel's weight rides the SAME N tile and the same column geometry, so each one is
+    # sized on its own terms and any refusal declines the whole node.
+    for side, tile_side, atom_dim in ((pair.a, tile.m, 0), *((op, tile.n, 1) for op in pair.b)):
         scale = inputs.get(side.scale.input)
         if scale is None or not _row_major_k_inner(scale, side.scale, c.axis.name):
             return None

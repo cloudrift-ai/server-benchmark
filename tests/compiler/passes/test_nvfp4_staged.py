@@ -676,10 +676,74 @@ def test_the_pair_reading_splits_each_side_into_codes_scale_and_residue():
     node, inputs, _axes = _pair_node()
     pair = match_packed_pair_node(node, inputs)
     assert pair is not None and pair.block == 16
-    assert pair.a.bits.input == "a_w_bits" and pair.b.bits.input == "w_bits"
-    assert pair.a.scale.input == "a_w_scale_bits" and pair.b.scale.input == "w_scale_bits"
+    assert len(pair.b) == 1  # one product channel, one streamed operand
+    assert pair.a.bits.input == "a_w_bits" and pair.b[0].bits.input == "w_bits"
+    assert pair.a.scale.input == "a_w_scale_bits" and pair.b[0].scale.input == "w_scale_bits"
     assert [ld.input for ld in pair.a.alpha] == ["a_w_scale_2"]
-    assert [ld.input for ld in pair.b.alpha] == ["w_scale_2"]
+    assert [ld.input for ld in pair.b[0].alpha] == ["w_scale_2"]
+
+
+def _fused_pair_node(*, m=512, n=4096, k=4096, block=16):
+    """The fused gate\u2297up shape: TWO channels over one shared packed-decode A cone, each with
+    its own packed-decode weight. What a quantized SwiGLU MLP binds to."""
+    axes = (Axis("m", Dim(m)), Axis("n", Dim(n)))
+    node = Fold.contraction(
+        k_axis=Axis("k", Dim(k)),
+        a=_packed_cone(k, block=block, row="m", prefix="a_"),
+        channels=(
+            Channel(b=_packed_cone(k, block=block, prefix="g_"), acc="acc0"),
+            Channel(b=_packed_cone(k, block=block, prefix="u_"), acc="acc1"),
+        ),
+    )
+    inputs = {
+        "a_w_bits": Tensor("a_w_bits", (m, k // 2), F4E2M1x2),
+        "a_w_scale_bits": Tensor("a_w_scale_bits", (m, k // block), F8E4M3),
+        "a_w_scale_2": Tensor("a_w_scale_2", (1, 1), F32),
+        "a_w_f4_pairs": Tensor("a_w_f4_pairs", (256, 2), F16),
+    }
+    for q in ("g_", "u_"):
+        inputs |= {
+            f"{q}w_bits": Tensor(f"{q}w_bits", (n, k // 2), F4E2M1x2),
+            f"{q}w_scale_bits": Tensor(f"{q}w_scale_bits", (n, k // block), F8E4M3),
+            f"{q}w_scale_2": Tensor(f"{q}w_scale_2", (1, 1), F32),
+            f"{q}w_f4_pairs": Tensor(f"{q}w_f4_pairs", (256, 2), F16),
+        }
+    return node, inputs, axes
+
+
+def test_the_pair_reading_takes_a_fused_two_channel_node():
+    """Sharing is arity: a fused gate\u2297up edge is the two-channel case of the same reading, not a
+    shape the cell declines. Refusing it kept that node off the packed path entirely."""
+    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_pair_node
+
+    node, inputs, _axes = _fused_pair_node()
+    pair = match_packed_pair_node(node, inputs)
+    assert pair is not None and pair.block == 16
+    assert pair.a.bits.input == "a_w_bits"  # ONE shared row operand
+    assert [op.bits.input for op in pair.b] == ["g_w_bits", "u_w_bits"]  # one per channel, in order
+    assert [op.scale.input for op in pair.b] == ["g_w_scale_bits", "u_w_scale_bits"]
+    # Each channel keeps its OWN k-invariant residue: one combined factor would scale a channel
+    # by its sibling's per-tensor level.
+    assert [[ld.input for ld in op.alpha] for op in pair.b] == [["g_w_scale_2"], ["u_w_scale_2"]]
+
+
+def test_the_pair_reading_declines_a_fused_node_whose_channels_disagree_on_block():
+    """One block extent per node: the cell applies one scale per block per side and has a single
+    block size, so channels spelled at different extents keep the decode-based readings."""
+    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_pair_node
+
+    node, inputs, _axes = _fused_pair_node()
+    mixed = Fold.contraction(
+        k_axis=Axis("k", Dim(4096)),
+        a=_packed_cone(4096, block=16, row="m", prefix="a_"),
+        channels=(
+            Channel(b=_packed_cone(4096, block=16, prefix="g_"), acc="acc0"),
+            Channel(b=_packed_cone(4096, block=32, prefix="u_"), acc="acc1"),
+        ),
+    )
+    inputs = dict(inputs)
+    inputs["u_w_scale_bits"] = Tensor("u_w_scale_bits", (4096, 4096 // 32), F8E4M3)
+    assert match_packed_pair_node(mixed, inputs) is None
 
 
 def test_a_packed_weight_beside_a_materialized_a_is_not_a_pair():

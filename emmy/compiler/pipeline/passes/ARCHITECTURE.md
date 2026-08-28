@@ -164,14 +164,16 @@ has byte-transport siblings beside the fill: a packed-pair (NVFP4) weight cone, 
 verbatim as a raw byte slab while only its block scales are compute-filled, so `resolve_warp_stage` answers for it
 and the cp.async and TMA rows sit beside the fill's depths as fork siblings. Which reading applies is a fact about
 the NODE, not about the transport a pin names — a multi-channel product carrying a cp.async or TMA pin still RAISES,
-since the byte-transport emitters carry one channel — and a shape the byte slab declines keeps the generic reading,
-which computes the same values through the fill. Where BOTH operands are packed over one block extent the native fp4
-mma cell multiplies those values as stored and applies their raw block scales itself: that node's atom is read off
-the pair rather than off the A edge's leaf dtype, and its stored slabs copy verbatim — only an activation whose
-values this kernel computes takes a fill underneath them. The fp8 (k32) gmem-direct tier rides the same
-two-layer policy as the f16-accumulate family: precision-gated for the catalog (`FP8_MMA` / the `FAST_MATH` umbrella),
-bindable by a pin regardless; its sm_89 hardware floor lives in the atom registry's target filter, which no pin
-overrides.
+since the single-sided byte-transport emitters carry one channel — and a shape the byte slab declines keeps the
+generic reading, which computes the same values through the fill. Where BOTH operands are packed over one block
+extent the native fp4 mma cell multiplies those values as stored and applies their raw block scales itself: that
+node's atom is read off the pair rather than off the A edge's leaf dtype, and its stored slabs copy verbatim — only
+an activation whose values this kernel computes takes a fill underneath them. That reading takes ANY channel arity:
+the shared A stages once and each product channel adds its own codes and block-scale slab (`2 + 2N` in all), so a
+fused gate⊗up MLP edge is the two-channel case of the same cell rather than a shape it declines. The fp8 (k32)
+gmem-direct tier rides the same two-layer policy as the f16-accumulate family: precision-gated for the catalog
+(`FP8_MMA` / the `FAST_MATH` umbrella), bindable by a pin regardless; its sm_89 hardware floor lives in the atom
+registry's target filter, which no pin overrides.
 
 **The fragment seam is a `Ctx` decision.** A fragment edge joins a consumer contraction to the one contraction
 producing its computed fragment operand — nested in its A cone, or a sibling in the enclosing fold's derived step

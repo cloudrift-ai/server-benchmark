@@ -35,7 +35,7 @@ from emmy.compiler.ir.schedule import ReducePlan, derive_inventory
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
-from emmy.compiler.ir.tile.path import resolve, sites, spell
+from emmy.compiler.ir.tile.path import UnknownSiteError, resolve, sites, spell
 
 
 def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -197,11 +197,31 @@ class Sched:
         #: not at each reader (:meth:`tile_of`).
         self.place = place
         self._sites = None
+        self._site_by_id = None
 
     def _all_sites(self):
         if self._sites is None:
             self._sites = sites(self.root)
         return self._sites
+
+    def site_of(self, node):
+        """The :class:`~emmy.compiler.ir.tile.path.Site` of ``node`` on this tree — how a consumer
+        holding a node learns its own address. A shared subtree keeps its FIRST site (one node,
+        one schedule, however many paths reach it). A node that is not a site RAISES
+        :class:`~emmy.compiler.ir.tile.path.UnknownSiteError` — an identity miss (a copied or
+        rebuilt node) must be loud, never a silent fall-through to the untiled path."""
+        if self._site_by_id is None:
+            by_id = {}
+            for s in self._all_sites():
+                by_id.setdefault(id(s.node), s)
+            self._site_by_id = by_id
+        site = self._site_by_id.get(id(node))
+        if site is None:
+            raise UnknownSiteError(
+                f"{type(node).__name__} is not a site of this tree — the caller holds a copied or "
+                f"rebuilt node, not the stored object the site walk enumerated"
+            )
+        return site
 
     def key(self, family: str, node) -> str | None:
         """The canonical codec key addressing ``node`` under ``family`` — ``None`` when the node
@@ -262,9 +282,7 @@ class Sched:
           the fragment clamps were built against.
         """
         free = tuple(self.place.free)
-        site = next((s for s in self._all_sites() if s.node is node), None)
-        if site is None:
-            return None
+        site = self.site_of(node)
         ancestors = tuple(
             candidate
             for candidate in self._all_sites()

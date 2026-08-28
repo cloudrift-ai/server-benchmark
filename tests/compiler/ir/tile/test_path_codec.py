@@ -314,3 +314,29 @@ def test_exact_full_path_outranks_deeper_subsequence_matches() -> None:
     for node in (shallow1, shallow2, deep_inner):
         key = spell(root, "REDUCE", node)
         assert resolve(root, key).node is node, key
+
+
+def test_identity_miss_is_loud_never_the_untiled_path() -> None:
+    """A copied node (``dataclasses.replace`` — structurally equal, a different object) is NOT a
+    site of the tree: addressing a schedule read through it must raise ``UnknownSiteError``, never
+    resolve to ``None``/untiled. A node that IS a site but not of the asked family keeps its plain
+    ``ValueError`` — the "family doesn't apply" decline the accessors swallow."""
+    import dataclasses
+
+    from emmy.compiler.ir.tile.ops import Sched
+    from emmy.compiler.ir.tile.path import UnknownSiteError
+
+    root, stream, qk, pv = _flash_tree()
+    copy = dataclasses.replace(qk)
+    assert copy == qk and copy is not qk
+    with pytest.raises(UnknownSiteError):
+        spell(root, "TILE", copy)
+    sched = Sched(root, {})
+    with pytest.raises(UnknownSiteError):
+        sched.site_of(copy)
+    with pytest.raises(UnknownSiteError):
+        sched.key("TILE", copy)
+    assert sched.site_of(qk).node is qk
+    plain = _planar_fold()
+    wrapper = Fold.projection(body=Body((Assign(name="o", op="copy", args=(plain.out,)),)), operands=(plain,))
+    assert Sched(wrapper, {}).key("TILE", plain) is None  # a real site, family declines — not an identity miss

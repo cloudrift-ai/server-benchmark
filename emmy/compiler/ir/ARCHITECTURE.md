@@ -277,6 +277,9 @@ type to dispatch on and no second place for a fact to live.
 from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO
 algebra — a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
 what makes kernel identity the α-invariant TERM HASH (`Fold.structural_key`) rather than the lowered nest.
+`Fold.deps()` exposes names captured outside the lift params, including captures reached recursively through operand
+edges. A contraction deliberately hides its pure lift body from generic nested-body walks, so this direct dependency
+surface is what keeps an operand's captured statistic ordered before the contraction that reads it.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two

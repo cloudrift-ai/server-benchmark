@@ -401,7 +401,10 @@ that canonical input:
 - **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam. A cut writes one workspace
   per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
-  are not. A contraction's operand edges are seams of the same class: cutting one materializes the cone feeding that
+  are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:
+  an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
+  until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
+  materializes the cone feeding that
   operand into its own kernel and the contraction reads it back as an ordinary load. Such a seam's workspace dtype is
   decided EXPLICITLY — the dtype the consuming contraction's output is stored at (traced through any epilogue to the
   output it feeds, so a sibling output at another width cannot mis-type it), which is the element the fused slab

@@ -18,7 +18,7 @@ from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines, deep_reads, is_contraction, refs_axis
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines, deep_reads, is_contraction
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import edge_dtypes
@@ -119,13 +119,15 @@ def storage_frontier(node: Fold) -> Frontier | None:
     return Frontier(name=frontier, producer=side(prefix), residue=side(residue), dtype=result)
 
 
+def _external_reads(node: Fold) -> frozenset[str]:
+    """Every lowered statement's scope-aware SSA and axis captures."""
+    lowered = Body(node.lower())
+    return lowered.forward_cone(lowered).external_reads
+
+
 def _closed_at(node: Fold, axes: tuple) -> bool:
     """Whether ``node`` has no capture other than axes available at its incoming edge."""
-    lowered = tuple(node.lower())
-    defined = set().union(*(deep_defines(stmt) for stmt in lowered)) if lowered else set()
-    available = {axis.name for axis in axes}
-    available.update(site.node.axis.name for site in sites(node) if isinstance(site.node, Fold) and site.node.axis is not None)
-    return deep_reads(list(lowered)) <= defined | available
+    return _external_reads(node) <= {axis.name for axis in axes}
 
 
 def _fed_store_dtype(tile: TileOp, consumer: Fold):
@@ -247,9 +249,8 @@ def _replace_fold(node: Fold, target: Fold, loads: tuple[Load, ...]) -> Fold:
 def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     """The seam axes the PRODUCED piece actually sweeps — its workspace dimensions. ``produced``
     is the seam node, or the frontier prefix when the seam materializes at a storage waypoint."""
-    bound = {site.node.axis.name for site in sites(produced) if isinstance(site.node, Fold) and site.node.axis is not None}
-    lowered = tuple(produced.lower())
-    return tuple(axis for axis in seam.axes if axis.name not in bound and any(refs_axis(stmt, axis.name) for stmt in lowered))
+    captures = _external_reads(produced)
+    return tuple(axis for axis in seam.axes if axis.name in captures)
 
 
 def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = ()) -> list[str]:

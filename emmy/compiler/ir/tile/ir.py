@@ -386,8 +386,9 @@ class TileOp(Op):
     # pure-reduce forms (derived launch geometry). The wire format spells the inventory ONCE, in
     # ``WORK``; the site values carry no worker tokens and the retired embedded spellings raise.
     work: object = None
-    # Whether the graph-level Fold-edge placement fork kept this kernel fused. Cut pieces are
-    # fresh TileOps with the default ``False`` and may expose their own smaller seam set.
+    # Whether the graph-level Fold-edge placement decision is consumed. Unpinned and bare cut
+    # pieces keep the default ``False`` and may expose their own smaller seam set; a scoped cut
+    # sets it on both pieces because its one authoritative path decision cannot name a fresh tree.
     placement_decided: bool = False
     # Whether the split QUESTION is consumed for this kernel: the structural cross-CTA fork
     # (``035_split_reduce``) declined it (the unsplit arm), or the kernel is a realized split's

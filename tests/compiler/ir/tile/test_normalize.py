@@ -207,7 +207,7 @@ def test_matvec_recovers_an_implicit_unit_row_through_an_output_reshape() -> Non
 
 def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
     """The reduced Qwen3 target needs its promoted value-width axis to close computed B."""
-    case = Path(__file__).parents[2] / "realization/cases/attention/rmsnorm-gqa-b-cut_xfail_offered.yaml"
+    case = Path(__file__).parents[2] / "realization/cases/attention/rmsnorm-gqa-b-cut.yaml"
     (record,) = load_golden_records(load_golden_file(case))
 
     tile = _lifted_target(record)

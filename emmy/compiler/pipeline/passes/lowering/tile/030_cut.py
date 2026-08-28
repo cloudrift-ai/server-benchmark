@@ -15,7 +15,7 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, out
 PATTERN = [Pattern("root", TileOp)]
 
 
-def _pin(tile: TileOp, seams) -> tuple[str, str] | None:
+def _pin(tile: TileOp, seams) -> tuple[str, str, bool] | None:
     pins = [(name, value) for name, value in family_pins("PLACE") if family_of(name) == "PLACE"]
     if not pins:
         return None
@@ -26,18 +26,18 @@ def _pin(tile: TileOp, seams) -> tuple[str, str] | None:
             raise ValueError(f"bad PLACE value {value!r}; expected 'fuse' or 'cut'")
         if name == "PLACE":
             if value == "fuse":
-                return name, value
+                return name, value, False
             # A bare ``PLACE=cut`` names the placement DECISION, not a site: the codec's primary
             # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (an unclosed
             # cone, a seam whose workspace dtypes stay undetermined), so a bare pin resolves among
             # the CUTTABLE seams instead: the root-most one.
             depth = {id(site.node): site.depth for site in all_sites}
             seam = min(seams, key=lambda s: depth[id(s.node)])
-            return seam.spelling, value
+            return seam.spelling, value, False
         site = resolve(tile.op, name, all_sites=all_sites)
         if site is None or id(site.node) not in by_node:
             raise ValueError(f"PLACE pin {name!r} does not address a cuttable Fold edge in this kernel")
-        return by_node[id(site.node)].spelling, value
+        return by_node[id(site.node)].spelling, value, True
     return None
 
 
@@ -54,11 +54,15 @@ def rewrite(match: Match, root: Node, ctx=None):
     match.output = renamed
     pinned = _pin(tile, seams)
     if pinned is not None:
-        spelling, value = pinned
+        spelling, value, scoped = pinned
         if value == "fuse":
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
         seam = next(seam for seam in seams if seam.spelling == spelling)
-        return DeferredFork(lambda: realize(match, root, seam, renamed), {spelling: "cut"}, structural=True)
+        return DeferredFork(
+            lambda: realize(match, root, seam, renamed, placement_decided=scoped),
+            {spelling: "cut"},
+            structural=True,
+        )
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
     options.extend(

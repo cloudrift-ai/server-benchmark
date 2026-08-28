@@ -79,6 +79,9 @@ STRUCTURAL forks whose chosen side replaces the kernel with fresh unmapped piece
 placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than through the
 codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone, a seam
 whose workspace dtypes stay undetermined).
+A scoped `PLACE@path=cut` pin is one authoritative seam decision: both pieces set `placement_decided` and proceed to
+scheduling rather than applying that path again to a different tree. Unpinned cuts and bare
+`PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
 `040_schedule` maps the free axes and enumerates the schedule. Keys
 use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
 

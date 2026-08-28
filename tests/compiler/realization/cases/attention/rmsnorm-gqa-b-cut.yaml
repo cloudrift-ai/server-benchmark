@@ -70,7 +70,7 @@ configs:
     knobs:
       TILE: ''
       WORK: t128
-      REDUCE: ''
+      REDUCE: coop
       STAGE: ''
       RASTER: ''
     identity: 1b36ebe9ee194143e446c36c4784f00a75df9f9db670abf09ae1074b2e9c0965

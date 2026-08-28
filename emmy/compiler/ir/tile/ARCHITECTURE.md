@@ -162,8 +162,9 @@ specifications. Schedule slices remain keyed by `path.py` and read through `ops.
 `lowering/tile/030_cut` offers kernel placement before scheduling. `PLACE` uses the same tree-path codec to address a
 stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
 writes the child Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with
-ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s, so they re-enter the same placement
-and scheduling rules. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation
+ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned and bare cuts re-enter
+placement before scheduling; a scoped cut carries the consumed placement decision on both pieces and proceeds
+directly to scheduling. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation
 families nor filters legal cuts by profitability.
 
 Scheduling sees only the rewritten stored Fold tree. Every Fold is an addressable schedule site; the scheduler does

@@ -16,7 +16,7 @@ from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.pipeline import LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.policy.greedy import greedy_decide, logger, tile_identity
+from emmy.compiler.pipeline.search.policy.greedy import StructuralRouteReplayError, greedy_decide, logger, tile_identity
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 
 if TYPE_CHECKING:
@@ -71,7 +71,14 @@ class GreedyStrategy(SearchStrategy):
             rejections: list[tuple[str, str, str]] = []
             run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
             decide = greedy_decide(blocked=blocked, price_structural=allow_structural, db=db)
-            terminal, trace = run.resolve(graph.copy(), decide)
+            try:
+                terminal, trace = run.resolve(graph.copy(), decide)
+            except StructuralRouteReplayError as exc:
+                if allow_structural:
+                    logger.warning("deploy: %s; retiring structural routes for this compile", exc)
+                    allow_structural = False
+                    continue
+                raise
             failed = _unlowered_tiles(terminal, rejections)
             if not failed:
                 break

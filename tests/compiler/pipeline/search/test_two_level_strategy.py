@@ -28,7 +28,7 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
-from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.db import RouteChild, SearchDB
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult, _KernelInventory
 from tests.compiler.helpers import run_inner_reward, run_two_level
@@ -200,10 +200,6 @@ def test_run_drives_outer_scores_separably_and_assembles() -> None:
     assert any(isinstance(n.op, CudaOp) for n in result.assembled.nodes.values())
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="PLACE routing receipts lack a parent-route → ordered exact child-schedule persistence contract",
-)
 def test_placement_route_cold_replay_preserves_measured_child_schedule_tree(monkeypatch, tmp_path) -> None:
     """A measured structural parent must cold-replay its exact child schedule tree.
 
@@ -236,6 +232,10 @@ def test_placement_route_cold_replay_preserves_measured_child_schedule_tree(monk
     route_rows = [row for row in db.iter_perf(ctx.structural_key(), backend="cuda") if row.knobs.get("PLACE") == "cut"]
     assert len(route_rows) == 1
     assert route_rows[0].stats.median == pytest.approx(2.0)
+    receipt = db.lookup_structural_route(ctx.structural_key(), route_rows[0].op_key, backend="cuda")
+    assert receipt is not None
+    assert tuple(child.op_key for child in receipt.children) == backend.measured_route
+    assert [child.latency_us for child in receipt.children] == pytest.approx([1.0, 1.0])
     db.close()
 
     reloaded = SearchDB.open_readonly(path)
@@ -247,6 +247,21 @@ def test_placement_route_cold_replay_preserves_measured_child_schedule_tree(monk
     assert len(replayed_route) == 2
     assert replayed_child is not None
     assert replayed_route == backend.measured_route
+
+    writer = SearchDB(path)
+    bad_children = [
+        RouteChild(op_key=receipt.children[0].op_key, op_sig="drifted", knobs=receipt.children[0].knobs, latency_us=1.0),
+        receipt.children[1],
+    ]
+    assert writer.record_structural_route(
+        ctx.structural_key(), route_rows[0].op_key, backend="cuda", children=bad_children, parent_latency_us=2.0
+    )
+    writer.close()
+    drifted = SearchDB.open_readonly(path)
+    with records_override([]):
+        retired = Pipeline.build(CUDA_PASSES).run(graph.copy(), ctx=ctx, db=drifted)
+    drifted.close()
+    assert sum(isinstance(node.op, CudaOp) for node in retired.nodes.values()) == 1
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:

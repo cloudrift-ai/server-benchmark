@@ -467,6 +467,15 @@ class TwoLevelStrategy(SearchStrategy):
                         knobs={**ctx.features(), **structural_knobs},
                         captured=True,
                     )
+                    route_children = inner.best_route_children()
+                    if route_children is not None and len(route_children) == searched[2]:
+                        db.record_structural_route(
+                            ctx_key,
+                            structural_key,
+                            backend=backend_name,
+                            children=route_children,
+                            parent_latency_us=searched[1],
+                        )
                 if best_total is not None:
                     # captured=True: the sweep benches under graph capture by default, so this
                     # Σ-best bookkeeping row derives from captured measurements.

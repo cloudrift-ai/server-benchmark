@@ -17,7 +17,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
-from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
+from emmy.compiler.pipeline.search.db import PerfStats, RouteChild, SearchDB
 from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
 from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, TuningSearch
 from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult
@@ -392,6 +392,15 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
             leaf.realized_knobs = None
             leaf.realized_cuda_ops = 2
             leaf.realized_cuda_knobs = [dict(node.op.knobs) for node in terminal.nodes.values()]
+            leaf.realized_route_children = [
+                RouteChild(
+                    op_key=node.op.cache_key(),
+                    op_sig=IdentityStrategy().op_sig(node.op),
+                    knobs=dict(node.op.knobs),
+                    latency_us=latency,
+                )
+                for node, latency in zip(terminal.nodes.values(), (30.0, 29.61), strict=True)
+            ]
             leaf.bench_status = "ok"
             leaf.bench_stats = search.last_stats
             search.tree.root.children = [leaf]
@@ -439,6 +448,10 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     assert perf.stats == PerfStats(median=59.61, min=59.61, max=59.61, mean=59.61, variance=0.0, n_samples=1)
     assert perf.captured is True
     assert perf.knobs == {**ctx.features(), **live_features, **route}
+    receipt = reloaded_db.lookup_structural_route(ctx.structural_key(), route_parent.cache_key(), backend="cuda")
+    assert receipt is not None
+    assert tuple(child.op_key for child in receipt.children) == tuple(node.op.cache_key() for node in terminal.nodes.values())
+    assert [child.latency_us for child in receipt.children] == pytest.approx([30.0, 29.61])
     assert reloaded_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
     reloaded_db.close()
 

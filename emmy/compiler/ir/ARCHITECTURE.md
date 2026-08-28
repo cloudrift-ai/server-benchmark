@@ -396,6 +396,15 @@ both maps renames it twice — and if the two passes form a chain (e.g.
 `x → in5` and a pre-existing `in5 → in26`) the double application
 collapses it transitively, silently wiring a gather to the wrong row.
 
+`rewrite` is also **not scope-aware**: it descends into every nested body and maps a stmt's own bindings as well as
+its reads, while `Assign` / `Load` / `Select` names bound inside a `Loop` / `Cond` body are scoped to that body. The
+two are safe together only for a whole-subtree renumbering (`rename_ssa_sequential`). When the rename instead comes
+from *dropping* a binding — load dedup, CSE — an inner scope that merely re-uses the dropped name's spelling is a
+different variable, and renaming it both redeclares the survivor inside the scope and rewires the inner arithmetic to
+the outer value. `passes.rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
+scope re-binds before descending. `normalize.dedup_loads` applies the same rule while threading its own per-scope
+environment.
+
 ### `ir/stmt/normalize.py` — structural canonicalization
 
 Pure `body → body` passes run from `LoopOp.__post_init__` so every

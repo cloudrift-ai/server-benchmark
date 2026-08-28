@@ -191,6 +191,33 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
     assert "measurements" not in winner
 
 
+def test_direct_winner_promotes_matching_proposal(tmp_path):
+    path = tmp_path / "working.yaml"
+    proposal = _matmul("mm", knobs={"TILE": "f4x2"})
+    document = _document(proposal)
+    dump_golden_file(document, path)
+    document, targets = load_working_targets(path)
+    target = targets[0]
+
+    persist_proposal_rankings(
+        path,
+        document,
+        target,
+        [{"status": "ok", "latency_us": 8.0, "compile_flags": "-O1", "measured_knobs": {"TILE": "f4x2"}}],
+    )
+    persist_tune_winner(path, document, target, ({"TILE": "f4x2"}, 7.5), compile_flags="-O1")
+
+    winner = load_golden_file(path)["configs"][0]["realizations"][0]
+    assert winner["ranking"] == {
+        "status": "ok",
+        "latency_us": 7.5,
+        "compile_flags": "-O1",
+        "measured_knobs": {"TILE": "f4x2"},
+        "source": "tune",
+        "tune_winner": True,
+    }
+
+
 def test_incremental_persist_matches_a_full_dump_and_still_checks_realizations(tmp_path):
     path = tmp_path / "working.yaml"
     dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})), path)

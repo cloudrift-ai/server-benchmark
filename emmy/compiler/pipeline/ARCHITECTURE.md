@@ -952,7 +952,9 @@ already cached, which makes hybrid-vs-MCTS comparisons charge LLM proposals cons
 slots and counts only terminals that reached a live backend; cached replay observations update the tree without
 spending the live-measurement budget. Ranking feedback is written under the entry's working-only `ranking` mapping,
 and the final tune winner is annotated or appended as another proposal only when one directly searched observation
-provides both its knob row and cost. When the fastest searched terminal changes the kernel set, the winner is its
+provides both its knob row and cost. When that row matches an existing proposal, the same entry is promoted from
+proposal feedback to a direct tune winner so strict replay can use it as an automatic exact pin. When the fastest
+searched terminal changes the kernel set, the winner is its
 first exact structural replay row: a `PLACE`-only routing row for a placement cut, or the complete pre-split schedule
 row for a cross-CTA reduction. The pieces remain independent tuning targets; promotion never fabricates their
 heterogeneous schedules into one row or falls back to a slower monolithic sibling. A cross-CTA parent becomes a tune

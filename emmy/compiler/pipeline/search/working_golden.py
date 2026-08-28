@@ -573,10 +573,8 @@ def persist_tune_winner(
         )
         if writable is not None:
             realization = configs[writable[0]]["realizations"][writable[1]]
-            previous = dict(realization.get("ranking") or {})
             realization["ranking"] = {
                 **winner_ranking,
-                "source": previous.get("source", "tune"),
                 "tune_winner": True,
             }
         elif not matching:

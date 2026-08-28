@@ -200,7 +200,7 @@
  "tests/compiler/ir/test_dynamic_shapes.py::test_qwen_whole_model_dynamic_traces": 6.39,
  "tests/compiler/ir/test_dynamic_shapes.py::test_symbolic_sdpa_traces_and_decomposes": 0.07,
  "tests/compiler/ir/tile/test_effect_boundary.py::test_sweep_body_out_of_canonical_order_still_extracts": 0.05,
- "tests/compiler/ir/tile/test_effect_boundary.py::test_sweep_write_of_a_captured_accumulator_extracts": 0.05,
+ "tests/compiler/ir/tile/test_effect_boundary.py::test_sweep_write_of_a_captured_accumulator_declines_cleanly": 0.05,
  "tests/compiler/loader/test_exl3.py::test_computed_b_lane_offers_the_cross_cta_split": 0.67,
  "tests/compiler/loader/test_exl3.py::test_computed_b_split_k_matches_decoded_linear@cuda": 5.0,
  "tests/compiler/loader/test_exl3.py::test_computed_b_split_partial_reindexes_the_cone": 0.63,

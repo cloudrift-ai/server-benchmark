@@ -116,7 +116,9 @@ Multiple output specifications owned by one projection region reconstitute one l
 compares the reconstruction against the stream **as reconstitution will spell it**: a `ProjectionRegion` stores its
 body in a `Lambda`, whose construction canonicalizes statement order and commutative arguments, so a raw stream that
 normalization reorders is still representable — the gate normalizes both sides the same way. A stream already in
-canonical form is gated on byte-identity exactly as before.
+canonical form is gated on byte-identity exactly as before. A write whose stored value is captured from the enclosing
+scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) has no body def to name, and is declined:
+the fusion lift-preflight turns that into "leave the region unfused".
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
 specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or

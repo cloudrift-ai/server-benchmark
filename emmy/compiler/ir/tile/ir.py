@@ -350,11 +350,14 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
                 results = tuple(dict.fromkeys(value for spec in child_direct for value in spec.write.values))
                 # A write may store a value captured from the enclosing scope unchanged (a sweep
                 # broadcasting an already-reduced accumulator, ``o[j] = acc``). Such a result is
-                # not a body def, so probe free names with results left off, then bind captured
-                # results as params alongside the body's own free reads.
+                # not a body def; spelling it as a captured param produced a kernel whose reduce
+                # body read a free axis under its pre-canonicalization name (an undefined
+                # identifier at nvcc), so the shape is DECLINED — a clean ``None`` (the merge
+                # stays unfused), not the Lambda formation crash probing it used to raise.
                 probe = Lambda(params=(stmt.axis.name,), body=child_body, results=())
-                captured_results = tuple(value for value in results if value not in probe.defined)
-                captures = tuple(sorted(probe.free_names() | set(captured_results)))
+                if any(value not in probe.defined for value in results):
+                    return None
+                captures = tuple(sorted(probe.free_names()))
                 region = ProjectionRegion(
                     axis=stmt.axis,
                     lift=Lambda(params=(stmt.axis.name, *captures), body=child_body, results=results),

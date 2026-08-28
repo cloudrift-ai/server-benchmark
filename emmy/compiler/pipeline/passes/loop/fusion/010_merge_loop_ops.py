@@ -142,6 +142,20 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
         if merged is None:
             raise RuleSkipped("N-way Loop splicer rejected the region")
 
+    # Liftability is a correctness boundary: a merge the tile lift cannot spell (an output whose
+    # value is captured from an enclosing scope, an interior write no OutputSpec split
+    # round-trips) would otherwise hard-fail the compile at 010_lift, where nothing can decline
+    # it. The preflight is the exact lift the lowering runs — with the round-trip gate comparing
+    # both sides under construction normalization, a pure reorder no longer fails it, so the
+    # predicate matches what the pipeline truly accepts. Declining leaves the region to smaller
+    # merges; every pre-fusion LoopOp lifts, so a compilable graph always remains.
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
+
+    try:
+        lift_loop_op(merged)
+    except ValueError as exc:
+        raise RuleSkipped(f"merged region does not lift: {exc}") from exc
+
     fragment, output_map = _wrap_multi_output_fragment(graph, merged, live_outputs)
     match.consumed = region
     match.output = live_outputs[0] if len(live_outputs) == 1 else output_map

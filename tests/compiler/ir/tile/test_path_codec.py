@@ -357,3 +357,24 @@ def test_identity_miss_is_loud_never_the_untiled_path() -> None:
     plain = _planar_fold()
     wrapper = Fold.projection(body=Body((Assign(name="o", op="copy", args=(plain.out,)),)), operands=(plain,))
     assert Sched(wrapper, {}).key("TILE", plain) is None  # a real site, family declines — not an identity miss
+
+
+def test_tile_axis_orientation_is_read_once_per_site(monkeypatch) -> None:
+    """Candidate plans share a site's output-axis orientation; the computed cone lowers once."""
+    from emmy.compiler.ir.tile import Placement
+    from emmy.compiler.ir.tile import ops as tile_ops
+
+    root, product, _ = _norm_linear_tree()
+    calls = []
+    original = tile_ops.edge_refs_axis
+
+    def spy(edge, name):
+        calls.append((edge, name))
+        return original(edge, name)
+
+    monkeypatch.setattr(tile_ops, "edge_refs_axis", spy)
+    axes = (Axis("m", 128), Axis("n", 256))
+    sched = tile_ops.Sched(root, {}, place=Placement(free=axes, grid=axes))
+    assert sched._mn_for(product) == axes
+    assert sched._mn_for(product) == axes
+    assert len(calls) == 2

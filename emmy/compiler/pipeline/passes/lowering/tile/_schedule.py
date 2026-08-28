@@ -63,7 +63,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.identity import hint_extent, pool_key
-from emmy.compiler.ir.tile.ops import Sched, carries_partition, edge_dtypes, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, carries_partition, cone_seam, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import SLICE_FAMILIES, sites
 from emmy.compiler.pipeline.fork import Fork, iter_leaves
 from emmy.compiler.pipeline.knob import axis_of, schedule_pin_fingerprint
@@ -1104,7 +1104,7 @@ class _SiteFacts:
     offered: tuple[str, ...]  # tensor-core atoms the catalog enumerates (precision policy applied)
     pin_only: tuple[str, ...]  # bindable atoms only a pin names (the policy-gated remainder)
     k_axis: Axis  # the reduction domain — a derived unit marker inherits its enclosing fold's axis
-    seam: tuple | None  # a derived marker's carried-state seam; None = the fill reads the cone itself
+    seam: tuple | None  # the computed-A stat-row seam, or a derived marker's carried-state seam
     producer: Fold | None  # the single contraction nested in the computed A edge (the paired budget)
     need: str | None  # the TILE key of this consumer's fragment producer (the cross-site seam)
 
@@ -1132,10 +1132,10 @@ def _site_facts(tile: TileOp, ctx, sched: Sched, tail: list, frag_ok: bool) -> d
         if not (isinstance(node, Fold) and node.axis is not None and is_contraction(node)):
             continue
         parent = parents.get(id(node))
-        # ``seam=None`` defers to the fill resolver's own ``cone_seam`` read — the seam is the
-        # fill's stat-row interface, so it is read only when a fill actually resolves, never
-        # eagerly for a node whose warp plans all drop. The derived marker is the one override:
-        # its states are the ENCLOSING carrier's, which no cone read can see.
+        # The seam is the fill's stat-row interface and a function of the node, not of a tile
+        # plan. Read it once for a warp-eligible computed A instead of lowering the entire cone
+        # again for every plan. The derived marker is the one override: its states are the
+        # ENCLOSING carrier's, which no cone read can see.
         k_axis, seam = node.axis, None
         refusal = _node_refusal(tile, ctx, node, frag_ok)
         if (
@@ -1147,6 +1147,8 @@ def _site_facts(tile: TileOp, ctx, sched: Sched, tail: list, frag_ok: bool) -> d
         ):
             k_axis = parent.axis
             seam = ((), (), tuple(parent.combine.results[: -len(node.combine.results)]))
+        elif refusal is None and isinstance(node.a, Fold):
+            seam = cone_seam(node.a, k_axis.name)
         producer = None
         if isinstance(node.a, Fold):
             nested = tuple(s.node for s in sites(node.a) if is_contraction(s.node) and edge_refs_axis(s.node, k_axis.name))

@@ -109,6 +109,29 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
     assert not repeats, f"_options was asked the same question {repeats} time(s) over ({len(keys)} calls)"
 
 
+def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> None:
+    """A computed-A cone is lowered once for its stat-row seam, not once per tile plan."""
+    from emmy.compiler.pipeline.passes.lowering.tile import _staging  # noqa: PLC0415
+
+    calls: list[tuple] = []
+    original = _schedule.cone_seam
+
+    def spy(cone, k_name):
+        calls.append((cone, k_name))
+        return original(cone, k_name)
+
+    monkeypatch.setattr(_schedule, "cone_seam", spy)
+    monkeypatch.setattr(
+        _staging,
+        "cone_seam",
+        lambda *_: (_ for _ in ()).throw(AssertionError("the fill must reuse the prescan's seam")),
+    )
+    assert _rows(FIXTURES["fused_norm_linear"]())
+    assert calls
+    keys = [(id(cone), k_name) for cone, k_name in calls]
+    assert len(keys) == len(set(keys))
+
+
 @pytest.mark.parametrize("case, tile_sites, reduce_sites", (("fused_norm_linear", 1, 2), ("flash_pair", 2, 3)))
 def test_computed_fold_sites_are_keyed_schedule_sites(case, tile_sites, reduce_sites, unpinned) -> None:
     """A computed cone's fold and a derived site (flash's synthesized PV) are real schedule sites:

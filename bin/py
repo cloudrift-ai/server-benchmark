@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Run THIS worktree's emmy, not the shared checkout's.
+#
+# The shared venv carries an editable install whose finder maps `emmy` to
+# /home/io/cr/emmy/emmy, and that beats both cwd and the console script. Without this,
+# every command run from a worktree silently measures the main checkout — which
+# invalidated a compile comparison on 2026-08-28 before anyone noticed.
+#
+# Separate venvs per worktree would be the structural fix, but /home is at 99% and each
+# venv is 6.2 GB.
+exec env PYTHONPATH="/home/io/cr/emmy-branches/merge-668" /home/io/cr/emmy/venv/bin/python -P "$@"

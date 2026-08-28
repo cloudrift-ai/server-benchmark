@@ -5443,15 +5443,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a0: coop
-      WORK: t128
-      TILE: ''
-      STAGE: ''
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f1x2/k8
+      REDUCE: ''
+      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 4202.5
-      reference_us: 238.1
+      emmy_us: 73.0
+      reference_us: 217.8
       reference_backend: torch-eager
 - program: 1
   target:

@@ -304,8 +304,27 @@ downstream failure to recognize or schedule a maximally fused body is a lowering
 repaired by retaining an early graph boundary.
 
 Only semantic splice boundaries remain: internal nodes must be owned, every escape must be an explicit live output,
-and the splicer must preserve semantics. Fusion does not estimate arithmetic work and has no lowering-dependent
-exception.
+the splicer must preserve semantics, and a region stops at a PACKED buffer it computes. Fusion does not estimate
+arithmetic work and has no lowering-dependent exception.
+
+Packed here means the storage sense — `logical_elems > 1`, two e2m1 codes to the byte — not a concatenated
+projection. Such a dtype states that a tensor's stored last-axis extent is half its logical one, and only a tensor
+carries that relation. The splice deletes the tensor. The codes then survive as an `Assign` at the packed dtype, a
+value with no extent, and a consumer's index names half a byte rather than one whole element. The merged body answers
+that by carrying the graph's own pack arithmetic into the consumer, deriving the whole byte at every logical index and
+reading one half of it.
+
+The splice also goes ONE WAY, and that is what makes this a refusal rather than a maximal merge evidence may cut
+back. Fusion may go maximal because `030_cut` offers each closed operand seam back. **Kernel boundaries after maximal
+fusion** below says what such a seam materializes: the dtype the consuming contraction stores, which is the decoded
+element rather than the codes. The storage-frontier refinement described there would hold the raw storage bits
+instead, but it recognizes a decode through the `ElementwiseImpl.decodes` trait, and only the fp8 casts carry that
+trait — an e2m1 code decodes through a value-table gather. Nothing offers the codes back. The merged form is not the
+widest of several siblings; it is the only one left.
+
+Consumer count decides nothing. One consumer or three reach the same shape: the quantize is a kernel of its own and
+the codes sit in memory. The buffer's readers leave the region together with everything downstream of them, so the
+remainder keeps no holes — a hole would make the merged node depend on a node that depends on it.
 
 There is one fusion pass and one fixpoint. One rewrite takes the maximal downstream Loop region: non-reconvergent
 consumers become output ports of one multi-output `LoopOp`, and all terminal Writes seed one splicer worklist. The

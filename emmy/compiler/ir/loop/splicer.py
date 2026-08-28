@@ -96,6 +96,16 @@ class _NotSupported(Exception):
     splicer."""
 
 
+class UnfusableStmt(_NotSupported):
+    """Construction hit the per-stmt binding cap: ``origin``'s statements multiply σ-bindings
+    instead of deduplicating (a recurrence-shaped chain). Surfaced — not folded into ``None`` —
+    when the caller asks, so fusion can drop ``origin`` from the region and retry the rest."""
+
+    def __init__(self, message: str, origin: str) -> None:
+        super().__init__(message)
+        self.origin = origin
+
+
 # Unified binding key: ``(origin, name, emit_scope, sigma.restrict(enclosing))``.
 # ``emit_scope`` is where the stmt lands in the merged body; ``sigma`` is
 # restricted to the stmt's own enclosing axis names — the only bindings that
@@ -142,6 +152,7 @@ def splice_loops(
     splice_edges: dict[tuple[str, str], tuple[str, str]],
     *,
     roots: tuple[tuple[str, str], ...] | None = None,
+    surface_unfusable: bool = False,
 ) -> LoopOp | None:
     """Splice a DAG of ``LoopOp``s into one merged kernel.
 
@@ -177,12 +188,16 @@ def splice_loops(
         # _NotSupported = splicer hit an unsupported pattern (σ-solve, scope).
         # ValueError = LoopOp construction validation rejected the emitted body.
         # Both surface to callers as None; debug log preserves which one for
-        # future investigation without polluting normal output.
+        # future investigation without polluting normal output. A binding-cap
+        # doom is re-raised on request so fusion can shrink the region by the
+        # named origin instead of abandoning every other merge in it.
+        if surface_unfusable and isinstance(exc, UnfusableStmt):
+            raise
         logger.debug("splice_loops rejected pattern: %s: %s", type(exc).__name__, exc)
         return None
 
 
-def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
+def splice_graph(graph, *, surface_unfusable: bool = False) -> tuple[LoopOp, list[str]] | None:
     """Splice a subgraph of ``LoopOp`` nodes into one merged kernel.
 
     Each ``LoopOp`` node in ``graph`` becomes a registered loop tagged
@@ -250,7 +265,7 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
                 seen_external.add(inp)
                 external_order.append(inp)
 
-    merged = splice_loops(loops=loops, splice_edges=splice_edges, roots=tuple(roots))
+    merged = splice_loops(loops=loops, splice_edges=splice_edges, roots=tuple(roots), surface_unfusable=surface_unfusable)
     if merged is None:
         return None
     return merged, external_order
@@ -617,10 +632,11 @@ class _Splicer(LoopBuilder):
             return existing
         self._bindings_per_stmt[(origin, name)] += 1
         if self._bindings_per_stmt[(origin, name)] > self._STMT_BINDING_CAP:
-            raise _NotSupported(
+            raise UnfusableStmt(
                 f"stmt {name!r} of loop {origin!r} takes over {self._STMT_BINDING_CAP} distinct bindings — "
                 f"the region's σ-bindings multiply instead of deduplicating (a recurrence-shaped chain); "
-                f"it stays unfused"
+                f"it stays unfused",
+                origin=origin,
             )
         bound = self.fresh(name)
         self._binding[key] = bound

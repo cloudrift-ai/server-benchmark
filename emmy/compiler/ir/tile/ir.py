@@ -348,8 +348,13 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
                     return None
                 child_body, child_outputs, child_direct = child
                 results = tuple(dict.fromkeys(value for spec in child_direct for value in spec.write.values))
-                provisional = Lambda(params=(stmt.axis.name,), body=child_body, results=results)
-                captures = tuple(sorted(provisional.free_names()))
+                # A write may store a value captured from the enclosing scope unchanged (a sweep
+                # broadcasting an already-reduced accumulator, ``o[j] = acc``). Such a result is
+                # not a body def, so probe free names with results left off, then bind captured
+                # results as params alongside the body's own free reads.
+                probe = Lambda(params=(stmt.axis.name,), body=child_body, results=())
+                captured_results = tuple(value for value in results if value not in probe.defined)
+                captures = tuple(sorted(probe.free_names() | set(captured_results)))
                 region = ProjectionRegion(
                     axis=stmt.axis,
                     lift=Lambda(params=(stmt.axis.name, *captures), body=child_body, results=results),
@@ -367,32 +372,29 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
     if extracted is None:
         return None
     body, outputs, _ = extracted
-    if apply_output_specs(body, outputs) != _construction_normalized(original):
+    if _construction_normalized(apply_output_specs(body, outputs)) != _construction_normalized(original):
         return None
     return tuple(body), tuple(outputs)
 
 
 def _construction_normalized(stmts) -> list[Stmt]:
-    """The effectful stream as reconstitution will spell it — the round-trip gate's honest target.
+    """Both sides of the round-trip gate, under the construction canonicalization — a COMPARATOR.
 
     A :class:`ProjectionRegion` stores its body in a ``Lambda``, whose construction canonicalizes
-    statement order and commutative arguments (``normalize_lambda_body``). Reconstitution therefore
-    returns the NORMALIZED body, and comparing it against the raw stream would reject any input the
-    normalization reorders — a semantics-preserving reorder, so a hard compile failure over spelling.
-    Mirror the exact treatment here: within each free sweep, the pure prefix is normalized and the
-    writes keep their relative order at the tail (where ``apply_output_specs`` re-appends them).
-    A stream already in canonical form maps to itself, so byte-identity is preserved exactly where
-    it held before.
-    """
+    statement order and commutative arguments (``normalize_lambda_body``), so reconstitution
+    returns the canonical spelling while the captured stream is raw. Gating on byte-identity with
+    the raw stream rejected any input the canonicalization reorders — a semantics-preserving
+    reorder, surfacing as a hard "cannot be represented" compile failure. The gate instead maps
+    BOTH streams through the same canonicalization, recursively into every loop body: the order
+    is dependency-respecting and canonical (not input-stable), so two spellings of one stream
+    converge, and two genuinely different streams still differ. A stream already in canonical
+    form maps to itself, so byte-identity holds exactly where it held before."""
     out: list[Stmt] = []
-    for stmt in stmts:
-        if isinstance(stmt, Loop) and not stmt.is_reduce:
-            inner = _construction_normalized(stmt.body)
-            pure = [child for child in inner if child.pure]
-            effects = [child for child in inner if not child.pure]
-            out.append(replace(stmt, body=Body((*normalize_lambda_body(Body(pure)), *effects))))
-        else:
-            out.append(stmt)
+    for stmt in normalize_lambda_body(Body.coerce(tuple(stmts))):
+        bodies = stmt.nested()
+        if bodies and isinstance(stmt, Loop):
+            stmt = replace(stmt, body=Body(tuple(_construction_normalized(stmt.body))))
+        out.append(stmt)
     return out
 
 

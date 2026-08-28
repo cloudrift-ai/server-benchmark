@@ -241,7 +241,9 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
 `RegEpilogue` (`extra_accs`). Materialized A copies into the same single A slab; computed A evaluates into it. Both
-forms use the synchronous compute fill because the gmem-direct and byte-copy MMA paths remain single-channel.
+forms use the synchronous compute fill because the gmem-direct and single-sided byte-copy MMA paths remain
+single-channel. The block-scaled fp4 cell is the exception: it carries N channels on cp.async, staging `2 + 2N` slabs
+over the one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
 
 **Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
 sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B

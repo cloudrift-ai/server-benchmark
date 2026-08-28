@@ -218,10 +218,18 @@ class BlockScaledOperand:
 
 @dataclass(frozen=True)
 class BlockScaledPair:
-    """Both contraction operands read as block-scaled packed pairs, over one block extent."""
+    """Every contraction operand read as a block-scaled packed pair, over one block extent.
+
+    ``a`` is the SHARED row operand and ``b`` holds one entry per product channel, in channel
+    order — the arity the node itself carries. A plain matmul has one entry; the fused gate⊗up MLP
+    edge has two, and both read the same ``a``. Sharing is what the cell is built on: one A
+    fragment and one A scale are staged once and feed every channel's mma, so the operands cannot
+    be modelled as N independent pairs without losing the guarantee that their ``a`` is the same
+    one.
+    """
 
     a: BlockScaledOperand
-    b: BlockScaledOperand
+    b: tuple[BlockScaledOperand, ...]
     block: int
 
 
@@ -265,19 +273,25 @@ def block_scaled_atom(atom) -> bool:
 def match_packed_pair_node(node, inputs) -> BlockScaledPair | None:
     """The contraction ``node`` read as a BLOCK-SCALED packed pair, or ``None``.
 
-    The instruction's own node shape: one channel, both edges plain operand projections, each a
+    The instruction's own node shape: every edge a plain operand projection, each a
     :func:`match_packed_kblock_b` decode chain that splits into (packed codes, raw block-scale
-    load, k-invariant residue), and both over the SAME block extent — the cell applies one scale
+    load, k-invariant residue), and all over the SAME block extent — the cell applies one scale
     per block per side and has one block size. A packed weight beside a 16-bit activation answers
     ``None`` here and keeps the single-sided reading (:func:`match_packed_b_node`), whose drain
     decodes into 16-bit fragments.
 
+    ANY channel arity reads: the shared ``a`` is matched once and each channel's ``b`` in turn, so
+    a fused gate⊗up MLP edge is the two-channel case of the same shape rather than a form the cell
+    declines. Refusing it here was what kept that node off the packed path entirely — with no pair
+    reading its A leaf is no longer a packed load, so the packed-dtype refusal downstream stops
+    firing too and the node is offered the whole 16-bit catalog instead.
+
     Asked here rather than at each consumer for the same reason its single-sided sibling is: the
     schedule's offer, the stage resolver and the materializer must recognize one set of nodes.
     """
-    if inputs is None or not isinstance(node, Fold) or node.axis is None or len(node.channels) != 1:
+    if inputs is None or not isinstance(node, Fold) or node.axis is None:
         return None
-    edges = (node.a, node.channels[0].b)
+    edges = (node.a, *(ch.b for ch in node.channels))
     if not all(isinstance(e, Fold) and e.axis is None for e in edges):
         return None
     k_name = node.axis.name
@@ -291,7 +305,7 @@ def match_packed_pair_node(node, inputs) -> BlockScaledPair | None:
         sides.append((read, split))
     if len({read.block for read, _ in sides}) != 1:
         return None
-    return BlockScaledPair(a=sides[0][1], b=sides[1][1], block=sides[0][0].block)
+    return BlockScaledPair(a=sides[0][1], b=tuple(split for _, split in sides[1:]), block=sides[0][0].block)
 
 
 __all__ = [

@@ -987,8 +987,12 @@ def _atom_families(tile: TileOp, ctx, node, tail: list, packed: tuple) -> tuple[
         # e4m3 block scales, the body happens to name first. The weight side's codes are always
         # STORED, so its dtype is the pair's; the activation's may be computed in this very kernel,
         # leaving no gmem tensor to ask. No precision policy: the cell has no decoded sibling to
-        # trade accuracy against.
-        return atoms_for(tile.inputs[pair.b.bits.input].dtype, ctx=ctx), ()
+        # trade accuracy against. Every channel's weight is read at one width — a mismatch would
+        # move raw bits at the wrong size — so channel 0 answers for all and the rest must agree.
+        weights = {tile.inputs[op.bits.input].dtype for op in pair.b}
+        if len(weights) != 1:
+            return (), ()
+        return atoms_for(next(iter(weights)), ctx=ctx), ()
     if dtype is not None and dtype.nbytes == 1:
         atoms = bindable(atoms_for(dtype, ctx=ctx))
         return (atoms, ()) if precision_pin(FP8_MMA) else ((), atoms)

@@ -35,19 +35,34 @@ class DataType:
     name: str
     np: np.dtype
     nbytes: int
-    # Logical elements per stored element. 1 for every scalar dtype. A packed pair
-    # (``f4e2m1x2``, ``f16x2``) carries 2: a tensor's stored last-axis extent is
-    # then HALF its logical extent, and any size arithmetic keyed on ``nbytes``
-    # alone (slab budgets, k-step spans) must also consult this factor.
-    logical_elems: int = 1
 
     def __str__(self) -> str:
         return self.name
 
     @property
+    def logical_elems(self) -> int:
+        """Logical elements per stored element — 1 for every dtype but the packed pairs, which
+        carry 2: a tensor's stored last-axis extent is then HALF its logical extent, and any size
+        arithmetic keyed on ``nbytes`` alone (slab budgets, k-step spans) must also consult this.
+
+        Derived from the name rather than stored as a field, and that is load-bearing rather than
+        tidiness. ``structural.form`` renders a dataclass by walking its fields, so a field here
+        joins the identity of every kernel that mentions any dtype — while carrying no information
+        the name did not already carry, since the name is the first thing ``form`` renders. As a
+        field it moved every contraction's ``Op.cache_key`` and orphaned the kernel names recorded
+        in the checked-in goldens; as a property it is invisible to the walk.
+        """
+        return 2 if self.name in _PACKED_PAIR_NAMES else 1
+
+    @property
     def is_structured(self) -> bool:
         """True for register-composite types (packed vectors, fragments)."""
         return False
+
+
+#: The dtypes whose one stored element is a PAIR of logical ones. Membership is the whole
+#: definition of :attr:`DataType.logical_elems`; a new packed format is one entry here.
+_PACKED_PAIR_NAMES = frozenset({"f4e2m1x2", "f16x2"})
 
 
 @dataclass(frozen=True)
@@ -89,12 +104,12 @@ F8E5M2 = DataType("f8e5m2", np.dtype(np.uint8), 1)
 # like F16x2 — one element is not one scalar. The format's block scales (one
 # e4m3 per 16 values + one f32 per tensor) are separate plain tensors — a
 # loader concern, not dtype information.
-F4E2M1x2 = StructuredType("f4e2m1x2", np.dtype(np.uint8), 1, logical_elems=2)
+F4E2M1x2 = StructuredType("f4e2m1x2", np.dtype(np.uint8), 1)
 # Two ``__half`` values packed into a 32-bit register, semantically a
 # 2-wide vector of fp16 — the first ``StructuredType``. Same numpy dtype as
 # F16 since numpy doesn't distinguish — packing is a CUDA-side storage detail;
 # the canonical IR token "f16x2" is what the renderer keys on.
-F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4, logical_elems=2)
+F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4)
 
 
 # Integer types — they appear on ``input_ids`` placeholders from HF whole-model

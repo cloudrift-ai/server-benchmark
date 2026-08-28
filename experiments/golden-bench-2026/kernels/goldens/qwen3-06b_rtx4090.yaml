@@ -5013,15 +5013,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: ''
+      WORK: t256
       TILE: ''
-      REDUCE: ''
+      REDUCE: coop
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 404.5
-      reference_us: 135.7
+      emmy_us: 2.4
+      reference_us: 126.6
       reference_backend: torch-eager
 - program: 0
   target:

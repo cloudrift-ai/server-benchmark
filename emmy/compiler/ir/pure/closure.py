@@ -118,6 +118,18 @@ class Closure:
         """Alpha-invariant equality across scopes — canonical forms compared structurally."""
         return isinstance(other, Closure) and self.canonical() == other.canonical()
 
+    @property
+    def value_captures(self) -> frozenset[str]:
+        """Free names that are NOT environment axes — data the term still reads from sibling
+        definitions. Empty in normal form: the closing rewrites in ``tile/normalize`` exist to
+        drain these into operand edges."""
+        return self.fn.free_names() - frozenset(self.axes)
+
+    @property
+    def closed(self) -> bool:
+        """Whether the lambda captures nothing beyond its environment axes."""
+        return not self.value_captures
+
 
 def equivalent_clusters(closures: Iterable[Closure]) -> tuple[tuple[int, ...], ...]:
     """Partition closures into alpha-equivalent clusters, in input order.

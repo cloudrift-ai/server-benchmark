@@ -326,7 +326,7 @@ def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset
         stmt
         for stmt in root.body
         if isinstance(stmt, Fold)
-        and not (set(stmt.lift.free_names()) - set(axes))
+        and Closure(stmt.lift, axes).closed
         and (is_contraction(stmt) or not any(edge_refs_axis(stmt, name) for name in sweep_axes))
     ]
     if not candidates:
@@ -367,6 +367,51 @@ def _carries_iteration(node) -> bool:
     return any(_carries_iteration(child) for child in children)
 
 
+def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
+    """The shared walk of both closing rewrites: establish the closure invariant on contractions.
+
+    A contraction's computed zero-axis operand may still carry value captures
+    (:attr:`~emmy.compiler.ir.pure.closure.Closure.value_captures` — sibling-defined data rather
+    than axes); ``provider(edge, binders)`` returns the source edge that supplies them, or
+    ``None`` to leave the operand open. ``binders`` counts only the iteration domains crossed
+    BELOW ``root`` — a reducing root already evaluates inside its own axis, and a projection root
+    has none — and each caller owns what a provider may take and what happens to the drained
+    chain afterwards."""
+
+    def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
+        inner = (*binders, node.axis.name) if node.axis is not None else binders
+        operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
+        body = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.body)
+        current = replace(node, operands=operands) if operands != node.operands else node
+        if body != current.body:
+            current = current.with_bodies((body,))
+        if not is_contraction(current):
+            return current
+
+        changed = False
+        closed = []
+        for edge in current.operands:
+            if not isinstance(edge, Fold) or edge.axis is not None:
+                closed.append(edge)
+                continue
+            source = provider(edge, binders)
+            if source is None:
+                closed.append(edge)
+                continue
+            closed.append(Fold.projection(operands=(source, *edge.operands), body=edge.body, results=edge.lift.results))
+            changed = True
+        return replace(current, operands=tuple(closed)) if changed else current
+
+    rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
+    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in root.body)
+    return rewritten_operands, rewritten_body
+
+
+def _provider_needs(edge, provider_order: tuple[str, ...], provider_names: frozenset[str]) -> tuple[str, ...]:
+    """The provider names an operand edge captures, in provider order."""
+    return tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
+
+
 def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
     """Move an enclosing projection's dependencies onto captured contraction operands."""
     assert root.axis is None
@@ -383,7 +428,10 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
     moved_members: set[int] = set()
     moved_edges: set[int] = set()
 
-    def provider(names: tuple[str, ...], binders: tuple[str, ...]):
+    def provider(edge, binders: tuple[str, ...]):
+        names = _provider_needs(edge, provider_order, provider_names)
+        if not names:
+            return None
         cone = root.body.backward_cone(names)
         required = set(cone.external_reads) | set(names)
         edges = tuple(dict.fromkeys(edge_by_name[name] for name in provider_order if name in required and name in edge_by_name))
@@ -408,33 +456,7 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
         hoisted = _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names), axes, sweep_axes)
         return _passthrough(hoisted) or hoisted
 
-    def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
-        inner = (*binders, node.axis.name) if node.axis is not None else binders
-        operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
-        body = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.body)
-        current = replace(node, operands=operands) if operands != node.operands else node
-        if body != current.body:
-            current = current.with_bodies((body,))
-        if not is_contraction(current):
-            return current
-
-        changed = False
-        closed = []
-        for edge in current.operands:
-            if not isinstance(edge, Fold) or edge.axis is not None:
-                closed.append(edge)
-                continue
-            needed = tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
-            source = provider(needed, binders) if needed else None
-            if source is None:
-                closed.append(edge)
-                continue
-            closed.append(Fold.projection(operands=(source, *edge.operands), body=edge.body, results=edge.lift.results))
-            changed = True
-        return replace(current, operands=tuple(closed)) if changed else current
-
-    rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
-    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in root.body)
+    rewritten_operands, rewritten_body = _close_tree(root, provider)
     if not moved_members and not moved_edges:
         if rewritten_operands == root.operands and rewritten_body == root.body:
             return root
@@ -474,7 +496,10 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
     provider_names = frozenset(provider_order)
     moved: set[int] = set()
 
-    def source(names: tuple[str, ...], binders: tuple[str, ...]) -> Fold | None:
+    def provider(edge, binders: tuple[str, ...]) -> Fold | None:
+        names = _provider_needs(edge, provider_order, provider_names)
+        if not names:
+            return None
         cone = body.backward_cone(names)
         defined = {name for stmt in cone.members for name in stmt.defines()}
         if not set(names) <= defined:
@@ -484,34 +509,7 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
         moved.update(id(stmt) for stmt in cone.members)
         return _hoist_closed_folds(Fold.projection(body=Body(cone.members), results=names), axes, sweep_axes)
 
-    def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
-        # ``root`` already evaluates inside its own axis; only descendants add a new domain.
-        inner = (*binders, node.axis.name) if node.axis is not None else binders
-        operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
-        stmts = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.lift.body)
-        current = replace(node, operands=operands) if operands != node.operands else node
-        if stmts != current.lift.body:
-            current = current.with_bodies((stmts,))
-        if not is_contraction(current):
-            return current
-
-        changed = False
-        closed = []
-        for edge in current.operands:
-            if not isinstance(edge, Fold) or edge.axis is not None:
-                closed.append(edge)
-                continue
-            needed = tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
-            provided = source(needed, binders) if needed else None
-            if provided is None:
-                closed.append(edge)
-                continue
-            closed.append(Fold.projection(operands=(provided, *edge.operands), body=edge.body, results=edge.lift.results))
-            changed = True
-        return replace(current, operands=tuple(closed)) if changed else current
-
-    rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
-    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in body)
+    rewritten_operands, rewritten_body = _close_tree(root, provider)
     if not moved:
         return root
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sys
 import traceback
 
@@ -159,8 +160,13 @@ CASES = [
     ("norm_linear_coop", lambda: norm_linear(), {"REDUCE": "coop", "WORK": "t128"}),
     ("norm_linear_dynm", lambda: norm_linear(S=Dim("seq_len")), {"TILE": f"{WARP}/f2x2/k2", "WORK": "w1x16", "REDUCE": ""}),
     ("mlp_geglu", lambda: mlp_geglu(), {"TILE": f"{WARP}/f4x8", "WORK": "w2x2", "REDUCE": ""}),
+    # The fill's pinned STAGE arm and its d2 asynchronous prefetch ring, neither reachable through
+    # any other case (matmul stages are byte transports; sdpa's first leaf takes the fill at d1).
+    # The retired sdpa TMA sibling has no realizable target since the fused sdpa's computed
+    # operand took the MANDATORY fill: a byte transport cannot evaluate a producer cone, and the
+    # sdpa shape's slabs refuse d2 on every offered tile.
+    ("norm_linear_fill_d2", lambda: norm_linear(), {"TILE": f"{WARP}/f2x2/k2", "WORK": "w1x16", "REDUCE": "", "STAGE": "d2/smem"}),
     ("sdpa_warp", lambda: sdpa(128), {"WORK": "w4x1"}),
-    ("sdpa_warp_tma", lambda: sdpa(128), {"WORK": "w1x4", "STAGE": "d1/smem-tma"}),
     # The MASKED score cone — the mask is a coord-predicated ``Select`` the twisted λ read and the
     # MAP cone carry, so it reaches the same computed-A contraction the unmasked one reaches.
     ("sdpa_warp_masked", lambda: sdpa(128, causal=True), {"WORK": "w4x1"}),
@@ -188,15 +194,23 @@ def _liveness(name, pins, realized):
     SOME same-family realized key carries its value (``knob.pin_key_matches`` / ``values_equal``,
     the same reading the golden matcher and the replay gate use). A fused kernel spells its
     contraction's K fold bare and the cone's statistic at ``REDUCE@<axis>``; requiring the bare key
-    to carry the value would call that miss a drop.
+    to carry the value would call that miss a drop. A ``REDUCE`` pin's cross-CTA ``g<n>[a|k]`` half
+    is CONSUMED by the structural split it names — the piece's row carries the rest of the row
+    (``g16k/coop-t`` on a split kernel is ``coop-t``) — so on a ``__partial`` kernel (the split's
+    visible receipt) the g-half is stripped from the wanted value before matching.
     """
     from emmy.compiler.pipeline.knob import family_of, pin_key_matches, values_equal
 
-    def lands(knobs, pin, want):
+    def lands(kname, knobs, pin, want):
         hits = [(k, v) for k, v in knobs.items() if family_of(k) == family_of(pin) and pin_key_matches(pin, k)]
-        return any(values_equal(k, want, v) for k, v in hits)
+        if any(values_equal(k, want, v) for k, v in hits):
+            return True
+        if family_of(pin) == "REDUCE" and "__partial" in kname:
+            stripped = re.sub(r"^g\d+[ak](/|$)", "", str(want))
+            return any(values_equal(k, stripped, v) for k, v in hits)
+        return False
 
-    landed = [kname for kname, knobs in realized if all(lands(knobs, f, v) for f, v in pins.items())]
+    landed = [kname for kname, knobs in realized if all(lands(kname, knobs, f, v) for f, v in pins.items())]
     if name in UNSCHEDULED:
         return None if not landed else f"{name}: pins now land on {landed[0]} — delete it from UNSCHEDULED"
     if landed:

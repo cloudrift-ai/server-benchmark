@@ -112,8 +112,8 @@ class Op:
         Called by the matcher after a match is built. Default mapping
         works for non-body ops (one Tensor per predecessor / this node).
         :class:`BodyOp` overrides to walk body-derived buf names."""
-        self.inputs = {pid: t for pid in node.inputs if (t := graph.buffer(pid)) is not None}
-        self.outputs = dict(zip(node.buffer_names(), node.outputs, strict=True))
+        self.inputs = frozendict({pid: t for pid in node.inputs if (t := graph.buffer(pid)) is not None})
+        self.outputs = frozendict(zip(node.buffer_names(), node.outputs, strict=True))
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         """Derive the output shape from input shapes. Override in subclasses."""

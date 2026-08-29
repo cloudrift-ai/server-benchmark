@@ -15,6 +15,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+from frozendict import frozendict
+
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.base import ConstantOp, Op
 from emmy.compiler.ir.stmt.base import Stmt
@@ -65,9 +67,9 @@ class BodyOp(Op):
         either dict if the caller already supplied entries."""
         in_names, out_names = self._derive_io_names()
         if not self.inputs:
-            self.inputs = {n: Tensor(n, (), F32) for n in in_names}
+            self.inputs = frozendict({n: Tensor(n, (), F32) for n in in_names})
         if not self.outputs:
-            self.outputs = {n: Tensor(n, (), F32) for n in out_names}
+            self.outputs = frozendict({n: Tensor(n, (), F32) for n in out_names})
 
     def _derive_io_names(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Walk the body once; aggregate per-stmt
@@ -133,8 +135,8 @@ class BodyOp(Op):
         # Keep matcher-known external/delegated buffers that are not graph ports.
         refreshed_inputs.update((name, tensor) for name, tensor in self.inputs.items() if name not in refreshed_inputs)
         refreshed_outputs.update((name, tensor) for name, tensor in self.outputs.items() if name not in refreshed_outputs)
-        self.inputs = refreshed_inputs
-        self.outputs = refreshed_outputs
+        self.inputs = frozendict(refreshed_inputs)
+        self.outputs = frozendict(refreshed_outputs)
 
     def pretty_body(self) -> str:
         """Indented body listing — one stmt per line via per-stmt

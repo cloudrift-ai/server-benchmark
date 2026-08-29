@@ -743,24 +743,27 @@ def _lifted_target(record: GoldenRecord):
 def decode_record(record: GoldenRecord) -> str | None:
     """STRICTLY decode one record against the current compiler — ``None`` on success, else the
     failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
-    program selects exactly one kernel; a routing record names a legal closed Fold seam; a SCHEDULE record's spelled row
-    equals one enumerated
-    leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
-    any-of, no classified shape. A child-identity schedule receipt (a stored identity that is not
-    the target's own lift) is stricter still: its identity must equal one kernel resolved under the
-    record's pins, and the spelled row must equal one of THAT kernel's rows — a sibling child's row
-    must not vouch for it."""
+    program selects exactly one kernel, except that a child-identity schedule receipt may select its
+    kernel from a multi-kernel target by stored identity; a routing record names a legal closed Fold
+    seam; a SCHEDULE record's spelled row equals one enumerated leaf (``canonical_row_key`` equality
+    under the record's own pins) — no prefix matching, no any-of, no classified shape. A receipt's
+    identity must equal one kernel resolved under the record's pins, and the spelled row must equal
+    one of THAT kernel's rows — a sibling child's row must not vouch for it."""
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
 
-    try:
-        tile = _lifted_target(record)
-    except Exception as exc:  # noqa: BLE001 — the reason IS the product here
-        return f"{type(exc).__name__}: {exc}"
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins), record.identity or "")
     store = _identity_store()
     verdicts = store.setdefault("verdicts", {})
     if verdict_key in verdicts:
         return verdicts[verdict_key]
+    pinned_cut = any(str(name).split("@", 1)[0] == "PLACE" and str(value) == "cut" for name, value in record.pins)
+    is_receipt = record.identity is not None and pinned_cut and not record.is_routing
+    tile = None
+    try:
+        tile = _lifted_target(record)
+    except Exception as exc:  # noqa: BLE001 — the reason IS the product here
+        if not is_receipt:
+            return _remember_verdict(verdict_key, f"{type(exc).__name__}: {exc}")
     if record.is_routing:
         from dataclasses import replace  # noqa: PLC0415
 
@@ -786,7 +789,7 @@ def decode_record(record: GoldenRecord) -> str | None:
         return _remember_verdict(verdict_key, None)
     candidates = _candidate_rows(record)
     row = schedule_row_key(record.knobs)
-    if record.identity is not None and record.identity != deploy_identity(tile):
+    if is_receipt and (tile is None or record.identity != deploy_identity(tile)):
         child_rows = candidates.get(record.identity)
         if child_rows is None:
             reason = f"stored identity equals none of the {len(candidates)} kernel identities resolved under the record's pins"

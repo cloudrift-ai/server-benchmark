@@ -20,7 +20,8 @@ from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.identity import deploy_identity
-from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
+from emmy.compiler.loop_wire import loop_graph_to_wire
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _workspace_axes, cuttable_seams
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
@@ -450,6 +451,30 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     stale = GoldenRecord(knobs=dict(row_a), identity="0" * 64, **fields)
     reason = decode_record(stale)
     assert reason is not None and "equals none" in reason
+
+
+def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target() -> None:
+    """A stored child identity is the selector when a regenerated target now lowers to several
+    kernels; strict decoding must consult that identity's rows before requiring a one-kernel lift."""
+    graph = _sdpa_graph(False)
+    _input(graph, "x", (4, 32))
+    graph.add_node(SoftmaxOp(axis=-1), ["x"], Tensor("softmax", (4, 32), "f16"), node_id="softmax")
+    graph.inputs.append("x")
+    graph.outputs.append("softmax")
+    loop = Pipeline.build(LOOP_PASSES).run(graph.copy(), ctx=_CTX)
+    fields = {
+        **_receipt_fields(),
+        "program_wire": graph_to_wire(graph),
+        "origins": (),
+        "loop_index": 0,
+        "loop_wire": loop_graph_to_wire(loop),
+    }
+    parent = GoldenRecord(knobs={}, **fields)
+    with pytest.raises(ValueError, match="target lowers to 2 kernels"):
+        _lifted_target(parent)
+    identity, rows = next((identity, rows) for identity, rows in _candidate_rows(parent).items() if identity is not None)
+    receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=identity, **fields)
+    assert decode_record(receipt) is None
 
 
 def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:

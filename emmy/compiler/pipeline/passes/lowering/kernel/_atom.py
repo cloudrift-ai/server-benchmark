@@ -52,7 +52,7 @@ from emmy.compiler.ir.kernel.ir import (
     frag_layout,
 )
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_body, operand_name
+from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_body, operand_name, subst_free
 from emmy.compiler.ir.schedule import Side, Stage, TilePlan
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
@@ -878,16 +878,18 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
 
     def a_value(k0, row, col):
         k = BinaryExpr("+", k0, col)
+        # σ is hygienic (:func:`subst_free`): a cone statistic re-binding the contraction axis
+        # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
         stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
-        stmts += [s.rewrite(lambda nm: nm, sigma) for s in cell]
+        stmts += [subst_free(s, sigma) for s in cell]
         return _k_masked(stmts, operand_name(c.a), k, k_ext)
 
     prologue: list[Stmt] = []
     if stats:
         row_axis = Axis(name="_sr", extent=mn[0].tile)
         sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
-        row_body = [s.rewrite(lambda nm: nm, sigma) for s in pro]
+        row_body = [subst_free(s, sigma) for s in pro]
         prologue = sync_stat_fill(
             stats=stats,
             slab_of=_stat_slab,
@@ -983,7 +985,7 @@ def _sync_operands(
             def b_value(k0, row, col, *, body=b_body, edge=bl):
                 k = BinaryExpr("+", k0, row)
                 sigma = Sigma({k_name: k_coord(k), n_name: n_coord(col)})
-                return _k_masked([s.rewrite(lambda nm: nm, sigma) for s in body], operand_name(edge), k, k_ext)
+                return _k_masked([subst_free(s, sigma) for s in body], operand_name(edge), k, k_ext)
 
             op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value, swizzle=swizzles[1])
             sync_ops.append(op)
@@ -1086,8 +1088,11 @@ def _packed_operands(
 
     def scale_value(k0, row, col):
         k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(block, "int")))
+        # Hygienic like the compute fill's own substitution above: nothing in a block-scale factor
+        # cone re-binds these names today, but the safe spelling costs nothing and the cone is
+        # whatever the speller wrote.
         sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k})
-        return [s.rewrite(lambda nm: nm, sigma) for s in factor_cone], packed.factor
+        return [subst_free(s, sigma) for s in factor_cone], packed.factor
 
     scale_op = SyncOperand(tag="bs", shape=(n.tile, bk_elems // block), value=scale_value)
 

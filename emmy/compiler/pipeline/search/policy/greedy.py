@@ -230,7 +230,7 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior) -> float 
 
 
 def _price_kernel(
-    graph: Graph, nid: str, ctx: Context, prior, memo: dict[str, float | None], db: object | None = None, decisions: dict | None = None
+    graph: Graph, nid: str, ctx: Context, prior, memo: dict[object, float | None], db: object | None = None, decisions: dict | None = None
 ) -> float | None:
     """One kernel's price: a nested deterministic resolution of its
     single-node slice through ``lowering/tile`` only (the schedule fork is
@@ -241,13 +241,19 @@ def _price_kernel(
     hierarchy as a top-level knob pick (reservoir rows, then the tune DB's
     measured rows, model prediction only where nothing was measured) — the
     priced µs is a measurement wherever the tune benched this kernel. Memoized
-    per ``Op.cache_key`` so 28 identical per-layer kernels price once.
+    per exact kernel identity (``Op.deploy_identity(structural=False)`` + knobs) so
+    28 identical per-layer kernels price once — the identity is α-invariant, so
+    sibling layers whose minted axis names differ still share the memo entry
+    (``Op.cache_key`` is the fallback for ops with no body-derived identity, and
+    was the old key: spelled per node, it never actually hit across layers).
     Best-effort: any resolve failure prices as ``None`` (→ the caller keeps
     the op-variant path)."""
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
 
-    key = graph.nodes[nid].op.cache_key()
+    op = graph.nodes[nid].op
+    identity = op.deploy_identity(structural=False)
+    key = (identity, tuple(sorted(op.knobs.items()))) if identity is not None else op.cache_key()
     if key in memo:
         return memo[key]
     us: float | None = None
@@ -262,7 +268,7 @@ def _price_kernel(
 
 
 def _price_graph(
-    graph: Graph, ctx: Context, prior, memo: dict[str, float | None], db: object | None = None, decisions: dict | None = None
+    graph: Graph, ctx: Context, prior, memo: dict[object, float | None], db: object | None = None, decisions: dict | None = None
 ) -> float | None:
     """Σ of per-kernel best-µs prices over ``graph``'s kernel-bearing
     nodes, or ``None`` when any kernel is unpriceable (no partition fork —
@@ -274,7 +280,7 @@ def _price_graph(
 
 
 def _price_op_leaf(
-    fp: ForkPoint, leaf: object, prior, memo: dict[str, float | None], db: object | None = None, decisions: dict | None = None
+    fp: ForkPoint, leaf: object, prior, memo: dict[object, float | None], db: object | None = None, decisions: dict | None = None
 ) -> float | None:
     """The keep-fused side's price: the leaf's ``Op`` rebound into a
     single-node slice of the current graph, priced like any kernel."""

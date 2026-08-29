@@ -481,6 +481,27 @@ def _requires_order(seams) -> tuple:
     return tuple(ordered)
 
 
+def _producer_order(pieces) -> list:
+    """Topologically order cut producers by the workspaces their stored Fold reads.
+
+    Containment can make one produced piece read another even when the corresponding seams have
+    no provider requirement. Dependency COUNT is not an order: two pieces may each read one
+    workspace while one of those workspaces is produced by the other piece.
+    """
+    workspaces = {buffer for *_, buffers in pieces for buffer in buffers}
+    remaining = list(pieces)
+    ordered = []
+    available: set[str] = set()
+    while remaining:
+        ready = [piece for piece in remaining if {load.input for load in Body.coerce(piece[1].lower()).loads} & workspaces <= available]
+        if not ready:
+            raise ValueError("cyclic cut-workspace dependency cannot arise from strict Fold containment")
+        ordered.extend(ready)
+        available.update(buffer for *_, buffers in ready for buffer in buffers)
+        remaining = [piece for piece in remaining if not any(piece is chosen for chosen in ready)]
+    return ordered
+
+
 def realize(
     match: Match,
     root: Node,
@@ -558,10 +579,10 @@ def realize(
 
     fragment = _input_fragment(match, root)
     all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
-    # A producer reading another seam's workspace must follow the node that writes it, so pieces
-    # are added in dependency order (containment is strict, so the order exists).
-    produced_pieces.sort(key=lambda piece: len({load.input for load in Body.coerce(piece[1].lower()).loads} & set(all_buffers)))
-    for seam, produced, axes, index, token, names, buffers in produced_pieces:
+    # A producer reading another seam's workspace must follow the node that writes it. Strict
+    # containment makes this dependency graph acyclic, including chains whose members have the
+    # same number of direct workspace reads.
+    for seam, produced, axes, index, token, names, buffers in _producer_order(produced_pieces):
         producer = TileOp(
             op=produced,
             # The seam token keeps recursive pieces' kernel names distinct — the one-name-one-source

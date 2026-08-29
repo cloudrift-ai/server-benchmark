@@ -23,7 +23,7 @@ from emmy.compiler.ir.tile.identity import deploy_identity
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
-from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _workspace_axes, cuttable_seams
+from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _producer_order, _workspace_axes, cuttable_seams
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
@@ -188,6 +188,19 @@ def test_cut_workspace_retains_static_unit_axes() -> None:
     )
 
     assert _workspace_axes(seam, produced) == (unit, column)
+
+
+def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> None:
+    """Counting direct workspace reads cannot order A->C->B when A and C each read one."""
+
+    def piece(name: str, source: str | None):
+        body = Body((Load(name=f"{name}_value", input=source or "input", index=()),))
+        produced = Fold.projection(body=body, results=(f"{name}_value",))
+        return (None, produced, (), (), name, (f"{name}_value",), (name,))
+
+    pieces = [piece("a", "c"), piece("c", "b"), piece("b", None)]
+
+    assert [buffers[0] for *_, buffers in _producer_order(pieces)] == ["b", "c", "a"]
 
 
 def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:

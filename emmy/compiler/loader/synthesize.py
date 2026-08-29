@@ -171,6 +171,20 @@ def write_quantized_checkpoint(graph: Graph, bundle, out_dir: str | Path, *, sch
     return out
 
 
+def quantize_and_spell(graph: Graph, bundle, out_dir: str | Path, *, scheme: str = "nvfp4") -> tuple[Path, int, int]:
+    """Write the checkpoint for ``graph``'s linear weights and spell the graph against it —
+    returning ``(checkpoint path, weights spelled, linears marked for 4-bit activations)``.
+
+    The pairing is the whole point of the module: writing a checkpoint and then reading it back
+    through the ORDINARY spellers is what keeps one producer of quantized graphs. Callers that did
+    the two halves themselves would be free to drift from `emmy compile --quantize`, which is the
+    drift this module exists to prevent."""
+    from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations  # noqa: PLC0415
+
+    ckpt = write_quantized_checkpoint(graph, bundle, out_dir, scheme=scheme)
+    return ckpt, spell_quantized_constants(graph, str(ckpt)), spell_static_fp4_activations(graph, str(ckpt))
+
+
 def summarize(out: Path) -> str:
     """One line per quantized linear — what the written checkpoint says, for the log."""
     from safetensors import safe_open  # noqa: PLC0415
@@ -186,4 +200,4 @@ def summarize(out: Path) -> str:
     return "\n".join(rows)
 
 
-__all__ = ["SCHEMES", "summarize", "write_quantized_checkpoint"]
+__all__ = ["SCHEMES", "quantize_and_spell", "summarize", "write_quantized_checkpoint"]

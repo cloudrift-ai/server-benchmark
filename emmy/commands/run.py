@@ -293,10 +293,11 @@ def _handle_run_once(args):
     # Model ID or --code: trace to a frontend graph + keep the runnable module
     # (+ example inputs) so accuracy / --bench compare against real torch.
     graph, _base_name, bundle = load_or_trace(args)
+    quantized_checkpoint = None
     if getattr(args, "quantize", None):
         from emmy.commands.compile import _quantize_traced  # noqa: PLC0415
 
-        _quantize_traced(graph, bundle, args)
+        quantized_checkpoint = _quantize_traced(graph, bundle, args)
     module, example_args, example_kwargs = bundle
 
     dump = CompilerDump.resolve(args.dump_dir)
@@ -331,9 +332,7 @@ def _handle_run_once(args):
         # in-process — the ``--debug`` per-launch dumps and the ncu child's profiled
         # launches live here — so a hung kernel still poisons this process's stream.
         try:
-            input_data = _bind_inputs(
-                compiled, module, example_args, example_kwargs, checkpoint=getattr(args, "_quantized_checkpoint", None) or args.input
-            )
+            input_data = _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=quantized_checkpoint or args.input)
         except RuntimeError as exc:
             logger.error(exc)
             sys.exit(1)
@@ -378,7 +377,7 @@ def _handle_run_once(args):
     pinned = list(getattr(args, "golden_configs", None) or []) + (_ab_samples(args.ab, dynamic=args.dynamic) if args.ab else [])
     trace_payload = {
         "code": args.code,
-        "input": getattr(args, "_quantized_checkpoint", None) or args.input,
+        "input": quantized_checkpoint or args.input,
         "adapter": getattr(args, "adapter", "causal-lm"),
         "layer": args.layer,
         "seq_len": args.seq_len,

@@ -502,7 +502,7 @@ def format_stage(graph, stage: str) -> str:
     return format_kernels(graph)
 
 
-def _quantize_traced(graph: Graph, bundle, args) -> None:
+def _quantize_traced(graph: Graph, bundle, args) -> str:
     """``--quantize``: quantize a TRACED graph's linear weights, then spell the result.
 
     Deliberately not a second way to build a quantized graph. It writes a real checkpoint and
@@ -511,26 +511,23 @@ def _quantize_traced(graph: Graph, bundle, args) -> None:
     lands in a temp dir whose path is logged."""
     import tempfile  # noqa: PLC0415
 
-    from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations  # noqa: PLC0415
-    from emmy.compiler.loader.synthesize import summarize, write_quantized_checkpoint  # noqa: PLC0415
+    from emmy.compiler.loader.synthesize import quantize_and_spell, summarize  # noqa: PLC0415
 
     if bundle is None:
         logger.error("--quantize needs a traced module: use --code, or a model that traces")
         sys.exit(2)
     out = Path(args.dump_dir) / "quantized-checkpoint" if getattr(args, "dump_dir", None) else Path(tempfile.mkdtemp(prefix="emmy-quant-"))
     try:
-        ckpt = write_quantized_checkpoint(graph, bundle, out, scheme=args.quantize)
+        ckpt, spelled, marked = quantize_and_spell(graph, bundle, out, scheme=args.quantize)
     except ValueError as e:
         logger.error("--quantize: %s", e)
         sys.exit(2)
     logger.info("%s checkpoint at %s\n%s", args.quantize, ckpt, summarize(ckpt))
-    # The isolated bench worker re-traces from ``--code`` and binds the packed constants through
-    # a checkpoint path; this is the one it needs (``load_or_trace`` prefers ``code``, so naming
-    # the directory here does not redirect the trace).
-    args._quantized_checkpoint = str(ckpt)
-    spelled = spell_quantized_constants(graph, str(ckpt))
-    marked = spell_static_fp4_activations(graph, str(ckpt))
     logger.info("spelled %d quantized weight(s); %d linear(s) marked for 4-bit activations", spelled, marked)
+    # The isolated bench worker re-traces from ``--code`` and binds the packed constants through a
+    # checkpoint path; this is the one it needs (``load_or_trace`` prefers ``code``, so naming the
+    # directory here does not redirect the trace).
+    return str(ckpt)
 
 
 def _is_boundary(op) -> bool:

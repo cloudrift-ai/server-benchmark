@@ -231,6 +231,8 @@
  "tests/compiler/passes/test_move_catalog.py::test_two_site_rows_are_distinct_and_materialize_both_sites": 0.19,
  "tests/compiler/passes/test_move_catalog.py::test_two_site_term_merges_both_sites_under_one_inventory": 0.19,
  "tests/compiler/passes/test_move_catalog.py::test_warp_staged_rows_fit_the_smem_budget": 3.56,
+ "tests/compiler/passes/test_nvfp4_w4a4.py::test_a_shared_quantized_activation_behind_a_norm_compiles_and_holds_flip_bounded_parity@cuda": 8.7,
+ "tests/compiler/passes/test_nvfp4_w4a4.py::test_the_spelled_w4a4_program_lowers_whole": 11.2,
  "tests/compiler/passes/test_placement_routing.py::test_contraction_operand_seam_takes_the_output_dtype": 2.11,
  "tests/compiler/passes/test_placement_routing.py::test_norm_linear_cone_cut_recurses_to_the_full_cascade": 5.05,
  "tests/compiler/passes/test_pool_space.py::test_a_real_space_addresses_what_it_iterates[flash_pair]": 1.26,

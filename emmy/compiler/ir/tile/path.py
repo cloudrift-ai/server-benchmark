@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from itertools import combinations
 
 from emmy.compiler.ir.pure.fold import Fold, is_contraction
+from emmy.compiler.structural import instance_memo
 
 #: The families that key a schedule SLICE on a node — the ONE list, since ``ir/`` never imports
 #: ``pipeline/`` and every reader on both sides of that line needs the same three.
@@ -294,9 +295,11 @@ def _match(key: _Key, fam_sites: tuple[Site, ...]) -> list[Site]:
     return out
 
 
-def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
-    """The canonical (shortest unique) spelling of ``site`` under ``family`` — see :func:`spell`."""
-    if primary(family, fam_sites) is site:
+def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...], head: Site | None = None) -> str:
+    """The canonical (shortest unique) spelling of ``site`` under ``family`` — see :func:`spell`.
+    ``head`` is the family's primary when the caller already resolved it (the bulk table builder
+    resolves it once for every site)."""
+    if (primary(family, fam_sites) if head is None else head) is site:
         return family
     axis_part = f".{site.axis}" if site.axis is not None else ""
     if site.axis is not None and sum(1 for s in fam_sites if s.axis == site.axis) == 1:
@@ -351,11 +354,24 @@ def spell(root, family: str, node, *, all_sites: tuple[Site, ...] | None = None)
     discriminates, else the shortest anchored path subsequence (deepest anchors preferred), with
     the 1-based ordinal only on a true same-path collision. Stampers and stored evidence use this
     spelling and nothing else."""
+    tables = instance_memo(root, "_memo_spellings")
+    table = tables.get(family)
+    if table is None:
+        # The whole family spells as ONE derived table (an ``instance_memo`` on the immutable
+        # root): the schedule pricing loops re-spell the same sites once per candidate row, and
+        # per-call spelling repeats the primary resolution and the uniqueness scans per site.
+        all_sites = sites(root) if all_sites is None else all_sites
+        fam_sites = family_sites(family, all_sites)
+        head = primary(family, fam_sites)
+        table = {}
+        for s in fam_sites:
+            if id(s.node) not in table:  # a shared subtree keeps its FIRST site's spelling
+                table[id(s.node)] = _spellings(family, s, fam_sites, head=head)
+        tables[family] = table
+    spelled = table.get(id(node))
+    if spelled is not None:
+        return spelled
     all_sites = sites(root) if all_sites is None else all_sites
-    fam_sites = family_sites(family, all_sites)
-    for s in fam_sites:
-        if s.node is node:
-            return _spellings(family, s, fam_sites)
     if not any(s.node is node for s in all_sites):
         raise UnknownSiteError(
             f"{type(node).__name__} is not a site of this tree — the caller holds a copied or "

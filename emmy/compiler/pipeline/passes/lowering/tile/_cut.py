@@ -279,6 +279,10 @@ def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) ->
     return tuple(merged.get(index, seam) for index, seam in enumerate(seams) if index not in drop)
 
 
+def _unchanged(pieces: tuple, members) -> bool:
+    return len(pieces) == len(members) and all(piece is member for piece, member in zip(pieces, members, strict=True))
+
+
 def _replace_member(member, targets: dict[int, tuple]):
     if id(member) in targets:
         return targets[id(member)]
@@ -288,19 +292,26 @@ def _replace_member(member, targets: dict[int, tuple]):
     if not nested:
         return (member,)
     bodies = []
+    changed = False
     for body in nested:
         replaced = tuple(piece for child in body for piece in _replace_member(child, targets))
+        changed = changed or not _unchanged(replaced, body)
         bodies.append(Body(replaced))
-    return (member.with_bodies(tuple(bodies)),)
+    return (member.with_bodies(tuple(bodies)) if changed else member,)
 
 
 def _replace_fold(node: Fold, targets: dict[int, tuple]) -> Fold:
     """Replace every stored occurrence of the target Folds in ONE walk — ``targets`` maps
     ``id(node)`` to its replacement stmts. One walk, because the rebuild copies every node on the
     way down: a second walk's target objects no longer exist in the first walk's output, so
-    sequential replacement silently loses every decision after the first."""
+    sequential replacement silently loses every decision after the first. IDENTITY-PRESERVING off
+    the replacement spine: a subtree holding no target returns the SAME object, so untouched
+    Lambdas are not reconstructed (construction normalization over a large fused body is where a
+    copying walk turns quadratic) and shared-node grouping keeps its identities."""
     operands = tuple(piece for edge in node.operands for piece in _replace_member(edge, targets))
     body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets))
+    if _unchanged(operands, node.operands) and _unchanged(body, node.lift.body):
+        return node
     return replace(node, operands=operands, lift=replace(node.lift, body=Body(body)))
 
 

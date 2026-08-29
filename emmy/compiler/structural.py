@@ -69,6 +69,22 @@ class Structural(Protocol):
         return digest(form(self))
 
 
+def instance_memo(obj, slot: str) -> dict:
+    """The named per-instance memo table riding an IMMUTABLE object — the structural-key
+    pattern, as one mechanism: a derived read caches on the term it derives from (the table is
+    created on first use via ``object.__setattr__``, so frozen dataclasses take it), and the
+    owner's ``__getstate__`` strips it so no cache — an id-keyed one especially — crosses a
+    process boundary. The structural key (``ir/tile/_key.py``) originated the pattern with its
+    single-slot form; the normalize fixpoint stamp (``ir/tile/normalize.py``) and the codec's
+    spelling tables (``ir/tile/path.py``) go through this table form. A memo holds ONLY values
+    derivable from the object; never decisions, never mutable policy."""
+    table = obj.__dict__.get(slot)
+    if table is None:
+        table = {}
+        object.__setattr__(obj, slot, table)
+    return table
+
+
 def form(value: object) -> object:
     """The STRUCTURAL rendering of ``value`` — a nested ``(class name, *fields)`` tuple.
 

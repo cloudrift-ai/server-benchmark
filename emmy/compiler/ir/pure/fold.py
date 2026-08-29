@@ -644,7 +644,7 @@ class Fold:
                         consumed.add(id(edge))
         return _unique_edges(tuple(e for e in self.operands if id(e) not in consumed))
 
-    @property
+    @cached_property
     def loop(self) -> Loop:
         """The synthesized annotated reduce ``Loop`` — reconstructed from the params: byte-identical
         to the loop :meth:`from_loop` captured (the λ spelling's construction gate guarantees it;
@@ -745,6 +745,12 @@ class Fold:
         the combine in lockstep."""
         return _rewrite(self, rename_ssa, Sigma.IDENTITY if sigma is None else sigma, _axis_identity if axis_fn is None else axis_fn)
 
+    def __getstate__(self):
+        """Pickle the stored params only. Every memo riding ``__dict__`` (the derived loop, deps,
+        the normalize stamp, the codec's spell cache) recomputes after transport — and an
+        id-keyed cache carried across processes could collide with a fresh object's id."""
+        return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
+
     def structural_key(self) -> str:
         """The α-invariant identity digest of this term — the
         :class:`~emmy.compiler.structural.Structural` implementation, computed BOTTOM-UP from
@@ -756,6 +762,13 @@ class Fold:
 
     def deps(self) -> tuple[str, ...]:
         """SSA names captured by the term rather than supplied through its ``lift`` params."""
+        return self._deps
+
+    @cached_property
+    def _deps(self) -> tuple[str, ...]:
+        # Memoized like :attr:`family` / :attr:`_contraction`: the term is immutable, and the
+        # scope walks (``_member_reads``) ask a nested node's captures once per ENCLOSING level —
+        # uncached, a deep fused tree recomputes every subtree's reads per ancestor.
         reads = set(self.lift.free_names())
         if self.observe is not None:
             reads.update(self.observe.free_names())

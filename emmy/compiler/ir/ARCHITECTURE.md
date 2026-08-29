@@ -52,6 +52,15 @@ rewrite handler) and its seed was a second placement path that `_lift` stripped.
 cross-CTA finalize was numerically wrong as a result, and became correct when the combine started
 arriving as ordinary statements.
 
+**Derived reads memoize on the immutable term; pickling carries only the stored params.** A term's
+expensive derived reads — the structural key, `Fold.deps`, `Lambda.free_names`, the synthesized
+`loop`, the normalize fixpoint stamp, the codec's spelling tables — ride the instance
+(`cached_property` entries and `structural.instance_memo` tables), which is sound because the term
+never changes, and is what keeps a walk over a large fused tree linear instead of re-deriving every
+subtree per ancestor. `__getstate__` strips them: every memo recomputes after transport, and an
+id-keyed cache carried across processes could collide with a fresh object's id. A memo holds only
+values derivable from the term — never decisions, never mutable policy.
+
 **Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term and pure projection regions; the schedule
 slices, output specifications and knobs are the `TileOp`'s, not the term's. So
 `Fold` lives in `ir/pure/fold.py` and is not a `Stmt`.

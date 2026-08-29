@@ -76,9 +76,13 @@ exclusive consumption (every moved definition dies into the closed edges), so th
 duplicated. Both rules measure an edge's captures with `Fold.deps` — scope-aware, so a name a sibling operand binds
 inside the edge is not a capture and an already-closed edge never re-fires the rewrite. A cone closed at its axes is
 what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
-vector) becomes materializable once per key instead of recomputed per query row. A body-member fold these rules
-leave capturing host names is not lost to placement: the fork closes it at offer time through provider closure
-(`lowering/tile/_cut.py`), without moving anything in the stored tree.
+vector) becomes materializable once per key instead of recomputed per query row.
+
+An iteration never crosses into a new evaluation domain. Attaching an iteration-bearing provider to a contraction
+operand would evaluate it once per step of every intervening binder; normalization therefore leaves that provider at
+its defining scope. Straight-line chains still close normally, and a reducing root's own axis counts as its existing
+domain. A stored fold left capturing by this rule remains placeable: the placement fork resolves its captures outward
+through the occurrence's lexical environment at offer time, without moving the stored tree.
 
 An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
 projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same

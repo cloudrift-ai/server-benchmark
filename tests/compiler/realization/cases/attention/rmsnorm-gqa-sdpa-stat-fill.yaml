@@ -63,12 +63,12 @@ configs:
       REDUCE@map.fold.a.map.fold.fold.a41: ''
       REDUCE@a.b.fold.a4: ''
       REDUCE@map.fold.a.fold.a81: ''
-      REDUCE@b.fold.a8: ''
+      REDUCE@a.map.fold.a8: ''
       STAGE@map.fold.a21: ''
       STAGE@a7: d1/smem
       STAGE@a.fold.a3: ''
       STAGE@map.fold.a.map.fold.fold.a41: d1/smem
       STAGE@a.b.fold.a4: ''
       STAGE@map.fold.a.fold.a81: ''
-      STAGE@b.fold.a8: ''
-    identity: 5ddf1772501faa05906fce50274ec678cfb78a51d14cb9793d6b2b65971b8b70
+      STAGE@a.map.fold.a8: ''
+    identity: b00596538d55f1f309c780a2ecafee155bb2cd1b48d0eec46c9e1b7bdf4bac37

@@ -180,7 +180,7 @@ def _fed_store_dtype(tile: TileOp, consumer: Fold):
     return fed.pop() if len(fed) == 1 else None
 
 
-def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None) -> tuple | None:
+def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None, table: dict[int, tuple]) -> tuple | None:
     """The cut workspace's per-component dtypes, or ``None`` when they cannot be determined.
     Reduction carrier precision is a Kernel IR policy — every Fold state is f32 until lowering
     stamps the concrete Accum/Init pair; a zero-axis value has no carrier and is inferred from its
@@ -194,68 +194,62 @@ def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None) -> tuple 
     if consumer is not None:
         dtype = _fed_store_dtype(tile, consumer)
         return None if dtype is None else (dtype,) * len(names)
-    dtypes = (F32,) * len(names) if node.axis is not None else edge_dtypes(node, tile.inputs)
+    dtypes = (F32,) * len(names) if node.axis is not None else table.get(id(node), ())
     if len(dtypes) != len(names) or any(dtype is None for dtype in dtypes):
         return None
     return dtypes
 
 
-def _member_hosts(root: Fold) -> dict[int, list[Fold]]:
-    """Each stored fold's hosting folds — every enclosing fold whose lift body holds it as a
-    member. A shared cone (normalization guarantees structurally identical cones are one object)
-    records every host, which is what lets provider closure demand the hosts agree."""
-    hosts: dict[int, list[Fold]] = {}
-    visited: set[int] = set()
+def _environments(root: Fold) -> dict[int, list[tuple[Fold, ...]]]:
+    """Each stored Fold occurrence's lexical environment, innermost scope first.
 
-    def visit(node: Fold) -> None:
-        if id(node) in visited:
-            return
-        visited.add(id(node))
-        for edge in node.operands:
-            if isinstance(edge, Fold):
-                visit(edge)
-        for stmt in node.lift.body:
-            if isinstance(stmt, Fold):
-                hosts.setdefault(id(stmt), []).append(node)
-                visit(stmt)
+    Operand edges and body members have the same lexical scoping. The walk follows every tree
+    occurrence, including shared nodes, because provider closure must prove that all occurrences
+    resolve to the same sources before one placement seam may represent them.
+    """
+    environments: dict[int, list[tuple[Fold, ...]]] = {}
 
-    visit(root)
-    return hosts
+    def visit(node: Fold, outer: tuple[Fold, ...]) -> None:
+        inner = (node, *outer)
+        for child in (*node.operands, *node.lift.body):
+            if isinstance(child, Fold):
+                environments.setdefault(id(child), []).append(inner)
+                visit(child, inner)
+
+    visit(root, ())
+    return environments
 
 
-def _provider_closure(node: Fold, scopes, hosts: list[Fold]) -> tuple[tuple, tuple] | None:
-    """The ``(providers, requires)`` that close an SSA-capturing body-member seam, or ``None``.
-
-    A member fold may read names its hosting body provides — attention's softmax statistics
-    capture the mask/scale scalars, and the second statistics pass reads the first pass's
-    accumulator. A capture whose producer chain is pure ``Load``/``Assign`` stmts joins the
-    produced piece verbatim (``providers``); a capture only a sibling or host-operand Fold
-    defines becomes a ``requires`` pair, realizable only when that producer is cut beside this
-    seam. Every hosting body must agree — structurally equal providers, the same producer
-    objects — and the closed piece must capture nothing but scope axes at every occurrence."""
-    if not hosts:
-        return None
-    axis_names = {axis.name for scope in scopes for axis in scope}
-    closures = []
-    for host in hosts:
+def _closed_in(node: Fold, environment: tuple[Fold, ...], axis_names: set[str]) -> tuple[tuple, tuple] | None:
+    """Resolve one occurrence's captures outward through its lexical environment."""
+    needed = set(_external_reads(node)) - axis_names
+    levels: list[tuple] = []
+    requires: list = []
+    for scope in environment:
+        if not needed:
+            break
         defined: dict[str, object] = {}
-        for stmt in host.lift.body:
+        for stmt in scope.lift.body:
             for name in stmt.defines():
                 defined[name] = stmt
-        for edge in host.operands:
+        for edge in scope.operands:
             for name in _operand_result_names(edge):
                 defined.setdefault(name, edge)
+        order = {id(stmt): position for position, stmt in enumerate(scope.lift.body)}
         providers: list = []
-        requires: list = []
-        queue = sorted(set(_external_reads(node)) - axis_names)
+        outward: set[str] = set()
         resolved: set[str] = set()
+        queue = sorted(needed)
         while queue:
             name = queue.pop()
             if name in resolved:
                 continue
             resolved.add(name)
             producer = defined.get(name)
-            if producer is None or producer is node:
+            if producer is None:
+                outward.add(name)
+                continue
+            if producer is node:
                 return None
             if isinstance(producer, Fold):
                 requires.append((name, producer))
@@ -265,16 +259,33 @@ def _provider_closure(node: Fold, scopes, hosts: list[Fold]) -> tuple[tuple, tup
             if not any(chosen is producer for chosen in providers):
                 providers.append(producer)
             queue.extend(sorted(deep_reads([producer]) - axis_names - resolved))
-        order = {id(stmt): position for position, stmt in enumerate(host.lift.body)}
         providers.sort(key=lambda stmt: order.get(id(stmt), -1))
-        closures.append((tuple(providers), tuple(sorted(requires, key=lambda pair: pair[0]))))
+        levels.append(tuple(providers))
+        needed = outward
+    if needed:
+        return None
+    providers = tuple(stmt for level in reversed(levels) for stmt in level)
+    return providers, tuple(sorted(requires, key=lambda pair: pair[0]))
+
+
+def _provider_closure(node: Fold, scopes, environments: list[tuple[Fold, ...]]) -> tuple[tuple, tuple] | None:
+    """Close a capturing seam identically at every stored occurrence, or return ``None``."""
+    if not environments:
+        return None
+    axis_names = {axis.name for scope in scopes for axis in scope}
+    closures = []
+    for environment in environments:
+        closure = _closed_in(node, environment, axis_names)
+        if closure is None:
+            return None
+        closures.append(closure)
     first_providers, first_requires = closures[0]
     for providers, requires in closures[1:]:
         aligned = providers == first_providers and len(requires) == len(first_requires)
         if not aligned or any(
             a != b or producer_a is not producer_b for (a, producer_a), (b, producer_b) in zip(requires, first_requires, strict=True)
         ):
-            return None  # the hosts spell different closures — one seam cannot read two sources
+            return None  # occurrences resolving to different sources cannot share one seam
     provided = {name for stmt in first_providers for name in stmt.defines()}
     provided.update(name for name, _ in first_requires)
     outside = (set(_external_reads(node)) | {name for stmt in first_providers for name in deep_reads([stmt])}) - provided
@@ -312,7 +323,11 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     occurrence_axes: dict[int, list[tuple]] = {}
     for node, available in islice(walk(tile.op, outer), 1, None):
         occurrence_axes.setdefault(id(node), []).append(available)
-    hosts = _member_hosts(tile.op) if isinstance(tile.op, Fold) else {}
+    environments: dict[int, list[tuple[Fold, ...]]] = {}
+    dtype_table: dict[int, tuple] = {}
+    if isinstance(tile.op, Fold):
+        environments = _environments(tile.op)
+        edge_dtypes(tile.op, tile.inputs, dtype_table)
     out: list[CutSite] = []
     seen: set[int] = set()
     for site in family_sites("PLACE", all_sites):
@@ -323,7 +338,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         providers: tuple = ()
         requires: tuple = ()
         if not all(_closed_at(node, scope) for scope in scopes):
-            closure = _provider_closure(node, scopes, hosts.get(id(node), []))
+            closure = _provider_closure(node, scopes, environments.get(id(node), []))
             if closure is None:
                 continue
             providers, requires = closure
@@ -337,7 +352,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         # re-rounded) and footprint (storage width vs store width), so there is no trade for the
         # evidence to decide — one site stays one decision.
         frontier = storage_frontier(node) if consumer is not None else None
-        dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer)
+        dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer, dtype_table)
         if dtypes is None:
             continue
         seen.add(id(node))

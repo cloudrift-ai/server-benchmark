@@ -418,16 +418,15 @@ _STAT_PINS = {
 
 
 def test_statistics_seams_close_via_providers_and_declare_requirements() -> None:
-    """The softmax-statistics folds capture host-provided scalars and each other's accumulator;
-    provider closure offers them anyway, with the chain recorded as a requirement."""
+    """Provider closure records every fold-produced capture as a requirement."""
     match, graph = _composed_case_match()
     tile = next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp))
     seams = {seam.spelling: seam for seam in cuttable_seams(tile)}
+    norm = seams["PLACE@map.fold.a21"]
     first = seams["PLACE@map.fold.a.map.fold.a31"]
     second = seams["PLACE@map.fold.a.map.fold.a32"]
-    assert first.providers and not first.requires
-    assert second.providers and len(second.requires) == 1
-    assert second.requires[0][1] is first.node
+    assert first.providers and [producer for _, producer in first.requires] == [norm.node]
+    assert second.providers and [producer for _, producer in second.requires] == [norm.node, first.node]
 
 
 def test_dependent_seam_pins_pull_their_producer_into_the_composed_cut() -> None:
@@ -437,7 +436,11 @@ def test_dependent_seam_pins_pull_their_producer_into_the_composed_cut() -> None
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
     with pinned_knobs({"PLACE@map.fold.a.map.fold.a32": "cut", **_OFF}):
         fork = _CUT.rewrite(match, node)
-    assert set(fork.knobs) == {"PLACE@map.fold.a.map.fold.a32", "PLACE@map.fold.a.map.fold.a31"}
+    assert set(fork.knobs) == {
+        "PLACE@map.fold.a.map.fold.a32",
+        "PLACE@map.fold.a.map.fold.a31",
+        "PLACE@map.fold.a21",
+    }
 
 
 def test_statistics_route_shares_the_row_reduction_across_output_keys() -> None:

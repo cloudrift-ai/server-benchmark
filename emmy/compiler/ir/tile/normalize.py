@@ -24,6 +24,7 @@ from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, op
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import _member_reads
+from emmy.compiler.structural import instance_memo
 
 
 def _lambda_members(body: Body):
@@ -746,16 +747,35 @@ def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[
     """Normalize a complete Tile IR tree bottom-up; ``None`` placeholders pass through.
 
     ``sweep_axes`` names the axes bound only by output-sweep reconstitution (never kernel scope);
-    :func:`_hoist_closed_folds` keeps a fold reading one as a projection body member."""
+    :func:`_hoist_closed_folds` keeps a fold reading one as a projection body member.
+
+    The reached fixpoint is STAMPED on the result (per enclosing scope, an
+    :func:`~emmy.compiler.structural.instance_memo`): the term is immutable and the rewrite
+    idempotent, so a reconstruction under the same scope answers without re-walking — on a large
+    fused tree the re-verification, once per ``TileOp`` construction, is what turns the pipeline
+    quadratic."""
     if not isinstance(root, Fold):
         return root
-    normalized = _normalize_fold(root, tuple(axes), frozenset(implicit_axes), frozenset(sweep_axes))
-    # A contraction reached as the whole tree has no projection to host hoisted factors, so the
-    # hoist creates one here. Nested contractions are handled by their own projection, which keeps
-    # the common shape flat.
-    if normalized.axis is not None:
-        normalized = _hoist_decode_root(normalized)
-    return root if normalized == root else normalized
+    scope = (tuple(axes), frozenset(implicit_axes), frozenset(sweep_axes))
+    if scope in instance_memo(root, "_memo_normal_scopes"):
+        return root
+    normalized = root
+    while True:
+        # One pass is not always the fixpoint (a close can expose the next pass's move), and the
+        # stamp must mean the REACHED fixpoint, so iterate here rather than relying on the next
+        # construction to finish the job.
+        again = _normalize_fold(normalized, scope[0], scope[1], scope[2])
+        # A contraction reached as the whole tree has no projection to host hoisted factors, so
+        # the hoist creates one here. Nested contractions are handled by their own projection,
+        # which keeps the common shape flat.
+        if again.axis is not None:
+            again = _hoist_decode_root(again)
+        if again == normalized:
+            break
+        normalized = again
+    result = root if normalized == root else normalized
+    instance_memo(result, "_memo_normal_scopes")[scope] = True
+    return result
 
 
 __all__ = [

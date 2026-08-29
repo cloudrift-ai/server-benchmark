@@ -3,10 +3,11 @@
 Each :class:`Fold` already owns context-independent lambda-body ordering. The rewrites here need
 the enclosing Tile axes or parent Fold.
 
-INVARIANT — normalization ends with structurally identical cones as ONE shared object
-(:func:`_share_common_cones`). Object identity is how the placement machinery recognizes that two
-consumption sites read one value, so a rewrite that copies a cone (the close rewrites do, by
-design) is only sound because this final pass restores the sharing. Recompute elimination is a
+INVARIANT — normalization ends with same-value cones (alpha-equal, identical captures and
+interface names) as ONE shared object (:func:`_share_common_cones`). Object identity is how the
+placement machinery recognizes that two consumption sites read one value, so a rewrite that
+copies a cone (the close rewrites do, by design) is only sound because this final pass restores
+the sharing. Recompute elimination is a
 Tile-level placement concern built on that identity: a duplicated value becomes one seam, and a
 composed cut materializes it once for every reader. Do NOT patch recompute downstream — a Loop IR
 fusion or emission workaround sees one kernel at a time and cannot know two kernels re-derive the
@@ -729,21 +730,32 @@ def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[
 
 
 def _share_common_cones(root: Fold) -> Fold:
-    """Restore object sharing between structurally identical cones — the tree-wide half of
-    canonicalization.
+    """Restore object sharing between same-value cones — the tree-wide half of canonicalization.
 
     Fusion and the close rewrites inline one value into every consumption site, so a traced value
     consumed twice (attention's softmax statistics, read by the weight cone and the epilogue)
     reappears as equal-but-distinct copies. Everything downstream keys on object identity —
     ``cuttable_seams`` groups occurrences by it, ``realize`` replaces cut values by it — so a
     severed sharing silently turns one value into per-site recompute that no schedule can undo.
-    This walk hash-conses every Fold bottom-up: copies that are structurally EQUAL (same captured
-    names included — the bucket key adds ``deps`` so α-equivalent cones under different captures,
-    the K-cone family, stay value clustering's job) collapse onto the first occurrence in walk
-    order. Emission is untouched: lowering walks tree positions, and every position still holds
-    an equal term. Identity-preserving off the replacement spine, like ``_replace_fold``."""
+    This walk hash-conses every Fold bottom-up: copies UNIFY onto the first occurrence in walk
+    order when they are alpha-equal with identical captures (the bucket key adds ``deps`` — the
+    K-cone family, alpha-equal under DIFFERENT captures, stays value clustering's job) and
+    identical interface names (``defines`` — what sibling members and the consuming lift read),
+    so a copy that differs only in internal binder spelling still collapses where plain
+    structural equality would silently sever the sharing. Emission is untouched in shape:
+    lowering walks tree positions, and every position holds a term of the same value (a unified
+    representative may change internal spelling). Identity-preserving off the replacement spine,
+    like ``_replace_fold``."""
     canon: dict[tuple, list[Fold]] = {}
     seen: dict[int, Fold] = {}
+    unify_keys: dict[int, Lambda] = {}
+
+    def unify_key(fold: Fold) -> Lambda:
+        # The whole-term alpha-quotient under an empty environment: free names (the captures) and
+        # the bucket-pinned interface names make canonical equality mean equal VALUE.
+        if id(fold) not in unify_keys:
+            unify_keys[id(fold)] = Closure(Lambda(params=(), body=Body((fold,)), results=fold.defines()), ()).canonical()
+        return unify_keys[id(fold)]
 
     def member(stmt):
         if isinstance(stmt, Fold):
@@ -768,9 +780,9 @@ def _share_common_cones(root: Fold) -> Fold:
             current = replace(current, operands=operands)
         if any(piece is not stmt for piece, stmt in zip(body, node.lift.body, strict=True)):
             current = current.with_bodies((Body(body),))
-        bucket = canon.setdefault((current.structural_key(), current.deps()), [])
+        bucket = canon.setdefault((current.structural_key(), current.deps(), current.defines()), [])
         for prior in bucket:
-            if prior == current:
+            if prior == current or unify_key(prior) == unify_key(current):
                 seen[id(node)] = prior
                 return prior
         bucket.append(current)

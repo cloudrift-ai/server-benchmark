@@ -399,6 +399,93 @@ def test_computed_b_factorizes_at_the_scalar_tier() -> None:
     assert exps, "the computed B operand (exp of the weight) must survive into the scalar kernel body"
 
 
+def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b() -> None:
+    """Selecting an output-tiled contraction from a projection must retain a sibling Fold whose
+    result its computed B edge reads. The sibling varies over the contraction's output column, so
+    it belongs inside the per-cell compute fill; treating it as a post-contraction projection
+    leaves the fill reading an undefined scalar."""
+    from emmy.compiler.dtype import F16
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.schedule import Placement, Stage, Workers
+    from emmy.compiler.ir.tile.ops import sched_of
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
+
+    m, n, k, r = Axis("m", 16), Axis("n", 32), Axis("k", 16), Axis("r", 16)
+    statistic = Fold(
+        axis=r,
+        lift=Lambda(
+            params=("r",),
+            body=Body(
+                (
+                    Load(name="stat_in", input="W", index=(Var("n"), Var("r"))),
+                    Assign(name="square", op="multiply", args=("stat_in", "stat_in")),
+                )
+            ),
+            results=("square",),
+        ),
+        init=(0.0,),
+        combine=Lambda(
+            params=("stat", "stat__o"),
+            body=Body((Assign(name="stat", op="add", args=("stat", "stat__o")),)),
+            results=("stat",),
+        ),
+    )
+    provider = Fold.projection(
+        operands=(statistic,),
+        body=Body(
+            (
+                Assign(name="norm", op="rsqrt", args=("stat",)),
+                Load(name="row_bias", input="Bias", index=(Var("m"),)),
+            )
+        ),
+        results=("norm", "row_bias"),
+    )
+    computed_b = Fold.projection(
+        body=Body(
+            (
+                Load(name="weight", input="W", index=(Var("n"), Var("k"))),
+                Assign(name="scaled", op="multiply", args=("weight", "norm")),
+            )
+        ),
+        results=("scaled",),
+    )
+    contraction = Fold.contraction(
+        k_axis=k,
+        a=Load(name="activation", input="A", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=computed_b, acc="out"),),
+    )
+    root = Fold.projection(
+        operands=(provider, contraction),
+        body=Body((Assign(name="biased", op="add", args=("out", "row_bias")),)),
+        results=("biased",),
+    )
+    workers = Workers.parse("w1x1")
+    plan = TilePlan.parse("mma_m16n8k16_f16_f32/f1x4/k1", workers).at(m, n)
+    tile = TileOp(
+        op=root,
+        name="out",
+        place=Placement(free=(m, n), grid=(m, n), mapped=True),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="biased")),),
+    )
+    tile.inputs = {
+        "A": Tensor("A", (16, 16), F16),
+        "Bias": Tensor("Bias", (16,), F16),
+        "W": Tensor("W", (32, 16), F16),
+    }
+    tile.outputs = {"out": Tensor("out", (16, 32), F16)}
+    sched = sched_of(tile)
+    sched.put("TILE", contraction, plan)
+    sched.put("STAGE", contraction, Stage(depth=1, transport="smem", smem=("scaled",), bk_elems=16))
+
+    lowered = factorize(tile, root=None)
+    stmts = tuple(lowered.body.iter())
+    first_def = {name: index for index, stmt in reversed(tuple(enumerate(stmts))) for name in stmt.defines()}
+    norm_reads = [(index, name) for index, stmt in enumerate(stmts) for name in stmt.deps() if name.startswith("norm")]
+    assert norm_reads
+    assert all(first_def.get(name, len(stmts)) < index for index, name in norm_reads)
+    assert all("m" not in expr.free_vars() for stmt in stmts for expr in stmt.exprs())
+
+
 def test_both_edges_may_be_computed_at_once() -> None:
     """Nothing privileges one side: a contraction of two computed operands lowers too."""
     c = _computed_b_contraction(a_load=False)

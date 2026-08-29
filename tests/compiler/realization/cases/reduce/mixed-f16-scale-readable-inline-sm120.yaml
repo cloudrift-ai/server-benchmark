@@ -1,0 +1,90 @@
+# evidence: The exact Qwen3 c3d placement child built the same f32-accumulator times f16-scale
+# expression on A100 with an explicit conversion, and sm120 offers and realizes this reduced
+# REDUCE=coop, WORK=t32 schedule before nvcc rejects only the emitted mixed-dtype expression.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs:
+  - x
+  - scale
+  - bias
+  outputs:
+  - out
+  nodes:
+  - id: bias
+    op: input
+    outputs:
+    - - bias
+      - f32
+      - - 4
+        - 1
+  - id: scale
+    op: input
+    outputs:
+    - - scale
+      - f16
+      - - 4
+        - 1
+  - id: x
+    op: input
+    outputs:
+    - - x
+      - f16
+      - - 4
+        - 128
+  - id: sum
+    op: tensor.reduce
+    attrs:
+      op:
+        __elementwise__: sum
+      axis: 1
+    inputs:
+    - x
+    outputs:
+    - - sum
+      - f32
+      - - 4
+        - 1
+  - id: mul
+    op: tensor.elementwise
+    attrs:
+      op:
+        __elementwise__: multiply
+    inputs:
+    - sum
+    - scale
+    outputs:
+    - - mul
+      - f32
+      - - 4
+        - 1
+  - id: out
+    op: tensor.elementwise
+    attrs:
+      op:
+        __elementwise__: add
+    inputs:
+    - bias
+    - mul
+    outputs:
+    - - out
+      - f32
+      - - 4
+        - 1
+configs:
+- program: 0
+  target:
+    origins:
+    - mul
+    - out
+    - sum
+  realizations:
+  - name: k_out_reduce.b58195b2f8d5
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: coop
+      WORK: t32
+    identity: 2cdff6ae0ea7b5e5e5776ef1b4d819aef2b3115db1858009357330d732c4045b

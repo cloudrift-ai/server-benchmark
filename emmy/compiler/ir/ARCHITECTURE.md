@@ -390,6 +390,9 @@ recurse via `pretty_body`).
 CUDA scalar rendering goes through `stmt.base.op_to_expr`. Boolean masks retain the historical f32 SSA convention,
 so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values use the
 same semantics. Integer complement is not inferred from that name and fails closed until it has a typed consumer.
+The optional readable-source fold keeps a single-use `Assign` named when any argument's stamped dtype differs from
+the result dtype, so the target-aware `Assign.render` path remains responsible for conversions such as
+`__half2float`.
 
 Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` / `Body.forward_cone(seeds)` build a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound

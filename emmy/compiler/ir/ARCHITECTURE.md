@@ -84,6 +84,17 @@ These are term operations spelled the same way so one canonicalizer and one deep
 vocabularies; they are not statement behaviour, and `Fold` has no `render`. Impure computation stays
 in Loop IR until total lift; there is no impure `Lambda` construction path.
 
+**`nested()` is the STATEMENT protocol, and it deliberately does not reach a Fold's operand edges**
+— it yields the lift body, and nothing at all for a contraction, whose algebra is meant to read as
+edges rather than body deps. Every walk built on it (`Body.iter`, and so `Body.loads` /
+`Body.writes`) therefore answers for a fully flattened stream only. A lowered body is not always
+one: a term survives lowering wherever a region kept it (`ProjectionRegion` holds its cones as
+terms), and a walk over `Fold.lower()` then silently under-reports everything beneath such an edge.
+Ask `loaded_buffers` instead whenever the answer must cover what a consumer of the STORED tree will
+reach — the kernel materializer walks that tree, so anything deciding a node's graph inputs has to
+see what it sees. Asking the lowered view there is what let a cut declare fewer inputs than the
+kernel it produced went on to read.
+
 ## Invariants by stage
 
 - **Frontend → tensor** (after `decomposition`): `LinearOp`, `MatmulOp`,

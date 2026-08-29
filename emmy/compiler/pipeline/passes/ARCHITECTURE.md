@@ -243,6 +243,14 @@ from a kernel-set decision (`search/golden_eval` filters on it). The same reason
 the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot erase "tensor cores were on offer here"
 from the rows it does enumerate.
 
+**The session kernel cache.** Greedy lowering of one fused kernel is a function — Loop-IR program in,
+lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `lowering/tile/005`
+fetches a finished lowering (io rebound through `Stmt.rename_buffers`) before the lift, and
+`lowering/cuda/001` harvests every single-kernel lowering just before the per-graph negotiations
+(zero-init delegation, rendering) that deliberately sit below the boundary. Caller-owned on
+`Context.kernel_cache` (nothing installs it by default), greedy-only (tune strips it, pricing probes
+strip it), multi-kernel origins poison their key. A twin program compiles ~750x faster than cold.
+
 **The prescan and the sampled draw.** The prescan — each node's option list — is computed fresh per
 `schedule()` call: options are a pure function of the node and the live pins. (The session pool memo that
 cached prescans across kernels is retired: its key had accreted every fact identity rightly excludes —

@@ -1331,6 +1331,10 @@ class FragmentBiasAdd(Stmt):
     def external_reads(self) -> tuple[str, ...]:
         return (self.buf,)
 
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.buf, self.buf)
+        return self if new == self.buf else replace(self, buf=new)
+
     def exprs(self) -> tuple[Expr, ...]:
         return (*self.index, self.col_base, self.row_base)
 
@@ -1573,6 +1577,10 @@ class LdmatrixLoad(Stmt):
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.src_buffer,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.src_buffer, self.src_buffer)
+        return self if new == self.src_buffer else replace(self, src_buffer=new)
 
     def exprs(self) -> tuple[Expr, ...]:
         guard = () if self.gmem_guard is None else self.gmem_guard
@@ -2011,6 +2019,10 @@ class RegStore(Stmt):
 
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst_buffer,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.dst_buffer, self.dst_buffer)
+        return self if new == self.dst_buffer else replace(self, dst_buffer=new)
 
     def exprs(self) -> tuple[Expr, ...]:
         epi = () if self.epilogue is None else tuple(e for ld in self.epilogue.loads for e in ld.index)

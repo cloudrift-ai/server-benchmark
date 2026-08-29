@@ -183,6 +183,11 @@ class Context:
     # serve a sampled pool to a live compile. NOT in ``structural_key`` — it decides which rows are
     # OFFERED, never what a chosen row compiles to.
     pool_sample: PoolSample | None = None
+    # The session kernel cache (``pipeline.kernel_cache.KernelCache``) — ambient, CALLER-owned,
+    # greedy-only (the tune search strips it; pricing probes strip it). Typed ``object`` because
+    # ``context`` sits below ``pipeline``. NOT in ``structural_key`` and ``compare=False``:
+    # caching must never change identity.
+    kernel_cache: object | None = field(default=None, compare=False, repr=False)
 
     @classmethod
     def from_target(cls, cap: tuple[int, int], *, gpu_name: str | None = None) -> Context:

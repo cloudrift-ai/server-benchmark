@@ -258,6 +258,10 @@ def _price_kernel(
     us: float | None = None
     try:
         nested = greedy_decide(prior=prior, price_structural=False, db=db, decisions=decisions)
+        if getattr(ctx, "kernel_cache", None) is not None:
+            from dataclasses import replace as _replace  # noqa: PLC0415
+
+            ctx = _replace(ctx, kernel_cache=None)  # a replayed kernel offers no fork to price
         terminal, trace = Run(pipeline=_tile_pipeline(), ctx=ctx).resolve(single_node_graph(graph, nid), nested)
         us = _resolved_price(terminal, trace, ctx, prior)
     except Exception:  # noqa: BLE001 — a price-probe failure must never break compile

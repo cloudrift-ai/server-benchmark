@@ -58,6 +58,16 @@ historically built term, with names minted from the canonical walk (the same can
   overlap on a serve boot before building it; the remaining within-program twin residual (~0.24s: leaf descent +
   materialize + glue) is the bound on what a twin-fill mechanism can win.
 
+## The session kernel cache (v1 landed; the rest)
+
+`pipeline/kernel_cache.py` + the `lowering/tile/005` fetch and `lowering/cuda/001` harvest rules landed the
+per-kernel artifact cache: caller-owned on `Context.kernel_cache`, keyed by the exact variant key + hints + pins,
+byte-identical replay proven, ~750x on a twin program. Remaining: (1) wire it into the serving runner beside its
+`plan_cache` (thread one `KernelCache` into `_compile_split`'s backend calls) and into `emmy compile`/`run`
+sessions that compile several programs; (2) multi-kernel artifacts (a cut/split origin currently poisons its key —
+storing the graph fragment lifts that); (3) once wired, re-measure and retire the decision memo (and possibly the
+price memo, if the cache also records prices) plus the `pool_id` stamp.
+
 ## Second follow-up: freeze `Op`
 
 `Op.__setattr__` now makes the io maps immutable in place and invalidates the one identity cache on reassignment —

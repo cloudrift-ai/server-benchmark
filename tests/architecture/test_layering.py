@@ -319,3 +319,37 @@ def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
             if forbidden.search(line):
                 offenders.append(f"{py.relative_to(_REPO_ROOT).as_posix()}:{lineno}: {line.strip()}")
     assert not offenders, "read kernel identity off the Op interface (Op.deploy_identity)\n" + "\n".join(offenders)
+
+
+def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
+    """``Stmt.rename_buffers`` is the setter counterpart of ``external_reads`` /
+    ``external_writes``: a stmt kind that DECLARES external buffers without knowing how to
+    rename them silently breaks every buffer rebind (``canonicalize_buffer_names``, the session
+    kernel cache) the day it first appears inside a body those walk. Wrapper stmts whose
+    declarations aggregate a nested body are exempt — ``Body.rename_buffers`` reaches their
+    leaves through the recursive map."""
+    import importlib
+    import pkgutil
+
+    import emmy.compiler.ir as ir_pkg
+    from emmy.compiler.ir.stmt.base import Stmt
+
+    for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
+        importlib.import_module(mod.name)
+
+    def subclasses(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from subclasses(sub)
+
+    offenders = [
+        cls.__name__
+        for cls in subclasses(Stmt)
+        if ("external_reads" in cls.__dict__ or "external_writes" in cls.__dict__)
+        and "rename_buffers" not in cls.__dict__
+        and not cls.__dict__.get("nested", None)  # wrapper aggregators rename through their bodies
+    ]
+    assert not offenders, (
+        "these stmt kinds declare external buffers but cannot rename them — add a "
+        "rename_buffers override beside the declaration:\n" + "\n".join(sorted(offenders))
+    )

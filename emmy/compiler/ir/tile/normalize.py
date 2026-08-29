@@ -19,7 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Var, affine_form
 from emmy.compiler.ir.pure import (
     Channel,
     Fold,
@@ -119,6 +119,14 @@ def _operand_lambda(operand, axes: tuple[str, ...]) -> tuple[Lambda, tuple[str, 
 
 def _operand_roles(operand, axes: tuple[str, ...]) -> frozenset[str]:
     return frozenset(axis for axis in axes if edge_refs_axis(operand, axis))
+
+
+def _loads_axis_contiguously(operand, axis: str) -> bool:
+    """Whether a materialized operand carries ``axis`` only in its trailing index component."""
+    if not isinstance(operand, Load) or not operand.index or any(axis in index.free_vars() for index in operand.index[:-1]):
+        return False
+    form = affine_form(operand.index[-1], {axis})
+    return form is not None and form[1].get(axis) == 1
 
 
 def _ordered_projection(members: Iterable, results: tuple[str, ...]) -> Fold:
@@ -283,14 +291,30 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
         left_roles, right_roles = _operand_roles(left, axes), _operand_roles(right, axes)
         left_only, right_only = left_roles - right_roles, right_roles - left_roles
         unused_implicit = implicit_axes - left_roles - right_roles
+        broadcast_batch = False
         if not left_only and len(right_only) == 1 and len(unused_implicit) == 1:
             left_only = unused_implicit
         elif not right_only and len(left_only) == 1 and len(unused_implicit) == 1:
             right_only = unused_implicit
+        one_sided_batch = (len(left_only) > 1 and len(right_only) == 1) or (len(right_only) > 1 and len(left_only) == 1)
+        if one_sided_batch:
+            # A broadcast batch axis may occur in only one operand. The placement's trailing pair
+            # still identifies the contraction's m/n roles; earlier free axes remain ordinary
+            # grid dimensions and do not change that orientation.
+            matrix_axes = frozenset(axes[-2:])
+            left_matrix = left_only & matrix_axes
+            right_matrix = right_only & matrix_axes
+            if len(left_matrix) == 1 and len(right_matrix) == 1:
+                left_only, right_only = left_matrix, right_matrix
+                broadcast_batch = True
         if len(left_only) != 1 or len(right_only) != 1:
             return fold
         left_axis, right_axis = next(iter(left_only)), next(iter(right_only))
         pair = (left, right) if axis_position[left_axis] < axis_position[right_axis] else (right, left)
+        if broadcast_batch and form.product.commutative:
+            first, second = pair
+            if _loads_axis_contiguously(second, fold.axis.name) and not _loads_axis_contiguously(first, fold.axis.name):
+                pair = (second, first)
         pairs.append(pair)  # A (earlier output axis), B (later output axis)
 
     pairs = _orient_shared(pairs, form.product, all_axes)

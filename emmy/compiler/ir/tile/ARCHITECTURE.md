@@ -56,7 +56,11 @@ boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a 
 pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
 Structural identity therefore reads the stored order directly. Contraction canonicalization first orders product
 arguments by geometry, then places the one argument shared by every product in the Fold's shared operand slot.
-Physical M/N orientation remains a placement fact rather than part of the Fold algebra.
+For a broadcast-batched product whose batch axis occurs in only one operand, the placement's trailing output pair
+still supplies that geometry. If its geometric first operand reads the reduction axis non-contiguously and the other
+materialized operand reads it contiguously, the commutative product puts the contiguous operand in the shared A slot;
+placement then derives the corresponding physical M/N orientation from the operand axes. Physical M/N orientation
+remains a placement fact rather than part of the Fold algebra.
 
 `normalize.py` owns only the idempotent, bottom-up rules that need Tile context: scoped lambda alpha-equivalence and
 clustering, semiring contraction canonicalization, and closed child-Fold extraction from a root projection. The

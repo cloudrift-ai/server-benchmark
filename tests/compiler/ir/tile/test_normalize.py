@@ -52,6 +52,28 @@ def test_tile_post_init_canonicalizes_contraction() -> None:
     assert TileOp(op=tile.op, place=tile.place).op == tile.op
 
 
+def test_tile_post_init_canonicalizes_broadcast_batched_contraction() -> None:
+    axis = Axis("k", Dim(32))
+    body = Body(
+        (
+            Load(name="left", input="x", index=(Var("k"), Var("batch") * 8 + Var("m"))),
+            Load(name="right", input="w", index=(Var("n"), Var("k"))),
+            Assign(name="product", op="multiply", args=("left", "right")),
+        )
+    )
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    planar = Fold(axis=axis, lift=Lambda(params=("k",), body=body, results=("product",)), init=init, combine=combine)
+
+    tile = TileOp(
+        op=planar,
+        place=Placement(free=(Axis("batch", 4), Axis("m", 8), Axis("n", 16))),
+    )
+
+    assert tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.a.input == "w"
+    assert tile.op.b.input == "x"
+
+
 def test_tile_post_init_recovers_an_elided_unit_contraction_row() -> None:
     axis = Axis("k", Dim(16))
     body = Body(

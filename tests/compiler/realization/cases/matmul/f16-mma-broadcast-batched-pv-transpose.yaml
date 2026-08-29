@@ -1,0 +1,66 @@
+# A transposed broadcast-batched projection carries its batch axis only in the strided operand.
+# The contiguous reduction operand must become contraction A so the tensor-core schedule can bind.
+compute_cap:
+- 8
+- 0
+programs:
+- inputs: [x0, x1]
+  outputs: [transpose]
+  nodes:
+  - id: transpose_c1
+    op: constant
+    attrs:
+      name: transpose_c1
+      value: -1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[transpose_c1, f16, [1]]]
+  - id: transpose_c2
+    op: constant
+    attrs:
+      name: transpose_c2
+      value: -2.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[transpose_c2, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 512, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [8, 1024, 128]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [8, 512, 128]]]
+  - id: transpose
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [-1, -2]}}
+    inputs: [matmul]
+    outputs: [[transpose, f16, [8, 128, 512]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - matmul
+    - transpose
+  realizations:
+  - name: k_matmul_8ceacc.afa60f6b06c8
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f4x8/k8
+      WORK: w2x2
+    identity: 1f3d5e942468de2db6d9713cb2c8d709da09eeee28d71169c2484915f5bd399f

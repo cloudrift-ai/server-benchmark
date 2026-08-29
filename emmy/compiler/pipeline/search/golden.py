@@ -144,6 +144,14 @@ def precision_trading_pins(pins: Mapping) -> bool:
     return any(bool(pins.get(name, umbrella)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
 
 
+def pins_freeze_cut(pins: Mapping) -> bool:
+    """Whether the input pins freeze any placement cut (a ``PLACE…=cut`` pin) — the ONE spelling
+    of the predicate behind both the loader's receipt validation and :attr:`GoldenRecord.is_receipt`."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    return any(family_of(str(name)) == "PLACE" and str(value) == "cut" for name, value in pins.items())
+
+
 def golden_entry_state(entry: Mapping) -> GoldenEntryState:
     has_knobs = "knobs" in entry
     has_measurements = "measurements" in entry
@@ -195,6 +203,12 @@ class GoldenRecord:
     def is_routing(self) -> bool:
         """Whether this row records a kernel-placement decision rather than a kernel schedule."""
         return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
+
+    @property
+    def is_receipt(self) -> bool:
+        """Whether this row is a child-identity schedule receipt: a schedule row recorded behind
+        pinned cut(s), whose stored ``identity`` names the child kernel the row decorates."""
+        return self.identity is not None and not self.is_routing and pins_freeze_cut(dict(self.pins))
 
     @cached_property
     def pool_key(self) -> tuple:
@@ -501,8 +515,7 @@ def validate_golden_file(
                 families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
                 if "PLACE" in families and families != {"PLACE"}:
                     raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
-                pins_cut = any(str(name).split("@", 1)[0] == "PLACE" and str(value) == "cut" for name, value in pins.items())
-                if families and "PLACE" not in families and pins_cut and "identity" not in realization:
+                if families and "PLACE" not in families and pins_freeze_cut(pins) and "identity" not in realization:
                     raise ValueError(
                         f"{realization_where} schedules a kernel behind pinned cut(s) without naming it; "
                         "a child-identity schedule receipt must store the child kernel's identity"
@@ -580,6 +593,22 @@ def load_golden_records(document: Mapping) -> list[GoldenRecord]:
     return [
         golden_record_from_entry(document, entry, realization) for entry in document["configs"] for realization in entry["realizations"]
     ]
+
+
+def shared_placement_pins(matches: list[GoldenRecord]) -> dict:
+    """The placement pins every matching working-file realization shares, or ``{}``.
+
+    An explicit working target's shared placement regime is part of the target, not unverified
+    schedule evidence: the ordinary compile applies it while the remaining schedule families stay
+    free for the normal deploy evidence hierarchy. When same-name realizations disagree on any
+    input pin the target stays unpinned — choosing one regime would silently change which
+    realization was requested."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    regimes = {match.pins for match in matches}
+    if len(regimes) != 1:
+        return {}
+    return {key: value for key, value in regimes.pop() if family_of(key) == "PLACE"}
 
 
 _STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
@@ -756,13 +785,11 @@ def decode_record(record: GoldenRecord) -> str | None:
     verdicts = store.setdefault("verdicts", {})
     if verdict_key in verdicts:
         return verdicts[verdict_key]
-    pinned_cut = any(str(name).split("@", 1)[0] == "PLACE" and str(value) == "cut" for name, value in record.pins)
-    is_receipt = record.identity is not None and pinned_cut and not record.is_routing
     tile = None
     try:
         tile = _lifted_target(record)
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
-        if not is_receipt:
+        if not record.is_receipt:
             return _remember_verdict(verdict_key, f"{type(exc).__name__}: {exc}")
     if record.is_routing:
         from dataclasses import replace  # noqa: PLC0415
@@ -789,7 +816,7 @@ def decode_record(record: GoldenRecord) -> str | None:
         return _remember_verdict(verdict_key, None)
     candidates = _candidate_rows(record)
     row = schedule_row_key(record.knobs)
-    if is_receipt and (tile is None or record.identity != deploy_identity(tile)):
+    if record.is_receipt and (tile is None or record.identity != deploy_identity(tile)):
         child_rows = candidates.get(record.identity)
         if child_rows is None:
             reason = f"stored identity equals none of the {len(candidates)} kernel identities resolved under the record's pins"

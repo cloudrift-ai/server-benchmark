@@ -631,15 +631,16 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     if not recs and _AUDIT_SINK is None:
         return None
 
-    def find_recorded(options, record, target):
+    def find_recorded(options, target):
         """Descend only branches compatible with one recorded row."""
+        record = dict(target)
         for option in options:
             if _is_structural_option(option):
                 return None
             if isinstance(option, Fork) and not option.is_leaf:
                 branch = drop_uninformative_scopes(option.knobs)
                 if all(key in record and values_equal(key, record[key], value) for key, value in branch.items()):
-                    found = find_recorded(option.expand(), record, target)
+                    found = find_recorded(option.expand(), target)
                     if found is not None:
                         return found
                 continue
@@ -650,8 +651,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
 
     if recs and _AUDIT_SINK is None:
         for rec in recs:
-            target = schedule_row_key(rec.knobs)
-            if (hit := find_recorded(fp.options, dict(target), target)) is not None:
+            if (hit := find_recorded(fp.options, schedule_row_key(rec.knobs))) is not None:
                 return hit[0], float(rec.emmy_us or 0.0), dict(hit[1])
         logger.warning(
             "deploy: node %r matches %d recorded golden(s) by structural identity, but none equals an enumerated row — "

@@ -9,8 +9,8 @@ direct correctness where a timing was admissible. The retained A100 VM stayed ru
 ### A100 corpus
 
 The exact sm80 lane collected 201 tests and found six applicable cases. It completed in 189 seconds with five passes,
-one independent stat-fill watchdog failure, and 195 skips. The result JSON and full log are preserved under
-`_tune/a100-corpus-857ba7e9/evidence/full-corpus/`.
+one independent stat-fill watchdog failure, and 195 skips. The result JSON and full log are retained host-local on the retained A100 VM (untracked
+`_tune/a100-corpus-857ba7e9/evidence/full-corpus/`; `_tune/` is not in the repository).
 
 | A100 case | Emmy | `torch.compile` | launches | result |
 | --- | ---: | ---: | ---: | --- |
@@ -49,7 +49,7 @@ sibling operands by dependency, closing tiled provider cones, and retaining comp
 authored fused schedule is nevertheless about 0.28 seconds per iteration and trips the benchmark watchdog. A correct
 six-seam route reached 3,342 µs versus 17.238 µs for `torch.compile`; its best measured factor-16 child was 184.525 µs.
 The parent instead selected an unmeasured factor-32 split, so a 206.592 µs parent canary is not qualified evidence.
-The remaining storage gap is an ordered structural receipt: record the split choice first, then join the identities
+The remaining storage gap is ordering in the child-identity schedule receipts: record the split choice first, then join the identities
 and measured schedules of the children that choice creates.
 
 ### Other exact platforms
@@ -75,7 +75,8 @@ A/B replay. It promotes the GQA, PV, workspace-chain, and V100 schedules. The co
 Parity is not achieved: A100 has two wins, three measurable losses, and one watchdog; V100 has one correct loss and
 one correctness failure; RTX 4090 has no exact corpus coverage. No large serving experiment was started while those
 kernel-level gaps remain. The next compiler work is structural reuse/materialization for attention, transpose-aware
-PV stores, a cross-CTA completion/reset primitive for split-K, ordered structural receipts for stat-fill, and a Volta
+PV stores, a cross-CTA completion/reset primitive for split-K, split-first ordering for stat-fill's child-identity
+schedule receipts, and a Volta
 producer/consumer staging primitive.
 
 ## Cut-pinned attention qualification after the computed-B changes (main through `d2950079`, 2026-08-28)

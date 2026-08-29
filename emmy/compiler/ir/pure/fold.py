@@ -70,8 +70,7 @@ def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...
             incoming[dependent].remove(index)
             if not incoming[dependent]:
                 heapq.heappush(ready, dependent)
-    if len(order) != len(operands):
-        raise ValueError("operand edges form a cyclic provider dependency")
+    assert len(order) == len(operands), "operand edges are acyclic SSA cones — a cyclic provider dependency is not constructible"
 
     indexes = []
     for edge in operands:

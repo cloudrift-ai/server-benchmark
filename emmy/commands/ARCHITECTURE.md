@@ -214,10 +214,10 @@ to the ordinary compile: the structural target is part of the requested working 
 unverified schedule knobs remain free for the normal deploy evidence hierarchy. Different input-pin regimes under the
 same name leave the ordinary target unpinned rather than choosing one. Canonical selection never gets this
 working-file behavior. Embedded Loop IR stores stable algebra rather than derived structural stamps. Registered
-Boolean values in an explicit `--ab` row
-remain input pins, so false values are not dropped with kernel pass markers and the JSON record identifies the inputs
-that were compiled. A scoped schedule-key OFF beside a non-OFF bare family pin also remains explicit: it is the
-site-specific exception to that bare pin, not a redundant declined-site stamp. A failed row with
+Boolean values in an explicit `--ab` row remain input pins, so false values are not dropped with kernel pass markers
+and the JSON record identifies the inputs that were compiled. A scoped schedule-key OFF beside a non-OFF bare family
+pin also remains explicit: it is the site-specific exception to that bare pin, not a redundant declined-site stamp
+(`replay_pin_spelling` in `compiler/pipeline/knob.py` owns the rule). A failed row with
 no realized graph reports the precision lane requested by those parsed input pins, including explicit false
 overrides, rather than defaulting every failure to the standard lane. `run --golden` replays it through the full
 compiler pipeline. When that replay has

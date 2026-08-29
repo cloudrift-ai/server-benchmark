@@ -518,8 +518,7 @@ def _producer_order(pieces) -> list:
     available: set[str] = set()
     while remaining:
         ready = [piece for piece in remaining if {load.input for load in Body.coerce(piece[1].lower()).loads} & workspaces <= available]
-        if not ready:
-            raise ValueError("cyclic cut-workspace dependency cannot arise from strict Fold containment")
+        assert ready, "strict Fold containment makes the cut-workspace dependency graph acyclic"
         ordered.extend(ready)
         available.update(buffer for *_, buffers in ready for buffer in buffers)
         remaining = [piece for piece in remaining if not any(piece is chosen for chosen in ready)]

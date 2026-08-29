@@ -70,7 +70,10 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
     """Infer an edge's result dtypes in the lexical scope where the edge occurs.
 
     A capturing Fold cannot be typed in an empty environment. Starting this walk at the root and
-    threading each enclosing environment produces one dtype table for every stored edge.
+    threading each enclosing environment produces one dtype table for every stored edge. The
+    ``cache`` is keyed by object identity, so a SHARED node keeps the dtypes of the first
+    environment reached — sound for placement's consumers because provider closure only offers a
+    capturing seam whose occurrences resolve to equal providers, and equal providers type equally.
     """
     cache = {} if cache is None else cache
     if id(edge) in cache:

@@ -168,8 +168,11 @@ def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
     A normal outer terminal sits at the loop dialect's end (:func:`outer_pipeline`), so its
     kernels are finalized ``LoopOp`` instances. A direct post-cut reproducer instead starts at an
     unscheduled ``TileOp``; it enters the same inner search so its rows keep the child identity
-    ordinary parent-route replay already consumes. A sealed Tile root is already scheduled and
-    stays lowering-only."""
+    ordinary parent-route replay already consumes. A Tile root whose worker inventory is sealed
+    (``work`` set) is already scheduled and stays lowering-only. ``work`` is the only sealed
+    signal today, and it is ``None`` for the per-cell / pure-reduce forms too — such a root
+    re-enters the per-kernel search and re-decides its schedule from the same evidence, which is
+    redundant but not wrong; a dedicated scheduled marker on ``TileOp`` would tighten this."""
     return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp) or (isinstance(n.op, TileOp) and n.op.work is None)]
 
 

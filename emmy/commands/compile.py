@@ -195,6 +195,7 @@ def resolve_golden_arg(args) -> None:
         goldens_for_live_gpu,
         load_golden_file,
         load_golden_records,
+        shared_placement_pins,
     )
 
     # Canonical replay scopes to the live card as before. An explicit working file is
@@ -239,17 +240,7 @@ def resolve_golden_arg(args) -> None:
         logger.error("golden %r resolves to %d different embedded program targets", name, len(targets))
         sys.exit(2)
     if document is not None:
-        # An explicit working target's shared placement regime is part of the target,
-        # not unverified schedule evidence. Apply it to the ordinary compile while the
-        # remaining schedule families stay free for the normal deploy hierarchy. If
-        # same-name realizations disagree on any input pin, leave the target unpinned:
-        # choosing one regime would silently change which realization was requested.
-        pin_regimes = {match.pins for match in matches}
-        if len(pin_regimes) == 1:
-            shared_pins = dict(pin_regimes.pop())
-            from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-
-            args.golden_target_pins = {key: value for key, value in shared_pins.items() if family_of(key) == "PLACE"}
+        args.golden_target_pins = shared_placement_pins(matches)
     args._golden_graph = matches[0].target_program.copy()
     from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
 
@@ -282,18 +273,6 @@ def resolve_golden_arg(args) -> None:
     )
     if args.golden_target_pins:
         logger.info("[golden] applying shared structural target pins: %s", args.golden_target_pins)
-
-
-def _golden_target_pin_context(args):
-    """Publish one explicit working target's shared structural input regime."""
-    from contextlib import nullcontext
-
-    pins = getattr(args, "golden_target_pins", None) or {}
-    if not pins:
-        return nullcontext()
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
-
-    return pinned_knobs(pins)
 
 
 def add_diagnostics_args(parser) -> None:
@@ -472,7 +451,9 @@ def handle_compile(args):
     else:
         logger.debug("No tuning DB at %s — using rule defaults", tune_db_path)
 
-    with _golden_target_pin_context(args):
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    with pinned_knobs(args.golden_target_pins):
         result = Pipeline.build(passes).run(graph, db=db, dump=dump)
 
     n_compute = sum(1 for n in result.nodes.values() if not _is_boundary(n.op))

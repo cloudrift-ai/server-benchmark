@@ -122,7 +122,11 @@ def _operand_roles(operand, axes: tuple[str, ...]) -> frozenset[str]:
 
 
 def _loads_axis_contiguously(operand, axis: str) -> bool:
-    """Whether a materialized operand carries ``axis`` only in its trailing index component."""
+    """Whether a materialized operand carries ``axis`` only in its trailing index component.
+
+    The same unit-stride reading one position over is ``reads_declared_rows`` in the lowering
+    layer's ``_addr``; it cannot be shared because ``ir/tile`` sits below ``pipeline/passes``.
+    This is the ONE layout fact canonicalization reads — see the caller's precedence note."""
     if not isinstance(operand, Load) or not operand.index or any(axis in index.free_vars() for index in operand.index[:-1]):
         return False
     form = affine_form(operand.index[-1], {axis})
@@ -312,6 +316,13 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
         left_axis, right_axis = next(iter(left_only)), next(iter(right_only))
         pair = (left, right) if axis_position[left_axis] < axis_position[right_axis] else (right, left)
         if broadcast_batch and form.product.commutative:
+            # Physical M/N orientation stays a placement fact; this swap decides only which
+            # commutative argument SPELLS the shared A slot when the batch axis breaks the
+            # symmetric geometry, preferring the operand that reads the reduction axis
+            # contiguously so placement can derive a tensor-core-eligible orientation.
+            # Precedence with ``_orient_shared`` below: a broadcast-batched product is
+            # single-channel, where ``_orient_shared`` is a no-op; with two or more channels its
+            # shared-argument rule wins and its tie-break retains the orientation chosen here.
             first, second = pair
             if _loads_axis_contiguously(second, fold.axis.name) and not _loads_axis_contiguously(first, fold.axis.name):
                 pair = (second, first)
@@ -464,8 +475,14 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
             return None
         # Attaching a provider to a nested operand evaluates it inside every binder crossed by
         # the move. An iteration-bearing chain therefore stays at its defining scope; straight-
-        # line chains still close normally. A whole operand edge is likewise kept when any part
-        # of it iterates, because closure cannot split that edge without changing its value.
+        # line chains still close normally. The two arms deliberately differ: a whole operand
+        # EDGE that iterates is kept unconditionally — the enclosing projection evaluates it
+        # once, so even the depth-0 move into a contraction operand's per-cell fill multiplies
+        # it, and closure cannot split the edge without changing its value — while an iterating
+        # body MEMBER is blocked only past a new binder (``_close_reduce_body`` states the
+        # mirror convention: a reducing root's own axis is its existing domain). A fold this
+        # rule leaves capturing stays placeable through provider closure at offer time
+        # (``lowering/tile/_cut.py``).
         if any(_carries_iteration(edge) for edge in edges) or (binders and any(_carries_iteration(stmt) for stmt in cone.members)):
             return None
         moved_members.update(id(stmt) for stmt in cone.members)

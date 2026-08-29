@@ -84,6 +84,15 @@ its defining scope. Straight-line chains still close normally, and a reducing ro
 domain. A stored fold left capturing by this rule remains placeable: the placement fork resolves its captures outward
 through the occurrence's lexical environment at offer time, without moving the stored tree.
 
+Three walks compute a capture's provider cone, at three stages, and each is allowed to move something different.
+Normalization's closing rules (`normalize.py`, above) are the only walk that REWRITES the stored tree, and only for
+straight-line providers within one evaluation domain. The placement fork's provider closure
+(`lowering/tile/_cut.py`) moves nothing: it proves every occurrence resolves to equal sources and offers the closed
+value as a seam, recording fold producers as the seam's requirements. Kernel lowering's per-cell closure
+(`lowering/kernel/_factor.py`) moves sibling providers into a computed operand's compute fill of the one kernel being
+emitted — a codegen fact that exists only inside that realization. A new capture-resolution need belongs in one of
+these three, not a fourth walk.
+
 An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
 projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
 computation compare unequal, and the placement fork's value clustering (`lowering/tile/_cut.py`) relies on

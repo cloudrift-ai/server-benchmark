@@ -301,10 +301,10 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         projection_reads = op.body.backward_cone(_operand_result_names(op)).external_reads
         siblings = []
         for edge in other:
-            required = set(_operand_result_names(edge)) & projection_reads
-            projection_edge = _provider_slice(edge, required) if id(edge) in consumed and required else edge
-            if id(edge) not in consumed or required:
-                siblings.extend(_emit(projection_edge, ctx).body)
+            if id(edge) not in consumed:
+                siblings.extend(_emit(edge, ctx).body)
+            elif required := set(_operand_result_names(edge)) & projection_reads:
+                siblings.extend(_emit(_provider_slice(edge, required), ctx).body)
         proj = [*siblings, *_emit_body(op.body, ctx, output_specs)]
         region_results = _projection_results(op.body)
         root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= region_results)
@@ -321,8 +321,9 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
     if output_specs and isinstance(op, Fold) and op.axis is None:
         # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
         # its output specifications only after that body is emitted so an output sweep wraps every stmt
-        # that reads the sweep coordinate.
-        return _bind(op, ctx, tail, out_val, store, output_specs=output_specs, cell_op=cell_op)
+        # that reads the sweep coordinate. ``cell_op`` cannot reach this branch: it is only set when
+        # recursing into a tiled contraction root, whose axis is never ``None``.
+        return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
     if output_specs:
         # A non-projection flat root can carry plain root ``Write``\\ s only. A STREAMED store
         # (its values an observer's results) stays a spec so the scalar arm splices it into the
@@ -435,6 +436,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         projection = tail
         tail = fold_store_tail(tail, op, c)
     else:
+        # ``cell_op`` is the provider-closed rewrite of ``op``: the emitted per-cell value carries
+        # the sibling providers its computed operands read, while every schedule lookup stays keyed
+        # on the STORED node — ``ctx.sched`` is identity-keyed, so a rewritten node has no schedule.
         c, value_child, projection = cell_op or op, None, ()
         tile = ctx.sched.tile_of(op) if is_contraction(op) else None
         stage = ctx.sched.get("STAGE", op) if tile is not None else None

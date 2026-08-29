@@ -19,11 +19,21 @@ from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile.identity import deploy_identity
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _workspace_axes, cuttable_seams
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
-from emmy.compiler.pipeline.search.golden import GoldenRecord, _lifted_target, decode_record, load_golden_file, load_golden_records
+from emmy.compiler.pipeline.search.golden import (
+    GoldenRecord,
+    _candidate_rows,
+    _lifted_target,
+    decode_record,
+    kernel_identity,
+    load_golden_file,
+    load_golden_records,
+    validate_golden_file,
+)
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
 from tests.compiler.helpers import requires_cuda
@@ -315,3 +325,67 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     assert all(node.op.placement_decided for node in pieces)
     workspaces = {node.id for node in producers}
     assert any(set(node.inputs) & workspaces for node in producers), "the nested value's producer must read a sibling workspace"
+
+
+def _receipt_fields() -> dict:
+    return {
+        "name": "sdpa.child",
+        "gpu_name": "",
+        "compute_cap": (12, 0),
+        "model": None,
+        "program_index": 0,
+        "program_wire": graph_to_wire(_sdpa_graph(False)),
+        "origins": ("out",),
+        "bindings": (),
+        "pins": (("PLACE@a3", "cut"),),
+        "measurements": None,
+        "ranking": None,
+    }
+
+
+def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() -> None:
+    """Conflicting per-child schedules behind one pinned cut persist as sibling receipts: each
+    stored child identity selects its own kernel's rows, a sibling child's row does not vouch for
+    it, and the verified-tier join reads the stored identity instead of the pre-cut lift."""
+    fields = _receipt_fields()
+    parent = GoldenRecord(knobs={}, **fields)
+    lift_identity = deploy_identity(_lifted_target(parent))
+    children = {i: rows for i, rows in _candidate_rows(parent).items() if i is not None and i != lift_identity}
+    assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
+    (id_a, rows_a), (id_b, rows_b) = sorted(children.items())
+    row_a = next(iter(rows_a - rows_b), None)
+    assert row_a is not None, "the children must offer at least one distinguishing schedule row"
+
+    receipt = GoldenRecord(knobs=dict(row_a), identity=id_a, **fields)
+    assert decode_record(receipt) is None
+    assert kernel_identity(receipt) == id_a
+
+    sibling = GoldenRecord(knobs=dict(row_a), identity=id_b, **fields)
+    reason = decode_record(sibling)
+    assert reason is not None and "no enumerated row of the identified kernel" in reason
+
+    stale = GoldenRecord(knobs=dict(row_a), identity="0" * 64, **fields)
+    reason = decode_record(stale)
+    assert reason is not None and "equals none" in reason
+
+
+def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:
+    from emmy.compiler.pipeline.search.policy.greedy import _pins_live
+
+    fields = _receipt_fields()
+    document = {
+        "compute_cap": [12, 0],
+        "programs": [fields["program_wire"]],
+        "configs": [
+            {
+                "program": 0,
+                "target": {"origins": ["out"]},
+                "realizations": [{"name": "sdpa.child", "bindings": {}, "pins": {"PLACE@a3": "cut"}, "knobs": {"WORK": "w4x2"}}],
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="child-identity schedule receipt"):
+        validate_golden_file(document)
+    document["configs"][0]["realizations"][0]["identity"] = "0" * 64
+    validate_golden_file(document)
+    assert _pins_live({"PLACE@a3": "cut"}), "a receipt's routing pins are replay context, never a dead env regime"

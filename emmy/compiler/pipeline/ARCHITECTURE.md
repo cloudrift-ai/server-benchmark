@@ -1273,6 +1273,20 @@ rejected shape is a bare OFF beside scoped keys of the same family: a bare OFF p
 replay and contradicts the scoped decisions, so `stamp_schedule_families` drops it when stamping and promotion
 rejects any that remain.
 
+**A split's children persist as child-identity schedule receipts.** One flat `knobs` map decorates exactly one
+kernel, so a route whose cut splits the target into several kernels cannot record conflicting per-child schedules in
+one realization. Each child instead gets its own sibling realization — a *receipt*: the route's cut(s) frozen in
+`pins` (replay context that lets the strict decode reach the children), the child's schedule row in `knobs`, and the
+child kernel's deploy identity stored in `identity`. A stored identity is authoritative for the verified-tier join
+(`kernel_identity` returns it as-is — the target's own lift stops at the pre-cut kernel and cannot name a child), and
+the join stays fail-closed: a stale identity matches no live fork and decides nothing. The strict decode is stricter —
+the stored identity must equal one kernel resolved under the record's pins, and the spelled row must equal one of
+THAT kernel's enumerated rows, so a sibling child's row never vouches. At deploy the pin-regime check skips PLACE
+pins (the route is the routing consult's decision; the identity join guarantees a receipt only decorates a
+structurally identical kernel), and validation rejects a realization that schedules behind pinned cuts without a
+stored identity. A stored identity equal to the target's own lift is the corpus's derived stamp, not a receipt, and
+keeps the pooled decode.
+
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
 post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately

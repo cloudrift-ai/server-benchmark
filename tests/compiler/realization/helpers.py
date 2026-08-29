@@ -237,7 +237,7 @@ def offered(case: Case) -> str | None:
         # A FORKLESS kernel: its schedule space collapsed to one row, so it opens no fork and the
         # enumeration has nothing to return. There is no schedule to be denied, so nothing here can
         # fail — `realized` still proves it lowers, and the later stages still prove it runs. This
-        # mirrors how `_candidate_row_keys` reads a forkless kernel's row off the resolved op.
+        # mirrors how `_candidate_rows` reads a forkless kernel's row off the resolved op.
         return None
     return f"no enumerated row carries the pin ({len(rows)} rows offered at sm_{''.join(map(str, case.compute_cap))})"
 

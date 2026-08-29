@@ -180,8 +180,11 @@ class GoldenRecord:
     loop_index: int | None = None
     loop_wire: dict | None = None
     #: The record's stored ``deploy_identity`` (see :func:`kernel_identity`), when the file keeps
-    #: one. Model inventories do not; the realization corpus does, because a new fingerprint fact
-    #: must show up as a diff there rather than silently re-key a checked-in reproducer.
+    #: one. Model inventories mostly do not; the realization corpus does, because a new fingerprint
+    #: fact must show up as a diff there rather than silently re-key a checked-in reproducer. A
+    #: stored identity is authoritative for the deploy join, and it is how a **child-identity
+    #: schedule receipt** names its kernel: a record whose pins freeze a cut lowers to several
+    #: kernels, and only the stored identity says which child this row's schedule decorates.
     identity: str | None = None
     #: Measured microseconds per ``Context.hardware_id``: ``{card: {emmy_us, tcompile_us}}``. A
     #: model golden is one file per card and uses the flat ``measurements`` block instead; a corpus
@@ -498,6 +501,12 @@ def validate_golden_file(
                 families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
                 if "PLACE" in families and families != {"PLACE"}:
                     raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
+                pins_cut = any(str(name).split("@", 1)[0] == "PLACE" and str(value) == "cut" for name, value in pins.items())
+                if families and "PLACE" not in families and pins_cut and "identity" not in realization:
+                    raise ValueError(
+                        f"{realization_where} schedules a kernel behind pinned cut(s) without naming it; "
+                        "a child-identity schedule receipt must store the child kernel's identity"
+                    )
                 if strict:
                     for family in families:
                         scoped = [str(key) for key in realization["knobs"] if str(key).split("@", 1)[0] == family]
@@ -670,10 +679,11 @@ def _record_fingerprint(record: GoldenRecord) -> str:
     return digest(cached[1], str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
 
 
-#: Enumerated rows per (target, pins) — sibling realizations of one config decode against one
-#: enumeration (the tripwire and the migration validator walk whole files) — and ONE Context per
-#: card, so same-shape targets share the schedule pool cache across configs and files.
-_DECODE_ROWS_CACHE: dict[tuple, list[dict]] = {}
+#: Enumerated rows per (target, pins), bucketed by kernel identity — sibling realizations of one
+#: config decode against one enumeration (the tripwire and the migration validator walk whole
+#: files) — and ONE Context per card, so same-shape targets share the schedule pool cache across
+#: configs and files.
+_DECODE_ROWS_CACHE: dict[tuple, dict[str | None, frozenset]] = {}
 _DECODE_CTX_CACHE: dict[tuple, object] = {}
 
 
@@ -736,14 +746,17 @@ def decode_record(record: GoldenRecord) -> str | None:
     program selects exactly one kernel; a routing record names a legal closed Fold seam; a SCHEDULE record's spelled row
     equals one enumerated
     leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
-    any-of, no classified shape."""
+    any-of, no classified shape. A child-identity schedule receipt (a stored identity that is not
+    the target's own lift) is stricter still: its identity must equal one kernel resolved under the
+    record's pins, and the spelled row must equal one of THAT kernel's rows — a sibling child's row
+    must not vouch for it."""
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
 
     try:
         tile = _lifted_target(record)
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         return f"{type(exc).__name__}: {exc}"
-    verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins))
+    verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins), record.identity or "")
     store = _identity_store()
     verdicts = store.setdefault("verdicts", {})
     if verdict_key in verdicts:
@@ -771,11 +784,19 @@ def decode_record(record: GoldenRecord) -> str | None:
             if site is None or id(site.node) not in seam_ids:
                 return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the Fold tree")
         return _remember_verdict(verdict_key, None)
-    candidates = _candidate_row_keys(record)
-    if schedule_row_key(record.knobs) in candidates:
-        reason = None
+    candidates = _candidate_rows(record)
+    row = schedule_row_key(record.knobs)
+    if record.identity is not None and record.identity != deploy_identity(tile):
+        child_rows = candidates.get(record.identity)
+        if child_rows is None:
+            reason = f"stored identity equals none of the {len(candidates)} kernel identities resolved under the record's pins"
+        elif row in child_rows:
+            reason = None
+        else:
+            reason = f"no enumerated row of the identified kernel equals the recording ({len(child_rows)} candidate rows)"
     else:
-        reason = f"no enumerated row equals the recording ({len(candidates)} candidate rows)"
+        pooled = frozenset().union(*candidates.values()) if candidates else frozenset()
+        reason = None if row in pooled else f"no enumerated row equals the recording ({len(pooled)} candidate rows)"
     verdicts[verdict_key] = reason
     global _IDENTITY_STORE_DIRTY
     _IDENTITY_STORE_DIRTY = True
@@ -789,11 +810,14 @@ def _remember_verdict(key: str, reason: str | None) -> str | None:
     return reason
 
 
-def _candidate_row_keys(record: GoldenRecord) -> frozenset:
-    """Every schedule-row identity the record's target can realize under its pins: the fork
-    leaves' rows, PLUS each resolved kernel's own realized row — a forkless kernel (the schedule
-    space collapsed to one row, often the all-OFF anchor) never opens a fork, so its one row is
-    read off the resolved op instead."""
+def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
+    """Every schedule-row identity the record's target can realize under its pins, bucketed by the
+    ``deploy_identity`` of the kernel that offers it (``None`` for forks whose root is not a
+    recognized ``TileOp``): the fork leaves' rows, PLUS each resolved kernel's own realized row — a
+    forkless kernel (the schedule space collapsed to one row, often the all-OFF anchor) never opens
+    a fork, so its one row is read off the resolved op instead. Under pinned cuts the buckets are
+    exactly the split children, which is what lets a child-identity receipt decode against its own
+    kernel only."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
@@ -810,35 +834,45 @@ def _candidate_row_keys(record: GoldenRecord) -> frozenset:
     ctx = _DECODE_CTX_CACHE.get(ctx_key)
     if ctx is None:
         ctx = _DECODE_CTX_CACHE.setdefault(ctx_key, Context.from_target(ctx_key[0], gpu_name=ctx_key[1]))
-    keys: set = set()
+    buckets: dict[str | None, set] = {}
+
+    def _identity_of(op) -> str | None:
+        return deploy_identity(op) if isinstance(op, TileOp) and op.op is not None else None
 
     def decide(fp):
         leaves = flatten_leaves(fp.options)
         ops = [o for o in leaves if not _is_structural_option(o)]
+        identity = _identity_of(fp.root_op)
         for leaf in ops:
             row = leaf_knobs(leaf)
             if row:
-                keys.add(schedule_row_key(row))
+                buckets.setdefault(identity, set()).add(schedule_row_key(row))
         return ops[0] if ops else leaves[0]
 
     with pinned_knobs(record.pin_map):
         out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(record.target_program.copy(), decide)
     for node in out.nodes.values():
         if isinstance(node.op, TileOp):
-            keys.add(schedule_row_key(dict(node.op.knobs or {})))
-    result = frozenset(keys)
+            buckets.setdefault(_identity_of(node.op), set()).add(schedule_row_key(dict(node.op.knobs or {})))
+    result = {identity: frozenset(rows) for identity, rows in buckets.items()}
     _DECODE_ROWS_CACHE[cache_key] = result
     return result
 
 
 def kernel_identity(record: GoldenRecord) -> str | None:
     """The record's kernel identity under the CURRENT compiler — the verified-tier join key
-    (``_schedule.deploy_identity``) of the lifted tile of the record's ONE target kernel,
-    derived through the exact total lift the live compile uses (``_fromloop.lift_loop_op``).
+    (``_schedule.deploy_identity``). A STORED identity is authoritative and returned as-is: it is
+    how a child-identity receipt names the one split child its schedule decorates (the target's own
+    lift stops at the pre-cut kernel and cannot say), and the deploy join is fail-closed, so a
+    stale stored identity matches no live fork and decides nothing — the strict decode is where it
+    fails loudly. Without one, the identity is derived as the lift of the record's ONE target
+    kernel, through the exact total lift the live compile uses (``_fromloop.lift_loop_op``).
     ``None`` when the record cannot carry a deploy identity: the target lowers to several kernels
     (a schedule row decorates exactly one), or selection/lifting fails — best-effort here
     (a corpus row must never break a compile); nightly strict decoding is where failure is loud."""
     global _IDENTITY_STORE_DIRTY
+    if record.identity is not None:
+        return record.identity
     key = _record_cache_key(record)
     if key in _IDENTITY_CACHE:
         return _IDENTITY_CACHE[key]

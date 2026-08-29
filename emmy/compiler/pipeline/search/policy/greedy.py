@@ -503,11 +503,17 @@ def _pins_live(pins: dict) -> bool:
     precision universe (:data:`_PRECISION_PINS`, umbrella semantics per ``space.precision_pin``)
     is compared even for pins the record omits (omitted = measured OFF)."""
     from emmy import config  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import KnobType, registry  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import KnobType, family_of, registry  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import precision_pin  # noqa: PLC0415
 
     knobs = registry()
     for name, value in pins.items():
+        if family_of(str(name)) == "PLACE":
+            # Routing pins are record-side replay context (a child-identity receipt freezes its
+            # cut there so the strict decode can reach the child); at deploy the route is the
+            # routing consult's decision, and the identity join guarantees the receipt only ever
+            # decorates a structurally identical kernel.
+            continue
         kn = knobs.get(str(name))
         raw = kn.raw() if kn is not None else config.knob_raw(str(name))
         if kn is not None and kn.type is KnobType.BOOL:

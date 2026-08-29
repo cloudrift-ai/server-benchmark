@@ -208,11 +208,7 @@ def test_transposed_free_extents_do_not_share_a_pool() -> None:
     ctx = Context.from_target((12, 0))
     wide, tall = _unmapped_tile(8, 512), _unmapped_tile(512, 8)
 
-    # The premise: everything the OLD key was built from agrees.
-    assert wide.structural_key() == tall.structural_key()
-    assert wide.cache_key() == tall.cache_key()
-
-    # The consequence: the spaces do not.
+    # The consequence of transposing: the spaces differ.
     def total(tile) -> int:
         return sum(1 for _ in iter_leaves(schedule(tile, "t", tile.knobs, ctx)))
 
@@ -250,8 +246,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
 
     flat, split = lifted(matmul), lifted(f"{matmul}.reshape(4,32,128)")
 
-    # The premise: the ALGEBRA and its extents agree — only the boundary differs.
-    assert flat.structural_key() == split.structural_key()
+    # The premise: the iteration space agrees — only the store boundary differs.
     assert [a.extent.as_static() for a in flat.place.free] == [a.extent.as_static() for a in split.place.free]
 
     def total(tile) -> int:

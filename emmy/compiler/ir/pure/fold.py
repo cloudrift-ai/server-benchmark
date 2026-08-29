@@ -797,12 +797,28 @@ class Fold:
 
     def structural_key(self) -> str:
         """The α-invariant identity digest of this term — the
-        :class:`~emmy.compiler.structural.Structural` implementation, computed BOTTOM-UP from
-        the children's cached keys (``tile/_key.py``). The term is immutable across the whole
-        schedule search, so the per-node memo is sound and a shared subtree keys once."""
-        from emmy.compiler.ir.tile._key import structural_key  # noqa: PLC0415
+        :class:`~emmy.compiler.structural.Structural` implementation: the EXACT-flavor canonical
+        digest of the Loop-IR body the term lowers to (``Body.structural_key(structural=False)``
+        — SSA / axis / buffer spelling normalized away, op kinds kept, since consumers like the
+        sharing unification replace occurrences with one representative and must never merge
+        distinct computations). The term is pure algebra and its lowered body is its normal
+        form, so no separate term hasher exists. Cached: the term is immutable across the whole
+        schedule search."""
+        return self._lowered_key
 
-        return structural_key(self)
+    @cached_property
+    def _lowered_key(self) -> str:
+        # Through the ONE reconstitution spelling (with no output specs — a bare term), so a
+        # ``ProjectionRegion`` in a projection body expands exactly as materialization expands it.
+        # The per-step observer is folded in beside the body: a bare lowering carries observer
+        # stmts only when reconstituted with their stream store, and a scan must never key as its
+        # plain fold (the sharing unification would merge them).
+        from emmy.compiler.ir.tile.ir import lower_with_output_specs  # noqa: PLC0415 — region expansion lives with the region type
+        from emmy.compiler.structural import digest  # noqa: PLC0415
+
+        body = Body.coerce(lower_with_output_specs(self, ())).structural_key(structural=False)
+        observed = "" if self.observe is None else Body.coerce(self.observe.body).structural_key(structural=False)
+        return digest(body, observed)
 
     def deps(self) -> tuple[str, ...]:
         """SSA names captured by the term rather than supplied through its ``lift`` params."""

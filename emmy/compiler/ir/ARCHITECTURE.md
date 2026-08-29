@@ -287,10 +287,11 @@ type to dispatch on and no second place for a fact to live.
 `Fold.lower()` flattens the term to the loop nest: `Fold.loop` reconstructs the annotated reduce `Loop`
 from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO
 algebra — a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
-what lets the tuning / cubin-cache identity (`Op.cache_key`) stay the α-invariant TERM HASH
-(`Fold.structural_key`). The deploy join key is deliberately coarser: it digests the complete canonicalized
-lowered body itself (`Op.deploy_identity`, over `TileOp.loop_body`), so term re-spellings and cluster-sibling
-ops that lower alike share schedule evidence.
+what makes every identity of the term a digest of its lowered body — there is no separate term hasher.
+`Fold.structural_key` is the exact-flavor canonical digest of the nest `lower()` derives (the body is the
+term's normal form); `Op.cache_key` folds the schedule-free `body_identity` with the knobs; and the deploy
+join key (`Op.deploy_identity`, over `TileOp.loop_body`) adds the io fingerprint, so term re-spellings and
+cluster-sibling ops that lower alike share schedule evidence.
 `Fold.deps()` exposes names captured outside the lift params, including captures reached recursively through operand
 edges. A contraction deliberately hides its pure lift body from generic nested-body walks, so this direct dependency
 surface is what keeps an operand's captured statistic ordered before the contraction that reads it.

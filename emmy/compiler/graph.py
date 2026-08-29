@@ -1115,13 +1115,13 @@ class Graph:
                 from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
                 def _field_key(o: object, name: str) -> str:
-                    # A ``TileOp``'s term digests α-invariantly (``TileOp.structural_key`` —
-                    # the bottom-up term key); a nested ``Graph`` field
+                    # A ``TileOp``'s term digests α-invariantly (``Fold.structural_key`` — the
+                    # exact-flavor digest of its lowered body); a nested ``Graph`` field
                     # (``ConstantOp.source_graph``) digests by its own structural key
                     # (its default repr carries the object address); every other field
                     # keeps its repr.
                     if name == "op" and isinstance(o, TileOp):
-                        return o.structural_key()
+                        return o.op.structural_key() if o.op is not None else ""
                     val = getattr(o, name)
                     if isinstance(val, Graph):
                         return val.structural_key()

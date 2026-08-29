@@ -197,8 +197,10 @@ Every "are these two kernels the same?" question is answered by the `Op` identit
 contribution is `loop_body` — the complete schedule-free Loop-IR body the kernel executes,
 derived from the term (the free grid axes wrapped back as plain loops around
 `lower_with_output_specs`, so the extents, the store program and a cut child's typed seam `Load`
-are all in the body) — and the `body_identity` override that digests it. The term digest
-(`_key.py`) stays the algebra-only identity behind `cache_key`. There is no schedule-space key on
+are all in the body) — and the `body_identity` override that digests it. There is no separate
+term hasher: `Fold.structural_key` is the exact-flavor digest of the term's own lowered body (the
+term is pure algebra; its body is its normal form), and `cache_key` folds `body_identity` with
+the knobs, same shape as every body-carrying dialect. There is no schedule-space key on
 the interface: the pool memo digest is minted at its one site in `lowering/tile/_schedule`, from
 the deploy identity plus everything the enumeration additionally reads (knobs, hints, pins, the
 split receipt, the spelled key vocabulary).

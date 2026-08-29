@@ -20,8 +20,8 @@ everything the term deliberately does not carry:
 
 That split is the layer's invariant, not a convenience. The stored term is pure algebra, IMMUTABLE
 across the whole schedule search — a fork is a different slice map, never a rebuilt tree — which is
-what makes kernel identity (``TileOp.structural_key``) the algebra alone, with placement, slices,
-workers and output specifications all excluded. Tile IR stores only pure terms; statements appear when the term is
+what keeps kernel identity (``Op.body_identity`` over the derived ``loop_body``) schedule-free, with
+placement, slices and workers all excluded. Tile IR stores only pure terms; statements appear when the term is
 lowered, never inside it (``ir/ARCHITECTURE.md``, "Pure terms vs statements").
 
 There is no per-kind kernel/schedule type: dispatch reads the role structurally off the node (a
@@ -522,15 +522,12 @@ class TileOp(Op):
 
         return tile_body(self)
 
-    def structural_key(self) -> str:
-        """Kernel identity — the stored term's α-invariant digest (``""`` for a placeholder).
-        Placement, schedule slices, workers and output specifications are deliberately EXCLUDED: identity is
-        the algebra alone (the NO-schedule-fields rule above), so every fork sibling of one term
-        shares the key and no emission path can leak a schedule into it."""
-        return self.op.structural_key() if self.op is not None else ""
-
     def cache_key(self) -> str | None:
-        return digest(type(self).__name__, self.structural_key(), self._knob_key())
+        """Override :meth:`Op.cache_key`: the dialect tag plus :meth:`Op.body_identity` plus the
+        knob dict — same shape as ``BodyOp.cache_key``. Schedule slices, placement, workers are
+        excluded (the body is schedule-free), so every fork sibling of one term shares the
+        content half and same-body / different-knobs variants never collide."""
+        return digest(type(self).__name__, self.body_identity() or "", self._knob_key())
 
     @cached_property
     def loop_body(self) -> Body | None:

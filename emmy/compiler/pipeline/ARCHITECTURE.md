@@ -150,7 +150,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **prior** | The ranking model — the fit-offline **offline prior** when cold, the CatBoost **online prior** trained from local measurements once data exists. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
 | **golden record** | A reviewed program-backed schedule measurement, selected by frontend provenance and used as deploy evidence and an A/B reference. |
-| **`Op.cache_key`** | A name-invariant digest of an op's body + knobs — the identity measurements are stored under. A `TileOp`'s structure digests as the α-invariant term hash (`Fold.structural_key`), never the lowered nest. |
+| **`Op.cache_key`** | A name-invariant digest of an op's body + knobs — the identity measurements are stored under. Every body-carrying dialect digests `Op.body_identity` (the canonical Loop-IR body — a `TileOp` derives it schedule-free from its term) folded with the knob dict. |
 
 ## Module map
 

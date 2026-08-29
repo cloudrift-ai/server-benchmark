@@ -16,11 +16,10 @@ Implementers today:
 - :class:`emmy.compiler.ir.stmt.body.Body` — canonicalized body
   rendering with SSA / axis / commutative-arg / external-buffer names
   normalized away.
-- :class:`emmy.compiler.ir.pure.fold.Fold` /
-  :class:`emmy.compiler.ir.tile.ir.TileOp` — the tile term's α-invariant
-  identity, digested bottom-up from per-node canonical content plus the
-  children's cached keys (``ir/tile/_key.py``); excludes placement,
-  schedule slices, workers and stores.
+- :class:`emmy.compiler.ir.pure.fold.Fold` — the tile term's α-invariant
+  identity: the exact-flavor canonical digest of the Loop-IR body the term
+  lowers to (the term is pure algebra; its body is its normal form);
+  excludes placement, schedule slices and workers.
 - :class:`emmy.compiler.context.Context` — codegen-affecting
   compilation knobs (compute capability today; tuning overrides as they
   land). Excludes ambient I/O fields (dump dirs, verbosity, the session
@@ -74,7 +73,7 @@ def instance_memo(obj, slot: str) -> dict:
     pattern, as one mechanism: a derived read caches on the term it derives from (the table is
     created on first use via ``object.__setattr__``, so frozen dataclasses take it), and the
     owner's ``__getstate__`` strips it so no cache — an id-keyed one especially — crosses a
-    process boundary. The structural key (``ir/tile/_key.py``) originated the pattern with its
+    process boundary. The retired bottom-up term hasher originated the pattern with its
     single-slot form; the normalize fixpoint stamp (``ir/tile/normalize.py``) and the codec's
     spelling tables (``ir/tile/path.py``) go through this table form. A memo holds ONLY values
     derivable from the object; never decisions, never mutable policy."""

@@ -46,7 +46,7 @@ def _matmul_tile(epilogue_op: str | None = None, k_extent: int = 128):
 
 def test_cluster_sibling_epilogues_share_the_structural_key_but_not_the_exact_one() -> None:
     relu, tanh = _matmul_tile("relu"), _matmul_tile("tanh")
-    assert relu.structural_key() != tanh.structural_key()
+    assert relu.body_identity(structural=False) != tanh.body_identity(structural=False)
     assert relu.deploy_identity() == tanh.deploy_identity(), "schedule evidence transfers within a cluster"
     assert relu.deploy_identity(structural=False) != tanh.deploy_identity(structural=False), "the exact kernels differ"
 

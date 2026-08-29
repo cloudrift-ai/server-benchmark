@@ -314,12 +314,12 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline
     from emmy.compiler.pipeline.search.db import SearchDB
 
-    term_keys, identity_keys, memo_keys = set(), set(), set()
+    identity_keys, memo_keys, calls = set(), set(), []
     orig = greedy._price_kernel
 
     def spy(graph, nid, ctx, prior, memo, db=None, decisions=None):
         op = graph.nodes[nid].op
-        term_keys.add(op.cache_key())
+        calls.append(nid)
         identity_keys.add((op.deploy_identity(structural=False), tuple(sorted(op.knobs.items()))))
         out = orig(graph, nid, ctx, prior, memo, db, decisions)
         memo_keys.update(memo)
@@ -337,5 +337,5 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
     Pipeline.build(TILE_PASSES).run(g, ctx=Context.from_target((12, 0)), db=SearchDB())
 
     assert identity_keys, "the chain must offer structural forks whose pricing probes fire"
-    assert len(identity_keys) < len(term_keys), "mirror cut pieces must unify under the exact identity"
+    assert len(identity_keys) < len(calls), "mirror cut pieces must unify under the exact identity"
     assert memo_keys == identity_keys, "the memo must key on the exact identity"

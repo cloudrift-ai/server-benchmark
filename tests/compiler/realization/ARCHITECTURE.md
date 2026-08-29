@@ -63,8 +63,8 @@ Why each part, and why nothing else:
   staleness mechanism safe.
 - `identity` — the record's `Op.deploy_identity` (structural flavor): the digest of the complete schedule-free
   Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. `cache_key` (in `name`) folds the
-  class name, the algebra key and the knobs instead, so a body or io fact moves `identity` while leaving `name`
-  untouched, and a term-only re-spelling moves `name` while leaving `identity` untouched.
+  class name, the schedule-free body identity and the knobs instead, so an io fact moves `identity` while leaving
+  `name` untouched, and a knob-only change moves `name` while leaving `identity` untouched.
 - `identity` and the optional per-card `latency` block are the only additions the corpus makes to the golden schema,
   and both are optional keys the model goldens do not carry.
 

@@ -203,8 +203,6 @@ def test_transposed_free_extents_do_not_share_a_pool() -> None:
     7x — the enumeration sizes the coop band against ``_inner_free`` and the fragment store
     against the free axes — so sharing a pool let whichever compiled first decide the other.
     """
-    from emmy.compiler.ir.tile.identity import pool_key
-    from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
 
     ctx = Context.from_target((12, 0))
@@ -219,8 +217,9 @@ def test_transposed_free_extents_do_not_share_a_pool() -> None:
         return sum(1 for _ in iter_leaves(schedule(tile, "t", tile.knobs, ctx)))
 
     assert total(wide) != total(tall), "transposed M/N must not enumerate the same space"
-    pins = schedule_pin_fingerprint()
-    assert pool_key(wide, pins=pins) != pool_key(tall, pins=pins), "so they must not share a pool entry"
+    assert schedule(wide, "t", wide.knobs, ctx)[0].pool_id != schedule(tall, "t", tall.knobs, ctx)[0].pool_id, (
+        "so they must not share a pool entry"
+    )
 
 
 def test_split_dim_store_does_not_share_an_identity() -> None:
@@ -231,12 +230,10 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     address the pair only under a divisibility rule, so the split form loses the warp tier — 50538
     candidates against 10284. The term carries neither fact: ``TileOp.structural_key`` excludes the
     stores by design and the algebra digest canonicalizes sizes away, so both reached one
-    ``deploy_identity`` as well as one ``pool_key``. The deploy collision is the worse half: a
+    deploy identity as well as one pool digest. The deploy collision is the worse half: a
     golden measured on the flat kernel would be handed to a kernel that cannot realize its row.
     """
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.ir.tile.identity import deploy_identity, pool_key
-    from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
 
@@ -261,9 +258,10 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
         return sum(1 for _ in iter_leaves(schedule(tile, "t", tile.knobs, ctx)))
 
     assert total(flat) != total(split), "a split-pair store must not offer the same tiers"
-    assert deploy_identity(flat) != deploy_identity(split), "so a golden must not join across them"
-    pins = schedule_pin_fingerprint()
-    assert pool_key(flat, pins=pins) != pool_key(split, pins=pins), "and they must not share a pool"
+    assert flat.deploy_identity() != split.deploy_identity(), "so a golden must not join across them"
+    assert schedule(flat, "t", flat.knobs, ctx)[0].pool_id != schedule(split, "t", split.knobs, ctx)[0].pool_id, (
+        "and they must not share a pool"
+    )
 
 
 def test_a_split_receipt_never_shares_a_pool_with_its_receipt_free_twin(monkeypatch) -> None:

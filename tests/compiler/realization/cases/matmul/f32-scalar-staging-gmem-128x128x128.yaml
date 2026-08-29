@@ -30,7 +30,7 @@ configs:
       TILE: f1x8
       WORK: t64x8
       STAGE: ''
-    identity: 923b88cdd5e946ac3fb750b422b5cc97a5a7d9920cb2f57674611399adf3479f
+    identity: b0444af6d69c4b68fd91eba4dc6850a8373576e25be911ceae1a210ed5ec7b73
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 3.240519529813296

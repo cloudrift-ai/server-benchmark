@@ -40,7 +40,7 @@ configs:
       TILE: f2x2
       WORK: t16x16
       REDUCE: ''
-    identity: 965525332425120f9ec836de2cf846bc38379835606e50d7dc6229ea05400019
+    identity: 9975a477038ee3eab66bb87283ed90c5321fbe251b1699918c1c7f82c15c4669
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 2.2020087893313773

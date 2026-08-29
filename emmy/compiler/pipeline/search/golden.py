@@ -22,7 +22,6 @@ from pathlib import Path
 
 import yaml
 
-from emmy.compiler.ir.tile.identity import deploy_identity
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
@@ -211,9 +210,10 @@ class GoldenRecord:
         return self.identity is not None and not self.is_routing and pins_freeze_cut(dict(self.pins))
 
     @cached_property
-    def pool_key(self) -> tuple:
+    def pool_group(self) -> tuple:
         """Which candidate pool this record belongs to — the ONE place that question is answered, so every
-        consumer that groups goldens groups them the same way.
+        consumer that groups goldens groups them the same way. (A grouping key over RECORDS —
+        distinct from the scheduler's session pool digest, ``_schedule._State.pool_id``.)
 
         Derived today, because nothing records it: ``enumerate_graph(self.target_program, ctx)`` under
         ``self.pin_map`` reads the card, the wire the target specializes from, which node it selects, the
@@ -816,7 +816,7 @@ def decode_record(record: GoldenRecord) -> str | None:
         return _remember_verdict(verdict_key, None)
     candidates = _candidate_rows(record)
     row = schedule_row_key(record.knobs)
-    if record.is_receipt and (tile is None or record.identity != deploy_identity(tile)):
+    if record.is_receipt and (tile is None or record.identity != tile.deploy_identity()):
         child_rows = candidates.get(record.identity)
         if child_rows is None:
             reason = f"stored identity equals none of the {len(candidates)} kernel identities resolved under the record's pins"
@@ -867,7 +867,7 @@ def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
     buckets: dict[str | None, set] = {}
 
     def _identity_of(op) -> str | None:
-        return deploy_identity(op) if isinstance(op, TileOp) and op.op is not None else None
+        return op.deploy_identity() if isinstance(op, TileOp) else None
 
     def decide(fp):
         leaves = flatten_leaves(fp.options)
@@ -891,7 +891,7 @@ def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
 
 def kernel_identity(record: GoldenRecord) -> str | None:
     """The record's kernel identity under the CURRENT compiler — the verified-tier join key
-    (``_schedule.deploy_identity``). A STORED identity is authoritative and returned as-is: it is
+    (``Op.deploy_identity``). A STORED identity is authoritative and returned as-is: it is
     how a child-identity receipt names the one split child its schedule decorates (the target's own
     lift stops at the pre-cut kernel and cannot say), and the deploy join is fail-closed, so a
     stale stored identity matches no live fork and decides nothing — the strict decode is where it
@@ -913,7 +913,7 @@ def kernel_identity(record: GoldenRecord) -> str | None:
         _IDENTITY_CACHE[key] = identity
         return identity
     try:
-        identity = deploy_identity(_lifted_target(record))
+        identity = _lifted_target(record).deploy_identity()
     except Exception:  # noqa: BLE001 — see the docstring; the decode tripwire re-derives loudly
         identity = None
     _IDENTITY_CACHE[key] = identity

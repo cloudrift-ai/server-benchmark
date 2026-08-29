@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from types import MappingProxyType
 
-from emmy.compiler.dim import Dim
+from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
@@ -62,7 +62,6 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.identity import hint_extent, pool_key
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, cone_seam, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import SLICE_FAMILIES, sites
 from emmy.compiler.pipeline.fork import Fork, iter_leaves
@@ -718,7 +717,7 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     - The catalog's width filter (a band wider than the axis has work for) does not bind a pin: a
       pinned over-wide band idles its extra lanes and still realizes — the split's finalize takes
       the kernel's pinned inventory over a fold as narrow as the split width."""
-    extent = hint_extent(node.axis)
+    extent = node.axis.hint_extent
     pin = _pin(REDUCE, key)
     if node.observed:
         # An observer makes the stream order-visible: every partitioned combine — cooperative
@@ -1317,11 +1316,11 @@ class _State:
     #: the same purity is what lets the prescan ride the session memo (:class:`_Pool`) across
     #: same-pool kernels and tune trajectories.
     options: dict = field(default_factory=dict)
-    #: The pool's minted identity — the SAME digest the session memo caches under (``pool_key`` +
-    #: pins + the split receipt + the spelled key vocabulary + the sample identity). Minted once
-    #: here, at the one place that knows every enumeration input, and carried by every Fork of the
-    #: tree (:attr:`Fork.pool_id`) so consumers (the greedy decision memo) key on the stamped
-    #: identity instead of re-deriving a weaker one.
+    #: The pool's minted identity — the SAME digest the session memo caches under (the deploy
+    #: identity + knobs + hints + pins + the split receipt + the spelled key vocabulary + the
+    #: sample identity). Minted once here, at the one place that knows every enumeration input,
+    #: and carried by every Fork of the tree (:attr:`Fork.pool_id`) so consumers (the greedy
+    #: decision memo) key on the stamped identity instead of re-deriving a weaker one.
     pool_id: str = ""
 
     @property
@@ -1557,7 +1556,7 @@ class _Pool:
     digest is an artifact of ``form``'s field walk, not a stated contract), and the spelled key
     vocabulary (the decided-empty OFF map the rows decode under — spelled off axis names, which
     are recognition-canonical identity today; the rows would mis-decode the day that changes).
-    Both are entailed by ``pool_key`` under the current serialization, and both are pinned by
+    Neither is entailed by the spelling-free identity half of the digest, and both are pinned by
     tests that hold whichever layer separates the twins."""
 
     options: tuple[tuple[_Option, ...], ...]  # per node, in ``_nodes`` preorder
@@ -1585,10 +1584,10 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     contract that leaves the term unmapped. A live SITE pin that names nothing raises out of the
     prescan instead.
 
-    The prescan is memoized in ``ctx.session_cache``, keyed by ``pool_key`` (the term + knobs, the
-    operand/output dtypes, per-axis extents, buffer shapes, stores and symbolic hints — every
-    enumeration input the term omits) folded with the live pin fingerprint, the split receipt and
-    the spelled key vocabulary (explicit key terms — :class:`_Pool` states why) and, when
+    The prescan is memoized in ``ctx.session_cache``, keyed by every enumeration input: the
+    kernel's ``Op.deploy_identity`` (body + io), the knobs, the symbolic-dim hints (a schedule
+    sizes against them), the live pin fingerprint, the split receipt and the spelled key
+    vocabulary (explicit key terms — :class:`_Pool` states why) and, when
     sampling, the sample's identity; target facts need no key part because the cache lives ON
     the Context and one instance never spans two fact sets. Options are a pure function of the node and the live pins,
     so a hit replays the walk over the memoized option lists and yields byte-identical rows.
@@ -1616,12 +1615,22 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     # The sample is part of the KEY, not merely of the Context: ``dataclasses.replace`` SHARES
     # the session cache, so a sampled Context and the live one it came from sit on one memo and
     # a Context-only flag would serve a sampled pool to a live compile. The split receipt
-    # and the spelled key vocabulary are explicit key terms beside ``pool_key`` (see
-    # :class:`_Pool`): a receipt-free twin must miss and raise where the partial memoized its
-    # stripped ``g``-pin options, and an α-renamed twin must enumerate its own spellings.
-    # Minted unconditionally: the digest is also the pool identity every Fork of this tree
-    # carries (``_State.pool_id``), whether or not a session cache is consulted.
-    key = digest(pool_key(tile, pins=schedule_pin_fingerprint()), sample.key if sample is not None else "", partition, tuple(off))
+    # and the spelled key vocabulary are explicit key terms (see :class:`_Pool`): a receipt-free
+    # twin must miss and raise where the partial memoized its stripped ``g``-pin options, and an
+    # α-renamed twin must enumerate its own spellings — ``off`` is the frame guard, since the
+    # identity half (``Op.deploy_identity``) is deliberately spelling-free. Minted
+    # unconditionally: the digest is also the pool identity every Fork of this tree carries
+    # (``_State.pool_id``), whether or not a session cache is consulted.
+    io = (*tile.inputs.values(), *tile.outputs.values())
+    key = digest(
+        tile.deploy_identity(),
+        tuple(sorted(tile.knobs.items())),
+        tuple(d.hint or DEFAULT_SEQ_HINT for t in io for d in t.shape if not d.is_static),
+        schedule_pin_fingerprint(),
+        sample.key if sample is not None else "",
+        partition,
+        tuple(off),
+    )
     state = _State(
         tile,
         sched,

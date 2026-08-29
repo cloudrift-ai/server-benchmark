@@ -1,5 +1,5 @@
-"""Shared base class for body-carrying IR ops (``LoopOp`` / ``TileOp`` /
-``KernelOp``).
+"""Shared base class for body-carrying IR ops (``LoopOp`` / ``KernelOp``;
+``TileOp`` stores a pure term instead and subclasses ``Op`` directly).
 
 Lives inside the ``ir.stmt`` package — and imports its dependencies
 (``Body``, ``Load``, ``Write``, ``Stmt``, ``pretty_body``) from their leaf
@@ -28,8 +28,8 @@ from emmy.compiler.tensor import Tensor
 @dataclass
 class BodyOp(Op):
     """Shared base for IR ops that carry a structured :class:`Body` of
-    stmts plus a kernel name — ``LoopOp`` (loop IR), ``TileOp`` (tile IR),
-    ``KernelOp`` (kernel IR). Provides:
+    stmts plus a kernel name — ``LoopOp`` (loop IR), ``KernelOp`` (kernel
+    IR). Provides:
 
     - ``body`` / ``name`` fields, plus a ``__post_init__`` that coerces
       tuple-bodies to :class:`Body`,
@@ -143,11 +143,14 @@ class BodyOp(Op):
         label themselves; duplicating it here would just rot."""
         return "\n".join(_pretty_body_stmts(self.body, "    "))
 
+    def body_identity(self, *, structural: bool = True) -> str | None:
+        """Override :meth:`Op.body_identity`: the stored body IS this op's Loop-IR body."""
+        return self.body.structural_key(structural=structural)
+
     def cache_key(self) -> str | None:
-        """Override :meth:`Op.cache_key`: digest of the dialect tag plus the canonical body
-        (:meth:`Body.structural_key` — SSA / axis / commutative-arg / external-buffer names
-        normalized away) plus the knob dict."""
-        return digest(type(self).__name__, self.body.structural_key(), self._knob_key())
+        """Override :meth:`Op.cache_key`: digest of the dialect tag plus :meth:`Op.body_identity`
+        plus the knob dict."""
+        return digest(type(self).__name__, self.body_identity(), self._knob_key())
 
 
 def _tensor_for_buffer(graph, name: str) -> Tensor | None:  # noqa: ANN001 — Graph lives in compiler.graph; would cycle to import.

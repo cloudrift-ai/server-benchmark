@@ -110,6 +110,24 @@ Op subclasses don't have to be frozen (the engine mutates `op.source` / `op.knob
 construction). Just make sure no Op ends up as a *field value* of a Stmt — `Assign.op` / `Accum.op` / `Select.op` take
 an `ElementwiseImpl` (the lightweight value object, already hashable), never an `ElementwiseOp` wrapper.
 
+### Immutable mappings are `frozendict`
+
+When a mapping must not be mutable in place (the `Op.inputs` / `Op.outputs` io maps), use `frozendict` — a builtin
+in Python 3.15, provided by the `frozendict` package on our 3.12+ floor (`from frozendict import frozendict`; on
+CPython the package's type is a `dict` subclass, so pickling, deepcopy, `isinstance` and serializers behave like the
+dict it replaces — note the 3.15 builtin is NOT a `dict` subclass, which the eventual stdlib switch must audit).
+Don't hand-roll immutable dict subclasses, and don't use `types.MappingProxyType` — it can't be pickled or
+deep-copied and is not a `dict`.
+
+### Derived values are first-class members, not `__dict__` stashes
+
+A derived value another module reads (a lowered body, an identity digest, a canonical rendering) is part of the
+owning type's interface: declare it as a `functools.cached_property` (mutable classes) or, on a frozen dataclass,
+through `structural.instance_memo` — the ONE sanctioned memo-table mechanism, whose owner's `__getstate__` strips it.
+Never invent a private slot with `obj.__dict__.get(...)` / `object.__setattr__(obj, "_my_cache", ...)` at a call
+site: an undeclared attribute is invisible to readers of the class, dodges pickling rules, and grows a second
+spelling of the same fact.
+
 ### Dependency Injection for Testability
 
 Shared logic accepts callable parameters (`run_cmd`, `write_file`) so

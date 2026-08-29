@@ -667,51 +667,53 @@ class Body(tuple[Stmt, ...]):
 
     # -- structural identity --------------------------------------------
 
-    def structural_key(self) -> str:
+    def structural_key(self, *, structural: bool = True) -> str:
         """Implements :class:`emmy.compiler.structural.Structural`.
 
-        Canonical text rendering used for structural-equivalence
-        queries. Two bodies that differ only by SSA / axis names,
-        commutative-arg order, external-buffer names, or the specific
-        op within a compute-unit cluster (``add`` vs ``sub``, ``div``
-        vs ``mod``) produce the same key.
+        Canonical digest used for structural-equivalence queries. Two
+        bodies that differ only by SSA / axis names, commutative-arg
+        order, or external-buffer names produce the same key; with the
+        default ``structural=True`` the specific op within a
+        compute-unit cluster (``add`` vs ``sub``, ``div`` vs ``mod``)
+        also normalizes away — the SCHEDULE-EQUIVALENT reading, since
+        cluster siblings offer the same schedule space and want the same
+        schedule. ``structural=False`` keeps the exact ops: the reading
+        for consumers to whom ``relu`` and ``gelu`` are different
+        kernels (their latency differs even under one schedule).
 
         Built by re-running :func:`normalize_body` with ``hoist=False``
         (safe for both Loop-IR and Tile-IR bodies — hoisting can move
-        Loads above Stage decls in Tile bodies),
+        Loads above Stage decls in Tile bodies) and
         ``canonical_buffers=True`` (renames ``Load.input`` /
-        ``Write.output`` to ``b0, b1, ...``), and ``cluster_ops=True``
-        (collapses each op to its compute-unit cluster representative
-        — see :func:`emmy.compiler.ir.elementwise.cluster_representative`),
-        then joining :func:`pretty_body`'s line list. Cached on the
+        ``Write.output`` to ``b0, b1, ...``). Cached on the
         instance — Body is immutable."""
-        return self._cached_structural_key
+        return self._structural_key_clustered if structural else self._structural_key_exact
 
     @cached_property
-    def _cached_structural_key(self) -> str:
-        # Delegates to a module-level lru_cache keyed by Body content
-        # (Body is ``tuple[Stmt, ...]`` and every Stmt subclass is a
-        # frozen dataclass, so the cache key is structural). Two
-        # different Body instances with identical stmts now share the
-        # one ``normalize_body`` call — matters in tune mode where
+    def _structural_key_clustered(self) -> str:
+        # Both flavors delegate to a module-level lru_cache keyed by Body
+        # content (Body is ``tuple[Stmt, ...]`` and every Stmt subclass is
+        # a frozen dataclass, so the cache key is structural). Two
+        # different Body instances with identical stmts share the one
+        # ``normalize_body`` call — matters in tune mode where
         # ``_record_op_inventory`` walks the source chain of every
         # CudaOp in every terminal and hammers ``Op.cache_key`` ->
         # ``Body.structural_key()`` on bodies that frequently recur
-        # structurally across variants. The cache is safe because
-        # ``structural_key`` always normalizes with the same fixed flag
-        # combination (``hoist=False, canonical_buffers=True,
-        # cluster_ops=True``); generic ``normalize_body`` callers with
-        # other flags do not share this cache.
-        return _shared_structural_key(self)
+        # structurally across variants.
+        return _shared_structural_key(self, True)
+
+    @cached_property
+    def _structural_key_exact(self) -> str:
+        return _shared_structural_key(self, False)
 
 
 @lru_cache(maxsize=4096)
-def _shared_structural_key(body: Body) -> str:
+def _shared_structural_key(body: Body, cluster: bool) -> str:
     """Module-level memoization for :meth:`Body.structural_key`.
 
-    The structural-key formula is fixed: ``normalize_body(body,
-    hoist=False, canonical_buffers=True, cluster_ops=True)`` rendered
-    through :func:`~emmy.compiler.structural.form`. Structural, not the
+    The formula is fixed per flavor: ``normalize_body(body, hoist=False,
+    canonical_buffers=True, cluster_ops=cluster)`` rendered through
+    :func:`~emmy.compiler.structural.form`. Structural, not the
     pretty text it used to join: ``pretty()`` is the human rendering, and
     a cosmetic change to how a statement prints must not re-key every
     kernel that contains it. With every concrete ``Stmt`` subclass a frozen
@@ -721,7 +723,6 @@ def _shared_structural_key(body: Body) -> str:
     this hard from ``_record_op_inventory`` (one ``Op.cache_key`` call
     per ancestor in every CudaOp's source chain, per terminal candidate).
 
-    The cache is sound because the flag combination is hard-coded here.
     Generic :func:`normalize_body` callers with other flags don't share
     this cache — ``cluster_ops=True`` collapses semantically distinct ops
     to a single cluster representative (``add``↔``sub``, ``div``↔``mod``,
@@ -732,5 +733,5 @@ def _shared_structural_key(body: Body) -> str:
     from emmy.compiler.ir.stmt.normalize import normalize_body  # noqa: PLC0415
     from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
-    normalized = normalize_body(body, hoist=False, canonical_buffers=True, cluster_ops=True)
+    normalized = normalize_body(body, hoist=False, canonical_buffers=True, cluster_ops=cluster)
     return digest(form(normalized))

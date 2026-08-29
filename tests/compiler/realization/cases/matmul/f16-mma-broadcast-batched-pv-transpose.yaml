@@ -69,4 +69,4 @@ configs:
       STAGE: d1/smem-async
       LOOPIFY: '0'
       RASTER: ''
-    identity: 1f3d5e942468de2db6d9713cb2c8d709da09eeee28d71169c2484915f5bd399f
+    identity: 42e1e6e2745ac13b5918a329e4c1faf73e0f78a9ae04abbe9653db1798be3925

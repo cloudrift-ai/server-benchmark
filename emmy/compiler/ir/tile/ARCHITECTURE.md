@@ -192,22 +192,29 @@ operand; the generic twisted Fold derivation then exposes the corresponding cont
 
 ## Kernel identity
 
-`identity.py` is the home for every "are these two kernels the same?" question, and the index over
-the ones answered elsewhere. The term digest (`_key.py`) canonicalizes α-renaming, buffer spelling
-**and sizes** away — right for the algebra, wrong for everything downstream — so each coarser
-identity folds the excluded facts back in through a named fingerprint rather than deriving them at
-the call site. `deploy_identity` is the verified-tier join key; `pool_key` is the schedule-space
-key and takes the live pin fingerprint as a required argument, which is what keeps the module a
-pure function of a `TileOp` and below the pipeline layer.
+Every "are these two kernels the same?" question is answered by the `Op` identity interface
+(`ir/base.py`): `body_identity` and `deploy_identity` (body + io) beside `cache_key`. `TileOp`'s
+contribution is `loop_body` — the complete schedule-free Loop-IR body the kernel executes,
+derived from the term (the free grid axes wrapped back as plain loops around
+`lower_with_output_specs`, so the extents, the store program and a cut child's typed seam `Load`
+are all in the body) — and the `body_identity` override that digests it. The term digest
+(`_key.py`) stays the algebra-only identity behind `cache_key`. There is no schedule-space key on
+the interface: the pool memo digest is minted at its one site in `lowering/tile/_schedule`, from
+the deploy identity plus everything the enumeration additionally reads (knobs, hints, pins, the
+split receipt, the spelled key vocabulary).
 
-A fact that changes what a reader produces, and that the term does not carry, belongs in a
-fingerprint here. Omitting one is silent, and both known omissions cost the same way. `pool_key`
-shipped without per-axis extents, so two matmuls with transposed M/N — equal terms, equal
-`S_ext_*` summaries — shared one pool entry over spaces of 57442 and 8280 candidates. Buffer
-shapes and the output specifications were missing from both identities, so a `(128, 128)` output and a
-`(4, 32, 128)` one over the same iteration space collided: the split form spells its coordinate as
-a dim pair the fragment store can address only under a divisibility rule, and a golden measured on
-the flat kernel joined a kernel that could not realize its row.
+Identity has two flavors: the default `structural=True` is schedule-equivalent (compute-unit op
+clusters collapse — `relu` and `tanh` epilogues share a key because their schedule evidence
+transfers, which is what golden records join on), while `structural=False` names the exact kernel.
+
+The design lesson the interface encodes: a fact a schedule reads must be in the body or the io
+fingerprint, never re-derived beside a caller. The pool digest once shipped without per-axis extents,
+so two matmuls with transposed M/N — equal terms, equal `S_ext_*` summaries — shared one pool
+entry over spaces of 57442 and 8280 candidates; buffer shapes and the output specifications were
+once missing too, so a `(128, 128)` output and a `(4, 32, 128)` one over the same iteration space
+collided — the split form spells its coordinate as a dim pair the fragment store can address only
+under a divisibility rule, and a golden measured on the flat kernel joined a kernel that could not
+realize its row. Both facts now live in the completed loop body and the io fingerprint.
 
 Static extent products used as structural features saturate at the largest finite float. Feature extraction therefore
 stays bounded even for a deeply nested symbolic-model fixture whose exact integer product is too large to convert,

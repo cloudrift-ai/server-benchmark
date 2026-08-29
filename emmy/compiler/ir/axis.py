@@ -20,7 +20,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 
-from emmy.compiler.dim import Dim, to_dim
+from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim, to_dim
 from emmy.compiler.ir.expr import Expr, Interval, Literal, SimplifyCtx
 
 
@@ -122,6 +122,13 @@ class Axis:
     def source_axis(self) -> Axis | None:
         """The pre-split axis this one was carved out of — the window's ``parent``."""
         return self.window.parent if self.window is not None else None
+
+    @property
+    def hint_extent(self) -> int:
+        """The static extent, or the ``Dim`` hint when symbolic — what a schedule SIZES against
+        (which coop bands a reduce extent can feed). Never part of a hint-free identity."""
+        e = self.extent
+        return e.as_static() if e.is_static else (e.hint or DEFAULT_SEQ_HINT)
 
     def split(self, factor: int) -> tuple[Axis, Axis]:
         """Split this axis into ``(outer, inner)`` for tile-style decomposition.

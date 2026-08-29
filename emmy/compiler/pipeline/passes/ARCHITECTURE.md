@@ -244,9 +244,9 @@ the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot e
 from the rows it does enumerate.
 
 **The pool memo and the sampled draw.** The prescan — each node's option list — is memoized in the Context's
-session cache, keyed by the scheduler's own `pool_key` (the term and its knobs plus every enumeration input the
-term omits: operand/output dtypes, per-axis extents, buffer shapes, stores, symbolic hints) folded with the live
-env-pin fingerprint, two facts the walk consumes directly and therefore keys explicitly — the split receipt
+session cache, keyed by every enumeration input: the kernel's `Op.deploy_identity` (the canonical body + io —
+extents, stores, dtypes and shapes all live there), the knobs, the symbolic-dim hints, the live
+env-pin fingerprint, and two facts the walk consumes directly and therefore keys explicitly — the split receipt
 (`carries_partition`, which strips a `REDUCE` pin's `g`-half where a receipt-free twin must raise) and the spelled
 key vocabulary (the decided-empty OFF map the rows decode under) — so that soundness never rides on how the term
 digest happens to serialize the `compare=False` `Axis.window` or the recognition-canonical axis names, which do

@@ -227,39 +227,53 @@ def test_search_data_does_not_import_the_prior() -> None:
     )
 
 
-_IDENTITY_HOME = "emmy/compiler/ir/tile/identity.py"
+_IDENTITY_HOME = "emmy/compiler/ir/base.py"
+
+#: The identity interface methods and the modules allowed to define/override each. ``Op`` (the
+#: home) declares them; ``body_identity`` is the ONE extension point (``BodyOp`` answers with
+#: its stored body, ``TileOp`` with its derived ``loop_body``), and ``hint_extent`` is the
+#: ``Axis`` property the scheduler sizes against. ``pool_key`` is retired — the schedule-pool
+#: memo digest is scheduler plumbing minted at its one site (``lowering/tile/_schedule``), so a
+#: method of that name reappearing anywhere is a second spelling.
+_IDENTITY_DEFINERS = {
+    "body_identity": {_IDENTITY_HOME, "emmy/compiler/ir/stmt/ir.py", "emmy/compiler/ir/tile/ir.py"},
+    "io_fingerprint": {_IDENTITY_HOME},
+    "deploy_identity": {_IDENTITY_HOME},
+    "pool_key": set(),
+    "hint_extent": {"emmy/compiler/ir/axis.py"},
+}
 
 
 def test_kernel_identity_is_not_redefined_outside_its_home() -> None:
-    """No module outside the home may DEFINE one of its readings.
+    """No module outside the home may DEFINE one of the identity readings.
 
     Identity has several legitimate meanings — the algebra digest, the deploy join key, the
-    schedule-space key, the ``S_*`` row — and each is answered once, in a module whose docstring
-    says which. What this forbids is a second copy of one of THESE readings: a fingerprint
-    re-derived beside its caller drifts from the thing it identifies, silently, and the failure is
-    two kernels sharing a cache entry or a golden record joining the wrong shape.
+    schedule-space key, the ``S_*`` row — and each is answered once, on the ``Op`` interface,
+    computed from the op's complete Loop-IR body and its io buffers. What this forbids is a
+    second copy of one of THESE readings: a key re-derived beside its caller drifts from the
+    thing it identifies, silently, and the failure is two kernels sharing a cache entry or a
+    golden record joining the wrong shape.
 
     ``pool_key`` shipped omitting per-axis extents for exactly that reason — it lived next to the
     enumeration it keyed, read as a local memo detail, and nobody treated it as a contract with
     three external consumers.
 
-    Deliberately narrow: it matches the home's own names, not every function whose name contains
-    "identity" or "sig". A guard that flagged those would be exempted rather than obeyed, and the
-    exemption list would become the real rule.
+    Deliberately narrow: it matches the interface's own names, not every function whose name
+    contains "identity" or "sig". A guard that flagged those would be exempted rather than
+    obeyed, and the exemption list would become the real rule.
     """
-    owned = ("deploy_identity", "pool_key", "dtype_fingerprint", "extent_fingerprint", "hint_fingerprint", "hint_extent")
-    forbidden = re.compile(r"^def\s+_?(" + "|".join(owned) + r")\s*\(")
+    forbidden = re.compile(r"^\s*def\s+_?(" + "|".join(_IDENTITY_DEFINERS) + r")\s*\(")
     offenders: list[str] = []
     for py in sorted((_REPO_ROOT / "emmy").rglob("*.py")):
         relative = py.relative_to(_REPO_ROOT).as_posix()
-        if relative == _IDENTITY_HOME:
-            continue
         for lineno, line in enumerate(py.read_text().splitlines(), start=1):
-            if forbidden.match(line):
+            m = forbidden.match(line)
+            if m and relative not in _IDENTITY_DEFINERS[m.group(1)]:
                 offenders.append(f"{relative}:{lineno}: {line.strip()}")
     assert not offenders, (
-        f"these readings are defined in {_IDENTITY_HOME}; import them instead of re-deriving. A new "
-        "fact the enumeration reads belongs in a fingerprint THERE.\n" + "\n".join(offenders)
+        f"these readings live on the Op interface ({_IDENTITY_HOME}); call the method instead of "
+        "re-deriving. A fact a schedule reads that the key misses is a modeling gap to fix in the "
+        "op's loop body or io, never a side-channel fingerprint.\n" + "\n".join(offenders)
     )
 
 
@@ -268,8 +282,8 @@ def test_a_new_fingerprint_fact_moves_the_corpus() -> None:
 
     The corpus stores each case's ``deploy_identity`` and fails when the stored value stops
     matching. That is only a tripwire for identity drift if the corpus actually carries the stamp,
-    so this pins the connection: adding a fingerprint fact — which ``ir/tile/identity.py``
-    documents as routine — must show up as a corpus diff rather than silently re-keying every
+    so this pins the connection: a fact newly folded into ``Op.deploy_identity`` — a loop-body
+    modeling fix, an io fact — must show up as a corpus diff rather than silently re-keying every
     checked-in reproducer.
     """
     cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.yaml"))
@@ -300,4 +314,4 @@ def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
         for lineno, line in enumerate(py.read_text().splitlines(), start=1):
             if forbidden.search(line):
                 offenders.append(f"{py.relative_to(_REPO_ROOT).as_posix()}:{lineno}: {line.strip()}")
-    assert not offenders, "import kernel identity from emmy.compiler.ir.tile.identity\n" + "\n".join(offenders)
+    assert not offenders, "read kernel identity off the Op interface (Op.deploy_identity)\n" + "\n".join(offenders)

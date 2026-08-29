@@ -148,7 +148,7 @@ def _pool_identity(g, tier: str, packed: tuple[tuple[str, ...], np.ndarray, bool
     Two enumerations belong in one group when this matches — the featurized pool is then byte-identical, so
     one enumeration's row index addresses the same row the other's does, and the goldens behind them are
     several verified answers to one question. Deciding it from the packed pool rather than from a key is what
-    catches the same program recorded twice, which :attr:`~..compiler.pipeline.search.golden.GoldenRecord.pool_key`
+    catches the same program recorded twice, which :attr:`~..compiler.pipeline.search.golden.GoldenRecord.pool_group`
     cannot see.
 
     The identity fields ride along with the matrix digest because they decide things the matrix does not: the
@@ -196,7 +196,7 @@ def build_golden_groups(
 
     **A group is a candidate pool, not a golden.** Several goldens can land on one pool — the same shape
     recorded under two names, or a name recorded twice — and they then share ONE group, each contributing a
-    row to its golden set. Which goldens share a pool is read off the records (``GoldenRecord.pool_key``)
+    row to its golden set. Which goldens share a pool is read off the records (``GoldenRecord.pool_group``)
     BEFORE anything is enumerated, so each pool is enumerated, featurized and packed once, then folded by
     :func:`_pool_identity`; every group is built knowing all of its goldens. This logs how many goldens merged, and the caller records
     groups against positives in the metrics header.
@@ -247,13 +247,13 @@ def build_golden_groups(
     # The keep-sets are precomputed BEFORE the loop because a bucket's obligation spans the whole
     # corpus: the pool a golden opens may also carry a later golden's recorded row.
     keeps = _keep_sets(GOLDEN_RECORDS) if sample > 0 else {}
-    # Group the records by the pool each will enumerate (:attr:`GoldenRecord.pool_key`) before touching
+    # Group the records by the pool each will enumerate (:attr:`GoldenRecord.pool_group`) before touching
     # the scheduler, so each enumeration is paid once. Insertion order is corpus order, so the groups
     # come out in the order they always did.
     by_pool: dict[tuple, list] = defaultdict(list)
     for g in GOLDEN_RECORDS:
         if kernel is None or kernel in g.name:
-            by_pool[g.pool_key].append(g)
+            by_pool[g.pool_group].append(g)
 
     for members in by_pool.values():
         g = members[0]  # the pool is a property of the KEY; every member spells it identically

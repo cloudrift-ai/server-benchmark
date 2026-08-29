@@ -20,7 +20,6 @@ from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.identity import deploy_identity
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
@@ -504,7 +503,7 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     it, and the verified-tier join reads the stored identity instead of the pre-cut lift."""
     fields = _receipt_fields()
     parent = GoldenRecord(knobs={}, **fields)
-    lift_identity = deploy_identity(_lifted_target(parent))
+    lift_identity = _lifted_target(parent).deploy_identity()
     children = {i: rows for i, rows in _candidate_rows(parent).items() if i is not None and i != lift_identity}
     assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
     (id_a, rows_a), (id_b, rows_b) = sorted(children.items())

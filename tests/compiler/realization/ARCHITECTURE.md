@@ -61,9 +61,10 @@ Why each part, and why nothing else:
 - `name` — already carries `Op.cache_key()[:12]`, so it detects cache-key drift for free.
 - `pins` / `knobs` — the authored schedule. Regeneration structurally cannot produce these, which is what makes the
   staleness mechanism safe.
-- `identity` — the record's `deploy_identity`. `cache_key` folds the class name, the algebra key and the knobs;
-  `deploy_identity` additionally folds the dtype, extent, shape and store fingerprints, so a new fingerprint fact moves
-  `identity` while leaving `name` untouched.
+- `identity` — the record's `Op.deploy_identity` (structural flavor): the digest of the complete schedule-free
+  Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. `cache_key` (in `name`) folds the
+  class name, the algebra key and the knobs instead, so a body or io fact moves `identity` while leaving `name`
+  untouched, and a term-only re-spelling moves `name` while leaving `identity` untouched.
 - `identity` and the optional per-card `latency` block are the only additions the corpus makes to the golden schema,
   and both are optional keys the model goldens do not carry.
 

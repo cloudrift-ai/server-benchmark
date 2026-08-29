@@ -77,7 +77,7 @@ def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) ->
         root_op=TileOp(op=Fold.projection(body=Body())),
     )
     record = SimpleNamespace(name="recorded-golden", knobs={"RASTER": "", "TILE": "recorded"}, emmy_us=1.25)
-    monkeypatch.setattr(greedy, "deploy_identity", lambda _op: "identity")
+    monkeypatch.setattr(TileOp, "deploy_identity", lambda _op, **_kw: "identity")
 
     leaf, price, knobs = _verified_pick(point, {"identity": [record]}, None)
 
@@ -102,7 +102,7 @@ def test_verified_pick_defers_a_structural_fork(monkeypatch) -> None:
         root_op=TileOp(op=Fold.projection(body=Body())),
     )
     record = SimpleNamespace(name="recorded-golden", knobs={"TILE": "recorded"}, emmy_us=1.25)
-    monkeypatch.setattr(greedy, "deploy_identity", lambda _op: "identity")
+    monkeypatch.setattr(TileOp, "deploy_identity", lambda _op, **_kw: "identity")
 
     assert _verified_pick(point, {"identity": [record]}, None) is None
 

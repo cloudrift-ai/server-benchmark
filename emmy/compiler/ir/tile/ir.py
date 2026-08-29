@@ -33,6 +33,7 @@ structure the tile IR already holds.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
@@ -530,6 +531,34 @@ class TileOp(Op):
 
     def cache_key(self) -> str | None:
         return digest(type(self).__name__, self.structural_key(), self._knob_key())
+
+    @cached_property
+    def loop_body(self) -> Body | None:
+        """The complete schedule-free Loop-IR body this kernel executes, derived from the term
+        — what :meth:`body_identity` digests. The free grid axes wrap back
+        as plain loops around the ONE lowering spelling (:func:`lower_with_output_specs` —
+        ``Fold.lower()`` with every output specification attached at its owning scope), so the
+        extents, the store program (index spelling, ``atomicAdd``, width, output sweeps) and a
+        cut child's typed seam ``Load`` are all in the body. Schedule-free by construction:
+        ``lower`` never reads the schedule slices, and ``place``'s grid BINDING stays out (an
+        axis's launch coordinate is execution choice, not identity). A bare reduction carries no
+        ``Write`` — its grid-cell store is materializer glue derived from ``place.grid``, so the
+        empty store stream is itself derivable. Cached: the term and the kernel-boundary fields
+        are immutable across the schedule search. ``None`` for a placeholder."""
+        if self.op is None:
+            return None
+        stmts: list = lower_with_output_specs(self.op, self.output_specs)
+        for axis in reversed(self.place.free):
+            stmts = [Loop(axis=axis, body=Body(stmts))]
+        return Body.coerce(stmts)
+
+    def body_identity(self, *, structural: bool = True) -> str | None:
+        """Override :meth:`Op.body_identity` with the DERIVED body: :attr:`loop_body`'s
+        canonical digest, so a golden record derives the SAME key from its persisted program
+        (both sides lower through the one spelling) and term re-spellings that lower alike
+        share it."""
+        body = self.loop_body
+        return None if body is None else body.structural_key(structural=structural)
 
 
 __all__ = [

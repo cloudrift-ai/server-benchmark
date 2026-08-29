@@ -30,7 +30,7 @@ configs:
       TILE: f2x2
       WORK: t16x8
       STAGE: d2/smem-async
-    identity: dfc158ae8b142bcf84b3e647481ccbdca62a1badded309a861c82e9c112ba8d2
+    identity: a202edfe8fb851fc1235184e4525c61ed5a8b9b71c76cd81691fe75624cc38a1
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.3773683021808492

@@ -5,73 +5,33 @@ compute_cap:
 - 12
 - 0
 programs:
-- inputs:
-  - x
-  - scale
-  - bias
-  outputs:
-  - out
+- inputs: [x, scale, bias]
+  outputs: [out]
   nodes:
   - id: bias
     op: input
-    outputs:
-    - - bias
-      - f32
-      - - 4
-        - 1
+    outputs: [[bias, f32, [4, 1]]]
   - id: scale
     op: input
-    outputs:
-    - - scale
-      - f16
-      - - 4
-        - 1
+    outputs: [[scale, f16, [4, 1]]]
   - id: x
     op: input
-    outputs:
-    - - x
-      - f16
-      - - 4
-        - 128
+    outputs: [[x, f16, [4, 128]]]
   - id: sum
     op: tensor.reduce
-    attrs:
-      op:
-        __elementwise__: sum
-      axis: 1
-    inputs:
-    - x
-    outputs:
-    - - sum
-      - f32
-      - - 4
-        - 1
+    attrs: {op: {__elementwise__: sum}, axis: 1}
+    inputs: [x]
+    outputs: [[sum, f32, [4, 1]]]
   - id: mul
     op: tensor.elementwise
-    attrs:
-      op:
-        __elementwise__: multiply
-    inputs:
-    - sum
-    - scale
-    outputs:
-    - - mul
-      - f32
-      - - 4
-        - 1
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [sum, scale]
+    outputs: [[mul, f32, [4, 1]]]
   - id: out
     op: tensor.elementwise
-    attrs:
-      op:
-        __elementwise__: add
-    inputs:
-    - bias
-    - mul
-    outputs:
-    - - out
-      - f32
-      - - 4
-        - 1
+    attrs: {op: {__elementwise__: add}}
+    inputs: [bias, mul]
+    outputs: [[out, f32, [4, 1]]]
 configs:
 - program: 0
   target:
@@ -87,4 +47,4 @@ configs:
     knobs:
       REDUCE: coop
       WORK: t32
-    identity: 2cdff6ae0ea7b5e5e5776ef1b4d819aef2b3115db1858009357330d732c4045b
+    identity: 9cf15d576d9daf566cb32f5e2a662570d454b8e278777af0b34333b5e091be30

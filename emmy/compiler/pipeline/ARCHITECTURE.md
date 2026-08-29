@@ -51,8 +51,9 @@ predicts kernel latency from a variant's features (Part 5).
 knowledge recorded earlier, in a fixed order — best evidence first:
 
 1. **The verified goldens** recorded for this GPU — reviewed measurements that ship with the repository, joined by
-   STRICT structural identity (the recognized term's algebra digest + dtype fingerprint + axis-extent fingerprint,
-   derived record-side from the record's own persisted program) and decoded by EXACT spelled-row equality (Part 7).
+   STRICT structural identity (`Op.deploy_identity`: the digest of the complete schedule-free Loop-IR body + the io
+   dtypes/shapes, derived record-side from the record's own persisted program) and
+   decoded by EXACT spelled-row equality (Part 7).
    Fail-closed: a record that matches the identity but equals no enumerated row is drift — a loud warning, never a
    fuzzy acceptance.
 2. **Measured evidence** — first the measurements stored inside the online prior's checkpoint (its **reservoir**)
@@ -507,9 +508,11 @@ and that is an accepted outcome of the design — the fix is a measurement, a re
 prior, never a preference written into a pass or into this policy.
 
 1. the **verified goldens** recorded for this GPU (`greedy._verified_index` / `_verified_pick`): the record whose
-   `deploy_identity` — the lifted term's α/buffer-invariant algebra digest folded with the operand/output dtype
-   fingerprint and the axis-extent fingerprint (static sizes and symbolic markers, never hints — the α-invariant
-   digest canonicalizes sizes away, and without extents every same-algebra cone on a card would share one key),
+   `Op.deploy_identity` — the canonical digest of the complete schedule-free Loop-IR body the lifted term lowers
+   to (free grid loops + `Fold.lower()` + the reconstituted output writes, through `Body.structural_key`'s
+   canonicalization, so term re-spellings and compute-unit cluster siblings that lower alike share it), folded
+   with the io dtype/shape fingerprint (hint-free — a symbolic record is the symbolic kernel's identity at every
+   hint),
    derived record-side through the shared total lift (`_fromloop.lift_loop_op`) — equals the
    fork's, and whose spelled row (`knob.schedule_row_key`, the recording canonicalizer restricted to the schedule
    families) equals EXACTLY one enumerated leaf. Fastest matching record first; a record that matches the identity
@@ -738,8 +741,8 @@ Greedy benches nothing, so it can only *use* a prior, never train one.
 
 **And it scores each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
 factory call — one compile attempt; never the shared `SessionCache`, which would hand MCTS cached picks): the memo
-keys on the schedule `pool_key` (the dtype / hint / pin discriminators op identity excludes) plus the node's
-blocklist content, so N same-shape kernels score once and the rest replay by descending the lazy tree's
+keys on the minted pool identity (`Fork.pool_id` — the deploy identity plus the knob / hint / pin
+discriminators it excludes) plus the node's blocklist content, so N same-shape kernels score once and the rest replay by descending the lazy tree's
 level keys to the one matching leaf (`_find_decided_leaf` — the O(path) descent `build_fork_tree` was built for),
 while a validate-retry with a blocked tile is a different key and re-decides.
 

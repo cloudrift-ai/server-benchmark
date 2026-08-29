@@ -5,10 +5,9 @@ are boundary sentinels that carry tensors into the graph without computing
 anything — they appear unchanged from the frontend stage all the way through
 to fusion, and the numpy backend supplies their values at runtime.
 
-The shared base for body-carrying ops (``LoopOp`` / ``KernelOp`` /
-``TileOp``) lives in :mod:`emmy.compiler.ir.body_op` — split out to
-avoid a circular import with the ``ir.stmt`` package (which imports
-``Stage`` from ``ir.tile.ir`` for normalization).
+The shared base for body-carrying ops (``LoopOp`` / ``KernelOp``) is
+:class:`emmy.compiler.ir.stmt.ir.BodyOp`; ``TileOp`` subclasses ``Op``
+directly (it stores a pure term, not a body).
 
 ``_keepdim_axis`` is a small shape helper used by both ``ReduceOp`` (minimal IR,
 ``tensor.py``) and ``MeanOp`` (frontend IR, ``frontend.py``). Keeping it here
@@ -18,9 +17,13 @@ avoids a frontend→tensor dependency for a single function.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import numpy as np
+from frozendict import frozendict
+
+from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -39,6 +42,21 @@ class _ClassProperty:
 
     def __get__(self, obj, owner):
         return self.fget(owner)
+
+
+def _io_fingerprint(op: Op) -> tuple:
+    """The dtypes and hint-free shapes of an op's buffers — operands, then outputs, in program
+    order: the two boundary facts the body digest canonicalizes away (buffer names normalize to
+    ``b0, b1, …``, so the types ride beside the key). An f16 and an f32 trace of one body key
+    apart (different atom eligibility), and so do a ``(128, 128)`` and a ``(4, 32, 128)`` output
+    over one iteration space — the buffer's dim spelling decides store addressability
+    (``lowering/_addr.split_addressable``), and a golden measured on the flat kernel must not
+    join a kernel that cannot realize its row."""
+
+    def sig(t) -> tuple:
+        return (str(t.dtype), tuple(str(d.as_static()) if d.is_static else "sym" for d in t.shape))
+
+    return (*(sig(t) for t in op.inputs.values()), "->", *(sig(t) for t in op.outputs.values()))
 
 
 @dataclass
@@ -74,8 +92,20 @@ class Op:
     # autotune knob picked along the chain. Excluded from structural
     # identity and equality — pure attribution metadata.
     knobs: dict = field(default_factory=dict, kw_only=True, repr=False, compare=False)
-    inputs: dict[str, Tensor] = field(default_factory=dict, kw_only=True, repr=False, compare=False)
-    outputs: dict[str, Tensor] = field(default_factory=dict, kw_only=True, repr=False, compare=False)
+    inputs: frozendict[str, Tensor] = field(default_factory=frozendict, kw_only=True, repr=False, compare=False)
+    outputs: frozendict[str, Tensor] = field(default_factory=frozendict, kw_only=True, repr=False, compare=False)
+
+    def __setattr__(self, name: str, value) -> None:
+        """The identity-safety hook: ``inputs`` / ``outputs`` land as ``frozendict`` (immutable
+        in place; Python 3.15's builtin, backfilled by the ``frozendict`` package on our 3.12+
+        floor), and their reassignment — the ONE way the io view changes (``populate_io``, the
+        ``BodyOp`` seed, test setups) — drops the cached io digest. Invalidation lives here,
+        not at call sites, so it cannot be forgotten."""
+        if name in ("inputs", "outputs"):
+            self.__dict__.pop("_io_key", None)
+            if not isinstance(value, frozendict):
+                value = frozendict(value)
+        super().__setattr__(name, value)
 
     def populate_io(self, graph: Graph, node: Node) -> None:
         """Refresh ``inputs`` / ``outputs`` from the surrounding graph.
@@ -120,6 +150,49 @@ class Op:
     def _knob_key(self) -> tuple:
         """The knob half of :meth:`cache_key` — the dict as a sorted item tuple."""
         return tuple(sorted(self.knobs.items())) if self.knobs else ()
+
+    # ---- the identity interface — THE home. "Are these two kernels the same?" is answered
+    # here, from two facts every op carries: its complete Loop-IR body (:meth:`body_identity` —
+    # the ONE override point) and its io buffers. Two flavors: ``structural=True`` (the
+    # default, everywhere durable — golden records, corpus stamps) is SCHEDULE-EQUIVALENT,
+    # collapsing compute-unit op clusters so recorded schedule evidence transfers and the
+    # schedule space shrinks; ``structural=False`` names the exact kernel. There is
+    # deliberately NO schedule-space key here: the pool memo digest is scheduler plumbing,
+    # minted at the one site that knows every enumeration input (``lowering/tile/_schedule``).
+    # A fact a schedule reads that neither the body nor the io carries is a modeling gap to fix
+    # there, never a side-channel fingerprint. ---- #
+
+    def body_identity(self, *, structural: bool = True) -> str | None:
+        """Does this op COMPUTE the same thing, spelling aside? — the canonical digest of the
+        op's complete Loop-IR body (``Body.structural_key``: SSA / axis / buffer names and
+        commutative-arg order normalized away; the default ``structural=True`` also collapses
+        compute-unit op clusters — the schedule-equivalent reading), or ``None`` for an op kind
+        that carries no Loop-IR body. The ONE identity override point: ``BodyOp`` answers with
+        its stored body, ``TileOp`` with the schedule-free :attr:`TileOp.loop_body` it derives
+        from its term. Cached on the body, which is immutable."""
+        return None
+
+    @cached_property
+    def _io_key(self) -> tuple:
+        """The cached io digest input (:func:`_io_fingerprint`) — the ONE Op-level identity
+        cache, with the ONE dependency ``__setattr__`` invalidates. The body key caches on the
+        immutable ``Body`` / term, and the knob key is always recomputed (:meth:`_knob_key`),
+        so knob and body mutations need no invalidation at all."""
+        return _io_fingerprint(self)
+
+    def deploy_identity(self, *, structural: bool = True) -> str | None:
+        """What the kernel IS — the durable join key (golden records, the deploy evidence
+        tiers, corpus stamps), or ``None`` for an op kind that is not one kernel of work.
+        :meth:`body_identity` folded with the io dtypes/shapes (:func:`_io_fingerprint` — the
+        two boundary facts the body digest cannot carry, because it canonicalizes buffer names
+        to ``b0, b1, …`` and renders symbolic dims hint-free). Excludes knobs, symbolic hints,
+        live pins and term spelling — a deploy record is schedule evidence, not code. The
+        default structural flavor joins compute-unit cluster siblings (same schedule space,
+        same winner); ``structural=False`` names the exact kernel (cluster siblings' latency
+        differs). Recomputed from the two cached halves (the body key on the immutable body,
+        the io key on the op), so a digest of two strings is the whole per-call cost."""
+        body = self.body_identity(structural=structural)
+        return None if body is None else digest(body, self._io_key)
 
     @_ClassProperty
     def dialect(cls) -> str | None:  # noqa: N805 — a class property; ``cls`` receives the owner

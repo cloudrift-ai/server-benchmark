@@ -31,7 +31,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE: ''
-    identity: f6ab2257649615cd792e49a271c12aebbef8daa911b579444e10f0c75bf045cd
+    identity: ecc2eee947b585dfc01d026d17628cb9c0429d05a77dbb662979a8cfc5e1a01e
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 7.444776261030738

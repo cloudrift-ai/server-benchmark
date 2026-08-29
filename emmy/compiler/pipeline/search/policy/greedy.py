@@ -42,7 +42,6 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph
-from emmy.compiler.ir.tile.identity import deploy_identity, pool_key
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves, iter_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
 
@@ -173,10 +172,10 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
 
     ``TileOp``-rooted forks only, keyed on the enumeration's MINTED pool identity
     (:attr:`~emmy.compiler.pipeline.fork.Fork.pool_id` — the session memo's own cache digest,
-    which also folds the split receipt and the spelled key vocabulary the bare ``pool_key``
-    only entails by serialization accident). One minting site means the decision memo and the
-    pool memo cannot key differently. A fork carrying no stamp (offered outside the schedule
-    enumeration) falls back to the derived ``pool_key`` + pins. The rule identity separates two
+    which also folds the split receipt and the spelled key vocabulary). One minting site means
+    the decision memo and the pool memo cannot key differently. A fork carrying no stamp
+    (offered outside the schedule enumeration) falls back to the kernel's deploy identity +
+    knobs + pins. The rule identity separates two
     forks offered on one op, and the node's blocklist CONTENT keys the validate-retry path — a
     retry with a blocked tile is a different decision."""
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
@@ -189,7 +188,7 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
     return (
         getattr(getattr(rule, "pass_", None), "name", None),
         getattr(rule, "name", None),
-        pid if pid is not None else pool_key(fp.root_op, pins=schedule_pin_fingerprint()),
+        pid if pid is not None else (fp.root_op.deploy_identity(), tuple(sorted(fp.root_op.knobs.items())), schedule_pin_fingerprint()),
         frozenset(node_blocked) if node_blocked else frozenset(),
     )
 
@@ -575,9 +574,9 @@ def _audit_record(
 
 
 def _verified_index(ctx: Context) -> dict:
-    """The card's recorded goldens keyed by STRICT structural identity — the recognized term's
-    algebra digest + dtype fingerprint (``_schedule.deploy_identity``), derived record-side from
-    each record's own persisted program through the shared recognition core. Returns schedule
+    """The card's recorded goldens keyed by STRICT structural identity — the schedule-free
+    lowered-body digest + io fingerprint (``Op.deploy_identity``), derived record-side
+    from each record's own persisted program through the shared recognition core. Returns schedule
     rows as ``{identity: [records fastest-first]}``, scoped to the live
     ``(gpu_name, compute_cap)`` and the live pin regime. Best-effort per record (an underivable row
     is skipped — the decode tripwire is where that is loud); classification-free: no shape key,
@@ -625,7 +624,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None:
         return None
-    identity = deploy_identity(root)
+    identity = root.deploy_identity()
     recs = sched_idx.get(identity)
     node_blocked = blocked.get(fp.node_id) if blocked else None
     if not recs and _AUDIT_SINK is None:

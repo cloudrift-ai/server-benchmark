@@ -34,7 +34,7 @@ configs:
       FAST_MATH: false
     knobs:
       STAGE: d2/smem-async
-    identity: e828e5662f2a76263aff614697d61a37a5c860678edf611f11bb8408581dc116
+    identity: a4de7b59622a60093837963131dedcf5d34bc48adc03b5a5194b47138c94a95b
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.8456087781054509

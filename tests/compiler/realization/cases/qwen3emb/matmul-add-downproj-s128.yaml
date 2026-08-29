@@ -41,7 +41,7 @@ configs:
       STAGE: d1/smem-tma
       RASTER: ''
       WORK: t16x8
-    identity: 1eda4e40e15e9d774a6409eea307c44719ae99ee9a0e38f88a20453b6fa6c3e1
+    identity: 82b9395776e0ade161fd02f53d16e997df74360bee351ca47886181facc4650c
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 44.56145384094932

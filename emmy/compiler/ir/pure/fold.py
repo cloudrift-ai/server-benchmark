@@ -165,6 +165,24 @@ def _operand_binding(fold: Fold) -> dict:
     return out
 
 
+def _expectation_bindings(fold: Fold) -> tuple[tuple[str, str, object], ...]:
+    """The twisted carrier's ``(state, injected term, operand edge)`` expectation channels.
+
+    This is the one structural reading shared by derived evaluation and placement: every named
+    non-pivot lift result bound to an operand becomes a synthesized expectation contraction when
+    that edge is materialized as a :class:`Load`. A computed edge is the same future contraction
+    operand before placement cuts it.
+    """
+    if fold.axis is None or not fold.family.twisted:
+        return ()
+    by_param = _operand_binding(fold)
+    return tuple(
+        (state, term, by_param[term])
+        for state, term in zip(fold.combine.results[1:], fold.lift.results[1:], strict=True)
+        if isinstance(term, str) and term in by_param
+    )
+
+
 def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     """The DERIVED blocked evaluation of a λ-spelled TWISTED fold: the INLINE-NODE operand edges
     at the head in operand order (flash's ``Σ_dd Q·K`` score, ahead of the lift body), the lift
@@ -177,11 +195,7 @@ def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     names = tuple(fold.combine.results)
     terms = tuple(lam.results)
     merge = list(exp_merge(names, terms, key=names[0]))
-    by_param = _operand_binding(fold)
-    for i, (nm, term) in enumerate(zip(names, terms, strict=True)):
-        if i == 0 or not isinstance(term, str):
-            continue  # the pivot / a literal denominator — only EXPECTATION components split
-        edge = by_param.get(term)
+    for nm, term, edge in _expectation_bindings(fold):
         if isinstance(edge, Load):
             merge = _split_expect(merge, nm, term, edge)
     # The inline-node edges are PLACED, not prepended: each lands immediately before the first
@@ -636,12 +650,9 @@ class Fold:
         twice."""
         consumed = {id(s) for s in self.step_stmts()}
         if self.family.twisted and not _identity_lift(self):
-            by_param = _operand_binding(self)
-            for term in self.lift.results[1:]:  # EXPECTATION components: a str-injected non-pivot
-                if isinstance(term, str):
-                    edge = by_param.get(term)
-                    if isinstance(edge, Load):
-                        consumed.add(id(edge))
+            for _, _, edge in _expectation_bindings(self):
+                if isinstance(edge, Load):
+                    consumed.add(id(edge))
         return _unique_edges(tuple(e for e in self.operands if id(e) not in consumed))
 
     @cached_property

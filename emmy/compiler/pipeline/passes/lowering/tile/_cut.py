@@ -19,7 +19,7 @@ from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_defines, deep_reads, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, _expectation_bindings, _operand_result_names, deep_defines, deep_reads, is_contraction
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.normalize import _operand_lambda, lambda_equivalent_clusters
@@ -292,13 +292,22 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     (:func:`_provider_closure`); one whose closure needs another seam's workspace is offered as a
     dependent seam and drops out unless that producer is offered too."""
     all_sites = sites(tile.op)
-    contraction_operands = {
+    store_dtype_consumers = {
         id(edge): site.node
         for site in all_sites
         if is_contraction(site.node)
         for edge in (site.node.a, *(channel.b for channel in site.node.channels))
         if isinstance(edge, Fold)
     }
+    # A computed twisted expectation edge becomes a synthesized contraction operand as soon as
+    # this placement fork materializes it. Preserve the same public store dtype the derived
+    # contraction needs instead of exposing the producer's f32 reduction carrier as its B slab.
+    for site in all_sites:
+        if not isinstance(site.node, Fold):
+            continue
+        for _, _, edge in _expectation_bindings(site.node):
+            if isinstance(edge, Fold):
+                store_dtype_consumers[id(edge)] = site.node
     outer = (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None))
     occurrence_axes: dict[int, list[tuple]] = {}
     for node, available in islice(walk(tile.op, outer), 1, None):
@@ -322,7 +331,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             # An observed fold's per-step results exist only inside its stream — a cut would
             # separate the scan from its streamed boundary store, which no piece can then spell.
             continue
-        consumer = contraction_operands.get(id(node))
+        consumer = store_dtype_consumers.get(id(node))
         # A frontier REPLACES the fed-store realization at this seam rather than joining the
         # offer: the raw bits dominate the fed-store workspace on both precision (exact vs
         # re-rounded) and footprint (storage width vs store width), so there is no trade for the
@@ -352,7 +361,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         if len(kept) == len(out):
             break
         out = kept
-    return _cluster_value_seams(out, {id(seam.node): seam.frontier is None and contraction_operands.get(id(seam.node)) for seam in out})
+    return _cluster_value_seams(out, {id(seam.node): seam.frontier is None and store_dtype_consumers.get(id(seam.node)) for seam in out})
 
 
 def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) -> tuple[CutSite, ...]:

@@ -212,6 +212,10 @@ placement before scheduling; a scoped cut carries the consumed placement decisio
 directly to scheduling. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation
 families nor filters legal cuts by profitability.
 
+A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
+when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's
+f32 reduction-carrier dtype; otherwise the materialized B slab would make every f16 tensor-core atom ineligible.
+
 Scheduling sees only the rewritten stored Fold tree. Every Fold is an addressable schedule site; the scheduler does
 not derive alternate classified views or suppress a child because its parent may realize it. A derived unit-axis
 contraction inherits its enclosing Fold's reduction domain through the parent/child scheduling interface, while its

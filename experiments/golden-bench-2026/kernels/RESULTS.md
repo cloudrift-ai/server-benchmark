@@ -1,6 +1,6 @@
 # Golden-bench kernel corpus
 
-## Cut-pinned attention qualification after the computed-B changes (main through `a597f15d`, 2026-08-28)
+## Cut-pinned attention qualification after the computed-B changes (main through `d2950079`, 2026-08-28)
 
 ### Corrected protocol
 
@@ -70,20 +70,53 @@ sm120 realization case proves offered, realized, built, and correct. The repaire
 at t32, 72,405 µs at t64, 71,969 µs at t128, 73,936 µs at t256, and 73,362 µs at t512. This closes compilation but
 does not change the repeated 512×128 work.
 
-`torch.compile` produced no positive latency for these score/statistics strict replays, so no parity ratio is claimed.
+### Statistics-sharing replay after #682
+
+PR #682 (`d2950079`) directly closes the repeated-statistics gap identified above: Tile normalization restores object
+sharing between structurally equal cones, and two provider-closed statistics seams make the shared row state
+materializable. On the exact Qwen s512 target, adding those two cuts to the prior four-cut route produces six launches.
+The statistics producer writes max and normalization state once per `(head, query)` row; the softmax-weight child
+loads that workspace and no longer contains the 512-key scan. The consumer also loads the shared state rather than
+recomputing it.
+
+The retained A100 was replayed at exact branch source `31e7e629` (PR #682 plus this draft's receipt and readable-CUDA
+fixes), deployable O3, isolated DB/prior/cubin state, five warmups, and 20 iterations. Both standard repeats passed the
+strict direct eager check.
+
+| lane | eager (µs) | Emmy route (µs) | dominant statistics child (µs) | result |
+| --- | ---: | ---: | ---: | --- |
+| standard repeat 1 | 744.653 | 11,717.632 | 11,501.568 | correct; 6 launches |
+| standard repeat 2 | 744.795 | 11,720.704 | 11,505.664 | correct; 6 launches |
+| `FAST_MATH` | 744.590 | 11,704.320 | 11,501.568 | correct; noise-scale 0.1% change |
+
+The prior four-cut full replay was 110,723 µs, so the shared-statistics route is 9.45x faster. The old c3d child falls
+from about 110,780 µs to 65-66 µs; the consumer is 81 µs and the other three producers are 7-37 µs. This is a real
+algorithmic improvement, but the route remains 15.7x slower than eager. The matched `torch.compile` request again
+produced no positive timing for this embedded target, so it still cannot supply a parity ratio.
+
+The new bottleneck is the one correctly shared statistics producer, not duplicated work. Its greedy row is
+`TILE@a4=f1x2, WORK=t32x8` and takes 11.50 ms. A bounded MCTS-only follow-up measured
+`TILE@a4=f4x6, WORK=t32x16` at 11.535 ms and found no improvement; after 2m55s the next candidate remained in CPU
+descent with the GPU idle, so the arm was stopped. The remaining performance work is to make the nested 128-channel
+score contraction inside the online 512-key statistics reduction eligible for an efficient tensor-core schedule,
+then reduce the still-large candidate descent. No receipt was promoted. Raw host-local evidence is retained under
+`_tune/pr682-a100/remote/`; the task-owned remote scratch was removed while the A100 VM stayed running.
+
+`torch.compile` produced no positive latency for these score/statistics strict replays, including the post-#682
+attempt, so no parity ratio is claimed.
 The earlier output-projection strict result remains a valid separate finding: 1,594,544 µs for Emmy versus 52.6 µs
 for `torch.compile` on RTX 4090. The V100 down-projection also remains a direct correctness failure and was not
 admitted as a performance result.
 
 ### Bottleneck and receipt-aware replay
 
-The correction changes the diagnosis. Placement works, and resulting kernels are independently schedulable. On A100
-and RTX 4090, four children tune into the tens-of-microseconds range; materializing the softmax weight isolates one
-producer that remains about 100-111 ms. Its lowered loop has free query and output-key axes and, for every output
-weight, recomputes the complete 512-key reduction whose body performs a 128-channel score contraction. Ordinary
-`WORK` and `REDUCE` choices change the constant factor but preserve that repeated scan. The missing optimization is to
-compute and share the row statistics once across its output keys, not to give all split children one shared schedule.
-On V100, even the K-cut consumer did not complete a candidate inside the original search wall.
+Before #682, the correction changed the diagnosis. Placement worked, and resulting kernels were independently
+schedulable. On A100 and RTX 4090, four children tuned into the tens-of-microseconds range; materializing the softmax
+weight isolated one producer that remained about 100-111 ms. Its lowered loop had free query and output-key axes and,
+for every output weight, recomputed the complete 512-key reduction whose body performs a 128-channel score
+contraction. Ordinary `WORK` and `REDUCE` choices changed the constant factor but preserved that repeated scan. PR #682
+closes that reuse gap; the statistics-sharing replay above supersedes this performance state. On V100, even the K-cut
+consumer did not complete a candidate inside the original search wall.
 
 The earlier cold-replay drift was a separate persistence gap: the DB keyed different rows by child structural
 identity, but the old flat realization could not serialize conflicting child-global `WORK`, `TILE`, `REDUCE`, `STAGE`,

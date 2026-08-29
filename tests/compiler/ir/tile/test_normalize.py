@@ -347,6 +347,34 @@ def test_key_swept_statistic_stays_when_a_sibling_reads_it() -> None:
     assert id(score.b) not in {id(seam.node) for seam in cuttable_seams(tile)}
 
 
+def test_normalization_shares_structurally_identical_cones() -> None:
+    """The tree-wide invariant: after normalization, no two DISTINCT Fold objects in the tree are
+    structurally equal with the same captures — copies fusion inlined into several consumption
+    sites (attention's softmax statistics, once in the weight cone and once in the epilogue) are
+    one object, so placement sees one value and a composed cut materializes it once. Severed
+    sharing is the recompute class PR #679 measured at three orders of magnitude."""
+    case = Path(__file__).parents[2] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
+    (record,) = load_golden_records(load_golden_file(case))
+    tile = _lifted_target(record)
+
+    def folds(node, out):
+        if isinstance(node, Fold):
+            out.setdefault(id(node), node)
+            for edge in node.operands:
+                folds(edge, out)
+            for stmt in node.lift.body:
+                folds(stmt, out)
+        return out
+
+    by_identity = folds(tile.op, {})
+    by_value: dict[tuple, list[Fold]] = {}
+    for node in by_identity.values():
+        by_value.setdefault((node.structural_key(), node.deps()), []).append(node)
+    for twins in by_value.values():
+        distinct_equals = [(a, b) for index, a in enumerate(twins) for b in twins[index + 1 :] if a == b]
+        assert not distinct_equals, "normalization left structurally equal cones as distinct objects"
+
+
 def test_reduced_qk_attention_offers_the_statistic_arm_b_seams_idempotently() -> None:
     """The reduced Qwen3 q/k-norm SDPA target offers the score contractions' K operand cones."""
     case = Path(__file__).parents[2] / "realization/cases/attention/rmsnorm-qk-sdpa-stat-b-cut.yaml"
@@ -355,10 +383,11 @@ def test_reduced_qk_attention_offers_the_statistic_arm_b_seams_idempotently() ->
     tile = _lifted_target(record)
     seams = {seam.spelling: seam for seam in cuttable_seams(tile)}
     seam = seams["PLACE@map.fold.a.map.fold.fold.b1"]
-    # The score contractions' K cones are one VALUE: the sigma-equivalent duplicates — the sum
-    # arm, the softmax-V arm, and the second-path copies of both statistic arms — ride the
-    # representative seam as siblings, each with its capture correspondence.
-    assert len(seam.siblings) == 4
+    # The score contractions' K cones are one VALUE. Name-identical copies (the second-path
+    # duplicates of each statistic arm) collapse into shared objects at normalization, so only
+    # the copies captured under DIFFERENT axis names — the sum arm and the softmax-V arm — remain
+    # clustering siblings, each with its capture correspondence.
+    assert len(seam.siblings) == 2
     assert all(dict(pairs).keys() == dict(seam.siblings[0][1]).keys() for _, pairs in seam.siblings)
     assert "PLACE@map.fold.a.map.fold.fold.b2" not in seams
     assert TileOp(op=tile.op, name=tile.name, place=tile.place, output_specs=tile.output_specs).op is tile.op

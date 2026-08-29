@@ -82,7 +82,17 @@ whose workspace dtypes stay undetermined).
 A contraction-operand seam stands for a VALUE, not only an object: closed cones that are alpha-equivalent up to
 their captured axis names (attention's normalized K cone, once per score contraction) fold into one seam, each
 duplicate carried as a sibling with its capture correspondence, and the cut replaces every one with workspace loads
-spelled through its own axes. Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
+spelled through its own axes. A body-member fold capturing host-provided names is cuttable through PROVIDER
+CLOSURE: a capture whose producer chain is pure `Load`/`Assign` stmts joins the produced piece verbatim, and a
+capture only a sibling fold defines makes the seam DEPENDENT — its piece reads the name back through that producer's
+workspace, so cutting it composes the producer's cut in (attention's second softmax-statistics pass reading the
+first's accumulator; a pinned dependent cut pulls its producers in transitively, and pinning a producer `fuse`
+beside it is an error). This is what lets the row statistics materialize once per query row instead of once per
+output weight. Provider-closed and dependent seams are SCOPED-PIN-ONLY: the unpinned fork and bare `PLACE=cut`
+never select them, because nearly every kernel — and every fresh cut piece, which copies its providers — hosts
+some, so offering them would make recursive placement inexhaustible and the candidate walk explode. A route through
+them is spelled by authored or golden-decoded pins.
+Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (attention's statistics cone contains the score dots whose operand cones are
 cut beside it) — and all pieces set `placement_decided` and proceed to scheduling. A scoped pin whose site path does
@@ -409,7 +419,9 @@ unmapped.
 Maximal Loop fusion remains canonical. Tile lowering may expose two kinds of graph-fragment siblings without changing
 that canonical input:
 
-- **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam. A cut writes one workspace
+- **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam — body-member folds
+  closed at offer time by provider closure and dependent seams stay scoped-pin-only (see the placement discussion
+  above). A cut writes one workspace
   per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
   are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:

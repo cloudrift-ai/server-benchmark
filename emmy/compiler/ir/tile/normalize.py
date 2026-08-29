@@ -1,8 +1,16 @@
 """Contextual canonical forms for Tile IR Fold trees.
 
 Each :class:`Fold` already owns context-independent lambda-body ordering. The rewrites here need
-the enclosing Tile axes or parent Fold; nonlocal sibling clustering belongs to later algebraic
-rewrite passes.
+the enclosing Tile axes or parent Fold.
+
+INVARIANT — normalization ends with structurally identical cones as ONE shared object
+(:func:`_share_common_cones`). Object identity is how the placement machinery recognizes that two
+consumption sites read one value, so a rewrite that copies a cone (the close rewrites do, by
+design) is only sound because this final pass restores the sharing. Recompute elimination is a
+Tile-level placement concern built on that identity: a duplicated value becomes one seam, and a
+composed cut materializes it once for every reader. Do NOT patch recompute downstream — a Loop IR
+fusion or emission workaround sees one kernel at a time and cannot know two kernels re-derive the
+same value; fix the sharing or the seam offer here instead.
 """
 
 from __future__ import annotations
@@ -743,6 +751,58 @@ def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[
     return _hoist_closed_folds(node, axes, sweep_axes)
 
 
+def _share_common_cones(root: Fold) -> Fold:
+    """Restore object sharing between structurally identical cones — the tree-wide half of
+    canonicalization.
+
+    Fusion and the close rewrites inline one value into every consumption site, so a traced value
+    consumed twice (attention's softmax statistics, read by the weight cone and the epilogue)
+    reappears as equal-but-distinct copies. Everything downstream keys on object identity —
+    ``cuttable_seams`` groups occurrences by it, ``realize`` replaces cut values by it — so a
+    severed sharing silently turns one value into per-site recompute that no schedule can undo.
+    This walk hash-conses every Fold bottom-up: copies that are structurally EQUAL (same captured
+    names included — the bucket key adds ``deps`` so α-equivalent cones under different captures,
+    the K-cone family, stay value clustering's job) collapse onto the first occurrence in walk
+    order. Emission is untouched: lowering walks tree positions, and every position still holds
+    an equal term. Identity-preserving off the replacement spine, like ``_replace_fold``."""
+    canon: dict[tuple, list[Fold]] = {}
+    seen: dict[int, Fold] = {}
+
+    def member(stmt):
+        if isinstance(stmt, Fold):
+            return visit(stmt)
+        nested = stmt.nested()
+        if not nested:
+            return stmt
+        bodies = tuple(Body(tuple(member(child) for child in body)) for body in nested)
+        unchanged = all(
+            len(body) == len(original) and all(piece is child for piece, child in zip(body, original, strict=True))
+            for body, original in zip(bodies, nested, strict=True)
+        )
+        return stmt if unchanged else stmt.with_bodies(bodies)
+
+    def visit(node: Fold) -> Fold:
+        if id(node) in seen:
+            return seen[id(node)]
+        operands = tuple(visit(edge) if isinstance(edge, Fold) else edge for edge in node.operands)
+        body = tuple(member(stmt) for stmt in node.lift.body)
+        current = node
+        if any(piece is not edge for piece, edge in zip(operands, node.operands, strict=True)):
+            current = replace(current, operands=operands)
+        if any(piece is not stmt for piece, stmt in zip(body, node.lift.body, strict=True)):
+            current = current.with_bodies((Body(body),))
+        bucket = canon.setdefault((current.structural_key(), current.deps()), [])
+        for prior in bucket:
+            if prior == current:
+                seen[id(node)] = prior
+                return prior
+        bucket.append(current)
+        seen[id(node)] = current
+        return current
+
+    return visit(root)
+
+
 def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[str] = (), sweep_axes: Iterable[str] = ()):
     """Normalize a complete Tile IR tree bottom-up; ``None`` placeholders pass through.
 
@@ -774,6 +834,7 @@ def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[
             break
         normalized = again
     result = root if normalized == root else normalized
+    result = _share_common_cones(result)
     instance_memo(result, "_memo_normal_scopes")[scope] = True
     return result
 

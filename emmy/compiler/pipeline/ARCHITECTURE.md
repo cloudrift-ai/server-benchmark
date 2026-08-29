@@ -1551,7 +1551,8 @@ The "owning rule" for the schedule codecs is the tile scheduler (the `040_schedu
 enumerator spells each family exactly once, site-local, where a row becomes stored state.
 
 **`PLACE`** (STR structural fork, `fuse` or `cut`) — a stored Fold edge's kernel placement, addressed by the same
-tree-path codec as schedule sites. The maximal fused kernel and every semantically closed cut are siblings. A cut is
+tree-path codec as schedule sites. The maximal fused kernel and every semantically closed cut are siblings — closure
+counting the offer-time provider closure and dependent-seam composition `passes/ARCHITECTURE.md` describes. A cut is
 consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
 the structural decision trace. A scoped cut consumes its authoritative placement decision on both fresh pieces, which
 proceed to scheduling. Bare `PLACE=cut` selects the primary seam but, like an unpinned cut, leaves both pieces able to

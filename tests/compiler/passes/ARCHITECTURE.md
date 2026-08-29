@@ -90,6 +90,7 @@ lowering.
 | `loop/lifting/025_lift_scan.py`        | `ScanOp` → `LoopOp`        | `test_pipeline_semantics.py::test_scan_*`                                          |
 | `loop/lifting/030_lift_indexmap.py`    | `IndexMapOp` → `LoopOp`    | `test_optimization_rules.py::test_matmul_with_transpose_fuses_to_one_kernel` (e2e) |
 | `loop/lifting/040_lift_gather.py`      | `GatherOp` → `LoopOp`      | `test_torch_ops.py::test_gather`                                                   |
+| `loop/lifting/090_spell_store_rounding.py` | public narrowing boundary → typed `copy` | `test_spell_store_rounding.py`                             |
 | `loop/fusion/010_merge_loop_ops.py`    | `LoopOp → LoopOp` (splice) | `test_fusion_rules.py` (fixpoint)                                                  |
 
 Numerical correctness for lifted + merged kernels runs through the

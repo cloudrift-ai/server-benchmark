@@ -303,6 +303,12 @@ Multi-source `IndexMapOp` lifting preserves predicate dtype: an explicit source 
 and an unconditional fallback is a boolean `Literal(True, "bool")`. The rendered CUDA condition remains `1`, while
 Loop IR persistence and vectorized reference evaluation retain the boolean type required by `Select`.
 
+Before fusion, `090_spell_store_rounding` turns a public narrowing reduction store into a typed `copy` value. A
+decomposition may place one transient, shape-only buffer between the accumulator and its public pass-through store;
+that direct private copy inherits the same accumulator dtype. Actual computation over private reduction state remains
+untyped, so normalization and softmax keep their f32 state until their own public result store. Fusion and placement
+then preserve the typed `copy` as an ordinary statement rather than reconstructing a boundary from graph topology.
+
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized
 tier, or faster than its parts. Nested reductions and multi-statistic compounds are therefore not fusion gates. A

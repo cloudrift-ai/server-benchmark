@@ -538,13 +538,13 @@ splicer refuses that shape whether it is the merged root or a producer edge: dep
 the reduce loop and move the `Write` after it, changing every prefix value into the final reduction. Such an
 effectful inner loop is not valid input to total lift.
 
-An `Accum` stores its value into the producing tensor before a distinct frontend operation loads that tensor. When the
-declared tensor dtype differs from the accumulator dtype (implicitly f32 until Kernel IR), `splice_graph` keeps that
-boundary as a typed `copy` alias. Nodes created by decomposing and rewriting one frontend operation share the ultimate
-`Op.source` object and may reconstruct their private edge directly. A private output stays recognizable even when its
-consumer fragment already mixes origins: it is absent from the ultimate frontend source's declared outputs. Missing
-or unrelated source chains preserve the conversion. Equal-dtype reductions and non-`Accum` producers keep the
-ordinary untyped alias, so fusion does not duplicate a conversion already carried by the defining statement.
+Before splicing, `loop/lifting/090_spell_store_rounding` turns a public store that narrows an `Accum` into an ordinary
+typed `copy` statement. A decomposition may route that accumulator through one transient, shape-only buffer before a
+pass-through LoopOp writes the public buffer; that direct load retains the accumulator's implicit f32 dtype, so the
+same rule spells its public conversion. An actual `Assign` computation over private reduction state remains untyped:
+normalization and softmax therefore retain f32 internal state rather than narrowing it at an inferred projection edge.
+`splice_graph` then preserves the explicit conversion through its ordinary statement path and reconstructs no dtype
+boundary from source provenance or graph topology.
 
 Construction is bounded per statement: the dedup table shares each `(stmt, emit scope, σ)` binding, and in
 every legitimate splice no single statement takes more than a handful of distinct bindings. A recurrence-shaped

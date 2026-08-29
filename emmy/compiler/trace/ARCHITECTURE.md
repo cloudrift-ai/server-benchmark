@@ -129,25 +129,6 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   CSA profile and additionally requires the compressor and indexer to enumerate entries at the same rate; a missing
   specialization, a rate mismatch, or a width where top-k is selective fails closed.
 
-- `build_linear_attention_split_wrapper(block) → (pre, post)` is the carve for a HYBRID architecture's
-  linear-attention layer. The Qwen3.5 family (text config `model_type` `qwen3_5_text`, and its `qwen3_5_moe`
-  sibling) alternates two token mixers down the stack: ordinary attention every fourth layer, a gated delta net on
-  the other three. The delta net is a causal depthwise convolution over the sequence, then a chunked or single-step
-  scan carrying a recurrent state across calls. That recurrence is sequence-structured and cache-bearing, so it
-  stays in torch — "the core" below — and the carve compiles what brackets it: the four input projections in front
-  and the output projection behind, which is where the block's weight lives. Same flattened `[num_tokens, H]` seam
-  as the attention carve. `pre(hidden) → (mixed_qkv, z, b, a)` runs `input_layernorm` then `in_proj_qkv` /
-  `in_proj_z` / `in_proj_b` / `in_proj_a`; `mixed_qkv` is un-convolved and still interleaved q/k/v, `z` is the gate
-  the core's gated RMSNorm applies at the far end (a `pre` output that returns as a core input), and `b` / `a` stay
-  RAW — `b` becomes the delta rule's write strength through a parameterless `sigmoid`, `a` its decay through the
-  mixer's own `dt_bias` and `A_log`, one element per value head each. `post(core_out, residual)` is `out_proj` then
-  the same two-RMSNorm layer shape the Llama/Qwen attention layer has, over a DENSE `mlp`; the MoE sibling's routed
-  block needs the expert carve `build_moe_split_wrapper` performs. `pre` deliberately omits the padding-mask
-  multiply the eager mixer opens with: the flat layout has no padding rows and the four projections are bias-free,
-  so the multiply commutes with them and belongs to the core — a projection that grew a bias is rejected, since it
-  would no longer commute. It also omits the `[B, S, ·]` reshapes and the channel-first transpose, which describe a
-  batched sequence the flat seam does not have.
-
 - **The fused query/gate layout** is the one shape where the attention seam widens. Qwen3.5's full-attention layer
   puts its output gate in `q_proj`, making it twice as wide as its query heads and splitting the result per head with
   `chunk(2)`; the gate then multiplies the attention result before `o_proj`. Every head count in the attention carve
@@ -155,11 +136,9 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   gate. The shared `_build_pre_wrapper` instead compares those widths against the module's own declared
   query-heads-per-key/value-head ratio (`num_key_value_groups`), which identifies the layout without keying on a
   model name. `pre` then returns a FOURTH tensor, the gate at `[tokens, Hq·D]`, and `post` takes it as a third
-  argument and applies `attn_out * sigmoid(gate)` — mirroring what the linear-attention carve does with its own
-  gate. Both carry a value some projection already produced rather than recompute it, because either recomputation
-  is a second full pass over a large weight; here that weight is `q_proj` itself, since the gate is its other half.
-  (The linear-attention gate is the same decision over a projection of its OWN, `in_proj_z`.) `Pre.emits_gate` says
-  which arity a caller got. The dense and MoE posts both take the argument.
+  argument and applies `attn_out * sigmoid(gate)`. It carries a value `q_proj` already produced rather than
+  recompute it, because recomputation is a second full pass over that same large weight — the gate is its other
+  half. `Pre.emits_gate` says which arity a caller got. The dense and MoE posts both take the argument.
   A query projection whose excess width is anything OTHER than that exact doubling still raises, as does a block
   carrying both a fused gate and a separate `g_proj` (two gates, undefined order); a module declaring no ratio
   passes through unchecked.

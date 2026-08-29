@@ -918,7 +918,7 @@ def test_expert_slot_reads_per_expert_fp8_modules_and_stacks_them():
 
 
 # --- Qwen3.5 linear-attention split: the traced/lowered half ----------------------------------
-# The eager numerics live in ``tests/serving/test_linear_attention_split.py``; what matters here is
+# What matters here is
 # that both halves of the carve survive ``torch.export`` and reach Loop IR, since that is the whole
 # point of carving them out of a recurrence torch keeps.
 
@@ -951,52 +951,6 @@ def _qwen3_5_linear_block():
     torch.manual_seed(0)
     model = Qwen3_5TextModel(Qwen3_5TextConfig(**_QWEN3_5_TINY)).eval()
     return model.layers[0]
-
-
-def test_linear_attention_split_pre_and_post_trace_and_lower():
-    """Both carve halves export and lower: ``pre`` is the four input projections, ``post`` the
-    output projection plus the layer's norm/MLP tail. Structure only — the lowered loops are not
-    executed here."""
-    import torch
-
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-    from emmy.compiler.trace.huggingface import build_linear_attention_split_wrapper
-    from emmy.compiler.trace.torch import trace_module
-
-    block = _qwen3_5_linear_block()
-    mixer = block.linear_attn
-    pre, post = build_linear_attention_split_wrapper(block)
-
-    t, h = 6, _QWEN3_5_TINY["hidden_size"]
-    pre_graph = trace_module(pre, (torch.randn(t, h),))
-    post_graph = trace_module(post, (torch.randn(t, mixer.value_dim), torch.randn(t, h)))
-
-    # Four projections in, one out — the packed weights this carve exists to compile.
-    assert len(pre_graph.outputs) == 4
-    assert len(post_graph.outputs) == 1
-
-    for graph in (pre_graph, post_graph):
-        lowered = Pipeline.build(LOOP_PASSES).run(graph)
-        assert any(type(node.op).__name__ == "LoopOp" for node in lowered.nodes.values())
-
-
-def test_linear_attention_split_pre_traces_a_dynamic_token_count():
-    """Serving packs a variable number of tokens into the flat axis, so the carve must export with
-    that axis symbolic — the same dynamic-shapes argument the layer wrapper takes."""
-    import torch
-
-    from emmy.compiler.trace.huggingface import build_linear_attention_split_wrapper
-    from emmy.compiler.trace.torch import trace_module
-
-    block = _qwen3_5_linear_block()
-    pre, _ = build_linear_attention_split_wrapper(block)
-    graph = trace_module(
-        pre,
-        (torch.randn(6, _QWEN3_5_TINY["hidden_size"]),),
-        dynamic_shapes={"hidden": {0: torch.export.Dim("num_tokens", min=2, max=1024)}},
-    )
-    dims = {str(d) for out in graph.outputs for d in graph.nodes[out].output.shape}
-    assert any(not str(d).isdigit() for d in dims), f"no symbolic token axis survived: {dims}"
 
 
 # --- checkpoint keys vs twin parameter names ---------------------------------------------------
@@ -1189,18 +1143,19 @@ def test_serving_retargeting_lands_on_checkpoint_keys_so_the_speller_fires(tmp_p
     from emmy.compiler.loader.quant import spell_quantized_constants
     from emmy.compiler.trace.huggingface import (
         _auto_model_from_config,
-        build_linear_attention_split_wrapper,
+        build_attention_split_wrapper,
         retarget_constants_to_model,
     )
 
     torch.manual_seed(0)
     twin = _auto_model_from_config(_qwen3_5_multimodal_config()).eval()
-    leaf = "model.layers.0.mlp.gate_proj.weight"
+    leaf = "model.layers.1.mlp.gate_proj.weight"
     ckpt_key = _wrapper_prefixed_nvfp4_checkpoint(tmp_path / "ck", twin, leaf)
 
     # The split wrapper holds the block's own submodules, so tensor identity bridges its
-    # wrapper-relative spelling to the twin's path — the mechanism retargeting relies on.
-    _pre, post = build_linear_attention_split_wrapper(twin.model.layers[0])
+    # wrapper-relative spelling to the twin's path — the mechanism retargeting relies on. Layer 1
+    # is this config's full-attention layer, which is the carve that ships here.
+    _pre, post = build_attention_split_wrapper(twin.model.layers[1])
     wrapper_path = next(p for p, t in post.named_parameters() if t is dict(twin.named_parameters())[leaf])
 
     shape = tuple(dict(twin.named_parameters())[leaf].shape)

@@ -622,10 +622,6 @@ def _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket=0) 
 
 
 class EmmyGenRunner:
-    # The ungated default, held on the class so a runner assembled attribute-by-attribute
-    # (the seam tests do this) reads as ungated instead of raising.
-    _gated: tuple[bool, ...] = ()
-
     def __init__(
         self,
         *,
@@ -651,7 +647,6 @@ class EmmyGenRunner:
         expert_tiers=None,
         residual_float32=False,
         activation_dtype=None,
-        gated=None,
     ):
         self._embed_weight = embed_weight  # numpy [vocab, H]
         self._norm = norm  # torch module
@@ -662,10 +657,6 @@ class EmmyGenRunner:
                 raise ValueError("hidden_size is required when this runner does not own the embedding table")
             hidden_size = embed_weight.shape[1]
         self._hidden_size = int(hidden_size)
-        # Per layer: does the seam carry the attention OUTPUT GATE — a fourth ``pre`` result the
-        # paired ``post`` takes as a third input (the fused query/gate layout)? ``None`` means no
-        # layer does, which is every model but the Qwen3.5 family's full-attention layers.
-        self._gated = tuple(bool(g) for g in gated) if gated is not None else ()
         self._layer_ids = tuple(range(len(attn_meta))) if layer_ids is None else tuple(int(i) for i in layer_ids)
         if len(self._layer_ids) != len(attn_meta):
             raise ValueError(f"layer_ids has {len(self._layer_ids)} entries for {len(attn_meta)} attention layers")
@@ -1011,7 +1002,6 @@ class EmmyGenRunner:
         from emmy.compiler.backend.cuda.program import BufferArena
 
         pre_programs, post_programs = [], []
-        gated: list[bool] = []  # per layer: does this layer's seam carry the output gate?
         pre_decode, post_decode = [], []
         pre_m1, post_m1 = [], []
         pre_prefill, post_prefill = [], []
@@ -1434,17 +1424,6 @@ class EmmyGenRunner:
             # decode-bucket twin bind the SAME weights — share one upload, not two.
             pre_consts: dict = {}
             post_consts: dict = {}
-            # The fused query/gate layout (Qwen3.5's full-attention layer) puts one extra tensor on
-            # the seam: ``pre`` emits the output gate as a fourth result and ``post`` takes it as a
-            # third input. The wrapper declares which arity it built, so every tier below sizes its
-            # post example list from one place rather than repeating the conditional four times.
-            # The gate is one value per projected query channel, so it is as wide as ``attn_out``.
-            emits_gate = bool(getattr(pre_w, "emits_gate", False))
-            gated.append(emits_gate)
-
-            def _post_examples(rows, *, w=attn_width, h=carrier, gate=emits_gate):
-                ex = [torch.zeros(rows, w, dtype=dtype), torch.zeros(rows, h, dtype=residual_dtype)]
-                return [*ex, torch.zeros(rows, w, dtype=dtype)] if gate else ex
 
             with torch.device("cpu"):
                 if not static_only:
@@ -1465,8 +1444,8 @@ class EmmyGenRunner:
                         build(
                             f"L{i:02d}.post.sym",
                             post_w,
-                            _post_examples(8),
-                            ["attn_out", "residual", "gate"] if emits_gate else ["attn_out", "residual"],
+                            [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, carrier, dtype=residual_dtype)],
+                            ["attn_out", "residual"],
                             np_dtype,
                             dev_consts=post_consts,
                             ckpt=ckpt,
@@ -1495,7 +1474,10 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.post.decode",
                                 post_w,
-                                _post_examples(decode_bucket),
+                                [
+                                    torch.zeros(decode_bucket, attn_width, dtype=dtype),
+                                    torch.zeros(decode_bucket, carrier, dtype=residual_dtype),
+                                ],
                                 None,
                                 np_dtype,
                                 dev_consts=post_consts,
@@ -1534,7 +1516,7 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.post.m1",
                                 post_w,
-                                _post_examples(1),
+                                [torch.zeros(1, attn_width, dtype=dtype), torch.zeros(1, carrier, dtype=residual_dtype)],
                                 None,
                                 np_dtype,
                                 dev_consts=post_consts,
@@ -1566,7 +1548,10 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.post.prefill",
                                 post_w,
-                                _post_examples(prefill_bucket),
+                                [
+                                    torch.zeros(prefill_bucket, attn_width, dtype=dtype),
+                                    torch.zeros(prefill_bucket, carrier, dtype=residual_dtype),
+                                ],
                                 None,
                                 np_dtype,
                                 dev_consts=post_consts,
@@ -1706,7 +1691,6 @@ class EmmyGenRunner:
             expert_tiers=expert_tiers or None,
             residual_float32=residual_float32,
             activation_dtype=dtype,
-            gated=gated if any(gated) else None,
         )
         runner._embed_scale = embed_scale  # raw-table scale for adopt_embed_table (host table keeps it folded)
         # The seam's residual width. It is the hidden size for a classic layer and the flattened
@@ -1763,14 +1747,6 @@ class EmmyGenRunner:
         rows = self._embed_weight[np.asarray(input_ids, dtype=np.int64)]
         return rows.astype(np.float32) if self._residual_float32 else rows
 
-    def layer_emits_gate(self, layer: int) -> bool:
-        """Whether layer ``layer``'s ``pre`` returns the attention output gate as a fourth tensor.
-
-        The model side asks this rather than counting ``pre`` results: a caller that guessed from
-        the tuple length would read a three-tensor layer and a four-tensor layer the same way only
-        by accident, and the gate has to reach ``post`` to be applied at all."""
-        return bool(self._gated[layer]) if self._gated else False
-
     def forward_layer_pre(self, layer, hidden, positions=None):
         """``hidden[T, H]`` numpy → un-rotated ``(q[T,Hq·D], k[T,Hkv·D], v[T,Hkv·D])``.
         ``positions`` is unused under A2 (RoPE applied downstream); kept for signature parity.
@@ -1785,10 +1761,9 @@ class EmmyGenRunner:
             raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return tuple(self._pre[layer].run([h]))
 
-    def forward_layer_post(self, layer, attn_out, residual, gate=None):
+    def forward_layer_post(self, layer, attn_out, residual):
         """``(attn_out[T,Hq·D], residual[T,H])`` numpy → ``layer_out[T, H]`` numpy. Decode-bucketed
-        like ``forward_layer_pre``. ``gate`` is the fourth ``pre`` result on a gated layer
-        (:meth:`layer_emits_gate`) and must be supplied there — the program has an input for it."""
+        like ``forward_layer_pre``."""
         if self._moe is not None and self._moe[layer] is not None:
             raise NotImplementedError(
                 "MoE layers run device-resident only — the routed expert dispatch has no host numpy path; "
@@ -1796,29 +1771,13 @@ class EmmyGenRunner:
             )
         a = attn_out.astype(self._np_dtype, copy=False)
         r = residual.astype("float32" if self._residual_float32 else self._np_dtype, copy=False)
-        g = self._gate_arg(layer, gate, a.dtype)
         t = a.shape[0]
         if self._post_decode is not None and t <= self._decode_bucket:
-            args = [_pad_rows(a, self._decode_bucket), _pad_rows(r, self._decode_bucket)]
-            if g is not None:
-                args.append(_pad_rows(g, self._decode_bucket))
-            return self._post_decode[layer].run(args)[0][:t]
+            out = self._post_decode[layer].run([_pad_rows(a, self._decode_bucket), _pad_rows(r, self._decode_bucket)])[0]
+            return out[:t]
         if not self._post:
             raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
-        return self._post[layer].run([a, r] if g is None else [a, r, g])[0]
-
-    def _gate_arg(self, layer, gate, dtype):
-        """Validate the gate against what layer ``layer``'s post program was built to take.
-
-        A gated layer whose caller forgot the gate, or an ungated layer handed one, is a wiring
-        bug that would otherwise surface as an input-count mismatch deep in the program launch."""
-        if not self.layer_emits_gate(layer):
-            if gate is not None:
-                raise ValueError(f"layer {layer}'s post program takes no gate, but one was supplied")
-            return None
-        if gate is None:
-            raise ValueError(f"layer {layer}'s post program requires the output gate that its pre emitted")
-        return gate.astype(dtype, copy=False) if hasattr(gate, "astype") else gate
+        return self._post[layer].run([a, r])[0]
 
     def final_norm(self, hidden):
         """Apply the model's final norm (held as a torch module) to ``hidden[T, H]`` numpy."""
@@ -2095,14 +2054,14 @@ class EmmyGenRunner:
             raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return tuple(self._pre[layer].run_device_sym([hidden]))
 
-    def forward_layer_post_device(self, layer, attn_out, residual, gate=None, token_ids=None):
+    def forward_layer_post_device(self, layer, attn_out, residual, token_ids=None):
         """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual)`` CUDA → ``[T,H]``
         CUDA. Decode-bucketed / exact-chunk / symbolic-routed like
         :meth:`forward_layer_pre_device`. A MoE layer's post program returns ``(h, xn)``; the
         routed expert dispatch + weighted combine run here in torch (the third seam) and the
         layer output is ``h + combine``. ``token_ids`` are the step's (clamped) token ids —
         a hash-routed layer selects its experts by them."""
-        outs = self._route_post_device(layer, attn_out, residual, gate)
+        outs = self._route_post_device(layer, attn_out, residual)
         moe = self._moe[layer] if self._moe is not None else None
         if moe is None:
             return outs[0]
@@ -2145,24 +2104,19 @@ class EmmyGenRunner:
                 raise RuntimeError("a separate float32 shared-expert output requires float32 routed accumulation")
         return _combine_moe_output(h, combined, shared)
 
-    def _route_post_device(self, layer, attn_out, residual, gate=None):
+    def _route_post_device(self, layer, attn_out, residual):
         """Tier-route one post program launch; returns the full output list (1 output for a
         dense layer's post, 2 — ``h, xn`` — for an ordinary MoE post, or 3 — ``h, xn,
-        shared`` — for the marked float32 shared-expert path).
-
-        A gated layer carries one extra input, the attention output gate, which rides EVERY tier
-        the same way ``attn_out`` does: same rows, same slicing across the rider split."""
+        shared`` — for the marked float32 shared-expert path)."""
         import torch
 
-        g = self._gate_arg(layer, gate, attn_out.dtype)
-        args = [attn_out, residual] if g is None else [attn_out, residual, g]
         t = attn_out.shape[0]
         if t == 1 and self._post_m1 is not None:
-            return self._post_m1[layer].run_device(args)
+            return self._post_m1[layer].run_device([attn_out, residual])
         if self._post_decode is not None and t <= self._decode_bucket:
-            return self._post_decode[layer].run_device(args)
+            return self._post_decode[layer].run_device([attn_out, residual])
         if self._post_prefill is not None and t == self._prefill_bucket:
-            return self._post_prefill[layer].run_device(args)
+            return self._post_prefill[layer].run_device([attn_out, residual])
         if 0 < t - self._prefill_bucket <= self.rider_width:
             # A3: same slice-bound joint destination as the pre path. The residual reads are
             # ordered before the overwrites: each half's upload copies its residual slice into
@@ -2192,14 +2146,12 @@ class EmmyGenRunner:
             else:
                 raise RuntimeError(f"unexpected post program output count {output_count}")
             dests = [self._rider_dest(nm, t, w, residual, dtype=dt) for nm, dt, w in specs]
-            head = [attn_out[:pb], residual[:pb]] + ([] if g is None else [g[:pb]])
-            tail = [attn_out[pb:], residual[pb:]] + ([] if g is None else [g[pb:]])
-            self._post_prefill[layer].run_device(head, out=[d[:pb] for d in dests])
-            self._post_decode[layer].run_device(tail, out=[d[pb:] for d in dests])
+            self._post_prefill[layer].run_device([attn_out[:pb], residual[:pb]], out=[d[:pb] for d in dests])
+            self._post_decode[layer].run_device([attn_out[pb:], residual[pb:]], out=[d[pb:] for d in dests])
             return dests
         if not self._post:
             raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
-        return self._post[layer].run_device_sym(args)
+        return self._post[layer].run_device_sym([attn_out, residual])
 
     def _route(self, moe, xn, token_ids):
         """One HF router call. A hash router selects experts by the step's TOKEN IDS (its frozen

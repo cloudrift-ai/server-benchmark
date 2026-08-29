@@ -56,6 +56,17 @@ def _pin(tile: TileOp, seams) -> tuple[tuple, str, bool] | None:
         elif not any(chosen is seam for chosen in cut):
             cut.append(seam)
     cut = [seam for seam in cut if seam.spelling not in fused]
+    # A dependent seam's producers join the composed decision transitively: the requirement is
+    # structural (its piece reads the producer's workspace), not a choice a pin can decline.
+    queue = list(cut)
+    while queue:
+        for _, producer in queue.pop().requires:
+            required = by_node[id(producer)]
+            if required.spelling in fused:
+                raise ValueError(f"PLACE pins fuse {required.spelling!r}, the producer a pinned dependent cut requires")
+            if not any(chosen is required for chosen in cut):
+                cut.append(required)
+                queue.append(required)
     if cut:
         return tuple(cut), "cut", True
     if fused:
@@ -69,8 +80,13 @@ def _pin(tile: TileOp, seams) -> tuple[tuple, str, bool] | None:
         # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (an unclosed
         # cone, a seam whose workspace dtypes stay undetermined), so a bare pin resolves among
         # the CUTTABLE seams instead: the root-most one.
+        # Provider-closed and dependent seams are scoped-pin-only: bare-cut recursion terminates
+        # because pieces run OUT of seams, and provider closure keeps every piece supplied.
+        plain = [seam for seam in seams if not (seam.providers or seam.requires)]
+        if not plain:
+            return ("PLACE",), "fuse", False
         depth = {id(site.node): site.depth for site in all_sites}
-        seam = min(seams, key=lambda s: depth[id(s.node)])
+        seam = min(plain, key=lambda s: depth[id(s.node)])
         return (seam,), value, False
     if missing:
         # A pin-driven compile whose scoped pins all address other kernels decides FUSE here —
@@ -104,6 +120,12 @@ def rewrite(match: Match, root: Node, ctx=None):
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
     options.extend(
-        DeferredFork(lambda seam=seam: realize(match, root, (seam,), renamed), {seam.spelling: "cut"}, structural=True) for seam in seams
+        # Provider-closed and dependent seams stay OUT of the unpinned fork: every kernel and
+        # every fresh piece hosts some (the piece copies its providers), so offering them makes
+        # recursive placement inexhaustible and the candidate walk explodes. A route through them
+        # is spelled by scoped pins, which realize every member in one composed decision.
+        DeferredFork(lambda seam=seam: realize(match, root, (seam,), renamed), {seam.spelling: "cut"}, structural=True)
+        for seam in seams
+        if not (seam.providers or seam.requires)
     )
     return options

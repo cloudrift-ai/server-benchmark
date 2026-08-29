@@ -51,6 +51,17 @@ class CutSite:
     #: replaces every sibling with workspace loads spelled through its own axes. Object sharing is
     #: the degenerate case (identity, with the identity correspondence).
     siblings: tuple = ()
+    #: Sibling stmts (``Load``/``Assign``, fold-free) the produced piece prepends to close the
+    #: cone — a body-member fold may capture host-provided scalars (attention's mask/scale
+    #: constants) that a plain-closure seam carries inside its cone. Identical across every
+    #: hosting body, or the seam is not offered.
+    providers: tuple = ()
+    #: Captured names this cone can only take from ANOTHER seam's workspace: ``(name, producer
+    #: Fold)`` pairs where the producer is itself an offered seam (attention's second statistics
+    #: pass reading the first pass's accumulator). Cutting this seam is only realizable as a
+    #: composed decision that also cuts every producer; the produced piece reads the name back
+    #: through the producer's workspace loads.
+    requires: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -189,11 +200,97 @@ def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None) -> tuple 
     return dtypes
 
 
+def _member_hosts(root: Fold) -> dict[int, list[Fold]]:
+    """Each stored fold's hosting folds — every enclosing fold whose lift body holds it as a
+    member. A shared cone (normalization guarantees structurally identical cones are one object)
+    records every host, which is what lets provider closure demand the hosts agree."""
+    hosts: dict[int, list[Fold]] = {}
+    visited: set[int] = set()
+
+    def visit(node: Fold) -> None:
+        if id(node) in visited:
+            return
+        visited.add(id(node))
+        for edge in node.operands:
+            if isinstance(edge, Fold):
+                visit(edge)
+        for stmt in node.lift.body:
+            if isinstance(stmt, Fold):
+                hosts.setdefault(id(stmt), []).append(node)
+                visit(stmt)
+
+    visit(root)
+    return hosts
+
+
+def _provider_closure(node: Fold, scopes, hosts: list[Fold]) -> tuple[tuple, tuple] | None:
+    """The ``(providers, requires)`` that close an SSA-capturing body-member seam, or ``None``.
+
+    A member fold may read names its hosting body provides — attention's softmax statistics
+    capture the mask/scale scalars, and the second statistics pass reads the first pass's
+    accumulator. A capture whose producer chain is pure ``Load``/``Assign`` stmts joins the
+    produced piece verbatim (``providers``); a capture only a sibling or host-operand Fold
+    defines becomes a ``requires`` pair, realizable only when that producer is cut beside this
+    seam. Every hosting body must agree — structurally equal providers, the same producer
+    objects — and the closed piece must capture nothing but scope axes at every occurrence."""
+    if not hosts:
+        return None
+    axis_names = {axis.name for scope in scopes for axis in scope}
+    closures = []
+    for host in hosts:
+        defined: dict[str, object] = {}
+        for stmt in host.lift.body:
+            for name in stmt.defines():
+                defined[name] = stmt
+        for edge in host.operands:
+            for name in _operand_result_names(edge):
+                defined.setdefault(name, edge)
+        providers: list = []
+        requires: list = []
+        queue = sorted(set(_external_reads(node)) - axis_names)
+        resolved: set[str] = set()
+        while queue:
+            name = queue.pop()
+            if name in resolved:
+                continue
+            resolved.add(name)
+            producer = defined.get(name)
+            if producer is None or producer is node:
+                return None
+            if isinstance(producer, Fold):
+                requires.append((name, producer))
+                continue
+            if not isinstance(producer, (Load, Assign)):
+                return None
+            if not any(chosen is producer for chosen in providers):
+                providers.append(producer)
+            queue.extend(sorted(deep_reads([producer]) - axis_names - resolved))
+        order = {id(stmt): position for position, stmt in enumerate(host.lift.body)}
+        providers.sort(key=lambda stmt: order.get(id(stmt), -1))
+        closures.append((tuple(providers), tuple(sorted(requires, key=lambda pair: pair[0]))))
+    first_providers, first_requires = closures[0]
+    for providers, requires in closures[1:]:
+        aligned = providers == first_providers and len(requires) == len(first_requires)
+        if not aligned or any(
+            a != b or producer_a is not producer_b for (a, producer_a), (b, producer_b) in zip(requires, first_requires, strict=True)
+        ):
+            return None  # the hosts spell different closures — one seam cannot read two sources
+    provided = {name for stmt in first_providers for name in stmt.defines()}
+    provided.update(name for name, _ in first_requires)
+    outside = (set(_external_reads(node)) | {name for stmt in first_providers for name in deep_reads([stmt])}) - provided
+    if any(outside - {axis.name for axis in scope} for scope in scopes):
+        return None
+    return first_providers, first_requires
+
+
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     """Every semantically closed stored Fold edge whose workspace dtypes are determined, grouped
     only by object sharing. A contraction's operand edges are seams too — cutting one materializes
     the cone feeding the operand into its own kernel and the contraction reads it back as an
-    ordinary load — and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`)."""
+    ordinary load — and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`).
+    A body-member fold capturing host-provided names is offered through provider closure
+    (:func:`_provider_closure`); one whose closure needs another seam's workspace is offered as a
+    dependent seam and drops out unless that producer is offered too."""
     all_sites = sites(tile.op)
     contraction_operands = {
         id(edge): site.node
@@ -206,13 +303,21 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     occurrence_axes: dict[int, list[tuple]] = {}
     for node, available in islice(walk(tile.op, outer), 1, None):
         occurrence_axes.setdefault(id(node), []).append(available)
+    hosts = _member_hosts(tile.op) if isinstance(tile.op, Fold) else {}
     out: list[CutSite] = []
     seen: set[int] = set()
     for site in family_sites("PLACE", all_sites):
         node = site.node
         scopes = occurrence_axes.get(id(node), ())
-        if not isinstance(node, Fold) or id(node) in seen or not scopes or not all(_closed_at(node, scope) for scope in scopes):
+        if not isinstance(node, Fold) or id(node) in seen or not scopes:
             continue
+        providers: tuple = ()
+        requires: tuple = ()
+        if not all(_closed_at(node, scope) for scope in scopes):
+            closure = _provider_closure(node, scopes, hosts.get(id(node), []))
+            if closure is None:
+                continue
+            providers, requires = closure
         if node.observed:
             # An observed fold's per-step results exist only inside its stream — a cut would
             # separate the scan from its streamed boundary store, which no piece can then spell.
@@ -229,8 +334,24 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         seen.add(id(node))
         axes = tuple({axis.name: axis for scope in scopes for axis in scope}.values())
         out.append(
-            CutSite(node=node, spelling=spell(tile.op, "PLACE", node, all_sites=all_sites), axes=axes, dtypes=dtypes, frontier=frontier)
+            CutSite(
+                node=node,
+                spelling=spell(tile.op, "PLACE", node, all_sites=all_sites),
+                axes=axes,
+                dtypes=dtypes,
+                frontier=frontier,
+                providers=providers,
+                requires=requires,
+            )
         )
+    # A dependent seam stands only while every required producer is itself offered; dropping one
+    # can orphan the next link of a chain, so filter to the fixpoint.
+    while True:
+        offered = {id(seam.node) for seam in out}
+        kept = [seam for seam in out if all(id(producer) in offered for _, producer in seam.requires)]
+        if len(kept) == len(out):
+            break
+        out = kept
     return _cluster_value_seams(out, {id(seam.node): seam.frontier is None and contraction_operands.get(id(seam.node)) for seam in out})
 
 
@@ -343,6 +464,23 @@ def output_map(root: Node) -> dict[str, str]:
     return {name: f"{name}__placed" for name in root.buffer_names()}
 
 
+def _requires_order(seams) -> tuple:
+    """``seams`` with every required producer ahead of its dependents; a producer absent from the
+    composed decision is left for the realization's per-name error. Requirement chains follow SSA
+    definition order, so the graph is acyclic by construction."""
+    present = {id(seam.node) for seam in seams}
+    remaining = list(seams)
+    ordered: list = []
+    placed: set[int] = set()
+    while remaining:
+        step = [seam for seam in remaining if all(id(producer) in placed or id(producer) not in present for _, producer in seam.requires)]
+        assert step, "cyclic seam requirements cannot arise from SSA definition order"
+        ordered.extend(step)
+        placed.update(id(seam.node) for seam in step)
+        remaining = [seam for seam in remaining if not any(seam is chosen for chosen in step)]
+    return tuple(ordered)
+
+
 def realize(
     match: Match,
     root: Node,
@@ -364,7 +502,8 @@ def realize(
     unpinned cuts leave it false so the fresh pieces can expose and decide smaller seams."""
     tile: TileOp = root.op
     pieces = []
-    for seam in seams:
+    workspace_loads: dict[int, tuple] = {}
+    for seam in _requires_order(seams):
         child = seam.node
         front = seam.frontier
         if front is not None:
@@ -373,6 +512,17 @@ def realize(
         else:
             names = _operand_result_names(child)
             produced = child
+        if seam.providers or seam.requires:
+            # Provider closure: the piece carries the host-provided scalar chain, and every
+            # required name arrives through its producer seam's workspace load — the same Load
+            # objects the replacement spells, so the two spellings cannot drift apart.
+            prefix = list(seam.providers)
+            for name, producer in seam.requires:
+                producer_loads = workspace_loads.get(id(producer))
+                if producer_loads is None:
+                    raise ValueError(f"seam {seam.spelling!r} requires {name!r} from a producer seam absent from this composed cut")
+                prefix.extend(load for load in producer_loads if isinstance(load, Load) and name in load.defines())
+            produced = Fold.projection(body=Body((*prefix, produced)), results=names)
         axes = _workspace_axes(seam, produced)
         index = tuple(Var(axis.name) for axis in axes)
         token = digest(tile.structural_key(), seam.spelling)[:10]
@@ -383,6 +533,7 @@ def realize(
             raw = replace(loads[0], dtype=front.dtype)
             loads = (Fold.projection(body=Body((raw, *front.residue)), results=child.lift.results),)
         replacements = {id(child): loads}
+        workspace_loads[id(child)] = loads
         for sibling, pairs in seam.siblings:
             # A clustered duplicate reads the SAME workspace, spelled through its own captured
             # axes via the correspondence the clustering proved.

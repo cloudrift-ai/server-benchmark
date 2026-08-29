@@ -327,6 +327,89 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     assert any(set(node.inputs) & workspaces for node in producers), "the nested value's producer must read a sibling workspace"
 
 
+def _composed_case_match() -> tuple[Match, Graph]:
+    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
+    (record,) = load_golden_records(load_golden_file(case))
+    tile = _lifted_target(record)
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
+    return Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[])), graph
+
+
+_STAT_PINS = {
+    "PLACE@map.fold.a21": "cut",
+    "PLACE@map.fold.a.map.fold.fold.b1": "cut",
+    "PLACE@map.fold.a.map.fold.fold.a1": "cut",
+    "PLACE@map.fold.a1": "cut",
+    "PLACE@map.fold.a.map.fold.a31": "cut",
+    "PLACE@map.fold.a.map.fold.a32": "cut",
+}
+
+
+def test_statistics_seams_close_via_providers_and_declare_requirements() -> None:
+    """The softmax-statistics folds capture host-provided scalars and each other's accumulator;
+    provider closure offers them anyway, with the chain recorded as a requirement."""
+    match, graph = _composed_case_match()
+    tile = next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    seams = {seam.spelling: seam for seam in cuttable_seams(tile)}
+    first = seams["PLACE@map.fold.a.map.fold.a31"]
+    second = seams["PLACE@map.fold.a.map.fold.a32"]
+    assert first.providers and not first.requires
+    assert second.providers and len(second.requires) == 1
+    assert second.requires[0][1] is first.node
+
+
+def test_dependent_seam_pins_pull_their_producer_into_the_composed_cut() -> None:
+    """Pinning only the second statistics pass cuts the first beside it — the requirement is
+    structural, so the pin cannot decline it."""
+    match, graph = _composed_case_match()
+    node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    with pinned_knobs({"PLACE@map.fold.a.map.fold.a32": "cut", **_OFF}):
+        fork = _CUT.rewrite(match, node)
+    assert set(fork.knobs) == {"PLACE@map.fold.a.map.fold.a32", "PLACE@map.fold.a.map.fold.a31"}
+
+
+def test_statistics_route_shares_the_row_reduction_across_output_keys() -> None:
+    """The composed statistics route computes each row statistic once per query: no piece repeats
+    a key-extent reduce beneath its output-key axis, and the softmax-weight piece keeps only the
+    per-element score contraction (the recompute PR #679 measured at three orders of magnitude)."""
+    match, graph = _composed_case_match()
+    node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    key_extent = 8
+
+    def reduce_extents(op) -> list[int]:
+        out = []
+        stack = [op]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, Fold):
+                if current.axis is not None:
+                    out.append(current.axis.extent.as_static())
+                stack.extend(current.operands)
+                stack.extend(current.lift.body)
+        return out
+
+    with pinned_knobs({**_STAT_PINS, **_OFF}):
+        fragment = _CUT.rewrite(match, node).expand()[0]
+    pieces = [piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp)]
+    assert len(pieces) == 7  # six workspaces plus the consumer
+    workspaces = {piece.id for piece in pieces if "__place_" in piece.id}
+    # The two statistics pieces each run the key-extent scan ONCE, into a per-query workspace
+    # (batch·head × query — no output-key axis).
+    statistics = [piece for piece in pieces if "__place_" in piece.id and reduce_extents(piece.op.op).count(key_extent) == 1]
+    assert len(statistics) == 2
+    assert all(len(piece.op.place.free) == 2 for piece in statistics)
+    # The softmax-weight piece sweeps the output-key axis, reads those workspaces back, and keeps
+    # only the per-element score contraction — the key-extent scan does not reappear beneath its
+    # output-key axis, and neither does it in the consumer beyond the softmax·V contraction itself.
+    weight = next(piece for piece in pieces if "__place_" in piece.id and len(piece.op.place.free) == 3 and set(piece.inputs) & workspaces)
+    assert key_extent not in reduce_extents(weight.op.op)
+    consumer = next(piece for piece in pieces if "__place_" not in piece.id)
+    assert reduce_extents(consumer.op.op).count(key_extent) == 1
+
+
 def _receipt_fields() -> dict:
     return {
         "name": "sdpa.child",

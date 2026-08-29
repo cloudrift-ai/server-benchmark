@@ -72,12 +72,24 @@ exclusive consumption (every moved definition dies into the closed edges), so th
 duplicated. Both rules measure an edge's captures with `Fold.deps` — scope-aware, so a name a sibling operand binds
 inside the edge is not a capture and an already-closed edge never re-fires the rewrite. A cone closed at its axes is
 what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
-vector) becomes materializable once per key instead of recomputed per query row.
+vector) becomes materializable once per key instead of recomputed per query row. A body-member fold these rules
+leave capturing host names is not lost to placement: the fork closes it at offer time through provider closure
+(`lowering/tile/_cut.py`), without moving anything in the stored tree.
 
 An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
 projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
 computation compare unequal, and the placement fork's value clustering (`lowering/tile/_cut.py`) relies on
 alpha-equivalent cones converging to one canonical shape.
+
+Normalization ends by restoring OBJECT SHARING: structurally equal cones with the same captures collapse onto one
+Fold object (`_share_common_cones`), so a value fusion inlined into several consumption sites — attention's softmax
+statistics, read by the weight cone and by the epilogue — is one node again. This is an invariant, not an
+optimization: seam grouping and cut realization key on object identity, so severed sharing silently turns one value
+into per-site recompute that no schedule can undo (the class PR #679 measured at three orders of magnitude). A
+recompute observed across kernels is therefore ALWAYS a Tile-level sharing or seam-offer defect — fix it here or in
+the placement fork; a Loop IR fusion or emission workaround sees one kernel at a time and is the wrong altitude by
+construction. Copies that differ in captured axis names cannot share an object and stay with value clustering; copies
+that differ in exposed result names stay distinct because unifying them would rename their consumers.
 
 An output sweep used by any nested contraction operand is promoted into the Tile's free-axis placement. Promotion
 expands the enclosing-axis context, so construction normalizes the Fold tree once more under that final scope; one

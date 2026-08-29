@@ -619,7 +619,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     Under an active :func:`golden_audit` sink every SCHEDULE consultation also appends its verdict
     (MATCH / DRIFT / GAP) — the drift audit's only reading of this tier."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import schedule_row_key, values_equal  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import drop_uninformative_scopes, schedule_row_key, values_equal  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     root = fp.root_op
@@ -635,9 +635,10 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
         """Descend only branches compatible with one recorded row."""
         for option in options:
             if _is_structural_option(option):
-                return None
+                continue
             if isinstance(option, Fork) and not option.is_leaf:
-                if all(key in record and values_equal(key, record[key], value) for key, value in option.knobs.items()):
+                branch = drop_uninformative_scopes(option.knobs)
+                if all(key in record and values_equal(key, record[key], value) for key, value in branch.items()):
                     found = find_recorded(option.expand(), record, target)
                     if found is not None:
                         return found
@@ -649,7 +650,8 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
 
     if recs and _AUDIT_SINK is None:
         for rec in recs:
-            if (hit := find_recorded(fp.options, rec.knobs, schedule_row_key(rec.knobs))) is not None:
+            target = schedule_row_key(rec.knobs)
+            if (hit := find_recorded(fp.options, dict(target), target)) is not None:
                 return hit[0], float(rec.emmy_us or 0.0), dict(hit[1])
         logger.warning(
             "deploy: node %r matches %d recorded golden(s) by structural identity, but none equals an enumerated row — "
@@ -669,7 +671,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     live_count = 0
     for leaf in iter_leaves(fp.options):
         if _is_structural_option(leaf):
-            return None
+            continue
         knobs = leaf_knobs(leaf)
         if node_blocked is not None and _tile_blocked(knobs, node_blocked):
             continue

@@ -19,7 +19,7 @@ from emmy.compiler.ir.tile.ir import (
     lower_with_output_specs,
     observed_result_names,
 )
-from emmy.compiler.ir.tile.normalize import lambda_equivalent_clusters, normalize_fold_tree
+from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 
 __all__ = [
     "Channel",
@@ -33,7 +33,6 @@ __all__ = [
     "ProjectionRegion",
     "TileOp",
     "apply_output_specs",
-    "lambda_equivalent_clusters",
     "lower_with_output_specs",
     "observed_result_names",
     "normalize_fold_tree",

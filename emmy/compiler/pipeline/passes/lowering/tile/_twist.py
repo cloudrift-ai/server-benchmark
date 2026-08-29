@@ -9,11 +9,11 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda, component_ops, is_contraction
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.carrier import EXP_FAMILY, exp_combine_states
+from emmy.compiler.ir.pure.closure import Closure
 from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, operand_name, refs_axis
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Select
 from emmy.compiler.ir.stmt.body import _member_reads
-from emmy.compiler.ir.tile.normalize import lambda_equivalent_clusters
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +31,6 @@ def _decline(what: str, why: str) -> None:
 
 
 @dataclass(frozen=True)
-class _Score:
-    fn: Lambda
-    axes: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class _NormalizedExp:
     statistic: Fold
     provider: Fold | None
@@ -47,7 +41,7 @@ def _bindings(fold: Fold) -> dict[str, object]:
     return {name: edge for edge in fold.operands for name in _operand_result_names(edge)}
 
 
-def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> _Score | None:
+def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> Closure | None:
     """A fold's one-source pure score cone, scoped by its streaming axis."""
     bindings = _bindings(fold)
     members = (bindings[result],) if result in bindings else fold.body.backward_cone((result,)).members
@@ -59,11 +53,7 @@ def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> _Score | None:
     nodes = tuple(stmt for stmt in members if isinstance(stmt, Fold))
     if len({id(source) for source in (*used_edges, *indexed_loads, *nodes)}) != 1:
         return None
-    return _Score(Lambda(params=(fold.axis.name,), body=Body(members), results=(result,)), (*axes, fold.axis.name))
-
-
-def _same_score(left: _Score, right: _Score) -> bool:
-    return lambda_equivalent_clusters(((left.fn, left.axes), (right.fn, right.axes))) == ((0, 1),)
+    return Closure(Lambda(params=(fold.axis.name,), body=Body(members), results=(result,)), (*axes, fold.axis.name))
 
 
 def _same_axis(left: Fold, right: Fold) -> bool:
@@ -84,7 +74,7 @@ def _exp_score(defs: dict[str, object], name: str, pivots: frozenset[str]) -> st
     return None
 
 
-def _maximum(fold: Fold, axes: tuple[str, ...]) -> tuple[str, _Score] | None:
+def _maximum(fold: Fold, axes: tuple[str, ...]) -> tuple[str, Closure] | None:
     if fold.axis is None:
         return None
     ops = component_ops(fold.combine)
@@ -100,7 +90,7 @@ def _maximum(fold: Fold, axes: tuple[str, ...]) -> tuple[str, _Score] | None:
     return fold.combine.results[0], score
 
 
-def _denominator(fold: Fold, pivots: frozenset[str], score: _Score, axes: tuple[str, ...]) -> bool:
+def _denominator(fold: Fold, pivots: frozenset[str], score: Closure, axes: tuple[str, ...]) -> bool:
     if fold.axis is None:
         return False
     ops = component_ops(fold.combine)
@@ -114,7 +104,7 @@ def _denominator(fold: Fold, pivots: frozenset[str], score: _Score, axes: tuple[
     cone = fold.body.backward_cone((result,))
     return (
         candidate_score is not None
-        and _same_score(score, candidate_score)
+        and score.alpha_eq(candidate_score)
         and {id(stmt) for stmt in cone.members} == {id(stmt) for stmt in fold.body}
     )
 
@@ -234,7 +224,7 @@ def _inverse_leaf(defs: dict[str, object], leaves: tuple[str, ...], denominator:
     return f"{denominator}__inv" if len(divisors) == 1 and not bound else None
 
 
-def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) -> tuple[_Score, Body] | None:
+def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) -> tuple[Closure, Body] | None:
     cone = body.backward_cone((result,))
     varying = {axis}
     members = []
@@ -246,7 +236,7 @@ def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) ->
     if not members:
         return None
     fn = Lambda(params=(axis,), body=Body(members), results=(result,))
-    return _Score(fn, (*axes, axis)), Body(members)
+    return Closure(fn, (*axes, axis)), Body(members)
 
 
 def _assign_cone(defs: dict[str, object], root: str, stops: frozenset[str]) -> frozenset[int]:
@@ -307,7 +297,7 @@ def _normalized_exp(edge: Fold, axis: str, axes: tuple[str, ...]) -> _Normalized
     score_name = weights[0][1]
     current = _varying_score(body, score_name, axis, axes)
     reference = _score(statistic, statistic.lift.results[0], axes)
-    if current is None or reference is None or not _same_score(reference, current[0]):
+    if current is None or reference is None or not reference.alpha_eq(current[0]):
         return _decline("normalized exponential", f"the weight's score {score_name!r} is not the statistic's own score")
 
     free = set(statistic.lift.free_names()) - {*axes, statistic.axis.name}

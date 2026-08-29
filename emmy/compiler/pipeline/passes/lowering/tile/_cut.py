@@ -19,10 +19,10 @@ from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.pure.fold import Fold, _expectation_bindings, _operand_result_names, deep_defines, deep_reads, is_contraction
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.normalize import _operand_lambda, lambda_equivalent_clusters
 from emmy.compiler.ir.tile.ops import edge_dtypes
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
@@ -387,29 +387,29 @@ def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) ->
     attention's normalized K cone appears once per score contraction. Those copies are one VALUE:
     the cluster's first seam becomes the decision for all of them, carrying each duplicate as a
     sibling with its positional capture correspondence (:class:`CutSite`). Membership reuses the
-    scoped lambda alpha-equivalence the semiring canonicalization already trusts
-    (:func:`lambda_equivalent_clusters`); a member joins only when its paired axes agree on
-    extent and window, its workspace dtypes match, and every workspace axis is a mapped capture —
-    otherwise it stays its own seam."""
+    closure alpha-equivalence the semiring canonicalization already trusts
+    (:func:`~emmy.compiler.ir.pure.closure.equivalent_clusters`); a member joins only when its
+    paired axes agree on extent and window, its workspace dtypes match, and every workspace axis
+    is a mapped capture — otherwise it stays its own seam."""
     eligible = [index for index, seam in enumerate(seams) if operand_of.get(id(seam.node))]
     if len(eligible) < 2:
         return tuple(seams)
-    scoped = {index: _operand_lambda(seams[index].node, tuple(axis.name for axis in seams[index].axes)) for index in eligible}
+    scoped = {index: Closure.over_edge(seams[index].node, tuple(axis.name for axis in seams[index].axes)) for index in eligible}
     drop: set[int] = set()
     merged: dict[int, CutSite] = {}
-    for cluster in lambda_equivalent_clusters(scoped[index] for index in eligible):
+    for cluster in equivalent_clusters(scoped[index] for index in eligible):
         rep_index, *rest = (eligible[position] for position in cluster)
         if not rest:
             continue
         rep = seams[rep_index]
-        rep_params = scoped[rep_index][1]
+        rep_params = scoped[rep_index].axes
         rep_axes = {axis.name: axis for axis in rep.axes}
         if {axis.name for axis in _workspace_axes(rep, rep.node)} - set(rep_params):
             continue  # a workspace axis with no capture to map has no sibling spelling
         siblings = []
         for member_index in rest:
             member = seams[member_index]
-            member_params = scoped[member_index][1]
+            member_params = scoped[member_index].axes
             member_axes = {axis.name: axis for axis in member.axes}
             aligned = member.dtypes == rep.dtypes and all(
                 (a := rep_axes[rn]).extent == (b := member_axes[mn]).extent and a.window == b.window

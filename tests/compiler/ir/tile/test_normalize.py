@@ -11,9 +11,10 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Channel, Fold, Lambda, M, is_contraction
+from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lambda_equivalent_clusters
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.path import family_sites, sites
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
@@ -775,7 +776,7 @@ def test_contraction_preserves_computed_operand_statement_order() -> None:
     assert TileOp(op=tile.op, place=tile.place).op is tile.op
 
 
-def test_lambda_equivalent_clusters_include_captured_axes() -> None:
+def test_equivalent_clusters_include_captured_axes() -> None:
     first = Lambda(
         params=("k",),
         body=Body((Load(name="x", input="q", index=(Var("row"), Var("k"))),)),
@@ -787,7 +788,7 @@ def test_lambda_equivalent_clusters_include_captured_axes() -> None:
         results=("value",),
     )
 
-    assert lambda_equivalent_clusters(((first, ("row", "k")), (second, ("unused", "query", "depth")))) == ((0, 1),)
+    assert equivalent_clusters((Closure(first, ("row", "k")), Closure(second, ("unused", "query", "depth")))) == ((0, 1),)
 
 
 def test_total_lift_produces_canonical_contraction() -> None:

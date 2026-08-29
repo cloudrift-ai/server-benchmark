@@ -18,8 +18,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var, affine_form
+from emmy.compiler.ir.expr import affine_form
 from emmy.compiler.ir.pure import (
     Channel,
     Fold,
@@ -28,93 +27,11 @@ from emmy.compiler.ir.pure import (
     is_contraction,
 )
 from emmy.compiler.ir.pure.algebra import product_spine
+from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, operand_name, refs_axis
-from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.structural import instance_memo
-
-
-def _lambda_members(body: Body):
-    """Walk every binding inside a lambda, including Fold operand edges and algebra bodies."""
-    for stmt in body:
-        yield stmt
-        if isinstance(stmt, Fold):
-            for edge in stmt.operands:
-                if isinstance(edge, Fold):
-                    yield from _lambda_members(Body((edge,)))
-                else:
-                    yield edge
-            yield from _lambda_members(stmt.lift.body)
-        else:
-            for nested in stmt.nested():
-                yield from _lambda_members(nested)
-
-
-def _canonical_lambda(fn: Lambda, axes: Iterable[str] = ()) -> Lambda:
-    """Return an alpha-canonical lambda, including its enclosing iteration axes.
-
-    :meth:`Lambda.canonical` handles names bound by the lambda itself.  A Fold tree also needs
-    captured axes canonicalized so equivalent lifts at different tree positions compare equal.
-    Unused enclosing axes do not affect the result.
-    """
-    if any(not stmt.pure for stmt in fn.body):
-        raise ValueError("lambda canonicalization requires a pure body")
-
-    body = fn.body
-    members = tuple(_lambda_members(body))
-    reads = {name for stmt in members for name in _member_reads(stmt)}
-    bound_axes = tuple(name for stmt in members for name in stmt.binds_axes())
-    axis_order = tuple(dict.fromkeys((*axes, *bound_axes)))
-    active_axes = tuple(name for name in axis_order if name in reads or name in fn.params or name in bound_axes)
-    names = {name: f"_a{i}" for i, name in enumerate(active_axes)}
-
-    p = 0
-    for name in fn.params:
-        if name not in names:
-            names[name] = f"_p{p}"
-            p += 1
-    v = 0
-    for stmt in members:
-        for name in stmt.defines():
-            if name not in names:
-                names[name] = f"_v{v}"
-                v += 1
-
-    def rename(name: str) -> str:
-        return names.get(name, name)
-
-    sigma = Sigma({name: Var(names[name]) for name in active_axes})
-
-    def rename_axis(axis: Axis) -> Axis:
-        name = names.get(axis.name)
-        return replace(axis, name=name) if name is not None else axis
-
-    renamed = Body(stmt.rewrite(rename, sigma, rename_axis) for stmt in body)
-    return Lambda(
-        params=tuple(rename(name) for name in fn.params),
-        body=renamed,
-        results=tuple(rename(result) if isinstance(result, str) else result for result in fn.results),
-    )
-
-
-def lambda_equivalent_clusters(
-    items: Iterable[tuple[Lambda, Iterable[str]]],
-) -> tuple[tuple[int, ...], ...]:
-    """Partition scoped lambdas into alpha-equivalent clusters, in input order.
-
-    Each item is ``(lambda, enclosing-axis-names)``.  The returned indices let a later pass keep
-    its own Fold or graph metadata beside this general equivalence analysis.
-    """
-    clusters: dict[Lambda, list[int]] = {}
-    for index, (fn, axes) in enumerate(items):
-        clusters.setdefault(_canonical_lambda(fn, axes), []).append(index)
-    return tuple(tuple(cluster) for cluster in clusters.values())
-
-
-def _operand_lambda(operand, axes: tuple[str, ...]) -> tuple[Lambda, tuple[str, ...]]:
-    params = tuple(axis for axis in axes if edge_refs_axis(operand, axis))
-    return Lambda(params=params, body=Body((operand,)), results=(operand_name(operand),)), params
 
 
 def _operand_roles(operand, axes: tuple[str, ...]) -> frozenset[str]:
@@ -259,7 +176,7 @@ def _orient_shared(pairs: list[tuple], product, axes: tuple[str, ...]) -> list[t
         return pairs
 
     candidates = tuple(edge for pair in pairs for edge in pair)
-    clusters = lambda_equivalent_clusters(_operand_lambda(edge, axes) for edge in candidates)
+    clusters = equivalent_clusters(Closure.over_edge(edge, axes) for edge in candidates)
     complete = [cluster for cluster in clusters if {index // 2 for index in cluster} == set(range(len(pairs)))]
     if not complete:
         return pairs
@@ -339,7 +256,7 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
     if not body.defs_die_at(members, roots=roots, allowed=form.products):
         return fold
 
-    a_clusters = lambda_equivalent_clusters(_operand_lambda(candidate, all_axes) for candidate, _ in pairs)
+    a_clusters = equivalent_clusters(Closure.over_edge(candidate, all_axes) for candidate, _ in pairs)
     member_sets = {name: {id(stmt) for stmt in cone_members} for name, (_, cone_members) in extracted.items()}
     names = tuple(member_sets)
     shared_names = {operand_name(candidate) for candidate, _ in pairs}
@@ -900,6 +817,5 @@ def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[
 
 
 __all__ = [
-    "lambda_equivalent_clusters",
     "normalize_fold_tree",
 ]

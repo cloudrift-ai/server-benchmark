@@ -21,18 +21,28 @@ result; no host-specific duration file was copied from the remote run.
 | --- | ---: | ---: | --- |
 | `attention/sdpa-computed-value-cut-mma.yaml` | 6.2 µs | 8.0 µs | Correct, two launches, 1.29x faster than `torch.compile` |
 | `matmul/f16-cut-splitk-unit-row.yaml` | 9.1 µs | 2.9 µs | Correct after the public-rounding fix; 3.14x slower |
-| `attention/rmsnorm-gqa-b-cut.yaml` | 38.1 µs | 10.1 µs | Bounded search reached about 24.3 µs; still a loss |
-| `matmul/f16-mma-broadcast-batched-pv-transpose.yaml` | 79.0 µs | 12.0 µs | Bounded search reached 19.845 µs; still a loss |
+| `attention/rmsnorm-gqa-b-cut.yaml` | 38.1 µs | 10.1 µs | Exact strict finalist reached 28.644 µs; still a loss |
+| `matmul/f16-mma-broadcast-batched-pv-transpose.yaml` | 79.0 µs | 12.0 µs | Exact strict finalist reached 19.777 µs; still a loss |
 | `attention/rmsnorm-gqa-sdpa-stat-fill.yaml` | — | — | Greedy kernel exceeded the two-second per-iteration watchdog |
 
-The two bounded improvements are search observations, not promoted timings. The split-K search had previously found a
-3.26 µs kernel row that failed strict correctness on 3/64 elements. After the compiler fix, the authored three-launch
-case passes strict correctness; its canonical 100-iteration perf result is the 9.1 µs row above, so it still loses.
+The two bounded improvements are search observations, not promoted timings. The PV finalist repeated at 19.784 and
+19.777 µs versus 12.009 µs for `torch.compile`. It launches 64 CTAs with 256 threads, 48 KiB shared memory, 126
+registers per thread, and 25% theoretical occupancy. Its eight f32 accumulator fragments end in 32 scalar stores per
+thread because the algebraic output axis has physical stride 512; alternate geometry and deeper-pipeline canaries were
+slower. Closing the remaining 7.77 µs requires a shared transpose epilogue or contraction-orientation change, not
+another ordinary schedule row. The GQA finalist measured 28.644 µs versus 10.075 µs for `torch.compile`; its 64-CTA,
+four-thread consumer recomputes Q RMSNorm state inside the score and value loops and softmax statistics across output
+lanes. It needs a reuse or materialization redesign.
+
+The split-K search had previously found a 3.26 µs kernel row that failed strict correctness on 3/64 elements. After
+the compiler fix, the authored three-launch case passes strict correctness; its canonical 100-iteration perf result is
+the 9.1 µs row above, so it still loses.
 
 The watchdog is a separate compiler-quality gap. Stage 07 duplicates the Q RMSNorm work that Stage 06 shares: the Fold
 count grows from two to five and the `rsqrt` count from five to eight when a provider with iteration-bearing axes is
 sunk across contraction and sweep binders. A guard-only change breaks four neighbouring attention cases, while the
-known complete correction spans the projection-closing design. No unsafe local patch was retained.
+known complete correction spans projection closure, lexical provider environments, root-scoped dtype inference, and
+affected schedule identities. No unsafe local patch was retained.
 
 ### Affected model targets
 
@@ -51,8 +61,10 @@ encoding: they also reach the unsplit sibling, and one combined value would forc
 that need different rows. The durable representation must record the exact parent identity and structural choice in
 sequence, then join each resulting child identity to its exact schedule row. Reusing the pre-split identity or
 skipping structural forks would weaken the existing fail-closed contract, so the experimental replay change was
-reverted. A bounded V100 retune confirms the impact: it can select `PLACE=cut`, but cannot express schedules for the
-resulting children and stops at a 282.702 µs placement-only row.
+reverted. A follow-up atomic-receipt prototype rejected an incomplete child set correctly, but the tune DB and online
+writer cannot emit the ordered parent-to-final-children join; retaining only its decoder would create a hand-authored
+verified-only path. A bounded V100 retune confirms the impact: it can select `PLACE=cut`, but cannot express schedules
+for the resulting children and stops at a 282.702 µs placement-only row.
 
 The A100 consumer remains limited by code generation rather than ordinary schedule selection. Its qualified row uses
 128 threads, 155 registers per thread, and 48 KiB shared memory. A narrow register-repack prototype removed the 8 KiB

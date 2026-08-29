@@ -299,12 +299,12 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         other = tuple(edge for edge in op.operands if edge is not root)
         closed_root, consumed = _close_cell_providers(root, other) if tiled else (None, frozenset())
         projection_reads = op.body.backward_cone(_operand_result_names(op)).external_reads
-        siblings = [
-            stmt
-            for edge in other
-            if id(edge) not in consumed or set(_operand_result_names(edge)) & projection_reads
-            for stmt in _emit(edge, ctx).body
-        ]
+        siblings = []
+        for edge in other:
+            required = set(_operand_result_names(edge)) & projection_reads
+            projection_edge = _provider_slice(edge, required) if id(edge) in consumed and required else edge
+            if id(edge) not in consumed or required:
+                siblings.extend(_emit(projection_edge, ctx).body)
         proj = [*siblings, *_emit_body(op.body, ctx, output_specs)]
         region_results = _projection_results(op.body)
         root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= region_results)

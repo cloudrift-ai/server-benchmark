@@ -70,11 +70,13 @@ the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step
 need to be a statement to get there. The tree already carries it: a composed node is an entry in
 `operands`, and its position is produced by the derivation — `_twisted_derived_step` PLACES each
 inline-node edge before the first stmt that reads its bound name (lift body or merge), and
-`splice_operands` applies the same first-use rule to every other edge. Placement, not prepending, is
-what lets a step whose pure prologue precedes its producer (a loop-invariant scale `Load` ahead of
-attention's score contraction) re-derive to the program it was read from. `Fold.loop` passes that
-mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the only place terms become statements
-is `Fold.lower()`.
+`splice_operands` applies the same first-use rule to every other edge. A sibling edge that provides a
+value to another operand inherits that consumer's insertion point and precedes it; otherwise the
+provider could land after its only use when the projection body reads only the consumer. Placement,
+not prepending, is what lets a step whose pure prologue precedes its producer (a loop-invariant scale
+`Load` ahead of attention's score contraction) re-derive to the program it was read from. `Fold.loop`
+passes that mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the only place terms become
+statements is `Fold.lower()`.
 
 `Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
 children, `rewrite()` for α-renaming, and `defines()` for its result names.

@@ -22,6 +22,7 @@ alone.
 
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 
@@ -38,18 +39,51 @@ from emmy.compiler.ir.stmt.base import _axis_identity
 
 def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
     """Splice each operand edge's producing stmts into ``stmts`` immediately BEFORE the first stmt
-    that reads the operand's bound name (appended when nothing reads it), ties resolved in operand
-    TUPLE order. This is the one lowering rule that turns the stored operands + derived step back
-    into the flat loop body — deterministic, so the derived loop (and with it ``Op.cache_key``)
-    depends only on the stored params."""
+    that reads the operand's bound name, directly or through another operand. A provider inherits
+    its dependent's insertion point and precedes it; otherwise an unread edge appends. Independent
+    ties retain operand TUPLE order. This is the one lowering rule that turns the stored operands +
+    derived step back into the flat loop body — deterministic, so the derived loop (and with it
+    ``Op.cache_key``) depends only on the stored params."""
     operands = _unique_edges(operands)
     if not operands:
         return stmts
-    at: dict[int, list] = {}
-    for edge in operands:  # first-use indexes against the ORIGINAL stmts — ties keep tuple order
+
+    results = tuple(frozenset(_operand_result_names(edge)) for edge in operands)
+    dependencies = []
+    for index, edge in enumerate(operands):
+        body = Body(operand_body(edge))
+        external = body.backward_cone(_operand_result_names(edge)).external_reads
+        dependencies.append(tuple(provider for provider, names in enumerate(results) if provider != index and names & external))
+
+    incoming = [set(providers) for providers in dependencies]
+    outgoing: list[list[int]] = [[] for _ in operands]
+    for dependent, providers in enumerate(dependencies):
+        for provider in providers:
+            outgoing[provider].append(dependent)
+    ready = [index for index, providers in enumerate(incoming) if not providers]
+    heapq.heapify(ready)
+    order: list[int] = []
+    while ready:
+        index = heapq.heappop(ready)
+        order.append(index)
+        for dependent in outgoing[index]:
+            incoming[dependent].remove(index)
+            if not incoming[dependent]:
+                heapq.heappush(ready, dependent)
+    if len(order) != len(operands):
+        raise ValueError("operand edges form a cyclic provider dependency")
+
+    indexes = []
+    for edge in operands:
         names = set(_operand_result_names(edge))
-        idx = next((i for i, st in enumerate(stmts) if names & deep_reads([st])), len(stmts))
-        at.setdefault(idx, []).append(edge)
+        indexes.append(next((i for i, st in enumerate(stmts) if names & deep_reads([st])), len(stmts)))
+    for dependent in reversed(order):
+        for provider in dependencies[dependent]:
+            indexes[provider] = min(indexes[provider], indexes[dependent])
+
+    at: dict[int, list] = {}
+    for index in order:
+        at.setdefault(indexes[index], []).append(operands[index])
     out: list[Stmt] = []
     for i, st in enumerate((*stmts, None)):
         for edge in at.get(i, ()):

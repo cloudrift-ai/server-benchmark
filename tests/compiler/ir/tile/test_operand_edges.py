@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
+from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name, splice_operands
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
@@ -85,6 +85,18 @@ def test_single_channel_node_is_the_plain_matmul() -> None:
 
 
 # --- inline computed operands ------------------------------------------------------------------- #
+
+
+def test_splice_orders_a_sibling_provider_before_its_consumer() -> None:
+    """A provider used only by another operand still precedes that dependent operand."""
+    provider = Fold.projection(body=Body((Load(name="raw", input="x", index=()), Assign(name="scale", op="rsqrt", args=("raw",)))))
+    consumer = Fold.projection(body=Body((Assign(name="weighted", op="multiply", args=("value", "scale")),)))
+    independent = Fold.projection(body=Body((Assign(name="offset", op="copy", args=("bias",)),)))
+    projection = (Assign(name="out", op="add", args=("weighted", "offset")),)
+
+    lowered = splice_operands((consumer, independent, provider), projection)
+
+    assert [stmt.defines()[-1] for stmt in lowered] == ["offset", "raw", "scale", "weighted", "out"]
 
 
 def test_a_computed_operand_is_stored_inline_and_flattens_on_the_edge() -> None:

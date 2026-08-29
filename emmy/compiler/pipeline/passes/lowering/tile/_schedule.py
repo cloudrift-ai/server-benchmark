@@ -68,8 +68,8 @@ from emmy.compiler.ir.tile.path import SLICE_FAMILIES, sites
 from emmy.compiler.pipeline.fork import Fork, iter_leaves
 from emmy.compiler.pipeline.knob import axis_of, schedule_pin_fingerprint
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_axis_step, split_addressable
+from emmy.compiler.pipeline.passes.lowering._packed import match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.passes.lowering.tile import _staging as staging
-from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.passes.lowering.tile._tree import children, walk
 from emmy.compiler.pipeline.search.space import (
     F16_MMA_F32_ACC,
@@ -382,7 +382,7 @@ def _fill_options(
         # those siblings — so a copy spelling there names the byte slab and nothing else.
         want = Stage.parse(pin)
         if want.transport != "smem":
-            if packed and want.transport in ("smem-async", "smem-tma"):
+            if _packed_byte_slab_row(facts, pin):
                 # The packed cone really does have those siblings, so a copy spelling here names
                 # the byte slab and nothing else. Its refusal is per-PLAN like the depths below:
                 # the slab is sized by this tile's geometry, so a sibling plan may still resolve it.

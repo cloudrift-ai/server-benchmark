@@ -26,7 +26,7 @@ from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
-from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_b_node
+from emmy.compiler.pipeline.passes.lowering._packed import match_packed_b_node
 from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 from tests.compiler.helpers import requires_cuda
 
@@ -677,7 +677,7 @@ def test_the_pair_reading_splits_each_side_into_codes_scale_and_residue():
     """What the cell takes: the packed codes, the RAW block-scale load, and the k-invariant factor
     the epilogue applies. The per-tensor scale is that residue — it is the one part of the
     operand's chain the instruction has no operand for."""
-    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_pair_node
+    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_pair_node
 
     node, inputs, _axes = _pair_node()
     pair = match_packed_pair_node(node, inputs)
@@ -720,7 +720,7 @@ def _fused_pair_node(*, m=512, n=4096, k=4096, block=16):
 def test_the_pair_reading_takes_a_fused_two_channel_node():
     """Sharing is arity: a fused gate\u2297up edge is the two-channel case of the same reading, not a
     shape the cell declines. Refusing it kept that node off the packed path entirely."""
-    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_pair_node
+    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_pair_node
 
     node, inputs, _axes = _fused_pair_node()
     pair = match_packed_pair_node(node, inputs)
@@ -736,7 +736,7 @@ def test_the_pair_reading_takes_a_fused_two_channel_node():
 def test_the_pair_reading_declines_a_fused_node_whose_channels_disagree_on_block():
     """One block extent per node: the cell applies one scale per block per side and has a single
     block size, so channels spelled at different extents keep the decode-based readings."""
-    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_pair_node
+    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_pair_node
 
     node, inputs, _axes = _fused_pair_node()
     mixed = Fold.contraction(
@@ -755,7 +755,7 @@ def test_the_pair_reading_declines_a_fused_node_whose_channels_disagree_on_block
 def test_a_packed_weight_beside_a_materialized_a_is_not_a_pair():
     """The single-sided shape answers ``None`` here and keeps its own reading — the k16 drain,
     which decodes the weight into 16-bit fragments against a 16-bit activation."""
-    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_pair_node
+    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_pair_node
 
     node, inputs, _axes = _node()
     assert match_packed_pair_node(node, inputs) is None

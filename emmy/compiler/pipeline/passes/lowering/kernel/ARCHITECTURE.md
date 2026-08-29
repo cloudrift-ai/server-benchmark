@@ -258,6 +258,14 @@ forms use the synchronous compute fill because the gmem-direct and single-sided 
 single-channel. The block-scaled fp4 cell is the exception: it carries N channels on cp.async, staging `2 + 2N` slabs
 over the one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
 
+**A bridged seam value keeps its own dtype.** A computed operand's cone splits at its K seam into a row-invariant
+prologue and a per-cell body, and the prologue publishes its results through smem rows the cell reads back — so
+those rows are the only place a bridged value's dtype is declared (`cone_stat_dtypes`, typed the way `edge_dtypes`
+types an edge's results; a name whose statement kind carries no dtype keeps the float default). Declaring every row
+`float` decides the CELL's arithmetic too: a value that crosses as an integer — a pack's shift amount, a nibble
+mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
+rather than computing something wrong.
+
 **Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
 sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
 16-element chunks. ldmatrix is b16-only below sm_100a, so the drain is a **cooperative byte gather** instead

@@ -30,7 +30,7 @@ from emmy.compiler.ir.schedule import Stage, TilePlan
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
-from emmy.compiler.pipeline.passes.lowering.tile._packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
+from emmy.compiler.pipeline.passes.lowering._packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
 # at 4 so it stays within the 5-dim limit.

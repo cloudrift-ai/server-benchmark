@@ -5,9 +5,10 @@ quantize→dequantize round trip into the graph as shared-vocabulary algebra, ne
 cone the weight speller spells. The program's own meaning then becomes Σ x̂·ŵ, and the numpy
 backend is the parity oracle for every lowering of it. These tests hold the CUDA lowering to that
 oracle: no pass below the frontend knows the checkpoint format, and no lowering code is specific
-to this chain — the generic readings compute it. The block-scaled tensor-core atom that would
-multiply the packed codes directly exists and is not offered yet; when its offer lands, these
-same oracles hold it.
+to this chain — the generic readings compute it. The block-scaled tensor-core atom that multiplies
+the packed codes directly is offered on this shape, and the same oracles hold it — to a tolerance
+rather than exactly, because the instruction takes the raw e4m3 block scale where the declared
+program applies the two levels fused (see the tolerance the device tests below declare).
 """
 
 from __future__ import annotations
@@ -216,7 +217,7 @@ def _edge_readings(tile, con):
     """``(activation, weight)`` — each operand edge's packed k-block reading, or ``None`` where the
     edge does not read as one."""
     from emmy.compiler.ir.pure.fold import operand_body
-    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_kblock_b
+    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_kblock_b
 
     return tuple(match_packed_kblock_b(list(operand_body(e)), con.axis.name, tile.inputs) for e in (con.a, con.channels[0].b))
 

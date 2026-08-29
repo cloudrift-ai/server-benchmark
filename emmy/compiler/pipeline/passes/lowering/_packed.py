@@ -9,9 +9,13 @@ It reads a SHAPE, never a checkpoint format: a packed-pair storage dtype (``logi
 a data-dependent gather into a pair-value table, and a scale factor whose every ``k`` reference is
 block-guarded. Any weight spelled that way is recognized; nothing here names a quantization scheme.
 
-Kept beside the lift rather than inside it: the shape is a CONSUMER'S reading of an already-built
-contraction (``TileOp`` post-init binds the computed B as a plain projection, and this asks what
-that projection contains), not one of the stages that build the tree.
+It is a CONSUMER'S reading of an already-built contraction — ``TileOp`` post-init binds the computed
+B as a plain projection, and this asks what that projection contains — so it is not one of the
+stages that build the tree, and it does not belong inside one.
+
+It lives in ``lowering/`` for the reason :mod:`._addr` does: its three consumers straddle the
+enumeration and assembly layers, and a reading both need cannot sit inside either without the
+other importing across that boundary.
 """
 
 from __future__ import annotations

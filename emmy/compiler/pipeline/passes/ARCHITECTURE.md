@@ -364,7 +364,7 @@ place, and one read from outside the region, whose value has to be stored for th
 
 That is a boundary-placement rule, not a lowering-driven exception. It asks only which side a value's readers are on,
 and it is what lets a contraction see a packed operand's two scale levels — the raw per-block byte and the k-invariant
-per-tensor factor — as separate loads, the shape `lowering/tile/_packed.py` reads and the block-scaled tensor-core cell
+per-tensor factor — as separate loads, the shape `lowering/_packed.py` reads and the block-scaled tensor-core cell
 requires. Materializing the fused product instead does not merely cost bytes; it erases the block structure from the
 consumer's index, and a reading that cannot prove k-block invariance declines.
 

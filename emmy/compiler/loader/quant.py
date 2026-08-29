@@ -53,6 +53,7 @@ from pathlib import Path
 import numpy as np
 
 from emmy.compiler.dtype import (  # noqa: F401 — re-exported; the LUTs' home is the dtype layer
+    F4_VALUES,
     F8E4M3,
     F4E2M1x2,
     decode_f4x2,
@@ -347,8 +348,8 @@ def decode_mxfp4(blocks: np.ndarray, scales: np.ndarray) -> np.ndarray:
     if blocks.ndim < 3 or blocks.shape[-1] != 16 or scales.shape != blocks.shape[:-1]:
         raise ValueError(f"MXFP4 storage geometry mismatch: blocks={blocks.shape}, scales={scales.shape}")
     nibbles = np.stack((blocks & np.uint8(0xF), blocks >> np.uint8(4)), axis=-1).reshape(*blocks.shape[:-1], 32)
-    values = np.asarray((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0))
-    decoded = np.ldexp(values[nibbles], scales.astype(np.int32)[..., None] - 127)
+    # MXFP4 shares e2m1's value table with NVFP4; only the block size and the scale format differ.
+    decoded = np.ldexp(np.asarray(F4_VALUES)[nibbles], scales.astype(np.int32)[..., None] - 127)
     dense = decoded.reshape(*blocks.shape[:-2], blocks.shape[-2] * 32)
     return np.swapaxes(dense, -2, -1).astype(np.float32)
 
@@ -1324,41 +1325,35 @@ def _dynamic_activation_declaration(qc: dict | None) -> tuple[bool, str | None]:
     return False, None
 
 
-def _cone_storage_formats(graph: Graph, start: str) -> set[str]:
-    """Return FP8 storage dtypes reachable upstream from one graph buffer."""
-    pending = [start]
-    seen: set[str] = set()
-    formats: set[str] = set()
+def _cone_nodes(graph: Graph, start: str):
+    """Every node upstream of buffer ``start``, each yielded once.
+
+    The one walk the cone readings below share; each applies its own predicate per node, and the
+    ones answering a yes/no question stop the walk early by breaking out of the generator."""
+    pending, seen = [start], set()
     while pending:
-        buf = pending.pop()
-        node = graph.producer(buf)
+        node = graph.producer(pending.pop())
         if node is None or node.id in seen:
             continue
         seen.add(node.id)
-        if isinstance(node.op, ConstantOp):
-            dtype = node.output.dtype.name
-            if dtype in F8_SAFETENSORS_DTYPES.values():
-                formats.add(dtype)
+        yield node
         pending.extend(node.inputs)
-    return formats
+
+
+def _cone_storage_formats(graph: Graph, start: str) -> set[str]:
+    """Return FP8 storage dtypes reachable upstream from one graph buffer."""
+    return {
+        name
+        for node in _cone_nodes(graph, start)
+        if isinstance(node.op, ConstantOp) and (name := node.output.dtype.name) in F8_SAFETENSORS_DTYPES.values()
+    }
 
 
 def _cone_has_fp8_encode(graph: Graph, start: str) -> bool:
     """Whether an activation buffer is already downstream of an FP8 encode."""
     from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
 
-    pending = [start]
-    seen: set[str] = set()
-    while pending:
-        buf = pending.pop()
-        node = graph.producer(buf)
-        if node is None or node.id in seen:
-            continue
-        seen.add(node.id)
-        if isinstance(node.op, ElementwiseOp) and node.op.op.name.startswith("to_f8"):
-            return True
-        pending.extend(node.inputs)
-    return False
+    return any(isinstance(n.op, ElementwiseOp) and n.op.op.name.startswith("to_f8") for n in _cone_nodes(graph, start))
 
 
 def _fresh_buffer_name(graph: Graph, base: str) -> str:
@@ -1507,17 +1502,11 @@ def _cone_fp4_weight_base(graph: Graph, start: str) -> str | None:
     """The checkpoint module base (the ``.weight`` key minus its suffix) of the ONE packed NVFP4
     weight constant upstream of buffer ``start``, or ``None`` — no packed weight, several, or a
     source path outside the ``<module>.weight`` pairing that ``input_scale`` siblings follow."""
-    pending = [start]
-    seen: set[str] = set()
-    paths: set[str] = set()
-    while pending:
-        node = graph.producer(pending.pop())
-        if node is None or node.id in seen:
-            continue
-        seen.add(node.id)
-        if isinstance(node.op, ConstantOp) and node.output.dtype.name == F4E2M1x2.name and node.op.source_path:
-            paths.add(node.op.source_path)
-        pending.extend(node.inputs)
+    paths = {
+        node.op.source_path
+        for node in _cone_nodes(graph, start)
+        if isinstance(node.op, ConstantOp) and node.output.dtype.name == F4E2M1x2.name and node.op.source_path
+    }
     if len(paths) != 1:
         return None
     path = next(iter(paths))
@@ -1528,17 +1517,7 @@ def _cone_has_fp4_encode(graph: Graph, start: str) -> bool:
     """Whether an activation buffer is already downstream of an e2m1 encode (idempotency)."""
     from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
 
-    pending = [start]
-    seen: set[str] = set()
-    while pending:
-        node = graph.producer(pending.pop())
-        if node is None or node.id in seen:
-            continue
-        seen.add(node.id)
-        if isinstance(node.op, ElementwiseOp) and node.op.op.name == "to_f4e2m1":
-            return True
-        pending.extend(node.inputs)
-    return False
+    return any(isinstance(n.op, ElementwiseOp) and n.op.op.name == "to_f4e2m1" for n in _cone_nodes(graph, start))
 
 
 def _spell_static_fp4_quantize(
@@ -1646,7 +1625,7 @@ def _spell_static_fp4_decode(graph: Graph, quant: tuple[str, str, str, str], dty
     """Spell ONE consumer's reconstruction over a shared quantized activation and return its
     restored buffer.
 
-    The shape is the packed weight constant's own decode chain (:func:`_spell_nvfp4_weight`): a
+    The shape is the packed weight constant's own decode chain (:func:`_spell_fp4_one`): a
     pair-table gather over the packed codes, times the block scale, with the two scale levels
     multiplied in f32 and rounded once to f16 (:func:`fuse_nvfp4_scales` parity). Spelled per
     consumer rather than shared, so each marked matmul carries both operands in that one

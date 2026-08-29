@@ -215,7 +215,7 @@ def _offered_atoms(tile, ctx, node):
     layers; spelled here the way ``_site_facts`` spells it, so this helper asks the two functions
     the same question the enumerator asks them."""
     from emmy.compiler.ir.tile.ops import projection_tail
-    from emmy.compiler.pipeline.passes.lowering.tile._packed import match_packed_b_node, match_packed_pair_node
+    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_b_node, match_packed_pair_node
 
     tail = projection_tail(tile)
     packed = (match_packed_b_node(node, tile.inputs), match_packed_pair_node(node, tile.inputs))

@@ -59,6 +59,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, S
 from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat_dtypes, make_cone
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
+from emmy.compiler.pipeline.passes.lowering._packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -76,7 +77,6 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     sync_stat_fill,
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import AxisOffset
-from emmy.compiler.pipeline.passes.lowering.tile._packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.search.space import UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``

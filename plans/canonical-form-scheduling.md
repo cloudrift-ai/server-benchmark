@@ -43,6 +43,21 @@ historically built term, with names minted from the canonical walk (the same can
 - One final re-spelling of persisted golden rows into the canonical vocabulary (a codec migration with a
   re-spelling story, like the identity re-key executed in the body-identity PR).
 
+## Measured state of greedy compile reuse (2026-08-29, RTX 5090 box, 512-cubed f16 matmul synthetics)
+
+- ONE unique kernel costs ~9s of tile-level greedy compile (enumeration + cut-piece pricing) — the dominant,
+  per-unique-shape cost no reuse cache can touch.
+- Truly identical sibling layers are ALREADY amortized: 8 identical matmuls cost 10.7s vs 9.1s for one
+  (~0.24s marginal per twin; the pool memo hits 7/7 and the pool-id-keyed decision memo replays the pick).
+- The structural-pricing memo was the real hole: keyed on the term hash it re-priced every mirror cut piece
+  (a depth-i prefix cone vs a depth-i suffix cone — same computation, different term-axis ranges). Re-keyed on
+  the exact deploy identity it collapses 31 -> 16 probes and 18.4s -> 10.6s on a 16-layer chain (landed).
+- A session-scoped lowered-kernel artifact cache (the "global kernel cache" idea) therefore only pays where the
+  SAME kernel shape recurs across DIFFERENT programs in one session; program-level recurrence is already covered
+  by the plan cache, and bucketed serving programs mostly differ in shape. Measure real cross-program identity
+  overlap on a serve boot before building it; the remaining within-program twin residual (~0.24s: leaf descent +
+  materialize + glue) is the bound on what a twin-fill mechanism can win.
+
 ## Second follow-up: freeze `Op`
 
 `Op.__setattr__` now makes the io maps immutable in place and invalidates the one identity cache on reassignment —

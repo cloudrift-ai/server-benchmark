@@ -41,6 +41,7 @@ from emmy.compiler.ir.kernel.ir import (
     EpilogueLoad,
     FragmentApply,
     FragmentPromote,
+    FragmentRepack,
     FragmentRowReduce,
     LdmatrixLoad,
     MmaSyncPtx,
@@ -332,6 +333,7 @@ def _staged_inner_atom_loop(
     byte_slabs=None,
     pads=None,
     frag_ns: str = "",
+    resident_a: tuple[tuple[str, ...], ...] | None = None,
 ) -> list[Stmt]:
     """The inner atom-K drain shared by every staged path: read the A/B ``slabs`` via
     ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. The leaf uses modern ``ldmatrix`` instructions
@@ -364,6 +366,10 @@ def _staged_inner_atom_loop(
     ``ldm = bk_elems``) and drains via the plain (no ``.trans``) ldmatrix — the
     ``LdmatrixLoad(b_trans=True)`` staged path. Always ``False`` for A.
 
+    ``resident_a`` replaces the A-slab load with the m16n8k16 C→A register repack. Each row carries
+    two adjacent C fragments per inner atom-K step. This is deliberately narrower than staging:
+    the producer and consumer already proved the common lane map before entering this leaf.
+
     ``byte_slabs`` (per-slab, aligned with ``slabs``): a 1-byte (fp8) slab — ldmatrix is b16-only
     below sm_100a, so its drain is the cooperative per-lane byte gather instead
     (``LdmatrixLoad(byte_slab=True)`` — the gmem fragment-loader lane map pointed at the slab; a
@@ -382,21 +388,23 @@ def _staged_inner_atom_loop(
     # atom dim, slot row off, swizzle, byte flag). A stacks the tile axis on the slab row (K the
     # col); B swaps (K the row, tile the col) — unless its slab is transposed (N-major: tile the
     # row, K the col, like A); the slot offset always lands on the ROW. All share ONE emission loop.
-    specs = [
-        (
-            lambda x: f"{frag_ns}_a{x}",
-            "a",
-            a_slab,
-            bk_elems + pads[0],
-            True,
-            m.reg,
-            m.unit,
-            atom_m,
-            offs[0],
-            swizzles[0],
-            byte_slabs[0],
+    specs = []
+    if resident_a is None:
+        specs.append(
+            (
+                lambda x: f"{frag_ns}_a{x}",
+                "a",
+                a_slab,
+                bk_elems + pads[0],
+                True,
+                m.reg,
+                m.unit,
+                atom_m,
+                offs[0],
+                swizzles[0],
+                byte_slabs[0],
+            )
         )
-    ]
     for f, bs in enumerate(b_slabs):
         frag_of = (lambda ff: lambda x: _fold_frag(f"{frag_ns}_b{x}", ff))(f)
         tr = trans[1 + f]
@@ -443,6 +451,22 @@ def _staged_inner_atom_loop(
             for i in range(m.reg)
             for j in range(n.reg)
         ]
+
+    if resident_a is not None:
+        assert reg_depth == 1, "the register-resident A seam has one fragment buffer"
+        stmts: list[Stmt] = []
+        for step in range(n_steps):
+            stmts.extend(
+                FragmentRepack(
+                    frag=f"{frag_ns}_a{i}",
+                    srcs=(row[2 * step], row[2 * step + 1]),
+                    ab_dtype=atom.ab_dtype,
+                )
+                for i, row in enumerate(resident_a)
+            )
+            stmts.extend(ldms(Literal(step * atom_k, "int"), ""))
+            stmts.extend(mmas(""))
+        return stmts
 
     if reg_depth < 2 or n_steps < 2:  # single-buffer: the inline fragment-load → mma loop
         body = ldms(Var(ki), "") + mmas("")
@@ -1261,7 +1285,7 @@ class _MmaOps(_AtomOps):
             out.append(t.dtype if t is not None and t.dtype.nbytes == 1 else dt)
         return tuple(out)
 
-    def staged_drain(self, operands, slot, cells, offset, mn):
+    def staged_drain(self, operands, slot, cells, offset, mn, resident_a=None):
         """The mma slab drain — the fragment-load + ``mma.sync`` leaf reading ring ``slot``
         (:func:`_staged_inner_atom_loop`; the cells ride ``mn``'s reg counts, so ``cells`` /
         ``offset`` are unused here). Each slab's swizzle mode rides its operand (``NONE`` on the
@@ -1270,19 +1294,36 @@ class _MmaOps(_AtomOps):
         instead of ldmatrix, its row pad riding the drain ``ldm``. An f16-accumulate
         atom promote-folds its packed f16 fragments into the f32 shadows once per drain — the
         bk chunk IS the promote cadence (the last chunk's fold doubles as the final one)."""
+        if resident_a is None:
+            slabs = tuple(op.slab for op in operands)
+            offs = tuple(op.slot_row(slot) for op in operands)
+            swizzles = tuple(getattr(op, "swizzle", "NONE") for op in operands)
+            trans = tuple(getattr(op, "trans", False) for op in operands)
+            byte_slabs = tuple((getattr(op, "elem_bytes", None) or self.tile.atom.operand_dtype("a").nbytes) == 1 for op in operands)
+            pads = tuple(getattr(op, "pad_cols", 0) for op in operands)
+        else:
+            assert len(operands) == 1, "the register-resident A seam stages only the B operand"
+            (b_op,) = operands
+            slabs = (None, b_op.slab)
+            offs = (None, b_op.slot_row(slot))
+            swizzles = ("NONE", getattr(b_op, "swizzle", "NONE"))
+            trans = (False, getattr(b_op, "trans", False))
+            byte_slabs = (False, (getattr(b_op, "elem_bytes", None) or self.tile.atom.operand_dtype("b").nbytes) == 1)
+            pads = (0, getattr(b_op, "pad_cols", 0))
         stmts = _staged_inner_atom_loop(
-            slabs=tuple(op.slab for op in operands),
-            offs=tuple(op.slot_row(slot) for op in operands),
+            slabs=slabs,
+            offs=offs,
             mn=mn,
             atom=self.tile.atom,
             bk_elems=self.stage.bk_elems,
             ki="_ki",
             reg_depth=self.stage.reg_depth,
-            swizzles=tuple(getattr(op, "swizzle", "NONE") for op in operands),
-            trans=tuple(getattr(op, "trans", False) for op in operands),
-            byte_slabs=tuple((getattr(op, "elem_bytes", None) or self.tile.atom.operand_dtype("a").nbytes) == 1 for op in operands),
-            pads=tuple(getattr(op, "pad_cols", 0) for op in operands),
+            swizzles=swizzles,
+            trans=trans,
+            byte_slabs=byte_slabs,
+            pads=pads,
             frag_ns=self.frag_ns,
+            resident_a=resident_a,
         )
         if _f16acc(self.tile.atom):
             stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.channels), self.frag_ns)]
@@ -1728,6 +1769,38 @@ def _projection_finalize(tail: tuple, carried: dict[str, Value], target: Value) 
     return body
 
 
+def _repacked_a_fragments(
+    weight: Value,
+    *,
+    producer_tile: TilePlan,
+    consumer_tile: TilePlan,
+    stage: Stage,
+    static_k: bool,
+) -> tuple[tuple[str, ...], ...] | None:
+    """Return the fragment rows for the exact legal C-to-A register handoff."""
+    producer, consumer = producer_tile.atom, consumer_tile.atom
+    if (
+        weight.kind != FRAG
+        or not isinstance(producer, AtomKind)
+        or not isinstance(consumer, AtomKind)
+        or producer != consumer
+        or not producer.c_to_a_repack
+        or producer.operand_dtype("c") != F32
+        or producer.ab_dtype not in ("f16", "bf16")
+        or producer_tile.m != consumer_tile.m
+        or not static_k
+        or stage.reg_depth != 1
+        or stage.bk_elems < consumer.atom_k
+        or stage.bk_elems % consumer.atom_k
+    ):
+        return None
+    n_steps = stage.bk_elems // consumer.atom_k
+    rows = weight.data
+    if len(rows) != consumer_tile.m.reg or any(len(row) != 2 * n_steps for row in rows):
+        return None
+    return rows
+
+
 def _fold_staged(
     ops: _AtomOps,
     fold: Fold,
@@ -1917,32 +1990,40 @@ def _fold_staged(
         names = tuple(tuple(f"_fold_partial_{index}_{i}_{r}" for r in range(lay.rows_per_lane)) for i in range(active_tile.m.reg))
         reduced, partial[stmt.name] = _row_value(value, stmt.op, names, lay.reduce_group)
         producer_body.extend(reduced)
-    producer_body.extend(
-        RegStore(
-            dst_buffer="_a_smem",
-            dst_index=(
-                BinaryExpr("-", bases[i][j][0], row_base),
-                BinaryExpr("-", bases[i][j][1], k0),
-            ),
-            frag=weight.data[i][j],
-            shape=active_tile.atom.shape,
-            ldm=bk,
-            swizzle=swizzles[0],
-            fragment_layout=active_tile.atom.fragment_layout,
-            row_dim=0,
-            col_dim=1,
-        )
-        for i in range(len(weight.data))
-        for j in range(len(weight.data[i]))
+    resident_a = _repacked_a_fragments(
+        weight,
+        producer_tile=active_tile,
+        consumer_tile=tile,
+        stage=stage,
+        static_k=fold.axis.extent.is_static,
     )
+    if resident_a is None:
+        producer_body.extend(
+            RegStore(
+                dst_buffer="_a_smem",
+                dst_index=(
+                    BinaryExpr("-", bases[i][j][0], row_base),
+                    BinaryExpr("-", bases[i][j][1], k0),
+                ),
+                frag=weight.data[i][j],
+                shape=active_tile.atom.shape,
+                ldm=bk,
+                swizzle=swizzles[0],
+                fragment_layout=active_tile.atom.fragment_layout,
+                row_dim=0,
+                col_dim=1,
+            )
+            for i in range(len(weight.data))
+            for j in range(len(weight.data[i]))
+        )
 
     def unreachable(_k0, _row, _col):
         raise AssertionError("a whole-slab scheduled producer has no scalar value callback")
 
     a_op = SyncOperand(tag="a", shape=(m.tile, bk), value=unreachable, producer=lambda _k0: producer_body, swizzle=swizzles[0])
-    operands = (a_op, b_op)
+    operands = (a_op, b_op) if resident_a is None else (b_op,)
     transport = SyncTransport(
-        operands=(a_op,),
+        operands=(a_op,) if resident_a is None else (),
         copy_operands=(b_op,),
         invariant_operands=(invariant_op,) if invariant_op is not None else (),
         slab_dtype=cuda_name(elem),
@@ -1963,7 +2044,7 @@ def _fold_staged(
             **{param: partial[name] for param, name in zip(fold.combine.params[len(carried) :], fold.combine.results, strict=True)},
         }
         merged, _, _ = evaluate(fold.combine, bindings, targets=carried)
-        return [*block_ops.state(cells), *block_ops.staged_drain(operands, slot, cells, offset, mn), *merged]
+        return [*block_ops.state(cells), *block_ops.staged_drain(operands, slot, cells, offset, mn, resident_a), *merged]
 
     extent = fold.axis.extent.as_static() if fold.axis.extent.is_static else fold.axis.extent
     n_chunks = (

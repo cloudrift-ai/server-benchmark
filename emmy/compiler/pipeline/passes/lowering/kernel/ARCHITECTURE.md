@@ -215,9 +215,12 @@ an `EMMY_STAGE` pin stays authoritative.
 
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
 producer in registers. Warp rows place a producer either in a synchronous shared-memory slab or, when the child is a
-scheduled contraction, directly in fragments before storing the slab consumed by `ldmatrix`. Materialized peers keep
-using the ordinary vectorized copy transports. These are residence choices over the same Fold tree; the scheduler and
-materializer do not recognize operation families.
+scheduled contraction, directly in fragments. At a static reduce extent, a child and value contraction with the same
+m16n8k16 f16/bf16 atom and M-side lane map can keep those fragments live under a single-buffer value stage:
+`FragmentRepack` converts each pair of adjacent f32 C fragments into one A fragment, while the materialized B operand
+retains its ordinary staged transport. A symbolic reduce extent, another atom or lane map, or register ping-pong
+stores the computed operand in the slab consumed by `ldmatrix`. These are residence choices over the same Fold tree;
+the scheduler and materializer do not recognize operation families.
 
 The fragment Fold evaluator assigns each live value one of three residences: CTA-cell uniform, one scalar per fragment
 row, or one C fragment. It interprets the stored `Lambda` directly. `Assign` broadcasts to the highest input residence,

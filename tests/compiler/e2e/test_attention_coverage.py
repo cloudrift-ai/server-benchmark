@@ -254,6 +254,65 @@ def test_fragment_lift_declines_nonuniform_select_branches():
             )
 
 
+def test_fragment_softmax_value_seam_reuses_score_fragments():
+    """The matching score/value lane map repacks C fragments while B keeps its slab."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    q, k, v = (torch.randn(1, 2, 64, 16, dtype=torch.float16) for _ in range(3))
+    graph = trace_module(_Sdpa(), (q, k, v))
+    knobs = {
+        "PLACE": "fuse",
+        "WORK": "w2x1",
+        "TILE@a3": "mma_m16n8k16_f16_f32/f2x4",
+        "TILE@pj": "mma_m16n8k16_f16_f32/f2x2/k2",
+        "STAGE@a3": "d1/smem-async",
+        "STAGE@pj": "d1/smem",
+        "REDUCE": "",
+        "RASTER": "",
+    }
+    with pinned_knobs(knobs):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
+    srcs = [node.op.kernel_source for node in lowered.nodes.values() if getattr(node.op, "kernel_source", None)]
+    assert len(srcs) == 1
+    src = srcs[0]
+    assert "__half _b_smem[" in src, "the value operand must retain its ordinary staged transport"
+    assert src.count("emmy_c_to_a_f16(_partial_a") == 4
+    assert "__half _a_smem[" not in src
+
+
+def test_fragment_softmax_value_seam_requires_exact_lane_map_and_single_buffer():
+    """The register handoff declines a different output map or register ping-pong."""
+    from emmy.compiler.ir.axis import Axis  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import Stage, TilePlan, Workers  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _repacked_a_fragments  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value  # noqa: PLC0415
+
+    work = Workers.parse("w2x1")
+    assert work is not None
+    m, score, value = Axis("m", 64), Axis("score", 64), Axis("value", 16)
+    producer = TilePlan.parse("mma_m16n8k16_f16_f32/f2x4", work).at(m, score)
+    consumer = TilePlan.parse("mma_m16n8k16_f16_f32/f2x2/k2", work).at(m, value)
+    fragments = Value.frag((("p00", "p01", "p02", "p03"), ("p10", "p11", "p12", "p13")))
+    stage = Stage(bk_elems=32)
+
+    assert _repacked_a_fragments(fragments, producer_tile=producer, consumer_tile=consumer, stage=stage, static_k=True) == fragments.data
+    different_map = consumer.at(Axis("other", 64), value)
+    assert _repacked_a_fragments(fragments, producer_tile=producer, consumer_tile=different_map, stage=stage, static_k=True) is None
+    assert _repacked_a_fragments(fragments, producer_tile=producer, consumer_tile=consumer, stage=stage, static_k=False) is None
+    assert (
+        _repacked_a_fragments(
+            fragments,
+            producer_tile=producer,
+            consumer_tile=consumer,
+            stage=Stage(reg_depth=2, bk_elems=32),
+            static_k=True,
+        )
+        is None
+    )
+
+
 # =========================================================================== #
 # Scalar-tier flash (the FLASH knob).
 # =========================================================================== #

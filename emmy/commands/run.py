@@ -959,11 +959,19 @@ def _sample_replay_knobs(sample) -> dict:
     row the realization stamps. A stored spelling may still carry a declined scoped key
     (``STAGE@a1: ''``); pinning it verbatim contradicts the row's own bare value (a bare pin fans
     out across every eligible site) and the realized kernel — which stamps nothing at a declined
-    site — can never satisfy it. The family-level OFF fill is deliberately NOT applied here: a
-    partial working row leaves a family unmentioned meaning "unpinned", not "pinned OFF"."""
-    from emmy.compiler.pipeline.knob import drop_uninformative_scopes  # noqa: PLC0415
+    site — can never satisfy it. A scoped OFF beside a non-OFF bare pin is different: it explicitly
+    overrides the bare pin at that site and must survive replay. The family-level OFF fill is
+    deliberately NOT applied here: a partial working row leaves a family unmentioned meaning
+    "unpinned", not "pinned OFF"."""
+    from emmy.compiler.pipeline.knob import drop_uninformative_scopes, family_of, is_off_value  # noqa: PLC0415
 
-    return {**getattr(sample, "pins", {}), **drop_uninformative_scopes(sample.knobs)}
+    replay = drop_uninformative_scopes(sample.knobs)
+    for name, value in sample.knobs.items():
+        family = family_of(name)
+        bare = sample.knobs.get(family)
+        if "@" in name and is_off_value(family, value) and bare is not None and not is_off_value(family, bare):
+            replay[name] = value
+    return {**getattr(sample, "pins", {}), **replay}
 
 
 def _failed_bench_status(exc: BaseException) -> str:

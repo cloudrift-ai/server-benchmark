@@ -3,10 +3,11 @@
 Each :class:`Fold` already owns context-independent lambda-body ordering. The rewrites here need
 the enclosing Tile axes or parent Fold.
 
-INVARIANT — normalization ends with structurally identical cones as ONE shared object
-(:func:`_share_common_cones`). Object identity is how the placement machinery recognizes that two
-consumption sites read one value, so a rewrite that copies a cone (the close rewrites do, by
-design) is only sound because this final pass restores the sharing. Recompute elimination is a
+INVARIANT — normalization ends with same-value cones (alpha-equal, identical captures and
+interface names) as ONE shared object (:func:`_share_common_cones`). Object identity is how the
+placement machinery recognizes that two consumption sites read one value, so a rewrite that
+copies a cone (the close rewrites do, by design) is only sound because this final pass restores
+the sharing. Recompute elimination is a
 Tile-level placement concern built on that identity: a duplicated value becomes one seam, and a
 composed cut materializes it once for every reader. Do NOT patch recompute downstream — a Loop IR
 fusion or emission workaround sees one kernel at a time and cannot know two kernels re-derive the
@@ -18,8 +19,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var, affine_form
+from emmy.compiler.ir.expr import affine_form
 from emmy.compiler.ir.pure import (
     Channel,
     Fold,
@@ -28,93 +28,11 @@ from emmy.compiler.ir.pure import (
     is_contraction,
 )
 from emmy.compiler.ir.pure.algebra import product_spine
+from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, operand_name, refs_axis
-from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.structural import instance_memo
-
-
-def _lambda_members(body: Body):
-    """Walk every binding inside a lambda, including Fold operand edges and algebra bodies."""
-    for stmt in body:
-        yield stmt
-        if isinstance(stmt, Fold):
-            for edge in stmt.operands:
-                if isinstance(edge, Fold):
-                    yield from _lambda_members(Body((edge,)))
-                else:
-                    yield edge
-            yield from _lambda_members(stmt.lift.body)
-        else:
-            for nested in stmt.nested():
-                yield from _lambda_members(nested)
-
-
-def _canonical_lambda(fn: Lambda, axes: Iterable[str] = ()) -> Lambda:
-    """Return an alpha-canonical lambda, including its enclosing iteration axes.
-
-    :meth:`Lambda.canonical` handles names bound by the lambda itself.  A Fold tree also needs
-    captured axes canonicalized so equivalent lifts at different tree positions compare equal.
-    Unused enclosing axes do not affect the result.
-    """
-    if any(not stmt.pure for stmt in fn.body):
-        raise ValueError("lambda canonicalization requires a pure body")
-
-    body = fn.body
-    members = tuple(_lambda_members(body))
-    reads = {name for stmt in members for name in _member_reads(stmt)}
-    bound_axes = tuple(name for stmt in members for name in stmt.binds_axes())
-    axis_order = tuple(dict.fromkeys((*axes, *bound_axes)))
-    active_axes = tuple(name for name in axis_order if name in reads or name in fn.params or name in bound_axes)
-    names = {name: f"_a{i}" for i, name in enumerate(active_axes)}
-
-    p = 0
-    for name in fn.params:
-        if name not in names:
-            names[name] = f"_p{p}"
-            p += 1
-    v = 0
-    for stmt in members:
-        for name in stmt.defines():
-            if name not in names:
-                names[name] = f"_v{v}"
-                v += 1
-
-    def rename(name: str) -> str:
-        return names.get(name, name)
-
-    sigma = Sigma({name: Var(names[name]) for name in active_axes})
-
-    def rename_axis(axis: Axis) -> Axis:
-        name = names.get(axis.name)
-        return replace(axis, name=name) if name is not None else axis
-
-    renamed = Body(stmt.rewrite(rename, sigma, rename_axis) for stmt in body)
-    return Lambda(
-        params=tuple(rename(name) for name in fn.params),
-        body=renamed,
-        results=tuple(rename(result) if isinstance(result, str) else result for result in fn.results),
-    )
-
-
-def lambda_equivalent_clusters(
-    items: Iterable[tuple[Lambda, Iterable[str]]],
-) -> tuple[tuple[int, ...], ...]:
-    """Partition scoped lambdas into alpha-equivalent clusters, in input order.
-
-    Each item is ``(lambda, enclosing-axis-names)``.  The returned indices let a later pass keep
-    its own Fold or graph metadata beside this general equivalence analysis.
-    """
-    clusters: dict[Lambda, list[int]] = {}
-    for index, (fn, axes) in enumerate(items):
-        clusters.setdefault(_canonical_lambda(fn, axes), []).append(index)
-    return tuple(tuple(cluster) for cluster in clusters.values())
-
-
-def _operand_lambda(operand, axes: tuple[str, ...]) -> tuple[Lambda, tuple[str, ...]]:
-    params = tuple(axis for axis in axes if edge_refs_axis(operand, axis))
-    return Lambda(params=params, body=Body((operand,)), results=(operand_name(operand),)), params
 
 
 def _operand_roles(operand, axes: tuple[str, ...]) -> frozenset[str]:
@@ -259,7 +177,7 @@ def _orient_shared(pairs: list[tuple], product, axes: tuple[str, ...]) -> list[t
         return pairs
 
     candidates = tuple(edge for pair in pairs for edge in pair)
-    clusters = lambda_equivalent_clusters(_operand_lambda(edge, axes) for edge in candidates)
+    clusters = equivalent_clusters(Closure.over_edge(edge, axes) for edge in candidates)
     complete = [cluster for cluster in clusters if {index // 2 for index in cluster} == set(range(len(pairs)))]
     if not complete:
         return pairs
@@ -339,7 +257,7 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
     if not body.defs_die_at(members, roots=roots, allowed=form.products):
         return fold
 
-    a_clusters = lambda_equivalent_clusters(_operand_lambda(candidate, all_axes) for candidate, _ in pairs)
+    a_clusters = equivalent_clusters(Closure.over_edge(candidate, all_axes) for candidate, _ in pairs)
     member_sets = {name: {id(stmt) for stmt in cone_members} for name, (_, cone_members) in extracted.items()}
     names = tuple(member_sets)
     shared_names = {operand_name(candidate) for candidate, _ in pairs}
@@ -408,7 +326,7 @@ def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset
         stmt
         for stmt in root.body
         if isinstance(stmt, Fold)
-        and not (set(stmt.lift.free_names()) - set(axes))
+        and Closure(stmt.lift, axes).closed
         and (is_contraction(stmt) or not any(edge_refs_axis(stmt, name) for name in sweep_axes))
     ]
     if not candidates:
@@ -449,6 +367,51 @@ def _carries_iteration(node) -> bool:
     return any(_carries_iteration(child) for child in children)
 
 
+def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
+    """The shared walk of both closing rewrites: establish the closure invariant on contractions.
+
+    A contraction's computed zero-axis operand may still carry value captures
+    (:attr:`~emmy.compiler.ir.pure.closure.Closure.value_captures` — sibling-defined data rather
+    than axes); ``provider(edge, binders)`` returns the source edge that supplies them, or
+    ``None`` to leave the operand open. ``binders`` counts only the iteration domains crossed
+    BELOW ``root`` — a reducing root already evaluates inside its own axis, and a projection root
+    has none — and each caller owns what a provider may take and what happens to the drained
+    chain afterwards."""
+
+    def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
+        inner = (*binders, node.axis.name) if node.axis is not None else binders
+        operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
+        body = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.body)
+        current = replace(node, operands=operands) if operands != node.operands else node
+        if body != current.body:
+            current = current.with_bodies((body,))
+        if not is_contraction(current):
+            return current
+
+        changed = False
+        closed = []
+        for edge in current.operands:
+            if not isinstance(edge, Fold) or edge.axis is not None:
+                closed.append(edge)
+                continue
+            source = provider(edge, binders)
+            if source is None:
+                closed.append(edge)
+                continue
+            closed.append(Fold.projection(operands=(source, *edge.operands), body=edge.body, results=edge.lift.results))
+            changed = True
+        return replace(current, operands=tuple(closed)) if changed else current
+
+    rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
+    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in root.body)
+    return rewritten_operands, rewritten_body
+
+
+def _provider_needs(edge, provider_order: tuple[str, ...], provider_names: frozenset[str]) -> tuple[str, ...]:
+    """The provider names an operand edge captures, in provider order."""
+    return tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
+
+
 def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
     """Move an enclosing projection's dependencies onto captured contraction operands."""
     assert root.axis is None
@@ -465,7 +428,10 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
     moved_members: set[int] = set()
     moved_edges: set[int] = set()
 
-    def provider(names: tuple[str, ...], binders: tuple[str, ...]):
+    def provider(edge, binders: tuple[str, ...]):
+        names = _provider_needs(edge, provider_order, provider_names)
+        if not names:
+            return None
         cone = root.body.backward_cone(names)
         required = set(cone.external_reads) | set(names)
         edges = tuple(dict.fromkeys(edge_by_name[name] for name in provider_order if name in required and name in edge_by_name))
@@ -490,33 +456,7 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
         hoisted = _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names), axes, sweep_axes)
         return _passthrough(hoisted) or hoisted
 
-    def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
-        inner = (*binders, node.axis.name) if node.axis is not None else binders
-        operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
-        body = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.body)
-        current = replace(node, operands=operands) if operands != node.operands else node
-        if body != current.body:
-            current = current.with_bodies((body,))
-        if not is_contraction(current):
-            return current
-
-        changed = False
-        closed = []
-        for edge in current.operands:
-            if not isinstance(edge, Fold) or edge.axis is not None:
-                closed.append(edge)
-                continue
-            needed = tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
-            source = provider(needed, binders) if needed else None
-            if source is None:
-                closed.append(edge)
-                continue
-            closed.append(Fold.projection(operands=(source, *edge.operands), body=edge.body, results=edge.lift.results))
-            changed = True
-        return replace(current, operands=tuple(closed)) if changed else current
-
-    rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
-    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in root.body)
+    rewritten_operands, rewritten_body = _close_tree(root, provider)
     if not moved_members and not moved_edges:
         if rewritten_operands == root.operands and rewritten_body == root.body:
             return root
@@ -556,7 +496,10 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
     provider_names = frozenset(provider_order)
     moved: set[int] = set()
 
-    def source(names: tuple[str, ...], binders: tuple[str, ...]) -> Fold | None:
+    def provider(edge, binders: tuple[str, ...]) -> Fold | None:
+        names = _provider_needs(edge, provider_order, provider_names)
+        if not names:
+            return None
         cone = body.backward_cone(names)
         defined = {name for stmt in cone.members for name in stmt.defines()}
         if not set(names) <= defined:
@@ -566,34 +509,7 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
         moved.update(id(stmt) for stmt in cone.members)
         return _hoist_closed_folds(Fold.projection(body=Body(cone.members), results=names), axes, sweep_axes)
 
-    def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
-        # ``root`` already evaluates inside its own axis; only descendants add a new domain.
-        inner = (*binders, node.axis.name) if node.axis is not None else binders
-        operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
-        stmts = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.lift.body)
-        current = replace(node, operands=operands) if operands != node.operands else node
-        if stmts != current.lift.body:
-            current = current.with_bodies((stmts,))
-        if not is_contraction(current):
-            return current
-
-        changed = False
-        closed = []
-        for edge in current.operands:
-            if not isinstance(edge, Fold) or edge.axis is not None:
-                closed.append(edge)
-                continue
-            needed = tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
-            provided = source(needed, binders) if needed else None
-            if provided is None:
-                closed.append(edge)
-                continue
-            closed.append(Fold.projection(operands=(provided, *edge.operands), body=edge.body, results=edge.lift.results))
-            changed = True
-        return replace(current, operands=tuple(closed)) if changed else current
-
-    rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
-    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in body)
+    rewritten_operands, rewritten_body = _close_tree(root, provider)
     if not moved:
         return root
 
@@ -812,21 +728,32 @@ def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[
 
 
 def _share_common_cones(root: Fold) -> Fold:
-    """Restore object sharing between structurally identical cones — the tree-wide half of
-    canonicalization.
+    """Restore object sharing between same-value cones — the tree-wide half of canonicalization.
 
     Fusion and the close rewrites inline one value into every consumption site, so a traced value
     consumed twice (attention's softmax statistics, read by the weight cone and the epilogue)
     reappears as equal-but-distinct copies. Everything downstream keys on object identity —
     ``cuttable_seams`` groups occurrences by it, ``realize`` replaces cut values by it — so a
     severed sharing silently turns one value into per-site recompute that no schedule can undo.
-    This walk hash-conses every Fold bottom-up: copies that are structurally EQUAL (same captured
-    names included — the bucket key adds ``deps`` so α-equivalent cones under different captures,
-    the K-cone family, stay value clustering's job) collapse onto the first occurrence in walk
-    order. Emission is untouched: lowering walks tree positions, and every position still holds
-    an equal term. Identity-preserving off the replacement spine, like ``_replace_fold``."""
+    This walk hash-conses every Fold bottom-up: copies UNIFY onto the first occurrence in walk
+    order when they are alpha-equal with identical captures (the bucket key adds ``deps`` — the
+    K-cone family, alpha-equal under DIFFERENT captures, stays value clustering's job) and
+    identical interface names (``defines`` — what sibling members and the consuming lift read),
+    so a copy that differs only in internal binder spelling still collapses where plain
+    structural equality would silently sever the sharing. Emission is untouched in shape:
+    lowering walks tree positions, and every position holds a term of the same value (a unified
+    representative may change internal spelling). Identity-preserving off the replacement spine,
+    like ``_replace_fold``."""
     canon: dict[tuple, list[Fold]] = {}
     seen: dict[int, Fold] = {}
+    unify_keys: dict[int, Lambda] = {}
+
+    def unify_key(fold: Fold) -> Lambda:
+        # The whole-term alpha-quotient under an empty environment: free names (the captures) and
+        # the bucket-pinned interface names make canonical equality mean equal VALUE.
+        if id(fold) not in unify_keys:
+            unify_keys[id(fold)] = Closure(Lambda(params=(), body=Body((fold,)), results=fold.defines()), ()).canonical()
+        return unify_keys[id(fold)]
 
     def member(stmt):
         if isinstance(stmt, Fold):
@@ -851,9 +778,9 @@ def _share_common_cones(root: Fold) -> Fold:
             current = replace(current, operands=operands)
         if any(piece is not stmt for piece, stmt in zip(body, node.lift.body, strict=True)):
             current = current.with_bodies((Body(body),))
-        bucket = canon.setdefault((current.structural_key(), current.deps()), [])
+        bucket = canon.setdefault((current.structural_key(), current.deps(), current.defines()), [])
         for prior in bucket:
-            if prior == current:
+            if prior == current or unify_key(prior) == unify_key(current):
                 seen[id(node)] = prior
                 return prior
         bucket.append(current)
@@ -900,6 +827,5 @@ def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[
 
 
 __all__ = [
-    "lambda_equivalent_clusters",
     "normalize_fold_tree",
 ]

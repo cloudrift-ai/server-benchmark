@@ -344,7 +344,11 @@ binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF
 `Load`/`Assign`/`Select` and the structural `Fold` and `ProjectionRegion` nodes opt in; `Accum`/`Write`/`Init`/`Loop`
 never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
-(`Lambda.canonical` — free names never renumbered). `Lambda.__post_init__` invokes `ir/pure/normalize.py` to install a
+(`Lambda.canonical` — free names never renumbered). The scope-aware half lives in `ir/pure/closure.py`: a `Closure`
+pairs a lambda with the enclosing iteration axes it may capture — an INDEX-SPACE environment, never values — and its
+alpha-invariant equality (with `canonical`/`equivalent_clusters`) is the one cross-scope equivalence the Tile canonical forms and the
+lowering passes (semiring A-merge, twisted-pair recognition, seam value clustering) all consult.
+`Lambda.__post_init__` invokes `ir/pure/normalize.py` to install a
 dependency-safe body order and commutative argument order, so these context-independent storage invariants do not
 belong to `Fold`, `TileOp`, or the structural-key path. Contraction operand roles live on Fold edges, so sorting a
 commutative product's arguments does not change them. Formation is strict: a kernel's writes ride

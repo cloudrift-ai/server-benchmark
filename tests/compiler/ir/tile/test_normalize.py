@@ -11,9 +11,11 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Channel, Fold, Lambda, M, is_contraction
+from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lambda_equivalent_clusters
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile.normalize import _share_common_cones
 from emmy.compiler.ir.tile.path import family_sites, sites
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
@@ -388,13 +390,16 @@ def test_normalization_shares_structurally_identical_cones() -> None:
                 folds(stmt, out)
         return out
 
+    def unify_key(node: Fold):
+        return Closure(Lambda(params=(), body=Body((node,)), results=node.defines()), ()).canonical()
+
     by_identity = folds(tile.op, {})
     by_value: dict[tuple, list[Fold]] = {}
     for node in by_identity.values():
-        by_value.setdefault((node.structural_key(), node.deps()), []).append(node)
+        by_value.setdefault((node.structural_key(), node.deps(), node.defines()), []).append(node)
     for twins in by_value.values():
-        distinct_equals = [(a, b) for index, a in enumerate(twins) for b in twins[index + 1 :] if a == b]
-        assert not distinct_equals, "normalization left structurally equal cones as distinct objects"
+        distinct_equals = [(a, b) for index, a in enumerate(twins) for b in twins[index + 1 :] if unify_key(a) == unify_key(b)]
+        assert not distinct_equals, "normalization left same-value cones as distinct objects"
 
 
 def test_reduced_qk_attention_offers_the_statistic_arm_b_seams_idempotently() -> None:
@@ -775,7 +780,41 @@ def test_contraction_preserves_computed_operand_statement_order() -> None:
     assert TileOp(op=tile.op, place=tile.place).op is tile.op
 
 
-def test_lambda_equivalent_clusters_include_captured_axes() -> None:
+def test_share_common_cones_unifies_internally_renamed_copies() -> None:
+    """Alpha-equal cones with identical captures and interface names collapse to one object even
+    when their internal binder spelling differs — plain structural equality would keep them
+    distinct and silently sever the sharing."""
+
+    def cone(load: str, product: str, row: str = "m") -> Fold:
+        body = Body(
+            (
+                Load(name=load, input="x", index=(Var(row), Var("k"))),
+                Assign(name=product, op="multiply", args=(load, load)),
+            )
+        )
+        init, combine = M(ElementwiseImpl("add"), names=("acc",))
+        return Fold(axis=Axis("k", Dim(8)), lift=Lambda(params=("k",), body=body, results=(product,)), init=init, combine=combine)
+
+    def consumer(inner: Fold, out: str) -> Fold:
+        return Fold.projection(operands=(inner,), body=Body((Assign(name=out, op="exp", args=("acc",)),)), results=(out,))
+
+    def rooted(second: Fold) -> Fold:
+        return _share_common_cones(
+            Fold.projection(
+                operands=(consumer(cone("l1", "p1"), "u"), consumer(second, "v")),
+                body=Body((Assign(name="w", op="add", args=("u", "v")),)),
+                results=("w",),
+            )
+        )
+
+    unified = rooted(cone("l2", "p2"))
+    assert unified.operands[0].operands[0] is unified.operands[1].operands[0]
+
+    distinct = rooted(cone("l2", "p2", row="q"))  # same form, different capture — a different value
+    assert distinct.operands[0].operands[0] is not distinct.operands[1].operands[0]
+
+
+def test_equivalent_clusters_include_captured_axes() -> None:
     first = Lambda(
         params=("k",),
         body=Body((Load(name="x", input="q", index=(Var("row"), Var("k"))),)),
@@ -787,7 +826,9 @@ def test_lambda_equivalent_clusters_include_captured_axes() -> None:
         results=("value",),
     )
 
-    assert lambda_equivalent_clusters(((first, ("row", "k")), (second, ("unused", "query", "depth")))) == ((0, 1),)
+    assert Closure(first, ("row", "k")) == Closure(second, ("unused", "query", "depth"))  # equality is alpha-invariant
+    assert equivalent_clusters((Closure(first, ("row", "k")), Closure(second, ("unused", "query", "depth")))) == ((0, 1),)
+    assert Closure(first, ("row", "k")) != Closure(first, ("k", "row"))  # capture order is the positional identity
 
 
 def test_total_lift_produces_canonical_contraction() -> None:

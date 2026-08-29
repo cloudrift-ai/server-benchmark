@@ -256,12 +256,17 @@ You MUST audit the complete diff after the before-committing checks and before r
 16. **Keep reasoning and reports out of code**: Which logic should become concise agent instructions? Code may
     transform structural data, but scripts must not interpret results or assemble human-readable reports.
 17. **Minimize the diff**: Can the same outcome be achieved with fewer changed lines, files, flags, and abstractions?
-18. **Apply the audit findings**: perform the removals and consolidation before requesting review. Tests must protect
+18. **Check the core line balance**: run `git diff --stat main -- emmy/`. A PR that introduces no new functionality
+    (a refactor, a cleanup, a fix) must NOT increase the line count under `emmy/` — net growth there without new
+    capability is the typical sign of architectural creep: another special case, helper, or early return layered onto
+    a design that no longer fits. If the balance is positive, do not shave lines cosmetically to pass the check —
+    restructure so the layering disappears, or say explicitly in the PR body why the growth is justified.
+19. **Apply the audit findings**: perform the removals and consolidation before requesting review. Tests must protect
     the smaller contract, not preserve unnecessary machinery.
 
 ### Submitting
 
-19. Push and open a PR
+20. Push and open a PR
 
 # Behavioral Guidelines:
 

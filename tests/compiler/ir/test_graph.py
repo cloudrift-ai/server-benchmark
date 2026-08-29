@@ -217,6 +217,31 @@ def test_kernel_op_windowed_axis_roundtrip():
     assert op.smem_bytes() == 128 * 32 * 2
 
 
+def test_tile_op_scalar_atom_schedule_roundtrip():
+    """A dumped tile-stage graph must rehydrate the scalar output-tile schedule."""
+    import json
+
+    from emmy.compiler.ir.atom import ScalarAtom
+    from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.schedule import TilePlan
+    from emmy.compiler.ir.tile import TileOp
+
+    g = Graph()
+    x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1,), "f16"), node_id="x")
+    g.add_node(
+        op=TileOp(op=Fold.projection(results=(0.0,)), schedule={"TILE": TilePlan()}),
+        inputs=[x],
+        output=Tensor("out", (1,), "f16"),
+        node_id="out",
+    )
+    g.inputs, g.outputs = [x], ["out"]
+
+    loaded = Graph.from_dict(json.loads(json.dumps(g.to_dict(), default=str)))
+    plan = loaded.nodes["out"].op.schedule["TILE"]
+    assert isinstance(plan, TilePlan)
+    assert isinstance(plan.atom, ScalarAtom)
+
+
 def test_stmt_eval_scope_reads_non_finite_literals():
     """``repr(float('-inf'))`` is the bare token ``-inf``, which does not eval without a name.
 

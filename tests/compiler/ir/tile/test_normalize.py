@@ -415,6 +415,75 @@ def test_reduced_qk_attention_offers_the_statistic_arm_b_seams_idempotently() ->
     assert TileOp(op=tile.op, name=tile.name, place=tile.place, output_specs=tile.output_specs).op is tile.op
 
 
+def _statistic_under_two_binders() -> TileOp:
+    """A row statistic feeding a contraction nested under a separate fold binder."""
+    r, k, t = Axis("r", Dim(16)), Axis("k", Dim(16)), Axis("t", Dim(4))
+    stat_init, stat_combine = M(ElementwiseImpl("add"), names=("ss",))
+    stat = Fold(
+        axis=r,
+        lift=Lambda(
+            params=("r",),
+            body=Body(
+                (
+                    Load(name="xr", input="x", index=(Var("m"), Var("r"))),
+                    Assign(name="sq", op="multiply", args=("xr", "xr")),
+                )
+            ),
+            results=("sq",),
+        ),
+        init=stat_init,
+        combine=stat_combine,
+    )
+    inv = Assign(name="inv", op="rsqrt", args=("ss",))
+    b_cone = Fold.projection(
+        body=Body(
+            (
+                Load(name="wv", input="w", index=(Var("t"), Var("k"))),
+                Assign(name="wn", op="multiply", args=("wv", "inv")),
+            )
+        ),
+        results=("wn",),
+    )
+    score = Fold.contraction(
+        k_axis=k,
+        a=Load(name="qv", input="q", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=b_cone, acc="acc"),),
+    )
+    sweep_init, sweep_combine = M(ElementwiseImpl("maximum"), names=("mx",))
+    sweep = Fold(
+        axis=t,
+        lift=Lambda(params=("t",), body=Body((score,)), results=("acc",)),
+        init=sweep_init,
+        combine=sweep_combine,
+    )
+    return TileOp(op=Fold.projection(body=Body((stat, inv, sweep))), place=Placement(free=(Axis("m", 4),)))
+
+
+def _loop_scopes(stmts, enclosing: tuple[str, ...] = ()) -> list[tuple[str, tuple[str, ...]]]:
+    """Each synthesized loop axis paired with its enclosing loop axes."""
+    out: list[tuple[str, tuple[str, ...]]] = []
+    for stmt in stmts:
+        axis = getattr(stmt, "axis", None)
+        inner = (*enclosing, axis.name) if axis is not None else enclosing
+        if axis is not None:
+            out.append((axis.name, enclosing))
+        for body in stmt.nested():
+            out.extend(_loop_scopes(list(body), inner))
+    return out
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="projection closure does not preserve an iteration-bearing provider's evaluation domain",
+)
+def test_a_statistic_is_not_sunk_beneath_new_binders() -> None:
+    """Projection closure must preserve the statistic's evaluation multiplicity."""
+    tile = _statistic_under_two_binders()
+
+    scopes = [enclosing for name, enclosing in _loop_scopes(tile.op.lower()) if name == "r"]
+    assert scopes == [()], scopes
+
+
 def test_a_fold_reading_a_sweep_axis_stays_a_body_member() -> None:
     """A per-column reduce whose streamed load reads the boundary store's sweep axis must stay a
     projection BODY member: reconstitution re-wraps body stmts inside the sweep ``Loop``, but an

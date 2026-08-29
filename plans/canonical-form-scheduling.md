@@ -18,9 +18,9 @@ tuning / search-tree / cubin cache key, where over-fineness costs cache misses, 
 
 Two facts still stand between here and "the rewrite trajectory is a function of body and knobs":
 
-- **spelling**: the pool memo stores rows addressed in the term's coordinate frame (tree-path codec keys name fold
-  nodes by recognition-assigned axis names), so `off` must stay a frame-guard key term — an α-renamed twin must not
-  replay a pool recorded in a different frame;
+- **spelling**: golden rows and pins are still addressed in the term's coordinate frame (tree-path codec keys name
+  fold nodes by recognition-assigned axis names) — the pool memo that also stored frame-addressed rows is retired
+  outright (with `SessionCache`), so the runtime frame guard is now only the strict decode's fail-safe;
 - **recognition variance**: the term caches what recognition proved, and two same-body terms can differ in it. The
   invariant to establish says any such divergence is a defect; today it is merely undetected.
 
@@ -32,7 +32,7 @@ historically built term, with names minted from the canonical walk (the same can
 
 - recognition is a function of the computation (one canonical input per body-equivalence class);
 - the spelled row vocabulary is spelling-stable forever (one final golden re-spelling to get there);
-- the `off` frame guard becomes redundant (one frame per body class) and can leave the pool digest.
+- the spelled row vocabulary becomes canonical, so persisted golden rows stop being re-keying hazards.
 
 ## What it takes
 

@@ -203,9 +203,9 @@ is the exact-flavor digest of the term's own lowered body (the term is pure alge
 its normal form). The named lattice points are spelled at call sites: the deploy identity
 (`with_io=True` — the durable join key) and the variant key (`with_io=True, with_knobs=True` —
 the search tree and measurement stores). There is no schedule-space key on
-the interface: the pool memo digest is minted at its one site in `lowering/tile/_schedule`, from
-the deploy identity plus everything the enumeration additionally reads (knobs, hints, pins, the
-split receipt, the spelled key vocabulary).
+the interface: the enumeration's `pool_id` stamp is minted at its one site in
+`lowering/tile/_schedule` (the variant key + hints + pins + sample identity) — a stamp for the
+greedy decision memo and the budgeted descent seed, not a cache key: nothing stores pools.
 
 Identity has two flavors: the default `structural=True` is schedule-equivalent (compute-unit op
 clusters collapse — `relu` and `tanh` epilogues share a key because their schedule evidence

@@ -171,9 +171,10 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
     matmuls — decide once and the rest replay by tree descent instead of a flatten-and-score.
 
     ``TileOp``-rooted forks only, keyed on the enumeration's MINTED pool identity
-    (:attr:`~emmy.compiler.pipeline.fork.Fork.pool_id` — the session memo's own cache digest,
-    which also folds the split receipt and the spelled key vocabulary). One minting site means
-    the decision memo and the pool memo cannot key differently. A fork carrying no stamp
+    (:attr:`~emmy.compiler.pipeline.fork.Fork.pool_id` — the enumeration's minted stamp: the
+    variant key + hints + pins + the sample identity). One minting site, one spelling; the memo
+    fails safe on anything the stamp cannot see, because a replayed row that no longer decodes
+    (``_find_decided_leaf`` → ``None``) simply re-decides. A fork carrying no stamp
     (offered outside the schedule enumeration) falls back to the kernel's variant key
     (``identity_key`` with io + knobs) + pins. The rule identity separates two
     forks offered on one op, and the node's blocklist CONTENT keys the validate-retry path — a

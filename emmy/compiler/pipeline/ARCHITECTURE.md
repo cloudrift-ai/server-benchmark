@@ -740,7 +740,7 @@ nothing entirely every fork falls to the first leaf in emission order, which is 
 Greedy benches nothing, so it can only *use* a prior, never train one.
 
 **And it scores each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
-factory call — one compile attempt; never the shared `SessionCache`, which would hand MCTS cached picks): the memo
+factory call — one compile attempt; never shared ambient state, which would hand MCTS cached picks): the memo
 keys on the minted pool identity (`Fork.pool_id` — the deploy identity plus the knob / hint / pin
 discriminators it excludes) plus the node's blocklist content, so N same-shape kernels score once and the rest replay by descending the lazy tree's
 level keys to the one matching leaf (`_find_decided_leaf` — the O(path) descent `build_fork_tree` was built for),

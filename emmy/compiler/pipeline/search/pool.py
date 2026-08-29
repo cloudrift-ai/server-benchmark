@@ -62,7 +62,7 @@ class PoolSample:
     reports its exact size.
 
     Carried on :class:`~emmy.compiler.context.Context` and folded into the schedule pool's cache
-    key. That key part is not decoration: ``dataclasses.replace`` SHARES a Context's session cache,
+    key. That key part is not decoration: ``dataclasses.replace`` shares ambient Context state,
     so a sampled compile and a live one sit on one memo, and a flag that did not key the cache would
     serve a sampled pool to a live compile. ``None`` on the Context means live, and live never
     samples.

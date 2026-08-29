@@ -264,8 +264,8 @@ def build_golden_groups(
         base = {**ctx.features(), **g.structural_features}
         from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
-        # The sample rides a REPLACED Context, which shares the session cache with the card's own:
-        # the pool memo keys on the sample too, so the two can share one cache and a sampled pool
+        # The sample rides a REPLACED Context; the pool stamp keys on the sample too, so a sampled
+        # enumeration can never be mistaken for a live one
         # can never be served to a live compile.
         keep_set = keeps.get(_pool_bucket(g), frozenset())
         enum_ctx = ctx if sample <= 0 else replace(ctx, pool_sample=PoolSample(sample, seed, keep_set))

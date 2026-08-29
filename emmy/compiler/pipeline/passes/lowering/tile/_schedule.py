@@ -279,6 +279,23 @@ def _contraction_options(state: _State, node) -> list[_Option]:
     return opts
 
 
+def _resolve_stage(state: _State, node, plan: TilePlan, placed: TilePlan, want: Stage, why: list[str] | None = None) -> Stage | None:
+    """The ONE resolve dispatch — enumeration and the leaf's re-resolution (:func:`_stage_of`) both
+    take it, chosen by the same predicate (:func:`_needs_fill`), so the materialized slice always
+    reproduces the one the row identity was built from. The fill branch reads only ``want.depth``
+    (the fill's transport is fixed); the warp / scalar branches resolve the full spelling."""
+    budget = state.ctx.max_dynamic_smem
+    if plan.is_warp and _needs_fill(state, node, plan):
+        facts = state.facts[id(node)]
+        seam, k_axis, producer = facts.seam, facts.k_axis, facts.producer
+        return staging.resolve_fill_stage(
+            node, placed, budget, want.depth, inputs=state.tile.inputs, why=why, seam=seam, k_axis=k_axis, producer=producer
+        )
+    if plan.is_warp:
+        return staging.resolve_warp_stage(node, placed, want, budget, state.tile.inputs)
+    return staging.resolve_scalar_stage(node, placed, want, state.tile.inputs, budget)
+
+
 def _stage_options(state: _State, node, plan: TilePlan, placed: TilePlan, pin: str | None, refused: list[str]) -> list[Stage | None]:
     """The RESOLVED operand stages one tile candidate offers — gmem-direct ``None`` first, then
     every catalog move that resolves against the node under this plan (deduped on the resolved
@@ -296,15 +313,8 @@ def _stage_options(state: _State, node, plan: TilePlan, placed: TilePlan, pin: s
         if pin:
             logger.debug("STAGE pin %r dropped: this plan has no operand slab to stage", pin)
         return [None]
-    budget = state.ctx.max_dynamic_smem
     if plan.is_warp and _needs_fill(state, node, plan):
-        return _fill_options(state, node, placed, pin, budget)
-
-    def resolve(st: Stage) -> Stage | None:
-        if plan.is_warp:
-            return staging.resolve_warp_stage(node, placed, st, budget, state.tile.inputs)
-        return staging.resolve_scalar_stage(node, placed, st, state.tile.inputs, budget)
-
+        return _fill_options(state, node, plan, placed, pin)
     if pin is not None:
         if not pin:
             return [None]  # pinned gmem-direct
@@ -313,7 +323,7 @@ def _stage_options(state: _State, node, plan: TilePlan, placed: TilePlan, pin: s
         if why is not None:
             refused.append(why)
             return []
-        r = resolve(want)
+        r = _resolve_stage(state, node, plan, placed, want)
         if r is None:
             refused.append(f"pinned STAGE {pin!r} does not resolve for this contraction")
             return []
@@ -321,14 +331,14 @@ def _stage_options(state: _State, node, plan: TilePlan, placed: TilePlan, pin: s
     out: list[Stage | None] = [None]
     spelled = {""}
     for move in stage_moves(warp=plan.is_warp, ctx=state.ctx):  # target-filtered in the catalog (a pin RAISES instead)
-        r = resolve(move)
+        r = _resolve_stage(state, node, plan, placed, move)
         if r is not None and r.spell() not in spelled:
             spelled.add(r.spell())
             out.append(r)
     return out
 
 
-def _fill_options(state: _State, node, placed: TilePlan, pin: str | None, budget: int) -> list[Stage | None]:
+def _fill_options(state: _State, node, plan: TilePlan, placed: TilePlan, pin: str | None) -> list[Stage | None]:
     """The RESOLVED smem compute-fill stages a computed operand, multi-channel product or
     converting materialized ``a`` offers — its depths, and nothing else: the fill is MANDATORY
     (no gmem-direct sibling, no byte transport can evaluate a cone or carry several B/C channels),
@@ -337,7 +347,6 @@ def _fill_options(state: _State, node, placed: TilePlan, pin: str | None, budget
     spells identically and dedupes to one row. A pin naming a byte transport, or a depth the
     budget refuses, RAISES — the fill's tier is selected here by construction, so the refusal is
     never a silent drop."""
-    facts = state.facts[id(node)]
     if pin:
         # A pinned spelling names a kernel, so its TRANSPORT cannot be quietly dropped and read as
         # depth alone: the fill's own asynchronous B-slab prefetch ring is the depth-2 ``smem``
@@ -356,12 +365,10 @@ def _fill_options(state: _State, node, placed: TilePlan, pin: str | None, budget
     spelled: set[str] = set()
     for depth in depths:
         why: list[str] = []
-        r = staging.resolve_fill_stage(
-            node, placed, budget, depth, inputs=state.tile.inputs, why=why, seam=facts.seam, k_axis=facts.k_axis, producer=facts.producer
-        )
+        r = _resolve_stage(state, node, plan, placed, Stage(depth=depth), why=why)
         if r is None:  # per DECLINED depth, so a pin that fits no depth names the gate it hit
             reason = f"the smem compute fill does not resolve at depth {depth}: " + (
-                why[-1] if why else f"its slabs must fit the {budget} B smem budget"
+                why[-1] if why else f"its slabs must fit the {state.ctx.max_dynamic_smem} B smem budget"
             )
             if pin:
                 raise ValueError(reason)
@@ -552,16 +559,15 @@ def _tile_moves(state: _State, node, key: str | None) -> list[TilePlan]:
         # Per-plan NODE refusals (the fp8 K-step, the fill's cover) are the option builder's —
         # it binds the placed geometry once per plan and drops or raises there.
         return [*scalar, *(warp_tile_moves(facts.offered) if facts.offered else [])]
-    if not facts.warp and _names_warp_atom(pin):
+    if facts.warp_refusal is not None and _names_warp_atom(pin):
         # The choice-layer drop: no warp tier here, whatever the pin says. Explicable, not silent.
         if logger.isEnabledFor(logging.DEBUG):
-            frag = _fragment_epilogue_ok(projection_tail(state.tile), _fold_states(state.tile.op))
-            logger.debug("TILE pin %r at %s dropped: %s", pin, key or "TILE", _node_refusal(state.tile, state.ctx, node, frag))
+            logger.debug("TILE pin %r at %s dropped: %s", pin, key or "TILE", facts.warp_refusal)
         return []
     if state.work_pinned:
         works = [state.work_pin]
     else:
-        catalog = [*scalar, *(warp_tile_moves((*facts.offered, *facts.pin_only)) if facts.warp else [])]
+        catalog = [*scalar, *(warp_tile_moves((*facts.offered, *facts.pin_only)) if facts.warp_refusal is None else [])]
         works = list(dict.fromkeys(plan_workers(p) for p in catalog))
     reduce_pin = _pin(REDUCE, state.sched.key("REDUCE", node))
     out: list[TilePlan] = []
@@ -662,6 +668,13 @@ def _kstep_refusal(k_axis: Axis, plan: TilePlan) -> str | None:
     )
 
 
+def _reduce_catalog(state: _State, extent: int) -> list[ReducePlan]:
+    """The serial fold plus every cooperative / ILP band ``extent`` admits — the ONE catalog arm,
+    shared by the plain fold and the contraction's per-cell tier (a contraction is a monoid with
+    a ⊗ lift, so its K partitions through the same moves and the same filter)."""
+    return [ReducePlan(), *(p for p in coop_reduce_moves() if _band_refusal(p, extent, state.transposed_ok) is None)]
+
+
 def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     """The reduce partitions this fold offers: the serial fold plus every :func:`coop_reduce_moves`
     band the node admits, or — under a ``REDUCE`` pin — the ONE partition that pin names, read
@@ -691,7 +704,7 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
             logger.debug("REDUCE pin %r names a partition; an observed fold (a scan) realizes the serial fold only", pin)
         return [ReducePlan()]
     if pin is None:
-        return [ReducePlan(), *(p for p in coop_reduce_moves() if _band_refusal(p, extent, state.transposed_ok) is None)]
+        return _reduce_catalog(state, extent)
     return [_parsed_reduce_pin(state, pin, key)]
 
 
@@ -745,8 +758,7 @@ def _contraction_reduces(state: _State, node, key: str | None, tiled: bool) -> l
     ext = node.axis.extent
     if tiled or not ext.is_static:
         return [ReducePlan()]
-    k = ext.as_static()
-    return [ReducePlan(), *(p for p in coop_reduce_moves() if _band_refusal(p, k, state.transposed_ok) is None)]
+    return _reduce_catalog(state, ext.as_static())
 
 
 # ---- the reduce partition: which bands this fold can carry ---------------------------------------- #
@@ -1074,7 +1086,7 @@ def _fragment_epilogue_ok(tail: list, states: frozenset[str]) -> bool:
 
 
 def _warp_refusal(state: _State, node, atom: AtomKind) -> str:
-    """Why a PINNED ``atom`` is not bindable on ``node`` — the same chain :func:`_bindable_atoms`
+    """Why a PINNED ``atom`` is not bindable on ``node`` — the same chain :func:`_atom_families`
     filtered under, re-asked for its message. Failure path only, and only where the node's tier
     was SELECTED (:func:`_tile_moves` drops the choice layer first), so recomputing the per-kernel
     facts here is free and :func:`_node_refusal` need not be re-asked."""
@@ -1100,7 +1112,7 @@ class _SiteFacts:
     """What one contraction node IS, read once by :func:`schedule`'s prescan — every field a fact
     about the stored node (and its live precision-policy pins), never a decision."""
 
-    warp: bool  # the node's algebra / operand dtypes select a warp tier (the choice layer)
+    warp_refusal: str | None  # why the node selects no warp tier (``None`` when it does) — the choice layer
     offered: tuple[str, ...]  # tensor-core atoms the catalog enumerates (precision policy applied)
     pin_only: tuple[str, ...]  # bindable atoms only a pin names (the policy-gated remainder)
     k_axis: Axis  # the reduction domain — a derived unit marker inherits its enclosing fold's axis
@@ -1157,7 +1169,7 @@ def _site_facts(tile: TileOp, ctx, sched: Sched, tail: list, frag_ok: bool) -> d
         if need is None and producer is not None:
             need = sched.key("TILE", producer)
         offered, pin_only = _atom_families(tile, ctx, node, tail) if refusal is None else ((), ())
-        out[id(node)] = _SiteFacts(refusal is None, offered, pin_only, k_axis, seam, producer, need)
+        out[id(node)] = _SiteFacts(refusal, offered, pin_only, k_axis, seam, producer, need)
     return out
 
 
@@ -1399,15 +1411,11 @@ def _step(state: _State, stack: tuple, ctx: Ctx, knobs: dict) -> list[Fork]:
 
 
 @dataclass(frozen=True)
-class _Branch(Fork):
-    """A partly-walked schedule: the nodes still to decide, the context they must honour, and the
-    row prefix decided so far. The subtree does not exist until ``expand`` walks one level more."""
+class _WalkFork(Fork):
+    """Every node of one schedule tree carries the pool's minted identity and size bounds — read
+    off the shared :class:`_State` rather than stored per node."""
 
     state: _State
-    stack: tuple
-    ctx: Ctx
-    knobs: dict
-    is_leaf = False
 
     @property
     def pool_id(self) -> str:
@@ -1420,56 +1428,37 @@ class _Branch(Fork):
     @property
     def pool_descent_bound(self) -> int:
         return self.state.pool_descent_bound
+
+
+@dataclass(frozen=True)
+class _Branch(_WalkFork):
+    """A partly-walked schedule: the nodes still to decide, the context they must honour, and the
+    row prefix decided so far. The subtree does not exist until ``expand`` walks one level more."""
+
+    stack: tuple
+    ctx: Ctx
+    knobs: dict
+    is_leaf = False
 
     def expand(self) -> list[Fork]:
         return _step(self.state, self.stack, self.ctx, self.knobs)
 
 
 @dataclass(frozen=True)
-class _Leaf(Fork):
+class _Leaf(_WalkFork):
     """A complete walk: ``knobs`` is the kernel's whole identity, materialized on demand."""
 
-    state: _State
     knobs: dict
     is_leaf = True
-
-    @property
-    def pool_id(self) -> str:
-        return self.state.pool_id
-
-    @property
-    def pool_bound(self) -> int:
-        return self.state.pool_bound
-
-    @property
-    def pool_descent_bound(self) -> int:
-        return self.state.pool_descent_bound
 
     def expand(self) -> list[TileOp]:
         return [_materialize(self.state, self.knobs)]
 
 
 def _stage_of(state: _State, node, plan: TilePlan, spec: str) -> Stage | None:
-    """The row's ``STAGE`` re-resolved against the node — dispatched by the same predicate the
-    enumeration used (:func:`_needs_fill`), so this reproduces the slice the leaf identity was
-    built from."""
-    placed = state.sched.placed(node, plan)
-    budget = state.ctx.max_dynamic_smem
-    if plan.is_warp and _needs_fill(state, node, plan):
-        facts = state.facts[id(node)]
-        return staging.resolve_fill_stage(
-            node,
-            placed,
-            budget,
-            Stage.parse(spec).depth,
-            inputs=state.tile.inputs,
-            seam=facts.seam,
-            k_axis=facts.k_axis,
-            producer=facts.producer,
-        )
-    if plan.is_warp:
-        return staging.resolve_warp_stage(node, placed, Stage.parse(spec), budget, state.tile.inputs)
-    return staging.resolve_scalar_stage(node, placed, Stage.parse(spec), state.tile.inputs, budget)
+    """The row's ``STAGE`` re-resolved against the node, through the enumeration's own dispatch
+    (:func:`_resolve_stage`), so this reproduces the slice the leaf identity was built from."""
+    return _resolve_stage(state, node, plan, state.sched.placed(node, plan), Stage.parse(spec))
 
 
 def _materialize(state: _State, row: dict) -> TileOp:

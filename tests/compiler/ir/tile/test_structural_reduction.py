@@ -567,10 +567,13 @@ def test_sealed_inventory_derives_off_the_schedule_dict() -> None:
 # --- an output sweep the bound reduce's cone reads ----------------------------------------------- #
 
 
-def _sweep_reading_reduce_tile(plan=None) -> TileOp:
+def _sweep_reading_reduce_tile(plan=None, chain: bool = False) -> TileOp:
     """The DeepSeek ``k_div_36_reduce`` shape: a zero-axis projection whose OPERAND reduce streams a
     load indexed by the boundary store's sweep axis (``acc = Σ_k x[m, k, j]`` under ``sweep(j)
-    o[m, j] = v``) — the reduce must re-run per swept cell, so the sweep loop has to enclose it."""
+    o[m, j] = v``) — the reduce must re-run per swept cell, so the sweep loop has to enclose it.
+
+    ``chain`` puts a second zero-axis projection between the root and the reduce, so the peeled
+    operand carries no ``REDUCE`` site of its own."""
     from emmy.compiler.ir.schedule import Placement
 
     body = Body(
@@ -581,14 +584,21 @@ def _sweep_reading_reduce_tile(plan=None) -> TileOp:
     )
     red = fold_from_loop(Loop(axis=Axis("k", 4), body=body, role=AxisRole.PLANAR))
     assert red is not None
-    node = Fold.projection(body=Body((Assign(name="v", op="sqrt", args=("acc",)),)), operands=(red,))
+    if chain:
+        inner = Fold.projection(body=Body((Assign(name="mid", op="copy", args=("acc",)),)), operands=(red,), results=("mid",))
+        node = Fold.projection(body=Body((Assign(name="v", op="sqrt", args=("mid",)),)), operands=(inner,))
+    else:
+        node = Fold.projection(body=Body((Assign(name="v", op="sqrt", args=("acc",)),)), operands=(red,))
     tile = TileOp(
         op=node,
         place=Placement(free=(Axis("m", 8),)),
         output_specs=(OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4)),),
     )
     if plan is not None:
-        tile = _with_slice(tile, "REDUCE", tile.op.operands[0], plan)
+        scheduled = tile.op.operands[0]
+        while scheduled.axis is None and scheduled.operands:
+            scheduled = scheduled.operands[0]
+        tile = _with_slice(tile, "REDUCE", scheduled, plan)
     return tile
 
 
@@ -626,3 +636,20 @@ def test_partitioned_reduce_reading_the_output_sweep_refuses_the_row() -> None:
 
     with pytest.raises(UnbindableProjection):
         factorize(_sweep_reading_reduce_tile(ReducePlan.of(coop=4)), root=None)
+
+
+def test_a_projection_chain_does_not_hide_the_partition_from_the_refusal() -> None:
+    """The schedule at stake is the ITERATING node's, and a chain of zero-axis projections may sit
+    between it and the peeled operand. Reading the plan off the wrapper found none and bound the
+    row as the serial fold: the emission was correct but silently dropped the partition the row
+    was priced on, which is the phantom stamp the offer-side narrowing exists to prevent."""
+    import pytest
+
+    from emmy.compiler.ir.tile.ops import UnbindableProjection
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
+
+    # The serial chain still emits with every axis bound.
+    tile = factorize(_sweep_reading_reduce_tile(chain=True), root=None)
+    assert not _reads_axis_outside_its_loop(list(tile.body), "j")
+    with pytest.raises(UnbindableProjection):
+        factorize(_sweep_reading_reduce_tile(ReducePlan.of(coop=4), chain=True), root=None)

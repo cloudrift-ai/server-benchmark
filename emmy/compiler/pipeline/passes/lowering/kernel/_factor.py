@@ -325,8 +325,16 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         # would have to re-run on — so the row is declined and the greedy retries the next one.
         swept = [spec.sweep.name for spec in plain if spec.sweep is not None and edge_refs_axis(root, spec.sweep.name)]
         if swept:
-            plan = ctx.sched.get("REDUCE", root) if isinstance(root, Fold) and root.axis is not None else None
-            if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (is_contraction(root) and ctx.sched.tile_of(root) is not None):
+            # The schedule at stake is the ITERATING node's, which a chain of zero-axis projections
+            # may sit above (``root`` is then a projection, carrying no ``REDUCE`` site of its
+            # own). Descend to it, or the decline reads an absent plan off the wrapper and binds a
+            # partitioned row as the serial fold — the emission is correct but silently drops the
+            # partition the row was priced on.
+            node = root
+            while isinstance(node, Fold) and node.axis is None and node.operands:
+                node = node.operands[0]
+            plan = ctx.sched.get("REDUCE", node) if isinstance(node, Fold) and node.axis is not None else None
+            if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (is_contraction(node) and ctx.sched.tile_of(node) is not None):
                 raise UnbindableProjection(
                     f"the bound reduce's cone reads output sweep axis {swept[0]!r} — a cooperative / ILP "
                     f"partition cannot re-run the reduce per swept cell"

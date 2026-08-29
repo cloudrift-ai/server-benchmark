@@ -123,6 +123,35 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     assert materialized == []
 
 
+def test_schedule_pick_ignores_feature_keys_in_measured_row_descent() -> None:
+    rows = [
+        {"S_warp_eligible": 1.0, "RASTER": "", "TILE": "slow"},
+        {"S_warp_eligible": 1.0, "RASTER": "", "TILE": "measured"},
+        {"S_warp_eligible": 1.0, "RASTER": "gm8", "TILE": "other"},
+    ]
+    tree = build_fork_tree(
+        params=rows,
+        levels=(
+            Level(("S_warp_eligible", "RASTER"), lambda row: (row["S_warp_eligible"], row["RASTER"])),
+            Level(("TILE",), lambda row: (row["TILE"],)),
+        ),
+        materialize=lambda _row: None,
+    )
+    point = SimpleNamespace(
+        options=[tree],
+        node_id="node",
+        root_op=SimpleNamespace(knobs={"S_warp_eligible": 1.0}),
+        ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
+    )
+    index = {frozenset({("S_warp_eligible", "1.0")}): [({"RASTER": "", "TILE": "measured"}, 1.25)]}
+
+    leaf, knobs, price = _direct_measured_pick(point, None, index)
+
+    assert leaf_knobs(leaf) == rows[1]
+    assert knobs == rows[1]
+    assert price == 1.25
+
+
 def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) -> None:
     rows = [
         {"S_warp_eligible": 1.0, "RASTER": "", "TILE": "slow"},

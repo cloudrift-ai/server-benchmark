@@ -419,7 +419,10 @@ from *dropping* a binding — load dedup, CSE — an inner scope that merely re-
 different variable, and renaming it both redeclares the survivor inside the scope and rewires the inner arithmetic to
 the outer value. `passes.rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
 scope re-binds before descending. `normalize.dedup_loads` applies the same rule while threading its own per-scope
-environment.
+environment. σ has the same hazard with axis names, which collide across a tree by design (a cone statistic's axis
+may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma)` is σ's hygienic form — it stops at
+a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
+cell coordinates through.
 
 ### `ir/stmt/normalize.py` — structural canonicalization
 

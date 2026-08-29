@@ -2208,6 +2208,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     """Run path: load JSON IR (any stage), finish lowering, execute, bench."""
     import json
 
+    from emmy.commands.compile import _golden_target_pin_context
     from emmy.compiler.backend import torch_ref
     from emmy.compiler.graph import Graph
     from emmy.compiler.pipeline import Pipeline
@@ -2251,7 +2252,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # prior (uniform PUCT → emission-order, option-0) and does not replay tuned
         # variants from the DB; ``db=`` is kept for perf recording only. Wiring a
         # warm-started prior into single-shot compile is a deferred follow-up.
-        graph = Pipeline.build(tail).run(graph, db=db, dump=dump)
+        with _golden_target_pin_context(args):
+            graph = Pipeline.build(tail).run(graph, db=db, dump=dump)
 
     if not args.bench:
         # No bench: one in-process run + non-fatal accuracy vs the torch reference

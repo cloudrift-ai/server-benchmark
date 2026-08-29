@@ -1,14 +1,20 @@
 """Explicit working-golden replay for ``compile`` / ``run``."""
 
+import argparse
 import asyncio
 import copy
+from contextlib import redirect_stdout
+from io import StringIO
 from types import SimpleNamespace
 
 import pytest
 
 from emmy.compiler.context import Context
+from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
@@ -16,7 +22,7 @@ from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_f
 from emmy.compiler.pipeline.search.working_golden import write_trace_inventory
 
 
-def _working_loop(path, *, state="inventory"):
+def _working_loop(path, *, state="inventory", pins=None):
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
@@ -31,6 +37,8 @@ def _working_loop(path, *, state="inventory"):
     entry = document["configs"][0]
     realization = entry["realizations"][0]
     realization["name"] = "working.relu"
+    if pins is not None:
+        realization["pins"] = pins
     if state in {"proposal", "tuned", "verified"}:
         realization["knobs"] = {"WORK": "w1x1"}
     if state == "tuned":
@@ -53,6 +61,33 @@ def _working_loop(path, *, state="inventory"):
     return document
 
 
+def _working_placement_route(path):
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (Dim(1), Dim(2), Dim(16)), dtype=F16), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("wn", (Dim(16),), dtype=F16), node_id="wn")
+    graph.add_node(InputOp(), [], Tensor("w", (Dim(16), Dim(16)), dtype=F16), node_id="w")
+    graph.add_node(
+        RmsNormOp(),
+        ["x", "wn"],
+        Tensor("xn", (Dim(1), Dim(2), Dim(16)), dtype=F16),
+        node_id="xn",
+    )
+    graph.add_node(
+        MatmulOp(),
+        ["xn", "w"],
+        Tensor("y", (Dim(1), Dim(2), Dim(16)), dtype=F16),
+        node_id="y",
+    )
+    graph.inputs, graph.outputs = ["x", "wn", "w"], ["y"]
+    write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)), force_loop_targets=True)
+    document = load_golden_file(path)
+    realization = document["configs"][0]["realizations"][0]
+    realization["name"] = "working.route"
+    realization["pins"] = {"FAST_MATH": False, "PLACE@a": "cut"}
+    dump_golden_file(document, path, overwrite=True)
+    return document
+
+
 def _args(path, **overrides):
     values = {
         "golden": "working.relu",
@@ -64,6 +99,23 @@ def _args(path, **overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _compile_output(*args):
+    from emmy.commands.compile import register_compile_command
+    from emmy.compiler.target import set_target
+
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    register_compile_command(subparsers)
+    parsed = parser.parse_args(["compile", *args])
+    stdout = StringIO()
+    try:
+        with redirect_stdout(stdout):
+            parsed.func(parsed)
+    finally:
+        set_target(None)
+    return stdout.getvalue()
 
 
 def test_compile_working_file_uses_exact_loop_target(run_cli, tmp_path):
@@ -190,6 +242,67 @@ def test_working_proposal_supplies_graph_but_is_not_automatically_pinned(tmp_pat
     (manual,) = _pinned_samples_for_ir(args, args._golden_graph)
     assert manual.name == "ab WORK=w2x2"
     assert manual.knobs == {"WORK": "w2x2"}
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["ordinary", "explicit"])
+def test_working_shared_placement_pins_select_the_exact_compile_target(tmp_path, monkeypatch, explicit):
+    path = tmp_path / "working-route.yaml"
+    _working_placement_route(path)
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
+    monkeypatch.setenv("EMMY_READABLE", "1")
+    monkeypatch.setenv("EMMY_TUNE_DB", str(tmp_path / "tune.db"))
+    if explicit:
+        monkeypatch.setenv("EMMY_KNOBS", "PLACE@a=cut")
+
+    stdout = _compile_output(
+        "--golden-file",
+        str(path),
+        "--golden",
+        "working.route",
+        "--target",
+        "sm_89",
+        "--ir",
+        "tile",
+    )
+
+    assert tuple(line for line in stdout.splitlines() if line.startswith("=== ")) == (
+        "=== 0: k_rms_norm_matmul_reduce_3ac0aa__place_a4b222d654 ===",
+        "=== 1: y__partial -> y__partial ===",
+        "=== 2: y -> y ===",
+    )
+
+
+def test_working_ambiguous_placement_pin_regimes_leave_the_target_unpinned(tmp_path):
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    document = _working_loop(path, pins={"FAST_MATH": False, "PLACE@a": "cut"})
+    second = copy.deepcopy(document["configs"][0]["realizations"][0])
+    second["pins"]["FAST_MATH"] = True
+    document["configs"][0]["realizations"].append(second)
+    dump_golden_file(document, path, overwrite=True)
+    args = _args(path)
+
+    resolve_golden_arg(args)
+
+    assert args.golden_target_pins == {}
+
+
+def test_canonical_golden_does_not_select_structural_target_pins(monkeypatch, tmp_path):
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.pipeline.search import golden
+
+    path = tmp_path / "canonical-like.yaml"
+    document = _working_loop(path, pins={"FAST_MATH": False, "PLACE@a": "cut"})
+    records = golden.load_golden_records(document)
+    monkeypatch.setattr(golden, "goldens_for_live_gpu", lambda: records)
+    monkeypatch.setattr(golden, "GOLDEN_RECORDS", records)
+    args = _args(path, golden_file=None)
+
+    resolve_golden_arg(args)
+
+    assert args.golden_target_pins == {}
 
 
 def test_working_verified_row_is_automatically_pinned(tmp_path):

@@ -160,14 +160,18 @@ def test_tileop_content_identity_is_the_term_alone() -> None:
     term = _contraction()
     a = TileOp(op=term, name="k_a")
     b = TileOp(op=term, name="k_b", knobs={"TILE": "f4"})
-    assert a.body_identity(structural=False) == b.body_identity(structural=False)
-    assert TileOp().body_identity() is None  # placeholder
+    assert a.identity_key(structural=False) == b.identity_key(structural=False)
+    assert TileOp().identity_key() is None  # placeholder
     assert isinstance(term, Structural)
 
 
 def test_cache_key_folds_the_knobs_back_in() -> None:
     term = _contraction()
     plain, knobbed = TileOp(op=term, name="k"), TileOp(op=term, name="k", knobs={"TILE": "f4"})
-    assert plain.cache_key() is not None
-    assert plain.cache_key() != knobbed.cache_key()  # fork variants must not collide
-    assert plain.cache_key() == TileOp(op=_contraction(names="r"), name="renamed").cache_key()  # α-equal terms share
+    assert plain.identity_key(with_io=True, with_knobs=True) is not None
+    assert plain.identity_key(with_io=True, with_knobs=True) != knobbed.identity_key(
+        with_io=True, with_knobs=True
+    )  # fork variants must not collide
+    assert plain.identity_key(with_io=True, with_knobs=True) == TileOp(op=_contraction(names="r"), name="renamed").identity_key(
+        with_io=True, with_knobs=True
+    )  # α-equal terms share

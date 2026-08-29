@@ -14,7 +14,7 @@ on-disk inventory + perf store, and the in-memory MCTS tree.
   reads or writes the tree).
 
 Op identity and the rewrite-chain walk live on the ops themselves —
-:meth:`~emmy.compiler.ir.base.Op.cache_key`, :attr:`~emmy.compiler.ir.base.Op.dialect`,
+:meth:`~emmy.compiler.ir.base.Op.identity_key`, :attr:`~emmy.compiler.ir.base.Op.dialect`,
 :meth:`~emmy.compiler.ir.base.Op.source_chain` (the retired ``keys`` module).
 
 The bench + DB write orchestration lives in

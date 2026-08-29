@@ -174,8 +174,8 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
     (:attr:`~emmy.compiler.pipeline.fork.Fork.pool_id` — the session memo's own cache digest,
     which also folds the split receipt and the spelled key vocabulary). One minting site means
     the decision memo and the pool memo cannot key differently. A fork carrying no stamp
-    (offered outside the schedule enumeration) falls back to the kernel's deploy identity +
-    knobs + pins. The rule identity separates two
+    (offered outside the schedule enumeration) falls back to the kernel's variant key
+    (``identity_key`` with io + knobs) + pins. The rule identity separates two
     forks offered on one op, and the node's blocklist CONTENT keys the validate-retry path — a
     retry with a blocked tile is a different decision."""
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
@@ -188,7 +188,7 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
     return (
         getattr(getattr(rule, "pass_", None), "name", None),
         getattr(rule, "name", None),
-        pid if pid is not None else (fp.root_op.deploy_identity(), tuple(sorted(fp.root_op.knobs.items())), schedule_pin_fingerprint()),
+        pid if pid is not None else (fp.root_op.identity_key(with_io=True, with_knobs=True), schedule_pin_fingerprint()),
         frozenset(node_blocked) if node_blocked else frozenset(),
     )
 
@@ -217,7 +217,7 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior) -> float 
     scored: dict[str, float | None] = {d.node_id: d.score for d in trace}
     total = 0.0
     for nid, node in terminal.nodes.items():
-        if node.op.cache_key() is None:
+        if node.op.identity_key(with_io=True, with_knobs=True) is None:
             continue
         us = scored.get(nid)
         if us is None:
@@ -241,19 +241,17 @@ def _price_kernel(
     hierarchy as a top-level knob pick (reservoir rows, then the tune DB's
     measured rows, model prediction only where nothing was measured) — the
     priced µs is a measurement wherever the tune benched this kernel. Memoized
-    per exact kernel identity (``Op.deploy_identity(structural=False)`` + knobs) so
-    28 identical per-layer kernels price once — the identity is α-invariant, so
-    sibling layers whose minted axis names differ still share the memo entry
-    (``Op.cache_key`` is the fallback for ops with no body-derived identity, and
-    was the old key: spelled per node, it never actually hit across layers).
+    per exact variant key (``Op.identity_key(structural=False, with_io=True,
+    with_knobs=True)``) so identically computing kernels price once — the key is
+    α-invariant, so mirror cut pieces and re-spelled siblings share the memo entry
+    (``identity_key(with_io=True, with_knobs=True)`` is the fallback for ops with no body-derived identity).
     Best-effort: any resolve failure prices as ``None`` (→ the caller keeps
     the op-variant path)."""
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
 
     op = graph.nodes[nid].op
-    identity = op.deploy_identity(structural=False)
-    key = (identity, tuple(sorted(op.knobs.items()))) if identity is not None else op.cache_key()
+    key = op.identity_key(structural=False, with_io=True, with_knobs=True) or op.identity_key(with_io=True, with_knobs=True)
     if key in memo:
         return memo[key]
     us: float | None = None
@@ -273,7 +271,11 @@ def _price_graph(
     """Σ of per-kernel best-µs prices over ``graph``'s kernel-bearing
     nodes, or ``None`` when any kernel is unpriceable (no partition fork —
     e.g. a pre-tiled combine ``TileOp`` — or a failed nested resolve)."""
-    prices = [_price_kernel(graph, nid, ctx, prior, memo, db, decisions) for nid, n in graph.nodes.items() if n.op.cache_key() is not None]
+    prices = [
+        _price_kernel(graph, nid, ctx, prior, memo, db, decisions)
+        for nid, n in graph.nodes.items()
+        if n.op.identity_key(with_io=True, with_knobs=True) is not None
+    ]
     if not prices or any(p is None for p in prices):
         return None
     return sum(prices)
@@ -548,7 +550,7 @@ _AUDIT_SINK: list[dict] | None = None
 def golden_audit(records: list[dict]):
     """Collect one ``{node, key, verdict, golden, us, n_rows, unrealized}`` record per
     verified-tier consultation into ``records`` for the duration of the block. ``key`` is the
-    fork's ``deploy_identity`` — the strict structural identity the tier joins on, not a
+    fork's the deploy identity (``identity_key(with_io=True)``) — the strict structural identity the tier joins on, not a
     classified shape. Verdicts:
 
       MATCH  a record carrying the fork's identity decided it (its spelled row equalled exactly
@@ -581,7 +583,7 @@ def _audit_record(
 
 def _verified_index(ctx: Context) -> dict:
     """The card's recorded goldens keyed by STRICT structural identity — the schedule-free
-    lowered-body digest + io fingerprint (``Op.deploy_identity``), derived record-side
+    lowered-body digest + io fingerprint (``identity_key(with_io=True)``), derived record-side
     from each record's own persisted program through the shared recognition core. Returns schedule
     rows as ``{identity: [records fastest-first]}``, scoped to the live
     ``(gpu_name, compute_cap)`` and the live pin regime. Best-effort per record (an underivable row
@@ -615,7 +617,7 @@ def _verified_index(ctx: Context) -> dict:
 def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, float, dict | None] | None:
     """The strict verified-tier decision for one fork, or ``None``.
 
-    A SCHEDULE fork (the recognized ``TileOp`` root): the fork's ``deploy_identity`` selects the
+    A SCHEDULE fork (the recognized ``TileOp`` root): the fork's the deploy identity (``identity_key(with_io=True)``) selects the
     records; the fastest record whose spelled row is EXACTLY one enumerated leaf
     (``canonical_row_key`` equality — no prefix, no any-of) decides. A record that matches the
     identity but equals no leaf is DRIFT: warn loudly and decide nothing (fail-closed — the fuzzy
@@ -630,7 +632,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None:
         return None
-    identity = root.deploy_identity()
+    identity = root.identity_key(with_io=True)
     recs = sched_idx.get(identity)
     node_blocked = blocked.get(fp.node_id) if blocked else None
     if not recs and _AUDIT_SINK is None:
@@ -974,10 +976,10 @@ def greedy_decide(
     about speed — ``Pipeline.run``'s retry after a structural pick failed to
     LOWER, and the nested pricing probes, which must not re-split the slice
     they are pricing. The price memo is per-factory-call (one compile
-    attempt), keyed by ``Op.cache_key``."""
+    attempt), keyed by ``identity_key(with_io=True, with_knobs=True)``."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    memo: dict[str, float | None] = {}  # Op.cache_key → predicted µs (None = unpriceable)
+    memo: dict[str, float | None] = {}  # exact variant key → predicted µs (None = unpriceable)
     #: The DECISION memo (:func:`_decision_key` → the winning row + its price) — same lifetime as
     #: the price memo, one compile attempt. A repeat offer replays by :func:`~emmy.compiler.pipeline.fork.find_leaf`
     #: descent; only genuinely new (key, blocklist) states pay the stream-and-score. The outer

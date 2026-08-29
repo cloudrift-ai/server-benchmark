@@ -49,7 +49,6 @@ from emmy.compiler.ir.stmt.base import _axis_identity
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.path import sites
-from emmy.compiler.structural import digest
 
 
 @dataclass(frozen=True)
@@ -425,7 +424,7 @@ class TileOp(Op):
     kind, so key and value agree by construction). The ``op`` term is pure algebra, IMMUTABLE
     across the whole schedule search — a fork is a different map, never a rebuilt tree. Read /
     write through :class:`~emmy.compiler.ir.tile.ops.Sched` (``ops.reduce_plan`` is the plan
-    accessor); ``lower`` never sees the slices, so kernel identity (``Op.cache_key``) is untouched."""
+    accessor); ``lower`` never sees the slices, so kernel identity (``identity_key(with_io=True, with_knobs=True)``) is untouched."""
 
     op: object = None
     name: str = ""
@@ -522,17 +521,10 @@ class TileOp(Op):
 
         return tile_body(self)
 
-    def cache_key(self) -> str | None:
-        """Override :meth:`Op.cache_key`: the dialect tag plus :meth:`Op.body_identity` plus the
-        knob dict — same shape as ``BodyOp.cache_key``. Schedule slices, placement, workers are
-        excluded (the body is schedule-free), so every fork sibling of one term shares the
-        content half and same-body / different-knobs variants never collide."""
-        return digest(type(self).__name__, self.body_identity() or "", self._knob_key())
-
     @cached_property
     def loop_body(self) -> Body | None:
         """The complete schedule-free Loop-IR body this kernel executes, derived from the term
-        — what :meth:`body_identity` digests. The free grid axes wrap back
+        — what the identity lattice digests. The free grid axes wrap back
         as plain loops around the ONE lowering spelling (:func:`lower_with_output_specs` —
         ``Fold.lower()`` with every output specification attached at its owning scope), so the
         extents, the store program (index spelling, ``atomicAdd``, width, output sweeps) and a
@@ -549,8 +541,8 @@ class TileOp(Op):
             stmts = [Loop(axis=axis, body=Body(stmts))]
         return Body.coerce(stmts)
 
-    def body_identity(self, *, structural: bool = True) -> str | None:
-        """Override :meth:`Op.body_identity` with the DERIVED body: :attr:`loop_body`'s
+    def _body_identity(self, *, structural: bool = True) -> str | None:
+        """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s
         canonical digest, so a golden record derives the SAME key from its persisted program
         (both sides lower through the one spelling) and term re-spellings that lower alike
         share it."""

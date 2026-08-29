@@ -79,8 +79,10 @@ class CudaOp(Op):
     def pretty_body(self) -> str:
         return self.kernel_source
 
-    def cache_key(self) -> str | None:
-        """Override :meth:`Op.cache_key`: digest of the rendered source + launch params (the
+    def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
+        """Override :meth:`Op.identity_key` whole: digest of the rendered source + launch
+        params — past rendering, body / io / knobs are all realized into the artifact, so the
+        lattice flags have nothing left to fold and are accepted-and-ignored. (the
         bits that determine runtime behavior). Name-invariant: the kernel function name is
         rendered into the source (``void <name>(...)``) but doesn't change runtime behavior,
         so it normalizes out — renaming a kernel (e.g. via op provenance) neither busts the

@@ -137,39 +137,32 @@ class Op:
         """
         return True
 
-    def cache_key(self) -> str | None:
-        """Tuning / cubin-cache identity for a kernel-bearing op, or ``None`` when this op
-        kind is not cacheable (boundary sentinels, pre-lowering ops). Each kernel-bearing
-        dialect overrides it as a digest of its content identity (``structural_key``) folded
-        with :meth:`_knob_key` — knobs are part of the key because same-body /
-        different-knobs variants must not collide with their parent in the search tree
-        (``SearchTree.expand`` self-parents the node otherwise). The same kernel reached via
-        different rewrite paths produces the same key — ``source`` is never part of it."""
-        return None
-
     def _knob_key(self) -> tuple:
-        """The knob half of :meth:`cache_key` — the dict as a sorted item tuple."""
+        """The knob half of the variant key (``identity_key(with_knobs=True)``) — the dict as a sorted item tuple."""
         return tuple(sorted(self.knobs.items())) if self.knobs else ()
 
-    # ---- the identity interface — THE home. "Are these two kernels the same?" is answered
-    # here, from two facts every op carries: its complete Loop-IR body (:meth:`body_identity` —
-    # the ONE override point) and its io buffers. Two flavors: ``structural=True`` (the
-    # default, everywhere durable — golden records, corpus stamps) is SCHEDULE-EQUIVALENT,
-    # collapsing compute-unit op clusters so recorded schedule evidence transfers and the
-    # schedule space shrinks; ``structural=False`` names the exact kernel. There is
+    # ---- the identity interface — THE home, and the WHOLE public surface is one function:
+    # :meth:`identity_key`, a lattice over the ONE base fact (the canonical Loop-IR body,
+    # :meth:`_body_identity`, the single override point) with one flag per additional fact.
+    # The named points live at call sites, not as methods: ``identity_key(with_io=True)`` is
+    # the durable deploy join key (golden records, corpus stamps, child receipts);
+    # ``identity_key(with_io=True, with_knobs=True)`` is the variant key (the search tree,
+    # measurement stores — knobs included because same-body / different-knobs variants must not
+    # collide with their parent, and a measurement belongs to (kernel, knob row)). There is
     # deliberately NO schedule-space key here: the pool memo digest is scheduler plumbing,
     # minted at the one site that knows every enumeration input (``lowering/tile/_schedule``).
     # A fact a schedule reads that neither the body nor the io carries is a modeling gap to fix
     # there, never a side-channel fingerprint. ---- #
 
-    def body_identity(self, *, structural: bool = True) -> str | None:
+    def _body_identity(self, *, structural: bool = True) -> str | None:
         """Does this op COMPUTE the same thing, spelling aside? — the canonical digest of the
         op's complete Loop-IR body (``Body.structural_key``: SSA / axis / buffer names and
         commutative-arg order normalized away; the default ``structural=True`` also collapses
         compute-unit op clusters — the schedule-equivalent reading), or ``None`` for an op kind
         that carries no Loop-IR body. The ONE identity override point: ``BodyOp`` answers with
         its stored body, ``TileOp`` with the schedule-free :attr:`TileOp.loop_body` it derives
-        from its term. Cached on the body, which is immutable."""
+        from its term. Cached on the body, which is immutable. Private — consumers go through
+        :meth:`identity_key` (the bare lattice point equals this)."""
         return None
 
     @cached_property
@@ -180,29 +173,41 @@ class Op:
         so knob and body mutations need no invalidation at all."""
         return _io_fingerprint(self)
 
-    def deploy_identity(self, *, structural: bool = True) -> str | None:
-        """What the kernel IS — the durable join key (golden records, the deploy evidence
-        tiers, corpus stamps), or ``None`` for an op kind that is not one kernel of work.
-        :meth:`body_identity` folded with the io dtypes/shapes (:func:`_io_fingerprint` — the
-        two boundary facts the body digest cannot carry, because it canonicalizes buffer names
-        to ``b0, b1, …`` and renders symbolic dims hint-free). Excludes knobs, symbolic hints,
-        live pins and term spelling — a deploy record is schedule evidence, not code. The
-        default structural flavor joins compute-unit cluster siblings (same schedule space,
-        same winner); ``structural=False`` names the exact kernel (cluster siblings' latency
-        differs). Recomputed from the two cached halves (the body key on the immutable body,
-        the io key on the op), so a digest of two strings is the whole per-call cost."""
-        body = self.body_identity(structural=structural)
-        return None if body is None else digest(body, self._io_key)
+    def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
+        """THE identity — one function, one lattice. The base fact is the canonical Loop-IR
+        body digest; each flag folds in one more fact:
+
+        - ``structural`` — collapse compute-unit op clusters (the schedule-equivalent reading,
+          the default: cluster siblings share a schedule space and want the same schedule) vs
+          the exact kernel (``structural=False`` — their latency differs);
+        - ``with_io`` — the io dtype/shape fingerprint: what a deployed kernel is bound to;
+        - ``with_knobs`` — the knob row: which variant of the kernel this op is.
+
+        ``None`` for an op kind that carries no Loop-IR body. ``CudaOp`` overrides the whole
+        function with its rendered-source digest: past rendering, body / io / knobs are all
+        realized into the artifact and the flags have nothing left to fold. The same kernel
+        reached via different rewrite paths produces the same key — ``source`` is never part
+        of it, and neither is the dialect tag: every stage of one rewrite chain keys off the
+        same Loop-IR content."""
+        key = self._body_identity(structural=structural)
+        if key is None:
+            return None
+        parts: list = [key]
+        if with_io:
+            parts.append(self._io_key)
+        if with_knobs:
+            parts.append(self._knob_key())
+        return key if len(parts) == 1 else digest(*parts)
 
     @_ClassProperty
     def dialect(cls) -> str | None:  # noqa: N805 — a class property; ``cls`` receives the owner
         """The lowering-stage tag for a kernel-bearing op (``"loop"`` / ``"tile"`` /
         ``"kernel"`` / ``"cuda"``); ``None`` for everything that is not one kernel of work
         (boundary sentinels, pre-fusion ops). DERIVED, never declared: kernel-bearing is
-        exactly "overrides :meth:`cache_key`", and the tag is the class name minus its ``Op``
-        suffix, lowercased. A future subclass of a dialect op that wants its PARENT's tag must
+        exactly "overrides :meth:`_body_identity` or :meth:`identity_key`", and the tag is the
+        class name minus its ``Op`` suffix, lowercased. A future subclass of a dialect op that wants its PARENT's tag must
         override this — the name rule tags it by its own name."""
-        if cls.cache_key is Op.cache_key:
+        if cls.identity_key is Op.identity_key and cls._body_identity is Op._body_identity:
             return None
         return cls.__name__.removesuffix("Op").lower()
 

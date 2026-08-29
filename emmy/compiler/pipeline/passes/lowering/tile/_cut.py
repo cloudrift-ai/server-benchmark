@@ -569,7 +569,7 @@ def realize(
             produced = Fold.projection(body=Body((*prefix, produced)), results=names)
         axes = _workspace_axes(seam, produced)
         index = tuple(Var(axis.name) for axis in axes)
-        token = digest(tile.body_identity(structural=False) or "", seam.spelling)[:10]
+        token = digest(tile.identity_key(structural=False) or "", seam.spelling)[:10]
         buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
 
         loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))

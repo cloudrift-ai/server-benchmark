@@ -46,14 +46,29 @@ def _matmul_tile(epilogue_op: str | None = None, k_extent: int = 128):
 
 def test_cluster_sibling_epilogues_share_the_structural_key_but_not_the_exact_one() -> None:
     relu, tanh = _matmul_tile("relu"), _matmul_tile("tanh")
-    assert relu.body_identity(structural=False) != tanh.body_identity(structural=False)
-    assert relu.deploy_identity() == tanh.deploy_identity(), "schedule evidence transfers within a cluster"
-    assert relu.deploy_identity(structural=False) != tanh.deploy_identity(structural=False), "the exact kernels differ"
+    assert relu.identity_key(structural=False) != tanh.identity_key(structural=False)
+    assert relu.identity_key(with_io=True) == tanh.identity_key(with_io=True), "schedule evidence transfers within a cluster"
+    assert relu.identity_key(structural=False, with_io=True) != tanh.identity_key(structural=False, with_io=True), (
+        "the exact kernels differ"
+    )
 
 
 def test_cross_cluster_epilogues_key_apart() -> None:
-    assert _matmul_tile("relu").deploy_identity() != _matmul_tile("abs").deploy_identity()
+    assert _matmul_tile("relu").identity_key(with_io=True) != _matmul_tile("abs").identity_key(with_io=True)
 
 
 def test_extent_moves_the_key() -> None:
-    assert _matmul_tile(k_extent=128).deploy_identity() != _matmul_tile(k_extent=64).deploy_identity()
+    assert _matmul_tile(k_extent=128).identity_key(with_io=True) != _matmul_tile(k_extent=64).identity_key(with_io=True)
+
+
+def test_identity_key_lattice() -> None:
+    """One function, one lattice: the named identities are points of ``identity_key``, and each
+    flag folds in exactly one fact."""
+    tile = _matmul_tile("relu", k_extent=128)
+    assert tile.identity_key() == tile.identity_key()
+    assert tile.identity_key(with_io=True) == tile.identity_key(with_io=True)
+    assert tile.identity_key(with_io=True, with_knobs=True) == tile.identity_key(with_io=True, with_knobs=True)
+    knobbed = _matmul_tile("relu", k_extent=128)
+    knobbed.knobs["TILE"] = "f4"
+    assert knobbed.identity_key(with_io=True) == tile.identity_key(with_io=True), "knobs stay out without the flag"
+    assert knobbed.identity_key(with_io=True, with_knobs=True) != tile.identity_key(with_io=True, with_knobs=True)

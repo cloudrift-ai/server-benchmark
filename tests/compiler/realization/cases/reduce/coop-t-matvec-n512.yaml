@@ -22,7 +22,7 @@ configs:
     origins:
     - linear
   realizations:
-  - name: k_linear_fbe2b7.b487b7f8bd65
+  - name: k_linear_fbe2b7.28adaf88f57d
     bindings: {}
     pins:
       FAST_MATH: false

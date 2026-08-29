@@ -43,7 +43,7 @@ def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...
     its dependent's insertion point and precedes it; otherwise an unread edge appends. Independent
     ties retain operand TUPLE order. This is the one lowering rule that turns the stored operands +
     derived step back into the flat loop body — deterministic, so the derived loop (and with it
-    ``Op.cache_key``) depends only on the stored params."""
+    ``identity_key(with_io=True, with_knobs=True)``) depends only on the stored params."""
     operands = _unique_edges(operands)
     if not operands:
         return stmts
@@ -322,7 +322,7 @@ class Fold:
 
     The reduce PARTITION (:class:`ReducePlan` — GRID split / BLOCK coop / REG ILP) is the schedule's,
     not the node's: it is keyed into ``TileOp.schedule`` and read through ``ops.Sched``, which is why
-    ``lower`` cannot see it and ``Op.cache_key`` stays byte-identical whichever partition the fork
+    ``lower`` cannot see it and ``identity_key(with_io=True, with_knobs=True)`` stays byte-identical whichever partition the fork
     picked. See the NO-schedule-fields note on ``operands`` below."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``

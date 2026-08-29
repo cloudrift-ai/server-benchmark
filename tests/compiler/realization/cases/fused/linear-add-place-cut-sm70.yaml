@@ -32,7 +32,7 @@ configs:
     - add_7
     - linear_6
   realizations:
-  - name: k_linear_86a1f4.9c286907da15
+  - name: k_linear_86a1f4.e5633fbc1f1b
     bindings: {}
     pins:
       FAST_MATH: false

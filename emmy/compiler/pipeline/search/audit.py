@@ -5,7 +5,7 @@ online-prior file pointed at a nonexistent path (``config.online_file_override``
 repo-shipped offline prior resolving whatever the records don't — and collects one verdict per
 verified-tier consultation through the :func:`~.policy.greedy.golden_audit` seam:
 
-  MATCH — a record carrying the fork's ``deploy_identity`` decided it: the record's spelled row
+  MATCH — a record carrying the fork's the deploy identity (``identity_key(with_io=True)``) decided it: the record's spelled row
           (``knob.schedule_row_key``) equalled exactly one enumerated leaf
   DRIFT — records carry that identity but NO offered leaf equals any of their rows (a graph /
           enumeration change invalidated the recording; the tier is fail-closed and the deploy

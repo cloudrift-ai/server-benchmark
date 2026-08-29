@@ -215,7 +215,7 @@ one zero-axis `TILE` site (`path.family_sites`); the `map_tile_moves` ladder off
 tile wherever `r` divides the static inner free extent (a masked overhang is refused because the slid last cell is no
 longer a provably aligned affine base, which defeats the load/store vectorizers the strip exists to feed — measured,
 see `_strip_refusal`), and a row whose root `TILE` names a width unrolls the cell into `r` grouped loads · computes ·
-writes at materialization — a different term, hence a different structural identity and `Op.cache_key`.
+writes at materialization — a different term, hence a different structural identity and the variant key (`identity_key(with_io=True, with_knobs=True)`).
 
 **`RASTER` leads the walk as its own fork level.** The CTA launch-order codec is kernel-global with nothing for
 `Ctx` to reconcile, so it is decided once per kernel, ahead of the sites: each candidate value is one branch whose
@@ -244,7 +244,7 @@ the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot e
 from the rows it does enumerate.
 
 **The pool memo and the sampled draw.** The prescan — each node's option list — is memoized in the Context's
-session cache, keyed by every enumeration input: the kernel's `Op.deploy_identity` (the canonical body + io —
+session cache, keyed by every enumeration input: the kernel's the deploy identity (`identity_key(with_io=True)`) (the canonical body + io —
 extents, stores, dtypes and shapes all live there), the knobs, the symbolic-dim hints, the live
 env-pin fingerprint, and two facts the walk consumes directly and therefore keys explicitly — the split receipt
 (`carries_partition`, which strips a `REDUCE` pin's `g`-half where a receipt-free twin must raise) and the spelled
@@ -268,7 +268,7 @@ cache with a live one can never serve it a draw.
 **Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
 alternative's latency. A cut's — and a cross-CTA split's — cost is the minimum sum over the kernels it produces,
 which is why each is a separate structural decision with a separate scoring rule (`policy/greedy._resolved_price`,
-memoized per `Op.cache_key` so a piece appearing in several partitions is solved once) rather than something the
+memoized per the variant key (`identity_key(with_io=True, with_knobs=True)`) so a piece appearing in several partitions is solved once) rather than something the
 per-row prior can rank.
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree.

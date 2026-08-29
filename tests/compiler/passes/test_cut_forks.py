@@ -503,7 +503,7 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     it, and the verified-tier join reads the stored identity instead of the pre-cut lift."""
     fields = _receipt_fields()
     parent = GoldenRecord(knobs={}, **fields)
-    lift_identity = _lifted_target(parent).deploy_identity()
+    lift_identity = _lifted_target(parent).identity_key(with_io=True)
     children = {i: rows for i, rows in _candidate_rows(parent).items() if i is not None and i != lift_identity}
     assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
     (id_a, rows_a), (id_b, rows_b) = sorted(children.items())

@@ -913,7 +913,7 @@ def _strip_variant(state: _State, plan: TilePlan, row: dict) -> TileOp:
     unrolled ``r`` times — copy ``i`` reads/writes ``inner·r + i`` with its SSA names suffixed —
     then regrouped as ``r`` loads · ``r`` computes · ``r`` writes so the unit-stride runs feed
     ``050_vectorize_loads`` / ``080_vectorize_stores``. A different term, hence a different
-    ``structural_key`` and ``Op.cache_key`` — which is why it is applied HERE and not at
+    ``structural_key`` and ``identity_key(with_io=True, with_knobs=True)`` — which is why it is applied HERE and not at
     recognition."""
     tile = state.tile
     inner = tile.place.free[-1]
@@ -1316,8 +1316,8 @@ class _State:
     #: the same purity is what lets the prescan ride the session memo (:class:`_Pool`) across
     #: same-pool kernels and tune trajectories.
     options: dict = field(default_factory=dict)
-    #: The pool's minted identity — the SAME digest the session memo caches under (the deploy
-    #: identity + knobs + hints + pins + the split receipt + the spelled key vocabulary + the
+    #: The pool's minted identity — the SAME digest the session memo caches under (the variant
+    #: key + hints + pins + the split receipt + the spelled key vocabulary + the
     #: sample identity). Minted once here, at the one place that knows every enumeration input,
     #: and carried by every Fork of the tree (:attr:`Fork.pool_id`) so consumers (the greedy
     #: decision memo) key on the stamped identity instead of re-deriving a weaker one.
@@ -1585,8 +1585,8 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     prescan instead.
 
     The prescan is memoized in ``ctx.session_cache``, keyed by every enumeration input: the
-    kernel's ``Op.deploy_identity`` (body + io), the knobs, the symbolic-dim hints (a schedule
-    sizes against them), the live pin fingerprint, the split receipt and the spelled key
+    kernel's variant key (``Op.identity_key`` with io + knobs), the symbolic-dim hints (a
+    schedule sizes against them), the live pin fingerprint, the split receipt and the spelled key
     vocabulary (explicit key terms — :class:`_Pool` states why) and, when
     sampling, the sample's identity; target facts need no key part because the cache lives ON
     the Context and one instance never spans two fact sets. Options are a pure function of the node and the live pins,
@@ -1618,13 +1618,12 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     # and the spelled key vocabulary are explicit key terms (see :class:`_Pool`): a receipt-free
     # twin must miss and raise where the partial memoized its stripped ``g``-pin options, and an
     # α-renamed twin must enumerate its own spellings — ``off`` is the frame guard, since the
-    # identity half (``Op.deploy_identity``) is deliberately spelling-free. Minted
+    # identity half (``identity_key(with_io=True)``) is deliberately spelling-free. Minted
     # unconditionally: the digest is also the pool identity every Fork of this tree carries
     # (``_State.pool_id``), whether or not a session cache is consulted.
     io = (*tile.inputs.values(), *tile.outputs.values())
     key = digest(
-        tile.deploy_identity(),
-        tuple(sorted(tile.knobs.items())),
+        tile.identity_key(with_io=True, with_knobs=True),
         tuple(d.hint or DEFAULT_SEQ_HINT for t in io for d in t.shape if not d.is_static),
         schedule_pin_fingerprint(),
         sample.key if sample is not None else "",

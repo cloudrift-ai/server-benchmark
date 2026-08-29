@@ -230,15 +230,19 @@ def test_search_data_does_not_import_the_prior() -> None:
 _IDENTITY_HOME = "emmy/compiler/ir/base.py"
 
 #: The identity interface methods and the modules allowed to define/override each. ``Op`` (the
-#: home) declares them; ``body_identity`` is the ONE extension point (``BodyOp`` answers with
-#: its stored body, ``TileOp`` with its derived ``loop_body``), and ``hint_extent`` is the
-#: ``Axis`` property the scheduler sizes against. ``pool_key`` is retired — the schedule-pool
-#: memo digest is scheduler plumbing minted at its one site (``lowering/tile/_schedule``), so a
-#: method of that name reappearing anywhere is a second spelling.
+#: home) declares ONE public function — ``identity_key`` (``CudaOp`` overrides it whole with its
+#: rendered-source digest); ``_body_identity`` is the ONE extension point (``BodyOp`` answers
+#: with its stored body, ``TileOp`` with its derived ``loop_body``), and ``hint_extent`` is the
+#: ``Axis`` property the scheduler sizes against. ``deploy_identity`` / ``cache_key`` /
+#: ``pool_key`` are retired lattice points, spelled at call sites via ``identity_key`` flags (or
+#: minted at the scheduler's one site) — a method of any of those names reappearing anywhere is a
+#: second spelling.
 _IDENTITY_DEFINERS = {
+    "identity_key": {_IDENTITY_HOME, "emmy/compiler/ir/cuda/ir.py"},
     "body_identity": {_IDENTITY_HOME, "emmy/compiler/ir/stmt/ir.py", "emmy/compiler/ir/tile/ir.py"},
     "io_fingerprint": {_IDENTITY_HOME},
-    "deploy_identity": {_IDENTITY_HOME},
+    "deploy_identity": set(),
+    "cache_key": set(),
     "pool_key": set(),
     "hint_extent": {"emmy/compiler/ir/axis.py"},
 }

@@ -32,7 +32,7 @@ configs:
     origins:
     - softmax
   realizations:
-  - name: k_softmax_4f256c.8be320a47123
+  - name: k_softmax_4f256c.d493a3965993
     bindings: {}
     pins:
       FAST_MATH: false

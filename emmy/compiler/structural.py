@@ -25,8 +25,10 @@ Implementers today:
   land). Excludes ambient I/O fields (dump dirs, verbosity, the session
   cache).
 
-``Op.cache_key`` layers on these: each kernel-bearing dialect folds its
-content identity with the op's knob dict for the tuning / cubin caches.
+``Op.identity_key`` layers on these: one lattice over the op's canonical
+Loop-IR body, folding in the io fingerprint and the knob dict for the
+deploy join (the deploy identity (``identity_key(with_io=True)``)) and the tuning / cubin caches
+(``identity_key(with_io=True, with_knobs=True)``).
 
 The cache layer in the autotuning loop keys candidates by these digests,
 so adding a field to an implementer is an explicit decision: include it

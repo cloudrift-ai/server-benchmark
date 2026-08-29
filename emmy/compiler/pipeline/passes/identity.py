@@ -1,7 +1,7 @@
 """IdentityStrategy — a kernel's structural identity, owned end to end.
 
 The ``S_*`` row (an extent-aware histogram of the kernel body — the structural identity that
-keys the tune DB's evidence, featurizes into the online prior, and folds into ``Op.cache_key``'s
+keys the tune DB's evidence, featurizes into the online prior, and folds into ``identity_key(with_io=True, with_knobs=True)``'s
 knob half) is computed here and MATERIALIZED into ``op.knobs`` at exactly two moments, once per
 kernel, at birth:
 

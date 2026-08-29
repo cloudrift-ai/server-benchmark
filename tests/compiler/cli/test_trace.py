@@ -313,7 +313,7 @@ def test_trace_inventory_keeps_every_kernel_even_without_cache_keys(monkeypatch,
     graph.add_node(ElementwiseOp("relu"), ["x0"], Tensor("y0", (16,)), node_id="y0")
     graph.add_node(ElementwiseOp("relu"), ["x1"], Tensor("y1", (16,)), node_id="y1")
     graph.inputs, graph.outputs = ["x0", "x1"], ["y0", "y1"]
-    monkeypatch.setattr(LoopOp, "cache_key", lambda _self: None)
+    monkeypatch.setattr(LoopOp, "identity_key", lambda _self, **_kw: None)
 
     path = tmp_path / "working.yaml"
     result = write_trace_inventory(graph, path, ctx=_TARGET_CTX)

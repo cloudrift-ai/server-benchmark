@@ -58,13 +58,13 @@ Why each part, and why nothing else:
 
 - `programs` / `target` / `compute_cap` — the reproducer. Stable Torch IR rather than a code snippet, so a frontend
   change cannot silently alter what the corpus tests.
-- `name` — already carries `Op.cache_key()[:12]`, so it detects cache-key drift for free.
+- `name` — already carries the variant key (`identity_key(with_io=True, with_knobs=True)`)`[:12]`, so it detects cache-key drift for free.
 - `pins` / `knobs` — the authored schedule. Regeneration structurally cannot produce these, which is what makes the
   staleness mechanism safe.
-- `identity` — the record's `Op.deploy_identity` (structural flavor): the digest of the complete schedule-free
-  Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. `cache_key` (in `name`) folds the
-  class name, the schedule-free body identity and the knobs instead, so an io fact moves `identity` while leaving
-  `name` untouched, and a knob-only change moves `name` while leaving `identity` untouched.
+- `identity` — the record's the deploy identity — `identity_key(with_io=True)`, structural flavor —: the digest of the complete schedule-free
+  Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. the variant key (in `name`) is the
+  variant key — the same body + io folded with the knob row — so a knob-only change moves `name` while leaving
+  `identity` untouched.
 - `identity` and the optional per-card `latency` block are the only additions the corpus makes to the golden schema,
   and both are optional keys the model goldens do not carry.
 

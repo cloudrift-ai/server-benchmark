@@ -532,7 +532,7 @@ def reduce_plan(tile):
 
 # Kernel identity lives in its own module (``tile/_key.py``) — it is not a compute read — and its
 # ONE public name is the ``Structural`` method, ``Fold.structural_key()`` / ``TileOp.structural_key()``
-# (``Op.cache_key`` / ``Graph.structural_key`` reach it there). The structural dump is NOT re-exported:
+# (``identity_key(with_io=True, with_knobs=True)`` / ``Graph.structural_key`` reach it there). The structural dump is NOT re-exported:
 # it has no consumer outside ``_dump`` itself, so a shim here would serve nothing.
 
 __all__ = [

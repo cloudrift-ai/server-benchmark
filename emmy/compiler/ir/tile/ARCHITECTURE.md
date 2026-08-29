@@ -192,15 +192,17 @@ operand; the generic twisted Fold derivation then exposes the corresponding cont
 
 ## Kernel identity
 
-Every "are these two kernels the same?" question is answered by the `Op` identity interface
-(`ir/base.py`): `body_identity` and `deploy_identity` (body + io) beside `cache_key`. `TileOp`'s
-contribution is `loop_body` — the complete schedule-free Loop-IR body the kernel executes,
-derived from the term (the free grid axes wrapped back as plain loops around
-`lower_with_output_specs`, so the extents, the store program and a cut child's typed seam `Load`
-are all in the body) — and the `body_identity` override that digests it. There is no separate
-term hasher: `Fold.structural_key` is the exact-flavor digest of the term's own lowered body (the
-term is pure algebra; its body is its normal form), and `cache_key` folds `body_identity` with
-the knobs, same shape as every body-carrying dialect. There is no schedule-space key on
+Every "are these two kernels the same?" question is answered by ONE function — `Op.identity_key`
+(`ir/base.py`), a lattice over the canonical Loop-IR body with one flag per additional fact
+(`structural` cluster-collapse, `with_io`, `with_knobs`). `TileOp`'s contribution is `loop_body` —
+the complete schedule-free Loop-IR body the kernel executes, derived from the term (the free grid
+axes wrapped back as plain loops around `lower_with_output_specs`, so the extents, the store
+program and a cut child's typed seam `Load` are all in the body) — and the private
+`_body_identity` override that digests it. There is no separate term hasher: `Fold.structural_key`
+is the exact-flavor digest of the term's own lowered body (the term is pure algebra; its body is
+its normal form). The named lattice points are spelled at call sites: the deploy identity
+(`with_io=True` — the durable join key) and the variant key (`with_io=True, with_knobs=True` —
+the search tree and measurement stores). There is no schedule-space key on
 the interface: the pool memo digest is minted at its one site in `lowering/tile/_schedule`, from
 the deploy identity plus everything the enumeration additionally reads (knobs, hints, pins, the
 split receipt, the spelled key vocabulary).

@@ -77,7 +77,7 @@ def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) ->
         root_op=TileOp(op=Fold.projection(body=Body())),
     )
     record = SimpleNamespace(name="recorded-golden", knobs={"RASTER": "", "TILE": "recorded"}, emmy_us=1.25)
-    monkeypatch.setattr(TileOp, "deploy_identity", lambda _op, **_kw: "identity")
+    monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
 
     leaf, price, knobs = _verified_pick(point, {"identity": [record]}, None)
 
@@ -102,7 +102,7 @@ def test_verified_pick_defers_a_structural_fork(monkeypatch) -> None:
         root_op=TileOp(op=Fold.projection(body=Body())),
     )
     record = SimpleNamespace(name="recorded-golden", knobs={"TILE": "recorded"}, emmy_us=1.25)
-    monkeypatch.setattr(TileOp, "deploy_identity", lambda _op, **_kw: "identity")
+    monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
 
     assert _verified_pick(point, {"identity": [record]}, None) is None
 
@@ -320,7 +320,7 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
     def spy(graph, nid, ctx, prior, memo, db=None, decisions=None):
         op = graph.nodes[nid].op
         calls.append(nid)
-        identity_keys.add((op.deploy_identity(structural=False), tuple(sorted(op.knobs.items()))))
+        identity_keys.add(op.identity_key(structural=False, with_io=True, with_knobs=True))
         out = orig(graph, nid, ctx, prior, memo, db, decisions)
         memo_keys.update(memo)
         return out

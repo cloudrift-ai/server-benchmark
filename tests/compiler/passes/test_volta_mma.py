@@ -238,16 +238,16 @@ def test_sm70_rejects_a_pinned_newer_stage(monkeypatch, stage, message) -> None:
         Pipeline.build(TILE_PASSES).run(_graph(), ctx=Context(compute_capability=(7, 0)))
 
 
-def test_requested_target_reaches_nvcc_arch_and_cache_key(monkeypatch) -> None:
+def test_requested_target_reaches_nvcc_arch_and_cubin_key(monkeypatch) -> None:
     monkeypatch.setattr(nvcc, "_toolkit_tag", lambda: "toolkit")
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
     try:
         set_target((7, 0))
         arch70 = nvcc.device_arch(False)
-        key70 = nvcc._cache_key("source", "kernel", arch70)
+        key70 = nvcc._cubin_key("source", "kernel", arch70)
         set_target((8, 0))
         arch80 = nvcc.device_arch(False)
-        key80 = nvcc._cache_key("source", "kernel", arch80)
+        key80 = nvcc._cubin_key("source", "kernel", arch80)
     finally:
         set_target(None)
     assert (arch70, arch80) == ("sm_70", "sm_80")

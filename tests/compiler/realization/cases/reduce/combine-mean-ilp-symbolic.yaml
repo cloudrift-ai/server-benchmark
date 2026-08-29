@@ -19,7 +19,7 @@ configs:
     origins:
     - mean
   realizations:
-  - name: k_mean_2c850e.a334095dce5a
+  - name: k_mean_2c850e.d909bc8c599b
     bindings: {}
     pins:
       FAST_MATH: false

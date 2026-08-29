@@ -253,7 +253,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
         return sum(1 for _ in iter_leaves(schedule(tile, "t", tile.knobs, ctx)))
 
     assert total(flat) != total(split), "a split-pair store must not offer the same tiers"
-    assert flat.deploy_identity() != split.deploy_identity(), "so a golden must not join across them"
+    assert flat.identity_key(with_io=True) != split.identity_key(with_io=True), "so a golden must not join across them"
     assert schedule(flat, "t", flat.knobs, ctx)[0].pool_id != schedule(split, "t", split.knobs, ctx)[0].pool_id, (
         "and they must not share a pool"
     )

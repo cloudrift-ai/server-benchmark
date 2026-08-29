@@ -159,6 +159,12 @@ class Body(tuple[Stmt, ...]):
 
     # -- transformation --------------------------------------------------
 
+    def rename_buffers(self, rename) -> Body:  # noqa: ANN001 — any str->str mapping
+        """This body with every external-buffer reference renamed through ``rename`` — the
+        body-level face of :meth:`Stmt.rename_buffers` (the recursive :meth:`map` reaches every
+        nested leaf, so wrapper stmts need no handling)."""
+        return self.map(lambda s: s.rename_buffers(rename))
+
     def map(self, fn: Callable[[Stmt], Stmt | None | Iterable[Stmt]]) -> Body:
         """Recursive 1:N body transformer. Post-order: each block stmt's
         nested body is mapped first, then ``fn`` is applied to the

@@ -476,6 +476,10 @@ class CpAsyncCopy(Stmt):
     def external_reads(self) -> tuple[str, ...]:
         return (self.src,)
 
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.src, self.src)
+        return self if new == self.src else replace(self, src=new)
+
     def pretty(self, indent: str = "") -> list[str]:
         smem_idx = ", ".join(e.pretty() for e in self.smem_index)
         src_idx = ", ".join(e.pretty() for e in self.src_index)
@@ -548,6 +552,10 @@ class TmaDescriptor(Stmt):
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.src_buf,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.src_buf, self.src_buf)
+        return self if new == self.src_buf else replace(self, src_buf=new)
 
     def pretty(self, indent: str = "") -> list[str]:
         shape = ", ".join(str(e) for e in self.src_shape)
@@ -1161,6 +1169,10 @@ class FragmentLoad(Stmt):
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.input,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.input, self.input)
+        return self if new == self.input else replace(self, input=new)
 
     def exprs(self) -> tuple[Expr, ...]:
         bases = (self.col_base,) + ((self.row_base,) if self.row_base is not None else ())

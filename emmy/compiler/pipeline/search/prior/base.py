@@ -433,6 +433,8 @@ class Prior(ABC):
         elif self._since_fit < self._refit_interval():
             return False
         self.fit()
+        if not self.fitted:
+            return False
         self._since_fit = 0
         self._note_fit()
         # Calibration gate input: can the fresh model rank its own reservoir? A

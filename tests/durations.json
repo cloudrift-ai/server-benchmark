@@ -145,7 +145,7 @@
  "tests/compiler/cli/test_run.py::test_run_no_code_errors": 0.78,
  "tests/compiler/cli/test_run.py::test_run_positional_json_like_ir@cuda-cli": 16.8,
  "tests/compiler/cli/test_run.py::test_run_record_shape_option_is_retired": 0.18,
- "tests/compiler/cli/test_run_golden.py::test_naming_one_target_skips_the_multi_target_walk@cuda-cli": 1.56,
+ "tests/compiler/cli/test_run_golden.py::test_naming_one_target_skips_the_multi_target_walk": 1.56,
  "tests/compiler/cli/test_run_golden.py::test_target_requires_golden": 0.18,
  "tests/compiler/cli/test_trace.py::test_trace_command_writes_only_golden_yaml": 0.14,
  "tests/compiler/cli/test_trace.py::test_trace_inventory_keeps_flash_attention_as_one_target": 0.08,

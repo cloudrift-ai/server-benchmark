@@ -92,6 +92,8 @@
  "tests/compiler/cli/test_golden_file_replay.py::test_compile_working_file_uses_exact_loop_target": 0.34,
  "tests/compiler/cli/test_golden_file_replay.py::test_working_file_golden_conflicts_with_direct_input": 0.2,
  "tests/compiler/cli/test_golden_file_replay.py::test_working_file_requires_name_and_reports_its_own_available_rows": 0.38,
+ "tests/compiler/cli/test_golden_file_replay.py::test_working_shared_placement_pins_select_the_exact_compile_target[explicit]": 6.68,
+ "tests/compiler/cli/test_golden_file_replay.py::test_working_shared_placement_pins_select_the_exact_compile_target[ordinary]": 7.26,
  "tests/compiler/cli/test_run.py::test_accuracy_check_fails_scrambled_output_passes_outliers": 0.05,
  "tests/compiler/cli/test_run.py::test_accuracy_check_gaussian_fp16_budget_not_free": 1.25,
  "tests/compiler/cli/test_run.py::test_accuracy_check_heavy_tailed_fp16_outputs": 1.68,

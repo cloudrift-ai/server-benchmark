@@ -852,7 +852,10 @@ predicted to be cheaper first.
 
 **Separable scoring** (`TwoLevelStrategy._evaluate_terminal`) tunes each finalized kernel **independently** in
 its own single-node slice (`single_node_graph`, `slice.py`) with a plain `TuningSearch` over the lowering passes
-only (`tile → kernel → cuda`), and returns the Σ once ALL Loop kernels are measured:
+only (`tile → kernel → cuda`), and returns the Σ once all kernel roots are measured. A serialized post-cut child is
+already Tile IR: an unscheduled Tile root enters this same per-kernel search directly and records ordinary
+child-identity evidence that a later parent cut can consume. A Tile root whose worker inventory is sealed is already
+scheduled; it remains lowering-only and is never enrolled or scheduled again.
 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
   The root op is shared **by reference**, so its body — and thus `Op.cache_key` — is byte-for-byte the full-graph op's.

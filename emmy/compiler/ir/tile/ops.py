@@ -94,6 +94,18 @@ def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, ob
     return {nm: dt for nm in stats if (dt := env.get(nm)) is not None}
 
 
+def _dtype_key(edge, scope: dict | None) -> tuple:
+    """An edge's cache key: its identity plus the dtypes its CAPTURES resolve to at this
+    occurrence. Captures are what make the answer occurrence-dependent; an edge with none keys the
+    same with or without a scope, so the unscoped and scoped walks share their entries."""
+    # Identity keying is only valid while the tree is alive — which it is for every caller, who
+    # holds the root across the walk.
+    captures = sorted(edge.deps()) if isinstance(edge, Fold) else ()
+    if not captures or not scope:
+        return (id(edge), ())
+    return (id(edge), tuple((name, getattr(scope.get(name), "name", None)) for name in captures))
+
+
 def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict | None = None) -> tuple:
     """Infer an edge's result dtypes in the lexical scope where the edge occurs.
 
@@ -104,16 +116,17 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
     capturing seam whose occurrences resolve to equal providers, and equal providers type equally.
     """
     cache = {} if cache is None else cache
-    if id(edge) in cache:
-        return cache[id(edge)]
+    key = _dtype_key(edge, scope)
+    if key in cache:
+        return cache[key]
     if isinstance(edge, Load):
         tensor = inputs.get(edge.input) if inputs else None
         result = (tensor.dtype if tensor is not None else None,) * len(edge.names)
-        cache[id(edge)] = result
+        cache[key] = result
         return result
     if not isinstance(edge, Fold):
         result = (None,) * len(_operand_result_names(edge))
-        cache[id(edge)] = result
+        cache[key] = result
         return result
 
     env = dict(scope or {})
@@ -142,7 +155,7 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
     else:
         carried = lifted[: len(edge.combine.results)]
         result = carried + tuple(env.get(name) for name in _operand_result_names(edge)[len(carried) :])
-    cache[id(edge)] = result
+    cache[key] = result
     return result
 
 

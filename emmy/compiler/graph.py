@@ -397,6 +397,7 @@ def _stmt_eval_scope() -> dict:
     # back. Auto-populate every public class from these modules (``setdefault`` so the
     # explicit stmt/expr entries above win on any name clash) — a new node/knob field
     # needs no edit here.
+    import emmy.compiler.ir.atom as _atom_mod  # noqa: PLC0415
     import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
@@ -404,7 +405,7 @@ def _stmt_eval_scope() -> dict:
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_axis_mod, _sched_mod, _fold_mod, _tile_mod, _kernel_mod, _cuda_mod):
+    for _mod in (_atom_mod, _axis_mod, _sched_mod, _fold_mod, _tile_mod, _kernel_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):

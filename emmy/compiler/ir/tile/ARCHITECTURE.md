@@ -56,7 +56,11 @@ boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a 
 pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
 Structural identity therefore reads the stored order directly. Contraction canonicalization first orders product
 arguments by geometry, then places the one argument shared by every product in the Fold's shared operand slot.
-Physical M/N orientation remains a placement fact rather than part of the Fold algebra.
+For a broadcast-batched product whose batch axis occurs in only one operand, the placement's trailing output pair
+still supplies that geometry. If its geometric first operand reads the reduction axis non-contiguously and the other
+materialized operand reads it contiguously, the commutative product puts the contiguous operand in the shared A slot;
+placement then derives the corresponding physical M/N orientation from the operand axes. Physical M/N orientation
+remains a placement fact rather than part of the Fold algebra.
 
 `normalize.py` owns only the idempotent, bottom-up rules that need Tile context: scoped lambda alpha-equivalence and
 clustering, semiring contraction canonicalization, and closed child-Fold extraction from a root projection. The
@@ -72,9 +76,22 @@ exclusive consumption (every moved definition dies into the closed edges), so th
 duplicated. Both rules measure an edge's captures with `Fold.deps` — scope-aware, so a name a sibling operand binds
 inside the edge is not a capture and an already-closed edge never re-fires the rewrite. A cone closed at its axes is
 what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
-vector) becomes materializable once per key instead of recomputed per query row. A body-member fold these rules
-leave capturing host names is not lost to placement: the fork closes it at offer time through provider closure
-(`lowering/tile/_cut.py`), without moving anything in the stored tree.
+vector) becomes materializable once per key instead of recomputed per query row.
+
+An iteration never crosses into a new evaluation domain. Attaching an iteration-bearing provider to a contraction
+operand would evaluate it once per step of every intervening binder; normalization therefore leaves that provider at
+its defining scope. Straight-line chains still close normally, and a reducing root's own axis counts as its existing
+domain. A stored fold left capturing by this rule remains placeable: the placement fork resolves its captures outward
+through the occurrence's lexical environment at offer time, without moving the stored tree.
+
+Three walks compute a capture's provider cone, at three stages, and each is allowed to move something different.
+Normalization's closing rules (`normalize.py`, above) are the only walk that REWRITES the stored tree, and only for
+straight-line providers within one evaluation domain. The placement fork's provider closure
+(`lowering/tile/_cut.py`) moves nothing: it proves every occurrence resolves to equal sources and offers the closed
+value as a seam, recording fold producers as the seam's requirements. Kernel lowering's per-cell closure
+(`lowering/kernel/_factor.py`) moves sibling providers into a computed operand's compute fill of the one kernel being
+emitted — a codegen fact that exists only inside that realization. A new capture-resolution need belongs in one of
+these three, not a fourth walk.
 
 An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
 projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
@@ -207,6 +224,10 @@ ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. 
 placement before scheduling; a scoped cut carries the consumed placement decision on both pieces and proceeds
 directly to scheduling. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation
 families nor filters legal cuts by profitability.
+
+A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
+when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's
+f32 reduction-carrier dtype; otherwise the materialized B slab would make every f16 tensor-core atom ineligible.
 
 Scheduling sees only the rewritten stored Fold tree. Every Fold is an addressable schedule site; the scheduler does
 not derive alternate classified views or suppress a child because its parent may realize it. A derived unit-axis

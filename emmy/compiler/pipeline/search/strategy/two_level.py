@@ -6,7 +6,9 @@
 - **Outer**: drive the graph-changing passes (``OUTER_PASSES`` — ``frontend`` + ``loop``, the
   strategy's OWN boundary config, never an engine parameter). The outer never ventures into
   Tile IR; a terminal is the fused graph of finalized ``LoopOp``\\ s. Today the outer tree is a
-  chain — fusion offers no multi-option forks yet — and nothing here depends on that.
+  chain — fusion offers no multi-option forks yet — and nothing here depends on that. A direct
+  unscheduled ``TileOp`` target passes through that boundary unchanged and joins the inner
+  per-kernel search; an already scheduled ``TileOp`` stays lowering-only.
 - **Scoring is DECLARED SEPARABLE**: an outer terminal's reward is the Σ of its unique kernels'
   bests, each kernel measured independently in its own single-node slice
   (:func:`single_node_graph`) by a plain :class:`TuningSearch` (MCTS) over ``INNER_PASSES``.
@@ -38,6 +40,7 @@ from uuid import uuid4
 
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.knob import stamp_schedule_families
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
@@ -140,7 +143,7 @@ class InnerReward:
 class TwoLevelResult:
     """Outcome of :meth:`TwoLevelStrategy.run`."""
 
-    best_fused: Graph | None  # winning fused graph (finalized LoopOps)
+    best_fused: Graph | None  # winning outer terminal (normally finalized LoopOps)
     best_reward: InnerReward | None  # its Σ-per-op breakdown
     n_terminals: int  # outer terminals evaluated (1 today)
     assembled: Graph | None  # greedy DB-best Graph[CudaOp] assembled from the bests
@@ -162,9 +165,15 @@ def _mint_run_id() -> str:
 def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
     """Post-fusion kernel nodes — ``(node_id, op)`` for every kernel-bearing op.
 
-    An outer terminal sits at the loop dialect's end (:func:`outer_pipeline`), so every kernel is a
-    finalized ``LoopOp`` and each gets its own inner slice."""
-    return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp)]
+    A normal outer terminal sits at the loop dialect's end (:func:`outer_pipeline`), so its
+    kernels are finalized ``LoopOp`` instances. A direct post-cut reproducer instead starts at an
+    unscheduled ``TileOp``; it enters the same inner search so its rows keep the child identity
+    ordinary parent-route replay already consumes. A Tile root whose worker inventory is sealed
+    (``work`` set) is already scheduled and stays lowering-only. ``work`` is the only sealed
+    signal today, and it is ``None`` for the per-cell / pure-reduce forms too — such a root
+    re-enters the per-kernel search and re-decides its schedule from the same evidence, which is
+    redundant but not wrong; a dedicated scheduled marker on ``TileOp`` would tighten this."""
+    return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp) or (isinstance(n.op, TileOp) and n.op.work is None)]
 
 
 @dataclass
@@ -334,7 +343,7 @@ class TwoLevelStrategy(SearchStrategy):
     async def _evaluate_terminal(self, fused_graph: Graph, ctx: Context) -> InnerReward:
         """The separable scoring function: tune every post-fusion kernel of ``fused_graph`` in
         its own single-node slice and return ``Σ best-per-op time`` — the outer terminal reward
-        — once ALL Loop kernels are measured. Kernels minted inside the inner loops are enrolled
+        — once all kernel roots are measured. Kernels minted inside the inner loops are enrolled
         in waves (evidence, never reward terms).
 
         One coroutine per work item over a slot queue of ``len(pool)`` device-pinned backends
@@ -346,7 +355,7 @@ class TwoLevelStrategy(SearchStrategy):
         identity = _identity()
         ctx_key = ctx.structural_key()
         backend_name = getattr(self.pool[0], "name", "cuda")
-        # Group structurally-identical LoopOps under one ``Op.cache_key`` — insertion order =
+        # Group structurally-identical kernel roots under one ``Op.cache_key`` — insertion order =
         # first occurrence (drives the progress tail name). Ops with no cache key are
         # unreachable through the bench path so they don't enter the dedup map at all.
         unique: OrderedDict[str, tuple[str, object, int]] = OrderedDict()

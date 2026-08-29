@@ -11,13 +11,17 @@ from dataclasses import replace
 
 import pytest
 
+from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import Accum, Assign, Axis, Load, Loop, LoopOp, Write
+from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.pipeline import Pipeline
+from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 _RULE = "090_spell_store_rounding"
 A0 = Axis("a0", 4)
@@ -59,6 +63,67 @@ def _pointwise_kernel() -> LoopOp:
             ),
         ),
     )
+
+
+def _copy_kernel(source: str, output: str) -> LoopOp:
+    return LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="value", input=source, index=(Var("a0"),)),
+                    Write(output=output, index=(Var("a0"),), value="value"),
+                ),
+            ),
+        ),
+    )
+
+
+def _add_kernel(left: str, right: str, output: str) -> LoopOp:
+    return LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="left", input=left, index=(Var("a0"),)),
+                    Load(name="right", input=right, index=(Var("a0"),)),
+                    Assign(name="sum", op="add", args=("left", "right")),
+                    Write(output=output, index=(Var("a0"),), value="sum"),
+                ),
+            ),
+        ),
+    )
+
+
+def _private_reduction_graph(*, public_copy: bool) -> Graph:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4, 16), F16), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("residual", (4,), F16), node_id="residual")
+    graph.add_node(
+        _reduce_kernel().rename_buffers({"out": "stage"}),
+        ["x"],
+        Tensor("stage", (4,), F16, transient=True),
+        node_id="stage",
+    )
+    if public_copy:
+        graph.add_node(_copy_kernel("stage", "rounded"), ["stage"], Tensor("rounded", (4,), F16), node_id="rounded")
+        graph.add_node(
+            _add_kernel("rounded", "residual", "out"),
+            ["rounded", "residual"],
+            Tensor("out", (4,), F16),
+            node_id="out",
+        )
+    else:
+        graph.add_node(
+            _add_kernel("stage", "residual", "rounded"),
+            ["stage", "residual"],
+            Tensor("rounded", (4,), F16),
+            node_id="rounded",
+        )
+        graph.add_node(ElementwiseOp("negative"), ["rounded"], Tensor("out", (4,), F16), node_id="out")
+    graph.inputs = ["x", "residual"]
+    graph.outputs = ["out"]
+    return graph
 
 
 def _run(kernel: LoopOp, out: Tensor, *, input_shape: tuple = (4, 16), consumed: bool = True) -> LoopOp:
@@ -123,3 +188,27 @@ def test_unconsumed_store_spells_nothing() -> None:
     """
     op = _run(_reduce_kernel(), Tensor("out", (4,), F16), consumed=False)
     assert _conversions(op) == []
+
+
+def test_public_copy_of_private_reduction_keeps_its_rounding_through_placement() -> None:
+    """A decomposition's private accumulator reaches its public f16 boundary through a copy."""
+    graph = _private_reduction_graph(public_copy=True)
+
+    fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(graph)
+    kernel = next(node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
+    assert _conversions(kernel) == [F16]
+
+    with pinned_knobs({"PLACE": "cut"}):
+        placed = Pipeline.build(TILE_PASSES).run(graph, ctx=Context.from_target((7, 0)))
+    tiles = [node.op for node in placed.nodes.values() if isinstance(node.op, TileOp)]
+    consumer = next(tile for tile in tiles if "out" in tile.outputs)
+    copies = [stmt.dtype for stmt in Body(consumer.op.lower()).iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
+    assert len(tiles) == 2
+    assert copies == [F16]
+
+
+def test_public_computation_from_private_reduction_stays_full_width() -> None:
+    """A private reduction used by public computation is not itself a rounding boundary."""
+    fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(_private_reduction_graph(public_copy=False))
+    kernel = next(node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
+    assert _conversions(kernel) == []

@@ -162,6 +162,11 @@ answer it and nowhere else. That asymmetry is deliberate: the derived-half check
 fires everywhere and its fix works everywhere, while a timing can only be produced on the machine
 holding the card.
 
+The perf command repeats both the realization's input `pins` and schedule `knobs` in its explicit
+A/B row. The working-file target context selects the ordinary compile; each A/B variant re-lowers
+under its own pin context, so a placement cut omitted from the row would silently benchmark a
+different kernel set and reject the child schedule.
+
 ## Staleness: regeneration, not stamps
 
 Kernel identity and schedule codec spellings change often, so a stored case rots. The failure mode that matters is

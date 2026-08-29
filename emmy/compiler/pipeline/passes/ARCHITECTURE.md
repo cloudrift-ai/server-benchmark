@@ -82,16 +82,17 @@ whose workspace dtypes stay undetermined).
 A contraction-operand seam stands for a VALUE, not only an object: closed cones that are alpha-equivalent up to
 their captured axis names (attention's normalized K cone, once per score contraction) fold into one seam, each
 duplicate carried as a sibling with its capture correspondence, and the cut replaces every one with workspace loads
-spelled through its own axes. A body-member fold capturing host-provided names is cuttable through PROVIDER
-CLOSURE: a capture whose producer chain is pure `Load`/`Assign` stmts joins the produced piece verbatim, and a
-capture only a sibling fold defines makes the seam DEPENDENT — its piece reads the name back through that producer's
-workspace, so cutting it composes the producer's cut in (attention's second softmax-statistics pass reading the
-first's accumulator; a pinned dependent cut pulls its producers in transitively, and pinning a producer `fuse`
-beside it is an error). This is what lets the row statistics materialize once per query row instead of once per
-output weight. Provider-closed and dependent seams are SCOPED-PIN-ONLY: the unpinned fork and bare `PLACE=cut`
-never select them, because nearly every kernel — and every fresh cut piece, which copies its providers — hosts
-some, so offering them would make recursive placement inexhaustible and the candidate walk explode. A route through
-them is spelled by authored or golden-decoded pins.
+spelled through its own axes. Any stored fold capturing enclosing-scope names — operand edge or body member — is
+cuttable through PROVIDER CLOSURE. Each occurrence resolves captures outward through its lexical environment,
+nearest scope first; every occurrence must resolve to equal straight-line providers and the same Fold producers. A
+pure `Load`/`Assign` chain joins the produced piece verbatim, while a Fold producer makes the seam DEPENDENT: its piece
+reads the name through that producer's workspace, so cutting it composes the producer's cut in. Dtypes for capturing
+seams come from inference rooted at the Tile tree, where the enclosing bindings are visible. This is what lets row
+statistics materialize once per query row instead of being copied into a contraction's evaluation domain.
+Provider-closed and dependent seams are SCOPED-PIN-ONLY: the unpinned fork and bare `PLACE=cut` never select them,
+because nearly every kernel — and every fresh cut piece, which copies its providers — hosts some, so offering them
+would make recursive placement inexhaustible and the candidate walk explode. A route through them is spelled by
+authored or golden-decoded pins.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (attention's statistics cone contains the score dots whose operand cones are
@@ -302,6 +303,12 @@ How to comply:
 Multi-source `IndexMapOp` lifting preserves predicate dtype: an explicit source predicate is substituted unchanged,
 and an unconditional fallback is a boolean `Literal(True, "bool")`. The rendered CUDA condition remains `1`, while
 Loop IR persistence and vectorized reference evaluation retain the boolean type required by `Select`.
+
+Before fusion, `090_spell_store_rounding` turns a public narrowing reduction store into a typed `copy` value. A
+decomposition may place one transient, shape-only buffer between the accumulator and its public pass-through store;
+that direct private copy inherits the same accumulator dtype. Actual computation over private reduction state remains
+untyped, so normalization and softmax keep their f32 state until their own public result store. Fusion and placement
+then preserve the typed `copy` as an ordinary statement rather than reconstructing a boundary from graph topology.
 
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized

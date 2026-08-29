@@ -954,16 +954,14 @@ def _ab_samples(specs, dynamic=None):
 
 
 def _sample_replay_knobs(sample) -> dict:
-    """All knob pins needed to reproduce a golden winner or explicit A/B row, with the
-    no-information spellings dropped (:func:`drop_uninformative_scopes`) so replay pins exactly the
-    row the realization stamps. A stored spelling may still carry a declined scoped key
-    (``STAGE@a1: ''``); pinning it verbatim contradicts the row's own bare value (a bare pin fans
-    out across every eligible site) and the realized kernel — which stamps nothing at a declined
-    site — can never satisfy it. The family-level OFF fill is deliberately NOT applied here: a
-    partial working row leaves a family unmentioned meaning "unpinned", not "pinned OFF"."""
-    from emmy.compiler.pipeline.knob import drop_uninformative_scopes  # noqa: PLC0415
+    """All knob pins needed to reproduce a golden winner or explicit A/B row: the record's input
+    pins plus its knobs in the replay spelling (:func:`replay_pin_spelling` — no-information
+    spellings dropped, scoped OFF exceptions to a non-OFF bare pin kept). The family-level OFF fill
+    is deliberately NOT applied here: a partial working row leaves a family unmentioned meaning
+    "unpinned", not "pinned OFF"."""
+    from emmy.compiler.pipeline.knob import replay_pin_spelling  # noqa: PLC0415
 
-    return {**getattr(sample, "pins", {}), **drop_uninformative_scopes(sample.knobs)}
+    return {**getattr(sample, "pins", {}), **replay_pin_spelling(sample.knobs)}
 
 
 def _failed_bench_status(exc: BaseException) -> str:
@@ -2251,7 +2249,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # prior (uniform PUCT → emission-order, option-0) and does not replay tuned
         # variants from the DB; ``db=`` is kept for perf recording only. Wiring a
         # warm-started prior into single-shot compile is a deferred follow-up.
-        graph = Pipeline.build(tail).run(graph, db=db, dump=dump)
+        with pinned_knobs(getattr(args, "golden_target_pins", None) or {}):
+            graph = Pipeline.build(tail).run(graph, db=db, dump=dump)
 
     if not args.bench:
         # No bench: one in-process run + non-fatal accuracy vs the torch reference

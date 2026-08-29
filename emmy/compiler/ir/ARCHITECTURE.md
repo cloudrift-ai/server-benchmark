@@ -70,11 +70,13 @@ the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step
 need to be a statement to get there. The tree already carries it: a composed node is an entry in
 `operands`, and its position is produced by the derivation — `_twisted_derived_step` PLACES each
 inline-node edge before the first stmt that reads its bound name (lift body or merge), and
-`splice_operands` applies the same first-use rule to every other edge. Placement, not prepending, is
-what lets a step whose pure prologue precedes its producer (a loop-invariant scale `Load` ahead of
-attention's score contraction) re-derive to the program it was read from. `Fold.loop` passes that
-mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the only place terms become statements
-is `Fold.lower()`.
+`splice_operands` applies the same first-use rule to every other edge. A sibling edge that provides a
+value to another operand inherits that consumer's insertion point and precedes it; otherwise the
+provider could land after its only use when the projection body reads only the consumer. Placement,
+not prepending, is what lets a step whose pure prologue precedes its producer (a loop-invariant scale
+`Load` ahead of attention's score contraction) re-derive to the program it was read from. `Fold.loop`
+passes that mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the only place terms become
+statements is `Fold.lower()`.
 
 `Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
 children, `rewrite()` for α-renaming, and `defines()` for its result names.
@@ -390,6 +392,9 @@ recurse via `pretty_body`).
 CUDA scalar rendering goes through `stmt.base.op_to_expr`. Boolean masks retain the historical f32 SSA convention,
 so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values use the
 same semantics. Integer complement is not inferred from that name and fails closed until it has a typed consumer.
+The optional readable-source fold keeps a single-use `Assign` named when any argument's stamped dtype differs from
+the result dtype, so the target-aware `Assign.render` path remains responsible for conversions such as
+`__half2float`.
 
 Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` / `Body.forward_cone(seeds)` build a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound
@@ -535,13 +540,13 @@ splicer refuses that shape whether it is the merged root or a producer edge: dep
 the reduce loop and move the `Write` after it, changing every prefix value into the final reduction. Such an
 effectful inner loop is not valid input to total lift.
 
-An `Accum` stores its value into the producing tensor before a distinct frontend operation loads that tensor. When the
-declared tensor dtype differs from the accumulator dtype (implicitly f32 until Kernel IR), `splice_graph` keeps that
-boundary as a typed `copy` alias. Nodes created by decomposing and rewriting one frontend operation share the ultimate
-`Op.source` object and may reconstruct their private edge directly. A private output stays recognizable even when its
-consumer fragment already mixes origins: it is absent from the ultimate frontend source's declared outputs. Missing
-or unrelated source chains preserve the conversion. Equal-dtype reductions and non-`Accum` producers keep the
-ordinary untyped alias, so fusion does not duplicate a conversion already carried by the defining statement.
+Before splicing, `loop/lifting/090_spell_store_rounding` turns a public store that narrows an `Accum` into an ordinary
+typed `copy` statement. A decomposition may route that accumulator through one transient, shape-only buffer before a
+pass-through LoopOp writes the public buffer; that direct load retains the accumulator's implicit f32 dtype, so the
+same rule spells its public conversion. An actual `Assign` computation over private reduction state remains untyped:
+normalization and softmax therefore retain f32 internal state rather than narrowing it at an inferred projection edge.
+`splice_graph` then preserves the explicit conversion through its ordinary statement path and reconstructs no dtype
+boundary from source provenance or graph topology.
 
 Construction is bounded per statement: the dedup table shares each `(stmt, emit scope, σ)` binding, and in
 every legitimate splice no single statement takes more than a handful of distinct bindings. A recurrence-shaped

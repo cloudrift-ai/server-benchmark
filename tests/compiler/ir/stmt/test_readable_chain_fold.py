@@ -9,10 +9,11 @@ across the redefinition.
 
 from __future__ import annotations
 
-from emmy.compiler.dtype import I32, U32
+from emmy.compiler.dtype import F16, F32, I32, U32
+from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.stmt.base import RenderCtx, render_body
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load
 
 
 def _render(*stmts) -> list[str]:
@@ -55,6 +56,26 @@ def test_fold_preserves_integer_dtype_for_bitwise_consumer(monkeypatch) -> None:
         ctx,
     )
     assert lines == ["    int nibble = (packed >> shift) & mask;"]
+
+
+def test_fold_keeps_mixed_dtype_conversion_named(monkeypatch) -> None:
+    """A readability fold must not bypass the target-aware conversion in ``Assign.render``."""
+    monkeypatch.setenv("EMMY_READABLE", "1")
+    lines = render_body(
+        Body(
+            (
+                Load(name="scale", input="scale_buffer", index=(Literal(0, "int"),), dtype=F16),
+                Assign(name="scaled", op="multiply", args=("acc", "scale"), dtype=F32),
+                Assign(name="out", op="add", args=("bias", "scaled"), dtype=F32),
+            )
+        ),
+        RenderCtx(ssa_dtypes={"acc": "f32", "bias": "f32"}, shapes={"scale_buffer": (1,)}),
+    )
+    assert lines == [
+        "    __half scale = scale_buffer[0];",
+        "    float scaled = acc * __half2float(scale);",
+        "    float out = bias + scaled;",
+    ]
 
 
 def test_fold_declines_across_operand_redefinition(monkeypatch) -> None:

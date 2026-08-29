@@ -144,6 +144,14 @@ def precision_trading_pins(pins: Mapping) -> bool:
     return any(bool(pins.get(name, umbrella)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
 
 
+def pins_freeze_cut(pins: Mapping) -> bool:
+    """Whether the input pins freeze any placement cut (a ``PLACE…=cut`` pin) — the ONE spelling
+    of the predicate behind both the loader's receipt validation and :attr:`GoldenRecord.is_receipt`."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    return any(family_of(str(name)) == "PLACE" and str(value) == "cut" for name, value in pins.items())
+
+
 def golden_entry_state(entry: Mapping) -> GoldenEntryState:
     has_knobs = "knobs" in entry
     has_measurements = "measurements" in entry
@@ -195,6 +203,12 @@ class GoldenRecord:
     def is_routing(self) -> bool:
         """Whether this row records a kernel-placement decision rather than a kernel schedule."""
         return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
+
+    @property
+    def is_receipt(self) -> bool:
+        """Whether this row is a child-identity schedule receipt: a schedule row recorded behind
+        pinned cut(s), whose stored ``identity`` names the child kernel the row decorates."""
+        return self.identity is not None and not self.is_routing and pins_freeze_cut(dict(self.pins))
 
     @cached_property
     def pool_key(self) -> tuple:
@@ -501,8 +515,7 @@ def validate_golden_file(
                 families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
                 if "PLACE" in families and families != {"PLACE"}:
                     raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
-                pins_cut = any(str(name).split("@", 1)[0] == "PLACE" and str(value) == "cut" for name, value in pins.items())
-                if families and "PLACE" not in families and pins_cut and "identity" not in realization:
+                if families and "PLACE" not in families and pins_freeze_cut(pins) and "identity" not in realization:
                     raise ValueError(
                         f"{realization_where} schedules a kernel behind pinned cut(s) without naming it; "
                         "a child-identity schedule receipt must store the child kernel's identity"
@@ -580,6 +593,22 @@ def load_golden_records(document: Mapping) -> list[GoldenRecord]:
     return [
         golden_record_from_entry(document, entry, realization) for entry in document["configs"] for realization in entry["realizations"]
     ]
+
+
+def shared_placement_pins(matches: list[GoldenRecord]) -> dict:
+    """The placement pins every matching working-file realization shares, or ``{}``.
+
+    An explicit working target's shared placement regime is part of the target, not unverified
+    schedule evidence: the ordinary compile applies it while the remaining schedule families stay
+    free for the normal deploy evidence hierarchy. When same-name realizations disagree on any
+    input pin the target stays unpinned — choosing one regime would silently change which
+    realization was requested."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    regimes = {match.pins for match in matches}
+    if len(regimes) != 1:
+        return {}
+    return {key: value for key, value in regimes.pop() if family_of(key) == "PLACE"}
 
 
 _STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
@@ -743,24 +772,25 @@ def _lifted_target(record: GoldenRecord):
 def decode_record(record: GoldenRecord) -> str | None:
     """STRICTLY decode one record against the current compiler — ``None`` on success, else the
     failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
-    program selects exactly one kernel; a routing record names a legal closed Fold seam; a SCHEDULE record's spelled row
-    equals one enumerated
-    leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
-    any-of, no classified shape. A child-identity schedule receipt (a stored identity that is not
-    the target's own lift) is stricter still: its identity must equal one kernel resolved under the
-    record's pins, and the spelled row must equal one of THAT kernel's rows — a sibling child's row
-    must not vouch for it."""
+    program selects exactly one kernel, except that a child-identity schedule receipt may select its
+    kernel from a multi-kernel target by stored identity; a routing record names a legal closed Fold
+    seam; a SCHEDULE record's spelled row equals one enumerated leaf (``canonical_row_key`` equality
+    under the record's own pins) — no prefix matching, no any-of, no classified shape. A receipt's
+    identity must equal one kernel resolved under the record's pins, and the spelled row must equal
+    one of THAT kernel's rows — a sibling child's row must not vouch for it."""
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
 
-    try:
-        tile = _lifted_target(record)
-    except Exception as exc:  # noqa: BLE001 — the reason IS the product here
-        return f"{type(exc).__name__}: {exc}"
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins), record.identity or "")
     store = _identity_store()
     verdicts = store.setdefault("verdicts", {})
     if verdict_key in verdicts:
         return verdicts[verdict_key]
+    tile = None
+    try:
+        tile = _lifted_target(record)
+    except Exception as exc:  # noqa: BLE001 — the reason IS the product here
+        if not record.is_receipt:
+            return _remember_verdict(verdict_key, f"{type(exc).__name__}: {exc}")
     if record.is_routing:
         from dataclasses import replace  # noqa: PLC0415
 
@@ -786,7 +816,7 @@ def decode_record(record: GoldenRecord) -> str | None:
         return _remember_verdict(verdict_key, None)
     candidates = _candidate_rows(record)
     row = schedule_row_key(record.knobs)
-    if record.identity is not None and record.identity != deploy_identity(tile):
+    if record.is_receipt and (tile is None or record.identity != deploy_identity(tile)):
         child_rows = candidates.get(record.identity)
         if child_rows is None:
             reason = f"stored identity equals none of the {len(candidates)} kernel identities resolved under the record's pins"

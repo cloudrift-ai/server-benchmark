@@ -19,7 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Var, affine_form
 from emmy.compiler.ir.pure import (
     Channel,
     Fold,
@@ -119,6 +119,18 @@ def _operand_lambda(operand, axes: tuple[str, ...]) -> tuple[Lambda, tuple[str, 
 
 def _operand_roles(operand, axes: tuple[str, ...]) -> frozenset[str]:
     return frozenset(axis for axis in axes if edge_refs_axis(operand, axis))
+
+
+def _loads_axis_contiguously(operand, axis: str) -> bool:
+    """Whether a materialized operand carries ``axis`` only in its trailing index component.
+
+    The same unit-stride reading one position over is ``reads_declared_rows`` in the lowering
+    layer's ``_addr``; it cannot be shared because ``ir/tile`` sits below ``pipeline/passes``.
+    This is the ONE layout fact canonicalization reads — see the caller's precedence note."""
+    if not isinstance(operand, Load) or not operand.index or any(axis in index.free_vars() for index in operand.index[:-1]):
+        return False
+    form = affine_form(operand.index[-1], {axis})
+    return form is not None and form[1].get(axis) == 1
 
 
 def _ordered_projection(members: Iterable, results: tuple[str, ...]) -> Fold:
@@ -283,14 +295,37 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
         left_roles, right_roles = _operand_roles(left, axes), _operand_roles(right, axes)
         left_only, right_only = left_roles - right_roles, right_roles - left_roles
         unused_implicit = implicit_axes - left_roles - right_roles
+        broadcast_batch = False
         if not left_only and len(right_only) == 1 and len(unused_implicit) == 1:
             left_only = unused_implicit
         elif not right_only and len(left_only) == 1 and len(unused_implicit) == 1:
             right_only = unused_implicit
+        one_sided_batch = (len(left_only) > 1 and len(right_only) == 1) or (len(right_only) > 1 and len(left_only) == 1)
+        if one_sided_batch:
+            # A broadcast batch axis may occur in only one operand. The placement's trailing pair
+            # still identifies the contraction's m/n roles; earlier free axes remain ordinary
+            # grid dimensions and do not change that orientation.
+            matrix_axes = frozenset(axes[-2:])
+            left_matrix = left_only & matrix_axes
+            right_matrix = right_only & matrix_axes
+            if len(left_matrix) == 1 and len(right_matrix) == 1:
+                left_only, right_only = left_matrix, right_matrix
+                broadcast_batch = True
         if len(left_only) != 1 or len(right_only) != 1:
             return fold
         left_axis, right_axis = next(iter(left_only)), next(iter(right_only))
         pair = (left, right) if axis_position[left_axis] < axis_position[right_axis] else (right, left)
+        if broadcast_batch and form.product.commutative:
+            # Physical M/N orientation stays a placement fact; this swap decides only which
+            # commutative argument SPELLS the shared A slot when the batch axis breaks the
+            # symmetric geometry, preferring the operand that reads the reduction axis
+            # contiguously so placement can derive a tensor-core-eligible orientation.
+            # Precedence with ``_orient_shared`` below: a broadcast-batched product is
+            # single-channel, where ``_orient_shared`` is a no-op; with two or more channels its
+            # shared-argument rule wins and its tie-break retains the orientation chosen here.
+            first, second = pair
+            if _loads_axis_contiguously(second, fold.axis.name) and not _loads_axis_contiguously(first, fold.axis.name):
+                pair = (second, first)
         pairs.append(pair)  # A (earlier output axis), B (later output axis)
 
     pairs = _orient_shared(pairs, form.product, all_axes)
@@ -406,6 +441,14 @@ def _edge_free_names(edge) -> frozenset[str]:
     return frozenset(edge.deps()) if isinstance(edge, Fold) else frozenset()
 
 
+def _carries_iteration(node) -> bool:
+    """Whether a provider chain contains a Fold axis rather than only straight-line code."""
+    if getattr(node, "axis", None) is not None:
+        return True
+    children = (*node.operands, *node.lift.body) if isinstance(node, Fold) else tuple(stmt for body in node.nested() for stmt in body)
+    return any(_carries_iteration(child) for child in children)
+
+
 def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
     """Move an enclosing projection's dependencies onto captured contraction operands."""
     assert root.axis is None
@@ -422,7 +465,7 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
     moved_members: set[int] = set()
     moved_edges: set[int] = set()
 
-    def provider(names: tuple[str, ...]):
+    def provider(names: tuple[str, ...], binders: tuple[str, ...]):
         cone = root.body.backward_cone(names)
         required = set(cone.external_reads) | set(names)
         edges = tuple(dict.fromkeys(edge_by_name[name] for name in provider_order if name in required and name in edge_by_name))
@@ -430,14 +473,27 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
         defined.update(name for edge in edges for name in _operand_result_names(edge))
         if not set(names) <= defined:
             return None
+        # Attaching a provider to a nested operand evaluates it inside every binder crossed by
+        # the move. An iteration-bearing chain therefore stays at its defining scope; straight-
+        # line chains still close normally. The two arms deliberately differ: a whole operand
+        # EDGE that iterates is kept unconditionally — the enclosing projection evaluates it
+        # once, so even the depth-0 move into a contraction operand's per-cell fill multiplies
+        # it, and closure cannot split the edge without changing its value — while an iterating
+        # body MEMBER is blocked only past a new binder (``_close_reduce_body`` states the
+        # mirror convention: a reducing root's own axis is its existing domain). A fold this
+        # rule leaves capturing stays placeable through provider closure at offer time
+        # (``lowering/tile/_cut.py``).
+        if any(_carries_iteration(edge) for edge in edges) or (binders and any(_carries_iteration(stmt) for stmt in cone.members)):
+            return None
         moved_members.update(id(stmt) for stmt in cone.members)
         moved_edges.update(id(edge) for edge in edges)
         hoisted = _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names), axes, sweep_axes)
         return _passthrough(hoisted) or hoisted
 
-    def close(node: Fold) -> Fold:
-        operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in node.operands)
-        body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in node.body)
+    def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
+        inner = (*binders, node.axis.name) if node.axis is not None else binders
+        operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
+        body = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.body)
         current = replace(node, operands=operands) if operands != node.operands else node
         if body != current.body:
             current = current.with_bodies((body,))
@@ -451,7 +507,7 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
                 closed.append(edge)
                 continue
             needed = tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
-            source = provider(needed) if needed else None
+            source = provider(needed, binders) if needed else None
             if source is None:
                 closed.append(edge)
                 continue
@@ -500,20 +556,24 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
     provider_names = frozenset(provider_order)
     moved: set[int] = set()
 
-    def source(names: tuple[str, ...]) -> Fold | None:
+    def source(names: tuple[str, ...], binders: tuple[str, ...]) -> Fold | None:
         cone = body.backward_cone(names)
         defined = {name for stmt in cone.members for name in stmt.defines()}
         if not set(names) <= defined:
             return None
+        if binders and any(_carries_iteration(member) for member in cone.members):
+            return None
         moved.update(id(stmt) for stmt in cone.members)
         return _hoist_closed_folds(Fold.projection(body=Body(cone.members), results=names), axes, sweep_axes)
 
-    def close(node: Fold) -> Fold:
-        operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in node.operands)
-        inner = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in node.lift.body)
+    def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
+        # ``root`` already evaluates inside its own axis; only descendants add a new domain.
+        inner = (*binders, node.axis.name) if node.axis is not None else binders
+        operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
+        stmts = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.lift.body)
         current = replace(node, operands=operands) if operands != node.operands else node
-        if inner != current.lift.body:
-            current = current.with_bodies((inner,))
+        if stmts != current.lift.body:
+            current = current.with_bodies((stmts,))
         if not is_contraction(current):
             return current
 
@@ -524,7 +584,7 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
                 closed.append(edge)
                 continue
             needed = tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
-            provided = source(needed) if needed else None
+            provided = source(needed, binders) if needed else None
             if provided is None:
                 closed.append(edge)
                 continue

@@ -4,10 +4,20 @@ from types import SimpleNamespace
 
 import pytest
 
+from emmy.compiler.ir.pure import Fold
+from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
-from emmy.compiler.pipeline.knob import canonical_row_key
+from emmy.compiler.pipeline.knob import canonical_row_key, schedule_row_key
 from emmy.compiler.pipeline.search.policy import greedy
-from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index_build, _direct_measured_pick, _stream_tiers, tile_identity
+from emmy.compiler.pipeline.search.policy.greedy import (
+    _db_measured_index_build,
+    _direct_measured_pick,
+    _stream_tiers,
+    _verified_pick,
+    golden_audit,
+    tile_identity,
+)
 
 
 @pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@a": "cut"}, {"PLACE@a": "cut", "WORK": "t32"}))
@@ -45,6 +55,56 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     assert leaf.knobs == knobs
     assert price == 1.25
     assert materialized == []
+
+
+def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) -> None:
+    rows = [
+        {"S_warp_eligible": 1.0, "RASTER": "", "TILE": "slow"},
+        {"S_warp_eligible": 1.0, "RASTER": "", "TILE": "recorded"},
+        {"S_warp_eligible": 1.0, "RASTER": "gm8", "TILE": "other"},
+    ]
+    tree = build_fork_tree(
+        params=rows,
+        levels=(
+            Level(("S_warp_eligible", "RASTER"), lambda row: (row["S_warp_eligible"], row["RASTER"])),
+            Level(("TILE",), lambda row: (row["TILE"],)),
+        ),
+        materialize=lambda _row: None,
+    )
+    point = SimpleNamespace(
+        options=[tree],
+        node_id="node",
+        root_op=TileOp(op=Fold.projection(body=Body())),
+    )
+    record = SimpleNamespace(name="recorded-golden", knobs={"RASTER": "", "TILE": "recorded"}, emmy_us=1.25)
+    monkeypatch.setattr(greedy, "deploy_identity", lambda _op: "identity")
+
+    leaf, price, knobs = _verified_pick(point, {"identity": [record]}, None)
+
+    assert schedule_row_key(leaf_knobs(leaf)) == schedule_row_key(record.knobs)
+    assert price == 1.25
+    assert schedule_row_key(knobs) == schedule_row_key(record.knobs)
+
+    audit = []
+    with golden_audit(audit):
+        audited_leaf, audited_price, audited_knobs = _verified_pick(point, {"identity": [record]}, None)
+    assert schedule_row_key(leaf_knobs(audited_leaf)) == schedule_row_key(record.knobs)
+    assert audited_price == 1.25
+    assert schedule_row_key(audited_knobs) == schedule_row_key(record.knobs)
+    assert audit[0]["verdict"] == "MATCH"
+
+
+def test_verified_pick_defers_a_structural_fork(monkeypatch) -> None:
+    structural = DeferredFork(materialize=lambda: None, structural=True)
+    point = SimpleNamespace(
+        options=[structural],
+        node_id="node",
+        root_op=TileOp(op=Fold.projection(body=Body())),
+    )
+    record = SimpleNamespace(name="recorded-golden", knobs={"TILE": "recorded"}, emmy_us=1.25)
+    monkeypatch.setattr(greedy, "deploy_identity", lambda _op: "identity")
+
+    assert _verified_pick(point, {"identity": [record]}, None) is None
 
 
 # ---------------------------------------------------------------------------

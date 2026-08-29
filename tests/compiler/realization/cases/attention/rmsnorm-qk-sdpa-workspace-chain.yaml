@@ -1,10 +1,7 @@
-# evidence: the sibling composed-cut case realizes the three-cut route on this program, and the
-# provider-closed softmax-statistics seams realize beside it (the pinned six-cut route removes the
-# per-output-key recompute of the row statistics: each statistics piece runs once per query row and
-# the softmax-weight piece reads the workspaces back). Guards the seam offer itself: if provider
-# closure or dependent-seam composition regresses, this pin stops being offered.
+# A composed attention cut may create a workspace chain whose members have the same number of
+# direct dependencies. The producers must follow the chain, not sort by dependency count.
 compute_cap:
-- 12
+- 8
 - 0
 programs:
 - inputs: [q, k, v, qw, kw]
@@ -52,16 +49,20 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-      PLACE@map.fold.a21: cut
-      PLACE@map.fold.a.map.fold.fold.b1: cut
-      PLACE@map.fold.a.map.fold.fold.a1: cut
-      PLACE@map.fold.a1: cut
-      PLACE@map.fold.a.map.fold.a31: cut
       PLACE@map.fold.a.map.fold.a32: cut
+      PLACE@map.fold.a.map.fold.fold.a51: cut
+      PLACE@map.fold.a.map.fold.fold.b.map3: cut
+      PLACE@a.b.fold.a5: cut
     knobs:
+      REDUCE@a.b.fold.a4: coop
+      REDUCE@a.fold.a3: coop
+      REDUCE@a.map.fold.a8: coop
+      REDUCE@map.fold.a.fold.a81: coop
+      REDUCE@map.fold.a.map.fold.fold.a41: coop
+      REDUCE@map.fold.a21: coop
+      WORK: t8
       TILE: ''
-      WORK: ''
-      REDUCE: ''
       STAGE: ''
+      LOOPIFY: '0'
       RASTER: ''
     identity: e267aa546e0e3a8e1ee869044715c12667dbf883e16152a337771d3e6fcb4076

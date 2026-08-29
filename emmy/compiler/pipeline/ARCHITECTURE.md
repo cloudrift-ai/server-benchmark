@@ -852,7 +852,10 @@ predicted to be cheaper first.
 
 **Separable scoring** (`TwoLevelStrategy._evaluate_terminal`) tunes each finalized kernel **independently** in
 its own single-node slice (`single_node_graph`, `slice.py`) with a plain `TuningSearch` over the lowering passes
-only (`tile → kernel → cuda`), and returns the Σ once ALL Loop kernels are measured:
+only (`tile → kernel → cuda`), and returns the Σ once all kernel roots are measured. A serialized post-cut child is
+already Tile IR: an unscheduled Tile root enters this same per-kernel search directly and records ordinary
+child-identity evidence that a later parent cut can consume. A Tile root whose worker inventory is sealed is already
+scheduled; it remains lowering-only and is never enrolled or scheduled again.
 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
   The root op is shared **by reference**, so its body — and thus `Op.cache_key` — is byte-for-byte the full-graph op's.
@@ -1281,11 +1284,13 @@ child kernel's deploy identity stored in `identity`. A stored identity is author
 (`kernel_identity` returns it as-is — the target's own lift stops at the pre-cut kernel and cannot name a child), and
 the join stays fail-closed: a stale identity matches no live fork and decides nothing. The strict decode is stricter —
 the stored identity must equal one kernel resolved under the record's pins, and the spelled row must equal one of
-THAT kernel's enumerated rows, so a sibling child's row never vouches. At deploy the pin-regime check skips PLACE
-pins (the route is the routing consult's decision; the identity join guarantees a receipt only decorates a
-structurally identical kernel), and validation rejects a realization that schedules behind pinned cuts without a
-stored identity. A stored identity equal to the target's own lift is the corpus's derived stamp, not a receipt, and
-keeps the pooled decode.
+THAT kernel's enumerated rows, so a sibling child's row never vouches. Ordinary records must still select exactly one
+pre-cut kernel, but a receipt may outlive target-boundary drift that makes its regenerated target lower to several:
+the stored identity selects one bucket from the kernels resolved under its pins, without first requiring the legacy
+one-kernel lift. At deploy the pin-regime check skips PLACE pins (the route is the routing consult's decision; the
+identity join guarantees a receipt only decorates a structurally identical kernel), and validation rejects a
+realization that schedules behind pinned cuts without a stored identity. A stored identity equal to the target's own
+lift is the corpus's derived stamp, not a receipt, and keeps the pooled decode.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose

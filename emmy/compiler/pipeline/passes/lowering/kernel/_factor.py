@@ -53,7 +53,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.pure.fold import Fold, _unique_edges, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, _unique_edges, is_contraction, operand_body
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
@@ -236,7 +236,54 @@ def factorize(tile, root, store=None) -> Tile:
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
 
 
-def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs: tuple = ()) -> Tile:
+def _cell_provider_closure(edge, siblings: tuple) -> tuple[object, frozenset[int]]:
+    """Close one computed contraction operand over sibling providers that its result cone reads."""
+    body = Body(operand_body(edge))
+    needed = set(body.backward_cone(_operand_result_names(edge)).external_reads)
+    required: dict[int, set[str]] = {}
+    while True:
+        added = False
+        for provider in siblings:
+            results = set(_operand_result_names(provider))
+            prior = required.get(id(provider), set())
+            if not ((results & needed) - prior):
+                continue
+            required[id(provider)] = prior | (results & needed)
+            provider_body = Body(operand_body(provider))
+            ordered = tuple(result for result in _operand_result_names(provider) if result in required[id(provider)])
+            needed.update(provider_body.backward_cone(ordered).external_reads)
+            added = True
+        if not added:
+            break
+    if not required:
+        return edge, frozenset()
+    selected = tuple(_provider_slice(provider, required[id(provider)]) for provider in siblings if id(provider) in required)
+    return Fold.projection(operands=(*selected, edge), results=_operand_result_names(edge)), frozenset(required)
+
+
+def _provider_slice(provider, required: set[str]):
+    """Narrow a projection provider to the result cone its cell consumer needs."""
+    results = _operand_result_names(provider)
+    if not isinstance(provider, Fold) or provider.axis is not None or required == set(results):
+        return provider
+    ordered = tuple(result for result in results if result in required)
+    cone = provider.body.backward_cone(ordered)
+    operands = tuple(edge for edge in provider.operands if set(_operand_result_names(edge)) & cone.external_reads)
+    return Fold.projection(operands=operands, body=Body(cone.members), results=ordered)
+
+
+def _close_cell_providers(contraction: Fold, siblings: tuple) -> tuple[Fold, frozenset[int]]:
+    """Move sibling providers read by computed operands into their per-cell fill."""
+    operands = []
+    consumed: set[int] = set()
+    for edge in contraction.operands:
+        closed, used = _cell_provider_closure(edge, siblings)
+        operands.append(closed)
+        consumed.update(used)
+    return replace(contraction, operands=tuple(operands)), frozenset(consumed)
+
+
+def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs: tuple = (), cell_op=None) -> Tile:
     """The recursive root walk — peel the projecting zero-axis ``Fold``\\ s, then bind each leaf to the grid via
     the ONE binding pipeline. A zero-axis :class:`Fold` with an operand recurses: its ``body`` (the projection /
     epilogue) is walked (:func:`_emit_body`, reaching any nested node), the kernel-boundary
@@ -249,7 +296,15 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         if len(tiled) > 1:
             return _bind_roots(op, ctx, output_specs)
         root = tiled[0] if tiled else op.operands[0]
-        siblings = [stmt for edge in op.operands if edge is not root for stmt in _emit(edge, ctx).body]
+        other = tuple(edge for edge in op.operands if edge is not root)
+        closed_root, consumed = _close_cell_providers(root, other) if tiled else (None, frozenset())
+        projection_reads = op.body.backward_cone(_operand_result_names(op)).external_reads
+        siblings = []
+        for edge in other:
+            if id(edge) not in consumed:
+                siblings.extend(_emit(edge, ctx).body)
+            elif required := set(_operand_result_names(edge)) & projection_reads:
+                siblings.extend(_emit(_provider_slice(edge, required), ctx).body)
         proj = [*siblings, *_emit_body(op.body, ctx, output_specs)]
         region_results = _projection_results(op.body)
         root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= region_results)
@@ -262,11 +317,12 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         plain = tuple(spec for spec in root_specs if id(spec) not in streamed_ids)
         if plain:
             proj = apply_output_specs(proj, plain)
-        return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store, output_specs=streamed)
+        return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store, output_specs=streamed, cell_op=closed_root)
     if output_specs and isinstance(op, Fold) and op.axis is None:
         # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
         # its output specifications only after that body is emitted so an output sweep wraps every stmt
-        # that reads the sweep coordinate.
+        # that reads the sweep coordinate. ``cell_op`` cannot reach this branch: it is only set when
+        # recursing into a tiled contraction root, whose axis is never ``None``.
         return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
     if output_specs:
         # A non-projection flat root can carry plain root ``Write``\\ s only. A STREAMED store
@@ -277,8 +333,8 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         streamed = tuple(st for st in output_specs if set(st.write.values) <= observed)
         streamed_ids = {id(st) for st in streamed}
         tail = (*tail, *(st.write for st in output_specs if id(st) not in streamed_ids))
-        return _bind(op, ctx, tail, out_val, store, output_specs=streamed)
-    return _bind(op, ctx, tail, out_val, store)
+        return _bind(op, ctx, tail, out_val, store, output_specs=streamed, cell_op=cell_op)
+    return _bind(op, ctx, tail, out_val, store, cell_op=cell_op)
 
 
 def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
@@ -348,7 +404,7 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     return [*stmts, Write(output=output, index=index, value=value)]
 
 
-def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: tuple = (), frag_ns: str = "") -> Tile:
+def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: tuple = (), frag_ns: str = "", cell_op=None) -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
     finalizer. The cases are points of one ``(output-tiling) × (reduce-folding)`` space, selected by
@@ -380,7 +436,10 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         projection = tail
         tail = fold_store_tail(tail, op, c)
     else:
-        c, value_child, projection = op, None, ()
+        # ``cell_op`` is the provider-closed rewrite of ``op``: the emitted per-cell value carries
+        # the sibling providers its computed operands read, while every schedule lookup stays keyed
+        # on the STORED node — ``ctx.sched`` is identity-keyed, so a rewritten node has no schedule.
+        c, value_child, projection = cell_op or op, None, ()
         tile = ctx.sched.tile_of(op) if is_contraction(op) else None
         stage = ctx.sched.get("STAGE", op) if tile is not None else None
     if tile is not None and tile.axes is not None and len(grid) >= 2:

@@ -635,7 +635,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
         """Descend only branches compatible with one recorded row."""
         for option in options:
             if _is_structural_option(option):
-                continue
+                return None
             if isinstance(option, Fork) and not option.is_leaf:
                 branch = drop_uninformative_scopes(option.knobs)
                 if all(key in record and values_equal(key, record[key], value) for key, value in branch.items()):
@@ -671,7 +671,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     live_count = 0
     for leaf in iter_leaves(fp.options):
         if _is_structural_option(leaf):
-            continue
+            return None
         knobs = leaf_knobs(leaf)
         if node_blocked is not None and _tile_blocked(knobs, node_blocked):
             continue

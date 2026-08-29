@@ -57,7 +57,7 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     assert materialized == []
 
 
-def test_verified_pick_skips_structural_sibling_before_recorded_schedule(monkeypatch) -> None:
+def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) -> None:
     rows = [
         {"S_warp_eligible": 1.0, "RASTER": "", "TILE": "slow"},
         {"S_warp_eligible": 1.0, "RASTER": "", "TILE": "recorded"},
@@ -71,9 +71,8 @@ def test_verified_pick_skips_structural_sibling_before_recorded_schedule(monkeyp
         ),
         materialize=lambda _row: None,
     )
-    structural = DeferredFork(materialize=lambda: None, structural=True)
     point = SimpleNamespace(
-        options=[structural, tree],
+        options=[tree],
         node_id="node",
         root_op=TileOp(op=Fold.projection(body=Body())),
     )
@@ -93,6 +92,19 @@ def test_verified_pick_skips_structural_sibling_before_recorded_schedule(monkeyp
     assert audited_price == 1.25
     assert schedule_row_key(audited_knobs) == schedule_row_key(record.knobs)
     assert audit[0]["verdict"] == "MATCH"
+
+
+def test_verified_pick_defers_a_structural_fork(monkeypatch) -> None:
+    structural = DeferredFork(materialize=lambda: None, structural=True)
+    point = SimpleNamespace(
+        options=[structural],
+        node_id="node",
+        root_op=TileOp(op=Fold.projection(body=Body())),
+    )
+    record = SimpleNamespace(name="recorded-golden", knobs={"TILE": "recorded"}, emmy_us=1.25)
+    monkeypatch.setattr(greedy, "deploy_identity", lambda _op: "identity")
+
+    assert _verified_pick(point, {"identity": [record]}, None) is None
 
 
 # ---------------------------------------------------------------------------

@@ -120,7 +120,9 @@ sample apart. `test_move_catalog.py` checks that independent
 roots with reversed M/N readings combine only when their tile
 widths and unit counts match on the physical output axes, and that f32 computed-A contractions retain scalar
 output-tile rows when no MMA atom applies. `test_cut_forks.py` checks fused and closed Fold-edge choices for SDPA score
-production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA lowering. Direct
+production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA lowering, and proves
+child-identity schedule receipts round-trip: under a pinned cut each child's stored identity decodes only its own
+kernel's schedule rows and joins the verified tier as-is. Direct
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
 The generated carrier's numerical laws are covered
 independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax and

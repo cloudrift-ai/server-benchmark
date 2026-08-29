@@ -103,9 +103,7 @@ def _denominator(fold: Fold, pivots: frozenset[str], score: Closure, axes: tuple
     candidate_score = _score(fold, candidate, axes) if candidate is not None else None
     cone = fold.body.backward_cone((result,))
     return (
-        candidate_score is not None
-        and score.alpha_eq(candidate_score)
-        and {id(stmt) for stmt in cone.members} == {id(stmt) for stmt in fold.body}
+        candidate_score is not None and score == candidate_score and {id(stmt) for stmt in cone.members} == {id(stmt) for stmt in fold.body}
     )
 
 
@@ -297,7 +295,7 @@ def _normalized_exp(edge: Fold, axis: str, axes: tuple[str, ...]) -> _Normalized
     score_name = weights[0][1]
     current = _varying_score(body, score_name, axis, axes)
     reference = _score(statistic, statistic.lift.results[0], axes)
-    if current is None or reference is None or not reference.alpha_eq(current[0]):
+    if current is None or reference is None or reference != current[0]:
         return _decline("normalized exponential", f"the weight's score {score_name!r} is not the statistic's own score")
 
     free = set(statistic.lift.free_names()) - {*axes, statistic.axis.name}

@@ -47,12 +47,25 @@ def _lambda_members(body: Body):
                 yield from _lambda_members(nested)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Closure:
-    """A pure lambda scoped by the enclosing iteration axes it may capture, in binding order."""
+    """A pure lambda scoped by the enclosing iteration axes it may capture, in binding order.
+
+    Equality and hash are ALPHA-INVARIANT — two closures are equal when their canonical forms
+    coincide — while the stored spelling is preserved: correspondence uses (the seam clustering's
+    sibling axis pairing, a drain's real capture names) read the original ``fn`` and ``axes``.
+    """
 
     fn: Lambda
     axes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.axes, tuple):
+            object.__setattr__(self, "axes", tuple(self.axes))
+        # ``fn`` purity is Lambda's own formation invariant; only the environment needs checking.
+        stray = [axis for axis in self.axes if not isinstance(axis, str)]
+        if stray:
+            raise ValueError(f"Closure axes must be iteration-axis names, got {stray}")
 
     @classmethod
     def over_edge(cls, operand, axes: Iterable[str]) -> Closure:
@@ -76,9 +89,6 @@ class Closure:
     @cached_property
     def _canonical(self) -> Lambda:
         fn = self.fn
-        if any(not stmt.pure for stmt in fn.body):
-            raise ValueError("closure canonicalization requires a pure body")
-
         members = tuple(_lambda_members(fn.body))
         reads = {name for stmt in members for name in _member_reads(stmt)}
         bound_axes = tuple(name for stmt in members for name in stmt.binds_axes())
@@ -114,9 +124,11 @@ class Closure:
             results=tuple(rename(result) if isinstance(result, str) else result for result in fn.results),
         )
 
-    def alpha_eq(self, other: Closure) -> bool:
-        """Alpha-invariant equality across scopes — canonical forms compared structurally."""
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, Closure) and self.canonical() == other.canonical()
+
+    def __hash__(self) -> int:
+        return hash(self.canonical())
 
     @property
     def value_captures(self) -> frozenset[str]:
@@ -137,9 +149,9 @@ def equivalent_clusters(closures: Iterable[Closure]) -> tuple[tuple[int, ...], .
     The returned indices let a later pass keep its own Fold or graph metadata beside this general
     equivalence analysis.
     """
-    clusters: dict[Lambda, list[int]] = {}
+    clusters: dict[Closure, list[int]] = {}
     for index, closure in enumerate(closures):
-        clusters.setdefault(closure.canonical(), []).append(index)
+        clusters.setdefault(closure, []).append(index)
     return tuple(tuple(cluster) for cluster in clusters.values())
 
 

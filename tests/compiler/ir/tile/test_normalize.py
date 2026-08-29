@@ -826,7 +826,9 @@ def test_equivalent_clusters_include_captured_axes() -> None:
         results=("value",),
     )
 
+    assert Closure(first, ("row", "k")) == Closure(second, ("unused", "query", "depth"))  # equality is alpha-invariant
     assert equivalent_clusters((Closure(first, ("row", "k")), Closure(second, ("unused", "query", "depth")))) == ((0, 1),)
+    assert Closure(first, ("row", "k")) != Closure(first, ("k", "row"))  # capture order is the positional identity
 
 
 def test_total_lift_produces_canonical_contraction() -> None:

@@ -896,6 +896,40 @@ def edge_refs_axis(edge, name: str) -> bool:
     return any(refs(s) for s in operand_body(edge))
 
 
+def subst_free(stmt: Stmt, sigma: Sigma) -> Stmt:
+    """:func:`~emmy.compiler.ir.stmt.passes.rewrite`'s σ-substitution made **hygienic**, the way
+    ``rename_free`` makes the SSA rename hygienic: the substitution stops at a nested scope whose
+    binder re-binds a substituted name.
+
+    ``rewrite``'s σ descends into every nested body. But axis names collide across a tree by
+    design (see :func:`edge_refs_axis`), so an occurrence under a ``Loop`` / reducing ``Fold``
+    that re-binds a substituted name is a DIFFERENT variable: substituting it rewires the inner
+    reduction onto the outer coordinate (the k-norm inside attention's K operand cone re-binds
+    the contraction axis; a blind σ made its 128-element reduce read one slab element 128 times).
+    Use this — not a bare ``rewrite`` — wherever σ carries axis coordinates into stmts that may
+    re-bind them, such as the smem compute fill's per-cell cone evaluation."""
+    if not sigma.mapping:
+        return stmt
+    bound = stmt.binds_axes() & sigma.mapping.keys()
+    inner = Sigma({k: v for k, v in sigma.mapping.items() if k not in bound}) if bound else sigma
+    if isinstance(stmt, Fold):
+        # Every part of a reducing Fold — operand edges included — evaluates per step, inside its
+        # binder; and a contraction's ``nested()`` is empty by design, so the generic body walk
+        # below could not reach its cones.
+        if not inner.mapping:
+            return stmt
+        lift = Lambda(stmt.lift.params, Body(tuple(subst_free(s, inner) for s in stmt.lift.body)), stmt.lift.results)
+        observe = stmt.observe
+        if observe is not None:
+            observe = Lambda(observe.params, Body(tuple(subst_free(s, inner) for s in observe.body)), observe.results)
+        return replace(stmt, operands=tuple(subst_free(e, inner) for e in stmt.operands), lift=lift, observe=observe)
+    bodies = stmt.nested()
+    renamed = stmt.rewrite(lambda nm: nm, sigma)  # header exprs (a StridedLoop's start/step) sit outside the binder
+    if not bodies:
+        return renamed
+    return renamed.with_bodies(tuple(Body(tuple(subst_free(c, inner) for c in b)) for b in bodies))
+
+
 @dataclass(frozen=True)
 class Channel:
     """One product channel of a contraction — the streamed K×N operand edge ``b`` plus the
@@ -963,4 +997,5 @@ __all__ = [
     "refs_axis",
     "splice_operands",
     "stmt_axis_names",
+    "subst_free",
 ]

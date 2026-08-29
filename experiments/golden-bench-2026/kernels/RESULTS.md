@@ -1,5 +1,42 @@
 # Golden-bench kernel corpus
 
+## Post-merge qualification and measured-row replay fix (2026-08-29)
+
+Qualification resumed from merged main `5f0a2076` on branch `codex/post-679-corpus-qualification`. The exact-main
+corpus run reproduced the prior platform verdicts; the merge's review follow-up did not regress a pinned kernel.
+
+| platform | exact coverage | result |
+| --- | --- | --- |
+| A100 sm80 | 6 cases | 2 wins, 3 measurable losses, and the same stat-fill watchdog |
+| V100 sm70 | 2 cases | Volta MMA remains a correct 4.13x loss; linear-cut remains incorrect and inadmissible |
+| RTX 4090 sm89 | 0 cases | 201 collected and skipped; no exact sm89 closed case |
+
+The exact-main A100 rows were 7.041 µs versus 10.016 µs for GQA and 6.076 µs versus 8.009 µs for computed-value
+attention. The remaining pinned rows were 84.224 µs versus 12.902 µs for the workspace chain, 9.060 µs versus
+4.175 µs for split-K, and 17.664 µs versus 11.106 µs for PV transpose. Stat-fill again exceeded its watchdog. V100
+reproduced 3,130.368 µs versus 756.736 µs for the promoted Volta row and 1,160.192 µs versus 66.048 µs for
+linear-cut; strict linear-cut correctness still found 26,418 mismatches with maximum absolute error 0.25.
+
+A fresh 10-candidate workspace tune exposed one deploy replay gap. Its fastest DB row was 76.012 µs, but direct
+descent compared the schedule tree's intermediate `S_warp_eligible` feature with a feature-free measured row after
+the `S_*` signature had already joined them. Every measured row therefore appeared disjoint and deploy fell back to
+the prior at about 85 µs. Commit `d2505362` ignores `S_*` / `H_*` fork keys during that tuning-knob descent. Exact
+A100 strict replay then selected the measured `WORK=t8` row at 76.0 µs with direct eager correctness, rather than the
+prior's `WORK=t4` fallback. This closes evidence replay but not the workspace performance gap: 76.0 µs remains about
+6.9x slower than the 11 µs `torch.compile` result.
+
+Stat-fill's remaining persistence gap is larger. A four-candidate fused probe stayed at 277,229 µs and produced no
+children. Replaying the previously correct six-cut route did enroll its resulting kernels: a four-candidate cap per
+kernel completed 53 measurements and found a 2.093 µs child. The written working golden nevertheless contained only
+the route seed and a 9,950.886 µs placement total—no child identities and no child schedule receipts. That total is
+not deploy evidence because a reload cannot reconstruct the measured ordered assembly. The required change is
+split-first persistence: record the route decision, realize the resulting kernel identities, then join each identity
+to its measured schedule before writing a replayable winner. This is not a safe small follow-up to the DB descent
+fix, and no unqualified stat-fill row was promoted.
+
+Draft PR #687 carries the replay fix. Local verification is 3,982 passed, 1,012 skipped, five expected failures, and
+clean lint; its GitHub test and lint jobs are also green. The retained A100 VM remains running.
+
 ## Current-head corpus requalification (2026-08-29)
 
 The draft is based on current main `b88763fa`; the exact combined source for this pass is `857ba7e9`. Every hardware

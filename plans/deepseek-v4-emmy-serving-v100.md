@@ -73,7 +73,12 @@ CUDA-12 `libnvrtc` preload only if that probe fails, using the path present in t
 - The emmy wheel + `cupy-cuda12x` install into the image cleanly beside vLLM's pins, and `emmy.serving.register` is
   importable there.
 
-## Stage 0 — unblock the `post` twin (compiler; hard prerequisite) — **DONE, fixed upstream**
+## Stage 0 — unblock the twins (compiler; hard prerequisite) — **REOPENED; `pre16` blocks serving on current main**
+
+The first round closed (2026-08-25, below). Loop fusion was then rewritten under it, and the same class of pathology
+came back on both twins — see "Round two" after the original diagnosis.
+
+### Round one — the `post` twin (2026-08-25) — closed
 
 The stall was never in the graph: it was a compiler pathology that main fixed while this plan was being written.
 
@@ -108,6 +113,34 @@ process works around it with `LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.
 does not inherit the workaround and dies with "invalid value for --gpu-architecture", so any `--bench` / `tune` work
 must run inside the 1Cat image (NVRTC 12.9 native, verified) or in a venv without the NVRTC-13 pin. The inventory is
 untuned (no knobs or timings) and is therefore NOT promoted to the canonical path; it regenerates in ~60 s.
+
+### Round two — fusion rewritten under the twins (2026-08-28/29) — `post` closed, `pre` OPEN
+
+**Make loop fusion maximal and multi-output (#648, `bff3e3444`) landed after gate (c) passed** and broke both remaining
+twins. Two of the three defects are fixed; the third blocks serving on current main.
+
+| twin | at `ab1ad4592` (pre-#648) | at `bff3e3444` (#648) | now |
+| --- | --- | --- | --- |
+| `expert16` | compiles | 11 same-scope redeclarations, nvcc rejects | fixed by #671 |
+| `post16` | compiles | lowering never terminates | fixed by #676, ~57 s on the V100 |
+| `pre16` | 3 kernels, 0.001 s | 1 kernel, never returns | **OPEN** |
+
+`pre16` lowers to a single kernel holding two 4-deep nests, each `a2<4096 × a3<4 × a4<16384 × a1<16384` ≈ 4.4 × 10¹²
+iterations per thread. The inner `a1` reduce is the loop-invariant RMSNorm sum-of-squares, recomputed under the full
+crossed product instead of once. Re-measured on `324ebfe93` (#684): unchanged, so #682/#683/#684 do not address it.
+
+Localized: Loop IR is correct through stages 04–06 (the reduce is a sibling); Tile IR stage 07 sinks it into an operand
+edge at depth 4, in `_close_projection` (`emmy/compiler/ir/tile/normalize.py`). A scope guard refusing to attach a
+provider beneath a fold binder takes `pre16` from never-returning to **8.192 s on the V100**, but regresses 7
+`attention/*.yaml` realization cases: with the guard the statistics cone stays an operand-edge capture, and `_cut.py`
+records seam hosts only for direct lift-body members, so the capture is hostless and its seam is silently dropped.
+Closing it needs provider closure generalized from "direct body-member host" to lexical environments for every `Fold`
+occurrence, so an operand-edge capture closes into a dependent seam (`CutSite.requires`). WIP, explicitly not for merge:
+branch `fix/close-projection-multiplicity`.
+
+**Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and does NOT reproduce on current main — a boot
+there stalls in the first kernel that executes (observed: 2 h 37 min, no progress). Stage 4 cannot warm or bake until
+`pre16` compiles to something executable.
 
 ## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
 
@@ -197,7 +230,10 @@ expert destinations, PP transport, and mixed scheduling — token IDs either agr
 - The remaining gates move to the on-host block beside Stage 4's image work: (c) the TP8×PP2 target-host boot
   serving mixed prefill/decode, and (d) real-checkpoint layer-level numerics plus greedy token-ID agreement.
 
-### Gate (c) — PASSED (2026-08-26, real checkpoint at TP8 × PP2)
+### Gate (c) — PASSED (2026-08-26, real checkpoint at TP8 × PP2, at `ab1ad4592`)
+
+**Does not reproduce on current main** — see Stage 0 round two. The result below stands as evidence that the seam,
+the loader and the plugin are correct; re-running it needs `pre16` to compile to something executable again.
 
 `deepseek-ai/DeepSeek-V4-Flash-0731` serves through `EmmyGenModel` on the 16× V100 SXM3 host, in the pinned 1Cat
 image, at TP8 × PP2 with `--max-model-len 4096 --kv-cache-dtype fp8 --block-size 256` and eager execution:
@@ -245,13 +281,16 @@ killed all 16 workers:
   the rider allowance too (16 rows of arena on a 4096-row buffer). Pinned by a GPU test whose OLMoE router scores
   every expert alike, which reproduces the degenerate routing without depending on a profiling run.
 
-**Open, found here, not yet fixed:** the twin lane and the serving lane disagree about this checkpoint's experts.
-`mxfp4_weight_profile` keys on `quant_method == "mxfp4"`, and DeepSeek declares `quant_method: fp8` with
-`expert_dtype: fp4`, so `capture_twin_graphs` records the expert twin as `@f8e4m3` while serving deploys `@mxfp4`.
-Goldens are keyed by strict structural kernel identity, so the shipped `golden/v100_sm70.yaml` covers the
-routed-expert kernels not at all — they resolve from reservoir/prior evidence instead. Correctness is unaffected;
-Stage 4 would otherwise warm, bake and seal unqualified fork picks for the model's dominant kernel. The fix is one
-shared `expert_dtype: fp4` predicate for both lanes plus a golden re-record on the host.
+**Found here — predicate half FIXED (#666), golden half still owed.** The twin lane and the serving lane disagreed
+about this checkpoint's experts: `mxfp4_weight_profile` keyed on `quant_method == "mxfp4"`, and DeepSeek declares
+`quant_method: fp8` with `expert_dtype: fp4`, so `capture_twin_graphs` recorded the expert twin as `@f8e4m3` while
+serving deployed `@mxfp4`. #666 added the one shared predicate both lanes now read (`native_mxfp4_experts`), so the
+recorded expert program is the one serving binds.
+
+The golden re-record is NOT done: `golden/v100_sm70.yaml` is still the #558 recording from before any of this, so it
+covers the routed-expert kernels not at all and they resolve from reservoir/prior evidence instead. Correctness is
+unaffected, but Stage 4 must not warm, bake or seal until the re-record happens on the host — which is itself blocked
+behind Stage 0 round two.
 
 ## Stage 4 — image + release plumbing
 
@@ -293,7 +332,9 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 
 ## Risks
 
-- Stage 0 is open-ended compiler work; nothing below it ships without it.
+- Stage 0 is open-ended compiler work; nothing below it ships without it. It has now reopened once: the twins sit on
+  the fusion/tile-lowering path, so any rewrite there (#648 was one) can re-block serving without touching this
+  model's code. Treat a green gate (c) as revision-scoped evidence, not a permanent one.
 - The fork's attention inside a foreign model class is the largest integration unknown (cache registration,
   metadata, capture breaks, `VLLM_MULTI_STREAM_GEMM` aux streams); mitigated by the stage-3 hybrid boot.
 - Per-hit-expert dispatch at top-6 × 43 layers is a known latency wall (~0.23 ms/launch framing); the fixed-slot
@@ -305,7 +346,11 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 
 ## Effort
 
-Stage −1: DONE (~2 h). Stage 0: DONE (fixed upstream by #602; verification ~2 h). Stage 1: DONE (#651).
-Stage 2: DONE (#656). Stage 3 in-repo: DONE (#662; gates (c)/(d) move on-host). Stage 4: 2–4 days on-host. Stage 5:
-1–2 days. A measured eager fp8 A/B is realistically 3–5 engineering weeks; adding stage 6 (MXFP4 + tuning,
-1–3 weeks) makes ~5–8 weeks, with stage 0 and the fork ABI as the dominant uncertainty.
+Stage −1: DONE (~2 h). Stage 0 round one: DONE (fixed upstream by #602). Stage 1: DONE (#651). Stage 2: DONE (#656).
+Stage 3 in-repo: DONE (#662); gate (c) passed once at `ab1ad4592`, gate (d)'s token-ID half with it.
+
+**Stage 0 round two is the critical path.** `expert16` and `post16` are closed (#671, #676); `pre16` is open and holds
+everything behind it. The measured guard says the fix works; landing it is the seam-machinery change described above —
+call it 2–5 days, and it lands in a subsystem three other PRs (#677/#678/#682) touched inside a week, so coordinate.
+Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days.
+Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The compiler, not the fork ABI, is now the dominant uncertainty.

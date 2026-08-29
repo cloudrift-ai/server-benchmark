@@ -212,6 +212,9 @@ def _contraction_options(state: _State, node) -> list[_Option]:
     stage_key = sched.key("STAGE", node)
     red_key = sched.key("REDUCE", node)
     stage_pin = _pin(STAGE, stage_key)
+    # Whether the STAGE pin addressed THIS site (``STAGE@<element>``) or is the bare graph-wide
+    # fallback — the distinction the fill's transport arm drops or raises on.
+    stage_scoped = stage_pin is not None and (element := axis_of(stage_key)) is not None and STAGE.pin_at(element) is not None
     tile_pin = _pin(TILE, key)
     red_pin = _pin(REDUCE, red_key)
     opts: list[_Option] = []
@@ -237,7 +240,7 @@ def _contraction_options(state: _State, node) -> list[_Option]:
                 f"per-cell tile realizes — the tiled {plan.spell() or 'scalar'} tile contracts K serially per register cell"
             )
             continue
-        for stage in _stage_options(state, node, plan, placed, stage_pin, refused):
+        for stage in _stage_options(state, node, plan, placed, stage_pin, stage_scoped, refused):
             # The ADDITIVE producer/consumer bound: a compute fill keeps the consuming fragments
             # live while it builds one scheduled producer block, so the pair's registers sum.
             why = _paired_budget_refusal(node, facts.producer, placed, stage)
@@ -296,7 +299,9 @@ def _resolve_stage(state: _State, node, plan: TilePlan, placed: TilePlan, want: 
     return staging.resolve_scalar_stage(node, placed, want, state.tile.inputs, budget)
 
 
-def _stage_options(state: _State, node, plan: TilePlan, placed: TilePlan, pin: str | None, refused: list[str]) -> list[Stage | None]:
+def _stage_options(
+    state: _State, node, plan: TilePlan, placed: TilePlan, pin: str | None, scoped: bool, refused: list[str]
+) -> list[Stage | None]:
     """The RESOLVED operand stages one tile candidate offers — gmem-direct ``None`` first, then
     every catalog move that resolves against the node under this plan (deduped on the resolved
     spelling: a depth that clamps under the smem budget spells identically to its shallower
@@ -314,7 +319,7 @@ def _stage_options(state: _State, node, plan: TilePlan, placed: TilePlan, pin: s
             logger.debug("STAGE pin %r dropped: this plan has no operand slab to stage", pin)
         return [None]
     if plan.is_warp and _needs_fill(state, node, plan):
-        return _fill_options(state, node, plan, placed, pin)
+        return _fill_options(state, node, plan, placed, pin, scoped, refused)
     if pin is not None:
         if not pin:
             return [None]  # pinned gmem-direct
@@ -338,29 +343,43 @@ def _stage_options(state: _State, node, plan: TilePlan, placed: TilePlan, pin: s
     return out
 
 
-def _fill_options(state: _State, node, plan: TilePlan, placed: TilePlan, pin: str | None) -> list[Stage | None]:
+def _fill_options(
+    state: _State, node, plan: TilePlan, placed: TilePlan, pin: str | None, scoped: bool, refused: list[str]
+) -> list[Stage | None]:
     """The RESOLVED smem compute-fill stages a computed operand, multi-channel product or
     converting materialized ``a`` offers — its depths, and nothing else: the fill is MANDATORY
     (no gmem-direct sibling, no byte transport can evaluate a cone or carry several B/C channels),
     so a ``STAGE`` pin can only choose the depth. ``d1`` and the asynchronous-peer prefetch ring
     ``d2`` are fork siblings, measured per shape; a ``d2`` that clamps back under the smem budget
-    spells identically and dedupes to one row. A pin naming a byte transport, or a depth the
-    budget refuses, RAISES — the fill's tier is selected here by construction, so the refusal is
-    never a silent drop."""
+    spells identically and dedupes to one row. A SCOPED pin naming a byte transport RAISES — the
+    fill's tier is selected here by construction, so an addressed refusal is never silent — while
+    a BARE byte-transport pin DROPS (the choice layer: it fans out to every STAGE site, and this
+    one has no byte-transport tier for it to mean). A pinned depth the budget refuses on THIS
+    plan's slabs is recorded like the family's other per-plan refusals; the caller raises when no
+    plan honors the pin."""
+    depths = [1, 2]
     if pin:
         # A pinned spelling names a kernel, so its TRANSPORT cannot be quietly dropped and read as
         # depth alone: the fill's own asynchronous B-slab prefetch ring is the depth-2 ``smem``
         # row, not ``smem-async``.
         want = Stage.parse(pin)
         if want.transport != "smem":
-            raise ValueError(
+            reason = (
                 f"the smem compute fill has no {want.transport} sibling: a computed operand cannot ride a byte "
                 f"transport (nothing but the fill can evaluate a producer cone). Its own asynchronous B-slab "
                 f"prefetch ring is spelled d2/smem."
             )
-        depths = [want.depth]
-    else:
-        depths = [1, 2]
+            if scoped:
+                raise ValueError(reason)
+            # The choice-layer drop: a bare pin fans out to every STAGE site of the graph, and the
+            # mandatory fill is a tier a byte-transport spelling cannot mean — refusing here would
+            # fail whole-graph sweeps on any kernel that hosts a fill. The fill keeps its own
+            # catalog; a pin that means THIS site spells it scoped and still raises above.
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("STAGE pin %r dropped at the compute fill: %s", pin, reason)
+            pin = None
+        else:
+            depths = [want.depth]
     out: list[Stage | None] = []
     spelled: set[str] = set()
     for depth in depths:
@@ -371,8 +390,12 @@ def _fill_options(state: _State, node, plan: TilePlan, placed: TilePlan, pin: st
                 why[-1] if why else f"its slabs must fit the {state.ctx.max_dynamic_smem} B smem budget"
             )
             if pin:
-                raise ValueError(reason)
-            logger.debug("%s", reason)
+                # Plan-scoped: the slab is sized by THIS tile's geometry, so the pinned depth may
+                # still resolve on a sibling plan — record the refusal and raise only when no plan
+                # honors the pin (the caller's rule, shared with the TILE / transport refusals).
+                refused.append(reason)
+            else:
+                logger.debug("%s", reason)
             continue
         if r.spell() not in spelled:
             spelled.add(r.spell())
@@ -448,7 +471,8 @@ def _seam_entries(state: _State, node, key: str | None, plan: TilePlan, placed: 
     facts = state.facts[id(node)]
     if facts.need is not None:
         if plan.is_tiled and plan.is_warp and stage is not None and stage.transport == "smem":
-            need = ("warp", plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems)
+            kind = "step" if facts.need_step else "warp"
+            need = (kind, plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems)
         else:
             need = ("free",)
         out.append(("need", facts.need, need))
@@ -515,13 +539,16 @@ def _paired_budget_refusal(node, producer, tile: TilePlan, stage: Stage | None) 
 
 def _seam_ok(need: tuple, offer: tuple) -> bool:
     """Whether a consumer's fragment NEED composes with a producer's OFFER across one fragment
-    edge. An untiled producer composes with anything (it is evaluated elementwise into the
-    consumer's synchronous slab); a TILED producer produces fragments, so it composes only with a
-    warp consumer over an smem compute fill whose atom family matches and whose slab chunk the
-    producer's single-unit N tile fills exactly."""
+    edge. An untiled producer composes with a nested-cone need (the compute fill re-evaluates the
+    cone elementwise into its slab) but NOT with a sibling-step one (``"step"``): a sibling's
+    per-step result exists only in the enclosing carrier's stream, and the fragment fill has no
+    way to re-evaluate it — its fragments must come from a warp-scheduled producer. A TILED
+    producer produces fragments, so it composes only with a warp consumer over an smem compute
+    fill whose atom family matches and whose slab chunk the producer's single-unit N tile fills
+    exactly."""
     if offer[0] == "free":
-        return True
-    if need[0] != "warp" or offer[0] != "warp":
+        return need[0] != "step"
+    if need[0] not in ("warp", "step") or offer[0] != "warp":
         return False
     _, shape, layout, bk = need
     _, o_shape, o_layout, o_units_n, o_tile_n = offer
@@ -1119,6 +1146,11 @@ class _SiteFacts:
     seam: tuple | None  # the computed-A stat-row seam, or a derived marker's carried-state seam
     producer: Fold | None  # the single contraction nested in the computed A edge (the paired budget)
     need: str | None  # the TILE key of this consumer's fragment producer (the cross-site seam)
+    #: whether the needed fragment is a SIBLING step's value rather than a nested cone's: a nested
+    #: cone the compute fill can re-evaluate elementwise, but a sibling's per-step result exists
+    #: only in the enclosing carrier's stream, so its fragments must come from a warp-scheduled
+    #: producer (:func:`_seam_ok` keys the free-offer rule on this).
+    need_step: bool = False
 
 
 def _site_facts(tile: TileOp, ctx, sched: Sched, tail: list, frag_ok: bool) -> dict:
@@ -1166,10 +1198,11 @@ def _site_facts(tile: TileOp, ctx, sched: Sched, tail: list, frag_ok: bool) -> d
             nested = tuple(s.node for s in sites(node.a) if is_contraction(s.node) and edge_refs_axis(s.node, k_axis.name))
             producer = nested[0] if len(nested) == 1 else None
         need = sibling.get(id(node))
+        step = need is not None
         if need is None and producer is not None:
             need = sched.key("TILE", producer)
         offered, pin_only = _atom_families(tile, ctx, node, tail) if refusal is None else ((), ())
-        out[id(node)] = _SiteFacts(refusal, offered, pin_only, k_axis, seam, producer, need)
+        out[id(node)] = _SiteFacts(refusal, offered, pin_only, k_axis, seam, producer, need, step)
     return out
 
 

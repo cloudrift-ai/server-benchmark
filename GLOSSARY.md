@@ -261,6 +261,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   dimension bindings and input pin regimes that were tuned for that target.
 - **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,
   input knob pins, the selected schedule knobs, and (after verification) paired measurements.
+- **Child-identity schedule receipt** — A realization that records one split child's schedule: the route's cut(s)
+  frozen in its input pins, the child's schedule row in its knobs, and the child kernel's deploy identity stored as
+  its identity. The stored identity is the verified-tier join key and the strict decode's kernel selector — one flat
+  knobs map decorates exactly one kernel, so conflicting per-child schedules persist as sibling receipts.
 - **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
   realizations, proposed knob rows, and tune ranking feedback. It is search state, not trusted deployment evidence.
 - **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at

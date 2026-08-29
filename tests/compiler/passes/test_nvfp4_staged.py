@@ -255,6 +255,7 @@ def _rows(node, inputs, axes, pins=None):
     from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import Placement, TileOp
     from emmy.compiler.ir.tile.ir import OutputSpec
+    from emmy.compiler.pipeline.knob import axis_of
     from emmy.compiler.pipeline.passes.lowering.tile import _schedule
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.compiler.pipeline.search.space import STAGE
@@ -271,8 +272,13 @@ def _rows(node, inputs, axes, pins=None):
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     with pinned_knobs(pins or {}):
         state = _schedule._state(op, "y", {}, ctx)
-        pin = _schedule._pin(STAGE, state.sched.key("STAGE", node))
-        return [st.spell() for st in _schedule._fill_options(state, node, tile, pin, ctx.max_dynamic_smem)]
+        key = state.sched.key("STAGE", node)
+        pin = _schedule._pin(STAGE, key)
+        # The enumeration's own reading of both: which plan the slabs are sized against, and
+        # whether the pin ADDRESSES this site (a scoped pin raises where a bare one drops).
+        scoped = pin is not None and (element := axis_of(key)) is not None and STAGE.pin_at(element) is not None
+        placed = state.sched.placed(node, tile)
+        return [st.spell() for st in _schedule._fill_options(state, node, tile, placed, pin, scoped, [])]
 
 
 def _transport(row: str) -> str:

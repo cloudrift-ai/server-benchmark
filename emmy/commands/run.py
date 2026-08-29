@@ -538,6 +538,8 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
         hardware_id=Context.probe().hardware_id(),
         emmy_us=emmy_us,
         tcompile_us=tcompile_us,
+        knobs=measured[0].sample.knobs if measured else None,
+        pins=measured[0].sample.pins if measured else None,
     )
     logger.info(
         "recorded %s: emmy %.2f us (%s)%s",

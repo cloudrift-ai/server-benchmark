@@ -1,0 +1,74 @@
+# evidence: Qwen3 target k_sdpa_mean_reduce_29d3df.171afed452e2.s512 dropped the same
+# Fold.combine=None statistic at materialization on sm_70, sm_89 and sm_120. This reduced GQA
+# slice preserves the zero-axis prologue whose first top-level reduce Loop is authored in its body.
+compute_cap:
+- 8
+- 0
+programs:
+- inputs: [q, k, v, qw, kw]
+  outputs: [out]
+  nodes:
+  - id: k
+    op: input
+    outputs: [[k, f16, [1, 2, 128, 128]]]
+  - id: kw
+    op: input
+    outputs: [[kw, f16, [128]]]
+  - id: kn
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [k, kw]
+    outputs: [[kn, f16, [1, 2, 128, 128]]]
+  - id: q
+    op: input
+    outputs: [[q, f16, [1, 4, 128, 128]]]
+  - id: qw
+    op: input
+    outputs: [[qw, f16, [128]]]
+  - id: qn
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [q, qw]
+    outputs: [[qn, f16, [1, 4, 128, 128]]]
+  - id: v
+    op: input
+    outputs: [[v, f16, [1, 2, 128, 128]]]
+  - id: out
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [qn, kn, v]
+    outputs: [[out, f16, [1, 4, 128, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - kn
+    - out
+    - qn
+  realizations:
+  - name: k_sdpa_rms_norm_reduce_3a0cc8.9035412a0046
+    bindings: {}
+    pins:
+      FAST_MATH: true
+      PLACE: fuse
+    knobs:
+      WORK: w1x1
+      RASTER: ''
+      TILE: mma_m16n8k16_f16_f32/f1x1
+      TILE@a.fold.a4: mma_m16n8k16_f16_f32/f1x1
+      TILE@a8: ''
+      REDUCE@map.fold.a21: ''
+      REDUCE@a7: ''
+      REDUCE@a.fold.a3: ''
+      REDUCE@map.fold.a.map.fold.fold.a41: ''
+      REDUCE@a.b.fold.a4: ''
+      REDUCE@map.fold.a.fold.a81: ''
+      REDUCE@b.fold.a8: ''
+      STAGE@map.fold.a21: ''
+      STAGE@a7: d1/smem
+      STAGE@a.fold.a3: ''
+      STAGE@map.fold.a.map.fold.fold.a41: d1/smem
+      STAGE@a.b.fold.a4: ''
+      STAGE@map.fold.a.fold.a81: ''
+      STAGE@b.fold.a8: ''
+    identity: 5ddf1772501faa05906fce50274ec678cfb78a51d14cb9793d6b2b65971b8b70

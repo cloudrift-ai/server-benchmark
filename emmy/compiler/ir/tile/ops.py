@@ -224,6 +224,7 @@ class Sched:
         self.place = place
         self._sites = None
         self._site_by_id = None
+        self._mn_by_id = {}
 
     def _all_sites(self):
         if self._sites is None:
@@ -292,6 +293,14 @@ class Sched:
         return plan.at(*mn) if mn is not None else plan
 
     def _mn_for(self, node):
+        """The cached ``(m, n)`` output axes for ``node``. Placement is a site fact: candidate
+        plans change tile sizes, never which output axes they tile."""
+        key = id(node)
+        if key not in self._mn_by_id:
+            self._mn_by_id[key] = self._derive_mn(node)
+        return self._mn_by_id[key]
+
+    def _derive_mn(self, node):
         """The ``(m, n)`` output axes a ``TILE`` slice at ``node``'s site tiles, or ``None`` when
         the placement cannot supply them (an unmapped / rank-<2 grid — the caller's untiled path).
 

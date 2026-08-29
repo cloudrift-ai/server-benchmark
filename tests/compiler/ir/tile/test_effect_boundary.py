@@ -189,27 +189,75 @@ def test_store_repr_round_trips_through_eval() -> None:
     assert _eval_stmt(repr(st)) == st
 
 
-def test_broadcast_sibling_loop_round_trips() -> None:
-    """A sibling output loop may BROADCAST — write a value the enclosing scope computed, so its own
-    body defines nothing and the region carries that value as a capture.
+# --- the gate compares under construction normalization ------------------------------------------ #
 
-    This used to raise rather than round-trip: the capture set was read by building a lambda that
-    binds the axis alone and asking what it left free, and ``Lambda`` rejects a result its body
-    does not define. The capture set now comes off the body, where a broadcast result is free like
-    any other name the body reads.
+
+def test_sweep_body_out_of_canonical_order_still_extracts() -> None:
+    """A free sweep whose pure prefix is not in canonical statement order must still extract.
+
+    ``ProjectionRegion`` stores its body in a ``Lambda``, whose construction canonicalizes
+    statement order — so reconstitution returns the NORMALIZED spelling. Gating on byte-identity
+    with the RAW stream rejected any sweep the normalization reorders (two independent computes
+    given in reverse-canonical order below), and the reject surfaced as a hard "cannot be
+    represented" compile failure on DeepSeek-V4's fused post block. The gate's target is the
+    stream as reconstitution will spell it.
     """
-    n = _ax("n", 16)
-    stmts = [
-        Assign(name="scale", op="copy", args=("x",)),
-        Loop(axis=n, body=Body((Write(output="o", index=(Var("m"), Var("n")), value="scale"),))),
-        Assign(name="tail", op="relu", args=("scale",)),
-        Write(output="p", index=(Var("m"),), value="tail"),
-    ]
+    first = Loop(
+        axis=_ax("a2", 8),
+        body=Body(
+            (
+                Load(name="x", input="src", index=(Var("a2"),)),
+                Assign(name="y", op="relu", args=("x",)),
+                Write(output="o1", index=(Var("a2"),), value="y"),
+            )
+        ),
+    )
+    second = Loop(
+        axis=_ax("a3", 4),
+        body=Body(
+            (
+                Load(name="w", input="src2", index=(Var("a3"),)),
+                # reverse-canonical: "sigmoid" orders after "negative", yet the stmts are independent
+                Assign(name="s", op="sigmoid", args=("w",)),
+                Assign(name="n", op="negative", args=("w",)),
+                Assign(name="z", op="add", args=("s", "n")),
+                Write(output="o2", index=(Var("a3"),), value="z"),
+            )
+        ),
+    )
+    split = extract_output_specs([first, second])
+    assert split is not None, "a semantics-preserving reorder must not make the stream unrepresentable"
+    pure, stores = split
+    assert [type(stmt).__name__ for stmt in pure] == ["ProjectionRegion", "ProjectionRegion"]
+    assert [store.write.output for store in stores] == ["o1", "o2"]
+    # The round trip agrees with itself: reconstitution of the extraction is a fixpoint.
+    rebuilt = apply_output_specs(pure, stores)
+    assert extract_output_specs(rebuilt) is not None
 
-    pure, specs = extract_output_specs(stmts)
 
-    region = next(member for member in pure if isinstance(member, ProjectionRegion))
-    assert region.lift.body == Body(()), "a broadcast region computes nothing of its own"
-    assert "scale" in region.lift.params, "the broadcast value must arrive as a capture"
-    assert all(member.pure for member in pure)
-    assert apply_output_specs(pure, specs) == stmts
+def test_sweep_write_of_a_captured_accumulator_extracts() -> None:
+    """A sweep may store an enclosing scope's value unchanged — ``o[j] = acc`` broadcasting an
+    already-reduced accumulator. The result is not a body def, so the region's Lambda must bind
+    it as a captured param; building the capture probe WITH results raised the formation error
+    instead ("Lambda results ['acc'] are not defined"), a crash on a legitimate stream."""
+    first = Loop(
+        axis=_ax("a1", 8),
+        body=Body(
+            (
+                Load(name="x", input="src", index=(Var("a1"),)),
+                Assign(name="y", op="relu", args=("x",)),
+                Write(output="o1", index=(Var("a1"),), value="y"),
+            )
+        ),
+    )
+    second = Loop(
+        axis=_ax("a2", 4),
+        body=Body((Write(output="o2", index=(Var("a2"),), value="acc"),)),
+    )
+    split = extract_output_specs([first, second])
+    assert split is not None
+    pure, stores = split
+    assert [store.write.output for store in stores] == ["o1", "o2"]
+    region = pure[-1]
+    assert isinstance(region, ProjectionRegion) and "acc" in region.lift.params
+    assert extract_output_specs(apply_output_specs(pure, stores)) is not None

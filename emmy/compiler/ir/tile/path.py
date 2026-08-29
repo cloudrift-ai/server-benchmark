@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from itertools import combinations
 
 from emmy.compiler.ir.pure.fold import Fold, is_contraction
+from emmy.compiler.structural import instance_memo
 
 #: The families that key a schedule SLICE on a node — the ONE list, since ``ir/`` never imports
 #: ``pipeline/`` and every reader on both sides of that line needs the same three.
@@ -58,6 +59,13 @@ _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
 #: unsplit literal first, then moves the split left one digit at a time. Thus ``a22`` can resolve as
 #: axis ``a2`` ordinal 2 without stealing an axis literally named ``a22``.
 _AXIS_ORDINAL_RE = re.compile(r"^(.*?)(\d+)$")
+
+
+class MissingSiteError(ValueError):
+    """A suffixed knob key that names NO site on this tree. A ``ValueError`` so every existing
+    handler still reads it as a broken stored key failing loudly; its own type so a caller
+    holding GRAPH-scoped pins (the placement rule) can tell "this key addresses another kernel"
+    apart from an ambiguity, which stays a plain ``ValueError``."""
 
 
 class UnknownSiteError(Exception):
@@ -287,9 +295,11 @@ def _match(key: _Key, fam_sites: tuple[Site, ...]) -> list[Site]:
     return out
 
 
-def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
-    """The canonical (shortest unique) spelling of ``site`` under ``family`` — see :func:`spell`."""
-    if primary(family, fam_sites) is site:
+def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...], head: Site | None = None) -> str:
+    """The canonical (shortest unique) spelling of ``site`` under ``family`` — see :func:`spell`.
+    ``head`` is the family's primary when the caller already resolved it (the bulk table builder
+    resolves it once for every site)."""
+    if (primary(family, fam_sites) if head is None else head) is site:
         return family
     axis_part = f".{site.axis}" if site.axis is not None else ""
     if site.axis is not None and sum(1 for s in fam_sites if s.axis == site.axis) == 1:
@@ -344,11 +354,24 @@ def spell(root, family: str, node, *, all_sites: tuple[Site, ...] | None = None)
     discriminates, else the shortest anchored path subsequence (deepest anchors preferred), with
     the 1-based ordinal only on a true same-path collision. Stampers and stored evidence use this
     spelling and nothing else."""
+    tables = instance_memo(root, "_memo_spellings")
+    table = tables.get(family)
+    if table is None:
+        # The whole family spells as ONE derived table (an ``instance_memo`` on the immutable
+        # root): the schedule pricing loops re-spell the same sites once per candidate row, and
+        # per-call spelling repeats the primary resolution and the uniqueness scans per site.
+        all_sites = sites(root) if all_sites is None else all_sites
+        fam_sites = family_sites(family, all_sites)
+        head = primary(family, fam_sites)
+        table = {}
+        for s in fam_sites:
+            if id(s.node) not in table:  # a shared subtree keeps its FIRST site's spelling
+                table[id(s.node)] = _spellings(family, s, fam_sites, head=head)
+        tables[family] = table
+    spelled = table.get(id(node))
+    if spelled is not None:
+        return spelled
     all_sites = sites(root) if all_sites is None else all_sites
-    fam_sites = family_sites(family, all_sites)
-    for s in fam_sites:
-        if s.node is node:
-            return _spellings(family, s, fam_sites)
     if not any(s.node is node for s in all_sites):
         raise UnknownSiteError(
             f"{type(node).__name__} is not a site of this tree — the caller holds a copied or "
@@ -371,6 +394,7 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
     carries that axis is it retried as ``<axis><ordinal>`` (so an axis named ``k2`` never loses to
     an ordinal reading)."""
     parsed = parse_key(key)
+    matched_key = parsed
     all_sites = sites(root) if all_sites is None else all_sites
     fam_sites = family_sites(parsed.family, all_sites)
     if parsed.bare:
@@ -398,17 +422,18 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
                 for retry in readings:
                     matches = _match(retry, fam_sites)
                     if matches:
+                        matched_key = retry
                         break
                 if matches:
                     break
     if not matches:
-        raise ValueError(f"knob key {key!r} names no site on this tree (a structural change broke a stored key?)")
+        raise MissingSiteError(f"knob key {key!r} names no site on this tree (a structural change broke a stored key?)")
     if len({id(s.node) for s in matches}) > 1:
         # An EXACT full-path match outranks subsequence admissions: a shallow site's full path is
         # an anchored subsequence of every deeper same-axis path, so without this preference the
         # canonical full-path spelling (the ordinal arm's fallback) could never name the shallow
         # site at all. Only consulted at the ambiguity point — sugar that was unique stays unique.
-        exact = [s for s in matches if s.segments == parsed.segments]
+        exact = [s for s in matches if s.segments == matched_key.segments]
         if len({id(s.node) for s in exact}) == 1:
             return exact[0]
         cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in matches))
@@ -434,6 +459,7 @@ def canonical(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> s
 __all__ = [
     "PATH_FAMILIES",
     "SLICE_FAMILIES",
+    "MissingSiteError",
     "Site",
     "UnknownSiteError",
     "canonical",

@@ -26,6 +26,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.slice import single_node_graph
@@ -72,6 +73,34 @@ class _CountingBackend:
     async def benchmark_async(self, graph, num_iters="auto", warmup=5) -> BenchmarkResult:
         del warmup
         return self.benchmark(graph, num_iters=num_iters)
+
+
+class _RouteBackend(_CountingBackend):
+    """Price one exact child schedule tree as the winning placement route."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.measured_route: tuple[str, ...] | None = None
+
+    def benchmark(self, graph, num_iters="auto") -> BenchmarkResult:  # noqa: ARG002
+        self.calls += 1
+        cuda = [n for n in graph.nodes.values() if isinstance(n.op, CudaOp)]
+        if len(cuda) > 1:
+            route = tuple(node.op.cache_key() for node in cuda)
+            first = cuda[0].op.knobs
+            fast_route = first.get("WORK") == "t16x8" and first.get("STAGE") == "d1/smem-async"
+            if fast_route:
+                self.measured_route = route
+            us = 1.0 if fast_route else 20.0
+        else:
+            knobs = cuda[0].op.knobs
+            fused = knobs.get("S_n_accum") == 1.0 and knobs.get("S_pw_add") == 1.0
+            us = 100.0 if fused else (0.25 if knobs.get("WORK") == "" and knobs.get("STAGE") == "" else 10.0)
+        per = [
+            LaunchTime(idx=i, kernel_name=getattr(node.op, "kernel_name", "k"), time_ms=us / 1000.0, samples=(us / 1000.0,))
+            for i, node in enumerate(cuda)
+        ]
+        return BenchmarkResult(time_ms=sum(item.time_ms for item in per), num_launches=len(per), per_launch=per)
 
 
 def _matmul(g: Graph, prefix: str, M: int, K: int, N: int) -> str:
@@ -169,6 +198,35 @@ def test_run_drives_outer_scores_separably_and_assembles() -> None:
     assert result.best_reward is not None and result.best_reward.ok
     assert result.assembled is not None
     assert any(isinstance(n.op, CudaOp) for n in result.assembled.nodes.values())
+
+
+def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt(monkeypatch, tmp_path) -> None:
+    """A measured route stays search evidence until its exact child tree can replay."""
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    graph = _graph(("x", 64, 128, 48))
+    graph.add_node(InputOp(), [], Tensor("residual", (64, 48)), node_id="residual")
+    graph.add_node(ElementwiseOp("add"), ["xc", "residual"], Tensor("out", (64, 48)), node_id="out")
+    graph.inputs.append("residual")
+    graph.outputs = ["out"]
+    ctx = Context.from_target((8, 0))
+    path = tmp_path / "route.db"
+    db = SearchDB(path)
+    backend = _RouteBackend()
+    result = run_two_level(
+        graph,
+        ctx=ctx,
+        db=db,
+        backend=backend,
+        patience=_PATIENCE,
+        prior=None,
+        manage_prior=False,
+    )
+    assert result.best_reward is not None
+    assert result.best_reward.searched_winner() == ({"PLACE": "cut"}, 2.0)
+    assert backend.measured_route is not None
+    route_rows = [row for row in db.iter_perf(ctx.structural_key(), backend="cuda") if row.knobs.get("PLACE") == "cut"]
+    assert route_rows == []
+    db.close()
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:

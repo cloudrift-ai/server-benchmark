@@ -10,6 +10,7 @@ spliced in as one).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.stmt.base import pretty_body
@@ -72,10 +73,21 @@ class Lambda:
     def free_names(self) -> frozenset[str]:
         """Names the body reads that this lambda does not bind — the contextual-invariant read
         the consuming Fold checks against its iteration vars."""
+        return self._free_names
+
+    @cached_property
+    def _free_names(self) -> frozenset[str]:
+        # Memoized: the lambda is immutable, and every scope walk that reaches a nested Fold asks
+        # its lift's free names again — uncached, a deep fused tree pays the full body walk once
+        # per enclosing level.
         reads: set[str] = set()
         for s in self.body:
             reads |= _member_reads(s)
         return frozenset(reads) - self.defined
+
+    def __getstate__(self):
+        """Pickle the stored fields only — memoized reads recompute after transport."""
+        return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
 
     def canonical(self) -> Lambda:
         """The α-canonical form: params renumber to ``_p0…`` and internal defs to ``_v0…`` in

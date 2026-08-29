@@ -1,8 +1,16 @@
 """Contextual canonical forms for Tile IR Fold trees.
 
 Each :class:`Fold` already owns context-independent lambda-body ordering. The rewrites here need
-the enclosing Tile axes or parent Fold; nonlocal sibling clustering belongs to later algebraic
-rewrite passes.
+the enclosing Tile axes or parent Fold.
+
+INVARIANT — normalization ends with structurally identical cones as ONE shared object
+(:func:`_share_common_cones`). Object identity is how the placement machinery recognizes that two
+consumption sites read one value, so a rewrite that copies a cone (the close rewrites do, by
+design) is only sound because this final pass restores the sharing. Recompute elimination is a
+Tile-level placement concern built on that identity: a duplicated value becomes one seam, and a
+composed cut materializes it once for every reader. Do NOT patch recompute downstream — a Loop IR
+fusion or emission workaround sees one kernel at a time and cannot know two kernels re-derive the
+same value; fix the sharing or the seam offer here instead.
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, op
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import _member_reads
+from emmy.compiler.structural import instance_memo
 
 
 def _lambda_members(body: Body):
@@ -335,44 +344,69 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
     return replace(fold, operands=tuple(ordered), lift=lift)
 
 
-def _normalize_body(body: Body, axes: tuple[str, ...], implicit_axes: frozenset[str]) -> Body:
+def _normalize_body(body: Body, axes: tuple[str, ...], implicit_axes: frozenset[str], sweep_axes: frozenset[str]) -> Body:
     out = []
     for stmt in body:
         if isinstance(stmt, Fold):
-            out.append(_normalize_fold(stmt, axes, implicit_axes))
+            out.append(_normalize_fold(stmt, axes, implicit_axes, sweep_axes))
             continue
         nested = stmt.nested()
         if not nested:
             out.append(stmt)
             continue
         child_axes = (*axes, *stmt.binds_axes())
-        out.append(stmt.with_bodies(tuple(_normalize_body(child, child_axes, implicit_axes) for child in nested)))
+        out.append(stmt.with_bodies(tuple(_normalize_body(child, child_axes, implicit_axes, sweep_axes) for child in nested)))
     return Body(out)
 
 
-def _hoist_closed_folds(root: Fold, axes: tuple[str, ...]) -> Fold:
-    """Move closed child Folds from a zero-axis body onto operand edges."""
-    candidates = [stmt for stmt in root.body if isinstance(stmt, Fold) and not (set(stmt.lift.free_names()) - set(axes))]
+def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
+    """Move closed child Folds from a zero-axis body onto operand edges.
+
+    A non-contraction fold that reads a SWEEP axis is never hoisted: a sweep axis is bound only by
+    the per-cell output ``Loop`` reconstitution wraps around the projection body
+    (``apply_output_specs``), so a body member re-enters that scope while an operand edge lowers
+    at kernel scope, where the axis is an undefined identifier (``head``'s sweep case — the fold
+    must stay the projection's body member; found live on DeepSeek-V4 post16's per-column sum,
+    ``k_div_36``). A CONTRACTION is exempt: ``TileOp.__post_init__`` promotes a sweep its operands
+    read into a real free axis right after normalization, so the hoisted edge stays bound."""
+    candidates = [
+        stmt
+        for stmt in root.body
+        if isinstance(stmt, Fold)
+        and not (set(stmt.lift.free_names()) - set(axes))
+        and (is_contraction(stmt) or not any(edge_refs_axis(stmt, name) for name in sweep_axes))
+    ]
     if not candidates:
         return root
     candidate_ids = {id(candidate) for candidate in candidates}
     remaining = Body(stmt for stmt in root.body if id(stmt) not in candidate_ids)
-    operands = (*root.operands, *candidates)
-    if not root.operands and len(candidates) == 1 and not remaining and root.lift.results == candidates[0].defines():
-        return candidates[0]
-    return Fold.projection(operands=operands, body=remaining, results=root.lift.results)
+    hoisted = Fold.projection(operands=(*root.operands, *candidates), body=remaining, results=root.lift.results)
+    return _passthrough(hoisted) or hoisted
+
+
+def _passthrough(node: Fold) -> Fold | None:
+    """The single operand an identity projection merely re-exposes, or ``None``.
+
+    A pass-through is shape noise — a closing rewrite can leave one behind — and it is what makes
+    two occurrences of the same computation compare unequal, so normalization dissolves it
+    wherever a projection is formed or revisited."""
+    if node.axis is not None or node.lift.body or len(node.operands) != 1:
+        return None
+    (operand,) = node.operands
+    if isinstance(operand, Fold) and tuple(node.lift.results) == _operand_result_names(operand):
+        return operand
+    return None
 
 
 def _edge_free_names(edge) -> frozenset[str]:
-    if not isinstance(edge, Fold):
-        return frozenset()
-    free = set(edge.lift.free_names())
-    for operand in edge.operands:
-        free.update(_edge_free_names(operand))
-    return frozenset(free)
+    """The names an operand edge CAPTURES — :meth:`Fold.deps`, which subtracts what each nesting
+    level binds. A scope-blind union would count a sibling-bound name (the statistic cone reading
+    the eps its source operand provides) as free, and the close rewrites would re-fire forever on
+    an edge that is already closed."""
+    return frozenset(edge.deps()) if isinstance(edge, Fold) else frozenset()
 
 
-def _close_projection(root: Fold, axes: tuple[str, ...]) -> Fold:
+def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
     """Move an enclosing projection's dependencies onto captured contraction operands."""
     assert root.axis is None
     provider_order = tuple(
@@ -398,7 +432,8 @@ def _close_projection(root: Fold, axes: tuple[str, ...]) -> Fold:
             return None
         moved_members.update(id(stmt) for stmt in cone.members)
         moved_edges.update(id(edge) for edge in edges)
-        return _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names), axes)
+        hoisted = _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names), axes, sweep_axes)
+        return _passthrough(hoisted) or hoisted
 
     def close(node: Fold) -> Fold:
         operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in node.operands)
@@ -445,6 +480,72 @@ def _close_projection(root: Fold, axes: tuple[str, ...]) -> Fold:
         edge for edge in rewritten_operands if id(edge) not in moved_edges or live & set(_operand_result_names(edge))
     )
     return Fold.projection(operands=remaining_operands, body=remaining_body, results=root.lift.results)
+
+
+def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
+    """Move a reducing fold's body-resident producer chain onto a captured contraction operand.
+
+    :func:`_close_projection` closes contraction operands against a zero-axis root, but a chain
+    that depends on the fold's own iteration axis lives in the reducing fold's lift body, one
+    scope below any projection — attention's per-key statistic and its rsqrt ahead of the score
+    dot's B cone. Moving that chain onto the captured edge closes the cone at the contraction's
+    fold axis plus the enclosing free axes, which is what lets the placement fork offer the
+    operand as a workspace seam. The move is gated on exclusive consumption: every moved
+    definition must die into the closed edges, so the step's work is repackaged rather than
+    duplicated and a chain a sibling member still reads stays put."""
+    if root.axis is None or is_contraction(root) or not root.lift.body:
+        return root
+    body = root.lift.body
+    provider_order = tuple(dict.fromkeys(name for stmt in body for name in stmt.defines()))
+    provider_names = frozenset(provider_order)
+    moved: set[int] = set()
+
+    def source(names: tuple[str, ...]) -> Fold | None:
+        cone = body.backward_cone(names)
+        defined = {name for stmt in cone.members for name in stmt.defines()}
+        if not set(names) <= defined:
+            return None
+        moved.update(id(stmt) for stmt in cone.members)
+        return _hoist_closed_folds(Fold.projection(body=Body(cone.members), results=names), axes, sweep_axes)
+
+    def close(node: Fold) -> Fold:
+        operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in node.operands)
+        inner = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in node.lift.body)
+        current = replace(node, operands=operands) if operands != node.operands else node
+        if inner != current.lift.body:
+            current = current.with_bodies((inner,))
+        if not is_contraction(current):
+            return current
+
+        changed = False
+        closed = []
+        for edge in current.operands:
+            if not isinstance(edge, Fold) or edge.axis is not None:
+                closed.append(edge)
+                continue
+            needed = tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
+            provided = source(needed) if needed else None
+            if provided is None:
+                closed.append(edge)
+                continue
+            closed.append(Fold.projection(operands=(provided, *edge.operands), body=edge.body, results=edge.lift.results))
+            changed = True
+        return replace(current, operands=tuple(closed)) if changed else current
+
+    rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
+    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in body)
+    if not moved:
+        return root
+
+    kept = Body(stmt for stmt in rewritten_body if id(stmt) not in moved)
+    moved_defs = {name for stmt in body if id(stmt) in moved for name in stmt.defines()}
+    outside = {result for result in root.lift.results if isinstance(result, str)}
+    outside.update(name for stmt in kept for name in _member_reads(stmt))
+    if root.observe is not None:
+        outside.update(root.observe.free_names())
+    if moved_defs & outside:
+        return root  # the chain does not die into the closed edges — moving it would duplicate work
+    return replace(root, operands=rewritten_operands, lift=replace(root.lift, body=kept))
 
 
 def _flat_members(edge) -> tuple | None:
@@ -633,32 +734,109 @@ def _hoist_decode_operands(root: Fold) -> Fold:
     return Fold.projection(operands=root.operands, body=Body(tuple(members)), results=root.lift.results)
 
 
-def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str]) -> Fold:
-    operands = tuple(_normalize_fold(edge, axes, implicit_axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
+def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str], sweep_axes: frozenset[str]) -> Fold:
+    operands = tuple(_normalize_fold(edge, axes, implicit_axes, sweep_axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
     node = replace(fold, operands=operands) if operands != fold.operands else fold
+    if node.axis is None and (collapsed := _passthrough(node)) is not None:
+        return collapsed
     body_axes = (*axes, node.axis.name) if node.axis is not None else axes
-    body = _normalize_body(node.lift.body, body_axes, implicit_axes)
+    body = _normalize_body(node.lift.body, body_axes, implicit_axes, sweep_axes)
     if body != node.lift.body:
         node = node.with_bodies((body,))
     node = _canonical_semiring(node, axes, implicit_axes)
     if node.axis is not None:
-        return node
+        return _close_reduce_body(node, body_axes, sweep_axes)
     node = _hoist_decode_operands(node)
-    node = _close_projection(node, axes)
-    return _hoist_closed_folds(node, axes)
+    node = _close_projection(node, axes, sweep_axes)
+    return _hoist_closed_folds(node, axes, sweep_axes)
 
 
-def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[str] = ()):
-    """Normalize a complete Tile IR tree bottom-up; ``None`` placeholders pass through."""
+def _share_common_cones(root: Fold) -> Fold:
+    """Restore object sharing between structurally identical cones — the tree-wide half of
+    canonicalization.
+
+    Fusion and the close rewrites inline one value into every consumption site, so a traced value
+    consumed twice (attention's softmax statistics, read by the weight cone and the epilogue)
+    reappears as equal-but-distinct copies. Everything downstream keys on object identity —
+    ``cuttable_seams`` groups occurrences by it, ``realize`` replaces cut values by it — so a
+    severed sharing silently turns one value into per-site recompute that no schedule can undo.
+    This walk hash-conses every Fold bottom-up: copies that are structurally EQUAL (same captured
+    names included — the bucket key adds ``deps`` so α-equivalent cones under different captures,
+    the K-cone family, stay value clustering's job) collapse onto the first occurrence in walk
+    order. Emission is untouched: lowering walks tree positions, and every position still holds
+    an equal term. Identity-preserving off the replacement spine, like ``_replace_fold``."""
+    canon: dict[tuple, list[Fold]] = {}
+    seen: dict[int, Fold] = {}
+
+    def member(stmt):
+        if isinstance(stmt, Fold):
+            return visit(stmt)
+        nested = stmt.nested()
+        if not nested:
+            return stmt
+        bodies = tuple(Body(tuple(member(child) for child in body)) for body in nested)
+        unchanged = all(
+            len(body) == len(original) and all(piece is child for piece, child in zip(body, original, strict=True))
+            for body, original in zip(bodies, nested, strict=True)
+        )
+        return stmt if unchanged else stmt.with_bodies(bodies)
+
+    def visit(node: Fold) -> Fold:
+        if id(node) in seen:
+            return seen[id(node)]
+        operands = tuple(visit(edge) if isinstance(edge, Fold) else edge for edge in node.operands)
+        body = tuple(member(stmt) for stmt in node.lift.body)
+        current = node
+        if any(piece is not edge for piece, edge in zip(operands, node.operands, strict=True)):
+            current = replace(current, operands=operands)
+        if any(piece is not stmt for piece, stmt in zip(body, node.lift.body, strict=True)):
+            current = current.with_bodies((Body(body),))
+        bucket = canon.setdefault((current.structural_key(), current.deps()), [])
+        for prior in bucket:
+            if prior == current:
+                seen[id(node)] = prior
+                return prior
+        bucket.append(current)
+        seen[id(node)] = current
+        return current
+
+    return visit(root)
+
+
+def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[str] = (), sweep_axes: Iterable[str] = ()):
+    """Normalize a complete Tile IR tree bottom-up; ``None`` placeholders pass through.
+
+    ``sweep_axes`` names the axes bound only by output-sweep reconstitution (never kernel scope);
+    :func:`_hoist_closed_folds` keeps a fold reading one as a projection body member.
+
+    The reached fixpoint is STAMPED on the result (per enclosing scope, an
+    :func:`~emmy.compiler.structural.instance_memo`): the term is immutable and the rewrite
+    idempotent, so a reconstruction under the same scope answers without re-walking — on a large
+    fused tree the re-verification, once per ``TileOp`` construction, is what turns the pipeline
+    quadratic."""
     if not isinstance(root, Fold):
         return root
-    normalized = _normalize_fold(root, tuple(axes), frozenset(implicit_axes))
-    # A contraction reached as the whole tree has no projection to host hoisted factors, so the
-    # hoist creates one here. Nested contractions are handled by their own projection, which keeps
-    # the common shape flat.
-    if normalized.axis is not None:
-        normalized = _hoist_decode_root(normalized)
-    return root if normalized == root else normalized
+    scope = (tuple(axes), frozenset(implicit_axes), frozenset(sweep_axes))
+    if scope in instance_memo(root, "_memo_normal_scopes"):
+        return root
+    normalized = root
+    while True:
+        # One pass is not always the fixpoint (a close can expose the next pass's move), and the
+        # stamp must mean the REACHED fixpoint, so iterate here rather than relying on the next
+        # construction to finish the job.
+        again = _normalize_fold(normalized, scope[0], scope[1], scope[2])
+        # A contraction reached as the whole tree has no projection to host hoisted factors, so
+        # the hoist creates one here. Nested contractions are handled by their own projection,
+        # which keeps the common shape flat.
+        if again.axis is not None:
+            again = _hoist_decode_root(again)
+        if again == normalized:
+            break
+        normalized = again
+    result = root if normalized == root else normalized
+    result = _share_common_cones(result)
+    instance_memo(result, "_memo_normal_scopes")[scope] = True
+    return result
 
 
 __all__ = [

@@ -334,8 +334,18 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
 
     Recognition proves the exact two-use score inverse, so nested-reduce readability and work
     account for the producer once. Pin the fused placement because this test protects that sibling,
-    not the tuner's choice between the fused and cut rows."""
+    not the tuner's choice between the fused and cut rows — and pin the paired mma row for the
+    same reason: the assertions below are about the composed score's tensor-core EMISSION, which
+    only that row exercises, while which row a cold compile picks is the evidence hierarchy's
+    business and an accepted-to-be-imperfect one."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    # The score's N tile is the value contraction's streamed K block (the paired fragment seam).
+    monkeypatch.setenv("EMMY_TILE@A2", "mma_m16n8k16_f16_f32/f1x2")
+    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f1x1")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_STAGE", "")
+    monkeypatch.setenv("EMMY_RASTER", "")
     torch.manual_seed(0)
     B, H, S, D = cfg
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))

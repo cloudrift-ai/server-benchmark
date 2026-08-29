@@ -79,6 +79,10 @@ class Fork(ABC):
     #: fan-out — legality only shrinks it), carried the same way. ``None`` outside a schedule
     #: enumeration. The greedy cold-pool budget triggers on this without walking anything.
     pool_bound: int | None = None
+    #: Upper bound on the option checks one random descent performs (the sum of per-node option
+    #: tuple lengths). ``None`` outside a schedule enumeration. The cold-pool sampler uses this
+    #: to bound work as well as the number of complete rows it draws.
+    pool_descent_bound: int | None = None
 
     @abstractmethod
     def expand(self) -> list[Op | Graph | Fork]: ...

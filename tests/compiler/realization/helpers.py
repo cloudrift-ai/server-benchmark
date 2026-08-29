@@ -237,7 +237,7 @@ def offered(case: Case) -> str | None:
         # A FORKLESS kernel: its schedule space collapsed to one row, so it opens no fork and the
         # enumeration has nothing to return. There is no schedule to be denied, so nothing here can
         # fail — `realized` still proves it lowers, and the later stages still prove it runs. This
-        # mirrors how `_candidate_row_keys` reads a forkless kernel's row off the resolved op.
+        # mirrors how `_candidate_rows` reads a forkless kernel's row off the resolved op.
         return None
     return f"no enumerated row carries the pin ({len(rows)} rows offered at sm_{''.join(map(str, case.compute_cap))})"
 
@@ -284,9 +284,14 @@ def _unstamped_families(knobs: dict, rows: list[dict]) -> set[str]:
 def built(case: Case):
     """Stage 3 — nvcc accepts the pinned kernel. Returns the compiled graph, raising on refusal."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+    from emmy.compiler.backend.cuda.program import CompiledProgram  # noqa: PLC0415
+    from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
 
     with pinned_knobs(case.pinned):
-        return CudaBackend().compile(case.record.target_program.copy())
+        lowered = CudaBackend().compile(case.record.target_program.copy())
+        with gpu_lock():
+            CompiledProgram.build(lowered, seeded_inputs(case.record.target_program))
+    return lowered
 
 
 def correct(case: Case, compiled) -> None:

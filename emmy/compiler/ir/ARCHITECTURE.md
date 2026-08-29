@@ -52,6 +52,15 @@ rewrite handler) and its seed was a second placement path that `_lift` stripped.
 cross-CTA finalize was numerically wrong as a result, and became correct when the combine started
 arriving as ordinary statements.
 
+**Derived reads memoize on the immutable term; pickling carries only the stored params.** A term's
+expensive derived reads — the structural key, `Fold.deps`, `Lambda.free_names`, the synthesized
+`loop`, the normalize fixpoint stamp, the codec's spelling tables — ride the instance
+(`cached_property` entries and `structural.instance_memo` tables), which is sound because the term
+never changes, and is what keeps a walk over a large fused tree linear instead of re-deriving every
+subtree per ancestor. `__getstate__` strips them: every memo recomputes after transport, and an
+id-keyed cache carried across processes could collide with a fresh object's id. A memo holds only
+values derivable from the term — never decisions, never mutable policy.
+
 **Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term and pure projection regions; the schedule
 slices, output specifications and knobs are the `TileOp`'s, not the term's. So
 `Fold` lives in `ir/pure/fold.py` and is not a `Stmt`.
@@ -277,6 +286,9 @@ type to dispatch on and no second place for a fact to live.
 from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO
 algebra — a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
 what makes kernel identity the α-invariant TERM HASH (`Fold.structural_key`) rather than the lowered nest.
+`Fold.deps()` exposes names captured outside the lift params, including captures reached recursively through operand
+edges. A contraction deliberately hides its pure lift body from generic nested-body walks, so this direct dependency
+surface is what keeps an operand's captured statistic ordered before the contraction that reads it.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two
@@ -418,6 +430,9 @@ canonicalized before validation:
 - `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
 - `drop_size_one_free_axes` — inline extent-1 free Loops.
+- `drop_size_one_reduce_axes` — collapse a canonical extent-1 reduction to its single monoid update. This includes
+  decode-softmax values that fusion hoists into the enclosing scope; copy-alias elimination then removes the identity
+  update before total reduction lifting.
 - `canonicalize_free_axis_order` — sort outer free Loops by their row-major position in boundary writes, so output
   storage geometry rather than axis spelling decides the nest. When the writes cannot totally order the chain, axis
   names provide a deterministic fallback. A cross-CTA partition coordinate occupies the workspace's leading index,
@@ -536,6 +551,16 @@ consumer fragment already mixes origins: it is absent from the ultimate frontend
 or unrelated source chains preserve the conversion. Equal-dtype reductions and non-`Accum` producers keep the
 ordinary untyped alias, so fusion does not duplicate a conversion already carried by the defining statement.
 
+Construction is bounded per statement: the dedup table shares each `(stmt, emit scope, σ)` binding, and in
+every legitimate splice no single statement takes more than a handful of distinct bindings. A recurrence-shaped
+region — each stage re-demanded under compositions of σs, DeepSeek-V4's 20-iteration Sinkhorn chain being the live
+case — multiplies bindings per stage instead of deduplicating, and such a merge cannot be constructed at any budget.
+The first statement past the cap stops the splice. The doom is structured (`UnfusableStmt` names the offending
+loop) and surfaced to the fusion pass on request, which drops that loop plus its downstream closure from the region
+and retries — so one doomed chain costs only itself, not every other merge in its region. This is a termination
+bound, not a fusion-quality gate: placement still owns every cut on a merge that CAN be built, and the refusal must
+stay cheap because the greedy policy re-runs fusion on every candidate graph it prices.
+
 Each splice memoizes `Expr.free_vars()` by expression identity while placing dependencies. Sigma expressions remain
 live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing a
 global cache would require; the memo is discarded with the splicer.
@@ -556,9 +581,12 @@ like any pre-fusion graph.
 ### `loop/builder.py` — fluent construction
 
 `LoopBuilder` constructs merged `LoopOp` bodies for the fusion splicer without spelling out every `Loop(Axis(…))`
-nest. Fresh SSA names retain the lowest available deterministic suffix while a per-hint monotonic cursor ensures each
-occupied suffix is tested at most once; the used-name set remains authoritative when another hint claims a future
-suffix.
+nest. Construction is mutable — descent is a dict lookup per scope level and a prepend is an append to a
+reverse-ordered list — and the immutable body is materialized once by `finish()`. Rebuilding the tuple tree per
+insert is quadratic in program size and re-runs each level's `Loop` construction normalization per insert, which is
+invisible on small graphs and decisive on large ones. Fresh SSA names retain the lowest available deterministic
+suffix while a per-hint monotonic cursor ensures each occupied suffix is tested at most once; the used-name set
+remains authoritative when another hint claims a future suffix.
 
 ## `tile/`
 

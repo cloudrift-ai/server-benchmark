@@ -15,10 +15,11 @@ Exploration stays in :class:`~.mcts.TuningSearch` (``Pipeline.tune``).
 though it were a complete row. Direct measured and verified rows descend to their exact spelling;
 otherwise greedy scores the complete offered rows and chooses the argmin — streamed off the
 lazy walk in bounded chunks (:func:`_stream_tiers`), so the scan is O(chunk) memory however large
-the pool, and bounded in TIME by the cold-pool budget: a pool whose minted size bound exceeds
-:data:`_POOL_BUDGET` is ranked over a deterministic drawn subset of its complete rows instead of
-walked at full length. Sampling complete rows is not branch substitution — no branch is ever
-scored as a stand-in for the schedules it contains — and the argmin is global again the moment
+the pool, and bounded in descent work by the cold-pool budget except when one complete path itself
+has a larger declared bound: that pool gets exactly one descent attempt. A pool whose minted size
+bound exceeds :data:`_POOL_BUDGET` is ranked over a deterministic drawn subset of its complete rows
+instead of walked at full length. Sampling complete rows is not branch substitution — no branch is
+ever scored as a stand-in for the schedules it contains — and the argmin is global again the moment
 evidence exists, because the verified / measured tiers descend directly whatever the pool size.
 
 **Greedy is ranked by evidence and by nothing else.** Its tiers are recorded
@@ -385,6 +386,11 @@ def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float]
                 continue
             sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
             tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
+            # A placement route's latency belongs to the exact ordered child schedule tree that
+            # ran. The perf schema carries no such receipt, so legacy route rows cannot be direct
+            # deploy evidence; independently selected children would be a different measurement.
+            if any(key.split("@", 1)[0] == "PLACE" for key in tun):
+                continue
             index.setdefault(sig, []).append((tun, float(row.stats.median)))
     except Exception:  # noqa: BLE001 — a DB consult failure must never break compile
         return {}
@@ -497,11 +503,17 @@ def _pins_live(pins: dict) -> bool:
     precision universe (:data:`_PRECISION_PINS`, umbrella semantics per ``space.precision_pin``)
     is compared even for pins the record omits (omitted = measured OFF)."""
     from emmy import config  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import KnobType, registry  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import KnobType, family_of, registry  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import precision_pin  # noqa: PLC0415
 
     knobs = registry()
     for name, value in pins.items():
+        if family_of(str(name)) == "PLACE":
+            # Routing pins are record-side replay context (a child-identity receipt freezes its
+            # cut there so the strict decode can reach the child); at deploy the route is the
+            # routing consult's decision, and the identity join guarantees the receipt only ever
+            # decorates a structurally identical kernel.
+            continue
         kn = knobs.get(str(name))
         raw = kn.raw() if kn is not None else config.knob_raw(str(name))
         if kn is not None and kn.type is KnobType.BOOL:
@@ -752,26 +764,35 @@ _CHUNK = 4096
 #: verified / measured tiers deploy by direct descent regardless of pool size.
 _POOL_BUDGET = 65_536
 
-#: Complete rows drawn for a budgeted pool: seeded uniform descents through the lazy tree — each
-#: descent picks one option per level, so the draw covers every level's values (an emission-order
-#: prefix would freeze the leading levels at option-0 and sweep only the deepest), costs
-#: O(depth × siblings) per row however large the pool, and yields only LEGAL complete rows (the
-#: walk's own ``Ctx`` reconciliation runs as usual). Deterministic: the RNG seeds from the pool's
-#: minted identity, so one pool draws one sample on every boot.
+#: Maximum complete rows drawn for a budgeted pool: seeded uniform descents through the lazy tree
+#: cover every level's values, unlike an emission-order prefix. The option-check budget below may
+#: reduce this count for a wide, deep tree; each emitted row remains a legal complete schedule.
 _POOL_DRAW = 2_048
+
+#: Maximum option checks spent drawing one cold pool, including the four-attempt allowance for a
+#: dead or blocklisted descent. A fixed row count is not a work bound for wide, deep terms. When
+#: one descent's declared bound already exceeds this value, exactly one complete-row attempt is
+#: the deliberate soft-cap exception; the Fork interface cannot pause one sibling expansion.
+_POOL_DESCENT_WORK = 262_144
 
 
 def _descent_sample(options, pool_id: str, node_blocked) -> list:
     """Up to :data:`_POOL_DRAW` complete leaves drawn by seeded uniform descents. Dead ends (a
     branch whose expansion is empty — legality killed the subtree) and blocklisted rows retry, up
-    to a bounded attempt count; duplicates are kept (a repeat costs a scoring slot, never a wrong
-    pick). Structural options never appear here — the caller samples only the variant side."""
+    to a bounded attempt count. When one descent is wider than the work budget, make exactly one
+    attempt: completing a legal row is indivisible through the Fork interface. Duplicates are kept
+    (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here —
+    the caller samples only the variant side."""
     import random  # noqa: PLC0415
 
     rng = random.Random(pool_id)
     sample: list = []
-    attempts = 4 * _POOL_DRAW
-    while len(sample) < _POOL_DRAW and attempts > 0:
+    descent_bound = max((getattr(option, "pool_descent_bound", None) or 1 for option in options), default=1)
+    one_descent_exceeds_budget = descent_bound > _POOL_DESCENT_WORK
+    attempt_budget = max(1, _POOL_DESCENT_WORK // descent_bound)
+    draw = 1 if one_descent_exceeds_budget else min(_POOL_DRAW, max(1, attempt_budget // 4))
+    attempts = 1 if one_descent_exceeds_budget else min(4 * draw, attempt_budget)
+    while len(sample) < draw and attempts > 0:
         attempts -= 1
         option = options[rng.randrange(len(options))]
         dead = False
@@ -865,13 +886,16 @@ def _stream_tiers(
     opts = fp.options if options is None else options
     # The cold-pool budget: a pool whose minted bound exceeds _POOL_BUDGET is sampled by seeded
     # descents instead of walked — the tiers below then rank the drawn complete rows exactly as
-    # they would the full pool. An empty draw (legality killed every attempt) falls back to the
-    # full walk: correctness never rides on the sampler.
+    # they would the full pool. An empty draw fails explicitly: walking the full oversized pool
+    # would silently discard the bound, while returning a partial branch would violate the prior's
+    # complete-row contract.
     bound = next((b for o in opts if (b := getattr(o, "pool_bound", None)) is not None), None)
     drawn = None
     if bound is not None and bound > _POOL_BUDGET:
         pid = next((p for o in opts if (p := getattr(o, "pool_id", None)) is not None), "")
-        drawn = _descent_sample(opts, pid, node_blocked) or None
+        drawn = _descent_sample(opts, pid, node_blocked)
+        if not drawn:
+            raise RuntimeError(f"budgeted schedule pool {pid!r} produced no live complete row")
     n_leaves = n_live = 0
     first: object = None
     sample_row: dict | None = None  # one live row — carries the fork's shared ``S_*`` signature

@@ -838,11 +838,16 @@ def test_expert_program_fp8_inputs_match_reference():
         )
 
 
-def test_expert_program_fp8_indirect_compose():
+def test_expert_program_fp8_indirect_compose(monkeypatch):
     """Indirect operands (the M2 fixed-slot dispatch) compose with input-sourced fp8: BOTH the
     bits input and its scale input compile as indirect operands, and the kernel resolves each
     expert's bits + scale slices from the device tables (``table[sel[slot]]``) — per-expert
-    outputs match the direct dequantized matmul."""
+    outputs match the direct dequantized matmul.
+
+    ``STAGE`` is pinned off: an indirect build refuses (loudly, by design) any schedule that
+    stages an indirect operand through a TMA descriptor, and whether the evidence hierarchy picks
+    one is a per-machine fact this test does not protect — the serving tier owns that fallback."""
+    monkeypatch.setenv("EMMY_STAGE", "")
     pytest.importorskip("cupy")
     import cupy as cp
     import torch

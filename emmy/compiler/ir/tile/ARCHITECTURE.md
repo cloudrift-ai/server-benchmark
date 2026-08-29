@@ -65,6 +65,38 @@ cone into a zero-axis Fold edge. Alpha-equivalent product arguments coalesce to 
 source cones overlap; other overlapping cones become one multi-result operand edge so shared computation remains
 single. A semiring without one shared product argument remains a general planar Fold.
 
+Closing runs at both scope kinds. A zero-axis root moves its body dependencies onto captured contraction operands;
+a REDUCING fold does the same for a chain that depends on its own iteration axis and so lives in its lift body —
+attention's per-key statistic and rsqrt ahead of the score dot's computed B cone. The reduce-body move is gated on
+exclusive consumption (every moved definition dies into the closed edges), so the step's work is repackaged, never
+duplicated. Both rules measure an edge's captures with `Fold.deps` — scope-aware, so a name a sibling operand binds
+inside the edge is not a capture and an already-closed edge never re-fires the rewrite. A cone closed at its axes is
+what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
+vector) becomes materializable once per key instead of recomputed per query row. A body-member fold these rules
+leave capturing host names is not lost to placement: the fork closes it at offer time through provider closure
+(`lowering/tile/_cut.py`), without moving anything in the stored tree.
+
+An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
+projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
+computation compare unequal, and the placement fork's value clustering (`lowering/tile/_cut.py`) relies on
+alpha-equivalent cones converging to one canonical shape.
+
+Normalization ends by restoring OBJECT SHARING: structurally equal cones with the same captures collapse onto one
+Fold object (`_share_common_cones`), so a value fusion inlined into several consumption sites — attention's softmax
+statistics, read by the weight cone and by the epilogue — is one node again. This is an invariant, not an
+optimization: seam grouping and cut realization key on object identity, so severed sharing silently turns one value
+into per-site recompute that no schedule can undo (the class PR #679 measured at three orders of magnitude). A
+recompute observed across kernels is therefore ALWAYS a Tile-level sharing or seam-offer defect — fix it here or in
+the placement fork; a Loop IR fusion or emission workaround sees one kernel at a time and is the wrong altitude by
+construction. Copies that differ in captured axis names cannot share an object and stay with value clustering; copies
+that differ in exposed result names stay distinct because unifying them would rename their consumers.
+
+An output sweep used by any nested contraction operand is promoted into the Tile's free-axis placement. Promotion
+expands the enclosing-axis context, so construction normalizes the Fold tree once more under that final scope; one
+construction and a reconstruction therefore expose the same closed operand edges and placement seams.
+The invariant also applies when a schedule row constructs or reloads an already-mapped Tile: promotion extends the
+grid in lockstep with the free axes, so per-cell replication never mistakes the swept coordinate for an SSA name.
+
 **Storage-decode factors hoist to the epilogue.** A product operand whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
 axis is not left as a computed cone. The decode is absorbed by the raw load's storage dtype, since every
@@ -90,13 +122,29 @@ and only the measurement moves. Treat a contraction that canonicalizes to PLANAR
 as a supported slow path.
 
 Canonicalization runs entirely in `TileOp.__post_init__`, including the legacy output-sweep-to-free-axis adjustment
-exposed when factoring makes a contraction the root compute node. Multiple output specifications owned by one
-projection region reconstitute one loop.
+whenever a contraction operand reads the sweep axis. The contraction may be the root compute node or a later site in
+the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute output loop.
+Multiple output specifications owned by one projection region reconstitute one loop. The extraction round-trip gate
+compares the reconstruction against the stream **as reconstitution will spell it**: a `ProjectionRegion` stores its
+body in a `Lambda`, whose construction canonicalizes statement order and commutative arguments, so a raw stream that
+normalization reorders is still representable — the gate normalizes both sides the same way. A stream already in
+canonical form is gated on byte-identity exactly as before. A write whose stored value is captured from the enclosing
+scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) has no body def to name, and is declined:
+the fusion lift-preflight turns that into "leave the region unfused".
+
+A sweep axis is bound only by the per-cell output `Loop` reconstitution wraps around the projection body — never at
+kernel scope. Canonicalization therefore keeps a non-contraction fold that reads a sweep axis a projection BODY
+member: hoisting it onto an operand edge would lower it outside the sweep loop, rendering the axis as an undefined
+identifier (DeepSeek-V4 post16's per-column sum was the live case). A contraction is exempt because post-init
+promotes a sweep its operands read into a real free axis right after normalization.
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
-specification writes `[0, n]`. Post-init restores that proven unit free axis before contraction canonicalization. The
-rule is boundary-derived and general: it does not recognize a model or operation family, and it does not alter a term
-whose output specifications disagree about the missing coordinate.
+specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or
+split into row-major quotient/remainder coordinates by a pure reshape. The `n` coordinate may already be free or may
+still be the one shared output sweep. Post-init restores that proven unit free axis before contraction canonicalization,
+even when a sibling reduction is the root-most Fold and the contraction is nested. A zero after `n` or a strided `n`
+does not prove a unit matrix row. The rule is boundary-derived and general: it does not recognize a model or operation
+family, and it does not alter a term whose output specifications disagree about the missing coordinate.
 
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that
@@ -155,8 +203,9 @@ specifications. Schedule slices remain keyed by `path.py` and read through `ops.
 `lowering/tile/030_cut` offers kernel placement before scheduling. `PLACE` uses the same tree-path codec to address a
 stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
 writes the child Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with
-ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s, so they re-enter the same placement
-and scheduling rules. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation
+ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned and bare cuts re-enter
+placement before scheduling; a scoped cut carries the consumed placement decision on both pieces and proceeds
+directly to scheduling. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation
 families nor filters legal cuts by profitability.
 
 Scheduling sees only the rewritten stored Fold tree. Every Fold is an addressable schedule site; the scheduler does

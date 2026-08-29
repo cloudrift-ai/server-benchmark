@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from importlib import import_module
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
@@ -15,16 +19,28 @@ from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.ir.tile.identity import deploy_identity
+from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
+from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _workspace_axes, cuttable_seams
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
-from emmy.compiler.pipeline.search.golden import GoldenRecord, decode_record
+from emmy.compiler.pipeline.search.golden import (
+    GoldenRecord,
+    _candidate_rows,
+    _lifted_target,
+    decode_record,
+    kernel_identity,
+    load_golden_file,
+    load_golden_records,
+    validate_golden_file,
+)
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
 from tests.compiler.helpers import requires_cuda
 
 _CTX = Context.from_target((12, 0))
 _OFF = {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}
+_CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
 
 
 def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
@@ -136,6 +152,43 @@ def _lower_cut(graph: Graph, spelling: str) -> Graph:
     return lowered
 
 
+def _nested_attention_cut(pins: dict[str, str]) -> Graph:
+    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-gqa-b-cut.yaml"
+    (record,) = load_golden_records(load_golden_file(case))
+    tile = _lifted_target(record)
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
+    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    with pinned_knobs(pins):
+        result = _CUT.rewrite(match, graph.nodes[tile.name])
+    options = result if isinstance(result, list) else [result]
+    cut = next(option for option in options if "cut" in option.knobs.values())
+    return cut.expand()[0]
+
+
+def _piece_with_seam(fragment: Graph):
+    return next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and cuttable_seams(node.op))
+
+
+def test_cut_workspace_retains_static_unit_axes() -> None:
+    """A unit seam axis remains workspace geometry even when the produced value is invariant in it."""
+    unit, unused, column = Axis("batch", 1), Axis("unused", 8), Axis("n", 64)
+    produced = Fold.projection(
+        body=Body((Load(name="value", input="x", index=(Var("n"),)),)),
+        results=("value",),
+    )
+    seam = CutSite(
+        node=produced,
+        spelling="PLACE",
+        axes=(unit, unused, column),
+        dtypes=(F16,),
+    )
+
+    assert _workspace_axes(seam, produced) == (unit, column)
+
+
 def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:
     with pinned_knobs({"PLACE": "fuse", **_OFF}):
         lowered = Pipeline.build(CUDA_PASSES).run(_computed_operand_graph("a"), ctx=_CTX)
@@ -209,3 +262,213 @@ def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:
     lowered = _lower_cut(_mimo_graph(), cuts[0])
     assert lowered.outputs == ["out0", "out1"]
     assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 2
+
+
+def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
+    fragment = _nested_attention_cut({"PLACE@map.fold.a.fold.b1": "cut"})
+    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+
+    assert pieces and all(node.op.placement_decided for node in pieces)
+    node = _piece_with_seam(fragment)
+    match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({"PLACE@map.fold.a.fold.b1": "cut"}), pytest.raises(RuleSkipped, match="already placed"):
+        _CUT.rewrite(match, node)
+
+
+def test_bare_place_cut_keeps_recursing_on_fresh_pieces() -> None:
+    fragment = _nested_attention_cut({"PLACE": "cut"})
+    node = _piece_with_seam(fragment)
+    match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+
+    assert not node.op.placement_decided
+    with pinned_knobs({"PLACE": "cut"}):
+        fork = _CUT.rewrite(match, node)
+    assert "cut" in fork.knobs.values()
+
+
+def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
+    fragment = _nested_attention_cut({})
+    node = _piece_with_seam(fragment)
+    match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+
+    assert not node.op.placement_decided
+    options = _CUT.rewrite(match, node)
+    assert {"fuse", "cut"} <= {value for option in options for value in option.knobs.values()}
+
+
+def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() -> None:
+    """Every scoped PLACE pin that resolves on one kernel joins ONE realization — a producer per
+    seam and one consumer, with a producer reading another seam's workspace when its value nests
+    inside it — while a pin whose site path exists on no kernel here is another kernel's and is
+    skipped, never an error."""
+    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
+    (record,) = load_golden_records(load_golden_file(case))
+    tile = _lifted_target(record)
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
+    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    pins = {
+        "PLACE@map.fold.a21": "cut",
+        "PLACE@map.fold.a.map.fold.fold.b1": "cut",
+        "PLACE@map.fold.a.map.fold.fold.a1": "cut",
+        "PLACE@map.map.map.map1": "cut",  # no such site here — another kernel's pin
+    }
+    with pinned_knobs(pins):
+        fork = _CUT.rewrite(match, graph.nodes[tile.name])
+    assert set(fork.knobs) == {"PLACE@map.fold.a21", "PLACE@map.fold.a.map.fold.fold.b1", "PLACE@map.fold.a.map.fold.fold.a1"}
+    (fragment,) = fork.expand()
+    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    producers = [node for node in pieces if "__place_" in node.id]
+    assert len(producers) == 3 and len(pieces) == 4
+    assert all(node.op.placement_decided for node in pieces)
+    workspaces = {node.id for node in producers}
+    assert any(set(node.inputs) & workspaces for node in producers), "the nested value's producer must read a sibling workspace"
+
+
+def _composed_case_match() -> tuple[Match, Graph]:
+    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
+    (record,) = load_golden_records(load_golden_file(case))
+    tile = _lifted_target(record)
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
+    return Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[])), graph
+
+
+_STAT_PINS = {
+    "PLACE@map.fold.a21": "cut",
+    "PLACE@map.fold.a.map.fold.fold.b1": "cut",
+    "PLACE@map.fold.a.map.fold.fold.a1": "cut",
+    "PLACE@map.fold.a1": "cut",
+    "PLACE@map.fold.a.map.fold.a31": "cut",
+    "PLACE@map.fold.a.map.fold.a32": "cut",
+}
+
+
+def test_statistics_seams_close_via_providers_and_declare_requirements() -> None:
+    """The softmax-statistics folds capture host-provided scalars and each other's accumulator;
+    provider closure offers them anyway, with the chain recorded as a requirement."""
+    match, graph = _composed_case_match()
+    tile = next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    seams = {seam.spelling: seam for seam in cuttable_seams(tile)}
+    first = seams["PLACE@map.fold.a.map.fold.a31"]
+    second = seams["PLACE@map.fold.a.map.fold.a32"]
+    assert first.providers and not first.requires
+    assert second.providers and len(second.requires) == 1
+    assert second.requires[0][1] is first.node
+
+
+def test_dependent_seam_pins_pull_their_producer_into_the_composed_cut() -> None:
+    """Pinning only the second statistics pass cuts the first beside it — the requirement is
+    structural, so the pin cannot decline it."""
+    match, graph = _composed_case_match()
+    node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    with pinned_knobs({"PLACE@map.fold.a.map.fold.a32": "cut", **_OFF}):
+        fork = _CUT.rewrite(match, node)
+    assert set(fork.knobs) == {"PLACE@map.fold.a.map.fold.a32", "PLACE@map.fold.a.map.fold.a31"}
+
+
+def test_statistics_route_shares_the_row_reduction_across_output_keys() -> None:
+    """The composed statistics route computes each row statistic once per query: no piece repeats
+    a key-extent reduce beneath its output-key axis, and the softmax-weight piece keeps only the
+    per-element score contraction (the recompute PR #679 measured at three orders of magnitude)."""
+    match, graph = _composed_case_match()
+    node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    key_extent = 8
+
+    def reduce_extents(op) -> list[int]:
+        out = []
+        stack = [op]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, Fold):
+                if current.axis is not None:
+                    out.append(current.axis.extent.as_static())
+                stack.extend(current.operands)
+                stack.extend(current.lift.body)
+        return out
+
+    with pinned_knobs({**_STAT_PINS, **_OFF}):
+        fragment = _CUT.rewrite(match, node).expand()[0]
+    pieces = [piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp)]
+    assert len(pieces) == 7  # six workspaces plus the consumer
+    workspaces = {piece.id for piece in pieces if "__place_" in piece.id}
+    # The two statistics pieces each run the key-extent scan ONCE, into a per-query workspace
+    # (batch·head × query — no output-key axis).
+    statistics = [piece for piece in pieces if "__place_" in piece.id and reduce_extents(piece.op.op).count(key_extent) == 1]
+    assert len(statistics) == 2
+    assert all(len(piece.op.place.free) == 2 for piece in statistics)
+    # The softmax-weight piece sweeps the output-key axis, reads those workspaces back, and keeps
+    # only the per-element score contraction — the key-extent scan does not reappear beneath its
+    # output-key axis, and neither does it in the consumer beyond the softmax·V contraction itself.
+    weight = next(piece for piece in pieces if "__place_" in piece.id and len(piece.op.place.free) == 3 and set(piece.inputs) & workspaces)
+    assert key_extent not in reduce_extents(weight.op.op)
+    consumer = next(piece for piece in pieces if "__place_" not in piece.id)
+    assert reduce_extents(consumer.op.op).count(key_extent) == 1
+
+
+def _receipt_fields() -> dict:
+    return {
+        "name": "sdpa.child",
+        "gpu_name": "",
+        "compute_cap": (12, 0),
+        "model": None,
+        "program_index": 0,
+        "program_wire": graph_to_wire(_sdpa_graph(False)),
+        "origins": ("out",),
+        "bindings": (),
+        "pins": (("PLACE@a3", "cut"),),
+        "measurements": None,
+        "ranking": None,
+    }
+
+
+def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() -> None:
+    """Conflicting per-child schedules behind one pinned cut persist as sibling receipts: each
+    stored child identity selects its own kernel's rows, a sibling child's row does not vouch for
+    it, and the verified-tier join reads the stored identity instead of the pre-cut lift."""
+    fields = _receipt_fields()
+    parent = GoldenRecord(knobs={}, **fields)
+    lift_identity = deploy_identity(_lifted_target(parent))
+    children = {i: rows for i, rows in _candidate_rows(parent).items() if i is not None and i != lift_identity}
+    assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
+    (id_a, rows_a), (id_b, rows_b) = sorted(children.items())
+    row_a = next(iter(rows_a - rows_b), None)
+    assert row_a is not None, "the children must offer at least one distinguishing schedule row"
+
+    receipt = GoldenRecord(knobs=dict(row_a), identity=id_a, **fields)
+    assert decode_record(receipt) is None
+    assert kernel_identity(receipt) == id_a
+
+    sibling = GoldenRecord(knobs=dict(row_a), identity=id_b, **fields)
+    reason = decode_record(sibling)
+    assert reason is not None and "no enumerated row of the identified kernel" in reason
+
+    stale = GoldenRecord(knobs=dict(row_a), identity="0" * 64, **fields)
+    reason = decode_record(stale)
+    assert reason is not None and "equals none" in reason
+
+
+def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:
+    from emmy.compiler.pipeline.search.policy.greedy import _pins_live
+
+    fields = _receipt_fields()
+    document = {
+        "compute_cap": [12, 0],
+        "programs": [fields["program_wire"]],
+        "configs": [
+            {
+                "program": 0,
+                "target": {"origins": ["out"]},
+                "realizations": [{"name": "sdpa.child", "bindings": {}, "pins": {"PLACE@a3": "cut"}, "knobs": {"WORK": "w4x2"}}],
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="child-identity schedule receipt"):
+        validate_golden_file(document)
+    document["configs"][0]["realizations"][0]["identity"] = "0" * 64
+    validate_golden_file(document)
+    assert _pins_live({"PLACE@a3": "cut"}), "a receipt's routing pins are replay context, never a dead env regime"

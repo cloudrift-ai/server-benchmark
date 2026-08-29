@@ -79,6 +79,27 @@ STRUCTURAL forks whose chosen side replaces the kernel with fresh unmapped piece
 placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than through the
 codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone, a seam
 whose workspace dtypes stay undetermined).
+A contraction-operand seam stands for a VALUE, not only an object: closed cones that are alpha-equivalent up to
+their captured axis names (attention's normalized K cone, once per score contraction) fold into one seam, each
+duplicate carried as a sibling with its capture correspondence, and the cut replaces every one with workspace loads
+spelled through its own axes. A body-member fold capturing host-provided names is cuttable through PROVIDER
+CLOSURE: a capture whose producer chain is pure `Load`/`Assign` stmts joins the produced piece verbatim, and a
+capture only a sibling fold defines makes the seam DEPENDENT — its piece reads the name back through that producer's
+workspace, so cutting it composes the producer's cut in (attention's second softmax-statistics pass reading the
+first's accumulator; a pinned dependent cut pulls its producers in transitively, and pinning a producer `fuse`
+beside it is an error). This is what lets the row statistics materialize once per query row instead of once per
+output weight. Provider-closed and dependent seams are SCOPED-PIN-ONLY: the unpinned fork and bare `PLACE=cut`
+never select them, because nearly every kernel — and every fresh cut piece, which copies its providers — hosts
+some, so offering them would make recursive placement inexhaustible and the candidate walk explode. A route through
+them is spelled by authored or golden-decoded pins.
+Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
+one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
+workspace when its value nests inside (attention's statistics cone contains the score dots whose operand cones are
+cut beside it) — and all pieces set `placement_decided` and proceed to scheduling. A scoped pin whose site path does
+not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
+so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
+realizes is an addressing error. Unpinned cuts and bare
+`PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
 `040_schedule` maps the free axes and enumerates the schedule. Keys
 use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
 
@@ -453,10 +474,15 @@ unmapped.
 Maximal Loop fusion remains canonical. Tile lowering may expose two kinds of graph-fragment siblings without changing
 that canonical input:
 
-- **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam. A cut writes one workspace
+- **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam — body-member folds
+  closed at offer time by provider closure and dependent seams stay scoped-pin-only (see the placement discussion
+  above). A cut writes one workspace
   per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
-  are not. A contraction's operand edges are seams of the same class: cutting one materializes the cone feeding that
+  are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:
+  an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
+  until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
+  materializes the cone feeding that
   operand into its own kernel and the contraction reads it back as an ordinary load. Such a seam's workspace dtype is
   decided EXPLICITLY — the dtype the consuming contraction's output is stored at (traced through any epilogue to the
   output it feeds, so a sibling output at another width cannot mis-type it), which is the element the fused slab
@@ -470,7 +496,8 @@ that canonical input:
   that seam rather than joining the offer: the raw bits dominate the fed-store workspace on both precision (exact vs
   re-rounded) and footprint (storage width vs store width), so there is no trade for the evidence to decide. Every
   seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
-  disagree. The new producer and consumer are fresh
+  disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
+  them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
   unmapped TileOps, so further legal cuts and schedules use the same ordinary passes; a pinned cut therefore recurses
   exactly until a piece schedules (a scheduled piece is placed and never re-cut). A piece minted by a structural
   apply joins the sweep after `030_cut`'s batch, so it reaches `040_schedule` first — when a pinned schedule REFUSES

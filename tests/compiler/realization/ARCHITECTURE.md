@@ -109,7 +109,7 @@ leading comment block is prose about where the gap came from; regeneration prese
 | --- | --- | --- |
 | `offered` | under `pinned_knobs(pins + knobs)`, `enumerate_graph` at the declared capability returns at least one row satisfying the pin | no |
 | `realized` | the graph lowers through `CUDA_PASSES` at that capability, `unreproducible_pin_flag` is `None`, and every authored family is stamped | no |
-| `built` | `CudaBackend().compile(...)` under the pin — nvcc accepts it | yes, exact capability |
+| `built` | lower under the pin, then build a `CompiledProgram` — nvcc accepts it | yes, exact capability |
 | `correct` | run against the reference within tolerance | yes, exact capability |
 
 Each is its own test node, so an `_xfail_<stage>` suffix lands on exactly the stage it names; the stages past a

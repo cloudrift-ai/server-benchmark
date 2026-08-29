@@ -109,6 +109,29 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
     assert not repeats, f"_options was asked the same question {repeats} time(s) over ({len(keys)} calls)"
 
 
+def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> None:
+    """A computed-A cone is lowered once for its stat-row seam, not once per tile plan."""
+    from emmy.compiler.pipeline.passes.lowering.tile import _staging  # noqa: PLC0415
+
+    calls: list[tuple] = []
+    original = _schedule.cone_seam
+
+    def spy(cone, k_name):
+        calls.append((cone, k_name))
+        return original(cone, k_name)
+
+    monkeypatch.setattr(_schedule, "cone_seam", spy)
+    monkeypatch.setattr(
+        _staging,
+        "cone_seam",
+        lambda *_: (_ for _ in ()).throw(AssertionError("the fill must reuse the prescan's seam")),
+    )
+    assert _rows(FIXTURES["fused_norm_linear"]())
+    assert calls
+    keys = [(id(cone), k_name) for cone, k_name in calls]
+    assert len(keys) == len(set(keys))
+
+
 @pytest.mark.parametrize("case, tile_sites, reduce_sites", (("fused_norm_linear", 1, 2), ("flash_pair", 2, 3)))
 def test_computed_fold_sites_are_keyed_schedule_sites(case, tile_sites, reduce_sites, unpinned) -> None:
     """A computed cone's fold and a derived site (flash's synthesized PV) are real schedule sites:
@@ -212,3 +235,23 @@ def test_an_observed_fold_offers_only_the_serial_reduce(unpinned) -> None:
     for row in rows:
         offending = {k: v for k, v in row.items() if k.split("@", 1)[0] == "REDUCE" and v not in ("", None)}
         assert not offending, f"a partitioned REDUCE row reached an observed fold: {offending}"
+
+
+def test_computed_b_statistic_is_a_keyed_schedule_site(unpinned, monkeypatch) -> None:
+    """A score contraction's computed B operand cone closes over its per-key statistic
+    (``normalize_fold_tree``'s reduce-body closing), and the walk keys that relocated fold as an
+    ordinary schedule site — nothing nested inside a B edge is silently undecided."""
+    monkeypatch.setenv("EMMY_TILE", "")
+    monkeypatch.setenv("EMMY_STAGE", "")
+    monkeypatch.setenv("EMMY_RASTER", "")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    graph = _code_graph(
+        "torch.nn.functional.scaled_dot_product_attention("
+        f"{_NORM}(torch.randn(1, 2, 8, 16, dtype=torch.float16)), "
+        f"{_NORM}(torch.randn(1, 2, 8, 16, dtype=torch.float16)), "
+        "torch.randn(1, 2, 8, 16, dtype=torch.float16))"
+    )
+    rows = _rows(graph)
+    assert rows, "the fused attention kernel must still enumerate"
+    keyed_under_b = [key for row in rows for key in row if key.split("@", 1)[0] == "REDUCE" and "b" in key.split("@", 1)[-1].split(".")]
+    assert keyed_under_b, "no REDUCE site was keyed inside a computed B operand cone"

@@ -11,7 +11,7 @@ before lifting a subtree into its own kernel (``_cut._closed_at``, successor to 
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
 from emmy.compiler.ir.sigma import Sigma
@@ -161,6 +161,45 @@ def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
     cone = node.a
     # The output axes are the CALLER's placement — never on the node — so the cut supplies them.
     assert not _closed_at(cone, (Axis("m", 256), Axis("k", 256))), "a cone capturing carrier state is not closed"
+
+
+def test_contraction_deps_include_inline_operand_captures() -> None:
+    node = _node(_capturing_cone(), ("acc_g", "Wg"))
+
+    assert "m_run" in node.deps()
+
+
+def test_cut_closure_does_not_confuse_a_sibling_loop_axis_for_scope() -> None:
+    """A loop binding ``k`` in one operand does not scope a sibling operand's ``x[k]`` load."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+
+    loop = Loop(
+        axis=Axis("k", 8),
+        body=Body((Load(name="value", input="x", index=(Var("k"),)), Accum(name="total", value="value", op="add"))),
+        role=AxisRole.PLANAR,
+    )
+    bound = fold_from_loop(loop)
+    leak = Fold.projection(body=Body((Load(name="leak", input="x", index=(Var("k"),)),)), results=("leak",))
+    root = Fold.projection(
+        operands=(bound, leak),
+        body=Body((Assign(name="out", op="add", args=("total", "leak")),)),
+    )
+
+    assert not _closed_at(root, ())
+
+
+def test_cut_closure_includes_dead_but_emitted_axis_reads() -> None:
+    """Until lowering removes a dead statement, its free axis still has to reach emitted CUDA."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
+
+    root = Fold.projection(
+        body=Body((Load(name="dead", input="x", index=(Var("m"),)), Load(name="live", input="y", index=()))),
+        results=("live",),
+    )
+
+    assert not _closed_at(root, ())
+    assert _closed_at(root, (Axis("m", 8),))
 
 
 def test_iteration_variables_are_not_captures() -> None:

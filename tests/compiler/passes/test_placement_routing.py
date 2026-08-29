@@ -122,10 +122,13 @@ def test_pinned_transposed_coop_band_still_refuses_without_a_free_axis() -> None
 
 
 @pytest.mark.parametrize("value", ("cut", "fuse"))
-def test_pin_naming_no_seam_fails_loudly(value: str) -> None:
-    """A scoped pin never restores the unpinned placement fork when its seam is absent."""
-    with pytest.raises(ValueError, match="names no site|does not address a cuttable Fold edge"):
-        _compile(_rms_graph(), {"PLACE@b": value})
+def test_pin_naming_no_seam_here_decides_fuse(value: str) -> None:
+    """A scoped pin whose site path exists nowhere on this kernel addresses another kernel of a
+    composed pinned route, so this kernel FUSES — deterministic, and the unpinned placement fork
+    never returns under a pin-driven compile."""
+    lowered = _compile(_rms_graph(), {"PLACE@b": value})
+    assert len(_kernels(lowered)) == 1
+    assert not any("_place_" in node.id for node in lowered.nodes.values())
 
 
 def test_contraction_operand_seam_takes_the_output_dtype() -> None:

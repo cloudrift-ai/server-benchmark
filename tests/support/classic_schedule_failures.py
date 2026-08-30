@@ -122,7 +122,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_symbolic_mma_accuracy_across_transports[smem-tma-256]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_symbolic_mma_accuracy_across_transports[smem-tma-512]",
                 "tests/compiler/e2e/test_warp_specialize_deadlock.py::test_mlp_slice_completes_and_matches",
-                "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_symbolic_linear_traced_and_run",
                 "tests/compiler/passes/test_fp8_mma.py::test_w8a8_dynamic_per_token_amax_cuda",
                 "tests/compiler/passes/test_fp8_staged.py::test_canonical_byte_b_and_splitk_compose_cuda",
             )
@@ -177,7 +176,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa]",
                 "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa_causal]",
                 "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa_gqa]",
-                "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_sdpa_over_symbolic_seq_len",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_rider_split_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_run_device_aliased_input_backing_replays_live",
@@ -220,8 +218,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_reaches_cuda_source_without_format_ir",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_streams_computed_b_through_tensor_cores",
                 "tests/compiler/loader/test_exl3.py::test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds",
-                "tests/compiler/passes/test_cut_forks.py::test_sdpa_score_cut_is_offered_and_pinned_cut_lowers[False]",
-                "tests/compiler/passes/test_cut_forks.py::test_sdpa_score_cut_is_offered_and_pinned_cut_lowers[True]",
                 "tests/compiler/passes/test_placement_routing.py::test_pinned_transposed_coop_band_still_refuses_without_a_free_axis",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_a_pin_hands_its_remaining_row_to_the_pieces",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_decides_its_own_row",
@@ -292,10 +288,7 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/cli/test_run.py::test_run_code_sdpa_tinyllama_per_head",
                 "tests/compiler/cli/test_run.py::test_run_code_target_override",
                 "tests/compiler/pipeline/search/policy/test_greedy.py::test_price_memo_keys_on_exact_identity_not_the_term_hash",
-                "tests/compiler/pipeline/search/test_two_level_strategy.py::test_persisted_unscheduled_tile_child_tunes_and_replays_in_parent_cut",
-                "tests/compiler/pipeline/search/test_two_level_strategy.py::test_pinned_placement_route_tunes_and_assembles_child_schedules",
                 "tests/compiler/pipeline/search/test_two_level_strategy.py::test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt",
-                "tests/compiler/pipeline/search/test_two_level_strategy.py::test_scheduled_tile_child_is_not_reenrolled_or_rescheduled",
                 "tests/compiler/pipeline/search/test_two_level_strategy.py::test_scoring_is_separable_over_unique_kernels",
                 "tests/compiler/pipeline/test_kernel_cache.py::test_twin_replay_renders_byte_identical_source",
                 "tests/compiler/pipeline/test_kernel_cache.py::test_without_a_cache_nothing_changes",
@@ -1138,7 +1131,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 1029
+REMAINING_FAILURE_COUNT = 1022
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

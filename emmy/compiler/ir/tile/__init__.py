@@ -2,10 +2,9 @@
 
 See :mod:`.ir` and :mod:`.schedule`. The layer between Loop IR and Kernel IR: a
 :class:`TileOp` holds one structural-IR root ``op`` (a :class:`Fold`, with contractions derived
-from its algebra and computed operands stored inline on their edges) plus
-``place`` / ``work`` / ``knobs`` and the tree-path-keyed ``schedule`` dict, so the *schedule*
-(free axes, reduce partition, grid binding) stays separate from the term; dispatch reads the
-node's derived ``Fold.role``, no per-kind type.
+from its algebra and computed operands stored inline on their edges), structural placement, one
+accepted ``ClassicSchedule``, separate materialization facts, and search knobs. The schedule stays
+separate from the term; dispatch reads the node's derived classification, not a per-kind type.
 """
 
 from emmy.compiler.ir.pure.fold import Channel, Fold

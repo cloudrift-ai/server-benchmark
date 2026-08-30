@@ -218,7 +218,7 @@ requires `EMMY_RUN_DIT_PRETRAINED=1`, so normal CI never downloads the multi-gig
 mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;
 on sm_80-89 it is pin-only and currently non-functional for two independent reasons — the `sm_NNa` arch-accelerated
 target the TMA path emits is rejected by nvcc (`Unsupported gpu architecture 'sm_89a'`), and `ldmatrix` itself faults
-at runtime on at least Ada (sm_89). Tests that **force** the warp tier via a warp `TILE` codec (`a:<atom>/…`) + `STAGE`
+at runtime on at least Ada (sm_89). Tests that **force** the warp tier via a warp `TILE` codec (`<atom>/…`) + `STAGE`
 carry `requires_sm90` so they skip below sm_90 instead of faulting (a single warp-tier fault corrupts the shared `cuda`
 context and cascades `cudaErrorIllegalAddress` into every later test on the worker, CUDA or not). The warp-tier matmul
 coverage all lives in `test_matmul_coverage.py` — the scalar vs warp `TILE` accuracy/structure matrix, the

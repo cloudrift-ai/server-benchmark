@@ -185,7 +185,7 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
     partition ``Window`` is the receipt, so the pieces re-entering the scan skip here and an
     ambient pin can never split twice). In the engine's batch order the pieces reach ``040`` FIRST
     (the splice lands mid-batch, and the scan only wraps back to ``030``/``035`` after ``040``
-    schedules them, whose ``tile.schedule`` guard then skips) — traced empirically on a pinned
+    schedules them, whose ``tile.classic`` guard then skips) — traced empirically on a pinned
     ``g2k`` matmul resolve — so the receipt's LIVE consumer is ``040``'s pin path (the ``g``-half
     strip); the check here bites only on a piece ``040`` could not schedule.
 
@@ -202,7 +202,7 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
         return None  # a scan preserves its stream order — there is no split question to decide
     if carries_partition(tile.op):
         return None  # a piece of a realized split — the partition was consumed
-    key = Sched(tile.op, {}).key("REDUCE", node) or "REDUCE"
+    key = Sched(tile.op).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(tile, split_consumed=True), {key: ""})
     element = axis_of(key)
     pin = REDUCE.pin_at(element) if element else None

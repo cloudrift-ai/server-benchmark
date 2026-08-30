@@ -82,6 +82,17 @@ def _document(*entries):
     return {"compute_cap": [8, 9], "programs": programs, "configs": [config]}
 
 
+def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
+    """One complete exact-site schedule for synthetic single-node CUDA graphs."""
+    return {
+        "WORK": work,
+        "TILE@n0": tile,
+        "REDUCE@n0": reduce,
+        "STAGE@n0.e0": stage,
+        "RASTER": raster,
+    }
+
+
 def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_path):
     path = tmp_path / "trace.yaml"
     dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})), path)
@@ -124,12 +135,12 @@ def test_empty_knob_map_is_a_forkless_proposal_not_inventory(tmp_path):
 
 def test_multi_cuda_realized_knobs_must_be_conflict_free():
     graph = Graph()
-    graph.add_node(op=CudaOp(kernel_name="a", knobs={"TILE": "f2x2"}), inputs=[], output=Tensor("a", (1,)), node_id="a")
-    graph.add_node(op=CudaOp(kernel_name="b", knobs={"TILE": "f4x2"}), inputs=[], output=Tensor("b", (1,)), node_id="b")
+    graph.add_node(op=CudaOp(kernel_name="a", knobs=_classic_row(tile="f2x2")), inputs=[], output=Tensor("a", (1,)), node_id="a")
+    graph.add_node(op=CudaOp(kernel_name="b", knobs=_classic_row(tile="f4x2")), inputs=[], output=Tensor("b", (1,)), node_id="b")
     assert realized_tuning_knobs(graph) is None
 
-    graph.nodes["b"].op.knobs["TILE"] = "f2x2"
-    assert realized_tuning_knobs(graph)["TILE"] == "f2x2"
+    graph.nodes["b"].op.knobs["TILE@n0"] = "f2x2"
+    assert realized_tuning_knobs(graph)["TILE@n0"] == "f2x2"
 
 
 def test_working_file_rejects_legacy_reproducer_field(tmp_path):
@@ -323,21 +334,26 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index, _db_measured_pick
 
     route = {
-        "WORK": "w2x1",
-        "TILE": "mma_m16n8k16_f16_f32/f4x8/k8",
+        **_classic_row(
+            work="w2x1",
+            tile="mma_m16n8k16_f16_f32/f4x8/k8",
+            stage="d1/smem-async",
+        ),
+        # Cross-CTA reduction changes the kernel set before the exact classic sites exist.
         "REDUCE": "g4k",
-        "STAGE": "d1/smem-async",
-        "RASTER": "",
     }
     terminal = Graph()
     terminal.add_node(
-        CudaOp(kernel_name="partial", knobs={**route, "REDUCE": ""}),
+        CudaOp(
+            kernel_name="partial",
+            knobs={key: value for key, value in route.items() if key != "REDUCE"},
+        ),
         [],
         Tensor("partial", (1,)),
         node_id="partial",
     )
     terminal.add_node(
-        CudaOp(kernel_name="finalize", knobs={key: "" for key in route}),
+        CudaOp(kernel_name="finalize", knobs=_classic_row()),
         [],
         Tensor("finalize", (1,)),
         node_id="finalize",
@@ -444,7 +460,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     db = SearchDB(db_path)
     bookkeeping = PerfStats(median=106.95, min=106.95, max=106.95, mean=106.95, variance=0.0, n_samples=1)
     monolithic = PerfStats(median=153.45, min=153.45, max=153.45, mean=153.45, variance=0.0, n_samples=1)
-    fallback = {**route, "REDUCE": ""}
+    fallback = {key: value for key, value in route.items() if key != "REDUCE"}
     fallback_key = "monolithic-cuda"
     db.record_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda", status="ok", stats=bookkeeping, captured=True)
     db.record_lowering(
@@ -483,7 +499,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     assert proposal["ranking"]["status"] == "ok"
     assert reloaded_targets[0].proposals == [((0, 1), route)]
 
-    nonstructural = {**route, "REDUCE": ""}
+    nonstructural = {key: value for key, value in route.items() if key != "REDUCE"}
     active_route = nonstructural
     negative_db = SearchDB(tmp_path / "negative.db")
     [ambiguous] = asyncio.run(

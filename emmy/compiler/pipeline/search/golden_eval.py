@@ -29,9 +29,9 @@ class Ranked:
 def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
     """The planner's candidate enumeration for any ``graph`` — the SAME rows the scheduler's fork
     tree offers a live compile, captured by resolving the graph through ``TILE_PASSES`` with a
-    decide that flattens each fork's leaves (each leaf's knob row keyed by the CANONICAL codec
-    spelling — bare on a single-primary tree, ``TILE@dd``-style on flash — exactly
-    what ``tile_signature`` joins a golden against). ``family`` keeps only rows carrying that knob
+    decide that flattens each fork's leaves. Every leaf encodes one accepted ``ClassicSchedule``
+    with bare kernel keys and exact ``@n`` / ``@n.e`` sites, which is exactly what
+    ``tile_signature`` joins a golden against. ``family`` keeps only rows carrying that knob
     family (``"TILE"`` for a contraction pool); ``""`` keeps every row with a per-node schedule
     knob (a reduce's ``REDUCE`` fork). The one live-fork capture the matmul
     offline fitter and record evaluator share.

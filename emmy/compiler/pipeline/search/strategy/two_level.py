@@ -39,7 +39,7 @@ from uuid import uuid4
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
-from emmy.compiler.pipeline.knob import stamp_schedule_families
+from emmy.compiler.pipeline.knob import complete_kernel_row
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.pipeline import Run, variant_label
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
@@ -453,7 +453,7 @@ class TwoLevelStrategy(SearchStrategy):
                 searched_structural = False
                 if searched is not None:
                     searched_structural = searched[3]
-                    searched_knobs = dict(searched[0]) if searched_structural else stamp_schedule_families(searched[0])
+                    searched_knobs = dict(searched[0]) if searched_structural else complete_kernel_row(searched[0])
                     searched_us = searched[1]
                     searched_cuda_ops = searched[2]
                 results[op_idx] = OpResult(

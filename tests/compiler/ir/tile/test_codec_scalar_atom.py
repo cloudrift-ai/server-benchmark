@@ -1,47 +1,19 @@
-"""The pin-only scalar-atom aliases ``a:scalar`` / ``a:none``.
-
-These give a pin an *explicit* spelling of the scalar output tile — symmetric with the warp form's
-bare leading atom name — instead of the invisible empty string. They are vocabulary only: a producer
-never emits them, so :meth:`Tile.parse` must strip them and :meth:`Tile.spell` re-emit the
-canonical scalar form (``""`` / ``f..``), and a stripped alias must never read as the warp tier
-despite naming an "atom".
-"""
+"""The scalar tile codec has no alias vocabulary."""
 
 from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.schedule import Tile, Work
-
-_THREADS = Work.parse("t8x16")
+from emmy.compiler.ir.schedule import Tile
 
 
-@pytest.mark.parametrize("alias", ["a:scalar", "a:none"])
-def test_alias_is_scalar_not_warp(alias: str) -> None:
-    plan = Tile.parse(alias, None)
-    assert not plan.is_warp  # names the scalar atom, never a tensor-core one
-    assert (plan.units, plan.regs) == ((1, 1), (1, 1))  # bare alias = the per-cell tier
+@pytest.mark.parametrize("alias", ["a:scalar", "a:none", "a:scalar/f4x8"])
+def test_scalar_atom_aliases_are_rejected(alias: str) -> None:
+    with pytest.raises(ValueError, match="TILE"):
+        Tile.parse(alias, None)
 
 
-@pytest.mark.parametrize(
-    ("alias", "work", "body_units", "body_regs"),
-    [("a:scalar/f4x8", None, (1, 1), (8, 4)), ("a:none", _THREADS, (1, 1), (1, 1)), ("a:scalar/f2x2", _THREADS, (16, 8), (2, 2))],
-)
-def test_alias_composes_with_scalar_body(alias: str, work, body_units: tuple, body_regs: tuple) -> None:
-    plan = Tile.parse(alias, work)
-    assert not plan.is_warp
-    assert (plan.units, plan.regs) == (body_units, body_regs)
-
-
-@pytest.mark.parametrize(("alias", "canonical"), [("a:scalar", ""), ("a:none", ""), ("a:scalar/f4x8", "f4x8")])
-def test_alias_never_survives_to_spell(alias: str, canonical: str) -> None:
-    # The alias is pin-only: it must normalize to the canonical scalar spelling so it never rides a
-    # stored knob dict / prior key / golden YAML.
-    assert Tile.parse(alias, None).spell() == canonical
-    assert "a:" not in Tile.parse(alias, None).spell()
-
-
-@pytest.mark.parametrize("spec", ["f8x16", "mma_m16n8k16_f16_f32/f2x2/k4", ""])
-def test_a_spec_without_the_alias_is_untouched(spec: str) -> None:
-    """The alias is stripped, never invented: a spelling that never carried one round-trips."""
-    assert Tile.parse(spec, Work.parse("w2x1" if "mma" in spec else "")).spell() == spec
+@pytest.mark.parametrize("alias", ["f04", "f4x01", "/f4", "f4/"])
+def test_noncanonical_scalar_spellings_are_rejected(alias: str) -> None:
+    with pytest.raises(ValueError, match="TILE"):
+        Tile.parse(alias, None)

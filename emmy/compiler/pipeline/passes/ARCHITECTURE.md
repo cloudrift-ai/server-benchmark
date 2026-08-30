@@ -100,8 +100,9 @@ not exist on a kernel addresses another kernel of the graph; a kernel none of th
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Unpinned cuts and bare
 `PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
-`040_schedule` maps the free axes and enumerates the schedule. Keys
-use the tree-path codec, and every resolved slice lives beside the immutable Fold tree in `TileOp.schedule`.
+`040_schedule` maps the free axes and enumerates classic assignments. Structural rewrites have finished before it
+constructs sites. Every leaf is a complete typed `ClassicSchedule`; only the search boundary encodes its exact
+`NodeId` / `EdgeSite` keys, and only materialization derives placed geometry and resolved transport facts.
 
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so `035_split_reduce` stands beside the cut, BEFORE scheduling: the
@@ -129,12 +130,12 @@ thread left to right, so a choice anywhere restricts everything enumerated after
 
     S(node, ctx) = for each option o of node under ctx:  o x S(children(node), ctx + o)
 
-There is no product over a flat site list and no join afterwards. The reasons two sites are not one kernel — one
-worker inventory, agreeing tile geometry on a shared physical axis, one decision per Fold however many paths reach it,
-and a compatible fragment seam across a producer/consumer edge — are stated once, in `Ctx.extend`, and applied while
-descending, so an illegal combination is never built. That
-matters because the join is where nearly all the pruning happens: on flash attention the unconstrained product is
-8.9e6 against 13,280 legal rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
+Semantically, kernel, node, and edge choices are independent domains and the schedule set is their Cartesian product
+filtered by `ClassicScheduleContext.accepts`. The production walk does not construct or join that flat product. It
+projects the factors from static per-node offers and applies their support through the private partial assignment,
+so an incompatible prefix is never built. Every leaf still crosses the complete context relation, and bounded spaces
+are exhaustively compared with the literal Cartesian reference. That pruning matters because on flash attention the
+unconstrained product is 8.9e6 against 13,280 legal rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
 
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated
@@ -166,8 +167,8 @@ refused at the leaf, which leaves the term unmapped.
 **The walk IS the fork tree.** A branch holds the nodes still to decide, the context they must honour, and the row
 prefix decided so far; nothing below it exists until it expands. A level with one option is collapsed, so the fork
 tree carries choices only. Traversal order is the fork order — there is no separate level vocabulary to keep in step
-with the walk. `WORK` leads because the root owns the free axes it is read off, and it is stamped the moment an
-option claims an inventory, which `Ctx.extend` then refuses to change.
+with the walk. Kernel-global `RASTER` leads. `WORK` is stamped the moment a site option claims an inventory, which the
+private partial assignment then refuses to change; neither ordering changes the Cartesian reference set.
 
 **Operand staging is resolved at option construction.** A contraction's option selects an axis- and size-free `Stage`
 choice. The resolvers (`tile/_staging.py`) answer with a separate `ResolvedStage` containing the slab names, resolved
@@ -186,7 +187,7 @@ two-layer policy as the f16-accumulate family: precision-gated for the catalog (
 bindable by a pin regardless; its sm_89 hardware floor lives in the atom registry's target filter, which no pin
 overrides.
 
-**The fragment seam is a `Ctx` decision.** A fragment edge joins a consumer contraction to the one contraction
+**The fragment seam is a compatibility decision.** A fragment edge joins a consumer contraction to the one contraction
 producing its computed fragment operand — nested in its A cone, or a sibling in the enclosing fold's derived step
 (flash's PV reading the score). The walk decides the two at different steps, so each endpoint's option stakes a seam
 entry the context reconciles whichever side arrives second: an untiled producer composes with anything (it is
@@ -207,8 +208,8 @@ untiled tile candidate composes with the same `coop_reduce_moves` catalog the pl
 bands, the ILP register chains, the transposed band — under a static K (the scalar contraction emitters carry no
 masked-K band), while a tiled output contracts K serially per register cell and takes only the serial fold. A
 cooperative band claims the kernel's inventory as the `t<coop>` thread inventory (`derive_inventory`), which is how
-`Ctx.extend` reconciles it with every other site, and a cooperative / ILP `REDUCE` pin reaches only the per-cell
-tier — a tiled plan offers nothing under it, the same per-family fan-out that lets a serial pin keep every plan.
+the private partial assignment reconciles it with every other site. A cooperative / ILP `REDUCE` pin reaches only
+the exact per-cell node site; a tiled plan offers nothing under it, while a serial choice remains valid for every tile.
 
 **The pointwise register strip is a `TILE` value materialized as a term variant.** The pure pointwise ROOT cell is the
 one zero-axis `TILE` site (`path.family_sites`); the `map_tile_moves` ladder offers `f<r>` beside the flat per-cell
@@ -218,8 +219,9 @@ see `_strip_refusal`), and a row whose root `TILE` names a width unrolls the cel
 writes at materialization — a different term, hence a different structural identity and `Op.cache_key`.
 
 **`RASTER` leads the walk as its own fork level.** The CTA launch-order codec is kernel-global with nothing for
-`Ctx` to reconcile, so it is decided once per kernel, ahead of the sites: each candidate value is one branch whose
-row prefix carries it and whose subtree is the whole site walk, and a kernel offering one value collapses the level
+the partial assignment to reconcile, so it is decided once per kernel, ahead of the sites: each candidate value is one
+branch whose row prefix carries it and whose subtree is the whole site walk, and a kernel offering one value collapses
+the level
 exactly as any other one-option level does — the honest parallel to `WORK` *leading* the walk. Contraction-scoped
 and static-grid only — a symbolic (masked-tile) grid renders through the dynamic decode path, which does not carry
 the swizzle, so the flat `""` is the one honest value there and a live pin drops with the other choice-layer drops.
@@ -412,8 +414,8 @@ canonicalization factors a normalized exponential into a computed operand. Softm
 in carrier arity and score/value lambdas; there is no operation-family matcher. `040_schedule` enumerates the complete
 rewritten tree. Direct contraction children and independent roots use the same physical-axis compatibility join, even
 when roots reverse their algebraic M/N readings. A derived contraction uses the enclosing Fold domain through the same
-parent/child interface. Materialization binds selected sites from their schedule slices; unsupported forms remain
-unmapped.
+parent/child interface. Materialization binds accepted choices to placed geometry and resolved transport facts;
+unsupported forms remain unmapped.
 
 ## Kernel boundaries after maximal fusion
 
@@ -489,8 +491,8 @@ the established `m16n8k16` families on SM80 and newer; an incompatible atom or c
 lowering through instructions the target cannot execute.
 
 **The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16`, C→f16 — atom names follow
-`mma_<shape>_<ab_dtype>_<acc_dtype>`, the compressed PTX/CUTLASS D.A.B.C order; the historical acc-unspecified
-spellings stay as parse aliases for the f32-accumulate atoms): on the consumer GeForce dies (sm_86/89/120)
+`mma_<shape>_<ab_dtype>_<acc_dtype>`, the compressed PTX/CUTLASS D.A.B.C order, with no acc-unspecified alias): on
+the consumer GeForce dies (sm_86/89/120)
 f32-accumulate HMMA runs at HALF the f16-accumulate rate, so this atom keeps the whole mma chain on the full-rate f16
 accumulator and the lowering promote-folds the packed f16 partials into f32 shadow fragments per K chunk
 (`FragmentPromote` — the staged bk slab is the cadence; gmem-direct promotes every `_atom._F16ACC_STEPS` steps plus a
@@ -525,8 +527,8 @@ channel's raw state to its `ws[comp, ksplit, *cell]` slice — no ⊗-combine in
 the partial — and the deferred finalize folds every component before applying the combine projection once.
 Multi-channel products still have no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge
 is the anticipated
-`RoleKind` extension. `TILE` pins narrow by MATCHING each site's own catalog, codec-canonicalized so `a:scalar` ≡
-`""` and `f64x1` ≡ `f64`: an explicit `TILE@<axis>` pin names one site and is authoritative there, while a BARE pin
+`RoleKind` extension. `TILE` pins narrow by matching each site's own catalog through the exact codec spelling: an
+explicit `TILE@n<ordinal>` pin names one site and is authoritative there, while a bare pin
 fans out to every eligible site and cannot say which it meant — so it narrows where it matches and leaves a site it
 names nothing at alone (`Knob.narrow`'s no-match-keeps-full-list). A bare pin that named nothing at a site decides
 nothing there, precision gates included. Staging additionally

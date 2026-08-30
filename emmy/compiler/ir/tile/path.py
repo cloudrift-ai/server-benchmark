@@ -1,36 +1,12 @@
 """The structural placement path codec over the stored Fold tree.
 
 Grammar: ``PLACE@<node-path>[.<axis>][<n>] = value``. Placement addresses a stored Fold edge by
-position because it is a structural decision made before a classic problem exists. Schedule
-choices do not use this codec: their sole identities are ``NodeId`` and ``EdgeSite``.
+position because it is a structural decision made before a classic problem exists. Its shortest
+unique path spelling is canonical; ambiguity and stale paths fail loudly. The retired
+``in.<operand>`` prefix and leading-``=`` value-name form remain reserved.
 
-Sugar levels, shortest first — **short paths are canonical** (stampers and ALL stored evidence use
-the shortest spelling unique for the kernel's tree, which is why every live golden spelling is
-already canonical and the corpus needs zero migration):
-
-- bare ``FAMILY`` — resolves to the PRIMARY (root-most schedule-bearing) node for that family; with
-  no eligible node the family "doesn't apply" (``None`` — the decided-empty stamp); with two nodes
-  at the same minimal depth it raises naming the candidates (the flash ``TILE@dd`` / ``TILE@pj``
-  pair). The bare-resolution guard keeps the ~46 stored bare keys meaning what they always meant:
-  bare ``REDUCE`` on norm_linear/geglu is the contraction's K fold, never the cone's stat.
-- ``FAMILY@<axis>`` — the axis is the real discriminator (the leaf key for TILE/REDUCE/STAGE);
-  unique axis name → that node (``TILE@dd``).
-- ``FAMILY@<path>.<axis>`` — path segments are lowercase node-kind tokens from the root (``map`` /
-  ``fold``) or operand-edge labels (``a`` / ``b`` — VIEW-ROLE sugar read off the bilinear parse,
-  the shared A edge vs a channel's B). Any unique ANCHORED SUBSEQUENCE of the full segment path is
-  accepted at pin time (the last path component must be the node's own segment); the canonical
-  spelling is the shortest unique one, deepest anchors first (``REDUCE@a.fold.k`` for the cone's
-  stat when the axis name collides with the contraction's).
-- the ordinal ``<n>`` (1-based, canonicalized traversal order) exists ONLY for true same-path
-  collisions — two sites with identical full path AND axis; current kernels never need it.
-
-RESERVED (reject cleanly, never reuse): the retired placement spellings — the ``in.<operand>`` path
-prefix and the leading-``=`` value-name pin form. Current ``PLACE`` keys address stored Fold edges
-through the same tree paths as schedule keys.
-
-Ambiguity failures are LOUD by design: a stored short key broken by a future structural change must
-fail and be re-spelled by hand (``test_golden_spelling_canonical`` is the tripwire) — never
-silently re-keyed.
+Classic choices never use this codec. A classic problem constructs sites only after every
+structural choice is consumed, and its strict codec addresses them by ``NodeId`` or ``EdgeSite``.
 """
 
 from __future__ import annotations
@@ -62,17 +38,13 @@ class MissingSiteError(ValueError):
 
 
 class UnknownSiteError(Exception):
-    """A node that is NOT a site of the tree was used to address a schedule read/write — an
-    identity miss: the caller holds a copy (``dataclasses.replace``, a rewrite) or a node from a
-    different tree, not the stored object the site walk enumerated. Deliberately not a
-    ``ValueError``: the accessors swallow ``ValueError`` as "family doesn't apply", and an
-    identity miss must never degrade silently into the untiled path."""
+    """A node outside the stored tree was used for a placement or lowering lookup."""
 
 
 @dataclass(frozen=True)
 class Site:
-    """One schedule-bearing tree position: the node, its schedule-bearing axis (``None`` for a
-    pointwise zero-axis fold), the FULL segment path from the root (this node's own segment last), and the
+    """One structural tree position: the node, its axis (``None`` for a pointwise zero-axis fold),
+    the full segment path from the root (this node's own segment last), and the
     1-based ``ordinal`` among sites sharing the identical ``(segments, axis)`` (1 when unique —
     the no-collision common case, where the ordinal is never spelled). ``derived`` marks a site
     living in a λ-spelled fold's derived evaluation (flash's synthesized PV contraction). Every
@@ -118,7 +90,7 @@ def _walk(node, prefix: tuple[str, ...], out: list[_Visit], derived: bool = Fals
     if is_contraction(node):
         # The BILINEAR reading's edges carry the view-role labels ``a`` / ``b`` — the A/B split
         # rides the stored operand order, so the labels are as stable as the term. This branch
-        # must precede the generic operand walk so a contraction cannot silently re-spell its schedule keys.
+        # must precede the generic operand walk so a contraction cannot silently re-spell its structural path.
         for label, edge in (("a", node.a), *(("b", ch.b) for ch in node.channels)):
             if isinstance(edge, Fold):
                 _walk(edge, (*prefix, label), out, derived)

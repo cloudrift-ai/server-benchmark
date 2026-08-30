@@ -742,7 +742,7 @@ class TreeHalve(Stmt):
     dtype: DataType = F32
     barrier_id: int = 0
     barrier_count: int | None = None
-    # Segment-indexed halving (the transposed b<n>t combine): each slab holds ``length``
+    # Segment-indexed halving (the transposed ``coop-t`` combine): each slab holds ``length``
     # SEGMENTS of ``inner[1]`` slots, and the tree halves the segment index at a fixed inner
     # slot — ``buf[t·scale + inner_var]`` vs ``buf[(t+s)·scale + inner_var]``, broadcast from
     # ``buf[inner_var]``. ``None`` keeps the flat ``buf[t]`` layout.

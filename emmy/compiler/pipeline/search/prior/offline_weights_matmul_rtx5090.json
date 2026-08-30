@@ -1,5 +1,5 @@
 {
-  "feat_ver": 3,
+  "feat_ver": 4,
   "kind": "linear",
   "weights": {
     "D_aspect": -1.6678268333456214,
@@ -124,6 +124,6 @@
       "dynamic": 38
     },
     "sample_frac": 0.33,
-    "notes": "Scoped experiment artifact: fit on the 286 RTX 5090 matmul golden pools only (248 static + 38 dynamic), MATMUL_FEATURES view including the new D_stage_prefetch step, 33% per-pool training sample with hard negatives over 3 rounds, ranks evaluated on full pools. Select with EMMY_OFFLINE_FILE / --offline-file."
+    "notes": "Scoped experiment artifact: fit on the 286 RTX 5090 matmul golden pools only (248 static + 38 dynamic), MATMUL_FEATURES view including the new D_stage_prefetch step, 33% per-pool training sample with hard negatives over 3 rounds, ranks evaluated on full pools. Select with EMMY_OFFLINE_FILE / --offline-file. The 2026-08-30 exact-site schema migration changed only feat_ver; this artifact already used D_stage_prefetch."
   }
 }

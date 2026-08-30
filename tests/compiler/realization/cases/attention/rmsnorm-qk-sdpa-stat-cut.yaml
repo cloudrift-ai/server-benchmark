@@ -52,15 +52,11 @@ configs:
     knobs:
       WORK: t256
       RASTER: ''
-      TILE@n3: ''
+      TILE@n3: f1
       REDUCE@n1: ''
       REDUCE@n2: ''
       REDUCE@n3: ''
       REDUCE@n7: ''
       STAGE@n3.e0: ''
       STAGE@n3.e1: ''
-      TILE@n0: ''
-      REDUCE@n0: ''
-      STAGE@n0.e0: ''
-      STAGE@n0.e1: ''
     identity: 83e4f2a6fa484a4b2a50babe833fc9cf35021c1f551fcfabaf496658c24d055f

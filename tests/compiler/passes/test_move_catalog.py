@@ -9,9 +9,7 @@ file pins the catalog's **legal set** three ways:
   is pinned, never position — the catalogs rank nothing;
 - the **leaf set** the walk actually emits over an f32 matmul / bare-reduce fixture equals that
   catalog, so a missing / extra move is caught structurally, without lowering a kernel;
-- the cross-site refusals the walk applies while descending — one worker inventory, agreeing tile
-  geometry on a shared physical axis, one decision per Fold — asked of ``Ctx.extend`` directly,
-  which is the one place they live.
+- the complete leaf set the scheduler emits, including multi-site worker agreement.
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ from emmy.compiler.pipeline.search.space import scalar_tile_moves
 
 # The hand-computed legal product as explicit literals — the per-cell tile and the (par × reg) box
 # as the pair each move STORES: its site-local ``TILE`` value (the register sub-tile; the default
-# ``f1x1`` suppresses to empty and a unit ``reg_m`` drops the ``x`` half) and the ``WORK`` thread
+# ``f1x1`` spells ``f1`` on a parallel tile and a unit ``reg_m`` drops the ``x`` half) and the ``WORK`` thread
 # inventory its parallel widths imply. The two ladders and the one bound are restated by hand here —
 # NOT recomputed from ``_SCALAR_TILE_SPACE`` — so a change to either dimension, to the thread budget,
 # or to the enumeration order is caught explicitly.
@@ -45,10 +43,10 @@ _REGS = [(rn, rm) for rn in (1, 2, 4) for rm in (1, 2, 4, 6, 8, 10, 12, 14, 26)]
 
 
 def _reg_spelling(rn: int, rm: int) -> str:
-    """How a register sub-tile spells site-locally: the ``f1x1`` default suppresses entirely and a
+    """How a register sub-tile spells site-locally: parallel ``f1x1`` spells ``f1`` and a
     unit ``reg_m`` drops the ``x`` half."""
     if (rn, rm) == (1, 1):
-        return ""
+        return "f1"
     return f"f{rn}" if rm == 1 else f"f{rn}x{rm}"
 
 
@@ -244,41 +242,6 @@ def _computed_a_term() -> TileOp:
     )
 
 
-def test_independent_roots_only_cross_physically_compatible_tiles():
-    """Reversed algebraic m/n readings may share a grid only at equal physical axis widths.
-
-    ``Ctx.extend`` is the ONE place that rule lives now: an option's placed tile joins the context
-    only when every physical axis it names is already tiled the same way, so a second site reading
-    the same grid as ``(n, m)`` composes at the mirrored register widths and refuses at any other.
-    """
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import Ctx, _Option
-
-    m, n = Axis("m", 8), Axis("n", 8)
-    first = Tile(regs=(1, 2)).at(m, n)  # physical m 1 wide, n 2 wide
-    compatible = Tile(regs=(2, 1)).at(n, m)  # under (n, m): physical n 2 wide, m 1 wide
-    incompatible = Tile(regs=(1, 2)).at(n, m)  # under (n, m): physical n 1 wide, m 2 wide
-
-    ctx = Ctx().extend(_Option({"TILE@first": first.spell()}, tile=first))
-    assert ctx is not None
-    assert ctx.extend(_Option({"TILE@second": compatible.spell()}, tile=compatible)) is not None
-    assert ctx.extend(_Option({"TILE@second": incompatible.spell()}, tile=incompatible)) is None
-
-
-def test_one_fold_reached_twice_is_one_decision():
-    """A key several sites spell is ONE decision: the second occurrence may only re-spell the
-    first's value. ``Ctx.decided`` states it, and it is what keeps a shared child (MoE experts
-    under one map, the repeated steps of a nested fold chain) from naming two kernels in one row.
-    """
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import Ctx, _Option
-
-    ctx = Ctx().extend(_Option({"REDUCE@k": "coop"}, work=Work.parse("t32")))
-    assert ctx is not None
-    assert ctx.extend(_Option({"REDUCE@k": "coop"}, work=Work.parse("t32"))) is not None
-    assert ctx.extend(_Option({"REDUCE@k": "r2"})) is None
-    # One kernel, one worker inventory — a second claim that disagrees is the same refusal.
-    assert ctx.extend(_Option({"REDUCE@j": "coop"}, work=Work.parse("t64"))) is None
-
-
 # --- WORK pin narrowing -------------------------------------------------------------------------- #
 
 
@@ -410,13 +373,13 @@ def test_the_all_off_row_is_always_offered(monkeypatch):
     with no evidence, and such a compile taking an arbitrary row is accepted. What must still hold
     is that the all-OFF row exists to be picked, by evidence or by a pin — a term that could not
     spell it would have a hole in its space, not a slow default."""
-    from emmy.compiler.pipeline.knob import is_off_value, stamp_schedule_families
+    from emmy.compiler.pipeline.knob import complete_kernel_row, is_off_value
 
     monkeypatch.delenv("EMMY_WORK", raising=False)
     for label, tile in {"bare reduce": _reduce_term(), "computed-B contraction": _computed_b_term()}.items():
         rows = _rows_of(tile)
         assert rows, f"{label}: the term enumerated nothing"
-        stamped = [stamp_schedule_families({k: v for k, v in row.items() if not k.startswith("S_")}) for row in rows]
+        stamped = [complete_kernel_row({k: v for k, v in row.items() if not k.startswith("S_")}) for row in rows]
         assert any(all(is_off_value(family_of(fam), value) for fam, value in row.items()) for row in stamped), (
             f"{label}: no row spells every family's OFF value"
         )

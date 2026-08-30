@@ -125,7 +125,7 @@ def fast_math_knobs(knobs: Mapping) -> bool:
     from emmy.compiler.pipeline.search.space import FAST_EXP  # noqa: PLC0415
 
     for key, value in knobs.items():
-        spelling = str(value).strip()
+        spelling = str(value)
         if str(key).split("@", 1)[0] == "TILE" and spelling:
             try:
                 plan = Tile.parse(spelling, Work(kind="warp", units=(1, 1)))
@@ -484,6 +484,13 @@ def validate_golden_file(
                 }[descriptor.type]
                 if not valid:
                     raise ValueError(f"{realization_where}.pins.{name} must be a {descriptor.type.value} value, got {value!r}")
+                if strict and family_of(name) in {"WORK", "TILE", "REDUCE", "STAGE", "RASTER"}:
+                    from emmy.compiler.pipeline.knob import validate_family_value  # noqa: PLC0415
+
+                    try:
+                        validate_family_value(name, value)
+                    except ValueError as exc:
+                        raise ValueError(f"{realization_where}.pins.{name}: {exc}") from exc
             if "knobs" in realization and not isinstance(realization["knobs"], Mapping):
                 raise ValueError(f"{realization_where}.knobs must be a mapping")
             if "knobs" in realization:
@@ -508,17 +515,18 @@ def validate_golden_file(
                         "a child-identity schedule receipt must store the child kernel's identity"
                     )
                 if strict:
+                    if families and "PLACE" not in families:
+                        from emmy.compiler.pipeline.knob import complete_kernel_row  # noqa: PLC0415
+
+                        try:
+                            complete_kernel_row(dict(realization["knobs"]))
+                        except ValueError as exc:
+                            raise ValueError(f"{realization_where}.knobs: {exc}") from exc
                     for family in families:
                         scoped = [str(key) for key in realization["knobs"] if str(key).split("@", 1)[0] == family]
-                        # A stamped row legitimately carries the primary node's bare key beside
-                        # axis-scoped site decisions (``STAGE: d2/smem`` + ``STAGE@a1: ''``) — that
-                        # IS the canonical codec spelling. The ambiguous shape is a bare OFF next
-                        # to scoped keys: replaying it would fan OFF across every eligible site,
-                        # so ``stamp_schedule_families`` drops it and a recording must not store it.
-                        if family in scoped and any("@" in key for key in scoped) and str(realization["knobs"][family]) == "":
+                        if family in {"TILE", "REDUCE", "STAGE"} and family in scoped:
                             raise ValueError(
-                                f"{realization_where}.knobs mixes bare and axis-scoped {family} keys with a bare OFF; "
-                                "the scoped spelling is the site decision — drop the bare OFF"
+                                f"{realization_where}.knobs uses bare {family}; classic node and edge choices require exact sites"
                             )
             if "ranking" in realization and not isinstance(realization["ranking"], Mapping):
                 raise ValueError(f"{realization_where}.ranking must be a mapping")

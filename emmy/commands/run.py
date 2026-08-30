@@ -954,16 +954,10 @@ def _ab_samples(specs, dynamic=None):
 
 
 def _sample_replay_knobs(sample) -> dict:
-    """All knob pins needed to reproduce a golden winner or explicit A/B row, with the
-    no-information spellings dropped (:func:`drop_uninformative_scopes`) so replay pins exactly the
-    row the realization stamps. A stored spelling may still carry a declined scoped key
-    (``STAGE@a1: ''``); pinning it verbatim contradicts the row's own bare value (a bare pin fans
-    out across every eligible site) and the realized kernel — which stamps nothing at a declined
-    site — can never satisfy it. The family-level OFF fill is deliberately NOT applied here: a
-    partial working row leaves a family unmentioned meaning "unpinned", not "pinned OFF"."""
-    from emmy.compiler.pipeline.knob import drop_uninformative_scopes  # noqa: PLC0415
+    """All exact knob pins needed to reproduce a golden winner or explicit A/B row."""
+    from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
-    return {**getattr(sample, "pins", {}), **drop_uninformative_scopes(sample.knobs)}
+    return {**getattr(sample, "pins", {}), **dict(tuning_knob_items(sample.knobs))}
 
 
 def _failed_bench_status(exc: BaseException) -> str:
@@ -1342,11 +1336,9 @@ def _write_ab_json(
     table parsers) and where the intensity-floor / wrong-answer verdicts become fields —
     the confirm-twice rule diffs two of these files instead of two terminal scrollbacks.
 
-    Each kernel row carries ``record_knobs`` — the realized tuning knobs with EVERY schedule
-    family explicitly stamped (:func:`~emmy.compiler.pipeline.knob.stamp_schedule_families`,
-    OFF spelling included) — the map to copy verbatim into a golden YAML ``knobs:`` entry, so
-    a new recording never leaves a family to the planner's replay-time fill (the recurring
-    unpinned-``REDUCE`` drift class). Failure states are fields, not absences: the greedy
+    Each kernel row carries ``record_knobs`` — the realized tuning knobs with the exact complete
+    classic row validated by :func:`~emmy.compiler.pipeline.knob.complete_kernel_row` — the map
+    to copy verbatim into a golden YAML ``knobs:`` entry. Failure states are fields, not absences: the greedy
     block carries ``status`` (``"bench_fail"`` + ``error`` when the deploy failed) and each
     pinned row its ``status`` (``ok`` / ``pin_unmatched`` / ``bench_fail``) with ``us`` /
     ``total_us`` null where nothing was measured.
@@ -1366,7 +1358,7 @@ def _write_ab_json(
     import json as _json  # noqa: PLC0415
 
     from emmy import gpu  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import stamp_schedule_families, tuning_knob_items  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import complete_kernel_row, tuning_knob_items  # noqa: PLC0415
 
     def _kernel_rows(g, b) -> list[dict]:
         import hashlib  # noqa: PLC0415
@@ -1384,7 +1376,7 @@ def _write_ab_json(
                     "us": None if b is None else times.get(idx, 0.0),
                     "smem_bytes": op.smem_bytes,
                     "knobs": {k: str(v) for k, v in tuning_knob_items(op.knobs or {})},
-                    "record_knobs": stamp_schedule_families(op.knobs or {}),
+                    "record_knobs": complete_kernel_row(op.knobs or {}),
                     "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
                 }
             )

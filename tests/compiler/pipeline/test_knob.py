@@ -173,9 +173,9 @@ def test_apply_off_defaults_fills_only_unspecified_off_knobs():
 
 
 def test_is_warp_and_mma_atom_tier_discriminator():
-    """The unified ``TILE`` knob self-discriminates: a value carrying an ``a:<atom>`` token is the
-    warp fragment (and names the atom); a scalar ``n../f..`` codec / empty / absent is the scalar
-    tier (no atom)."""
+    """The unified ``TILE`` knob self-discriminates: a value carrying a bare atom token is the
+    warp fragment (and names the atom); a scalar ``f..`` codec beside thread ``WORK``, empty value,
+    or absent value is the scalar tier (no atom)."""
     assert not is_warp({}) and mma_atom({}) is None
     assert not is_warp({"TILE@n0": ""}) and mma_atom({"TILE@n0": ""}) is None
     assert not is_warp({"TILE@n0": "f2x4", "WORK": "t32x8"})  # scalar fragment names no atom
@@ -360,7 +360,7 @@ def test_stage_codec_reg_depth_roundtrip():
 
 
 def test_knob_features_mma_expansion():
-    # The warp fragment names its atom on the ``TILE`` codec (``a:<atom>``); ``knob_features``
+    # The warp fragment names its atom on the ``TILE`` codec; ``knob_features``
     # expands its physical cell / dtype properties into the ``MMA_*`` family.
     feats = knob_features({"TILE@n0": "mma_m16n8k16_f16_f32/f1x1", "WORK": "w1x1"})
     assert feats["MMA_tier"] == 1.0
@@ -484,73 +484,56 @@ def test_exact_site_featurizes_consistently():
         "TILE@n0": "mma_m16n8k16_f16_f32/f2x2/k2",
         "WORK": "w2x2",
         "STAGE@n0.e0": "d2/smem-async",
+        "STAGE@n0.e1": "d2/smem-async",
         "S_ext_free_prod": 4096.0,
     }
-    assert knob_features(row)
+    from emmy.compiler.pipeline.search.features import node_slices
+
+    (node,) = node_slices(row)
+    assert {key for key in node if "@" in key} == {"TILE@n0", "STAGE@n0.e0", "STAGE@n0.e1"}
+    assert knob_features(row)["D_stage_depth"] == 2.0
     assert tile_signature(row)
     assert is_warp(row) is True
     assert mma_atom(row) == "mma_m16n8k16_f16_f32"
 
 
 def test_display_renders_keys_as_stored():
-    """Since phase 3 the stampers spell the canonical codec key, so the view renders keys AS
-    STORED — bare stays bare, an explicit ``@`` spelling (flash's pair, the fused kernel's cone
-    stat) stays explicit; there is no display collapse between memory and storage."""
+    """The view renders keys as stored without collapsing distinct exact sites."""
     one = dict(tuning_knob_items({"TILE": "f2", "REDUCE": "coop", "STAGE": "d2/smem-async"}))
     assert set(one) == {"TILE", "REDUCE", "STAGE"}
-    flash = dict(tuning_knob_items({"TILE@dd": "f2", "TILE@pj": "f4", "REDUCE": "coop"}))
-    assert set(flash) == {"TILE@dd", "TILE@pj", "REDUCE"}
-    fused = dict(tuning_knob_items({"REDUCE@a1": "coop", "TILE": "", "REDUCE": ""}))
-    assert set(fused) == {"REDUCE@a1", "TILE", "REDUCE"}
+    exact = dict(tuning_knob_items({"TILE@n0": "f2", "TILE@n1": "f4", "REDUCE@n1": "coop"}))
+    assert set(exact) == {"TILE@n0", "TILE@n1", "REDUCE@n1"}
 
 
 # --- Per-node featurizer (multi-node pool) -----------------------------------
 
 
 def test_multinode_flash_keys_apart_and_pools_per_node():
-    """A flash kernel addresses two contractions by their k-axis (QK@d, PV@sk) + the online reduce
-    (REDUCE@sk); the two ``TILE`` keys are distinct flat entries (no collision), and the schedule
-    geometry featurizes **per node** and sum-pools — ``D_threads`` = QK threads + PV threads, and
-    ``MMA_tier`` = 2.0 over the two warp nodes. This is the case the flat one-key schema can't express."""
+    """Two contraction sites remain distinct and their geometry features sum-pool per node."""
     from emmy.compiler.pipeline.search.features import _schedule_node_features, node_slices
 
     qk_tile = "mma_m16n8k16_f16_f32/f2x2/k2"  # over the shared w4x1 inventory: 128 threads
     pv_tile = "mma_m16n8k16_f16_f32/f4x1/k2"  # the same inventory, its own register tile
     knobs = {
-        "TILE@d": qk_tile,
-        "STAGE@d": "d2/smem-async",
-        "REDUCE@sk": "",
-        "TILE@sk": pv_tile,
-        "STAGE@sk": "d2/smem-async",
+        "TILE@n0": qk_tile,
+        "STAGE@n0.e0": "d2/smem-async",
+        "REDUCE@n1": "",
+        "TILE@n1": pv_tile,
+        "STAGE@n1.e0": "d2/smem-async",
         "WORK": "w4x1",  # one kernel, one inventory — both nodes share the warp map
         "S_ext_free_prod": 4096.0,
     }
-    assert knobs["TILE@d"] != knobs["TILE@sk"]  # the two tiles key apart in the flat dict
+    assert knobs["TILE@n0"] != knobs["TILE@n1"]
     slices = node_slices(knobs)
     assert [sorted(k for k in sl if "@" in k) for sl in slices] == [
-        ["STAGE@d", "TILE@d"],
-        ["REDUCE@sk", "STAGE@sk", "TILE@sk"],
+        ["STAGE@n0.e0", "TILE@n0"],
+        ["REDUCE@n1", "STAGE@n1.e0", "TILE@n1"],
     ]
     qk = _schedule_node_features(slices[0])
     pv = _schedule_node_features(slices[1])
     feats = knob_features(knobs)
     assert feats["D_threads"] == qk["D_threads"] + pv["D_threads"] == 256.0
     assert feats["MMA_tier"] == 2.0  # both nodes are warp-tier → pooled tier count
-
-
-def test_node_slice_addresses_per_node_struct():
-    """Each node reads its OWN reduce extent: an addressed ``S_ext_reduce_prod@<axis>`` overrides the
-    shared bare value in that node's slice (so QK@d and PV@sk featurize with different K depths), while
-    a one-node kernel with a bare ``S_ext_reduce_prod`` featurizes byte-identically (bare fallback)."""
-    from emmy.compiler.pipeline.search.features import node_slices
-
-    knobs = {"TILE@d": "f2", "TILE@sk": "f4", "S_ext_reduce_prod": 8.0, "S_ext_reduce_prod@sk": 512.0}
-    d_slice, sk_slice = node_slices(knobs)
-    assert d_slice["S_ext_reduce_prod"] == 8.0  # no @d override → bare fallback
-    assert sk_slice["S_ext_reduce_prod"] == 512.0  # addressed override wins
-    # One-node bare stamp: the sole node's slice carries the whole row's geometry projection.
-    (bare,) = node_slices({"TILE": "f2", "S_ext_reduce_prod": 8.0})
-    assert dict(bare) == {"TILE": "f2", "S_ext_reduce_prod": 8.0}
 
 
 def test_precision_pin_precedence(monkeypatch):
@@ -574,28 +557,14 @@ def test_precision_pin_precedence(monkeypatch):
     assert FAST_MATH.unfeatured, "the umbrella is a meta gate — it must never enter the feature vector"
 
 
-def test_values_equal_canonicalizes_tile_atom_alias():
-    """A ``TILE`` pin spelled with an acc-unspecified atom ALIAS matches the canonically-stamped
-    row (the pin-verification gate must not false-flag alias users), bare or axis-keyed; a
-    genuinely different tile still mismatches."""
+def test_values_equal_requires_exact_classic_spelling():
     from emmy.compiler.pipeline.knob import values_equal
 
-    assert values_equal("TILE", "mma_m16n8k16_f16/f2x2/k2", "mma_m16n8k16_f16_f32/f2x2/k2")
-    assert values_equal("TILE@d", "mma_m16n8k16_bf16/f1x2/k8", "mma_m16n8k16_bf16_f32/f1x2/k8")
-    assert not values_equal("TILE", "mma_m16n8k16_f16/f2x2/k2", "mma_m16n8k16_f16_f16/f2x2/k2")
-    assert not values_equal("TILE", "mma_m16n8k16_f16/f2x2/k2", "mma_m16n8k16_f16_f32/f2x2/k4")
-
-
-def test_values_equal_canonicalizes_stage_token_order():
-    """A ``STAGE`` pin binds order-free but spells in schema order, so a hand pin ``cp/d2`` must
-    verify against the realized ``d2/smem-async`` — this runs on the DEPLOY path (the golden-row match),
-    where a false mismatch drops the recorded row. A genuinely different pipeline still misses."""
-    from emmy.compiler.pipeline.knob import values_equal
-
-    assert values_equal("STAGE", "smem-async/d2", "d2/smem-async")
-    assert values_equal("STAGE@a1", "smem-tma/d1", "d1/smem-tma")
+    assert values_equal("TILE@n0", "mma_m16n8k16_f16_f32/f2x2/k2", "mma_m16n8k16_f16_f32/f2x2/k2")
+    assert not values_equal("TILE", "mma_m16n8k16_f16_f32/f2x2/k2", "mma_m16n8k16_f16_f16/f2x2/k2")
+    assert not values_equal("STAGE@n0.e0", "smem-async/d2", "d2/smem-async")
+    assert not values_equal("STAGE@n0.e0", "d2/smem-async", " d2/smem-async")
     assert not values_equal("STAGE", "d2/smem-async", "d3/smem-async")
-    assert not values_equal("STAGE", "d1/smem-tma", "d2/smem-tma")
 
 
 def test_knob_pinned_scopes_and_restores(monkeypatch):
@@ -638,56 +607,41 @@ def test_registry_complete_in_a_bare_process():
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
-def test_stamp_schedule_families_fills_absent_families_with_off():
-    """The recording view stamps EVERY schedule codec family explicitly: realized values pass
-    through, and a family the compile never stamped (a target-gated pass — ``WSPEC`` off
-    Hopper/Blackwell) gains its registered OFF spelling. A recorded entry that omits a family
-    leaves it to the planner's replay-time fill, which drifts as the planner evolves (the
-    recurring unpinned-``REDUCE`` phantom-regression class) — this is the recorder-side fix."""
-    from emmy.compiler.pipeline.knob import stamp_schedule_families
+def test_complete_kernel_row_requires_the_emitted_exact_schedule():
+    from emmy.compiler.pipeline.knob import complete_kernel_row
 
-    out = stamp_schedule_families({"TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "g2k", "STAGE": "", "S_ext_free_prod": 64.0})
-    # Realized values pass through; the struct stamp is dropped (not a tuning decision).
-    assert out["TILE"] == "mma_m16n8k16_f16_f32/f1x1" and out["REDUCE"] == "g2k"
+    row = {
+        "WORK": "w1x1",
+        "RASTER": "",
+        "TILE@n0": "mma_m16n8k16_f16_f32/f1x1",
+        "REDUCE@n0": "",
+        "STAGE@n0.e0": "",
+        "STAGE@n0.e1": "",
+        "S_ext_free_prod": 64.0,
+    }
+    out = complete_kernel_row(row)
+    assert out["TILE@n0"] == "mma_m16n8k16_f16_f32/f1x1"
     assert "S_ext_free_prod" not in out
-    # Families the compile never stamped are pinned as declined (OFF spelling) — WORK included
-    # (F1: the worker-inventory family replaced WSPEC in SCHEDULE_FAMILIES).
-    assert out["WORK"] == "" and out["RASTER"] == "" and out["STAGE"] == ""
-    assert "WSPEC" not in out  # retired from the recording view — the +p band rides WORK
-    # A family present under an explicit ``@`` spelling (flash's TILE pair, the cone stat's
-    # REDUCE) counts as present — the fill never duplicates it under the bare key.
-    axed = stamp_schedule_families({"TILE@dd": "f2", "REDUCE@a1": "coop"})
-    assert axed["TILE@dd"] == "f2" and axed["REDUCE@a1"] == "coop"
-    assert "TILE" not in axed and "REDUCE" not in axed
-    assert "REDUCE@d" not in axed and axed["STAGE"] == "" and axed["WORK"] == "" and axed["RASTER"] == ""
+    assert complete_kernel_row(out) == out
 
-    # Re-stamping an already filled row keeps one schedule spelling per family. The
-    # exact site decision supersedes the bare OFF that an earlier pass recorded.
-    restamped = stamp_schedule_families({"REDUCE": "", "REDUCE@a0": "coop"})
-    assert restamped["REDUCE@a0"] == "coop"
-    assert "REDUCE" not in restamped
-
-    # The MIRROR of the bare-OFF rule: a scoped OFF names a site that declined, which is what
-    # stamping nothing there already says — realization drops the key, so keeping it would spell
-    # one configuration two ways, and beside a bare non-OFF value it contradicts it (a bare pin
-    # fans out over every eligible site). The bare decision survives alone.
-    primary_and_scoped = stamp_schedule_families({"REDUCE": "g2k", "REDUCE@a0": ""})
-    assert primary_and_scoped["REDUCE"] == "g2k"
-    assert "REDUCE@a0" not in primary_and_scoped
-
-    # …and a row whose family is ONLY declined scoped keys collapses to the family-level OFF —
-    # exactly the realized stamp of that configuration (the sm_89 restored-row replay class).
-    declined_only = stamp_schedule_families({"STAGE@a1": "", "REDUCE@a1": "", "WORK": "w1x16"})
-    assert declined_only["STAGE"] == "" and declined_only["REDUCE"] == ""
-    assert not any("@" in key for key in declined_only)
+    with pytest.raises(ValueError, match="missing RASTER"):
+        complete_kernel_row({"WORK": "", "REDUCE@n0": ""})
+    with pytest.raises(ValueError, match="require exact sites"):
+        complete_kernel_row({"WORK": "", "RASTER": "", "REDUCE": ""})
+    with pytest.raises(ValueError, match="not canonical"):
+        complete_kernel_row({"WORK": "", "RASTER": "", "REDUCE@row": ""})
+    with pytest.raises(ValueError, match="must be bare"):
+        complete_kernel_row({"WORK@n0": "", "WORK": "", "RASTER": "", "REDUCE@n0": ""})
+    with pytest.raises(ValueError, match="no node assignment"):
+        complete_kernel_row({"WORK": "", "RASTER": "", "STAGE@n0.e0": ""})
 
 
 def test_knob_features_geometry_memo_is_invisible():
     """The geometry memo (``features._GEOMETRY_MEMO``, keyed on the :class:`NodeSlice` the block
     is computed FROM — input and key are one object) must be byte-invisible, and the slices must
     carry everything the block reads: each row's per-slice blocks equal the block computed from
-    the FULL row dict (the retired pre-slice contract) for the all-bare rows, and repeat passes
-    (all memo hits) equal the first."""
+    the full row dict for schema-agnostic bare analytical rows, and repeat passes (all memo hits)
+    equal the first."""
     import emmy.compiler.pipeline.search.features as features_mod
     from emmy.compiler.pipeline.search.features import node_slices
 
@@ -698,7 +652,7 @@ def test_knob_features_geometry_memo_is_invisible():
         {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "S_ext_free_prod": 2048.0 * 2048.0, "H_sm_count": 128.0},
         {"TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "coop", "STAGE": "d2/smem-async", "WORK": "w4x2"},
         {"STAGE": "d3/smem-tma"},
-        {"TILE@dd": "f2", "TILE@pj": "f4", "REDUCE": "coop", "WORK": "t32x8", "S_ext_free_prod": 64.0, "H_sm_count": 128.0},
+        {"TILE@n0": "f2", "TILE@n1": "f4", "REDUCE": "coop", "WORK": "t32x8", "S_ext_free_prod": 64.0, "H_sm_count": 128.0},
         {"TILE": "f2x4", "WORK": "t32x8", "BN": 64, "unrelated": 3},
         {"S_n_load": 3.0, "S_ext_free_prod": 512.0},
     ]

@@ -23,21 +23,19 @@ its ladder (a domain is not a preference history), and a compile with no evidenc
 takes whatever the enumeration emitted first. That pick being slow is an accepted outcome; adding
 a default, a lead value, or a filter to improve it is not.
 
-The ``TILE`` / ``REDUCE`` grids hand out the **typed schedule slices** themselves
+The ``TILE`` / ``REDUCE`` grids hand out typed classic leaf choices
 (:class:`~emmy.compiler.ir.schedule.Tile` / :class:`~emmy.compiler.ir.schedule.Reduce`,
 built structurally — never a parsed literal), so the enumeration never speaks a codec spelling; the
-scheduler spells each row ONCE, site-local, where it becomes stored state. ``STAGE`` hands out typed
-:class:`~emmy.compiler.ir.schedule.Stage` slices in the same currency; ``RASTER`` stays a codec string
-(it has no slice type of its own).
+scheduler spells each accepted assignment once at the search boundary. ``STAGE`` and ``RASTER``
+use :class:`~emmy.compiler.ir.schedule.Stage` and :class:`~emmy.compiler.ir.schedule.Raster` in the
+same typed currency.
 
 Two groups:
 
 - **Schedule codec knobs** (``WORK`` / ``REDUCE`` / ``TILE`` / ``STAGE`` / ``RASTER``) — the tile-lowering schedule
-  fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided by the
-  tile schedule and materialized in ``lowering/kernel/010_materialize``. Each is the **ephemeral** codec spelling: it resolves into a
-  schedule slice (``Reduce`` / ``Tile`` / ``Stage`` / ``WarpSpec``) and rides on ``TileOp.knobs``
-  so the online prior featurizes / tunes the decision. ``off=""`` (the serial / per-cell /
-  gmem-direct / uniform spelling) is auto-stamped on kernels the pass doesn't schedule.
+  fork points serialized by ``ClassicScheduleCodec``. The typed assignment is materialized in
+  ``lowering/kernel/010_materialize``; its encoded row rides on ``TileOp.knobs`` so the online
+  prior can featurize and tune the decision. ``off=""`` is the explicit direct leaf value.
 - **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen
   policies recorded on the kernel op (idempotence + env override), on by default and not search
   dimensions (``hints=(True,)``).
@@ -103,8 +101,8 @@ STAGE = Knob(
 
 # The kernel-global worker inventory (the step-7 value-grammar family): the w/n worker tokens
 # factored out of the per-site TILE values, the coop width out of REDUCE, and the producer band the
-# retired WSPEC family used to spell, absorbed as ``+p<n>``. Stamped by ``ops.seal_workers`` on every
-# assembled option row; ``off=""``
+# retired WSPEC family used to spell, absorbed as ``+p<n>``. Encoded from the accepted kernel
+# choice on every complete row; ``off=""``
 # = the per-cell / pure-reduce forms' derived launch geometry.
 
 
@@ -245,7 +243,7 @@ FAST_EXP = Knob(
 # umbrella (the ``-use_fast_math`` / ``-O3`` analogue). Precedence per knob: its own pin >
 # ``FAST_MATH`` > off (:func:`precision_pin`). The umbrella is a meta gate, not a kernel
 # property — the realized fork is already fully identified by what it enables (``FAST_EXP``'s
-# stamped BOOL, the ``TILE`` codec's ``a:<atom>`` token) — so it is ``unfeatured`` and never
+# stamped BOOL, the ``TILE`` codec's bare atom token) — so it is ``unfeatured`` and never
 # stamped, enumerated, or featurized.
 
 FAST_MATH = Knob(
@@ -261,7 +259,7 @@ F16_MMA_F32_ACC = Knob(
     "F16_MMA_F32_ACC",
     KnobType.BOOL,
     hints=(False,),
-    help="Offer the f16-mma / chunked-f32-accumulate atom forks (a:mma_m16n8k16_f16_f16 — the mma "
+    help="Offer the f16-mma / chunked-f32-accumulate atom forks (mma_m16n8k16_f16_f16 — the mma "
     "chain accumulates in f16 at the full HMMA rate, with a periodic register promote into f32 "
     "shadows; ~2x mma throughput on consumer dies where f32-accumulate is half rate). "
     "Pin 1 to offer on every target, 0 never; unset follows FAST_MATH (consumer-die targets only). "
@@ -273,7 +271,7 @@ FP8_MMA = Knob(
     "FP8_MMA",
     KnobType.BOOL,
     hints=(False,),
-    help="Offer the native fp8 tensor-core atom forks (a:mma_m16n8k32_e4m3_f32 / _e5m2_f32 — both "
+    help="Offer the native fp8 tensor-core atom forks (mma_m16n8k32_e4m3_f32 / _e5m2_f32 — both "
     "multiplicands consumed as raw f8 bytes at k32, scale factors on the f32 epilogue). The "
     "instruction's effective accumulation precision is arch-dependent (reduced on sm_89, ~3e-4 rel "
     "vs the exact f32 decode-and-fma scalar path), so the fork family is precision-trading: pin 1 "
@@ -380,7 +378,7 @@ def scalar_tile_moves() -> list[Tile]:
 
 
 # The warp (tensor-core) tile candidate SPACE: ``(WM, WN)`` warp counts × ``(FM, FN)`` per-warp
-# register fragments × ``bk`` K-chunks, spelled ``a:<atom>/w..x../f..x../k..``. Two multiplicative
+# register fragments × ``bk`` K-chunks, spelled ``<atom>/f..x../k..`` beside the kernel's ``WORK``. Two multiplicative
 # budgets bound it and both are real hardware/codegen limits rather than deployment history: a warp
 # tile spends ``32·WM·WN`` threads of the CTA budget, and the C fragment holds ``FM·FN ≤ 32`` cells.
 # ``bk`` carries no budget of its own — the staged slab it implies is sized by the stage resolvers

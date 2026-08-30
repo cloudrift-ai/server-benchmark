@@ -303,7 +303,7 @@ def test_k32_mma_matches_lut_reference_cuda():
     m, n, k = 32, 64, 64
     rng = np.random.default_rng(11)
     backend = CudaBackend()
-    with pinned_knobs(classic_row({"TILE": f"{K32}/f2x2/k1", "WORK": "w1x4", "REDUCE": "", "STAGE": ""})):
+    with pinned_knobs(classic_row({"TILE": f"{K32}/f2x2", "WORK": "w1x4", "REDUCE": "", "STAGE": ""})):
         compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32" in s), None)

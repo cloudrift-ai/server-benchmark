@@ -332,9 +332,9 @@ def validate_working_gpu(document: dict, ctx) -> None:
 def realized_tuning_knobs(graph) -> dict[str, str] | None:
     """Conflict-free canonical tuning knobs across every CudaOp in ``graph``."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import stamp_schedule_families  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import complete_kernel_row  # noqa: PLC0415
 
-    rows = [stamp_schedule_families(node.op.knobs) for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
+    rows = [complete_kernel_row(node.op.knobs) for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
     if not rows:
         return None
     merged: dict[str, str] = {}

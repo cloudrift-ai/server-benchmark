@@ -6,33 +6,12 @@ reads made ``ops`` half presentation."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.classic_schedule import CLASSIC_FAMILIES, CLASSIC_NODE_FAMILIES
+from emmy.compiler.ir.classic_schedule import CLASSIC_FAMILIES
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Body, Load
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.tile.ir import ProjectionRegion
 from emmy.compiler.ir.tile.ops import axis_names, sched_of
-
-
-def unplaced_slices(tile) -> list[tuple[str, object]]:
-    """The kernel's schedule entries that NO stored node carries — the keys addressing DERIVED
-    material (flash's synthesized PV, ``TILE@pj``), sorted by key.
-
-    Every other slice reaches its reader by annotating the node it keys against. These cannot: the
-    node they address is a consequence of the stored params, not one of them. They are a schedule
-    fact either way, so the dump prints them in its schedule region rather than reconstructing the
-    derived node inside the term to hang them on. Empty for a kernel whose sites are all stored —
-    which, measured over the frontend's kernels, is all of them but causal flash."""
-    if tile.op is None or not tile.schedule:
-        return []
-    from emmy.compiler.ir.tile.path import sites  # noqa: PLC0415 — path imports ir; keep ops light
-
-    sched = sched_of(tile)
-    stored = [s.node for s in sites(tile.op) if not s.derived]
-    claimed = {k for nd in stored for family in CLASSIC_NODE_FAMILIES if (k := sched.key(family, nd)) is not None}
-    claimed.update(key for node in stored for key in sched.edge_keys(node))
-    return sorted((k, v) for k, v in tile.schedule.items() if k not in claimed)
-
 
 # --------------------------------------------------------------------------- #
 # The structural dump — the STORED term as a tree, and NOTHING derived.
@@ -51,10 +30,8 @@ def unplaced_slices(tile) -> list[tuple[str, object]]:
 # ``lift`` + ``combine`` and contributed no schedule site on seven of them. ``--ir loop`` is where
 # a reader goes for a body.
 #
-# Schedule slices are not on the term at all — they annotate a node from the owning
-# ``TileOp.schedule`` when one is supplied. The one slice that can address DERIVED material
-# (flash's synthesized PV, ``TILE@pj``) has no stored node to annotate, so it prints in the
-# ``schedule`` region beside the term rather than dragging the derived node into it.
+# Schedule choices are not on the term at all. The owning ``TileOp`` supplies one complete
+# ``ClassicSchedule`` whose node choices annotate their canonical sites.
 # --------------------------------------------------------------------------- #
 
 _TEE, _ELBOW, _PIPE, _GAP = "├─ ", "└─ ", "│  ", "   "
@@ -216,7 +193,7 @@ def pretty(op, indent: str = "", *, tile=None) -> list[str]:
     each node's kind and params, and which lift param each recursed operand edge binds. No derived
     material: the per-cell step, the nodes synthesized inside it and the lowered nest all follow
     from these params (``--ir loop`` is where a body lives). Pass ``tile`` — the owning
-    ``TileOp`` — to annotate each node with the schedule slices keyed against it. A bare stmt
+    ``TileOp`` — to annotate each node with its accepted schedule choices. A bare stmt
     falls back to its own pretty."""
     ctx = _Ctx(tile, root=op)
     if isinstance(op, Fold):
@@ -226,7 +203,7 @@ def pretty(op, indent: str = "", *, tile=None) -> list[str]:
     return [f"{indent}{op!r}"]
 
 
-__all__ = ["pretty", "tile_body", "unplaced_slices"]
+__all__ = ["pretty", "tile_body"]
 
 
 def _pretty_region(title: str, rows: list[str]) -> list[str]:
@@ -246,8 +223,8 @@ def _pretty_place(tile) -> list[str]:
     if tile.place.free or tile.place.grid:
         grid = f"grid=({axes(tile.place.grid)})" if tile.place.is_mapped else "unmapped"
         out.append(f"place  free=({axes(tile.place.free)})  {grid}")
-    if tile.work is not None:
-        out.append(f"work   {tile.work.spell()}")
+    if tile.classic is not None and tile.classic.kernel.work.spell():
+        out.append(f"work   {tile.classic.kernel.work.spell()}")
     if tile.workers is not None:
         out.append(f"band   {tile.workers.spell()}")
     return out
@@ -255,10 +232,8 @@ def _pretty_place(tile) -> list[str]:
 
 def tile_body(tile) -> str:
     """Render the kernel structurally (the dump view) — no lowering and nothing derived: the
-    caller facts that live BESIDE the term (``place`` / ``workers`` / ``work``), then the STORED
-    ``op`` tree with each node's schedule slices annotated from ``schedule``, then any schedule
-    entry no stored node carries (:func:`unplaced_slices` — a slice keyed against DERIVED
-    material, which the term deliberately does not show), then the kernel-boundary ``stores``
+    caller facts that live beside the term (``place`` / ``workers`` / ``classic.kernel.work``), then the stored
+    ``op`` tree with each node's accepted choices annotated, then the kernel-boundary ``stores``
     (the root ``Write``\\s live there, so a dump without them would hide where the kernel's
     output lands). The regions are the owners — geometry, algebra, schedule, boundary — kept
     visibly apart."""
@@ -266,7 +241,6 @@ def tile_body(tile) -> str:
         return ""
     lines = [f"    {line}" for line in _pretty_place(tile)]
     lines += pretty(tile.op, "    ", tile=tile)
-    lines += _pretty_region("schedule", [f"{k} = {v.spell() or '·'}" for k, v in unplaced_slices(tile)])
     outputs = [
         f"{f'sweep({spec.sweep.name}) ' if spec.sweep else ''}{line.strip()}" for spec in tile.output_specs for line in spec.write.pretty()
     ]

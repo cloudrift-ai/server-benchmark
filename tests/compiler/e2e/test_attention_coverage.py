@@ -485,7 +485,7 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
     no gmem fragment loader is CALLED (the helper definitions always ship)."""
     _pin_sdpa_reductions(monkeypatch)
     monkeypatch.setenv("EMMY_WORK", "w2x1")
-    monkeypatch.setenv("EMMY_TILE@N3", "mma_m16n8k16_f16_f32/f2x2/k1")
+    monkeypatch.setenv("EMMY_TILE@N3", "mma_m16n8k16_f16_f32/f2x2")
     monkeypatch.setenv("EMMY_TILE@N4", "mma_m16n8k16_f16_f32/f2x2")
     for edge in (0, 1):
         monkeypatch.setenv(f"EMMY_STAGE@N3.E{edge}", "d1/smem")

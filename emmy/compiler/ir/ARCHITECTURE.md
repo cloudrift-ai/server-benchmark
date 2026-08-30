@@ -12,7 +12,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 | `frontend/ir`     | after tracing / loader spelling | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, layout ops                             |
 | `tensor/ir`       | after decomposition             | `ElementwiseOp`, `ReduceOp`, `ScanOp`, `GatherOp`, `ScatterOp`, `IndexMapOp`                          |
 | `loop/ir`         | after fusion                    | `LoopOp` + body types (`Load`, `Assign`, `Accum`, `Write`, `Select`, `Loop`, `Axis`)                  |
-| `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural root `op`, `output_specs`, placement, workers, knobs, and tree-path-keyed schedule slices |
+| `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural root `op`, output specifications, placement, workers, knobs, a typed classic schedule, and its materialization |
 | `kernel/ir`       | after `lowering/kernel`         | `KernelOp` + hardware stmts (`Tile`, `Smem`, `Sync`, `TreeHalve`)                                     |
 | `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (rendered `__global__` source)                                                               |
 
@@ -73,13 +73,24 @@ slices, output specifications and knobs are the `TileOp`'s, not the term's. So
 scheduled once while each use receives an independent transport choice. Site classification reads only the Fold at a
 node site; target facts cannot affect whether that site is a projection, reduction, or contraction-capable reduction.
 
-`ClassicSchedule` is an immutable, complete assignment of kernel, node, and edge choices. Direct work, flat raster,
+`ClassicSchedule` is an immutable, typed assignment of kernel, node, and edge choices. Direct work, flat raster,
 untiled nodes, serial reductions, and direct edges are explicit values rather than missing fields. Choice values never
 carry site identities, paths, target facts, encodings, or materialization results: `Tile` is axis-free and `Stage`
-contains no slab names or resolved K chunk. `ClassicMaterialization` separately maps accepted sites to `PlacedTile`
-geometry and `ResolvedStage` transport facts. Completeness and node-sum agreement need the problem, so
-`ClassicScheduleContext.accepts` is their one semantic authority; the schedule data cannot validate itself.
-Enumeration, codecs, search policy, and lowering consume this boundary and may not define another membership relation.
+contains no slab names or resolved K chunk. The wire codec is injective: empty `TILE` means only per-cell, while a
+parallel unit-register thread tile spells `f1`; `WORK` never changes the meaning of an empty node choice.
+`ClassicMaterialization` separately maps accepted sites to `PlacedTile`
+geometry and `ResolvedStage` transport facts. Construction enforces the value types; completeness, site scope,
+node-sum agreement, worker inventory and thread limits, producer-band/TMA agreement, raster eligibility, target
+choice availability, and current per-contraction transport agreement need the problem and are enforced by
+`ClassicScheduleContext.accepts`. Every enumeration and decode leaf crosses that complete-assignment boundary before
+search or lowering can observe it.
+
+Kernel, node, and edge domains are independent projections of static offers; none reads another selected choice.
+Their Cartesian product is the definition of the candidate space. Static support retains derived physical-axis and
+fragment-seam facts outside the choice values, and `ClassicScheduleContext.accepts` filters the complete product by
+that one compatibility relation. The literal reference enumerator remains the oracle. The production Fold walk may
+prune incompatible prefixes, but bounded-product checks and traversal-order tests require its complete leaf set to
+equal the reference set exactly.
 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not
@@ -111,21 +122,18 @@ in Loop IR until total lift; there is no impure `Lambda` construction path.
   op; reductions are `Accum` statements inside a reduce `Loop`). `LoopOp` construction orders a free-loop chain by
   the row-major coordinate depth in its boundary writes; axis spelling is only the fallback when output storage does
   not totally order the chain. The resulting geometry, rather than source names, reaches Tile IR placement.
-- **Loop → tile** (after `lowering/tile`): `LoopOp` nodes replaced by
-  `TileOp` holding the structural-IR root `op` directly (`tile/ir` —
-  one `Fold` kind) plus the root-global schedule fields
-  (`place` / `work` / `workers`, with every per-node slice — `Tile` / `Reduce` / `Stage` — keyed into
-  the `schedule` dict); a kernel's structure is read off the node's derived role, not a Python
+- **Loop → tile** (after `lowering/tile`): `LoopOp` nodes are replaced by
+  `TileOp` holding the structural-IR root `op` directly (`tile/ir` — one `Fold` kind), structural
+  placement, one accepted site-indexed `ClassicSchedule`, and separate `ClassicMaterialization`
+  facts. A kernel's structure is read from each node's derived classification, not a Python kernel
   type. `010_lift` lifts the `Fold` tree (the loop nest reconstructed on demand, each reduce `Loop`
   carrying its `AxisRole` — the ONLY loop annotation; the algebra is the term's own
   `lift` / `(init, combine)`) with an UNMAPPED `Placement`;
-  The tile schedule maps the free
-  axes onto the grid and decides the reduce `Reduce` via the single
+  The tile schedule maps the free axes onto the grid and decides the reduce `Reduce` via the single
   `REDUCE` codec knob (`g<n>` cta / `coop` (its width in `WORK`) / `r<n>` reg; the
   decision hierarchy = env pin > the deploy evidence hierarchy, and nothing
   else — there is no default partition). The knob is ephemeral — resolved here
-  into the schedule's
-  `Reduce`; the combine stays the `Fold` node's stored program. Any static
+  into the typed assignment's `Reduce`; the combine stays the `Fold` node's stored program. Any static
   `PLANAR` / `TWISTED` reduce is cooperation-eligible (degenerate
   `sum`/`max`/`mean` AND twisted online-softmax, scalar AND
   full-row outputs), and the schedule enumerates the serial fold beside every
@@ -614,9 +622,10 @@ overlapping producer cones become one multi-result operand edge. Scoped lambda e
 canonical Folds. A separate pre-scheduling rewrite joins equivalent maximum and exp-weighted sibling Folds into the
 general `(maximum, denominator, expectations…)` twisted carrier, including when contraction canonicalization has
 nested the statistics inside a computed probability edge; softmax and masked or unmasked SDPA are arity variants, not
-separate matchers. There is no Tile IR classification or placement-cut phase. Scheduling annotates the rewritten Fold
-sites through `TileOp.schedule`; independent roots combine only schedules with equal physical output-axis tile widths
-and unit counts, and unsupported shapes remain unmapped.
+separate matchers. Placement and cross-CTA split are structural phases before site construction. Classic scheduling
+classifies the resulting Fold tree, assigns each node once and every consumer operand edge independently, then stores
+one complete typed assignment on `TileOp.classic`. Unsupported shapes remain unmapped; scheduling never annotates or
+rewrites the Fold tree.
 
 See [`tile/ARCHITECTURE.md`](tile/ARCHITECTURE.md) for the exact storage and boundary contract.
 

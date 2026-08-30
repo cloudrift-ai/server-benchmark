@@ -14,10 +14,9 @@ of its bound name), not by sitting in a statement list. The term becomes stateme
 place, :meth:`Fold.lower` / :attr:`Fold.loop`. See ``ir/ARCHITECTURE.md``, "Pure terms vs
 statements".
 
-The schedule is deliberately absent: the ``tile`` / ``reduce`` / ``stage`` slices live in
-``TileOp.schedule`` (``ir/tile/ir.py``), keyed by the tree-path codec, so the term is IMMUTABLE
-across the whole schedule search and kernel identity (:meth:`Fold.structural_key`) is the algebra
-alone.
+The schedule is deliberately absent: an accepted, site-indexed ``ClassicSchedule`` lives on the
+``TileOp`` boundary (``ir/tile/ir.py``), so the term is IMMUTABLE across the whole schedule search
+and kernel identity (:meth:`Fold.structural_key`) is the algebra alone.
 """
 
 from __future__ import annotations
@@ -260,7 +259,7 @@ class Fold:
     never stored. The fold ``Loop`` is **synthesized on
     demand** (:attr:`loop`), never stored — so the same node tiles under any
     :class:`~emmy.compiler.ir.schedule.Reduce`, which is not a field here: the reduce
-    partition is a SLICE in ``TileOp.schedule``, read through ``ops.Sched``.
+    partition is a site choice in ``TileOp.classic``, read through ``ops.Sched``.
 
     A reduce whose per-step partial COMPOSES another node — split-K's ``Fold ⊃ Fold``
     (whose ``axis`` ``ksplit`` differs from the inner ``k_axis`` ``kslice``, so no double-reduce),
@@ -274,9 +273,9 @@ class Fold:
     that flattens it to the synthesized loop.
 
     The reduce PARTITION (:class:`Reduce` — GRID split / BLOCK coop / REG ILP) is the schedule's,
-    not the node's: it is keyed into ``TileOp.schedule`` and read through ``ops.Sched``, which is why
-    ``lower`` cannot see it and ``Op.cache_key`` stays byte-identical whichever partition the fork
-    picked. See the NO-schedule-fields note on ``operands`` below."""
+    not the node's: it is selected for the node site in ``TileOp.classic`` and read through
+    ``ops.Sched``, which is why ``lower`` cannot see it and ``Op.cache_key`` stays byte-identical
+    whichever partition the fork picked. See the NO-schedule-fields note on ``operands`` below."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
 
@@ -289,9 +288,9 @@ class Fold:
     # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
     # needs. ``lower`` splices each edge's body before its first use (:func:`splice_operands`).
     operands: tuple = ()
-    # NO schedule fields: the ``tile`` / ``reduce`` / ``stage`` slices live in
-    # ``TileOp.schedule``, keyed by the tree-path codec key — the term is pure algebra, IMMUTABLE
-    # across the whole schedule search (a fork is a different map, never a rebuilt tree).
+    # NO schedule fields: node and edge choices live in ``TileOp.classic`` — the term is pure
+    # algebra, IMMUTABLE across the whole schedule search (a fork is a different assignment,
+    # never a rebuilt tree).
     # A cross-CTA SLICE of the stream (flash split-KV) is not spelled here: ``035_split_reduce``
     # shrinks ``axis`` to the slice length and the slice's absolute base / end ride that axis's
     # :class:`~emmy.compiler.ir.axis.Window` — ONE windowing vocabulary, the same one an axis's
@@ -565,7 +564,7 @@ class Fold:
         slot; sharing never duplicates its load.
 
         Placement and schedule live nowhere here: the ``(m, n)`` axes ride ``TileOp.place`` and the
-        slices ``TileOp.schedule``, so a node's identity is its algebra alone."""
+        typed assignment rides ``TileOp.classic``, so a node's identity is its algebra alone."""
         mul = ElementwiseImpl(product) if isinstance(product, str) else product
         plus = ElementwiseImpl(fold_op) if isinstance(fold_op, str) else fold_op
         if not (plus.associative and plus.commutative and plus.has_identity and mul.distributes_over(plus)):
@@ -882,9 +881,9 @@ def edge_refs_axis(edge, name: str) -> bool:
     can address) are the same question, so they share this one read.
 
     SCOPED: a nested loop that RE-BINDS the name shadows it, and indices under it name that inner
-    axis, not the enclosing one. Axis names collide across a tree by design (the codec spells
-    ``REDUCE@a.fold.k`` exactly for a cone statistic whose axis name matches the contraction's), so
-    an unscoped scan would read a row-invariant statistic as k-varying."""
+    axis, not the enclosing one. Axis names collide across a tree by design, while schedule identity
+    comes from the containing node site, so an unscoped scan would read a row-invariant statistic
+    as k-varying."""
 
     def refs(s: Stmt) -> bool:
         if name in s.binds_axes():  # a node re-binding the name shadows it — ``Fold.binds_axes`` is its iteration var

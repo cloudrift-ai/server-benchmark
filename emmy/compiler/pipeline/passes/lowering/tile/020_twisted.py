@@ -15,7 +15,7 @@ PATTERN = [Pattern("root", TileOp)]
 def rewrite(match: Match, root: Node, ctx=None) -> TileOp:
     del match, ctx
     tile: TileOp = root.op
-    if tile.op is None or tile.place.is_mapped or tile.schedule:
+    if tile.op is None or tile.place.is_mapped or tile.classic is not None:
         raise RuleSkipped("TileOp already scheduled / nothing to rewrite")
     axes = [axis.name for axis in tile.place.free]
     axes.extend(store.sweep.name for store in tile.output_specs if store.sweep is not None)

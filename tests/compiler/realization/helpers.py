@@ -15,7 +15,7 @@ import numpy as np
 import yaml
 
 from emmy.compiler.context import Context
-from emmy.compiler.pipeline.knob import canon_family_value, family_of
+from emmy.compiler.pipeline.knob import family_of, validate_family_value
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
     dump_golden_file,
@@ -200,16 +200,11 @@ def _matching_entry(fresh: dict, entry: dict) -> dict:
 
 
 def canonical_knobs(knobs: dict) -> dict:
-    """The authored knobs in their codec's normal form, strictly.
-
-    Strictness is the point: ``canon_family_value`` normally swallows a ``ValueError`` and returns
-    the raw string, which is exactly how a retired spelling survives to match no candidate and
-    report as a compiler lockout.
-    """
+    """The authored knobs after exact classic codec validation."""
     canonical = {}
     for name, value in knobs.items():
         try:
-            canonical[name] = canon_family_value(name, value, strict=True)
+            canonical[name] = validate_family_value(name, value)
         except ValueError as exc:
             raise CaseError(f"knob {name}={value!r} is not a spelling this compiler's codec accepts: {exc}") from exc
     return canonical

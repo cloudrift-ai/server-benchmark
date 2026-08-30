@@ -39,7 +39,7 @@ configs:
     knobs:
       WORK: t128
       RASTER: ''
-      TILE@n0: ''
+      TILE@n0: f1
       REDUCE@n0: ''
       REDUCE@n3: ''
       STAGE@n0.e0: ''

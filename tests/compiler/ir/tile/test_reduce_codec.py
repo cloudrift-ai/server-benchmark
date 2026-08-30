@@ -7,10 +7,12 @@ deferred-kernel cross-CTA split) must survive the round-trip so ``035_split_redu
 ``Reduce.finalize`` — it was historically parsed then dropped (``spell`` never re-emitted it),
 making ``g2a`` and ``g2k`` indistinguishable. The round-trip cases themselves live once, in
 ``test_codec_roundtrip.py``, over the wider corpus this file's list was a subset of; what is
-unique here is the OMITTED letter's default, which no round-trip can state.
+unique here is refusing an omitted letter, which no round-trip can state.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from emmy.compiler.ir.schedule import Reduce, Work
 
@@ -20,7 +22,8 @@ _T32 = Work.parse("t32")
 def test_grid_finalize_letter_decodes() -> None:
     assert Reduce.parse("g2a", None).finalize == "atomic"
     assert Reduce.parse("g2k", None).finalize == "kernel"
-    assert Reduce.parse("g2", None).finalize == "kernel"  # default when the letter is omitted
+    with pytest.raises(ValueError, match="not canonical"):
+        Reduce.parse("g2", None)  # the finalize letter is never implicit on the wire
     assert Reduce.parse("coop", _T32).finalize == "kernel"  # no GRID stage → the default value
 
 

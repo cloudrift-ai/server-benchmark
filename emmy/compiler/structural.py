@@ -20,7 +20,7 @@ Implementers today:
   :class:`emmy.compiler.ir.tile.ir.TileOp` — the tile term's α-invariant
   identity, digested bottom-up from per-node canonical content plus the
   children's cached keys (``ir/tile/_key.py``); excludes placement,
-  schedule slices, workers and stores.
+  classic schedule, materialization, workers and stores.
 - :class:`emmy.compiler.context.Context` — codegen-affecting
   compilation knobs (compute capability today; tuning overrides as they
   land). Excludes ambient I/O fields (dump dirs, verbosity, the session

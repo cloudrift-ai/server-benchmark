@@ -5894,99 +5894,21 @@ configs:
     loop: 0
   realizations:
   - bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: false
-    name: post-sym.k_linear_5d061b.4f57a8700b55.m1
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g8k/coop-t
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    measurements:
-      emmy_us: 10.234686097160715
-      reference_us: 10.233263143428879
-      reference_backend: emmy-greedy
-  - bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    name: post-sym.k_linear_5d061b.4f57a8700b55.m32
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g8k
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x2/k2
-      WORK: w1x8
-    measurements:
-      emmy_us: 12.296275845889387
-      reference_us: 12.294363569129597
-      reference_backend: emmy-greedy
-  - bindings:
       num_tokens: 4096
     pins:
       FAST_MATH: false
     name: post-sym.k_linear_5d061b.4f57a8700b55.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      TILE@n1: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE@n1: ''
+      STAGE@n1.e0: d2/smem-tma
+      STAGE@n1.e1: d2/smem-tma
       WORK: w4x2
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 645.5360054969788
       reference_us: 646.4640200138092
-      reference_backend: emmy-greedy
-  - bindings: {}
-    pins:
-      FAST_MATH: false
-    name: post-sym.k_linear_5d061b.4f57a8700b55.dynamic
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g4k
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
-      WORK: w4x2
-    measurements:
-      emmy_us: 92.81309084458785
-      reference_us: 93.39054606177591
-      reference_backend: emmy-greedy
-  - bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: true
-    name: post-sym.k_linear_5d061b.4f57a8700b55.m1.fm
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g8k/coop-t
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    measurements:
-      emmy_us: 10.234166346070275
-      reference_us: 10.233778349220863
-      reference_backend: emmy-greedy
-  - bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: true
-    name: post-sym.k_linear_5d061b.4f57a8700b55.m32.fm
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g8k
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x2/k2
-      WORK: w1x8
-    measurements:
-      emmy_us: 12.294762965404626
-      reference_us: 12.296908958391711
       reference_backend: emmy-greedy
   - bindings:
       num_tokens: 4096
@@ -5994,30 +5916,16 @@ configs:
       FAST_MATH: true
     name: post-sym.k_linear_5d061b.4f57a8700b55.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      TILE@n1: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE@n1: ''
+      STAGE@n1.e0: d2/smem-tma
+      STAGE@n1.e1: d2/smem-tma
       WORK: w4x2
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 645.5279886722565
       reference_us: 645.4240083694458
-      reference_backend: emmy-greedy
-  - bindings: {}
-    pins:
-      FAST_MATH: true
-    name: post-sym.k_linear_5d061b.4f57a8700b55.dynamic.fm
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g4k
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
-      WORK: w4x2
-    measurements:
-      emmy_us: 92.95418045737526
-      reference_us: 93.27854351563889
       reference_backend: emmy-greedy
 - program: 0
   target:
@@ -6029,12 +5937,10 @@ configs:
       FAST_MATH: false
     name: post-sym.k_mean_c2914c.b1a7520dd46a.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.0476693471041605
       reference_us: 3.0484641235325665
@@ -6045,12 +5951,10 @@ configs:
       FAST_MATH: false
     name: post-sym.k_mean_c2914c.b1a7520dd46a.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.7011556051395558
       reference_us: 3.7035852670669556
@@ -6061,12 +5965,10 @@ configs:
       FAST_MATH: false
     name: post-sym.k_mean_c2914c.b1a7520dd46a.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t128
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 73.1439973626818
       reference_us: 73.20457271167211
@@ -6076,12 +5978,10 @@ configs:
       FAST_MATH: false
     name: post-sym.k_mean_c2914c.b1a7520dd46a.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 6.510535875956217
       reference_us: 6.516705735836155
@@ -6092,12 +5992,10 @@ configs:
       FAST_MATH: true
     name: post-sym.k_mean_c2914c.b1a7520dd46a.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.0497559686986406
       reference_us: 3.0488423253453676
@@ -6108,12 +6006,10 @@ configs:
       FAST_MATH: true
     name: post-sym.k_mean_c2914c.b1a7520dd46a.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.702992642367328
       reference_us: 3.7037628668325917
@@ -6124,12 +6020,10 @@ configs:
       FAST_MATH: true
     name: post-sym.k_mean_c2914c.b1a7520dd46a.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t128
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 73.16571474075317
       reference_us: 73.2000001839229
@@ -6139,12 +6033,10 @@ configs:
       FAST_MATH: true
     name: post-sym.k_mean_c2914c.b1a7520dd46a.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 6.497426160415398
       reference_us: 6.490594041882787
@@ -6154,33 +6046,18 @@ configs:
     loop: 2
   realizations:
   - bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: false
-    name: post-sym.k_linear_350cc3.9adc74c89722.m1
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g16k/coop-t
-      STAGE: ''
-      TILE: ''
-      WORK: t256
-    measurements:
-      emmy_us: 73.71771335601807
-      reference_us: 73.67542811802456
-      reference_backend: emmy-greedy
-  - bindings:
       num_tokens: 32
     pins:
       FAST_MATH: false
     name: post-sym.k_linear_350cc3.9adc74c89722.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k8
+      TILE@n1: mma_m16n8k16_f16_f32/f2x4/k8
+      REDUCE@n1: ''
+      STAGE@n1.e0: d1/smem-tma
+      STAGE@n1.e1: d1/smem-tma
       WORK: w1x1
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 178.42933535575867
       reference_us: 178.13066641489667
@@ -6191,46 +6068,16 @@ configs:
       FAST_MATH: false
     name: post-sym.k_linear_350cc3.9adc74c89722.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      TILE@n1: mma_m16n8k16_f16_f32/f4x8/k4
+      REDUCE@n1: ''
+      STAGE@n1.e0: d2/smem-tma
+      STAGE@n1.e1: d2/smem-tma
       WORK: w4x2
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 2441.9840574264526
       reference_us: 2442.639946937561
-      reference_backend: emmy-greedy
-  - bindings: {}
-    pins:
-      FAST_MATH: false
-    name: post-sym.k_linear_350cc3.9adc74c89722.dynamic
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g2k
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
-      WORK: w4x2
-    measurements:
-      emmy_us: 324.3680000305176
-      reference_us: 324.79466001192725
-      reference_backend: emmy-greedy
-  - bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: true
-    name: post-sym.k_linear_350cc3.9adc74c89722.m1.fm
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g16k/coop-t
-      STAGE: ''
-      TILE: ''
-      WORK: t256
-    measurements:
-      emmy_us: 73.72114062309265
-      reference_us: 73.66742832320077
       reference_backend: emmy-greedy
   - bindings:
       num_tokens: 32
@@ -6238,12 +6085,13 @@ configs:
       FAST_MATH: true
     name: post-sym.k_linear_350cc3.9adc74c89722.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k8
+      TILE@n1: mma_m16n8k16_f16_f32/f2x4/k8
+      REDUCE@n1: ''
+      STAGE@n1.e0: d1/smem-tma
+      STAGE@n1.e1: d1/smem-tma
       WORK: w1x1
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 177.75999506314594
       reference_us: 178.01333467165628
@@ -6254,30 +6102,16 @@ configs:
       FAST_MATH: true
     name: post-sym.k_linear_350cc3.9adc74c89722.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      TILE@n1: mma_m16n8k16_f16_f32/f4x8/k4
+      REDUCE@n1: ''
+      STAGE@n1.e0: d2/smem-tma
+      STAGE@n1.e1: d2/smem-tma
       WORK: w4x2
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 2446.6400146484375
       reference_us: 2441.7600631713867
-      reference_backend: emmy-greedy
-  - bindings: {}
-    pins:
-      FAST_MATH: true
-    name: post-sym.k_linear_350cc3.9adc74c89722.dynamic.fm
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g2k
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
-      WORK: w4x2
-    measurements:
-      emmy_us: 325.4079918066661
-      reference_us: 325.1520097255707
       reference_backend: emmy-greedy
 - program: 0
   target:
@@ -6289,12 +6123,10 @@ configs:
       FAST_MATH: false
     name: post-sym.k_mean_c7eb9e.7e3b7010a922.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.090377654822618
       reference_us: 3.091368420574318
@@ -6305,12 +6137,10 @@ configs:
       FAST_MATH: false
     name: post-sym.k_mean_c7eb9e.7e3b7010a922.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.7310840609361646
       reference_us: 3.731223851887148
@@ -6321,12 +6151,10 @@ configs:
       FAST_MATH: false
     name: post-sym.k_mean_c7eb9e.7e3b7010a922.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t128
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 73.58171684401376
       reference_us: 73.61599802970886
@@ -6336,12 +6164,10 @@ configs:
       FAST_MATH: false
     name: post-sym.k_mean_c7eb9e.7e3b7010a922.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 6.475166825335311
       reference_us: 6.486170042574017
@@ -6352,12 +6178,10 @@ configs:
       FAST_MATH: true
     name: post-sym.k_mean_c7eb9e.7e3b7010a922.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.0908234901841585
       reference_us: 3.091071227755709
@@ -6368,12 +6192,10 @@ configs:
       FAST_MATH: true
     name: post-sym.k_mean_c7eb9e.7e3b7010a922.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.7383789065312136
       reference_us: 3.738079209019562
@@ -6384,12 +6206,10 @@ configs:
       FAST_MATH: true
     name: post-sym.k_mean_c7eb9e.7e3b7010a922.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t128
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 73.48914231572833
       reference_us: 73.61714329038348
@@ -6399,12 +6219,10 @@ configs:
       FAST_MATH: true
     name: post-sym.k_mean_c7eb9e.7e3b7010a922.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 6.481102003467153
       reference_us: 6.487792188471014
@@ -6414,99 +6232,21 @@ configs:
     loop: 4
   realizations:
   - bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: false
-    name: post-sym-global.k_linear_1d1123.704cb1e5da0c.m1
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g16k/coop-t
-      STAGE: ''
-      TILE: ''
-      WORK: t256
-    measurements:
-      emmy_us: 15.916563325644658
-      reference_us: 16.172888378302254
-      reference_backend: emmy-greedy
-  - bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    name: post-sym-global.k_linear_1d1123.704cb1e5da0c.m32
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g8k
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x2/k2
-      WORK: w1x8
-    measurements:
-      emmy_us: 20.48400044441223
-      reference_us: 20.49138454290537
-      reference_backend: emmy-greedy
-  - bindings:
       num_tokens: 4096
     pins:
       FAST_MATH: false
     name: post-sym-global.k_linear_1d1123.704cb1e5da0c.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      TILE@n1: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE@n1: ''
+      STAGE@n1.e0: d2/smem-tma
+      STAGE@n1.e1: d2/smem-tma
       WORK: w4x2
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1282.751977443695
       reference_us: 1284.2879891395569
-      reference_backend: emmy-greedy
-  - bindings: {}
-    pins:
-      FAST_MATH: false
-    name: post-sym-global.k_linear_1d1123.704cb1e5da0c.dynamic
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g2k
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
-      WORK: w4x2
-    measurements:
-      emmy_us: 174.95733499526978
-      reference_us: 174.68800147374472
-      reference_backend: emmy-greedy
-  - bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: true
-    name: post-sym-global.k_linear_1d1123.704cb1e5da0c.m1.fm
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g16k/coop-t
-      STAGE: ''
-      TILE: ''
-      WORK: t256
-    measurements:
-      emmy_us: 16.34368657226294
-      reference_us: 16.366422176361084
-      reference_backend: emmy-greedy
-  - bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: true
-    name: post-sym-global.k_linear_1d1123.704cb1e5da0c.m32.fm
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g8k
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x2/k2
-      WORK: w1x8
-    measurements:
-      emmy_us: 20.493538333819462
-      reference_us: 20.49292394748101
       reference_backend: emmy-greedy
   - bindings:
       num_tokens: 4096
@@ -6514,30 +6254,16 @@ configs:
       FAST_MATH: true
     name: post-sym-global.k_linear_1d1123.704cb1e5da0c.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      TILE@n1: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE@n1: ''
+      STAGE@n1.e0: d2/smem-tma
+      STAGE@n1.e1: d2/smem-tma
       WORK: w4x2
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1284.3520045280457
       reference_us: 1283.664047718048
-      reference_backend: emmy-greedy
-  - bindings: {}
-    pins:
-      FAST_MATH: true
-    name: post-sym-global.k_linear_1d1123.704cb1e5da0c.dynamic.fm
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: g2k
-      STAGE: d2/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
-      WORK: w4x2
-    measurements:
-      emmy_us: 174.9386688073476
-      reference_us: 175.11999607086182
       reference_backend: emmy-greedy
 - program: 2
   target:
@@ -6549,12 +6275,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_1cc7bd.eafcfeb3643a.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7223190964248201
       reference_us: 0.7650895319156688
@@ -6565,12 +6289,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_1cc7bd.eafcfeb3643a.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7937004431963347
       reference_us: 0.8485056788482852
@@ -6581,12 +6303,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_1cc7bd.eafcfeb3643a.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 29.120941372478708
       reference_us: 29.12658803603228
@@ -6596,12 +6316,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_1cc7bd.eafcfeb3643a.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.2259613275527954
       reference_us: 3.22740193834035
@@ -6612,12 +6330,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_1cc7bd.eafcfeb3643a.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7220924240947723
       reference_us: 0.7664657297689561
@@ -6628,12 +6344,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_1cc7bd.eafcfeb3643a.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.793804800999214
       reference_us: 0.8520163093357184
@@ -6644,12 +6358,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_1cc7bd.eafcfeb3643a.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 29.1237647042555
       reference_us: 29.159059419351465
@@ -6659,12 +6371,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_1cc7bd.eafcfeb3643a.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.2296180725097656
       reference_us: 3.229721657280783
@@ -6679,12 +6389,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_b99500.1d8c9e0de9ff.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7035816738457965
       reference_us: 0.7462801047248134
@@ -6695,12 +6403,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_b99500.1d8c9e0de9ff.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7557378585815013
       reference_us: 0.8236769022886548
@@ -6711,12 +6417,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_b99500.1d8c9e0de9ff.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 10.580085059429738
       reference_us: 10.585702163107852
@@ -6726,12 +6430,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_b99500.1d8c9e0de9ff.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.922956497091107
       reference_us: 1.9820572038378488
@@ -6742,12 +6444,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_b99500.1d8c9e0de9ff.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7039211726884163
       reference_us: 0.7464914200820524
@@ -6758,12 +6458,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_b99500.1d8c9e0de9ff.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7562180361606439
       reference_us: 0.8247199143851749
@@ -6774,12 +6472,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_b99500.1d8c9e0de9ff.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 10.560168718036852
       reference_us: 10.556968889738386
@@ -6789,12 +6485,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_b99500.1d8c9e0de9ff.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.9199386145548298
       reference_us: 1.9799365055939506
@@ -6809,12 +6503,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_6ddce9.f8c5347c61c9.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.6956859592807237
       reference_us: 0.7432565148435117
@@ -6825,12 +6517,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_6ddce9.f8c5347c61c9.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7488557110563583
       reference_us: 0.8267396085962431
@@ -6841,12 +6531,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_6ddce9.f8c5347c61c9.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 10.526989321959647
       reference_us: 10.52783162970292
@@ -6856,12 +6544,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_linear_pointwise_6ddce9.f8c5347c61c9.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.9288957118988037
       reference_us: 1.98844362114242
@@ -6872,12 +6558,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_6ddce9.f8c5347c61c9.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.6958103084162996
       reference_us: 0.7433791501472504
@@ -6888,12 +6572,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_6ddce9.f8c5347c61c9.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7499721693954922
       reference_us: 0.8275555338630234
@@ -6904,12 +6586,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_6ddce9.f8c5347c61c9.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 10.549389061174896
       reference_us: 10.548210771460283
@@ -6919,12 +6599,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_linear_pointwise_6ddce9.f8c5347c61c9.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.9311399293090008
       reference_us: 1.9896845974608095
@@ -6939,12 +6617,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_0db6ad.4a40e9b9a32e.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.0500505770293196
       reference_us: 1.145419762096387
@@ -6955,12 +6631,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_0db6ad.4a40e9b9a32e.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.205146312713623
       reference_us: 1.205558300166825
@@ -6971,12 +6645,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_0db6ad.4a40e9b9a32e.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 15.995871155492722
       reference_us: 16.196950001416543
@@ -6986,12 +6658,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_0db6ad.4a40e9b9a32e.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.206585285364623
       reference_us: 3.2087156277649536
@@ -7002,12 +6672,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_0db6ad.4a40e9b9a32e.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.0506161943971173
       reference_us: 1.1461100993900124
@@ -7018,12 +6686,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_0db6ad.4a40e9b9a32e.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.2039797908449792
       reference_us: 1.2041315182242958
@@ -7034,12 +6700,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_0db6ad.4a40e9b9a32e.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 16.027096779115737
       reference_us: 16.236590068848407
@@ -7049,12 +6713,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_0db6ad.4a40e9b9a32e.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t8
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.1974374240262313
       reference_us: 3.2080256670617597
@@ -7069,12 +6731,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_9ab739.a4c027e03156.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.723647769541762
       reference_us: 0.8065917358180109
@@ -7085,12 +6745,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_9ab739.a4c027e03156.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.8089701746616357
       reference_us: 0.9567938737878406
@@ -7101,12 +6759,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_9ab739.a4c027e03156.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 10.105918673573107
       reference_us: 10.326666447023552
@@ -7116,12 +6772,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_9ab739.a4c027e03156.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 2.0046565952986635
       reference_us: 2.0326773671738363
@@ -7132,12 +6786,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_9ab739.a4c027e03156.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7240247065825722
       reference_us: 0.8070436763223072
@@ -7148,12 +6800,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_9ab739.a4c027e03156.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.8090932365916679
       reference_us: 0.9566604208208886
@@ -7164,12 +6814,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_9ab739.a4c027e03156.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 10.081484452965334
       reference_us: 10.28583322962125
@@ -7179,12 +6827,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_9ab739.a4c027e03156.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 2.0006589438160365
       reference_us: 2.0202875737415447
@@ -7199,12 +6845,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_f62a04.381aa028fb6b.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.2253194009065342
       reference_us: 1.5057165687213039
@@ -7215,12 +6859,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_f62a04.381aa028fb6b.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.562424277931846
       reference_us: 1.5625773735766142
@@ -7231,12 +6873,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_f62a04.381aa028fb6b.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 31.631483185675837
       reference_us: 31.651613212400868
@@ -7246,12 +6886,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_f62a04.381aa028fb6b.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 5.640768398672847
       reference_us: 5.819040955158702
@@ -7262,12 +6900,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_f62a04.381aa028fb6b.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.226370707809757
       reference_us: 1.5059531679522407
@@ -7278,12 +6914,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_f62a04.381aa028fb6b.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.5603021938094894
       reference_us: 1.5592476510702629
@@ -7294,12 +6928,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_f62a04.381aa028fb6b.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 31.802322595350205
       reference_us: 31.796645733617968
@@ -7309,12 +6941,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_f62a04.381aa028fb6b.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 5.6423051545848955
       reference_us: 5.796583653480522
@@ -7329,12 +6959,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_04890c.ed040b8a1ff3.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7119999930113767
       reference_us: 0.7186072396670864
@@ -7345,12 +6973,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_04890c.ed040b8a1ff3.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7971044601538243
       reference_us: 0.7994075994233952
@@ -7361,12 +6987,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_04890c.ed040b8a1ff3.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 11.268010395326947
       reference_us: 11.25914595100317
@@ -7376,12 +7000,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_04890c.ed040b8a1ff3.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 2.058568005211625
       reference_us: 2.06205480385284
@@ -7392,12 +7014,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_04890c.ed040b8a1ff3.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7111141727828348
       reference_us: 0.7168002002395342
@@ -7408,12 +7028,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_04890c.ed040b8a1ff3.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7943210566676264
       reference_us: 0.7978484068925564
@@ -7424,12 +7042,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_04890c.ed040b8a1ff3.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 11.249618583850646
       reference_us: 11.250337188163499
@@ -7439,12 +7055,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_04890c.ed040b8a1ff3.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 2.059503368283253
       reference_us: 2.0595658885512695
@@ -7459,12 +7073,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_a72f61.f06fe3e3362f.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.2084579028473865
       reference_us: 1.476351355663538
@@ -7475,12 +7087,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_a72f61.f06fe3e3362f.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.4590453874663414
       reference_us: 1.4596347077588863
@@ -7491,12 +7101,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_a72f61.f06fe3e3362f.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 16.574933628241222
       reference_us: 18.04479956626892
@@ -7506,12 +7114,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_mean_a72f61.f06fe3e3362f.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.701037058123836
       reference_us: 3.703525883180124
@@ -7522,12 +7128,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_a72f61.f06fe3e3362f.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.216519136054843
       reference_us: 1.484279972690679
@@ -7538,12 +7142,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_a72f61.f06fe3e3362f.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.4590812869019405
       reference_us: 1.46055356875415
@@ -7554,12 +7156,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_a72f61.f06fe3e3362f.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 16.596533358097076
       reference_us: 18.188972746081625
@@ -7569,12 +7169,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_mean_a72f61.f06fe3e3362f.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.7035258831801237
       reference_us: 3.703689387263829
@@ -7589,12 +7187,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_4dde69.026966882bf0.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.6903977807384828
       reference_us: 0.7064571763637297
@@ -7605,12 +7201,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_4dde69.026966882bf0.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7510736696702196
       reference_us: 0.7746365275009657
@@ -7621,12 +7215,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_4dde69.026966882bf0.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 6.087902479055451
       reference_us: 6.091533229591139
@@ -7636,12 +7228,10 @@ configs:
       FAST_MATH: false
     name: pre-sym.k_reshape_4dde69.026966882bf0.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.363072867900476
       reference_us: 1.5708537568480976
@@ -7652,12 +7242,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_4dde69.026966882bf0.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.6905467246230499
       reference_us: 0.7071512986172908
@@ -7668,12 +7256,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_4dde69.026966882bf0.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7514643203404431
       reference_us: 0.7764607891356332
@@ -7684,12 +7270,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_4dde69.026966882bf0.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 6.098048716056638
       reference_us: 6.098552167049946
@@ -7699,12 +7283,10 @@ configs:
       FAST_MATH: true
     name: pre-sym.k_reshape_4dde69.026966882bf0.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.3632848556155932
       reference_us: 1.572117920254823
@@ -7719,12 +7301,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_2fcec6.d48ec865c8c6.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7221186600959766
       reference_us: 0.7924703302291629
@@ -7735,12 +7315,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_2fcec6.d48ec865c8c6.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.9923671683636552
       reference_us: 1.0104663164295005
@@ -7751,12 +7329,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_2fcec6.d48ec865c8c6.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 135.72571533066886
       reference_us: 136.14628570420402
@@ -7766,12 +7342,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_2fcec6.d48ec865c8c6.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 5.669636482542211
       reference_us: 5.814604634462401
@@ -7782,12 +7356,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_2fcec6.d48ec865c8c6.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7237448299941227
       reference_us: 0.7941724389290055
@@ -7798,12 +7370,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_2fcec6.d48ec865c8c6.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.9947420643052627
       reference_us: 1.0123875874753037
@@ -7814,12 +7384,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_2fcec6.d48ec865c8c6.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 136.146285704204
       reference_us: 135.96799969673157
@@ -7829,12 +7397,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_2fcec6.d48ec865c8c6.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 5.675387010945903
       reference_us: 5.827175274716256
@@ -7849,12 +7415,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.6682630601759647
       reference_us: 0.7168819748348686
@@ -7865,12 +7429,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7469902339842845
       reference_us: 0.8273677246611422
@@ -7881,12 +7443,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.1706413579365567
       reference_us: 3.1684063729785734
@@ -7896,12 +7456,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.9660871135069117
       reference_us: 0.9815905272491334
@@ -7912,12 +7470,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.6686575017289624
       reference_us: 0.7169952139810087
@@ -7928,12 +7484,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7479983554702881
       reference_us: 0.8281244808957687
@@ -7944,12 +7498,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.1750096215142145
       reference_us: 3.1761425222548807
@@ -7959,12 +7511,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.9655272128123473
       reference_us: 0.9811445557848425
@@ -7979,12 +7529,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_b5b045.31e0ecb905ba.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.399775930479461
       reference_us: 1.6910078901979106
@@ -7995,12 +7543,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_b5b045.31e0ecb905ba.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.40403931249186
       reference_us: 1.4039100974463343
@@ -8011,12 +7557,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_b5b045.31e0ecb905ba.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 5.381681169233015
       reference_us: 5.510187149047852
@@ -8026,12 +7570,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_b5b045.31e0ecb905ba.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.9970787370673517
       reference_us: 1.9982749850810186
@@ -8042,12 +7584,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_b5b045.31e0ecb905ba.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.3997923763699536
       reference_us: 1.6923660949125128
@@ -8058,12 +7598,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_b5b045.31e0ecb905ba.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.4038425413537234
       reference_us: 1.4043820373127969
@@ -8074,12 +7612,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_b5b045.31e0ecb905ba.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 5.4218142084736645
       reference_us: 5.557599829302894
@@ -8089,12 +7625,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_b5b045.31e0ecb905ba.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 2.0086297377860314
       reference_us: 2.00808078351647
@@ -8109,12 +7643,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.6682630601759647
       reference_us: 0.7168819748348686
@@ -8125,12 +7657,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7469902339842845
       reference_us: 0.8273677246611422
@@ -8141,12 +7671,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.1706413579365567
       reference_us: 3.1684063729785734
@@ -8156,12 +7684,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.9660871135069117
       reference_us: 0.9815905272491334
@@ -8172,12 +7698,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.6686575017289624
       reference_us: 0.7169952139810087
@@ -8188,12 +7712,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7479983554702881
       reference_us: 0.8281244808957687
@@ -8204,12 +7726,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.1750096215142145
       reference_us: 3.1761425222548807
@@ -8219,12 +7739,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_linear_pointwise_8ae7e5.092fc8e1a75c.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.9655272128123473
       reference_us: 0.9811445557848425
@@ -8239,12 +7757,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_d21432.96db75fac986.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t128
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.192496400459854
       reference_us: 1.192410957306777
@@ -8255,12 +7771,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_d21432.96db75fac986.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.2043476604815702
       reference_us: 1.2044583787676508
@@ -8271,12 +7785,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_d21432.96db75fac986.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t128
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 4.622213923653891
       reference_us: 4.633215759609399
@@ -8286,12 +7798,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_d21432.96db75fac986.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.5468585830667831
       reference_us: 1.5477074041799006
@@ -8302,12 +7812,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_d21432.96db75fac986.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t128
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.1924492059500271
       reference_us: 1.1927066794900891
@@ -8318,12 +7826,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_d21432.96db75fac986.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.2131434513463648
       reference_us: 1.2131766349919066
@@ -8334,12 +7840,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_d21432.96db75fac986.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t128
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 4.620745488545916
       reference_us: 4.616855743319489
@@ -8349,12 +7853,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_d21432.96db75fac986.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.5477542125727612
       reference_us: 1.546908090444528
@@ -8369,12 +7871,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_bf618d.5d5af8799d18.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.3697095929759824
       reference_us: 2.1352242349344355
@@ -8385,12 +7885,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_bf618d.5d5af8799d18.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 2.0195452005008443
       reference_us: 2.0202561670114085
@@ -8401,12 +7899,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_bf618d.5d5af8799d18.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 124.23599883913994
       reference_us: 124.62799996137619
@@ -8416,12 +7912,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_mean_bf618d.5d5af8799d18.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t128
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 8.708350752529345
       reference_us: 8.682245748084888
@@ -8432,12 +7926,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_bf618d.5d5af8799d18.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t512
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 1.3694419150091108
       reference_us: 2.136376105312608
@@ -8448,12 +7940,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_bf618d.5d5af8799d18.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t256
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 2.020344268103837
       reference_us: 2.0204413507508083
@@ -8464,12 +7954,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_bf618d.5d5af8799d18.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t64
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 124.24799799919128
       reference_us: 124.64600056409836
@@ -8479,12 +7967,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_mean_bf618d.5d5af8799d18.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
+      REDUCE@n1: coop
       WORK: t128
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 8.677979072064574
       reference_us: 8.724007419401541
@@ -8499,12 +7985,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_reshape_c6ad9d.5d29b0423af9.m1
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7197694788924415
       reference_us: 0.7499978337954284
@@ -8515,12 +7999,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_reshape_c6ad9d.5d29b0423af9.m32
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.864166459473354
       reference_us: 0.862322358174566
@@ -8531,12 +8013,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_reshape_c6ad9d.5d29b0423af9.m4096
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 69.09485587051935
       reference_us: 69.14057263306209
@@ -8546,12 +8026,10 @@ configs:
       FAST_MATH: false
     name: pre-sym-global.k_reshape_c6ad9d.5d29b0423af9.dynamic
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.4411034707365364
       reference_us: 4.405546723264992
@@ -8562,12 +8040,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_reshape_c6ad9d.5d29b0423af9.m1.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
+      TILE@n0: ''
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.7196596907874016
       reference_us: 0.7501740738819407
@@ -8578,12 +8054,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_reshape_c6ad9d.5d29b0423af9.m32.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f2
+      TILE@n0: f2
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 0.863231042632757
       reference_us: 0.8635441583779446
@@ -8594,12 +8068,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_reshape_c6ad9d.5d29b0423af9.m4096.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 69.09942839826857
       reference_us: 69.09828739506858
@@ -8609,12 +8081,10 @@ configs:
       FAST_MATH: true
     name: pre-sym-global.k_reshape_c6ad9d.5d29b0423af9.dynamic.fm
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4
+      TILE@n0: f4
       WORK: ''
+      RASTER: ''
+      LOOPIFY: '0'
     measurements:
       emmy_us: 3.4422620617110153
       reference_us: 4.411893872033179
@@ -8700,42 +8170,6 @@ configs:
     measurements:
       emmy_us: 98980.88073730469
       reference_us: 98984.68780517578
-      reference_backend: emmy-greedy
-- program: 0
-  target:
-    loop: 22
-  realizations:
-  - bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: false
-    name: post-sym.k_linear_mean_reduce_1831ce.901b51c12c65.m1
-    knobs:
-      REDUCE@a0: coop
-      WORK: t512
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-      LOOPIFY: '0'
-    measurements:
-      emmy_us: 15436.863899230957
-      reference_us: 60147.071838378906
-      reference_backend: emmy-greedy
-  - bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: true
-    name: post-sym.k_linear_mean_reduce_1831ce.901b51c12c65.m1.fm
-    knobs:
-      REDUCE@a0: coop
-      WORK: t512
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-      LOOPIFY: '0'
-    measurements:
-      emmy_us: 15408.127784729004
-      reference_us: 60215.98434448242
       reference_backend: emmy-greedy
 - program: 2
   target:

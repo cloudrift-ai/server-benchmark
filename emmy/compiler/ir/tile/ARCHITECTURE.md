@@ -200,8 +200,34 @@ while retaining exact values throughout the ordinary extent range.
 `TileOp` owns facts deliberately excluded from the Fold tree: placement, the accepted `ClassicSchedule`, its separate
 `ClassicMaterialization`, knobs, and output specifications. The semantic assignment contains choices only;
 site-indexed placed tile geometry and resolved transport sizes are lowering facts and cannot enter a row identity.
-`ops.Sched` is the lowering view over those typed fields. The keyed slice map remains a migration detail until all
-materializers consume the typed fields; it is not a second semantic schedule.
+`ops.Sched` is a read-only lowering view over those typed fields. There is no keyed slice map, per-node schedule
+field, compatibility adapter, alias codec, or dual reader.
+
+A scheduled `TileOp` must carry both typed fields. Its materialization contains exactly the contraction sites whose
+accepted tiles require placed geometry and exactly the edges whose accepted transport is non-direct. Every placed tile
+must equal the geometry derived from the structural placement and its axis-free choice; every resolved stage must retain
+its edge's choice. Construction rejects missing, extra, mismatched, or partly attached facts.
+
+`ir/classic_schedule.py` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
+
+- `ClassicProblem` contains the unscheduled Fold root and target. `SiteIndex` assigns one stable `NodeSite` per Fold
+  identity and one distinct `EdgeSite` per consumer operand position, including multiple uses of one producer.
+- `classify` reads one node site without target input. A contraction records consumer-relative operand positions;
+  it does not mint alternate nodes or edge identities.
+- `KernelSchedule`, `ProjectionSchedule` / `ReductionSchedule`, and `EdgeSchedule` contain choices only. They do not
+  cache paths, classifications, shapes, placed geometry, resolved shared-memory sizes, or codec spellings.
+- `ClassicScheduleContext.accepts` checks complete coverage, classification arms, worker inventory, target thread
+  limits, producer-band/TMA agreement, raster eligibility, target availability, and node/edge transport agreement
+  without mutating the problem or assignment.
+- The production walk keeps its catalogs and partial-assignment pruning private. Every leaf is decoded into one typed
+  schedule and accepted by the context before search can observe it; an encoded dictionary is never a semantic leaf.
+- `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`; node keys are exact
+  `TILE@n<N>` / `REDUCE@n<N>` sites; transport keys are exact `STAGE@n<N>.e<M>` edge sites. Decode requires the full
+  key set and rejects aliases, missing direct values, unknown keys, and semantically refused assignments.
+
+Structural choices are deliberately outside this algebra. A cut or split changes the kernel set first; every fresh
+kernel then constructs a fresh problem and fresh sites. Search ranks encoded accepted leaves and materialization
+consumes the typed assignment, so neither layer defines schedule membership.
 
 `lowering/tile/030_cut` offers kernel placement before scheduling. `PLACE` uses the same tree-path codec to address a
 stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
@@ -211,8 +237,8 @@ placement before scheduling; a scoped cut carries the consumed placement decisio
 directly to scheduling. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation
 families nor filters legal cuts by profitability.
 
-Scheduling sees only the rewritten stored Fold tree. Every Fold is an addressable schedule site; the scheduler does
-not derive alternate classified views or suppress a child because its parent may realize it. A derived unit-axis
+Scheduling sees only the rewritten stored Fold tree. Every Fold has one node site; the scheduler does not suppress a
+child because its parent may realize it. A derived unit-axis
 contraction inherits its enclosing Fold's reduction domain through the parent/child scheduling interface, while its
 output tile remains at the child site. Local catalogs compose lazily through one worker inventory and equal geometry
 on any shared physical axes. The same rule combines independent roots, including roots whose algebraic M/N readings
@@ -220,6 +246,5 @@ reverse the same physical axes. A shape with no legal row remains unmapped, and 
 annotates the Fold tree.
 
 A consumer holding a node learns its own address through `Sched.site_of` — one identity-keyed lookup against the
-site walk. A node that is a site but not of the asked family reads as "family doesn't apply"; a node that is not a
-site of the tree at all (a copied or rebuilt object) raises `UnknownSiteError`, which no accessor swallows — an
-identity miss is never the silent untiled path.
+problem's site index. A family outside that node's schedule sum reads as "family doesn't apply"; a node outside the
+problem raises `UnknownSiteError`. An identity miss is never the silent direct path.

@@ -40,7 +40,6 @@ from emmy.compiler.pipeline.knob import (
     context_view,
     decision_view,
     family_of,
-    stamp_schedule_families,
     tuning_knob_items,
 )
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
@@ -285,7 +284,7 @@ class TuningSearch(Search):
             return placement
         work = Work.parse(row.get("WORK"))
         if any(Reduce.parse(value, work).needs_split for key, value in row.items() if family_of(key) == "REDUCE"):
-            return stamp_schedule_families(row)
+            return row
         return None
 
     def _structural_replay_row(self, node: SearchNode) -> dict[str, str] | None:

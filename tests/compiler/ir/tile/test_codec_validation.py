@@ -2,8 +2,8 @@
 
 A ``0`` width (``f0`` / ``g0``) used to parse to a level the plan silently dropped — a no-op pin
 whose knob column still echoed it — and a missing number (``g``) threw a bare ``int('')`` error.
-Each codec rejects empty / non-numeric / ``< 1`` widths uniformly; a ``1`` width stays legal (the
-level is off, the identity). Since the values went SITE-LOCAL the retired embedded-worker
+Each codec rejects empty / non-numeric / ``< 1`` widths uniformly; an identity width is omitted
+from the one canonical wire spelling. Since the values went SITE-LOCAL the retired embedded-worker
 spellings are rejected the same way: the worker widths have one home, so a value carrying its own
 must not decode into a second, self-contained reading.
 """
@@ -24,9 +24,19 @@ def test_reduce_codec_rejects_degenerate(spec: str) -> None:
         Reduce.parse(spec, _THREADS)
 
 
-@pytest.mark.parametrize("spec", ["r1", "g1k", ""])  # width 1 / absent = level off — the legal identity
-def test_reduce_codec_allows_identity(spec: str) -> None:
-    Reduce.parse(spec, _THREADS)  # no raise
+def test_reduce_codec_allows_canonical_identity() -> None:
+    Reduce.parse("", _THREADS)  # no raise
+
+
+@pytest.mark.parametrize("spec", ["r1", "g1k"])
+def test_reduce_codec_rejects_spelled_identity_levels(spec: str) -> None:
+    with pytest.raises(ValueError, match="not canonical"):
+        Reduce.parse(spec, _THREADS)
+
+
+def test_reduce_constructor_rejects_invalid_widths() -> None:
+    with pytest.raises(ValueError, match="positive integers"):
+        Reduce.of(cta=0)
 
 
 @pytest.mark.parametrize("spec", ["f0", "f0x4", "f2x0", "f", "fx", "n4x4", "n32x16/f2x4"])
@@ -53,5 +63,6 @@ def test_warp_codec_rejects_degenerate(spec: str) -> None:
         Tile.parse(spec, _WARP)
 
 
-def test_warp_codec_allows_identity() -> None:
-    Tile.parse("mma_m16n8k16_f16_f32/f1x1/k1", _WARP)  # all-1 widths — no raise
+def test_warp_codec_rejects_spelled_identity_k_chunk() -> None:
+    with pytest.raises(ValueError, match="not canonical"):
+        Tile.parse("mma_m16n8k16_f16_f32/f1x1/k1", _WARP)

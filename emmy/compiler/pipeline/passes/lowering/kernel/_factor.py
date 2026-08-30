@@ -120,9 +120,8 @@ class Ctx:
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
     raster: object = None  # the parsed RASTER codec (ir.schedule.Raster; None = flat launch order)
-    # The kernel's schedule slices (``TileOp.schedule`` bound to its op tree — ``ops.Sched``): the
-    # per-node ``tile`` / ``reduce`` / ``stage`` reads all go through here (1r — the term stores
-    # no slices).
+    # The accepted classic assignment bound to its Fold sites (read through ``ops.Sched``): all
+    # per-node tile/reduce and per-edge stage reads go through here; the term stores no choices.
     sched: object = None
     # The placement's FREE axes — the un-shrunk originals. A split partial may prefix ``_ksplit``;
     # contraction views derive their output axes from the trailing pair.
@@ -434,7 +433,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
                 body = apply_output_specs(body, root_specs, observed=observed_result_names(op))
             state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
         elif plan.coop_transposed:
-            # The ``b<n>t`` k-major matvec partition: the innermost output axis splits into a
+            # The ``coop-t`` k-major matvec partition: the innermost output axis splits into a
             # shrunk ``<out>_blk`` grid axis (×32) + the 32-wide ``n_lane`` thread axis (with
             # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
             # output-var references were σ-substituted to ``blk·32 + n_lane`` inside (clamped,
@@ -614,7 +613,7 @@ def emit_combine(
     smem_c = cuda_name(dtype)
     bufs = tuple(f"{st}_smem" for st in state)
     if inner is not None:
-        # The transposed (``b<n>t``) combine: threads sharing an output lane sit ``scale``
+        # The transposed (``coop-t``) combine: threads sharing an output lane sit ``scale``
         # apart in tid, so a shuffle would fold DIFFERENT outputs — always the segment-indexed
         # smem tree: ``n_threads`` k-slices × ``scale`` lanes per slab, each lane's tree
         # halving its own segment (``TreeHalve.inner``).
@@ -677,7 +676,7 @@ def combine_tail(red, *, reg: int, coop: int, lane) -> list[Stmt]:
 def _tile_reduce_axis_transposed(
     op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str
 ) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...]]:
-    """The ``b<n>t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
+    """The ``coop-t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
     ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
     every k step, and ``coop/32`` ``k_co`` slices ride the upper thread bits. The emitted body
     keeps referencing the original output axis var — one σ substitutes it with

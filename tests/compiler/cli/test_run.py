@@ -15,6 +15,17 @@ import torch  # used by test_bind_inputs_preserves_int_dtype
 from tests.compiler.helpers import requires_cuda
 
 
+def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
+    """One complete exact-site schedule for synthetic single-node CUDA graphs."""
+    return {
+        "WORK": work,
+        "TILE@n0": tile,
+        "REDUCE@n0": reduce,
+        "STAGE@n0.e0": stage,
+        "RASTER": raster,
+    }
+
+
 def _randn(shape: str, dtype, scale: float | None = None) -> str:
     """Build a ``torch.randn(...)`` snippet for the given dtype.
 
@@ -453,10 +464,10 @@ def test_unreproducible_pin_flag(monkeypatch):
     )
 
     # Honored pin — realized exactly.
-    assert unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w2x1/f1x8"}]) is None
+    assert unreproducible_pin_flag({"TILE": "mma_m16n8k16_f16_f32/f1x8"}, [{"TILE": "mma_m16n8k16_f16_f32/f1x8"}]) is None
     # Silently swapped pin — the greedy-vs-greedy case the gate exists for.
-    flag = unreproducible_pin_flag({"TILE": "w2x1/f1x8"}, [{"TILE": "w4x2/f2x4"}])
-    assert "unreproducible pin" in flag and "TILE=w2x1/f1x8" in flag and "w4x2/f2x4" in flag
+    flag = unreproducible_pin_flag({"TILE": "mma_m16n8k16_f16_f32/f1x8"}, [{"TILE": "mma_m16n8k16_f16_f32/f2x4"}])
+    assert "unreproducible pin" in flag and "TILE=mma_m16n8k16_f16_f32/f1x8" in flag and "mma_m16n8k16_f16_f32/f2x4" in flag
     # A classic schedule family with no site stamp is a miss. Typed schedule serialization may
     # not silently discard an assignment.
     assert "unreproducible pin" in unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}])
@@ -469,8 +480,8 @@ def test_unreproducible_pin_flag(monkeypatch):
     assert "unreproducible pin" in unreproducible_pin_flag({"TILE": "f2x2"}, [{"TILE@n2": "f2x2"}])
     # A keyed pin whose site differs: a genuine miss, but the
     # diagnostic names the family's realized value instead of (unset).
-    flag = unreproducible_pin_flag({"TILE@n2": "w4x1/f1x16"}, [{"TILE@n3": "w2x1/f1x8"}])
-    assert "TILE@n3=w2x1/f1x8" in flag and "(unset)" not in flag
+    flag = unreproducible_pin_flag({"TILE@n2": "mma_m16n8k16_f16_f32/f1x16"}, [{"TILE@n3": "mma_m16n8k16_f16_f32/f1x8"}])
+    assert "TILE@n3=mma_m16n8k16_f16_f32/f1x8" in flag and "(unset)" not in flag
     # Registry-canonical value compare (bool knob pinned via the string grammar).
     assert unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
     # OFF values are "declined", not conflicts: the honored axis wins, the off-stamped
@@ -505,7 +516,7 @@ def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypa
         g.add_node(op=CudaOp(kernel_name="k", knobs=knobs), inputs=[], output=Tensor("o", (4,)), node_id="n0")
         return g
 
-    compiled = iter([graph_with({"TILE": "w4x2/f2x4"}), graph_with({"TILE": "w2x1/f1x8"})])
+    compiled = iter([graph_with({"TILE": "mma_m16n8k16_f16_f32/f2x4"}), graph_with({"TILE": "mma_m16n8k16_f16_f32/f1x8"})])
     benched: list = []
 
     async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
@@ -513,8 +524,8 @@ def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypa
         return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
     backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
-    dropped = SimpleNamespace(name="g.dropped", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None)
-    honored = SimpleNamespace(name="g.honored", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None)
+    dropped = SimpleNamespace(name="g.dropped", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None)
+    honored = SimpleNamespace(name="g.honored", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None)
     benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", [dropped, honored], warmup=1, iters=1))
     assert len(benches) == 2
     assert benches[0].status == "pin_unmatched" and benches[0].bench is None
@@ -551,7 +562,7 @@ def test_bench_golden_variants_survives_row_bench_fail(monkeypatch, failure):
         g.add_node(op=CudaOp(kernel_name="k", knobs=knobs), inputs=[], output=Tensor("o", (4,)), node_id="n0")
         return g
 
-    compiled = iter([graph_with({"TILE": "w2x1/f1x8"}), graph_with({"TILE": "w2x1/f1x8"})])
+    compiled = iter([graph_with({"TILE": "mma_m16n8k16_f16_f32/f1x8"}), graph_with({"TILE": "mma_m16n8k16_f16_f32/f1x8"})])
     calls = iter([failure, None])
 
     async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
@@ -562,8 +573,8 @@ def test_bench_golden_variants_survives_row_bench_fail(monkeypatch, failure):
 
     backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
     rows = [
-        SimpleNamespace(name="g.slow", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None),
-        SimpleNamespace(name="g.fine", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None),
+        SimpleNamespace(name="g.slow", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None),
+        SimpleNamespace(name="g.fine", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None),
     ]
     benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", rows, warmup=1, iters=1))
     assert len(benches) == 2
@@ -593,7 +604,7 @@ def test_bench_golden_variants_wrong_answer_gate_uses_worker_outputs(monkeypatch
         g.add_node(op=CudaOp(kernel_name="k", knobs=knobs), inputs=[], output=Tensor("o", (4,)), node_id="n0")
         return g
 
-    compiled = iter([graph_with({"TILE": "w2x1/f1x8"}), graph_with({"TILE": "w2x1/f1x8"})])
+    compiled = iter([graph_with({"TILE": "mma_m16n8k16_f16_f32/f1x8"}), graph_with({"TILE": "mma_m16n8k16_f16_f32/f1x8"})])
     ref_outputs = {"n0": np.full((4,), 100.0)}
     row_outputs = iter([{"n0": ref_outputs["n0"].copy()}, {"n0": ref_outputs["n0"] * 0.5}])
     seen_inputs: list = []
@@ -605,8 +616,8 @@ def test_bench_golden_variants_wrong_answer_gate_uses_worker_outputs(monkeypatch
 
     backend = SimpleNamespace(compile=lambda g: next(compiled), bench_pinned_async=fake_bench_pinned_async)
     rows = [
-        SimpleNamespace(name="g.good", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None),
-        SimpleNamespace(name="g.bad", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None),
+        SimpleNamespace(name="g.good", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None),
+        SimpleNamespace(name="g.bad", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None),
     ]
     ref = ({"x": np.zeros((4,))}, ref_outputs)
     benches = asyncio.run(_bench_golden_variants(backend, "torch.matmul(a, b)", rows, warmup=1, iters=1, ref=ref))
@@ -728,7 +739,7 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     greedy_graph, fm_graph, std_graph = object(), object(), object()
 
     def _nodes(graph):
-        knobs = {"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"} if graph is fm_graph else {"TILE": "f2x8", "WORK": "t32x8"}
+        knobs = _classic_row(tile="mma_m16n8k16_f16_f16/f2x2/k4") if graph is fm_graph else _classic_row(work="t32x8", tile="f2x8")
         return [_node(knobs)]
 
     monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", _nodes)
@@ -1453,8 +1464,7 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     """The ``--json`` record survives a failed greedy row: the greedy block carries
     ``status: bench_fail`` + ``error`` with null timings, pinned rows carry their own
     ``status``, and every kernel row exposes ``record_knobs`` — the realized tuning knobs
-    with EVERY schedule family explicitly stamped (OFF included), the map a golden
-    recording copies verbatim so no family is left to the planner's replay-time fill."""
+    as the complete exact-site schedule a golden recording copies verbatim."""
     import json
     from types import SimpleNamespace
 
@@ -1467,12 +1477,15 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
         g.add_node(op=CudaOp(kernel_name="k", knobs=knobs), inputs=[], output=Tensor("o", (4,)), node_id="n0")
         return g
 
-    greedy_graph = graph_with({"TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "g2k"})
+    greedy_knobs = _classic_row(tile="mma_m16n8k16_f16_f32/f1x1", reduce="g2k")
+    greedy_graph = graph_with(greedy_knobs)
     unmatched = _GoldenBench(
-        SimpleNamespace(name="g.unmatched", knobs={"TILE": "w2x1/f1x8"}, shape=None, dynamic=None, latency_us=None, ref_us=None),
-        graph_with({"TILE": "w4x2/f2x4"}),
+        SimpleNamespace(
+            name="g.unmatched", knobs={"TILE": "mma_m16n8k16_f16_f32/f1x8"}, shape=None, dynamic=None, latency_us=None, ref_us=None
+        ),
+        graph_with(_classic_row(tile="mma_m16n8k16_f16_f32/f2x4")),
         None,
-        ["unreproducible pin: TILE=w2x1/f1x8 realized w4x2/f2x4 — row NOT benched"],
+        ["unreproducible pin: TILE=mma_m16n8k16_f16_f32/f1x8 realized mma_m16n8k16_f16_f32/f2x4 — row NOT benched"],
         "pin_unmatched",
     )
     args = SimpleNamespace(
@@ -1484,11 +1497,7 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     assert rec["greedy"]["total_us"] is None
     krow = rec["greedy"]["kernels"][0]
     assert krow["us"] is None
-    # record_knobs: realized values + explicit OFF for families the compile never stamped
-    # (WORK replaced WSPEC in SCHEDULE_FAMILIES — F1: the producer band rides WORK's +p suffix).
-    assert krow["record_knobs"]["REDUCE"] == "g2k"
-    for fam in ("STAGE", "WORK", "RASTER"):
-        assert krow["record_knobs"][fam] == ""
+    assert krow["record_knobs"] == greedy_knobs
     row = rec["pinned"][0]
     assert row["status"] == "pin_unmatched" and row["total_us"] is None
     assert any("NOT benched" in f for f in row["flags"])
@@ -1511,18 +1520,23 @@ def test_print_kernel_stats_greedy_bench_fail_row(capsys):
         return g
 
     greedy = Graph()
-    greedy.add_node(op=CudaOp(kernel_name="k_greedy", knobs={"TILE": "w2x1/f1x8"}), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+    greedy.add_node(
+        op=CudaOp(kernel_name="k_greedy", knobs=_classic_row(tile="mma_m16n8k16_f16_f32/f1x8")),
+        inputs=[],
+        output=Tensor("o", (4,)),
+        node_id="n0",
+    )
     pinned_bench = SimpleNamespace(min_ms=0.5, time_ms=0.5, per_launch=[], e2e_min_ms=None)
     ok_row = _GoldenBench(
-        SimpleNamespace(name="ab TILE=w4x2/f2x4", knobs={"TILE": "w4x2/f2x4"}, shape=None, dynamic=None),
-        graph_with({"TILE": "w4x2/f2x4"}),
+        SimpleNamespace(name="ab TILE=mma_m16n8k16_f16_f32/f2x4", knobs={"TILE": "mma_m16n8k16_f16_f32/f2x4"}, shape=None, dynamic=None),
+        graph_with({"TILE": "mma_m16n8k16_f16_f32/f2x4"}),
         pinned_bench,
         [],
     )
     _print_kernel_stats(greedy, None, golden_benches=[ok_row], greedy_fail="greedy bench failed: hung")
     outp = capsys.readouterr().out
     assert "bench_fail" in outp and "greedy bench failed: hung" in outp
-    assert "k_greedy" in outp and "ab TILE=w4x2/f2x4" in outp
+    assert "k_greedy" in outp and "ab TILE=mma_m16n8k16_f16_f32/f2x4" in outp
 
 
 def test_print_kernel_stats_uses_execution_symbolic_environment(capsys):
@@ -1563,7 +1577,12 @@ def _iso_bench_fixtures():
     from emmy.compiler.ir.cuda.ir import CudaOp
 
     greedy = Graph()
-    greedy.add_node(op=CudaOp(kernel_name="k_greedy", knobs={"TILE": "w2x1/f1x8"}), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+    greedy.add_node(
+        op=CudaOp(kernel_name="k_greedy", knobs=_classic_row(tile="mma_m16n8k16_f16_f32/f1x8")),
+        inputs=[],
+        output=Tensor("o", (4,)),
+        node_id="n0",
+    )
     bench = SimpleNamespace(min_ms=0.5, time_ms=0.5, per_launch=[SimpleNamespace(idx=0, samples=[0.5], time_ms=0.5)], e2e_min_ms=None)
     iso_bench = SimpleNamespace(min_ms=0.4, time_ms=0.4, per_launch=[SimpleNamespace(idx=0, samples=[0.4], time_ms=0.4)], e2e_min_ms=None)
     iso_sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)

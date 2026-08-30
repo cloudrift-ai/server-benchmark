@@ -1266,12 +1266,9 @@ explicit knob mapping (possibly empty for a forkless anchor) and paired positive
 every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before
 they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
 the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
-An axis-scoped schedule family (`REDUCE@a1`, for example) may coexist with a non-OFF bare spelling of the same
-family in one promoted entry — that IS the canonical stamped spelling (the bare key is the primary node's decision,
-the scoped keys are the other tree sites' decisions, a `''` scoped value recording a site that declined). The one
-rejected shape is a bare OFF beside scoped keys of the same family: a bare OFF pin fans out across eligible axes on
-replay and contradicts the scoped decisions, so `stamp_schedule_families` drops it when stamping and promotion
-rejects any that remain.
+A promoted classic row is already complete: bare `WORK` and `RASTER`, exact `TILE@n<N>` / `REDUCE@n<N>` node
+sites, and exact `STAGE@n<N>.e<M>` operand edges, including explicit empty direct choices. Promotion rejects bare
+node or edge families, incomplete rows, aliases, and unknown sites. It never fills or repairs a recording.
 
 **A split's children persist as child-identity schedule receipts.** One flat `knobs` map decorates exactly one
 kernel, so a route whose cut splits the target into several kernels cannot record conflicting per-child schedules in
@@ -1328,9 +1325,9 @@ explicit working file whose GPU header is checked against the selected tune devi
    pinned compile. A pin that matches none of the knob values the compile actually produced marks the row
    `pin_unmatched` / `unreproducible pin … NOT benched` (a loud error log; the row is kept in the table and in
    `--json`, and no GPU time is spent), and the remaining rows still run. Matching is aware of knob families — a
-   golden written as plain `TILE: …` matches the `TILE@dd` the compile produced — and values are compared through the
-   registered knob's canonical `Knob.parse`, so alternative ways of writing the same value, like `FAST_EXP=1`, do not
-   raise a false alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
+   golden key must equal the exact site the compile produced — while values are compared through the registered
+   knob's canonical `Knob.parse`, so alternative spellings of the same value, like `FAST_EXP=1`, do not raise a false
+   alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
    match it. The `g<n>` cross-CTA stage of a `REDUCE` value is structural and cannot be read off a knob stamp, so the
    check skips it. A split replaces the kernel it splits, and
@@ -1373,11 +1370,9 @@ their flags and a `status` field: `ok` / `pin_unmatched` / `bench_fail` / `compi
 past its budget, so nothing about it was measured and the row is reported but never recorded); a failed greedy block carries
 `status: bench_fail` and an `error`, with null timings), so a sweep's judgments can be traced to flagged fields
 instead of to parsed terminal text. Each kernel row also carries **`record_knobs`**: the tuning knobs the compile
-actually produced, with every schedule knob family (`knob.SCHEDULE_FAMILIES`: WORK / TILE / REDUCE / STAGE / RASTER)
-written out explicitly, including the ones that are off (`knob.stamp_schedule_families`). That is the map to copy
-verbatim into a golden YAML `knobs:` entry. An entry that omits a family leaves that family to whatever the planner
-fills in at replay time, which shifts as the planner evolves — the recurring source of regressions that look real but
-come from an unpinned `REDUCE`. Golden rows attach to the run's SHAPE rather than to a kernel node, so a pinned row
+actually produced, validated as one complete exact classic row by `knob.complete_kernel_row`. That is the map to
+copy verbatim into a golden YAML `knobs:` entry; no recording helper fills absent choices or drops scopes. Golden
+rows attach to the run's SHAPE rather than to a kernel node, so a pinned row
 whose shape matches no greedy kernel — because greedy deployed a split partial+finalize pair — still prints and still
 lands in the record.
 
@@ -1550,29 +1545,31 @@ All declared in `search/space.py`; see [`passes/ARCHITECTURE.md`](passes/ARCHITE
 The "owning rule" for the schedule codecs is the tile scheduler (the `040_schedule` rule), whose recursive row
 enumerator spells each family exactly once, site-local, where a row becomes stored state.
 
-**`PLACE`** (STR structural fork, `fuse` or `cut`) — a stored Fold edge's kernel placement, addressed by the same
-tree-path codec as schedule sites. The maximal fused kernel and every semantically closed cut are siblings — closure
-counting the offer-time provider closure and dependent-seam composition `passes/ARCHITECTURE.md` describes. A cut is
+**`PLACE`** (STR structural fork, `fuse` or `cut`) — a stored Fold edge's kernel placement, addressed by the
+structural tree-path codec before classic sites exist. The maximal fused kernel and every semantically closed cut are
+siblings — closure counting the offer-time provider closure and dependent-seam composition `passes/ARCHITECTURE.md`
+describes. A cut is
 consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
 the structural decision trace. A scoped cut consumes its authoritative placement decision on both fresh pieces, which
 proceed to scheduling. Bare `PLACE=cut` selects the primary seam but, like an unpinned cut, leaves both pieces able to
 re-enter placement and expose smaller seams.
 
-**`WORK`** (STR codec, stamped by `seal_workers` at option assembly) — the kernel-global **worker inventory**,
-spelled exactly once per row (step 7): `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer
-band the retired per-row `WSPEC` key spelled) / `t<N>x<M>` (the scalar thread tile, native n-then-m) / `t<N>` (the
-1-D cooperative width). Empty = a 1-thread register strip whose launch geometry stays derived. The tier
-discriminator IS the worker kind — never a per-`TILE` spelling — and `seal_workers` derives the inventory from the
-resolved site slices, failing loudly on cross-site disagreement (one kernel, one inventory).
+**`WORK`** (STR codec) — the kernel-global **worker inventory**, spelled exactly once per row (step 7):
+`w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer band the retired per-row `WSPEC` key
+spelled) / `t<N>x<M>` (the scalar thread tile, native n-then-m) / `t<N>` (the 1-D cooperative width). Empty = a
+1-thread register strip whose launch geometry stays derived. The tier discriminator IS the worker kind — never a
+per-`TILE` spelling. Option assembly derives the inventory from site choices, the complete typed assignment stores it
+once, and acceptance fails loudly on cross-site disagreement (one kernel, one inventory).
 
 **`TILE`** (STR codec, the tile schedule) — the **output-fragment** codec, site-local since step 7. A
 contraction's output tile is *either* the **scalar** register sub-tile `f<fn>[x<fm>]` *or* the **warp** tensor-core
 mma tile `<atom>/f<FM>x<FN>[/k<bk>]` (atom + register sub-tile + K-chunk) — no worker tokens; the worker halves live
-in `WORK`, and `resolve_site_tile` disambiguates an empty site `TILE` beside a thread `WORK` from the coop tier.
-Empty = per-cell. The retired embedded-worker spellings (`n<N>[x<M>]/f…`, `a:<atom>/w<WM>x<WN>/f…/k<bk>`) RAISE —
+in `WORK`. Empty means only per-cell; a parallel unit-register thread tile spells `f1`, so the exact row is
+injective without inferring one node's choice from another node's `WORK` claim. The retired embedded-worker
+spellings (`n<N>[x<M>]/f…`, `a:<atom>/w<WM>x<WN>/f…/k<bk>`) RAISE —
 the worker widths have exactly one home, so a value carrying its own cannot decode into a second, self-contained
-reading. The `a:scalar` / `a:none` aliases stay pin-only vocabulary for the scalar tier (stripped at parse, never
-stored).
+reading. There is no alias vocabulary: old `a:scalar` / `a:none` scalar tags, alternative atom names, reordered
+tokens, leading-zero widths, and surrounding whitespace all raise rather than naming the same schedule twice.
 
 **`REDUCE`** (STR codec, the tile schedule) — the reduce-axis partition codec, site-local since step 7:
 `[g<n>[a|k]][/coop[-t]][/r<n>]` — `g` cross-CTA split-K (+ finalize letter), `coop` the cooperative-thread fold
@@ -1614,7 +1611,7 @@ contractions and the LayerNorm statistic reduce now deploy off the prior; adding
 let them be recorded.
 
 **`STAGE`** (STR codec, the tile schedule → `lowering/kernel/010_materialize`) — the operand-staging codec
-`d<depth>/sync|cp|tma[/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
+`d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
 of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the
 smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. A `STAGE` value names only what the
 schedule CHOOSES — rotation and refill discipline derive at materialization from the depth alone (which is why the
@@ -1650,37 +1647,23 @@ Skipped by `format_tuning_knobs`.
 **`FAST_MATH` / `F16_MMA_F32_ACC` / `FAST_EXP`** (BOOL, pin-only, the f16-accumulate enumeration gate /
 `lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own
 pin > the `FAST_MATH` umbrella > off (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
-`F16_MMA_F32_ACC` offers the f16-accumulate mma atom forks (`a:mma_m16n8k16_f16_f16` — chunked f32 register promote;
+`F16_MMA_F32_ACC` offers the f16-accumulate mma atom forks (`mma_m16n8k16_f16_f16` — chunked f32 register promote;
 its own pin offers on any target, the umbrella only on the consumer dies where f32-accumulate is half rate).
 `FAST_MATH` is a meta gate over the others — `unfeatured`, never stamped/enumerated/featurized (the realized fork is
 identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token).
 
-### Tree-path schedule keys (the phase-2/3 codec)
+### Exact classic site keys
 
-A per-node schedule key addresses the node it decorates by POSITION in the recognized tile tree —
-`FAMILY@<node-path>[.<axis>][<n>]`, resolved by the ONE walker/resolver in `ir/tile/path.py` (`sites` / `resolve` /
-`spell` — total over the sugar levels, idempotent, loud on ambiguity and on a stored short key a structural change
-broke). **Short paths are canonical**: the stampers spell the SHORTEST key unique for the kernel's tree, which is
-exactly the stored golden/DB spelling — bare `TILE`/`REDUCE`/`STAGE` on today's single-primary trees,
-`REDUCE@<stat axis>` for the fused kernel's cone statistic
-(the path form — `REDUCE@a.fold.k` — when the axis name collides; edge labels `a`/`b` are view-role sugar off the
-bilinear parse). Bare-family sugar resolves to the PRIMARY (root-most schedule-bearing) node, so bare `REDUCE` on
-norm_linear/geglu still means the contraction's K fold; `WORK` / `RASTER` stay root-global (bare). Since step 7 the
-VALUES are site-local too: the worker inventory is spelled once in `WORK` (`w<M>x<N>[+p<np>]` / `t<N>[x<M>]` — the
-`+p` band absorbing the retired per-row `WSPEC` key), `TILE` values drop their worker tokens
-(`<atom>/f<FM>x<FN>[/k<bk>]` | `f<fn>[x<fm>]`) and `REDUCE` its coop width (`[g<n>[a|k]][/coop[-t]][/r<n>]` — the
-finalize letter kept: a MODE, not an axis token); the retired embedded-token spellings raise, and the
-golden corpus itself was re-spelled mechanically (715 rows, replay digest-identical; the one-shot script is gone
-with the grammar it read).
-The retired placement grammar (`in.<operand>` path prefix, leading-`=` value pins) is rejected, never reused. Current
-`PLACE` uses the Fold tree-path grammar above. The
-golden-spelling tripwire (`tests/.../test_golden_spelling_canonical.py`) resolves every stored knob dict against its
-kind's tree and proves every spelling canonical. The tune DB / reservoir /
-online prior are REGENERATED after a re-key, never migrated — no reader special-cases pre-phase-3 axis-suffixed
-spellings, and `tuning_knob_items` renders keys AS STORED (the old `@<axis>`→bare display collapse is gone). What
-remains is the live bare-golden contract: `family_value(knobs, family)` / `pin_key_matches`' bare↔explicit any-of
-(a bare golden key matches an axis-keyed realization of the same family); it survives the step-7
-re-spell deliberately and retires only when symbolic-trace keyed resolution exists.
+Structural choices finish before `ClassicProblem` constructs its immutable site index. Each shared Fold object gets
+one preorder `NodeId`; every consumer operand position gets a distinct `EdgeSite`, even when two edges reach the same
+producer. The strict codec spells kernel choices as bare `WORK` / `RASTER`, node choices as `TILE@n<N>` and
+`REDUCE@n<N>`, and edge transport as `STAGE@n<N>.e<M>`. No short path, axis name, primary-node sugar, family fan-out,
+or alias is accepted. Empty direct values remain explicit, so every leaf has the same key vocabulary.
+
+`PLACE` alone retains the Fold tree-path grammar because it changes kernel boundaries before classic sites exist.
+Repository goldens were regenerated in the exact grammar; mutable tune evidence is discarded after a re-key, never
+migrated. `tuning_knob_items` renders keys as stored and all decode paths use `ClassicScheduleCodec`. Family-level
+feature pooling may aggregate exact sites, but matching and replay never do.
 
 ### Odds and ends
 

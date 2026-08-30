@@ -144,7 +144,7 @@ class Knob:
         ranked-buffer ``i``; length must match ``width``), the keywords
         ``"all"`` / ``"none"``, or a decimal / ``0x``-hex int (clamped
         to ``width`` bits)."""
-        s = raw.strip()
+        s = raw if self.name in SCHEDULE_FAMILIES else raw.strip()
         if self.type is KnobType.INT:
             return int(s, 0)
         if self.type is KnobType.BOOL:
@@ -333,47 +333,33 @@ def pin_key_matches(pinned: str, realized: str) -> bool:
     return pinned == realized
 
 
-def canon_family_value(name: str, value, *, strict: bool = False) -> str:
-    """The canonical spelling of a ``WORK`` / ``TILE`` / ``REDUCE`` / ``STAGE`` value — the codec's own
-    normal form. The two site families decode under a DUMMY inventory (the worker widths never reach a site
-    spelling, so the dummy cannot leak) and re-spell: ``f64x1`` ≡ ``f64``, the pin-only ``a:scalar``
-    alias ≡ ``""``. ``STAGE`` needs no inventory and normalizes token ORDER, which binds order-free
-    but spells in schema order — so a hand pin ``smem-async/d2`` matches the realized ``d2/smem-async`` instead of
-    failing verification against its own value on the deploy path. ``WORK`` re-spells its inventory
-    (``t4x1`` ≡ ``t4``). Any other family — and any
-    unparseable value — passes through untouched (the caller's own equality applies).
+def validate_family_value(name: str, value) -> str:
+    """Validate one classic value's sole codec spelling and return it unchanged.
 
-    ``strict`` turns that last fallback into a ``ValueError``. Comparison callers want the
-    fallback: an unparseable realized spelling should simply fail to equal the pin. A caller that
-    is *storing* a hand-authored value wants the raise, because a retired spelling that
-    canonicalizes to itself then matches no candidate and reports as a compiler lockout — a
-    phantom gap. The realization corpus regenerates under ``strict=True`` for exactly that reason.
-
-    Memoized on ``(family, value)``: the value vocabulary is tiny beside the comparison count (a
-    golden consult runs :func:`values_equal` per candidate row per recorded knob), so the parse
-    runs once per distinct spelling per process."""
+    The dummy inventory supplies the out-of-band worker type needed to parse a site-local value;
+    strict choice parsers still require the input to equal what they spell. Non-classic values are
+    returned unchanged.
+    """
     fam = family_of(name)
-    v = str(value).strip()
-    return _canon_family_cached(fam, v, strict) if v else v
+    v = str(value)
+    return _validate_family_cached(fam, v) if v else v
 
 
 @lru_cache(maxsize=8192)
-def _canon_family_cached(fam: str, v: str, strict: bool = False) -> str:
-    from emmy.compiler.ir.schedule import Reduce, Stage, Tile, Work  # noqa: PLC0415
+def _validate_family_cached(fam: str, v: str) -> str:
+    from emmy.compiler.ir.schedule import Raster, Reduce, Stage, Tile, Work  # noqa: PLC0415
 
-    try:
-        if fam == "WORK":
-            return Work.parse(v).spell()
-        if fam == "TILE":
-            return Tile.parse(v, Work(kind="warp", units=(1, 1))).spell()
-        if fam == "REDUCE":
-            return Reduce.parse(v, Work(kind="thread", units=(2, 1))).spell()
-        if fam == "STAGE":
-            return Stage.parse(v).spell()
-    except ValueError:
-        if strict:
-            raise
-        return v
+    if fam == "WORK":
+        return Work.parse(v).spell()
+    if fam == "TILE":
+        work = Work(kind="thread", units=(2, 1)) if v.startswith("f") else Work(kind="warp", units=(1, 1))
+        return Tile.parse(v, work).spell()
+    if fam == "REDUCE":
+        return Reduce.parse(v, Work(kind="thread", units=(2, 1))).spell()
+    if fam == "STAGE":
+        return Stage.parse(v).spell()
+    if fam == "RASTER":
+        return Raster.parse(v).spell()
     return v
 
 
@@ -383,24 +369,14 @@ def values_equal(name: str, want, got) -> bool:
     knob's canonical :meth:`Knob.parse` — a BOOL pinned ``1``/``yes``/``on`` matches a
     realized ``True``, a hex INT its decimal, a BINMASK spelling the stamped binary
     string (width taken from the realized binary spelling — the :meth:`Knob.pretty`
-    storage convention). ``TILE`` / ``REDUCE`` / ``STAGE`` values canonicalize through
-    their codec's normal form (:func:`canon_family_value`), so an atom-ALIAS pin
-    (``mma_m16n8k16_f16/…``) keeps matching the canonically-stamped atom, the
-    pin-only ``a:scalar`` alias matches the per-cell row, and an out-of-order
-    ``smem-async/d2`` matches the realized ``d2/smem-async``. ``WORK``
-    compares through its own codec. An unregistered family compares by string only."""
-    w, g = str(want).strip(), str(got).strip()
+    storage convention). Classic schedule values compare by exact wire spelling; their parsers
+    reject aliases and alternative token order. An unregistered family compares by string only."""
+    raw_w, raw_g = str(want), str(got)
+    if family_of(name) in SCHEDULE_FAMILIES:
+        return raw_w == raw_g
+    w, g = raw_w.strip(), raw_g.strip()
     if w.casefold() == g.casefold():
         return True
-    if family_of(name) in _SITE_FAMILIES:
-        return canon_family_value(name, w) == canon_family_value(name, g)
-    if family_of(name) == "WORK":
-        from emmy.compiler.ir.schedule import Work  # noqa: PLC0415
-
-        try:
-            return Work.parse(w) == Work.parse(g)
-        except ValueError:
-            return False
     kn = get(family_of(name))
     if kn is None:
         return False
@@ -422,7 +398,11 @@ def is_off_value(family: str, value) -> bool:
     conflicting realization. ``False`` for an unregistered family or a knob with no
     declared OFF."""
     kn = get(family)
-    return kn is not None and kn.off is not _UNSET and str(value).strip().casefold() == str(kn.off).strip().casefold()
+    if kn is None or kn.off is _UNSET:
+        return False
+    if family in SCHEDULE_FAMILIES:
+        return str(value) == str(kn.off)
+    return str(value).strip().casefold() == str(kn.off).strip().casefold()
 
 
 # --- Aggregate env var ------------------------------------------------------
@@ -478,8 +458,8 @@ def parse_knob_spec(raw: str) -> dict[str, str]:
     aggregate, ``run --ab``) into an ordered ``{NAME: value}`` dict — whitespace
     tolerated, empty entries skipped. A malformed entry (missing ``=`` / empty
     KEY) raises ``ValueError``. Case is canonicalized per key part: the family
-    (before any ``@``) uppercases, the element (after it) lowercases — so
-    ``tile@D=…`` pins ``TILE@d`` instead of being mangled to ``TILE@D``."""
+    (before any ``@``) uppercases, while the exact site (after it) lowercases — so
+    ``tile@N0=…`` pins ``TILE@n0`` instead of being mangled to ``TILE@N0``."""
     out: dict[str, str] = {}
     for entry in (raw or "").split(","):
         entry = entry.strip()
@@ -505,19 +485,16 @@ apply_knobs_env()
 
 # --- Rendering -------------------------------------------------------------
 
-# Canonical display order for tuning knobs. The axis-named schedule codecs (``TILE@`` /
-# ``REDUCE@`` / ``STAGE@``) lead, each family's keys sorted by element; the bare exact-name knobs
+# Canonical display order for tuning knobs. The exact-site schedule codecs (``TILE@`` /
+# ``REDUCE@`` / ``STAGE@``) lead, each family's keys sorted by site; the bare exact-name knobs
 # follow in ``KNOB_ORDER``, unknown knobs last (alpha). Shared by the ``run --bench`` kernel table
 # and the ``emmy eval`` tables so columns read stably.
 _FAMILY_ORDER = ("PLACE@", "TILE@", "REDUCE@", "STAGE@")
 KNOB_ORDER = ("PLACE", "WORK", "TILE", "REDUCE", "STAGE")
 _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 
-# The greedy-fillable schedule codec families a golden RECORDING must pin explicitly. An entry that
-# omits one leaves that family to the planner's fill at replay time, and the fill drifts as the
-# planner evolves — the recurring unpinned-``REDUCE`` phantom-regression class (a recorded un-split
-# config replaying with a surprise ``g2k`` fill). :func:`stamp_schedule_families` is the recording
-# view that closes the gap: every family explicit, OFF spelling (``""`` = decided unused) included.
+# The complete classic families emitted at every semantic leaf. Node and edge families are always
+# site-keyed; kernel families are bare.
 SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
 KERNEL_DECISION_FAMILIES = ("PLACE", *SCHEDULE_FAMILIES)
 
@@ -592,10 +569,8 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     ``TILE`` output-fragment knob is one column for both the scalar and warp tiers
     (the value self-describes), so there are no tier-foreign OFF knobs to hide.
 
-    Keys render AS STORED — since phase 3 the stampers spell the canonical codec key (bare for the
-    primary node, ``TILE@dd``-style where the tree needs it), so the view needs no bare-collapse:
-    the stamped row IS the stored/golden spelling. (The old ``@<axis>``→bare display collapse died
-    with the axis-suffix codec; pre-phase-3 evidence is regenerated, not migrated.)"""
+    Keys render as stored. Classic node and edge choices already carry their exact ``NodeId`` or
+    ``EdgeSite`` suffix, so this view performs no aliasing or scope collapse."""
     rendered: list[tuple[str, str]] = []
     for k, v in knobs.items():
         if k.startswith(STRUCT_PREFIX) or k.startswith(CTX_PREFIX):
@@ -623,13 +598,13 @@ def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
 
 
 def schedule_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
-    """The verified tier's EXACT row identity: the recording-canonical view
-    (:func:`stamp_schedule_families`) restricted to the :data:`SCHEDULE_FAMILIES` keys — what the
-    schedule fork decides. A recorded row legitimately carries later forks' knobs too (the
+    """The verified tier's exact schedule identity projection.
+
+    A recorded row legitimately carries later forks' knobs too (the
     kernel-stage policy BOOLs, ``LOOPIFY``); those are separate decisions at separate forks and
-    never part of THIS fork's identity."""
-    stamped = stamp_schedule_families(knobs)
-    return canonical_row_key({k: v for k, v in stamped.items() if family_of(k) in SCHEDULE_FAMILIES})
+    never part of THIS fork's identity. Structural branch prefixes pass through this helper while
+    matching a complete leaf, so validation belongs at recording and leaf-construction boundaries."""
+    return canonical_row_key({k: v for k, v in knobs.items() if family_of(k) in SCHEDULE_FAMILIES})
 
 
 def evidence_row_vouches(cand_tun: dict, row_tun: dict, *, exact_families: frozenset[str] = frozenset()) -> bool:
@@ -646,44 +621,48 @@ def evidence_row_vouches(cand_tun: dict, row_tun: dict, *, exact_families: froze
     return not any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items() if family_of(k) not in exact_families)
 
 
-def drop_uninformative_scopes(knobs: dict) -> dict[str, str]:
-    """The two spelling rules that make a row equal its own realization, WITHOUT the
-    family-level OFF fill: a bare OFF beside scoped keys of the same family is dropped (a bare pin
-    fans out over every eligible site, so it would contradict them), and a scoped OFF is dropped
-    (it names a site that declined, which is exactly what stamping nothing there says). Both are
-    no-information spellings, so removing them changes no decision — unlike the fill, which turns
-    "this family was never mentioned" into "this family is pinned OFF" and would over-constrain a
-    partial row. :func:`stamp_schedule_families` applies these rules and then fills; a replay pin
-    wants only these."""
+def complete_kernel_row(knobs: dict) -> dict[str, str]:
+    """Return one realized kernel row, rejecting legacy or structurally incomplete schedules.
+
+    Exact coverage is problem-dependent and is enforced by :class:`ClassicScheduleCodec` at leaf
+    construction. This recording boundary enforces the context-free half: bare kernel families,
+    canonical node and edge sites, and at least one node assignment.
+    """
     out = dict(tuning_knob_items(knobs))
-    for family in {family_of(name) for name in out if "@" in name}:
-        if out.get(family) == "":
-            out.pop(family)
-    for name in [n for n in out if "@" in n and out[n] == ""]:
-        out.pop(name)
-    return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))
+    present = {family_of(key) for key in out}
+    if present & set(SCHEDULE_FAMILIES):
+        missing = {"WORK", "RASTER"} - set(out)
+        if missing:
+            raise ValueError(
+                f"complete classic schedule row is missing {', '.join(sorted(missing))}; present keys: {', '.join(out) or '<none>'}"
+            )
+        bare = sorted(key for key in out if key in {"TILE", "REDUCE", "STAGE"})
+        if bare:
+            raise ValueError(f"classic node and edge families require exact sites: {', '.join(bare)}")
+        from emmy.compiler.ir.classic_schedule import EdgeSite, NodeId  # noqa: PLC0415
 
-
-def stamp_schedule_families(knobs: dict) -> dict[str, str]:
-    """The ready-to-record knob map for one realized kernel: its tuning knobs
-    (:func:`tuning_knob_items`) plus an explicit OFF value for every :data:`SCHEDULE_FAMILIES`
-    family the realized dict never stamped. The pass-boundary OFF fill covers a pass that ran
-    and declined, but a family whose pass never loads for the target (e.g. ``STAGE`` when no
-    transport resolves) can be absent from ``op.knobs`` entirely — a recording must still pin it
-    as declined, or the entry drifts when a later planner starts filling it. A family with no
-    registered OFF is skipped rather than invented."""
-    # Read the canonical family declarations directly. Besides making this helper
-    # independent of golden-module import side effects, this remains correct when a
-    # test temporarily replaces the registry after ``space`` has already loaded.
-    from emmy.compiler.pipeline.search import space as _space  # noqa: PLC0415
-
-    # The no-information spellings go first (:func:`drop_uninformative_scopes`), THEN the fill.
-    out = drop_uninformative_scopes(knobs)
-    present = {family_of(k) for k in out}
-    for fam in SCHEDULE_FAMILIES:
-        if fam in present:
-            continue
-        kn = getattr(_space, fam, None)
-        if kn is not None and kn.off is not _UNSET:
-            out[fam] = str(kn.off)
-    return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))
+        node_keys = []
+        for key in out:
+            family, separator, site = key.partition("@")
+            if family not in SCHEDULE_FAMILIES:
+                continue
+            if family in {"WORK", "RASTER"}:
+                if separator:
+                    raise ValueError(f"classic kernel family {family} must be bare, got {key}")
+                continue
+            try:
+                if family == "STAGE":
+                    EdgeSite.parse(site)
+                else:
+                    NodeId.parse(site)
+            except ValueError:
+                expected = f"{family}@n<ordinal>.e<operand>" if family == "STAGE" else f"{family}@n<ordinal>"
+                raise ValueError(f"classic schedule key {key!r} is not canonical; expected {expected}") from None
+            if family in {"TILE", "REDUCE"}:
+                node_keys.append(key)
+        if not node_keys:
+            raise ValueError("complete classic schedule row has no node assignment")
+        for key, value in out.items():
+            if family_of(key) in SCHEDULE_FAMILIES:
+                validate_family_value(key, value)
+    return dict(sorted(out.items(), key=lambda item: knob_sort_key(item[0])))

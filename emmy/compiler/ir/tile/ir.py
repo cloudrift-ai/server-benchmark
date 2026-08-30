@@ -417,9 +417,8 @@ class TileOp(Op):
     product contraction's arity (see the module docstring), so stored trees are already
     resolved and every walk is a plain tree walk. An accepted ``classic`` assignment contains
     choices only; ``materialization`` separately contains placed geometry and resolved transport
-    facts. The ``schedule`` map is temporary migration storage for materializers not yet moved to
-    those typed fields and is not a semantic representation. The ``op`` term is pure algebra,
-    IMMUTABLE across the whole schedule search. Read through
+    facts. There is no second schedule map or per-node schedule field. The ``op`` term is pure
+    algebra, IMMUTABLE across the whole schedule search. Read through
     :class:`~emmy.compiler.ir.tile.ops.Sched`; ``lower`` never sees the schedule, so kernel identity
     (``Op.cache_key``) is untouched."""
 
@@ -427,10 +426,8 @@ class TileOp(Op):
     name: str = ""
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
-    schedule: dict = field(default_factory=dict)
     # The accepted semantic assignment and its derived lowering facts. Unscheduled Tile IR carries
-    # neither; scheduling installs both together. The keyed ``schedule`` map remains only while the
-    # materializer readers are migrated to these typed fields.
+    # neither; scheduling installs both together.
     classic: ClassicSchedule | None = field(default=None, compare=False, repr=False)
     materialization: ClassicMaterialization | None = field(default=None, compare=False, repr=False)
     # The kernel's output specifications: every explicit ``Write`` (and the legacy rms/softmax
@@ -439,12 +436,6 @@ class TileOp(Op):
     # stays the materializer's default glue (``_factor.with_store``). Consumers reconstitute
     # the effectful stmt stream via ``apply_output_specs`` — never read a ``Write`` out of the term.
     output_specs: tuple[OutputSpec, ...] = ()
-    # The ONE worker inventory (``ir.schedule.Work``): the ``w``/``n`` worker
-    # tokens factored out of the per-site TILE values, derived at option assembly
-    # (``ops.Sched.seal_workers`` — loud on cross-site disagreement). ``None`` = the per-cell /
-    # pure-reduce forms (derived launch geometry). The wire format spells the inventory ONCE, in
-    # ``WORK``; the site values carry no worker tokens and the retired embedded spellings raise.
-    work: object = None
     # Whether the graph-level Fold-edge placement decision is consumed. Unpinned and bare cut
     # pieces keep the default ``False`` and may expose their own smaller seam set; a scoped cut
     # sets it on both pieces because its one authoritative path decision cannot name a fresh tree.
@@ -474,8 +465,8 @@ class TileOp(Op):
             if any(is_contraction(site.node) for site in sites(candidate)):
                 normalized = candidate
                 self.place = replace(self.place, free=candidate_free)
-        if self.schedule and normalized != self.op:
-            raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
+        if self.classic is not None and normalized != self.op:
+            raise ValueError("cannot canonicalize a TileOp after a classic schedule has been attached")
         self.op = normalized
 
         contractions = tuple(site.node for site in sites(normalized) if is_contraction(site.node))
@@ -486,6 +477,7 @@ class TileOp(Op):
             and any(any(edge_refs_axis(edge, store.sweep.name) for edge in contraction.operands) for contraction in contractions)
         }
         if not promoted:
+            self._validate_classic()
             return
         free_names = {axis.name for axis in self.place.free}
         extra = tuple(
@@ -512,9 +504,47 @@ class TileOp(Op):
         final_axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
         final_sweeps = frozenset(name for name in final_axes if name not in {axis.name for axis in self.place.free})
         renormalized = normalize_fold_tree(self.op, final_axes, sweep_axes=final_sweeps)
-        if self.schedule and renormalized != self.op:
-            raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
+        if self.classic is not None and renormalized != self.op:
+            raise ValueError("cannot canonicalize a TileOp after a classic schedule has been attached")
         self.op = renormalized
+        self._validate_classic()
+
+    def _validate_classic(self) -> None:
+        """Enforce the typed schedule/materialization boundary on construction."""
+        if self.classic is None and self.materialization is None:
+            return
+        if self.classic is None or self.materialization is None:
+            raise ValueError("a scheduled TileOp requires both ClassicSchedule and ClassicMaterialization")
+        from emmy.compiler.ir.classic_schedule import ClassicProblem, ClassicScheduleContext, Reduction  # noqa: PLC0415
+        from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
+
+        context = ClassicScheduleContext(ClassicProblem(self.op, target=None))
+        verdict = context.accepts(self.classic)
+        if not verdict:
+            raise ValueError(f"TileOp carries a refused classic schedule: {verdict.refusal}")
+        expected_tiles = {
+            site
+            for site, assignment in self.classic.nodes.items()
+            if assignment.tile.is_tiled and isinstance(context.views[site], Reduction) and context.views[site].contraction is not None
+        }
+        if set(self.materialization.tiles) != expected_tiles:
+            raise ValueError("classic materialization must contain exactly the tiled node sites")
+        expected_stages = {edge for edge, assignment in self.classic.edges.items() if not assignment.stage.is_direct}
+        if set(self.materialization.stages) != expected_stages:
+            raise ValueError("classic materialization must contain exactly the staged edge sites")
+        placement = Sched(self.op, place=self.place)
+        for site, placed in self.materialization.tiles.items():
+            choice = self.classic.nodes[site].tile
+            expected = placement.placed(context.index.node(site), choice)
+            if placed.choice != choice or placed != expected:
+                raise ValueError(f"materialized tile at {site.id.spell()} does not derive from its classic choice")
+        for edge, resolved in self.materialization.stages.items():
+            if edge not in self.classic.edges or resolved.choice != self.classic.edges[edge].stage:
+                where = f"{edge.consumer.id.spell()}.e{edge.operand}"
+                raise ValueError(f"materialized stage at {where} does not derive from its classic choice")
+        producer = self.workers.producer_warps if self.workers is not None else 0
+        if self.classic.kernel.work.producer != producer:
+            raise ValueError(f"classic producer band {self.classic.kernel.work.producer} disagrees with WarpSpec producer band {producer}")
 
     def pretty_body(self) -> str:
         """The structural dump — delegated to :mod:`~emmy.compiler.ir.tile._dump`, which owns
@@ -525,7 +555,7 @@ class TileOp(Op):
 
     def structural_key(self) -> str:
         """Kernel identity — the stored term's α-invariant digest (``""`` for a placeholder).
-        Placement, schedule slices, workers and output specifications are deliberately EXCLUDED: identity is
+        Placement, classic schedule, materialization, workers and output specifications are deliberately EXCLUDED: identity is
         the algebra alone (the NO-schedule-fields rule above), so every fork sibling of one term
         shares the key and no emission path can leak a schedule into it."""
         return self.op.structural_key() if self.op is not None else ""

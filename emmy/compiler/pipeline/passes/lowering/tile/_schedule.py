@@ -1,19 +1,19 @@
 r"""Schedule a lifted ``TileOp`` by walking its stored Fold tree.
 
 One recursive generator IS the enumeration. A Fold offers its own options; each option extends the
-:class:`Ctx` of what the kernel has already agreed, and the subtree below is walked under that
+:class:`_PartialAssignment` of what the kernel has already agreed, and the subtree below is walked under that
 extended context. Siblings thread left to right, so a choice anywhere restricts everything
 enumerated after it::
 
     S(node, ctx) = for each option o of node under ctx:  o x S(children(node), ctx + o)
 
-There is no product over a flat site list and no join afterwards. The reasons two sites are not
-one kernel — one worker inventory, agreeing tile geometry on a shared physical axis, one decision
-per Fold however many paths reach it, and a compatible fragment seam across a producer/consumer
-edge — are stated once, in :meth:`Ctx.extend`, and applied while descending, so an illegal
-combination is never built. Traversal order is the fork order:
-``WORK`` leads because the root owns the free axes it is read off, and the site keys follow as the
-walk decides them.
+The semantic set is the compatible subset of independent kernel, node, and edge domains. This
+production walk does not construct that flat product: it projects those domains from static local
+offers, then applies the same support relation through a private partial-assignment propagator so
+an incompatible prefix is never built. Every complete leaf is checked again by
+``ClassicScheduleContext``, and bounded products are compared exhaustively with the literal
+Cartesian reference. Traversal order is only the fork order: kernel-global ``RASTER`` leads, while
+``WORK`` is stamped when the site options establish their shared inventory.
 
 It offers the whole reduce-partition catalog — on plain folds AND on the per-cell contraction
 tier, whose K folds cooperatively / across ILP register chains through the same moves — both
@@ -46,16 +46,23 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.classic_schedule import (
     CLASSIC_NODE_FAMILIES,
+    AxisAgreement,
+    ClassicDomains,
     ClassicMaterialization,
     ClassicProblem,
     ClassicSchedule,
+    ClassicScheduleCodec,
     ClassicScheduleContext,
     EdgeSchedule,
+    EdgeSite,
+    FragmentAgreement,
     KernelSchedule,
+    LocalSupport,
     NodeId,
     Projection,
     ProjectionSchedule,
     ReductionSchedule,
+    enumerate_reference,
 )
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure.fold import Fold, deep_reads, edge_refs_axis, is_contraction
@@ -126,7 +133,8 @@ def _nodes(node) -> Iterator:
 class _Option:
     """One site's local choice: what it spells, the worker inventory that claims (``None`` claims
     nothing and composes with any), the placed tile the rest of the kernel must agree with, and the
-    fragment-seam entries it stakes (``(role, edge key, value)`` triples — see :class:`Ctx`).
+    fragment-seam entries it stakes (``(role, edge key, value)`` triples), and whether it places a
+    two-dimensional contraction tile that can realize grouped rasterization.
 
     Fully immutable — the knob dict is sealed at construction — because option lists are what the
     pool memo shares across kernels and tune trajectories (:class:`_Pool`): a walk reads options,
@@ -136,6 +144,7 @@ class _Option:
     work: Work | None = None
     tile: PlacedTile | None = None
     seam: tuple = ()
+    raster_eligible: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "knobs", MappingProxyType(dict(self.knobs)))
@@ -276,9 +285,9 @@ def _contraction_options(state: _State, node) -> list[_Option]:
                 # only ever offered on the untiled tier, so nothing here can disagree).
                 work = derive_inventory((plan,), coop=red.coop)
                 red_knobs = {**knobs, red_key: red.spell()} if red_key is not None else knobs
-                opts.append(_Option(red_knobs, work, tile, seam))
+                opts.append(_Option(red_knobs, work, tile, seam, raster_eligible=plan.is_tiled))
                 opts.extend(
-                    _Option(red_knobs, replace(work, producer=band), tile, seam)
+                    _Option(red_knobs, replace(work, producer=band), tile, seam, raster_eligible=plan.is_tiled)
                     for band in _producer_bands(work, stage, plan.block_threads)
                 )
     if not opts:
@@ -443,7 +452,7 @@ def _producer_bands(work: Work | None, stage: ResolvedStage | None, block_thread
     kernel-global, but every condition on it is a fact about the OPTION: it drives a resolved TMA
     stage and needs a warp inventory wide enough to spare it. Claiming it here is what makes the
     old "no band beside a synchronous compute fill" gate fall out: a fill stage is not TMA, so a
-    fill option claims no band and :meth:`Ctx.extend` finds no partner — which also makes an
+    fill option claims no band and :meth:`_PartialAssignment.extend` finds no partner — which also makes an
     unclaimable ``+p`` WORK pin a leaf-level refusal, so the drops are explained at debug level
     like the family's other choice-layer drops."""
     if work is None or work.kind != "warp":
@@ -469,7 +478,7 @@ def _producer_bands(work: Work | None, stage: ResolvedStage | None, block_thread
 def _seam_entries(state: _State, node, key: str | None, plan: Tile, placed: PlacedTile, stage: ResolvedStage | None) -> tuple:
     """The fragment-seam stakes this option carries — an OFFER when the node produces a fragment
     operand for another contraction, a NEED when it consumes one — as ``(role, edge key, value)``
-    triples :meth:`Ctx.extend` reconciles. Both are spelled off the option alone; the cross-site
+    triples :meth:`_PartialAssignment.extend` reconciles. Both are spelled off the option alone; the cross-site
     check lives in the context, whichever endpoint the walk decides first."""
     out = []
     if key is not None and key in state.frag_producers:
@@ -613,8 +622,8 @@ def _tile_moves(state: _State, node, key: str | None) -> list[Tile]:
     refused: list[str] = []
     for work in works:
         try:
-            # The empty-TILE-beside-a-thread-inventory ambiguity resolves against the REDUCE pin's
-            # cooperative width, exactly as a stamped row's spelling does.
+            # TILE and REDUCE both decode their widths against WORK. Empty TILE is per-cell;
+            # the parallel unit-register thread tile has the explicit f1 spelling.
             coop = Reduce.parse(reduce_pin, work).coop if reduce_pin else 1
             plan = resolve_site_tile(pin, work, coop)
         except ValueError as e:
@@ -927,7 +936,7 @@ def _strip_options(state: _State, node) -> list[_Option]:
     return [_Option({key: plan.spell()})]
 
 
-def _strip_variant(state: _State, plan: Tile, row: dict) -> TileOp:
+def _strip_variant(state: _State, plan: Tile, row: dict, schedule: ClassicSchedule) -> TileOp:
     """The pointwise register-STRIP term variant: hand each thread ``r`` CONTIGUOUS inner-axis
     elements. The inner free axis shrinks to ``extent/r`` (the grid walks it) and the cell body is
     unrolled ``r`` times — copy ``i`` reads/writes ``inner·r + i`` with its SSA names suffixed —
@@ -958,13 +967,19 @@ def _strip_variant(state: _State, plan: Tile, row: dict) -> TileOp:
     new_inner = replace(inner, extent=Dim(inner.extent.as_static() // r))
     new_free = (*tile.place.free[:-1], new_inner)
     new_place = Placement(free=new_free, grid=new_free)
-    return scheduled(
+    out = scheduled(
         Fold.projection(body=Body((*loads, *computes))),
         name=state.name,
         place=new_place,
         knobs={**state.knobs, **row},
         output_specs=tuple(stores),
+        classic=schedule,
+        materialization=ClassicMaterialization({}, {}),
     )
+    verdict = ClassicScheduleContext(ClassicProblem(out.op, state.ctx)).accepts(schedule)
+    if not verdict:
+        raise ValueError(f"materialized register strip was refused: {verdict.refusal}")
+    return out
 
 
 # ---- the warp (tensor-core) tile: which atoms this contraction's fragments can bind ---------------- #
@@ -1254,7 +1269,7 @@ def _sibling_fragment_edges(root, sched: Sched) -> dict[int, str]:
 
 
 @dataclass(frozen=True)
-class Ctx:
+class _PartialAssignment:
     """What the walk has already decided for the WHOLE kernel, carried down and across siblings.
 
     ``work`` — a kernel has ONE worker inventory. ``axes`` — two sites sharing a physical grid axis
@@ -1264,14 +1279,17 @@ class Ctx:
     its stake under ``(role, producer key)`` — the producer an OFFER (its placed fragment
     interface), the consumer a NEED (what its fill's slab chunk requires) — and whichever side
     arrives second is reconciled against the first (:func:`_seam_ok`); a re-record must equal the
-    first, the same one-decision rule ``decided`` states for spellings."""
+    first, the same one-decision rule ``decided`` states for spellings. ``raster_eligible`` records
+    whether the completed prefix contains the placed contraction tile required by a grouped
+    ``RASTER`` choice."""
 
     work: Work | None = None
     axes: dict = field(default_factory=dict)
     decided: dict = field(default_factory=dict)
     seam: dict = field(default_factory=dict)
+    raster_eligible: bool = False
 
-    def extend(self, option: _Option) -> Ctx | None:
+    def extend(self, option: _Option) -> _PartialAssignment | None:
         """This context with ``option`` folded in, or ``None`` when the option contradicts it.
 
         The hot inner loop of the walk (one call per option per branch level), so the untouched
@@ -1303,7 +1321,13 @@ class Ctx:
                     need, offer = (value, other) if role == "need" else (other, value)
                     if not _seam_ok(need, offer):
                         return None
-        return Ctx(work, axes, {**decided, **option.knobs} if option.knobs else decided, seam)
+        return _PartialAssignment(
+            work,
+            axes,
+            {**decided, **option.knobs} if option.knobs else decided,
+            seam,
+            self.raster_eligible or option.raster_eligible,
+        )
 
 
 # ---- the walk, reified as the fork tree ---------------------------------------------------------- #
@@ -1317,6 +1341,7 @@ class _State:
 
     tile: TileOp
     sched: Sched
+    codec: ClassicScheduleCodec
     ctx: object  # the compile Context — which mma instruction families the target has
     name: str
     knobs: dict
@@ -1346,7 +1371,7 @@ class _State:
     @property
     def pool_bound(self) -> int:
         """Upper bound on the pool's leaf count — Π over the per-node option tuples × the RASTER
-        fan-out, before ``Ctx`` legality prunes (legality only shrinks). Derived from the prescan
+        fan-out, before ``_PartialAssignment`` legality prunes (legality only shrinks). Derived from the prescan
         rather than stored, so it cannot go stale against ``options``; carried by every Fork of
         the tree (:attr:`Fork.pool_bound`) so a consumer can ask "roughly how large is this pool"
         without walking it — the greedy cold-pool budget trigger."""
@@ -1357,14 +1382,13 @@ class _State:
 
     @property
     def pool_descent_bound(self) -> int:
-        """Upper bound on ``Ctx.extend`` calls in one complete random descent. ``_step`` checks
+        """Upper bound on ``_PartialAssignment.extend`` calls in one complete random descent. ``_step`` checks
         every sibling at a level before choosing one, so the bound is the sum of option counts."""
         return sum(len(opts) for opts in self.options.values())
 
     def honors_work_pin(self, work: Work | None) -> bool:
         """Whether ``work`` is the inventory the live ``WORK`` pin named (vacuously true unpinned).
-        Compared as parsed :class:`Work`, never as spellings — ``t16x1`` and ``t16`` are one
-        inventory."""
+        Compared as parsed :class:`Work`, never as raw dictionary values."""
         return not self.work_pinned or (work or Work()) == self.work_pin
 
     @property
@@ -1403,15 +1427,12 @@ def _validate_classic_pins() -> None:
     """
     for family in (*CLASSIC_NODE_FAMILIES, "STAGE"):
         for key, _value in family_pins(family):
-            _family, at, site = key.partition("@")
+            _family, _at, site = key.partition("@")
             try:
-                node, dot, edge = site.partition(".e")
-                NodeId.parse(node)
                 if family == "STAGE":
-                    if dot != ".e" or not edge.isdigit():
-                        raise ValueError
-                elif dot:
-                    raise ValueError
+                    EdgeSite.parse(site)
+                else:
+                    NodeId.parse(site)
             except ValueError:
                 expected = f"{family}@n<ordinal>.e<operand>" if family == "STAGE" else f"{family}@n<ordinal>"
                 raise ValueError(f"classic schedule pin {key!r} is not canonical; expected {expected}") from None
@@ -1419,7 +1440,7 @@ def _validate_classic_pins() -> None:
 
 def _raster_values(state: _State) -> tuple[str, ...]:
     """The ``RASTER`` candidates — kernel-global like ``WORK``, so they are decided ONCE per
-    kernel as the walk's LEADING fork level (no ``Ctx`` reconciliation: nothing else can claim
+    kernel as the walk's LEADING fork level (no ``_PartialAssignment`` reconciliation: nothing else can claim
     the launch order; a one-value level collapses like any other), and CONTRACTION-scoped: only
     a 2-D-tiled contraction grid decodes the swizzle (the ``grid_tile`` seal applies it where
     both ``(m, n)`` block axes exist). A symbolic-axis
@@ -1441,6 +1462,81 @@ def _raster_values(state: _State) -> tuple[str, ...]:
     return ("",)
 
 
+def _classic_domains(state: _State, raster_values: tuple[str, ...]) -> ClassicDomains:
+    """Project independent classic domains from the prescanned static offers.
+
+    A contraction offer deliberately carries a locally compatible tile/reduce/transport tuple so
+    expensive stage resolution runs once.  This function forgets that construction order: node,
+    edge, and kernel choices become independent factors, while :class:`LocalSupport` retains the
+    static geometry and fragment facts that :class:`ClassicScheduleContext` uses to filter their
+    Cartesian product.
+    """
+    context = state.codec.context
+    node_domains: dict = {}
+    edge_domains: dict = {edge: {} for edge in context.index.edges}
+    supports: dict = {}
+    work_domain: dict[Work, None] = {}
+
+    for node in _nodes(state.tile.op):
+        site = context.index.site(node)
+        view = context.views[site]
+        incident = tuple(edge for edge in context.index.edges if edge.consumer == site)
+        tile_key = state.sched.key("TILE", node)
+        reduce_key = state.sched.key("REDUCE", node)
+        edge_keys = dict(zip(incident, state.sched.edge_keys(node), strict=True)) if state.sched.edge_keys(node) else {}
+        node_choices: dict = {}
+        local: list[LocalSupport] = []
+        local_keys: set[tuple] = set()
+        for option in state.options[id(node)]:
+            tile = resolve_site_tile(option.knobs.get(tile_key, "") if tile_key is not None else "", option.work)
+            if isinstance(view, Projection):
+                node_choice = ProjectionSchedule(tile)
+            else:
+                reduce = Reduce.parse(option.knobs.get(reduce_key, "") if reduce_key is not None else "", option.work)
+                node_choice = ReductionSchedule(tile, reduce)
+            edge_choices = {
+                edge: EdgeSchedule(Stage.parse(option.knobs.get(edge_keys[edge], "")))
+                if edge in edge_keys
+                else EdgeSchedule(Stage.direct())
+                for edge in incident
+            }
+            node_choices.setdefault(node_choice, None)
+            for edge, choice in edge_choices.items():
+                edge_domains[edge].setdefault(choice, None)
+            if option.work is not None:
+                work_domain.setdefault(option.work, None)
+            axes = tuple(AxisAgreement(side.axis.name, side.tile, side.units) for side in option.tile.mn) if option.tile is not None else ()
+            fragments = tuple(FragmentAgreement(role, edge, value) for role, edge, value in option.seam)
+            support_key = (node_choice, tuple(edge_choices.items()), option.work, axes, fragments, option.raster_eligible)
+            if support_key in local_keys:
+                continue
+            local_keys.add(support_key)
+            support = LocalSupport(
+                node=node_choice,
+                edges=edge_choices,
+                work=option.work,
+                axes=axes,
+                fragments=fragments,
+                raster_eligible=option.raster_eligible,
+            )
+            local.append(support)
+        node_domains[site] = tuple(node_choices)
+        supports[site] = tuple(local)
+
+    if not state.work_pinned or state.observed:
+        work_domain = {Work(): None, **work_domain}
+    elif state.work_pin is not None:
+        work_domain.setdefault(state.work_pin, None)
+    rasters = tuple(Raster.parse(value) for value in raster_values)
+    kernel = tuple(KernelSchedule(work, raster) for work in work_domain for raster in rasters)
+    return ClassicDomains(
+        kernel=kernel,
+        nodes=node_domains,
+        edges={edge: tuple(choices) for edge, choices in edge_domains.items()},
+        supports=supports,
+    )
+
+
 @lru_cache(maxsize=1024)
 def _work_spelling(work: Work) -> str:
     """``Work.spell`` memoized per (frozen, hashable) inventory — the walk re-spells the same
@@ -1448,9 +1544,9 @@ def _work_spelling(work: Work) -> str:
     return work.spell()
 
 
-def _spelled(knobs: dict, option: _Option, ctx: Ctx) -> dict:
+def _spelled(knobs: dict, option: _Option, ctx: _PartialAssignment) -> dict:
     """The row prefix one decision leaves behind: what the option spells, plus the inventory as
-    soon as any option claims it — :meth:`Ctx.extend` refuses a second one, so a prefix that
+    soon as any option claims it — :meth:`_PartialAssignment.extend` refuses a second one, so a prefix that
     carries ``WORK`` already carries its final value."""
     out = {**knobs, **option.knobs}
     if ctx.work is not None:
@@ -1458,7 +1554,7 @@ def _spelled(knobs: dict, option: _Option, ctx: Ctx) -> dict:
     return out
 
 
-def _step(state: _State, stack: tuple, ctx: Ctx, knobs: dict) -> list[Fork]:
+def _step(state: _State, stack: tuple, ctx: _PartialAssignment, knobs: dict) -> list[Fork]:
     """One level of the walk: descend past every FORCED decision, then return the siblings standing
     at the first real choice — or the leaf, when the stack runs out.
 
@@ -1484,7 +1580,9 @@ def _step(state: _State, stack: tuple, ctx: Ctx, knobs: dict) -> list[Fork]:
         return [_Branch(state, children, below, _spelled(knobs, o, below)) for o, below in offers]
     if not state.honors_work_pin(ctx.work) and not state.observed:
         return []  # the walk finished without ever claiming the pinned inventory
-    return [_Leaf(state, {**state.off, **knobs, WORK.name: _work_spelling(ctx.work) if ctx.work is not None else ""})]
+    if knobs.get("RASTER") and not ctx.raster_eligible:
+        return []  # grouped launch order requires a placed two-dimensional contraction tile
+    return [_leaf(state, {**state.off, **knobs, WORK.name: _work_spelling(ctx.work) if ctx.work is not None else ""})]
 
 
 @dataclass(frozen=True)
@@ -1513,7 +1611,7 @@ class _Branch(_WalkFork):
     row prefix decided so far. The subtree does not exist until ``expand`` walks one level more."""
 
     stack: tuple
-    ctx: Ctx
+    ctx: _PartialAssignment
     knobs: dict
     is_leaf = False
 
@@ -1523,13 +1621,27 @@ class _Branch(_WalkFork):
 
 @dataclass(frozen=True)
 class _Leaf(_WalkFork):
-    """A complete walk: ``knobs`` is the kernel's whole identity, materialized on demand."""
+    """A validated typed schedule plus non-semantic search features."""
 
-    knobs: dict
+    schedule: ClassicSchedule
+    features: Mapping
     is_leaf = True
 
+    @property
+    def knobs(self) -> dict:
+        """Encode the typed schedule only at the search boundary."""
+        return {**self.features, **self.state.codec.encode(self.schedule)}
+
     def expand(self) -> list[TileOp]:
-        return [_materialize(self.state, self.knobs)]
+        return [_materialize(self.state, self.schedule, self.features)]
+
+
+def _leaf(state: _State, row: Mapping) -> _Leaf:
+    """Construct the semantic value at the enumeration boundary and reject any invalid leaf."""
+    keys = state.codec.keys()
+    schedule = state.codec.decode({key: row[key] for key in keys})
+    features = MappingProxyType({key: value for key, value in row.items() if key not in keys})
+    return _Leaf(state, schedule, features)
 
 
 def _stage_of(state: _State, node, plan: Tile, spec: str) -> ResolvedStage | None:
@@ -1538,87 +1650,53 @@ def _stage_of(state: _State, node, plan: Tile, spec: str) -> ResolvedStage | Non
     return _resolve_stage(state, node, plan, state.sched.placed(node, plan), Stage.parse(spec))
 
 
-def _materialize(state: _State, row: dict) -> TileOp:
-    """One row -> its ``TileOp``, every slice RE-RESOLVED from the row's own spellings over the same
-    ``_nodes`` order the walk decided in. The row is the kernel's complete identity, so
-    decode-by-spelling is what makes it replayable."""
+def _materialize(state: _State, schedule: ClassicSchedule, features: Mapping) -> TileOp:
+    """Materialize one accepted semantic assignment without re-decoding its wire representation."""
     sched, tile = state.sched, state.tile
-    work = Work.parse(row.get(WORK.name) or None)
+    work = schedule.kernel.work
+    row = {**features, **state.codec.encode(schedule)}
     root = tile.op
     if isinstance(root, Fold) and root.axis is None and not root.operands:
         # The register strip is a TERM VARIANT: a row whose root ``TILE`` names a width unrolls
         # the cell rather than decorating it with a slice.
-        plan = resolve_site_tile(row.get(sched.key("TILE", root) or "") or None, work)
+        plan = schedule.nodes[state.codec.context.index.site(root)].tile
         if _strip_width(plan) > 1:
-            return _strip_variant(state, plan, row)
-    slices = []
-    for node in _nodes(tile.op):
-        if not isinstance(node, Fold) or node.axis is None:
-            continue
-        red = Reduce.parse(row.get(sched.key("REDUCE", node) or "") or None, work)
-        if not is_contraction(node):
-            slices.append(("REDUCE", node, red if red.stages else None))
-            continue
-        plan = resolve_site_tile(row.get(sched.key("TILE", node) or "") or None, work, red.coop)
-        if plan.is_tiled:
-            slices.append(("TILE", node, plan))
-            specs = {row.get(key, "") for key in sched.edge_keys(node)}
-            if len(specs) > 1:
-                raise ValueError(f"STAGE edge choices disagree at {sched.key('TILE', node)}: {sorted(specs)!r}")
-            spec = next(iter(specs), "")
-            if spec:
-                slices.append(("STAGE", node, _stage_of(state, node, plan, spec)))
-        else:
-            # The per-cell tier's cooperative / ILP K partition rides a REDUCE slice, exactly as
-            # a plain fold's does (a decided-empty spelling resolves to no slice).
-            slices.append(("REDUCE", node, red if red.stages else None))
+            return _strip_variant(state, plan, row, schedule)
     workers = WarpSpec(work.producer) if work.producer else None
-    out = scheduled(
+    return scheduled(
         tile.op,
         name=state.name,
         place=sched.place,
         knobs={**state.knobs, **row},
         output_specs=tile.output_specs,
-        slices=slices,
+        classic=schedule,
+        materialization=_materialization(state, schedule),
         workers=workers,
     )
-    _attach_classic(out, state, row, slices, work)
-    return out
 
 
-def _attach_classic(out: TileOp, state: _State, row: dict, slices: list, work: Work) -> None:
-    """Install the typed complete assignment and separate derived materialization facts."""
-    del slices
-    problem = ClassicProblem(out.op, state.ctx)
-    context = ClassicScheduleContext(problem)
-    resolved_schedule = Sched(out.op, out.schedule, place=out.place)
-    nodes = {}
+def _materialization(state: _State, schedule: ClassicSchedule) -> ClassicMaterialization:
+    """Derive lowering facts from an accepted assignment without mutating its choices."""
+    context = state.codec.context
+    verdict = context.accepts(schedule)
+    if not verdict:
+        raise ValueError(f"cannot materialize a refused schedule: {verdict.refusal}")
     placed = {}
     resolved = {}
     for site in context.index.nodes:
         node = context.index.node(site)
-        tile = resolved_schedule.get("TILE", node) or Tile()
-        reduce = resolved_schedule.get("REDUCE", node) or Reduce()
-        nodes[site] = ProjectionSchedule(tile) if isinstance(context.views[site], Projection) else ReductionSchedule(tile, reduce)
-        if tile.is_tiled:
-            geometry = resolved_schedule.placed(node, tile)
+        plan = schedule.nodes[site].tile
+        if plan.is_tiled:
+            geometry = state.sched.placed(node, plan)
             if isinstance(geometry, PlacedTile):
                 placed[site] = geometry
-        stage = resolved_schedule.get("STAGE", node)
-        for edge in (edge for edge in context.index.edges if edge.consumer == site):
-            if stage is not None:
+        for edge, edge_schedule in schedule.edges.items():
+            if edge.consumer == site and not edge_schedule.stage.is_direct:
+                stage = _stage_of(state, node, plan, edge_schedule.stage.spell())
+                if stage is None:
+                    raise ValueError(f"accepted STAGE at {site.id.spell()}.e{edge.operand} did not resolve")
                 resolved[edge] = stage
-
-    schedule = ClassicSchedule(
-        KernelSchedule(work, Raster.parse(row.get("RASTER"))),
-        nodes,
-        {edge: EdgeSchedule(resolved[edge].choice if edge in resolved else Stage.direct()) for edge in context.index.edges},
-    )
-    verdict = context.accepts(schedule)
-    if not verdict:
-        raise ValueError(f"materialized schedule was refused: {verdict.refusal}")
-    out.classic = schedule
-    out.materialization = ClassicMaterialization(placed, resolved)
+    return ClassicMaterialization(placed, resolved)
 
 
 # ---- the pool memo: what one enumeration leaves for the next ------------------------------------- #
@@ -1680,7 +1758,9 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     Under ``ctx.pool_sample`` (``emmy fit``, never a deploy) the lazy fork is NOT returned:
     the walk's leaf stream is reservoir-sampled (:meth:`~…search.pool.PoolSample.take`), the pool's
     exact size is reported through ``sample.totals``, and the drawn rows come back as leaf forks."""
-    sched = Sched(tile.op, {}, place=tile.place.on_grid())
+    problem = ClassicProblem(tile.op, ctx)
+    codec = ClassicScheduleCodec(problem)
+    sched = Sched(tile.op, place=tile.place.on_grid())
     off = _off(sched, tile.op)
     if ctx.validate_pins:
         _validate_classic_pins()
@@ -1711,6 +1791,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     state = _State(
         tile,
         sched,
+        codec,
         ctx,
         name,
         knobs,
@@ -1727,7 +1808,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     pool = cache.get(key) if cache is not None else None
     if isinstance(pool, _Draw):
         sample.totals[key] = pool.total  # the drawn rows cannot carry it; the caller reads it here
-        return [_Leaf(state, dict(row)) for row in pool.rows]
+        return [_leaf(state, row) for row in pool.rows]
     if isinstance(pool, _Pool):
         state.options.update(zip((id(node) for node in nodes), pool.options, strict=True))
     else:
@@ -1745,6 +1826,9 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
             cache.put(key, _Pool(tuple(state.options[id(node)] for node in nodes)))
     if any(not opts for opts in state.options.values()):
         return []
+    values = _raster_values(state)
+    domains = _classic_domains(state, values)
+    state = replace(state, codec=ClassicScheduleCodec(problem, domains))
     # ``S_``-prefixed — not a schedule family, so tile identity and prefix-consistency are
     # untouched; it prices "a scalar tile where tensor cores were on offer". It is read off the
     # sites' own offered atoms, never off the rows — a pin naming the scalar tier cannot erase it —
@@ -1753,22 +1837,22 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     warp = any(f.offered for f in facts.values())
     prefix = {"S_warp_eligible": 1.0} if warp else {}
     # The kernel-global RASTER LEADS the walk as its own fork level: one decision per kernel, no
-    # cross-site agreement to thread through Ctx, so each candidate seeds the row prefix and the
+    # cross-site agreement to thread through _PartialAssignment, so each candidate seeds the row prefix and the
     # whole site walk is one branch beneath it. A single-value level is collapsed (the walk runs
     # directly, like any other one-option level). The walk's aliveness is value-independent (RASTER
-    # rides only the prefix, never the Ctx), so ONE probe under the first value states the
+    # rides only the prefix, never the _PartialAssignment), so ONE probe under the first value states the
     # "[] when nothing schedules" guardrail for the whole fan-out: the walk must yield a first
     # branch AND that tree must hold a leaf. The per-node offer check above cannot promise the
     # latter — its own kernel-global exceptions (a ``WORK`` pin answered at the leaf, a fragment
     # seam emptying a sibling's offer mid-walk) can kill every leaf, and a fork with no leaf breaks
     # the guardrail for every consumer. A live probe costs one extra leftmost-spine expansion; a
     # dead one drains the whole tree before answering — the accepted price of the guardrail.
-    values = _raster_values(state)
-    forks = _step(state, (tile.op,), Ctx(), {**prefix, "RASTER": values[0]})
+    forks = _step(state, (tile.op,), _PartialAssignment(), {**prefix, "RASTER": values[0]})
     if forks and next(iter_leaves(forks), None) is None:
         return []
     if forks and len(values) > 1:
-        forks = [_Branch(state, (tile.op,), Ctx(), {**prefix, "RASTER": value}) for value in values]
+        forks = [_Branch(state, (tile.op,), _PartialAssignment(), {**prefix, "RASTER": value}) for value in values]
+    _verify_reference(problem, domains, forks, state.codec)
     if sample is None:
         return forks
     drawn = sample.take(dict(leaf.knobs) for leaf in iter_leaves(forks))
@@ -1776,7 +1860,28 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     if cache is not None:
         cache.put(key, _Draw(rows, drawn.total))
     sample.totals[key] = drawn.total
-    return [_Leaf(state, dict(row)) for row in rows]
+    return [_leaf(state, row) for row in rows]
 
 
-__all__ = ["Ctx", "schedule"]
+def _verify_reference(
+    problem: ClassicProblem,
+    domains: ClassicDomains,
+    forks: list[Fork],
+    codec: ClassicScheduleCodec,
+) -> None:
+    """Prove the optimized walk equals the literal Cartesian oracle on bounded products."""
+    if domains.product_size > 256:
+        return
+
+    def signature(schedule: ClassicSchedule) -> tuple[tuple[str, str], ...]:
+        return tuple(codec.encode(schedule).items())
+
+    optimized = {signature(leaf.schedule) for leaf in iter_leaves(forks)}
+    reference = {signature(schedule) for schedule in enumerate_reference(problem, domains)}
+    if optimized != reference:
+        missing = sorted(reference - optimized)[:3]
+        extra = sorted(optimized - reference)[:3]
+        raise AssertionError(f"classic optimized enumeration differs from its Cartesian reference: missing={missing!r}, extra={extra!r}")
+
+
+__all__ = ["schedule"]

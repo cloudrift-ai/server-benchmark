@@ -128,6 +128,9 @@ rasterization beside every untiled node choice.
 The staged-edge boundary limits the transport catalog to one copy choice, projects that choice independently onto both
 operand edges, and compares production against the literal product. Only equal edge choices survive compatibility,
 and expanding a selected staged row derives one `ResolvedStage` per edge without changing the typed schedule.
+The compute-fill boundary makes the same bounded comparison with direct, `d1/smem`, and `d2/smem` edge factors. A
+warp node that needs the fill accepts only equal smem edges, while scalar support keeps direct transport in each
+independent public factor.
 `test_move_catalog.py` also verifies that a matching `WORK` pin selects only existing rows and an unmatched pin returns
 no row, so pin filtering cannot manufacture a worker inventory. Precision-gated atom and raster tests cover the
 explicit exception: a legal pin-only spelling enters its addressed independent factor before complete-row filtering.

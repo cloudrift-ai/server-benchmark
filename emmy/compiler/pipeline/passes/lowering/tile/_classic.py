@@ -5,8 +5,9 @@ independently from static facts, and enumeration is exactly the compatible subse
 Cartesian product. Traversal order may change evaluation cost, never membership.
 
 Projection, plain-reduction, scalar-contraction, precision-gated tensor-core, materialized-operand
-copy staging, and kernel-global raster choices are live. Later schedule families extend the same
-independent factors and the one compatibility relation; they do not add another enumerator.
+copy staging, smem compute-fill staging, and kernel-global raster choices are live. Later schedule
+families extend the same independent factors and the one compatibility relation; they do not add
+another enumerator.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.classic_schedule import (
     AxisAgreement,
     ClassicDomains,
@@ -31,16 +33,18 @@ from emmy.compiler.ir.classic_schedule import (
     Reduction,
     ReductionSchedule,
 )
-from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis
+from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction
 from emmy.compiler.ir.schedule import PlacedTile, Raster, Reduce, ResolvedStage, Stage, Tile, Work, derive_inventory
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import Sched, edge_dtypes, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, cone_seam, edge_dtypes, projection_tail, scheduled
+from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.knob import family_pins
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_axis_step, split_addressable
 from emmy.compiler.pipeline.passes.lowering.tile import _staging as staging
+from emmy.compiler.pipeline.passes.lowering.tile._tree import children, walk
 from emmy.compiler.pipeline.search.space import (
     F16_MMA_F32_ACC,
     FP8_MMA,
@@ -61,6 +65,49 @@ class ClassicScheduleUnavailable(RuntimeError):
 
 class PinRefused(ValueError):
     """A classic schedule pin may be realizable only after a structural rewrite."""
+
+
+@dataclass(frozen=True)
+class _ContractionFacts:
+    """The effective reduction axis and carried-state seam of one contraction node."""
+
+    k_axis: Axis
+    seam: tuple | None = None
+
+
+def _contraction_facts(tile: TileOp, target) -> dict[int, _ContractionFacts]:
+    """Derive contraction facts that are independent of every schedule choice."""
+    root = tile.op
+    parents: dict[int, Fold] = {}
+    for node, _axes in walk(root):
+        for child, _child_axes in children(node):
+            parents.setdefault(id(child), node)
+    derived = {id(site.node) for site in sites(root) if site.derived}
+    tail = projection_tail(tile)
+    fragment_epilogue = _fragment_epilogue_ok(tail, _fold_states(root))
+    facts = {}
+    for node, _axes in walk(root):
+        if not (isinstance(node, Fold) and node.axis is not None and is_contraction(node)):
+            continue
+        parent = parents.get(id(node))
+        if (
+            id(node) in derived
+            and node.axis.extent.is_static
+            and node.axis.extent.as_static() == 1
+            and isinstance(parent, Fold)
+            and parent.axis is not None
+        ):
+            assert parent.combine is not None and node.combine is not None
+            seam = ((), (), tuple(parent.combine.results[: -len(node.combine.results)]))
+            facts[id(node)] = _ContractionFacts(parent.axis, seam)
+        else:
+            seam = (
+                cone_seam(node.a, node.axis.name)
+                if isinstance(node.a, Fold) and _node_refusal(tile, target, node, fragment_epilogue) is None
+                else None
+            )
+            facts[id(node)] = _ContractionFacts(node.axis, seam)
+    return facts
 
 
 def _inner_free(tile: TileOp):
@@ -234,11 +281,19 @@ def _kstep_refusal(k_axis, plan: Tile) -> str | None:
     return f"warp TILE K-step {step} does not divide the static contraction K={extent}"
 
 
+def _computed_edge(node) -> bool:
+    """Whether a contraction operand is an inline zero-axis producer cone."""
+    return any(isinstance(edge, Fold) and edge.axis is None for edge in (node.a, *(channel.b for channel in node.channels)))
+
+
+def _needs_fill(tile: TileOp, node, plan: Tile) -> bool:
+    """Whether one warp choice requires the shared-memory compute fill."""
+    return plan.is_warp and (_computed_edge(node) or len(node.channels) > 1 or staging.converting_a(node, plan.atom, tile.inputs))
+
+
 def _warp_atoms(tile: TileOp, target, node, tile_pins: tuple[tuple[str, str], ...], site) -> tuple[str, ...]:
-    """Project direct tensor-core atoms from contraction, dtype, address, and target facts."""
+    """Project tensor-core atoms from contraction, dtype, address, and target facts."""
     tail = projection_tail(tile)
-    if len(node.channels) != 1 or not isinstance(node.a, Load) or not isinstance(node.channels[0].b, Load):
-        return ()
     if _node_refusal(tile, target, node, _fragment_epilogue_ok(tail, _fold_states(tile.op))) is not None:
         return ()
     offered, pin_only = _atom_families(tile, target, node, tail)
@@ -249,17 +304,36 @@ def _warp_atoms(tile: TileOp, target, node, tile_pins: tuple[tuple[str, str], ..
     return tuple(dict.fromkeys((*offered, *pinned_atoms)))
 
 
-def _contraction_domain(tile: TileOp, target, node, tile_pins: tuple[tuple[str, str], ...], site) -> tuple[ReductionSchedule, ...]:
-    """Project one contraction's locally realizable direct scalar and tensor-core choices."""
-    if len(node.channels) != 1:
-        raise ClassicScheduleUnavailable("multi-channel contractions require tensor-core schedules")
-    per_cell_reductions = _reduction_domain(tile, node) if node.axis.extent.is_static else (Reduce(),)
+def _contraction_domain(
+    tile: TileOp,
+    target,
+    node,
+    facts: _ContractionFacts,
+    tile_pins: tuple[tuple[str, str], ...],
+    site,
+) -> tuple[ReductionSchedule, ...]:
+    """Project one contraction's locally realizable scalar and tensor-core choices."""
+    per_cell_reductions = _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
     plans = (
-        *scalar_tile_moves(),
-        *(plan for plan in warp_tile_moves(_warp_atoms(tile, target, node, tile_pins, site)) if _kstep_refusal(node.axis, plan) is None),
+        *(scalar_tile_moves() if len(node.channels) == 1 else ()),
+        *(plan for plan in warp_tile_moves(_warp_atoms(tile, target, node, tile_pins, site)) if _kstep_refusal(facts.k_axis, plan) is None),
     )
     return tuple(
         ReductionSchedule(plan, reduction) for plan in plans for reduction in (per_cell_reductions if not plan.is_tiled else (Reduce(),))
+    )
+
+
+def _plan_node_refusal(tile: TileOp, node, plan: Tile, placed: PlacedTile, facts: _ContractionFacts) -> str | None:
+    """Return why node-local compute-fill facts reject one tensor-core choice."""
+    refusal = _kstep_refusal(facts.k_axis, plan)
+    if refusal is not None or not _needs_fill(tile, node, plan):
+        return refusal
+    converting = staging.converting_a(node, plan.atom, tile.inputs)
+    return staging.computed_operand_cover(node, placed, converting=converting, k_axis=facts.k_axis) or staging.computed_operand_copy_dtype(
+        node,
+        placed,
+        tile.inputs,
+        converting=converting,
     )
 
 
@@ -272,8 +346,26 @@ def _stage_pin(stage_pins: tuple[tuple[str, str], ...], incident: tuple) -> str 
     return next(iter(values), None)
 
 
-def _resolve_stage(tile: TileOp, target, node, plan: Tile, placed: PlacedTile, choice: Stage) -> ResolvedStage | None:
+def _resolve_stage(
+    tile: TileOp,
+    target,
+    node,
+    plan: Tile,
+    placed: PlacedTile,
+    choice: Stage,
+    facts: _ContractionFacts,
+) -> ResolvedStage | None:
     """Resolve one copy transport without consulting any selected edge assignment."""
+    if _needs_fill(tile, node, plan):
+        return staging.resolve_fill_stage(
+            node,
+            placed,
+            target.max_dynamic_smem,
+            choice.depth,
+            inputs=tile.inputs,
+            seam=facts.seam,
+            k_axis=facts.k_axis,
+        )
     if plan.is_warp:
         return staging.resolve_warp_stage(node, placed, choice, target.max_dynamic_smem, tile.inputs)
     return staging.resolve_scalar_stage(node, placed, choice, tile.inputs, target.max_dynamic_smem)
@@ -287,11 +379,27 @@ def _stage_supports(
     placed,
     incident: tuple,
     stage_pin: str | None,
+    facts: _ContractionFacts,
 ) -> tuple[dict, ...]:
     """Project supported edge tuples for one node choice, with resolved facts kept private."""
     direct = {edge: EdgeSchedule(Stage.direct()) for edge in incident}
     if not plan.is_tiled or not isinstance(placed, PlacedTile):
         return (direct,)
+    if _needs_fill(tile, node, plan):
+        candidates = [Stage(depth=1), Stage(depth=2)]
+        if stage_pin is not None:
+            pinned = Stage.parse(stage_pin)
+            if pinned.transport == "smem" and pinned not in candidates:
+                candidates.append(pinned)
+        out = []
+        spelled = set()
+        for candidate in candidates:
+            resolved = _resolve_stage(tile, target, node, plan, placed, candidate, facts)
+            if resolved is None or resolved.spell() in spelled:
+                continue
+            spelled.add(resolved.spell())
+            out.append({edge: EdgeSchedule(resolved.choice) for edge in incident})
+        return tuple(out)
     candidates = list(stage_moves(warp=plan.is_warp, ctx=target))
     if stage_pin is not None:
         pinned = Stage.parse(stage_pin)
@@ -303,7 +411,7 @@ def _stage_supports(
     out = [direct]
     spelled = {""}
     for candidate in candidates:
-        resolved = _resolve_stage(tile, target, node, plan, placed, candidate)
+        resolved = _resolve_stage(tile, target, node, plan, placed, candidate, facts)
         if resolved is None or resolved.spell() in spelled:
             continue
         spelled.add(resolved.spell())
@@ -396,6 +504,7 @@ def project_domains(tile: TileOp, target) -> ClassicDomains:
     work_domain = {Work()}
     tile_pins = family_pins("TILE")
     stage_pins = family_pins("STAGE")
+    contraction_facts = _contraction_facts(tile, target)
     sched = Sched(tile.op, place=tile.place.on_grid())
     for site, view in context.views.items():
         incident = {edge: direct_edges[edge] for edge in context.index.edges if edge.consumer == site}
@@ -405,7 +514,7 @@ def project_domains(tile: TileOp, target) -> ClassicDomains:
         else:
             node = context.index.node(site)
             choices = (
-                _contraction_domain(tile, target, node, tile_pins, site)
+                _contraction_domain(tile, target, node, contraction_facts[id(node)], tile_pins, site)
                 if view.contraction is not None
                 else tuple(ReductionSchedule(Tile(), reduction) for reduction in _reduction_domain(tile, node))
             )
@@ -417,14 +526,21 @@ def project_domains(tile: TileOp, target) -> ClassicDomains:
                 geometry = sched.placed(node, choice.tile)
                 if choice.tile.is_tiled and not isinstance(geometry, PlacedTile):
                     continue
+                facts = contraction_facts.get(id(node))
+                if (
+                    isinstance(geometry, PlacedTile)
+                    and facts is not None
+                    and _plan_node_refusal(tile, node, choice.tile, geometry, facts) is not None
+                ):
+                    continue
                 valid_choices.append(choice)
                 axes = (
                     tuple(AxisAgreement(side.axis.name, side.tile, side.units) for side in geometry.mn)
-                    if isinstance(geometry, PlacedTile)
+                    if choice.tile.is_tiled and isinstance(geometry, PlacedTile)
                     else ()
                 )
                 edge_supports = (
-                    _stage_supports(tile, target, node, choice.tile, geometry, incident_sites, stage_pin)
+                    _stage_supports(tile, target, node, choice.tile, geometry, incident_sites, stage_pin, facts)
                     if view.contraction is not None
                     else (incident,)
                 )
@@ -485,6 +601,7 @@ class _ScheduleLeaf(Fork):
 
     def expand(self) -> list[TileOp]:
         context = ClassicScheduleContext(ClassicProblem(self.tile.op, target=None))
+        contraction_facts = _contraction_facts(self.tile, self.target)
         sched = Sched(self.tile.op, place=self.tile.place.on_grid())
         placed = {}
         resolved = {}
@@ -501,7 +618,15 @@ class _ScheduleLeaf(Fork):
                     continue
                 if not isinstance(geometry, PlacedTile):
                     raise ValueError(f"accepted STAGE at {edge.spell()} has no placed consumer geometry")
-                stage = _resolve_stage(self.tile, self.target, node, choice.tile, geometry, edge_choice.stage)
+                stage = _resolve_stage(
+                    self.tile,
+                    self.target,
+                    node,
+                    choice.tile,
+                    geometry,
+                    edge_choice.stage,
+                    contraction_facts[id(node)],
+                )
                 if stage is None:
                     raise ValueError(f"accepted STAGE at {edge.spell()} did not resolve")
                 resolved[edge] = stage
@@ -568,7 +693,6 @@ def _removed(*args, **kwargs):
 
 _options = _removed
 _reduce_moves = _removed
-cone_seam = _removed
 
 
 __all__ = ["ClassicScheduleUnavailable", "PinRefused", "project_domains", "schedule"]

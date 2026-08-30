@@ -103,8 +103,8 @@ realizes is an addressing error. Unpinned cuts and bare
 `PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
 `040_schedule` is the clean-slate reconstruction boundary for classic assignments. The former `_schedule.py` was
 deleted rather than adapted. `_classic.py` now realizes direct projection, plain-reduction, scalar-contraction,
-precision-gated tensor-core, materialized-operand copy staging, and kernel-global raster domains; compute-filled
-transport, composed contractions, and sampled lazy enumeration raise
+precision-gated tensor-core, materialized-operand copy staging, computed-operand and multi-channel smem compute-fill
+staging, and kernel-global raster domains; composed contractions and sampled lazy enumeration raise
 `ClassicScheduleUnavailable` until their coherent recovery phases land. A plain reduction projects serial,
 cooperative and ILP choices independently from its node, while the kernel domain projects the union of their worker
 inventories; the compatibility relation is the only join between them. A scalar contraction projects its complete
@@ -120,7 +120,7 @@ the resolved node–edge tuples without putting slab sizes into either public fa
 mixed transport assignments, and selected non-direct edges are resolved again only during materialization. The
 production traversal follows support-compatible prefixes, while bounded tests compare its complete set against the
 literal node × edge × kernel product.
-fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete typed
+The fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete typed
 `ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization derives
 placed geometry and resolved transport facts. Authoritative pin-only spellings first enter the independently projected
 factor they address, but only when static legality admits them; pins then filter complete canonical rows and never
@@ -207,10 +207,18 @@ materialized A the atom cannot bind (only the fill's typed slab store converts �
 has no gmem-direct sibling and a `STAGE` pin can only choose its depth. A NESTED-reduce B edge (the streamed
 computed-B decode cone) rides the same mandatory multi-channel fill — the fill evaluates every non-materialized B
 channel into its slab, nested reduce included — while a nested A, or a nested B on a single-channel node, keeps the
-refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. The fp8 (k32) gmem-direct tier rides the same
-two-layer policy as the f16-accumulate family: precision-gated for the catalog (`FP8_MMA` / the `FAST_MATH` umbrella),
-bindable by a pin regardless; its sm_89 hardware floor lives in the atom registry's target filter, which no pin
-overrides.
+refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. The fp8 (k32)
+gmem-direct tier rides the same two-layer policy as the f16-accumulate family: precision-gated for the catalog
+(`FP8_MMA` / the `FAST_MATH` umbrella), bindable by a pin regardless; its sm_89 hardware floor lives in the atom
+registry's target filter, which no pin overrides.
+
+The fill's `d1/smem` and `d2/smem` choices are projected independently onto every operand edge. Direct transport may
+still occur in those public edge factors because a scalar node choice supports it; compatibility alone rejects a
+direct or mixed edge assignment beside a warp node choice that needs the fill. Fill sizing uses the contraction's
+effective reduction axis. A derived unit-marker contraction therefore inherits its enclosing Fold's K axis and
+carried-state seam as immutable node facts; the synthetic unit axis never controls the K chunk or mask. An untiled
+choice claims neither physical-axis geometry nor a fill, so it composes with a tiled sibling without inventing an
+axis disagreement.
 
 **The fragment seam is a compatibility decision.** A fragment edge joins a consumer contraction to the one contraction
 producing its computed fragment operand — nested in its A cone, or a sibling in the enclosing fold's derived step

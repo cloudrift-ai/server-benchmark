@@ -12,7 +12,7 @@ from emmy.compiler.ir.classic_schedule import (
 )
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Channel, Fold
-from emmy.compiler.ir.schedule import Reduce, Stage
+from emmy.compiler.ir.schedule import Reduce, Stage, Tile, Work
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline.passes.lowering.tile import _classic as classic
@@ -180,3 +180,44 @@ def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
     materialized = staged.expand()[0]
     assert set(materialized.materialization.stages) == set(context.index.edges)
     assert all(stage.choice == staged.schedule.edges[edge].stage for edge, stage in materialized.materialization.stages.items())
+
+
+def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> None:
+    m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
+    computed_a = Fold.projection(
+        body=Body(
+            (
+                Load(name="score", input="scores", index=(Var("m"), Var("k"))),
+                Assign(name="prob", op="exp", args=("score",)),
+            )
+        )
+    )
+    root = Fold.contraction(
+        k_axis=k,
+        a=computed_a,
+        channels=(Channel(b=Load(name="value", input="values", index=(Var("k"), Var("n"))), acc="acc"),),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m, n)),
+        inputs={"scores": Tensor("scores", (64, 64), "f16"), "values": Tensor("values", (64, 64), "f16")},
+        outputs={"out": Tensor("out", (64, 64), "f16")},
+    )
+    target = Context.from_target((12, 0))
+    warp = Tile.parse("mma_m16n8k16_f16_f32/f1x1", Work.parse("w1x1"))
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
+    problem = ClassicProblem(tile.op, target)
+    domains = project_domains(tile, target)
+    context = ClassicScheduleContext(problem, domains)
+    contraction = context.index.nodes[0]
+
+    assert all({choice.stage.spell() for choice in choices} == {"", "d1/smem", "d2/smem"} for choices in domains.edges.values())
+    reference = tuple(enumerate_reference(problem, domains))
+    leaves = schedule(tile, "computed_a", {}, target)
+    codec = ClassicScheduleCodec(problem, domains)
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
+    assert domains.product_size > len(reference)
+    warp_assignments = tuple(assignment for assignment in reference if assignment.nodes[contraction].tile.is_warp)
+    assert warp_assignments
+    assert all({edge.stage.transport for edge in assignment.edges.values()} == {"smem"} for assignment in warp_assignments)

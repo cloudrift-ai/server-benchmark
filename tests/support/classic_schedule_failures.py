@@ -39,7 +39,6 @@ RECOVERY_CLUSTERS = (
         reason="restore scalar contraction schedules and move-catalog choices",
         nodeids=frozenset(
             (
-                "tests/compiler/e2e/test_matmul_coverage.py::test_computed_a_symbolic_k_reaches_warp",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_2d]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_f3]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_inner]",
@@ -131,9 +130,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/passes/test_fp8_staged.py::test_canonical_byte_b_and_splitk_compose_cuda",
                 "tests/compiler/passes/test_fp8_staged.py::test_k32_staged_bit_identical_to_gmem_direct_cuda",
                 "tests/compiler/passes/test_fp8_staged.py::test_w8a16_staged_bit_identical_to_gmem_direct_cuda",
-                "tests/compiler/passes/test_volta_mma.py::test_modern_computed_a_edge_keeps_the_cp_async_peer_copy",
-                "tests/compiler/passes/test_volta_mma.py::test_sm70_computed_a_edge_stages_through_the_smem_compute_fill[d1/smem]",
-                "tests/compiler/passes/test_volta_mma.py::test_sm70_computed_a_edge_stages_through_the_smem_compute_fill[d2/smem]",
                 "tests/compiler/passes/test_volta_mma.py::test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll",
                 "tests/compiler/passes/test_volta_mma.py::test_sm70_rejects_a_pinned_modern_atom",
                 "tests/compiler/passes/test_volta_mma.py::test_sm70_rejects_a_pinned_newer_stage[d1/smem-async-cp.async requires sm_80]",
@@ -1174,7 +1170,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 1065
+REMAINING_FAILURE_COUNT = 1061
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

@@ -398,16 +398,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-offered]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-realized]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-serial.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-serial.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n33.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n33.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n500.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n500.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n512.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n512.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-symbolic-rows.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-symbolic-rows.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-flash-kernel.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-flash-kernel.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-matmul-atomic.yaml-built]",
@@ -418,34 +408,12 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-sum-atomic.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-sum-kernel.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-sum-kernel.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/fused-add-rms-norm-escaping-residual.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/fused-add-rms-norm-escaping-residual.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/fused-add-rms-norm.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/fused-add-rms-norm.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/mixed-f16-scale-readable-inline-sm120.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/mixed-f16-scale-readable-inline-sm120.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/online-softmax-2x4x128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/online-softmax-2x4x128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/online-softmax-2x64.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/online-softmax-2x64.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/online-softmax-4x128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/online-softmax-4x128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/online-softmax-8x256.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/online-softmax-8x256.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/segmented-2d-sum-64x128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/segmented-2d-sum-64x128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/singleton-softmax-unsqueeze.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/singleton-softmax-unsqueeze.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-l2-kernel.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-l2-kernel.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-mean-atomic.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-mean-atomic.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-mean-kernel.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-mean-kernel.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/symbolic-coop-softmax-t64.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/symbolic-coop-softmax-t64.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/symbolic-ilp-softmax-r4.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/symbolic-ilp-softmax-r4.yaml-correct]",
             )
         ),
     ),
@@ -453,7 +421,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 344
+REMAINING_FAILURE_COUNT = 312
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

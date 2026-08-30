@@ -77,6 +77,27 @@ def test_a_shape_whose_every_variant_failed_prices_as_infeasible() -> None:
     assert greedy._resolved_price(terminal, trace, ctx, None, failed={doomed: [2_000_000.0]}) == math.inf
 
 
+def test_a_disqualification_condemns_only_the_shape_that_was_measured() -> None:
+    """Elimination matches the signature EXACTLY, unlike the ranking tier's drift-tolerant
+    :func:`_sig_groups`. There a loose match only widens the candidate pool and a second filter
+    still has to agree on the tunable knobs; here nothing follows the match, so condemning every
+    shape that merely does not contradict a recorded failure disqualifies the whole program.
+    Measured: on DeepSeek-V4's post block the tolerant form priced all 17 leaves of one fork
+    ``inf``, which decides nothing at all."""
+    recorded = frozenset({("S_shape", "4096"), ("S_dtype_f16", "1.0")})
+    # Agrees on every SHARED key, so the drift-tolerant matcher would call it a hit; it is a
+    # different shape and must still be priced.
+    other = SimpleNamespace(knobs={"S_shape": 4096, "S_n_loop": 9}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=other)})
+    trace = [SimpleNamespace(node_id="n", score=5.0)]
+    ctx = SimpleNamespace(features=lambda: {})
+
+    assert greedy._sig_groups({recorded: [1.0]}, frozenset({("S_shape", "4096"), ("S_n_loop", "9")})), (
+        "the tolerant matcher does hit here — which is exactly why elimination must not use it"
+    )
+    assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}) == 5.0
+
+
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     materialized = []
     rows = [{"TILE": str(tile), "STAGE": str(stage)} for tile in range(100) for stage in range(100)]

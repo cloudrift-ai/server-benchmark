@@ -243,7 +243,14 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
         if failed:
             knobs = getattr(node.op, "knobs", None) or {}
             sig = frozenset((k, str(v)) for k, v in knobs.items() if k.startswith("S_"))
-            if _sig_groups(failed, sig):
+            # EXACT signature, deliberately not the drift-tolerant :func:`_sig_groups` the ranking
+            # tier uses. There, a loose match only widens the candidate pool and a second filter
+            # (``evidence_row_vouches``) still has to agree on the tunable knobs; here there is no
+            # second filter, so agreeing on merely the SHARED keys would condemn every shape that
+            # happens not to contradict one recorded failure — measured on DeepSeek-V4's post
+            # block, where it priced all 17 leaves of a fork ``inf`` and thereby decided nothing.
+            # An elimination must fail safe: a failure condemns the shape that was measured.
+            if sig in failed:
                 return math.inf
         us = scored.get(nid)
         if us is None:

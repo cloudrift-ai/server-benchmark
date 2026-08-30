@@ -598,6 +598,8 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
 
     unpinned = GoldenRecord(knobs={}, **{**fields, "pins": ()})
     assert unpinned.pool_group != a.pool_group, "the pin regime is a group-key term"
+
+
 def test_a_fold_held_by_a_plain_statement_still_gets_an_environment() -> None:
     """A plain statement binds axes, not SSA definitions — but it can HOLD a stored fold.
 

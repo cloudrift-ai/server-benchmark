@@ -538,10 +538,12 @@ The realized fork is identified by the `TILE`
 codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync has no bf16-accumulate form).
 
 **The move catalog** (`search/space.py`) supplies the static choices projected into the classic domains.
-`scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤ 1024`) with
-the per-cell `""` tile as one more member; the scheduler projects it alongside the warp, reduction, and transport
-catalogs. Every accepted leaf is a complete `ClassicSchedule` with exact `NodeId` and `EdgeSite` keys. Schedule
-parameters restrict complete assignments without changing those exact domains.
+`scalar_tile_moves()` is the union of two fixed legality-guarded scalar register-tile products: pure register tiles
+and parallel thread tiles × per-thread register tiles (`block_threads ≤ 1024`), with the per-cell `""` tile as one
+more member. The normal cooperative-reduction catalog is likewise the fixed cooperative-width × ILP product. The
+scheduler projects these alongside the warp and transport catalogs. Every accepted leaf is a complete
+`ClassicSchedule` with exact `NodeId` and `EdgeSite` keys. Schedule parameters restrict complete assignments without
+changing those exact domains.
 The producer band is the fourth level (`""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization

@@ -350,20 +350,27 @@ MAX_FRAGMENT_REGISTERS = 128
 MAX_REGISTERS_PER_THREAD = 255
 MAX_REGISTERS_PER_CTA = 64 * 1024
 
-# The scalar register-tile candidate SPACE: ``(par_n, par_m)`` parallel thread-tile widths ×
-# ``(reg_n, reg_m)`` per-thread register sub-tile widths, generated from the one constraint that
-# bounds it — the CTA thread budget, which a scalar tile spends ``par_n·par_m`` of. The register
-# widths carry no budget (the register file is unmodeled everywhere in scheduling), so their
-# dimensions are the value ladders themselves: the square / skewed core plus the deep-FM points
-# (``f2x14`` / ``f4x8`` / ``f4x10`` / ``f4x26``) that are recorded golden winners.
+# The scalar register-tile candidate spaces. ``_SCALAR_REGISTER_SPACE`` is the pure register-only
+# grid (one thread owns the output tile); ``_SCALAR_PARALLEL_TILE_SPACE`` crosses parallel thread-
+# tile widths with per-thread register sub-tiles. The parallel space is generated from the one
+# constraint that bounds it — the CTA thread budget, which a scalar tile spends
+# ``par_n·par_m`` of. The register widths carry no budget (the register file is unmodeled
+# everywhere in scheduling), so their dimensions are the value ladders themselves: the square /
+# skewed core plus the deep-FM and deep-FN points recorded in the realization corpus.
 #
-# ``tests/compiler/test_golden_configs.py`` asserts every golden TILE stays a member of this space;
-# ``test_move_catalog.py`` recomputes the product independently.
-_SCALAR_TILE_SPACE = Space(
+# ``test_move_catalog.py`` recomputes both products independently, including their exact ladders.
+_SCALAR_REGISTER_SPACE = Space(
+    dims=(
+        Dimension("reg_n", (1, 2, 3, 4)),
+        Dimension("reg_m", (1, 2, 4)),
+    )
+)
+
+_SCALAR_PARALLEL_TILE_SPACE = Space(
     dims=(
         Dimension("par_n", (16, 32, 64)),
         Dimension("par_m", (8, 16)),
-        Dimension("reg_n", (1, 2, 4)),
+        Dimension("reg_n", (1, 2, 4, 26)),
         Dimension("reg_m", (1, 2, 4, 6, 8, 10, 12, 14, 26)),
     ),
     bounds=(Bound(("par_n", "par_m"), limit=MAX_BLOCK_THREADS),),
@@ -371,11 +378,11 @@ _SCALAR_TILE_SPACE = Space(
 
 
 def scalar_tile_moves() -> list[Tile]:
-    """The scalar-contraction output-tile candidates: the untiled per-cell tile, plus every point
-    of :data:`_SCALAR_TILE_SPACE` (parallel widths varying slowest — a generation order, not a
-    ranking)."""
+    """The scalar-contraction output-tile candidates: the untiled per-cell tile, every nontrivial
+    pure register tile, and every parallel register tile. Domain order is not a ranking."""
     moves = [Tile()]
-    moves.extend(Tile(units=(p["par_m"], p["par_n"]), regs=(p["reg_m"], p["reg_n"])) for p in _SCALAR_TILE_SPACE)
+    moves.extend(Tile(regs=(p["reg_m"], p["reg_n"])) for p in _SCALAR_REGISTER_SPACE if (p["reg_m"], p["reg_n"]) != (1, 1))
+    moves.extend(Tile(units=(p["par_m"], p["par_n"]), regs=(p["reg_m"], p["reg_n"])) for p in _SCALAR_PARALLEL_TILE_SPACE)
     return moves
 
 
@@ -512,10 +519,7 @@ def coop_reduce_moves() -> list[Reduce]:
     the old grid+transposed composites (the long-K matvec winners, ``g32k`` + ``coop-t``) are the
     split fork's wide widths composed with the pieces' own transposed bands here."""
     return [
-        *(Reduce.of(coop=n) for n in (4, 8, 16, 32, 64, 128, 256, 512)),
-        Reduce.of(reg=2),
-        Reduce.of(reg=4),
-        Reduce.of(coop=4, reg=2),
+        *(Reduce.of(coop=coop, reg=reg) for coop in (1, 4, 8, 16, 32, 64, 128, 256, 512) for reg in (1, 2, 4) if coop > 1 or reg > 1),
         # The transposed band: the k-major-B matvec partition. A bare transposed fold is
         # latency-bound on long-K matvecs (120 CTAs of serial K); the deployable winners pair it
         # with a deferred-kernel grid split (down g32k/b256t 75.7 us = the row-major floor on

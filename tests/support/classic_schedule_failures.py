@@ -346,30 +346,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s512.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s512.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s512.yaml-realized]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-downproj-s128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-downproj-s128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-downproj-s32.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-downproj-s32.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-downproj-s512.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-downproj-s512.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-oproj-s128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-oproj-s128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-oproj-s32.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-oproj-s32.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-oproj-s512.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-add-oproj-s512.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-kvproj-s128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-kvproj-s128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-kvproj-s32.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-kvproj-s32.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-kvproj-s512.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-kvproj-s512.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-qproj-s128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-qproj-s128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-qproj-s32.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-qproj-s32.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-qproj-s512.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-qproj-s512.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/sdpa-s128.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/sdpa-s128.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/sdpa-s32.yaml-built]",
@@ -387,7 +363,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 278
+REMAINING_FAILURE_COUNT = 254
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

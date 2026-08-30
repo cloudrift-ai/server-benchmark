@@ -353,3 +353,61 @@ def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
         "these stmt kinds declare external buffers but cannot rename them — add a "
         "rename_buffers override beside the declaration:\n" + "\n".join(sorted(offenders))
     )
+
+
+def test_every_op_is_a_frozen_dataclass() -> None:
+    """``Op`` immutability is the type, not a convention: every ``Op`` dataclass is
+    ``frozen=True``, its maps land as ``frozendict`` (``Op.__post_init__``), and mutation-shaped
+    bugs (a stamp editing a shared instance, a cache outdated by a silent write) are
+    unrepresentable. A rewrite is always a ``replace`` + node rebind."""
+    import importlib
+    import pkgutil
+
+    import emmy.compiler.ir as ir_pkg
+    from emmy.compiler.ir.base import Op
+
+    for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
+        importlib.import_module(mod.name)
+
+    def subclasses(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from subclasses(sub)
+
+    offenders = [
+        cls.__name__ for cls in {Op, *subclasses(Op)} if hasattr(cls, "__dataclass_params__") and not cls.__dataclass_params__.frozen
+    ]
+    assert not offenders, "every Op dataclass must be frozen=True:\n" + "\n".join(sorted(offenders))
+
+
+def test_the_op_identity_surface_is_exactly_identity_key() -> None:
+    """One identity function. Any public method on any ``Op`` whose name says identity or key —
+    beyond ``identity_key`` itself — is a second spelling waiting to drift; the retired names
+    (``deploy_identity`` / ``cache_key`` / ``pool_key`` / ``structural_key``-on-ops) must not
+    return under new spellings either."""
+    import importlib
+    import pkgutil
+    import re as _re
+
+    import emmy.compiler.ir as ir_pkg
+    from emmy.compiler.ir.base import Op
+
+    for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
+        importlib.import_module(mod.name)
+
+    def subclasses(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from subclasses(sub)
+
+    pattern = _re.compile(r"identity|(?:^|_)key")
+    offenders = {
+        f"{cls.__name__}.{name}"
+        for cls in {Op, *subclasses(Op)}
+        for name, value in vars(cls).items()
+        if callable(value)
+        and not name.startswith(("_", "is_"))  # ``IndexMapOp.is_identity`` is the identity MAP predicate, not a key
+        and pattern.search(name)
+        and name != "identity_key"
+    }
+    assert not offenders, "the public Op identity surface is identity_key alone:\n" + "\n".join(sorted(offenders))

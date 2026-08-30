@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -128,7 +129,7 @@ def test_multi_cuda_realized_knobs_must_be_conflict_free():
     graph.add_node(op=CudaOp(kernel_name="b", knobs={"TILE": "f4x2"}), inputs=[], output=Tensor("b", (1,)), node_id="b")
     assert realized_tuning_knobs(graph) is None
 
-    graph.nodes["b"].op.knobs["TILE"] = "f2x2"
+    graph.nodes["b"].op = replace(graph.nodes["b"].op, knobs={"TILE": "f2x2"})
     assert realized_tuning_knobs(graph)["TILE"] == "f2x2"
 
 
@@ -379,8 +380,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
             event = SimpleNamespace(graph=loop_graph)
             for strategy in self.strategies:
                 strategy.on_pass_end(event)
-            route_parent = TileOp(knobs=dict(live_features))
-            route_parent.knobs.update(active_route)
+            route_parent = TileOp(knobs={**live_features, **active_route})
             fragment = Graph()
             splice = SimpleNamespace(root_op=route_parent, fragment=fragment)
             for strategy in self.strategies:

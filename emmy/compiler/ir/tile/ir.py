@@ -35,6 +35,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 
+from frozendict import frozendict
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
@@ -398,7 +400,7 @@ def _construction_normalized(stmts) -> list[Stmt]:
     return out
 
 
-@dataclass
+@dataclass(frozen=True)
 class TileOp(Op):
     """One scheduled map/reduce kernel (see module docstring).
 
@@ -407,7 +409,7 @@ class TileOp(Op):
     body is generated at materialize time by ``op.lower()``, and a bare reduction / contraction's
     output ``Write`` is glue generated there too (from ``place.grid`` + the graph node's output
     buffer; see ``lowering/kernel/010_materialize``). ``inputs`` / ``outputs`` come from the base
-    :meth:`Op.populate_io` (graph edges) — no body walk.
+    :meth:`Op.with_io` (graph edges) — no body walk.
 
     Schedule fields (all defaulted, so a fresh / placeholder node is well-formed):
 
@@ -430,7 +432,7 @@ class TileOp(Op):
     name: str = ""
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
-    schedule: dict = field(default_factory=dict)
+    schedule: frozendict = field(default_factory=frozendict)
     # The kernel's output specifications: every explicit ``Write`` (and the legacy rms/softmax
     # output-sweep spelling) as a kernel-boundary fact beside ``place``. Empty for a
     # bare reduction / contraction — its grid-cell store
@@ -457,6 +459,9 @@ class TileOp(Op):
     split_consumed: bool = False
 
     def __post_init__(self) -> None:
+        Op.__post_init__(self)
+        if not isinstance(self.schedule, frozendict):
+            object.__setattr__(self, "schedule", frozendict(self.schedule))
         scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
         axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
         free_names = {axis.name for axis in self.place.free}
@@ -471,10 +476,10 @@ class TileOp(Op):
             candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,), sweep_axes=candidate_sweeps)
             if any(is_contraction(site.node) for site in sites(candidate)):
                 normalized = candidate
-                self.place = replace(self.place, free=candidate_free)
+                object.__setattr__(self, "place", replace(self.place, free=candidate_free))
         if self.schedule and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
-        self.op = normalized
+        object.__setattr__(self, "op", normalized)
 
         contractions = tuple(site.node for site in sites(normalized) if is_contraction(site.node))
         promoted = {
@@ -497,11 +502,16 @@ class TileOp(Op):
             free = (*self.place.free, *extra)
             if self.place.is_mapped:
                 grid = self.place.grid or self.place.free
-                self.place = replace(self.place, free=free, grid=(*grid, *extra), mapped=True)
+                object.__setattr__(self, "place", replace(self.place, free=free, grid=(*grid, *extra), mapped=True))
             else:
-                self.place = replace(self.place, free=free)
-        self.output_specs = tuple(
-            replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store for store in self.output_specs
+                object.__setattr__(self, "place", replace(self.place, free=free))
+        object.__setattr__(
+            self,
+            "output_specs",
+            tuple(
+                replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store
+                for store in self.output_specs
+            ),
         )
         # Promotion changes the enclosing-axis context that closes computed contraction operands.
         # Normalize once under the final scope so reconstructing this TileOp cannot expose a
@@ -512,7 +522,7 @@ class TileOp(Op):
         renormalized = normalize_fold_tree(self.op, final_axes, sweep_axes=final_sweeps)
         if self.schedule and renormalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
-        self.op = renormalized
+        object.__setattr__(self, "op", renormalized)
 
     def pretty_body(self) -> str:
         """The structural dump — delegated to :mod:`~emmy.compiler.ir.tile._dump`, which owns

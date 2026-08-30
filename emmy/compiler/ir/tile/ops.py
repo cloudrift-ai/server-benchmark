@@ -17,6 +17,8 @@ ahead of a lowering walk."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.pure.algebra import product_spine
@@ -356,23 +358,25 @@ def scheduled(
     ``slices`` are ``(family, node, value)`` triples keyed on the way in. ``None`` slice values
     are skipped, so a resolver that declined needs no guard."""
     source = Sched(op, {}, place=place)
-    out = TileOp(
-        op=op,
-        name=name,
-        place=place,
-        workers=workers,
-        knobs=knobs,
-        output_specs=tuple(output_specs),
-    )
-    sched = sched_of(out)
+    # The op term normalizes at construction, so key spelling and slice writes go through a
+    # PLACEHOLDER TileOp's normalized term; the final op is then built in one shot — schedule,
+    # work inventory and the ``WORK`` knob included — and never mutated after.
+    shell = TileOp(op=op, name=name, place=place, workers=workers, output_specs=tuple(output_specs))
+    schedule: dict = {}
+    sched = Sched(shell.op, schedule, place=shell.place)
     for family, node, value in slices:
         if value is not None:
             key = source.key(family, node)
             if key is None:
                 raise ValueError(f"{family} does not apply to this {type(node).__name__} — no site to key the slice on")
-            sched.put(family, resolve(out.op, key).node, value)
-    seal_workers(out)
-    return out
+            sched.put(family, resolve(shell.op, key).node, value)
+    work = sealed_inventory(schedule, workers)
+    return replace(
+        shell,
+        schedule=schedule,
+        work=work,
+        knobs={**knobs, "WORK": work.spell() if work is not None else ""},
+    )
 
 
 def axis_names(root) -> set[str]:
@@ -445,26 +449,25 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body,
     return tuple((root, Body(stmt for stmt in op.body if stmt in members[id(root)]), tuple(grouped[id(root)])) for root in roots)
 
 
-def seal_workers(tile) -> None:
-    """Derive and STAMP the kernel's ONE worker inventory (``TileOp.work`` + the ``WORK`` knob —
-    the step-7 value-grammar family): the per-site ``w``/``n`` worker tokens factored out of the
+def sealed_inventory(schedule: dict, workers) -> object | None:
+    """Derive the kernel's ONE worker inventory (``TileOp.work`` + the ``WORK`` knob — the
+    step-7 value-grammar family): the per-site ``w``/``n`` worker tokens factored out of the
     resolved ``TILE`` slices, the cooperative width off the ``REDUCE`` slices (``b512`` →
     ``t512``), and the producer band off the resolved :class:`WarpSpec` (the ``WSPEC`` absorb —
     ``+p<n>``). FAILING LOUDLY on cross-site disagreement (one kernel, one inventory). A 1-thread
     inventory (a bare register strip) keeps ``None`` — the per-cell forms' launch geometry stays
-    derived. Called by every option builder / split realizer after the schedule dict is
-    assembled."""
+    derived. A PURE derivation over the assembled schedule dict, consumed by the one scheduled
+    builder BEFORE it constructs the ``TileOp`` — sealing rides construction, and a built op is
+    never edited."""
     coop = max(
-        (v.coop for k, v in tile.schedule.items() if k.split("@", 1)[0] == "REDUCE"),
+        (v.coop for k, v in schedule.items() if k.split("@", 1)[0] == "REDUCE"),
         default=1,
     )
-    work = derive_inventory(
-        (v for k, v in tile.schedule.items() if k.split("@", 1)[0] == "TILE"),
+    return derive_inventory(
+        (v for k, v in schedule.items() if k.split("@", 1)[0] == "TILE"),
         coop=coop,
-        producer=tile.workers.producer_warps if tile.workers is not None else 0,
+        producer=workers.producer_warps if workers is not None else 0,
     )
-    tile.work = work
-    tile.knobs["WORK"] = work.spell() if work is not None else ""
 
 
 def head(op):
@@ -547,6 +550,6 @@ __all__ = [
     "projection_tail",
     "reduce_plan",
     "sched_of",
-    "seal_workers",
+    "sealed_inventory",
     "split_invariant_factors",
 ]

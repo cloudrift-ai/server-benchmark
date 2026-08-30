@@ -14,7 +14,7 @@ import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import cached_property
 from numbers import Real
@@ -761,12 +761,11 @@ def _lifted_target(record: GoldenRecord):
     if len(nodes) != 1:
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
-    node.op.populate_io(lowered, node)
+    node.op = node.op.with_io(lowered, node)
     tile = lift_loop_op(node.op, name=node.id)
     # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
     # half of the identity (the deploy identity (``identity_key(with_io=True)``)) reads the same output fingerprint.
-    tile.outputs = {node.output.name: node.output}
-    return tile
+    return replace(tile, outputs={node.output.name: node.output})
 
 
 def decode_record(record: GoldenRecord) -> str | None:

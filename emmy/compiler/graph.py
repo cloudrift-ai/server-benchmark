@@ -1347,7 +1347,10 @@ def _rename_buf_in_op(op, old: str, new: str):
         }
 
     if isinstance(op, LoopOp):
-        renamed = op.rename_buffers({old: new})
+        # ``LoopOp.rename_buffers`` is the spelling-preserving clone: fields carried whole
+        # (name / knobs / source identity preserved), io renamed, and NO ``__post_init__`` — a
+        # rename must never renormalize (``sort_commutative_args`` orders by buffer name).
+        return op.rename_buffers({old: new})
     else:
 
         def rename_body(body):
@@ -1377,12 +1380,7 @@ def _rename_buf_in_op(op, old: str, new: str):
             op=rename_term(op.op),
             output_specs=tuple(replace(store, write=fn(store.write)) for store in op.output_specs),
         )
-    renamed.inputs = renamed_io(op.inputs)
-    renamed.outputs = renamed_io(op.outputs)
-    renamed.name = op.name
-    renamed.knobs = dict(op.knobs)
-    renamed.source = op.source
-    return renamed
+    return replace(renamed, inputs=renamed_io(op.inputs), outputs=renamed_io(op.outputs))
 
 
 # ---------------------------------------------------------------------------

@@ -39,7 +39,7 @@ _GridFactor = int | str | Expr
 GridDimSpec = tuple[_GridFactor, ...]  # product of factors → one grid dim's extent
 
 
-@dataclass
+@dataclass(frozen=True)
 class CudaOp(Op):
     """One CUDA kernel invocation as a graph-op.
 

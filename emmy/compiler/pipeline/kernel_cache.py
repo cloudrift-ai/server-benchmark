@@ -85,11 +85,12 @@ class KernelCache:
         self._store.move_to_end(key)
         self.hits += 1
         names = (*target.inputs, *target.outputs)
-        kernel = replace(entry.kernel, body=entry.kernel.body.rename_buffers(dict(zip(entry.slots, names, strict=True))))
-        kernel.knobs = dict(entry.kernel.knobs)
-        kernel.inputs = dict(target.inputs)
-        kernel.outputs = dict(target.outputs)
-        return kernel
+        return replace(
+            entry.kernel,
+            body=entry.kernel.body.rename_buffers(dict(zip(entry.slots, names, strict=True))),
+            inputs=dict(target.inputs),
+            outputs=dict(target.outputs),
+        )
 
     def harvest(self, key: str, kernel, origin) -> None:
         """Record one lowered kernel under its origin's key. A second, different kernel from the
@@ -108,8 +109,13 @@ class KernelCache:
         if not buffers <= set(names):
             return  # the kernel reads buffers beyond its origin's io — not a pure single-kernel lowering
         slots = tuple(f"__kc{i}" for i in range(len(names)))
-        slotted = replace(kernel, body=kernel.body.rename_buffers(dict(zip(names, slots, strict=True))))
-        slotted.inputs, slotted.outputs = {}, {}
+        slot_map = dict(zip(names, slots, strict=True))
+        slotted = replace(
+            kernel,
+            body=kernel.body.rename_buffers(slot_map),
+            inputs={slot_map[n]: t for n, t in kernel.inputs.items() if n in slot_map},
+            outputs={slot_map[n]: t for n, t in kernel.outputs.items() if n in slot_map},
+        )
         self._store[key] = _Entry(kernel=slotted, slots=slots, origin_id=id(origin))
         while len(self._store) > self.cap:
             self._store.popitem(last=False)

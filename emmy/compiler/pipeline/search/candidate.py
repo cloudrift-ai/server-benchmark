@@ -99,7 +99,7 @@ class Candidate:
         for nid in match.consumed:
             node = match.graph.nodes.get(nid)
             if node is not None:
-                node.op.populate_io(match.graph, node)
+                node.op = node.op.with_io(match.graph, node)
         rule = match.rule
         try:
             result = rule.rewrite(**_build_rewrite_kwargs(rule, match, self.ctx))
@@ -200,8 +200,7 @@ class Candidate:
         if isinstance(option, Op):
             old_op = self.graph.nodes[match.root_node_id].op
             if option is not old_op:
-                option.source = old_op
-                option.knobs = {**old_op.knobs, **option.knobs}
+                option = replace(option, source=old_op, knobs={**old_op.knobs, **option.knobs})
             self.graph.nodes[match.root_node_id].op = option
         else:
             assert isinstance(option, Graph), f"expected Graph or Op; got {type(option).__name__}"

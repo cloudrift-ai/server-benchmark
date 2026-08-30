@@ -2425,7 +2425,7 @@ def pack_smem(smems) -> tuple[dict[str, int], int]:  # noqa: ANN001 — smems: I
     return offsets, cursor
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelOp(BodyOp):
     """One ``__global__`` GPU kernel as a Kernel IR program.
 

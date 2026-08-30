@@ -68,10 +68,10 @@ sessions that compile several programs; (2) multi-kernel artifacts (a cut/split 
 storing the graph fragment lifts that); (3) once wired, re-measure and retire the decision memo (and possibly the
 price memo, if the cache also records prices) plus the `pool_id` stamp.
 
-## Second follow-up: freeze `Op`
+## Second follow-up: freeze `Op` — EXECUTED
 
-`Op.__setattr__` now makes the io maps immutable in place and invalidates the one identity cache on reassignment —
-the cheap version of immutability. The end state is a frozen `Op`: every mutation site (the engine's rebind
-stamping `source`/`knobs`, the matcher's `populate_io`, `Sched`'s slice writes) becomes `replace()` + a graph
-rebind, and the `__setattr__` hook disappears. Composes naturally with canonical-form scheduling: an op derived
-from a canonical form has no reason to mutate after birth.
+Every `Op` dataclass is `frozen=True` with `frozendict` maps (ratcheted by architecture tests); the engine stamps
+via `replace` + node rebind, the matcher rebinds through `with_io` (an origin's io refresh threads itself into
+`source`, so chains still end at the ultimate frontend object), schedule slices assemble before construction
+(`sealed_inventory`), and the `__setattr__` hook plus every cache-invalidation concern are deleted. The public op
+identity surface is ratcheted to exactly `identity_key`.

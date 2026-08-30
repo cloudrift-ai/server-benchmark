@@ -8,6 +8,8 @@ folded in beside the body digest)."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
@@ -68,7 +70,7 @@ def test_identity_key_lattice() -> None:
     assert tile.identity_key() == tile.identity_key()
     assert tile.identity_key(with_io=True) == tile.identity_key(with_io=True)
     assert tile.identity_key(with_io=True, with_knobs=True) == tile.identity_key(with_io=True, with_knobs=True)
-    knobbed = _matmul_tile("relu", k_extent=128)
-    knobbed.knobs["TILE"] = "f4"
+    base = _matmul_tile("relu", k_extent=128)
+    knobbed = replace(base, knobs={**base.knobs, "TILE": "f4"})
     assert knobbed.identity_key(with_io=True) == tile.identity_key(with_io=True), "knobs stay out without the flag"
     assert knobbed.identity_key(with_io=True, with_knobs=True) != tile.identity_key(with_io=True, with_knobs=True)

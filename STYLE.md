@@ -106,9 +106,14 @@ that's the standard pattern for frozen dataclasses that still need light normali
 add `try/except TypeError` fallbacks around structural caches to tolerate unhashable stmts; fix the unhashable stmt
 instead.
 
-Op subclasses don't have to be frozen (the engine mutates `op.source` / `op.knobs` / `op.inputs` / `op.outputs` post-
-construction). Just make sure no Op ends up as a *field value* of a Stmt — `Assign.op` / `Accum.op` / `Select.op` take
-an `ElementwiseImpl` (the lightweight value object, already hashable), never an `ElementwiseOp` wrapper.
+Every `Op` dataclass is `frozen=True` as well (an architecture test ratchets it), and its maps (`knobs`,
+`inputs`, `outputs`, a `TileOp`'s `schedule`) land as `frozendict` via `Op.__post_init__` — a rewrite is always a
+`dataclasses.replace` + graph-node rebind, never an edit. The one sanctioned bypass is the spelling-preserving
+clone in `LoopOp.rename_buffers` (field-level `object.__setattr__`, no `__init__`): a buffer rename must not
+renormalize, since commutative-arg order sorts by buffer name. Ops stay UNHASHABLE (`__hash__ = None`) — semantic
+comparison is `identity_key`, never `hash`. Also make sure no Op ends up as a *field value* of a Stmt —
+`Assign.op` / `Accum.op` / `Select.op` take an `ElementwiseImpl` (the lightweight value object, already hashable),
+never an `ElementwiseOp` wrapper.
 
 ### Immutable mappings are `frozendict`
 

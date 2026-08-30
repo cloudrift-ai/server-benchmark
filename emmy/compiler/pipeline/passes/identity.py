@@ -28,6 +28,7 @@ mutation of a possibly-shared knob dict.
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 from sys import float_info
 from typing import TYPE_CHECKING
 
@@ -65,13 +66,13 @@ class IdentityStrategy(PipelineStrategy):
         # ride the rebind knob-merge onto fused bodies it no longer describes.
         if self._stamp_boundary(e.passes) is None:
             for node in e.graph.nodes.values():
-                self._stamp(node.op, e.graph)
+                self._stamp(node, e.graph)
 
     def on_pass_end(self, e: PassEndEvent) -> None:
         if e.pass_name != self._stamp_boundary(e.passes):
             return
         for node in e.graph.nodes.values():
-            self._stamp(node.op, e.graph)
+            self._stamp(node, e.graph)
 
     def on_splice(self, e: SpliceEvent) -> None:
         # Kernels minted inside lowering. Fusion-era splices are skipped: their kernels are
@@ -83,16 +84,17 @@ class IdentityStrategy(PipelineStrategy):
             if not isinstance(op, (LoopOp, TileOp)):
                 continue
             if op.source is None and e.root_op.dialect == "loop":
-                op.source = e.root_op
+                node.op = op = replace(op, source=e.root_op)
             # Fragment buffers carry the operand Tensors (the pieces' builders add them), so the
             # dtype features read the same values the assembled graph would give.
-            self._stamp(op, e.fragment)
+            self._stamp(node, e.fragment)
 
-    def _stamp(self, op, graph: Graph) -> None:
+    def _stamp(self, node, graph: Graph) -> None:
+        op = node.op
         if not isinstance(op, (LoopOp, TileOp)) or any(k.startswith(STRUCT_PREFIX) for k in op.knobs):
             return
         body = _identity_body(op)
-        op.knobs = {**op.knobs, **structure_features(body, graph)}
+        node.op = replace(op, knobs={**op.knobs, **structure_features(body, graph)})
 
     # --- the read API: the one spelling of identity ------------------------------------------
 

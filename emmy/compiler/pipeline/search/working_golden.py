@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from emmy.compiler.pipeline.search.golden import (
@@ -384,8 +384,7 @@ class _ProposalLoopIdentity(PipelineStrategy):
         route = TuningSearch._structural_row(parent_knobs)
         if route is None:
             return
-        parent = copy.copy(event.root_op)
-        parent.knobs = {**parent_knobs, **route}
+        parent = replace(event.root_op, knobs={**parent_knobs, **route})
         if not any(key.startswith("S_") for key in parent.knobs):
             return
         key = parent.identity_key(with_io=True, with_knobs=True)

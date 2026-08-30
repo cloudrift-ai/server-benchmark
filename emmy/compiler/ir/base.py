@@ -16,7 +16,7 @@ avoids a frontend→tensor dependency for a single function.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -59,7 +59,7 @@ def _io_fingerprint(op: Op) -> tuple:
     return (*(sig(t) for t in op.inputs.values()), "->", *(sig(t) for t in op.outputs.values()))
 
 
-@dataclass
+@dataclass(frozen=True)
 class Op:
     """Base class for all operations.
 
@@ -75,7 +75,7 @@ class Op:
 
     ``inputs`` / ``outputs`` are per-op-instance buffer maps populated by
     the matcher (``_match_at``) just after a match is built — the matcher
-    calls :meth:`populate_io` on every matched node, snapping in real
+    rebinds every matched node through :meth:`with_io`, snapping in real
     :class:`Tensor` values from the surrounding graph so rule rewrites can
     read shapes / dtypes off ``op.inputs[name]`` without re-querying.
     Default: predecessor outputs by predecessor id, this node's output by
@@ -84,6 +84,10 @@ class Op:
     surrounding graph at match time.
     """
 
+    #: Frozen + eq would auto-derive a field-walk hash (hashing whole bodies); ops stay
+    #: UNHASHABLE, as they were — semantic comparison is :meth:`identity_key`, never ``hash``.
+    __hash__ = None
+
     source: Op | None = field(default=None, kw_only=True, repr=False, compare=False)
     # Free-form metadata dict for rules to stamp the knobs they used
     # (e.g. ``{"BN": 64, "BM": 64}`` from ``005_blockify_launch``). The
@@ -91,29 +95,35 @@ class Op:
     # every 1:1 rebind, so a fully-lowered ``CudaOp`` carries every
     # autotune knob picked along the chain. Excluded from structural
     # identity and equality — pure attribution metadata.
-    knobs: dict = field(default_factory=dict, kw_only=True, repr=False, compare=False)
+    knobs: frozendict = field(default_factory=frozendict, kw_only=True, repr=False, compare=False)
     inputs: frozendict[str, Tensor] = field(default_factory=frozendict, kw_only=True, repr=False, compare=False)
     outputs: frozendict[str, Tensor] = field(default_factory=frozendict, kw_only=True, repr=False, compare=False)
 
-    def __setattr__(self, name: str, value) -> None:
-        """The identity-safety hook: ``inputs`` / ``outputs`` land as ``frozendict`` (immutable
-        in place; Python 3.15's builtin, backfilled by the ``frozendict`` package on our 3.12+
-        floor), and their reassignment — the ONE way the io view changes (``populate_io``, the
-        ``BodyOp`` seed, test setups) — drops the cached io digest. Invalidation lives here,
-        not at call sites, so it cannot be forgotten."""
-        if name in ("inputs", "outputs"):
-            self.__dict__.pop("_io_key", None)
+    def __post_init__(self) -> None:
+        """Frozen construction-time coercion (the STYLE-sanctioned pattern): the io maps and
+        the knob dict land as ``frozendict``, so an ``Op`` is immutable in depth — no attribute
+        rebinding (``frozen=True``) and no in-place map write anywhere. Subclass
+        ``__post_init__`` overrides run this first."""
+        for name in ("knobs", "inputs", "outputs"):
+            value = getattr(self, name)
             if not isinstance(value, frozendict):
-                value = frozendict(value)
-        super().__setattr__(name, value)
+                object.__setattr__(self, name, frozendict(value))
 
-    def populate_io(self, graph: Graph, node: Node) -> None:
-        """Refresh ``inputs`` / ``outputs`` from the surrounding graph.
-        Called by the matcher after a match is built. Default mapping
-        works for non-body ops (one Tensor per predecessor / this node).
-        :class:`BodyOp` overrides to walk body-derived buf names."""
-        self.inputs = frozendict({pid: t for pid in node.inputs if (t := graph.buffer(pid)) is not None})
-        self.outputs = frozendict(zip(node.buffer_names(), node.outputs, strict=True))
+    def with_io(self, graph: Graph, node: Node) -> Op:
+        """This op with ``inputs`` / ``outputs`` refreshed from the surrounding graph — a PURE
+        builder (the matcher rebinds ``node.op`` to the result; ops are never edited in place).
+        Returns ``self`` unchanged when the refresh is a no-op, so repeated matching does not
+        churn instances or their cached identities. Default mapping works for non-body ops (one
+        Tensor per predecessor / this node); :class:`BodyOp` overrides to walk body-derived buf
+        names."""
+        inputs = frozendict({pid: t for pid in node.inputs if (t := graph.buffer(pid)) is not None})
+        outputs = frozendict(zip(node.buffer_names(), node.outputs, strict=True))
+        if inputs == self.inputs and outputs == self.outputs:
+            return self
+        # A chain ORIGIN's refresh threads itself into ``source``: rewrite chains must keep
+        # ending at the one ultimate frontend object (provenance compares it by identity), and a
+        # refresh is a rebind like any other — one more hop, never a lost origin.
+        return replace(self, inputs=inputs, outputs=outputs, source=self.source if self.source is not None else self)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         """Derive the output shape from input shapes. Override in subclasses."""
@@ -167,10 +177,9 @@ class Op:
 
     @cached_property
     def _io_key(self) -> tuple:
-        """The cached io digest input (:func:`_io_fingerprint`) — the ONE Op-level identity
-        cache, with the ONE dependency ``__setattr__`` invalidates. The body key caches on the
-        immutable ``Body`` / term, and the knob key is always recomputed (:meth:`_knob_key`),
-        so knob and body mutations need no invalidation at all."""
+        """The cached io digest input (:func:`_io_fingerprint`). No invalidation exists or is
+        needed: an ``Op`` is frozen and its maps are ``frozendict``, so every cache on it is
+        sound outright."""
         return _io_fingerprint(self)
 
     def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
@@ -219,7 +228,7 @@ class Op:
             cur = cur.source
 
 
-@dataclass
+@dataclass(frozen=True)
 class InputOp(Op):
     """Sentinel for graph input tensors (no computation)."""
 
@@ -230,7 +239,7 @@ class InputOp(Op):
         raise NotImplementedError("InputOp is a sentinel; value is supplied by the executor")
 
 
-@dataclass
+@dataclass(frozen=True)
 class ConstantOp(Op):
     """Fixed tensor: weights, RoPE tables, scalars. Not an activation.
 
@@ -293,6 +302,7 @@ class ConstantOp(Op):
     source_graph: Graph | None = None
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.value is not None and self.context_value is not None:
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a static value OR a context_value, not both")
         if self.source_path is not None and self.source_parts:
@@ -300,7 +310,7 @@ class ConstantOp(Op):
         if self.source_graph is not None and (self.source_path is not None or self.source_parts):
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a source_graph record OR checkpoint source paths, not both")
         if self.source_parts:  # normalize the JSON round-trip's nested lists back to hashable tuples
-            self.source_parts = tuple((p, tuple(int(d) for d in s)) for p, s in self.source_parts)
+            object.__setattr__(self, "source_parts", tuple((p, tuple(int(d) for d in s)) for p, s in self.source_parts))
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         raise NotImplementedError("ConstantOp has no inputs; use node.output.shape directly")

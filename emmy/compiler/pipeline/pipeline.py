@@ -1027,7 +1027,7 @@ def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:
     # every matched node so rule rewrites can read per-buffer Tensors
     # straight off the op without re-querying the graph.
     for node in matched_nodes:
-        node.op.populate_io(graph, node)
+        node.op = node.op.with_io(graph, node)
     return Match(
         graph=graph,
         root_node_id=start,

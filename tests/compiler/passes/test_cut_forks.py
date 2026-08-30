@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 
@@ -164,13 +165,15 @@ def _computed_value_expectation_tile() -> TileOp:
         place=Placement(free=(query, column)),
         output_specs=(OutputSpec(Write(output="out", index=(Var("q"), Var("n")), value="out")),),
     )
-    tile.inputs = {
-        "x": Tensor("x", (8, 16), F16),
-        "w": Tensor("w", (16, 16), F16),
-        "scores": Tensor("scores", (4, 8), F16),
-    }
-    tile.outputs = {"out": Tensor("out", (4, 16), F16)}
-    return tile
+    return replace(
+        tile,
+        inputs={
+            "x": Tensor("x", (8, 16), F16),
+            "w": Tensor("w", (16, 16), F16),
+            "scores": Tensor("scores", (4, 8), F16),
+        },
+        outputs={"out": Tensor("out", (4, 16), F16)},
+    )
 
 
 def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:

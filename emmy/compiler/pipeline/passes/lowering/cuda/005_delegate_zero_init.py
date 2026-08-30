@@ -84,12 +84,16 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
     # match's ``populate_io`` swaps in the real graph tensors (the buffers are graph nodes).
     total_words = sum(s.words for s in prologues) + sum(s.words for s in pnode.op.body.iter() if isinstance(s, ZeroPrologue))
     base = pnode.op.name.rsplit("__zp", 1)[0] if "__zp" in pnode.op.name else pnode.op.name
-    new_p = replace(pnode.op, body=Body((*prologues, *pnode.op.body)), name=f"{base}__zp{total_words}")
-    new_p.inputs = dict(pnode.op.inputs)
-    new_p.outputs = {**pnode.op.outputs, **{b: Tensor(b, (), "f32") for b in delegated}}
-    pnode.op = new_p
-
-    new_k = replace(kernel, zero_delegated=(*kernel.zero_delegated, *delegated))
-    new_k.inputs = dict(kernel.inputs)
-    new_k.outputs = dict(kernel.outputs)
-    return new_k
+    pnode.op = replace(
+        pnode.op,
+        body=Body((*prologues, *pnode.op.body)),
+        name=f"{base}__zp{total_words}",
+        inputs=dict(pnode.op.inputs),
+        outputs={**pnode.op.outputs, **{b: Tensor(b, (), "f32") for b in delegated}},
+    )
+    return replace(
+        kernel,
+        zero_delegated=(*kernel.zero_delegated, *delegated),
+        inputs=dict(kernel.inputs),
+        outputs=dict(kernel.outputs),
+    )

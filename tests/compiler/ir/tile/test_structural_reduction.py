@@ -25,6 +25,18 @@ def _sum_loop() -> Loop:
     return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR)
 
 
+def _with_slice(tile, family, node, value):
+    """Attach one schedule slice by rebuilding — ops are frozen; a slice map is assembled
+    before construction, never written after."""
+    from dataclasses import replace
+
+    from emmy.compiler.ir.tile.ops import Sched
+
+    schedule = dict(tile.schedule)
+    Sched(tile.op, schedule, place=tile.place).put(family, node, value)
+    return replace(tile, schedule=schedule)
+
+
 def test_from_loop_reconstructs_the_loop_exactly() -> None:
     loop = _sum_loop()
     red = fold_from_loop(loop)
@@ -64,17 +76,16 @@ def _tile(op) -> TileOp:
 
 
 def test_reduce_plan_reads_the_partition_off_the_schedule_dict() -> None:
-    from emmy.compiler.ir.tile.ops import sched_of
 
     plan = ReducePlan.of(coop=128)
     red = fold_from_loop(_sum_loop())
     assert red is not None
     # A bare reduce root and a zero-axis projection both surface the partition keyed on the fold.
     bare = _tile(red)
-    sched_of(bare).put("REDUCE", red, plan)
+    bare = _with_slice(bare, "REDUCE", red, plan)
     assert reduce_plan(bare) is plan
     wrapped = _tile(Fold.projection(body=Body((Assign(name="rms", op="sqrt", args=("acc",)),)), operands=(red,)))
-    sched_of(wrapped).put("REDUCE", red, plan)
+    wrapped = _with_slice(wrapped, "REDUCE", red, plan)
     assert reduce_plan(wrapped) is plan
 
 
@@ -180,7 +191,6 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
         a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
         channels=(replace(c.channels[0], b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index))),),
     )
-    from emmy.compiler.ir.tile.ops import sched_of
 
     accs = inner.defines()
     init, combine = M(*(["add"] * len(accs)), names=accs)
@@ -198,7 +208,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     assert red.role is AxisRole.PLANAR
     assert red.composed is inner
     t = _tile(red)
-    sched_of(t).put("REDUCE", red, ReducePlan.of(cta=2, finalize="atomic"))
+    t = _with_slice(t, "REDUCE", red, ReducePlan.of(cta=2, finalize="atomic"))
     assert reduce_plan(t).cta == 2
     lo = red.lower()
     assert len(lo) == 1 and isinstance(lo[0], Loop) and lo[0].axis.name == "k_ks"
@@ -408,7 +418,6 @@ def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b(mo
     from emmy.compiler.graph import Tensor
     from emmy.compiler.ir.kernel.ir import RegStore
     from emmy.compiler.ir.schedule import Placement, Stage, Workers
-    from emmy.compiler.ir.tile.ops import sched_of
     from emmy.compiler.pipeline.passes.lowering.kernel import _factor
 
     m, n, k, r = Axis("m", 16), Axis("n", 32), Axis("k", 16), Axis("r", 16)
@@ -468,15 +477,22 @@ def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b(mo
         place=Placement(free=(m, n), grid=(m, n), mapped=True),
         output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="biased")),),
     )
-    tile.inputs = {
-        "A": Tensor("A", (16, 16), F16),
-        "Bias": Tensor("Bias", (16,), F16),
-        "W": Tensor("W", (32, 16), F16),
-    }
-    tile.outputs = {"out": Tensor("out", (16, 32), F16)}
-    sched = sched_of(tile)
+    from emmy.compiler.ir.tile.ops import Sched
+
+    schedule: dict = {}
+    sched = Sched(tile.op, schedule, place=tile.place)
     sched.put("TILE", contraction, plan)
     sched.put("STAGE", contraction, Stage(depth=1, transport="smem", smem=("scaled",), bk_elems=16))
+    tile = replace(
+        tile,
+        schedule=schedule,
+        inputs={
+            "A": Tensor("A", (16, 16), F16),
+            "Bias": Tensor("Bias", (16,), F16),
+            "W": Tensor("W", (32, 16), F16),
+        },
+        outputs={"out": Tensor("out", (16, 32), F16)},
+    )
 
     sliced_results = []
     provider_slice = _factor._provider_slice
@@ -537,12 +553,12 @@ def test_workers_derive_from_tile_slices_and_disagreement_is_loud() -> None:
         derive_workers([warp, TilePlan.parse("mma_m16n8k16_f16_f32/f1x2/k8", Workers.parse("w2x1"))])
 
 
-def test_seal_workers_fills_the_slot_off_the_schedule_dict() -> None:
+def test_sealed_inventory_derives_off_the_schedule_dict() -> None:
     from emmy.compiler.ir.schedule import Workers
-    from emmy.compiler.ir.tile.ops import sched_of, seal_workers
+    from emmy.compiler.ir.tile.ops import Sched, sealed_inventory
 
     c = _contraction()
     t = _tile(c)
-    sched_of(t).put("TILE", c, TilePlan.parse("f2", Workers.parse("t2")))
-    seal_workers(t)
-    assert t.work == Workers(kind="thread", units=(2, 1))
+    schedule: dict = {}
+    Sched(t.op, schedule, place=t.place).put("TILE", c, TilePlan.parse("f2", Workers.parse("t2")))
+    assert sealed_inventory(schedule, t.workers) == Workers(kind="thread", units=(2, 1))

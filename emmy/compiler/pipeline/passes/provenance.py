@@ -11,6 +11,8 @@ seed gives every unseeded node a fresh self-origin.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler import provenance
 from emmy.compiler.pipeline.strategy import PipelineStrategy, RunStartEvent, SplicedEvent, SpliceEvent
 
@@ -51,7 +53,7 @@ class ProvenanceStrategy(PipelineStrategy):
             op = node.op
             if provenance.is_boundary(op) or op is origin or op.source is not None:
                 continue
-            op.source = origin
+            node.op = replace(op, source=origin)
 
     def on_spliced(self, e: SplicedEvent) -> None:
         r = e.receipt

@@ -29,6 +29,7 @@ with ``num_layers`` (the memory budget the plan flagged, Phase 2 / Top risk #9).
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 logger = logging.getLogger(__name__)
 
@@ -326,11 +327,14 @@ def _retarget_constants(graph, wrapper, id_to_key) -> None:
         full = id_to_key.get(id(t))
         if full is not None:
             key_map[path] = full
-    for _nid, op in graph.loadable_constants():
-        if op.source_path in key_map:
-            op.source_path = key_map[op.source_path]
-        if op.source_parts:
-            op.source_parts = tuple((key_map.get(p, p), s) for p, s in op.source_parts)
+    for nid, op in graph.loadable_constants():
+        retargeted = replace(
+            op,
+            source_path=key_map.get(op.source_path, op.source_path),
+            source_parts=tuple((key_map.get(p, p), s) for p, s in op.source_parts) if op.source_parts else op.source_parts,
+        )
+        if retargeted != op:
+            graph.nodes[nid].op = retargeted
 
 
 def _plan_sources(plan, wrapper, np_dtype, ckpt_dir, id_to_key):

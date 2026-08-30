@@ -8,6 +8,8 @@ twin enumerates rows under ITS OWN spelled vocabulary."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
@@ -33,8 +35,7 @@ def _unmapped_tile(m: int, n: int, k: int = 64, dtype: str = "f16"):
     g.inputs, g.outputs = ["a", "b"], ["o"]
     node = Pipeline.build(LOOP_PASSES).run(g).nodes["o"]
     tile = lift_loop_op(node.op, name=node.op.name)
-    tile.knobs, tile.inputs, tile.outputs = dict(node.op.knobs), dict(node.op.inputs), dict(node.op.outputs)
-    return tile
+    return replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
 
 
 def test_a_precision_gate_pin_keys_a_different_pool() -> None:
@@ -98,8 +99,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
         out = Pipeline.build(LOOP_PASSES).run(graph)
         node = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)][-1]
         tile = lift_loop_op(node.op, name=node.op.name)
-        tile.knobs, tile.inputs, tile.outputs = dict(node.op.knobs), dict(node.op.inputs), dict(node.op.outputs)
-        return tile
+        return replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
 
     flat, split = lifted(matmul), lifted(f"{matmul}.reshape(4,32,128)")
 
@@ -136,7 +136,7 @@ def test_an_axis_renamed_twin_enumerates_its_own_spellings() -> None:
     out = Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0])
     node = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)][-1]
     tile = lift_loop_op(node.op, name=node.op.name)
-    tile.knobs, tile.inputs, tile.outputs = dict(node.op.knobs), dict(node.op.inputs), dict(node.op.outputs)
+    tile = replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
 
     ctx = Context.from_target((12, 0))
     row = dict(next(iter_leaves(schedule(tile, "t", tile.knobs, ctx))).knobs)
@@ -149,7 +149,7 @@ def test_an_axis_renamed_twin_enumerates_its_own_spellings() -> None:
 
     twin_op = tile.op.rewrite(lambda n: n, Sigma({old: Var(new)}), ren)
     twin = TileOp(op=twin_op, place=tile.place, output_specs=tile.output_specs)
-    twin.knobs, twin.inputs, twin.outputs = dict(tile.knobs), dict(tile.inputs), dict(tile.outputs)
+    twin = replace(twin, knobs=dict(tile.knobs), inputs=dict(tile.inputs), outputs=dict(tile.outputs))
     twin_row = dict(next(iter_leaves(schedule(twin, "t", twin.knobs, ctx))).knobs)
     family = spelled.split("@", 1)[0]
     assert f"{family}@{new}" in twin_row, "the twin must enumerate under its own vocabulary"

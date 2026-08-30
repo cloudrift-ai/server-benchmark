@@ -34,62 +34,13 @@ class ReconstructionFailure:
 
 RECOVERY_CLUSTERS = (
     RecoveryCluster(
-        name="direct-materialization",
-        phase=1,
-        reason="restore direct pointwise and indexing materialization with canonical work mapping",
-        nodeids=frozenset(
-            (
-                "tests/compiler/backend/test_dtype_cuda.py::test_fp16_elementwise_chain_cuda",
-                "tests/compiler/backend/test_dtype_cuda.py::test_fp16_fallback_to_float_for_non_native_op",
-                "tests/compiler/backend/test_dtype_cuda.py::test_fp16_max_reduction_stays_in_fp16",
-                "tests/compiler/backend/test_dtype_cuda.py::test_fp16_reduction_uses_fp32_accumulator_on_cuda",
-                "tests/compiler/backend/test_emit.py::test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda",
-                "tests/compiler/backend/test_emit.py::test_buffer_roles",
-                "tests/compiler/backend/test_emit.py::test_chained_pointwise_single_kernel",
-                "tests/compiler/backend/test_emit.py::test_pointwise_emits_correct_source",
-                "tests/compiler/backend/test_emit.py::test_pointwise_runs_on_gpu",
-                "tests/compiler/e2e/test_accuracy.py::test_e2e_pointwise_add[cuda-f16]",
-                "tests/compiler/e2e/test_accuracy.py::test_e2e_pointwise_add[cuda-f32]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_binary[cuda-add-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_binary[cuda-divide-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_binary[cuda-multiply-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_binary[cuda-subtract-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-add_broadcast]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-cat]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-embedding]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-gather]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-index_select_middle_axis]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-pow]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-reshape]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-slice]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-transpose]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-transpose_perm]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-unsqueeze]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_unary[cuda-abs-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_unary[cuda-exp-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_unary[cuda-negative-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_unary[cuda-reciprocal-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_unary[cuda-relu-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_unary[cuda-rsqrt-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_unary[cuda-sigmoid-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_unary[cuda-silu-<lambda>]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_unary[cuda-tanh-<lambda>]",
-                "tests/compiler/e2e/test_pipeline.py::test_pipeline_to_program",
-                "tests/compiler/e2e/test_pipeline.py::test_pointwise_chain_gpu",
-                "tests/compiler/e2e/test_program_rebind.py::test_rebind_keeps_weight_array_and_drops_graphs",
-                "tests/compiler/e2e/test_program_rebind.py::test_rebind_runs_at_new_seq_lens",
-                "tests/compiler/e2e/test_program_rebind.py::test_rebind_same_shape_reuploads_in_place",
-                "tests/compiler/passes/test_spell_store_rounding.py::test_public_copy_of_private_reduction_keeps_its_rounding_through_placement",
-                "tests/compiler/passes/test_total_lift.py::test_total_lift_fires_through_the_pipeline",
-            )
-        ),
-    ),
-    RecoveryCluster(
         name="reductions-and-scans",
         phase=2,
         reason="restore reduction, scan, and shared-memory materialization",
         nodeids=frozenset(
             (
+                "tests/compiler/backend/test_dtype_cuda.py::test_fp16_max_reduction_stays_in_fp16",
+                "tests/compiler/backend/test_dtype_cuda.py::test_fp16_reduction_uses_fp32_accumulator_on_cuda",
                 "tests/compiler/backend/test_dtype_cuda.py::test_fp16_rmsnorm_cuda",
                 "tests/compiler/backend/test_emit.py::test_reduce_emits_k_loop",
                 "tests/compiler/backend/test_emit.py::test_reduce_runs_on_gpu",
@@ -111,6 +62,8 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/passes/test_move_catalog.py::test_bare_reduce_forks_the_coop_catalog",
                 "tests/compiler/passes/test_pipeline_semantics.py::test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop",
                 "tests/compiler/passes/test_pipeline_semantics.py::test_scan_sum_lifts_and_preserves_prefix_values",
+                "tests/compiler/passes/test_spell_store_rounding.py::test_public_copy_of_private_reduction_keeps_its_rounding_through_placement",
+                "tests/compiler/passes/test_total_lift.py::test_total_lift_fires_through_the_pipeline",
             )
         ),
     ),
@@ -123,6 +76,7 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/backend/test_dtype_cuda.py::test_fp16_matmul_cuda",
                 "tests/compiler/backend/test_emit.py::test_contraction_emits_matmul",
                 "tests/compiler/backend/test_emit.py::test_matmul_runs_on_gpu",
+                "tests/compiler/e2e/test_pipeline.py::test_pipeline_to_program",
                 "tests/compiler/e2e/test_accuracy.py::test_e2e_matmul[cuda-f16]",
                 "tests/compiler/e2e/test_accuracy.py::test_e2e_matmul[cuda-f32]",
                 "tests/compiler/e2e/test_accuracy.py::test_e2e_matmul_blockify[cuda-f16]",
@@ -289,7 +243,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/ir/test_dynamic_shapes.py::test_capture_replay_cache_rmsnorm_over_capacity_buffers",
                 "tests/compiler/ir/test_dynamic_shapes.py::test_capture_replay_device_io_matches_eager",
                 "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_softmax_over_symbolic_seq_len",
-                "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_symbolic_elementwise_one_kernel_multiple_seq_lens",
                 "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_symbolic_linear_traced_and_run",
                 "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_symbolic_rmsnorm_traced_and_run",
                 "tests/compiler/passes/test_fp8_mma.py::test_k32_enumeration_requires_the_precision_gate",
@@ -378,13 +331,10 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa_causal]",
                 "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa_gqa]",
                 "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_sdpa_over_symbolic_seq_len",
-                "tests/compiler/passes/test_conv1d_einsum_rules.py::test_causal_conv1d_with_zero_width_chunk_pad_matches_eager[cuda]",
                 "tests/compiler/passes/test_conv1d_einsum_rules.py::test_dense_conv1d_im2col_matches_eager[cuda]",
-                "tests/compiler/passes/test_conv1d_einsum_rules.py::test_depthwise_conv1d_matches_eager[cuda]",
                 "tests/compiler/passes/test_conv1d_einsum_rules.py::test_einsum_matches_eager[cuda-bhld,bhdm->bhlm]",
                 "tests/compiler/passes/test_conv1d_einsum_rules.py::test_einsum_matches_eager[cuda-bij,bjk->bik]",
                 "tests/compiler/passes/test_conv1d_einsum_rules.py::test_einsum_matches_eager[cuda-bij,bjk->bki]",
-                "tests/compiler/passes/test_fusion_rules.py::test_shared_const_broadcast_lowers_as_one_mimo_cuda_kernel",
                 "tests/compiler/passes/test_fusion_rules.py::test_transcendental_is_not_duplicated_across_contraction_columns",
                 "tests/compiler/passes/test_shared_constant_cone.py::test_sibling_cones_share_one_declaration_of_a_broadcast_constant",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live",
@@ -522,9 +472,7 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/cli/test_compile.py::test_compile_dump_dir_writes_rule_application_files",
                 "tests/compiler/cli/test_compile.py::test_compile_dynamic_emits_runtime_arg",
                 "tests/compiler/cli/test_compile.py::test_compile_golden_substring_resolves_dynamic",
-                "tests/compiler/cli/test_compile.py::test_compile_passes_shorthand",
                 "tests/compiler/cli/test_eval.py::test_offer_audit_flags_unrealized_entries_and_fall_through",
-                "tests/compiler/cli/test_golden_file_replay.py::test_compile_working_file_uses_exact_loop_target",
                 "tests/compiler/cli/test_golden_file_replay.py::test_working_shared_placement_pins_select_the_exact_compile_target[explicit]",
                 "tests/compiler/cli/test_golden_file_replay.py::test_working_shared_placement_pins_select_the_exact_compile_target[ordinary]",
                 "tests/compiler/cli/test_run.py::test_run_ab_bench_shows_pinned_row",
@@ -590,10 +538,9 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/backend/test_graph_capture.py::test_bench_lowered_vs_torch_captures",
                 "tests/compiler/backend/test_graph_capture.py::test_emmy_capture_failure_falls_back_uncaptured",
                 "tests/compiler/backend/test_graph_capture.py::test_torch_capture_failure_disables_emmy_capture",
-                "tests/compiler/backend/test_pack_gpu.py::test_pack_key_mismatch_falls_back",
-                "tests/compiler/backend/test_pack_gpu.py::test_pack_missing_cubin_falls_back",
-                "tests/compiler/backend/test_pack_gpu.py::test_pack_path_separates_environments",
-                "tests/compiler/backend/test_pack_gpu.py::test_pack_round_trip_runs_identically",
+                "tests/compiler/e2e/test_program_rebind.py::test_rebind_keeps_weight_array_and_drops_graphs",
+                "tests/compiler/e2e/test_program_rebind.py::test_rebind_runs_at_new_seq_lens",
+                "tests/compiler/e2e/test_program_rebind.py::test_rebind_same_shape_reuploads_in_place",
                 "tests/serving/generation/test_gen_pack_gpu.py::test_gen_pack_key_separates_quantized_rungs",
                 "tests/serving/generation/test_gen_pack_gpu.py::test_gen_pack_second_boot_hits_and_matches",
             )
@@ -1431,7 +1378,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 1304
+REMAINING_FAILURE_COUNT = 1260
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

@@ -113,9 +113,11 @@ numpy backends in three places:
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
 sites through the CUDA pipeline. During the clean-slate classic-scheduler reconstruction, the exact strict registry
-holds these acceptance obligations at `ClassicScheduleUnavailable`. `test_schedule_walk.py` pins the target
-enumeration contracts — independent node and edge domains, traversal-order-invariant compatible membership, computed
-and derived folds keyed as schedule sites, and exact pins — without flattening a live space into test memory.
+holds the unreconstructed acceptance obligations at `ClassicScheduleUnavailable`. The direct projection boundary is
+live and exhaustively compares its production rows with the literal compatible subset of the independent Cartesian
+product before checking materialization. `test_schedule_walk.py` pins the target enumeration contracts — independent
+node and edge domains, traversal-order-invariant compatible membership, computed and derived folds keyed as schedule
+sites, and exact pins — without flattening a live space into test memory.
 `test_schedule_pool_cache.py` pins the session memo:
 sharing, hit equality, read-only payloads, and the keying that holds pin states, dtypes, extents, stores and the
 sample apart. `test_move_catalog.py` checks that independent

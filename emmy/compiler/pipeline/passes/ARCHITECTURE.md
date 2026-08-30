@@ -102,10 +102,11 @@ so the unpinned placement fork never returns under a pin-driven compile. A pin t
 realizes is an addressing error. Unpinned cuts and bare
 `PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
 `040_schedule` is the clean-slate reconstruction boundary for classic assignments. The former `_schedule.py` was
-deleted rather than adapted; `_classic.py` currently raises `ClassicScheduleUnavailable` while recovery proceeds in
-coherent phases. The fixed completion contract is that structural rewrites finish before site construction, every leaf
-is a complete typed `ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only
-materialization derives placed geometry and resolved transport facts.
+deleted rather than adapted. `_classic.py` now realizes the direct projection domain; reduction, contraction and pin
+domains raise `ClassicScheduleUnavailable` until their coherent recovery phases land. The fixed completion contract is
+that structural rewrites finish before site construction, every leaf is a complete typed `ClassicSchedule`, only the
+search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization derives placed geometry and resolved
+transport facts.
 
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so `035_split_reduce` stands beside the cut, BEFORE scheduling: the
@@ -128,18 +129,19 @@ lone unsplit arm, a pinned `PLACE` fuse, a fully forced schedule walk — and th
 a decision, so a fully pinned kernel's row is keyed into the trace and the evidence exactly like a contested one.
 
 **Enumeration is the compatible subset of independent domains.** Kernel, node, and edge domains are projected from
-static offers without reading another selected choice. Their Cartesian product defines the candidate space;
-`ClassicScheduleContext.accepts` is the compatibility relation. A production traversal may prune incompatible partial
-assignments, but order may affect only evaluation cost, never membership:
+static facts without reading another selected choice. For a problem `p`, these domains define exactly one candidate set
+and one accepted set:
 
-    S(node, ctx) = for each option o of node under ctx:  o x S(children(node), ctx + o)
+    D(p) = K(p) × ∏ N(p, node) × ∏ E(p, edge)
+    S(p) = {assignment ∈ D(p) | accepts(p, assignment)}
 
-A rebuilt production walk need not construct or join that flat product. It may apply static support through a private
-partial assignment so an incompatible prefix is never built. Every leaf still crosses the complete context relation
-exactly once at the strict codec boundary, then carries that accepted typed assignment and canonical row through search
-and materialization; downstream reads never repeat the compatibility walk. Bounded spaces are exhaustively compared
-with the literal Cartesian reference. That pruning matters because on flash attention the unconstrained product is
-8.9e6 against 13,280 legal rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
+There is no production-specific product and no second notion of membership. A production traversal may use static
+support to avoid materializing an incompatible prefix, but it must enumerate exactly `S(p)`; traversal order can change
+only evaluation cost. Every leaf crosses the complete compatibility relation once at the strict codec boundary, then
+carries that accepted typed assignment and canonical row through search and materialization. Downstream reads never
+repeat the compatibility walk. Bounded spaces are exhaustively compared with the literal Cartesian reference. That
+pruning matters because on flash attention the unconstrained product is 8.9e6 against 13,280 compatible rows, and on
+an EXL3 coded linear 5.3e12 against 19,407,312.
 
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated

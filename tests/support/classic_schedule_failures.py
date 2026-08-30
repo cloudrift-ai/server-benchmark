@@ -336,32 +336,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[fused/norm-weight-linear-f16-computed-b.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-matvec-reshaped-output-tma.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-matvec-reshaped-output-tma.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-f16acc-cp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-f16acc-cp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-f16acc-gmem.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-f16acc-gmem.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-f16acc-symbolic-k.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-f16acc-symbolic-k.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-f16acc-tma.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-f16acc-tma.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-parity-m256-cp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-parity-m256-cp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-parity-m256-tma.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-parity-m256-tma.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-parity-m512-cp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-parity-m512-cp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-parity-m512-tma.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-parity-m512-tma.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-splitk-atomic-f16acc-tma-rolled.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-splitk-atomic-f16acc-tma-rolled.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-splitk-atomic.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-splitk-atomic.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-splitk-deferred.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-splitk-deferred.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-trans-b-staged-cp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-trans-b-staged-cp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-trans-b-staged-tma.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-mma-trans-b-staged-tma.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-batched-mk-greedy.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-batched-mk-greedy.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-computed-a-k-warp.yaml-built]",
@@ -382,12 +356,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-mn-gmem.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-pv-materialized-warp.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-pv-materialized-warp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-k-split-staged.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-k-split-staged.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-splitk.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-splitk.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-symbolic-m-cp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-symbolic-m-cp.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-masked-n-staged_xfail_offered.yaml-offered]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-cp.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-cp.yaml-correct]",
@@ -625,7 +593,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 516
+REMAINING_FAILURE_COUNT = 484
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

@@ -2,8 +2,8 @@
 
 The model contains choices only.  A :class:`ClassicProblem` supplies the immutable Fold tree and
 target; :class:`ClassicScheduleContext` derives identities and classification from that problem and
-is the only authority that accepts or refuses a complete assignment.  Codecs, enumeration order,
-search state, and materialization data do not belong here.
+is the only compatibility authority for a complete assignment. Codecs, enumeration order, search
+state, and materialization data do not belong here.
 """
 
 from __future__ import annotations
@@ -203,8 +203,28 @@ class ClassicSchedule:
         return type(self), (self.kernel, dict(self.nodes), dict(self.edges))
 
 
-# A parameter predicate that restricts complete classic assignments during enumeration.
-ScheduleRestriction = Callable[[ClassicSchedule], bool]
+def _allow_schedule(_schedule: ClassicSchedule) -> bool:
+    """The unrestricted Algorithm 1 context."""
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleRestriction:
+    """The immutable ``c`` input to Algorithm 1.
+
+    The predicate sees one complete assignment. Enumerators may carry this context intact, but
+    must not inspect it while traversing the independent domains.
+    """
+
+    _predicate: Callable[[ClassicSchedule], bool] = _allow_schedule
+
+    def __post_init__(self) -> None:
+        if not callable(self._predicate):
+            raise TypeError("classic schedule restriction requires a callable complete-assignment predicate")
+
+    def accepts(self, schedule: ClassicSchedule) -> bool:
+        """Whether this complete assignment satisfies ``c``."""
+        return bool(self._predicate(schedule))
 
 
 @dataclass(frozen=True)
@@ -842,22 +862,22 @@ def edge_domain(
     return (EdgeSchedule(Stage.direct()),)
 
 
-def cartesian_assignments(
-    problem: ClassicProblem,
-    domains: ClassicDomains | None = None,
-) -> Iterator[tuple[ClassicSchedule, Acceptance]]:
-    """Enumerate the literal independent-domain product and each membership verdict."""
+def cartesian_assignments(p: Fold, t, *, domains: ClassicDomains | None = None) -> Iterator[tuple[ClassicSchedule, Acceptance]]:
+    """Enumerate ``D(p, t)`` and each compatibility verdict."""
+    problem = ClassicProblem(p, t)
     context = ClassicScheduleContext(problem, domains)
-    for schedule in _cartesian_product(problem, context, domains):
+    for schedule in _cartesian_product(p, t, context, domains):
         yield schedule, context.accepts(schedule)
 
 
 def _cartesian_product(
-    problem: ClassicProblem,
+    p: Fold,
+    t,
     context: ClassicScheduleContext,
     domains: ClassicDomains | None,
 ) -> Iterator[ClassicSchedule]:
-    """Enumerate ``K(p) × ∏ N(p, node) × ∏ E(p, edge)`` without filtering."""
+    """Enumerate ``K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)`` without filtering."""
+    problem = ClassicProblem(p, t)
     node_domains = tuple(node_domain(problem, site, context.views[site], domains) for site in context.index.nodes)
     edge_domains = tuple(edge_domain(problem, edge, domains) for edge in context.index.edges)
     for kernel, node_values, edge_values in product(
@@ -873,31 +893,41 @@ def _cartesian_product(
 
 
 def enumerate_reference(
-    problem: ClassicProblem,
+    c: ScheduleRestriction,
+    p: Fold,
+    t,
+    *,
     domains: ClassicDomains | None = None,
-    restriction: ScheduleRestriction | None = None,
 ) -> Iterator[ClassicSchedule]:
-    """Algorithm 1: restrict the literal product, then retain compatible assignments."""
+    """Algorithm 1(c, p, t): restrict ``D(p, t)``, then retain compatible assignments."""
+    if not isinstance(c, ScheduleRestriction):
+        raise TypeError("Algorithm 1 requires one immutable ScheduleRestriction c")
+    problem = ClassicProblem(p, t)
     context = ClassicScheduleContext(problem, domains)
-    for schedule in _cartesian_product(problem, context, domains):
-        if restriction is not None and not restriction(schedule):
+    for schedule in _cartesian_product(p, t, context, domains):
+        if not c.accepts(schedule):
             continue
         if context.accepts(schedule):
             yield schedule
 
 
 def enumerate_classic(
-    problem: ClassicProblem,
+    c: ScheduleRestriction,
+    p: Fold,
+    t,
+    *,
     traversal: Sequence[NodeSite | EdgeSite] | None = None,
     domains: ClassicDomains | None = None,
-    restriction: ScheduleRestriction | None = None,
 ) -> Iterator[ClassicSchedule]:
     """Lazily enumerate complete assignments in any site order.
 
     This traversal intentionally performs no semantic pruning.  Its set must therefore equal
-    :func:`enumerate_reference` for every site order; the production walk may prune prefixes only
-    while preserving the same complete set.
+    :func:`enumerate_reference` for every site order; the walk may prune only ``p``/``t``
+    incompatibility prefixes while preserving the same complete set.
     """
+    if not isinstance(c, ScheduleRestriction):
+        raise TypeError("Algorithm 1 requires one immutable ScheduleRestriction c")
+    problem = ClassicProblem(p, t)
     context = ClassicScheduleContext(problem, domains)
     canonical = (*context.index.nodes, *context.index.edges)
     order = tuple(canonical if traversal is None else traversal)
@@ -908,7 +938,7 @@ def enumerate_classic(
         if position == len(order):
             for kernel in kernel_domain(problem, domains):
                 schedule = ClassicSchedule(kernel, nodes, edges)
-                if (restriction is None or restriction(schedule)) and context.accepts(schedule):
+                if c.accepts(schedule) and context.accepts(schedule):
                     yield schedule
             return
         site = order[position]

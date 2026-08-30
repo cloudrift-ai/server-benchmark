@@ -9,9 +9,10 @@ THIS rule picks that up and decides the schedule — the free-axis → grid mapp
 Direct projection, plain-reduction, scalar-contraction, precision-gated tensor-core,
 materialized-operand copy staging, smem compute-fill staging, and kernel-global raster schedules are
 live while the remaining classic domains are being reconstructed behind an explicit unavailable
-boundary. The fixed candidate-space contract is the compatible subset of independently projected
-kernel, node, and edge domains; a traversal may prune that product but cannot make traversal order
-semantic.
+boundary. The fixed candidate-space contract is Algorithm 1(c, p, t): the schedule restriction
+``c`` is one immutable context evaluated only on complete assignments from the independently
+projected kernel, node, and edge domains. A traversal may prune ``p``/``t`` incompatibility, but it
+never unpacks ``c`` and cannot make traversal order semantic.
 
 Splitting the two halves is what makes the fork ONE thing: a kernel reaches scheduling by
 several routes — the ordinary lift and a cross-CTA split's partial and finalize — and all converge here. The engine restarts its

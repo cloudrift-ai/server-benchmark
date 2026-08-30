@@ -150,24 +150,27 @@ a decision, so a fully pinned kernel's row is keyed into the trace and the evide
 
 **Enumeration is Algorithm 1 from the introduction: the restricted compatible subset of independent domains.**
 Kernel, node, and edge domains are projected from static problem facts without reading parameters or another selected
-choice. For problem `p` and schedule-parameter restriction `r`, there is exactly one candidate set and one result:
+choice. For one immutable schedule restriction `c`, unscheduled Fold program `p`, and target `t`, there is exactly one
+candidate set and one result:
 
-    D(p) = K(p) × ∏ N(p, node) × ∏ E(p, edge)
-    S(p, r) = {assignment ∈ D(p) | r(assignment) ∧ accepts(p, assignment)}
+    D(p, t) = K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)
+    Algorithm 1(c, p, t) = {a ∈ D(p, t) | c.accepts(a) ∧ accepts(p, t, a)}
 
-There is no production-specific product and no second notion of membership. A production traversal may use static
-support and the restriction to avoid materializing an excluded or incompatible prefix, but it must enumerate exactly
-`S(p, r)`; traversal order can change only evaluation cost. Every leaf crosses the complete compatibility relation
-once at the strict codec boundary, then carries that accepted typed assignment and canonical row through search and
-materialization. Downstream reads never repeat the compatibility walk. Bounded spaces are exhaustively compared with
-the literal Cartesian reference. That pruning matters because on flash attention the unconstrained product is 8.9e6
-against 13,280 compatible rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
+There is no production-specific product and no second notion of membership. Production carries `c` intact through
+the traversal and evaluates it only for a complete assignment; the visitor never unpacks the restriction to filter a
+kernel, node, or edge prefix. Static support derived solely from `p` and `t` may prune incompatible prefixes, but the
+walk must enumerate exactly Algorithm 1(c, p, t); traversal order can change only evaluation cost. Every leaf crosses
+the complete compatibility relation once at the strict codec boundary, then carries that accepted typed assignment
+and canonical row through search and materialization. Downstream reads never repeat the compatibility walk. Bounded
+spaces are exhaustively compared with the literal Cartesian reference. That compatibility pruning matters because on
+flash attention the unconstrained product is 8.9e6 against 13,280 compatible rows, and on an EXL3 coded linear 5.3e12
+against 19,407,312.
 
 Placement is the outer enumeration. `030_cut` projects the fused/cut choices and applies the `PLACE` restriction; each
 realized choice produces zero or more fresh kernel problems. Only after a kernel has no remaining cuttable seam, or
-its placement has been decided, may `040_schedule` evaluate `S(p, r)`. A fresh piece that enters the current sweep
-after `030_cut` is therefore skipped by `040_schedule` unconditionally until the next cut pass sees it. Schedule
-refusal is never used to discover that cut enumeration should have happened first.
+its placement has been decided, may `040_schedule` evaluate Algorithm 1(c, p, t). A fresh piece that enters the
+current sweep after `030_cut` is therefore skipped by `040_schedule` unconditionally until the next cut pass sees it.
+Schedule refusal is never used to discover that cut enumeration should have happened first.
 
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated
@@ -186,11 +189,12 @@ effect).
 **A schedule pin is a restriction, never a domain constructor.** `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` pins
 compare their exact canonical values with the applicable factors in Algorithm 1. They do not replace a factor or add a
 value the static catalog did not project. Precision gates are restrictions of the same enumeration: their atom choices
-remain in the fixed node domain, but a disabled gate excludes them before a production prefix is expanded. A malformed
-or unavailable exact value therefore names no member of `D(p)` and is refused; pinning cannot manufacture a worker
-inventory, tile, transport, or raster value. With only bare schedule pins, they restrict every applicable kernel. Once
-the parameter set contains scoped schedule pins, its bare kernel values travel with that partial row: they restrict a
-kernel where at least one scoped key resolves and are inert on kernels where every scoped key is foreign.
+remain in the fixed node domain, and the immutable `c` excludes them when it evaluates a complete assignment. A
+malformed or unavailable exact value therefore names no member of `D(p, t)` and is refused; pinning cannot manufacture
+a worker inventory, tile, transport, or raster value. With only bare schedule pins, they restrict every applicable
+kernel. Once the parameter set contains scoped schedule pins, its bare kernel values travel with that partial row:
+they restrict a kernel where at least one scoped key resolves and are inert on kernels where every scoped key is
+foreign.
 
 **The walk IS the fork tree.** A branch holds the nodes still to decide, the context they must honour, and the row
 prefix decided so far; nothing below it exists until it expands. A level with one option is collapsed, so the fork
@@ -290,8 +294,8 @@ fetches a finished lowering (io rebound through `Stmt.rename_buffers`) before th
 `Context.kernel_cache` (nothing installs it by default), greedy-only (tune strips it, pricing probes
 strip it), multi-kernel origins poison their key. A twin program compiles ~750x faster than cold.
 
-**The domains and pool identity.** Each `schedule()` call projects fixed independent domains from the problem, then
-applies the live schedule restriction during Algorithm 1. `Fork.pool_id` stamps the deploy identity, target, ordered
+**The domains and pool identity.** Each `schedule()` call projects fixed independent domains from `p` and `t`, builds
+one immutable `c`, then evaluates Algorithm 1(c, p, t). `Fork.pool_id` stamps the deploy identity, target, ordered
 free-axis extents, exact codec vocabulary, schedule-parameter fingerprint, and split receipt; it keys the greedy
 decision memo without weakening any enumeration input. Sampled lazy enumeration remains behind the explicit classic
 reconstruction boundary.

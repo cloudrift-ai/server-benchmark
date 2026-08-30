@@ -2,7 +2,9 @@
 
 The scheduler has one candidate-space contract: kernel, node, and edge domains are projected
 independently from static facts, and enumeration is exactly the compatible subset of their
-Cartesian product. Traversal order may change evaluation cost, never membership.
+Cartesian product. Algorithm 1(c, p, t) carries the immutable schedule restriction ``c`` intact
+and evaluates it only on complete assignments. Traversal order may change evaluation cost, never
+membership.
 
 Projection, plain-reduction, scalar-contraction, precision-gated tensor-core, materialized-operand
 copy staging, smem compute-fill staging, and kernel-global raster choices are live. Later schedule
@@ -33,6 +35,7 @@ from emmy.compiler.ir.classic_schedule import (
     ProjectionSchedule,
     Reduction,
     ReductionSchedule,
+    ScheduleRestriction,
     reduction_sites,
     stage_edges,
     tile_sites,
@@ -516,8 +519,16 @@ def _stage_supports(
     return tuple(out)
 
 
-def _enumerate_supported(problem: ClassicProblem, domains: ClassicDomains, restriction, codec: ClassicScheduleCodec):
-    """Enumerate support-compatible assignments without constructing incompatible prefixes."""
+def _enumerate_supported(
+    c: ScheduleRestriction,
+    p: Fold,
+    t,
+    *,
+    domains: ClassicDomains,
+    codec: ClassicScheduleCodec,
+):
+    """Algorithm 1(c, p, t), using only p/t compatibility support to prune traversal."""
+    problem = ClassicProblem(p, t)
     context = ClassicScheduleContext(problem, domains)
     sites = context.index.nodes
     seen: set[tuple] = set()
@@ -527,15 +538,11 @@ def _enumerate_supported(problem: ClassicProblem, domains: ClassicDomains, restr
             claimed_work = work or Work()
             for kernel in domains.kernel:
                 kernel_work = Work(kernel.work.kind, kernel.work.units)
-                if (
-                    kernel_work != claimed_work
-                    or (not kernel.raster.is_direct and not raster_eligible)
-                    or not restriction.allows_kernel(kernel)
-                ):
+                if kernel_work != claimed_work or (not kernel.raster.is_direct and not raster_eligible):
                     continue
                 assignment = ClassicSchedule(kernel, nodes, edges)
                 key = (kernel, tuple(nodes.items()), tuple(edges.items()))
-                if key in seen or not restriction(assignment) or not context.accepts(assignment):
+                if key in seen or not c.accepts(assignment) or not context.accepts(assignment):
                     continue
                 seen.add(key)
                 yield assignment, codec._encode_accepted(assignment)
@@ -543,10 +550,6 @@ def _enumerate_supported(problem: ClassicProblem, domains: ClassicDomains, restr
 
         site = sites[position]
         for support in domains.supports[site]:
-            if not restriction.allows_node(site, support.node) or any(
-                not restriction.allows_edge(edge, choice) for edge, choice in support.edges.items()
-            ):
-                continue
             next_work = work
             if support.work is not None:
                 if next_work is not None and next_work != support.work:
@@ -764,9 +767,9 @@ class _ScheduleLeaf(Fork):
         ]
 
 
-@dataclass(frozen=True)
-class _ScheduleRestriction:
-    """The schedule parameters that restrict Algorithm 1 without changing its domains."""
+@dataclass(frozen=True, slots=True)
+class _ScheduleParameters:
+    """Immutable schedule-parameter values evaluated only on a complete assignment."""
 
     pins: MappingProxyType
     tile_sites: frozenset
@@ -779,60 +782,57 @@ class _ScheduleRestriction:
     def _allows_value(self, family: str, key: str, value: str) -> bool:
         return all(pin_value == value for pin_key, pin_value in self.pins[family] if pin_key in (family, key))
 
-    def allows_kernel(self, kernel: KernelSchedule) -> bool:
-        return (
+    def __call__(self, assignment: ClassicSchedule) -> bool:
+        kernel = assignment.kernel
+        if not (
             self._allows_value("WORK", "WORK", kernel.work.spell())
             and (kernel.raster.orient != "n" or self.allow_transposed_raster)
             and self._allows_value("RASTER", "RASTER", kernel.raster.spell())
-        )
-
-    def allows_node(self, site, choice) -> bool:
-        if site in self.tile_sites and not self._allows_value("TILE", f"TILE@{site.id.spell()}", choice.tile.spell()):
+        ):
             return False
-        if site in self.reduction_sites and not self._allows_value("REDUCE", f"REDUCE@{site.id.spell()}", choice.reduce.spell()):
-            return False
-        if not choice.tile.is_warp:
-            return True
-        atom = choice.tile.atom
-        if atom.operand_dtype("a").nbytes == 1:
-            return self.allow_fp8
-        if atom.operand_dtype("c").nbytes == 2:
-            return self.allow_f16_accumulate
-        return True
-
-    def allows_edge(self, edge, choice: EdgeSchedule) -> bool:
-        return edge not in self.stage_edges or self._allows_value("STAGE", f"STAGE@{edge.spell()}", choice.stage.spell())
-
-    def __call__(self, assignment: ClassicSchedule) -> bool:
-        return (
-            self.allows_kernel(assignment.kernel)
-            and all(self.allows_node(site, choice) for site, choice in assignment.nodes.items())
-            and all(self.allows_edge(edge, choice) for edge, choice in assignment.edges.items())
+        for site, choice in assignment.nodes.items():
+            if site in self.tile_sites and not self._allows_value("TILE", f"TILE@{site.id.spell()}", choice.tile.spell()):
+                return False
+            if site in self.reduction_sites and not self._allows_value("REDUCE", f"REDUCE@{site.id.spell()}", choice.reduce.spell()):
+                return False
+            if choice.tile.is_warp:
+                atom = choice.tile.atom
+                if atom.operand_dtype("a").nbytes == 1 and not self.allow_fp8:
+                    return False
+                if atom.operand_dtype("c").nbytes == 2 and not self.allow_f16_accumulate:
+                    return False
+        return all(
+            edge not in self.stage_edges or self._allows_value("STAGE", f"STAGE@{edge.spell()}", choice.stage.spell())
+            for edge, choice in assignment.edges.items()
         )
 
 
-def schedule_restriction(problem: ClassicProblem, domains: ClassicDomains, *, pins=None) -> _ScheduleRestriction:
-    """Return the live schedule-parameter restriction for Algorithm 1."""
+def schedule_restriction(p: Fold, t, domains: ClassicDomains, *, pins=None) -> ScheduleRestriction:
+    """Build the immutable ``c`` input to Algorithm 1 from schedule parameters."""
+    problem = ClassicProblem(p, t)
     codec = ClassicScheduleCodec(problem, domains)
     context = codec.context
     requested = {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")} if pins is None else pins
     scoped = tuple((key, value) for values in requested.values() for key, value in values if "@" in key)
     addressed = not scoped or any(key in codec.keys() for key, _value in scoped)
-    values = requested if addressed else {family: () for family in requested}
-    return _ScheduleRestriction(
-        MappingProxyType(values),
-        frozenset(tile_sites(context)),
-        frozenset(reduction_sites(context)),
-        frozenset(stage_edges(context)),
-        precision_pin(F16_MMA_F32_ACC) is True,
-        precision_pin(FP8_MMA) is True,
-        any(key == "RASTER" and value.startswith("gn") for key, value in values["RASTER"]),
+    values = {family: tuple(entries) for family, entries in requested.items()} if addressed else {family: () for family in requested}
+    return ScheduleRestriction(
+        _ScheduleParameters(
+            MappingProxyType(values),
+            frozenset(tile_sites(context)),
+            frozenset(reduction_sites(context)),
+            frozenset(stage_edges(context)),
+            precision_pin(F16_MMA_F32_ACC) is True,
+            precision_pin(FP8_MMA) is True,
+            any(key == "RASTER" and value.startswith("gn") for key, value in values["RASTER"]),
+        )
     )
 
 
 def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
-    """Run Algorithm 1 over fixed independent domains under the live schedule restriction."""
-    problem = ClassicProblem(tile.op, ctx)
+    """Run Algorithm 1(c, p, t) over fixed independent domains."""
+    p, t = tile.op, ctx
+    problem = ClassicProblem(p, t)
     context = ClassicScheduleContext(problem)
     observed = any(context.index.node(site).observed for site in context.index.nodes)
     if observed and getattr(ctx, "pool_sample", None) is not None:
@@ -842,7 +842,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     except _EmptyDomain:
         return []
     codec = ClassicScheduleCodec(problem, domains)
-    restriction = schedule_restriction(problem, domains)
+    c = schedule_restriction(p, t, domains)
     pool_id = digest(
         tile.identity_key(with_io=True) or "",
         ctx.structural_key(),
@@ -852,7 +852,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         tile.split_consumed,
     )
     leaves = []
-    for assignment, row in _enumerate_supported(problem, domains, restriction, codec):
+    for assignment, row in _enumerate_supported(c, p, t, domains=domains, codec=codec):
         leaves.append(_ScheduleLeaf(tile, name, dict(knobs), ctx, assignment, MappingProxyType(row), pool_id))
     return leaves
 

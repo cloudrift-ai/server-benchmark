@@ -28,6 +28,7 @@ from emmy.compiler.ir.classic_schedule import (
     ProjectionSchedule,
     Reduction,
     ReductionSchedule,
+    ScheduleRestriction,
     SiteIndex,
     cartesian_assignments,
     classify,
@@ -216,10 +217,11 @@ def test_reference_is_the_compatible_cartesian_subset() -> None:
     problem = ClassicProblem(_contraction(), target=object())
     domains = _finite_domains(problem)
 
-    assignments = list(cartesian_assignments(problem, domains))
+    assignments = list(cartesian_assignments(problem.root, problem.target, domains=domains))
 
     assert {_schedule_signature(schedule) for schedule, verdict in assignments if verdict} == {
-        _schedule_signature(schedule) for schedule in enumerate_reference(problem, domains)
+        _schedule_signature(schedule)
+        for schedule in enumerate_reference(ScheduleRestriction(), problem.root, problem.target, domains=domains)
     }
     assert len(assignments) == domains.product_size == 24
 
@@ -228,10 +230,14 @@ def test_every_lazy_traversal_equals_the_cartesian_reference() -> None:
     problem = ClassicProblem(_contraction(), target=object())
     context = ClassicScheduleContext(problem)
     domains = _finite_domains(problem)
-    reference = {_schedule_signature(schedule) for schedule in enumerate_reference(problem, domains)}
+    c = ScheduleRestriction()
+    reference = {_schedule_signature(schedule) for schedule in enumerate_reference(c, problem.root, problem.target, domains=domains)}
 
     for traversal in permutations((*context.index.nodes, *context.index.edges)):
-        assert {_schedule_signature(schedule) for schedule in enumerate_classic(problem, traversal, domains)} == reference
+        assert {
+            _schedule_signature(schedule)
+            for schedule in enumerate_classic(c, problem.root, problem.target, traversal=traversal, domains=domains)
+        } == reference
 
 
 def test_every_lazy_traversal_equals_algorithm_one_under_a_restriction() -> None:
@@ -239,13 +245,12 @@ def test_every_lazy_traversal_equals_algorithm_one_under_a_restriction() -> None
     context = ClassicScheduleContext(problem)
     domains = _finite_domains(problem)
 
-    def restriction(schedule):
-        return schedule.kernel.raster.is_direct
+    c = ScheduleRestriction(lambda schedule: schedule.kernel.raster.is_direct)
 
-    reference = {_schedule_signature(schedule) for schedule in enumerate_reference(problem, domains, restriction=restriction)}
+    reference = {_schedule_signature(schedule) for schedule in enumerate_reference(c, problem.root, problem.target, domains=domains)}
 
     for traversal in permutations((*context.index.nodes, *context.index.edges)):
-        actual = enumerate_classic(problem, traversal, domains, restriction=restriction)
+        actual = enumerate_classic(c, problem.root, problem.target, traversal=traversal, domains=domains)
         assert {_schedule_signature(schedule) for schedule in actual} == reference
 
 
@@ -254,7 +259,17 @@ def test_lazy_enumerator_rejects_incomplete_or_duplicate_traversals() -> None:
     site = ClassicScheduleContext(problem).index.nodes[0]
 
     with pytest.raises(ValueError, match="exactly once"):
-        list(enumerate_classic(problem, (site, site)))
+        list(enumerate_classic(ScheduleRestriction(), problem.root, problem.target, traversal=(site, site)))
+
+
+def test_algorithm_one_requires_one_immutable_restriction_context() -> None:
+    problem = ClassicProblem(_sum(), target=object())
+
+    with pytest.raises(TypeError, match="immutable ScheduleRestriction c"):
+        list(enumerate_reference(lambda _schedule: True, problem.root, problem.target))
+
+    with pytest.raises(AttributeError, match="cannot assign"):
+        ScheduleRestriction()._predicate = lambda _schedule: False
 
 
 def test_node_ids_reject_negative_ordinals() -> None:

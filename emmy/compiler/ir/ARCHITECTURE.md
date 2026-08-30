@@ -88,15 +88,20 @@ materialization reuse that row and typed assignment instead of repeating the com
 schedule remains a validating public boundary.
 
 Kernel, node, and edge domains are independent projections of static offers; none reads another selected choice.
-Their Cartesian product is the definition of the candidate space. Algorithm 1 takes a separate
-`ScheduleRestriction` parameter and returns exactly the assignments that satisfy both that predicate and
-`ClassicScheduleContext.accepts`; a restriction cannot mutate a domain or introduce a choice. Static support retains
-derived physical-axis and fragment-seam facts outside the choice values. Domain membership and local-support lookup
-use immutable indexes built with the context; validating a leaf must never linearly scan a factor whose choices are
-already finite and hashable. The literal reference enumerator remains the oracle. The production Fold walk may prune
-restricted or incompatible prefixes, but bounded-product checks and traversal-order tests require every traversal
-order to produce the same result. The lowering-side implementation is currently being rebuilt behind
-`_classic.ClassicScheduleUnavailable`; the semantic model and this product contract remain the boundary the
+Their Cartesian product is the definition of the candidate space. For immutable schedule restriction `c`, unscheduled
+Fold program `p`, and target `t`, Algorithm 1 is exactly:
+
+    D(p, t) = K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)
+    Algorithm 1(c, p, t) = {a ∈ D(p, t) | c.accepts(a) ∧ accepts(p, t, a)}
+
+The enumerator carries the one `ScheduleRestriction` context intact and consults it only on complete assignments. It
+never unpacks `c` to prune a kernel, node, or edge prefix. A restriction cannot mutate a domain or introduce a choice.
+Static support retains derived physical-axis and fragment-seam facts outside the choice values. Domain membership and
+local-support lookup use immutable indexes built from `p` and `t`; production may prune only prefixes known to violate
+their compatibility relation. Validating a leaf must never linearly scan a factor whose choices are already finite and
+hashable. The literal reference enumerator remains the oracle. Bounded-product checks and traversal-order tests require
+every traversal order to produce the same complete set. The lowering-side implementation is currently being rebuilt
+behind `_classic.ClassicScheduleUnavailable`; the semantic model and this product contract remain the boundary the
 reconstruction must satisfy.
 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be

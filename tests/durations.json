@@ -316,7 +316,6 @@
   "tests/compiler/loader/test_quant.py::test_trace_model_spells_cones_and_binds_dequantized_twin": 0.05,
   "tests/compiler/loader/test_quant.py::test_trace_model_unquantized_checkpoint_takes_existing_path": 0.08,
   "tests/compiler/passes/test_classic_schedule_domains.py::test_compute_fill_edges_remain_independent_product_factors": 0.02,
-  "tests/compiler/passes/test_classic_schedule_domains.py::test_tensor_core_enumeration_is_the_compatible_independent_product": 5.4,
   "tests/compiler/passes/test_conv1d_einsum_rules.py::test_einsum_matches_eager[cuda-bhld,bhdm->bhlm]@cuda": 0.05,
   "tests/compiler/passes/test_cut_forks.py::test_bare_place_cut_keeps_recursing_on_fresh_pieces": 0.18,
   "tests/compiler/passes/test_cut_forks.py::test_child_identity_receipts_decode_per_child_and_join_by_stored_identity": 0.89,

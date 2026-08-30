@@ -402,7 +402,7 @@
   "tests/compiler/passes/test_volta_mma.py::test_modern_computed_a_edge_keeps_the_cp_async_peer_copy": 0.08,
   "tests/compiler/passes/test_volta_mma.py::test_sm70_computed_a_edge_stages_through_the_smem_compute_fill[d1/smem]": 0.08,
   "tests/compiler/passes/test_volta_mma.py::test_sm70_computed_a_edge_stages_through_the_smem_compute_fill[d2/smem]": 0.08,
-  "tests/compiler/passes/test_warp_eligible_stamp.py::test_materialized_op_carries_warp_eligibility_stamp": 0.47,
+  "tests/compiler/passes/test_warp_eligible_stamp.py::test_materialized_op_carries_warp_eligibility_stamp": 7.6,
   "tests/compiler/pipeline/search/data/test_dataset.py::test_from_db_grouping": 0.11,
   "tests/compiler/pipeline/search/data/test_dataset.py::test_golden_compile_s_feats_matches_inline": 0.34,
   "tests/compiler/pipeline/search/data/test_dataset.py::test_golden_features_use_own_cards_sm_count": 0.07,

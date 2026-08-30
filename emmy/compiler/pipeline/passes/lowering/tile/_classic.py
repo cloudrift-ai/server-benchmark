@@ -851,9 +851,10 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         schedule_pin_fingerprint(),
         tile.split_consumed,
     )
+    prefix = {"S_warp_eligible": 1.0} if any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices) else {}
     leaves = []
     for assignment, row in _enumerate_supported(c, p, t, domains=domains, codec=codec):
-        leaves.append(_ScheduleLeaf(tile, name, dict(knobs), ctx, assignment, MappingProxyType(row), pool_id))
+        leaves.append(_ScheduleLeaf(tile, name, dict(knobs), ctx, assignment, MappingProxyType({**prefix, **row}), pool_id))
     return leaves
 
 

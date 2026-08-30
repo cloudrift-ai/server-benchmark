@@ -253,7 +253,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/passes/test_schedule_walk.py::test_the_prescan_asks_each_catalog_question_once[warp_matmul]",
                 "tests/compiler/passes/test_schedule_walk.py::test_the_prescan_reads_each_computed_a_seam_once",
                 "tests/compiler/passes/test_schedule_walk.py::test_the_twisted_carrier_split_offers_only_the_deferred_arm",
-                "tests/compiler/passes/test_warp_eligible_stamp.py::test_materialized_op_carries_warp_eligibility_stamp",
             )
         ),
     ),
@@ -357,7 +356,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 248
+REMAINING_FAILURE_COUNT = 247
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

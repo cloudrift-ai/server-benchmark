@@ -4,8 +4,9 @@ The scheduler has one candidate-space contract: kernel, node, and edge domains a
 independently from static facts, and enumeration is exactly the compatible subset of their
 Cartesian product. Traversal order may change evaluation cost, never membership.
 
-Projection and plain-reduction choices are live. Later schedule families extend the same
-independent factors and the one compatibility relation; they do not add another enumerator.
+Projection, plain-reduction, and scalar-contraction choices are live. Later schedule families
+extend the same independent factors and the one compatibility relation; they do not add another
+enumerator.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from emmy.compiler.ir.classic_schedule import (
+    AxisAgreement,
     ClassicDomains,
     ClassicMaterialization,
     ClassicProblem,
@@ -30,14 +32,14 @@ from emmy.compiler.ir.classic_schedule import (
     enumerate_classic,
 )
 from emmy.compiler.ir.pure.fold import edge_refs_axis
-from emmy.compiler.ir.schedule import Raster, Reduce, Stage, Tile, Work
+from emmy.compiler.ir.schedule import PlacedTile, Raster, Reduce, Stage, Tile, Work, derive_inventory
 from emmy.compiler.ir.stmt import Loop
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, projection_tail, scheduled
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.knob import family_pins
-from emmy.compiler.pipeline.search.space import WARP_LANES, coop_reduce_moves
+from emmy.compiler.pipeline.search.space import WARP_LANES, coop_reduce_moves, scalar_tile_moves
 
 
 class ClassicScheduleUnavailable(RuntimeError):
@@ -82,6 +84,18 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     )
 
 
+def _contraction_domain(tile: TileOp, node) -> tuple[ReductionSchedule, ...]:
+    """Project one single-channel contraction's locally realizable scalar choices."""
+    if len(node.channels) != 1:
+        raise ClassicScheduleUnavailable("multi-channel contractions require tensor-core schedules")
+    per_cell_reductions = _reduction_domain(tile, node) if node.axis.extent.is_static else (Reduce(),)
+    return tuple(
+        ReductionSchedule(plan, reduction)
+        for plan in scalar_tile_moves()
+        for reduction in (per_cell_reductions if not plan.is_tiled else (Reduce(),))
+    )
+
+
 def project_domains(tile: TileOp, target) -> ClassicDomains:
     """Project independent kernel, node, and edge domains from immutable problem facts.
 
@@ -94,20 +108,40 @@ def project_domains(tile: TileOp, target) -> ClassicDomains:
     nodes = {}
     supports = {}
     work_domain = {Work()}
+    sched = Sched(tile.op, place=tile.place.on_grid())
     for site, view in context.views.items():
         incident = {edge: direct_edges[edge] for edge in context.index.edges if edge.consumer == site}
         if isinstance(view, Projection):
             choices = (ProjectionSchedule(Tile()),)
             local = tuple(LocalSupport(choice, incident) for choice in choices)
         else:
-            reductions = _reduction_domain(tile, context.index.node(site))
-            choices = tuple(ReductionSchedule(Tile(), reduction) for reduction in reductions)
-            local = tuple(
-                LocalSupport(choice, incident, work=Work(kind="thread", units=(choice.reduce.coop, 1)))
-                if choice.reduce.coop > 1
-                else LocalSupport(choice, incident)
-                for choice in choices
+            node = context.index.node(site)
+            choices = (
+                _contraction_domain(tile, node)
+                if view.contraction is not None
+                else tuple(ReductionSchedule(Tile(), reduction) for reduction in _reduction_domain(tile, node))
             )
+            local = []
+            for choice in choices:
+                geometry = sched.placed(node, choice.tile)
+                if choice.tile.is_tiled and not isinstance(geometry, PlacedTile):
+                    continue
+                axes = (
+                    tuple(AxisAgreement(side.axis.name, side.tile, side.units) for side in geometry.mn)
+                    if isinstance(geometry, PlacedTile)
+                    else ()
+                )
+                local.append(
+                    LocalSupport(
+                        choice,
+                        incident,
+                        work=derive_inventory((choice.tile,), coop=choice.reduce.coop),
+                        axes=axes,
+                        raster_eligible=choice.tile.is_tiled,
+                    )
+                )
+            local = tuple(local)
+            choices = tuple(support.node for support in local)
         nodes[site] = choices
         supports[site] = local
         work_domain.update(support.work for support in local if support.work is not None)
@@ -135,6 +169,16 @@ class _ScheduleLeaf(Fork):
         return {**self.inherited_knobs, **self.row}
 
     def expand(self) -> list[TileOp]:
+        context = ClassicScheduleContext(ClassicProblem(self.tile.op, target=None))
+        sched = Sched(self.tile.op, place=self.tile.place.on_grid())
+        placed = {}
+        for site, choice in self.schedule.nodes.items():
+            if not choice.tile.is_tiled:
+                continue
+            geometry = sched.placed(context.index.node(site), choice.tile)
+            if not isinstance(geometry, PlacedTile):
+                raise ValueError(f"accepted TILE at {site.id.spell()} has no placed geometry")
+            placed[site] = geometry
         return [
             scheduled(
                 self.tile.op,
@@ -143,7 +187,7 @@ class _ScheduleLeaf(Fork):
                 knobs=self.knobs,
                 output_specs=self.tile.output_specs,
                 classic=self.schedule,
-                materialization=ClassicMaterialization({}, {}),
+                materialization=ClassicMaterialization(placed, {}),
                 workers=None,
             )
         ]
@@ -153,8 +197,9 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     """Enumerate the compatible subset of the independently projected classic domains."""
     problem = ClassicProblem(tile.op, ctx)
     context = ClassicScheduleContext(problem)
-    if any(isinstance(view, Reduction) and view.contraction is not None for view in context.views.values()):
-        raise ClassicScheduleUnavailable("contraction domains have not been reconstructed")
+    contractions = tuple(site for site, view in context.views.items() if isinstance(view, Reduction) and view.contraction is not None)
+    if len(contractions) > 1:
+        raise ClassicScheduleUnavailable("composed contraction domains have not been reconstructed")
     pins = {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
     observed = any(context.index.node(site).observed for site in context.index.nodes)
     if observed and getattr(ctx, "pool_sample", None) is not None:

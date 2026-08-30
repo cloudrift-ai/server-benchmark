@@ -119,7 +119,9 @@ product before checking materialization. The plain-reduction boundary also compa
 literal reference: its independent product contains mismatched node and kernel worker choices that only the
 compatibility relation may reject. `test_schedule_walk.py` pins the target enumeration contracts — independent node
 and edge domains, traversal-order-invariant compatible membership, computed and derived folds keyed as schedule sites,
-and exact pins — without flattening a live space into test memory.
+and exact pins — without flattening a live space into test memory. The scalar-contraction boundary likewise compares
+production with the literal reference, proves the independent product is larger than the accepted set, and checks that
+a selected output tile alone produces placed materialization geometry.
 `test_schedule_pool_cache.py` pins the session memo:
 sharing, hit equality, read-only payloads, and the keying that holds pin states, dtypes, extents, stores and the
 sample apart. `test_move_catalog.py` checks that independent

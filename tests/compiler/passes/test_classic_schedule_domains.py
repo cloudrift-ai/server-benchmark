@@ -10,13 +10,13 @@ from emmy.compiler.ir.classic_schedule import (
     enumerate_reference,
 )
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold
+from emmy.compiler.ir.pure import Channel, Fold
 from emmy.compiler.ir.schedule import Reduce
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline.passes.lowering.tile._classic import project_domains, schedule
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-from emmy.compiler.pipeline.search.space import coop_reduce_moves
+from emmy.compiler.pipeline.search.space import coop_reduce_moves, scalar_tile_moves
 
 
 def _signature(codec, assignment) -> tuple[tuple[str, str], ...]:
@@ -71,3 +71,39 @@ def test_reduction_enumeration_filters_the_independent_product_by_compatibility(
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
     assert len(reference) == len(expected_reductions)
     assert domains.product_size > len(reference)
+
+
+def test_scalar_contraction_enumeration_is_the_compatible_independent_product() -> None:
+    m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
+    root = Fold.contraction(
+        k_axis=k,
+        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
+    )
+    tile = TileOp(op=root, place=Placement(free=(m, n)))
+    target = Context.from_target((12, 0))
+    problem = ClassicProblem(tile.op, target)
+    domains = project_domains(tile, target)
+    context = ClassicScheduleContext(problem, domains)
+    site = context.index.nodes[0]
+
+    choices = domains.nodes[site]
+    assert {choice.tile for choice in choices if isinstance(choice, ReductionSchedule) and choice.reduce == Reduce()} == set(
+        scalar_tile_moves()
+    )
+    expected_reductions = {
+        Reduce(),
+        *(choice for choice in coop_reduce_moves() if choice.coop <= 64 and choice.reg <= 64),
+    }
+    actual_reductions = {choice.reduce for choice in choices if isinstance(choice, ReductionSchedule) and not choice.tile.is_tiled}
+    assert actual_reductions == expected_reductions
+
+    reference = tuple(enumerate_reference(problem, domains))
+    leaves = schedule(tile, "matmul", {}, target)
+    codec = ClassicScheduleCodec(problem, domains)
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
+    assert domains.product_size > len(reference) == len(choices)
+
+    tiled = next(leaf for leaf in leaves if leaf.schedule.nodes[site].tile.is_tiled)
+    materialized = tiled.expand()[0]
+    assert materialized.materialization.tiles[site].choice == tiled.schedule.nodes[site].tile

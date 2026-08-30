@@ -102,10 +102,13 @@ so the unpinned placement fork never returns under a pin-driven compile. A pin t
 realizes is an addressing error. Unpinned cuts and bare
 `PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
 `040_schedule` is the clean-slate reconstruction boundary for classic assignments. The former `_schedule.py` was
-deleted rather than adapted. `_classic.py` now realizes direct projection and plain-reduction domains; contraction,
-pin narrowing and sampled lazy enumeration raise `ClassicScheduleUnavailable` until their coherent recovery phases
-land. A plain reduction projects serial, cooperative and ILP choices independently from its node, while the kernel
-domain projects the union of their worker inventories; the compatibility relation is the only join between them. The
+deleted rather than adapted. `_classic.py` now realizes direct projection, plain-reduction, and scalar-contraction
+domains; tensor-core transport, pin narrowing, composed contractions, and sampled lazy enumeration raise
+`ClassicScheduleUnavailable` until their coherent recovery phases land. A plain reduction projects serial,
+cooperative and ILP choices independently from its node, while the kernel domain projects the union of their worker
+inventories; the compatibility relation is the only join between them. A scalar contraction projects its complete
+output-tile catalog as one node factor, materializes placed geometry only after selection, and uses physical-axis
+claims to make independently projected sites agree. The
 fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete typed
 `ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization derives
 placed geometry and resolved transport facts.

@@ -29,7 +29,7 @@ def _atomic_graph(shape=(32, 512)) -> tuple[Graph, KernelOp, Match]:
     graph.add_node(
         atomic, ["mid"], Tensor("acc", tuple(Dim(size) if isinstance(size, int) else size for size in shape), F32), node_id="acc"
     )
-    atomic.populate_io(graph, graph.nodes["acc"])
+    atomic = graph.nodes["acc"].op = atomic.with_io(graph, graph.nodes["acc"])
     match = Match(graph=graph, root_node_id="acc", rule=Rule(name="test", pattern=[]))
     return graph, atomic, match
 
@@ -58,7 +58,7 @@ def test_first_atomic_kernel_keeps_runtime_zero_init() -> None:
     graph.add_node(InputOp(), [], Tensor("x", (1,), F32), node_id="x")
     atomic = KernelOp(body=Body((Write(output="acc", index=(Literal(0, "int"),), value="v", atomic=True),)), name="k_atomic")
     graph.add_node(atomic, ["x"], Tensor("acc", (32, 512), F32), node_id="acc")
-    atomic.populate_io(graph, graph.nodes["acc"])
+    atomic = graph.nodes["acc"].op = atomic.with_io(graph, graph.nodes["acc"])
     match = Match(graph=graph, root_node_id="acc", rule=Rule(name="test", pattern=[]))
 
     with pytest.raises(RuleSkipped, match="first launch keeps its memset"):

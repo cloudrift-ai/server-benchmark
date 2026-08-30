@@ -46,7 +46,7 @@ configs:
     - out
     - qn
   realizations:
-  - name: k_sdpa_rms_norm_reduce_3a0cc8.9035412a0046
+  - name: k_sdpa_rms_norm_reduce_3a0cc8.da5e7b02319e
     bindings: {}
     pins:
       FAST_MATH: true
@@ -71,4 +71,4 @@ configs:
       STAGE@a.b.fold.a4: ''
       STAGE@map.fold.a.fold.a81: ''
       STAGE@a.map.fold.a8: ''
-    identity: b00596538d55f1f309c780a2ecafee155bb2cd1b48d0eec46c9e1b7bdf4bac37
+    identity: 65bf7fb58c06bce21e81f9adf1841e495e47f0b6713b1e6b86d011e51e7f2483

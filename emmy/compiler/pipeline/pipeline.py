@@ -962,7 +962,7 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
     and that is the whole of the evidence.
 
     So: find the kernels whose ``Op.source`` chain reaches an op structurally identical to this
-    offer (same ``Op.cache_key`` — the engine stamps ``source`` unconditionally on rebinds and
+    offer (same ``identity_key(with_io=True, with_knobs=True)`` — the engine stamps ``source`` unconditionally on rebinds and
     across loop-dialect splices, and ``_rename_buf_in_op`` preserves it), count them, and replay
     the option that produces that many. This keeps the tune tree linear in UNIQUE kernels rather
     than ``2^sites`` — one decision for 28 identical per-layer seams.
@@ -978,16 +978,16 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
     TESTS for a second structural family unwritable through ``resolve``: ask the offer function
     directly (the exl3 split-offer test does). Correctness never depended on
     the replay; only the tree's width does."""
-    key = root_op.cache_key()
+    key = root_op.identity_key(with_io=True, with_knobs=True)
     if key is None:
         return None
     produced = 0
     for node in graph.nodes.values():
-        if node.op.cache_key() is None:
+        if node.op.identity_key(with_io=True, with_knobs=True) is None:
             continue  # not a kernel
         chain = node.op.source_chain()
         next(chain)  # the op itself — its key differs from the pre-decision key by later stamps
-        if any(anc.cache_key() == key for anc in chain):
+        if any(anc.identity_key(with_io=True, with_knobs=True) == key for anc in chain):
             produced += 1
     if not produced:
         return None  # this site is undecided on this trajectory
@@ -995,7 +995,7 @@ def _replay_structural_decision(graph: Graph, root_op, options: list) -> object 
     for opt in options:
         concrete = _concrete_option(opt)
         if isinstance(concrete, Graph):
-            n = sum(1 for node in concrete.nodes.values() if node.op.cache_key() is not None)
+            n = sum(1 for node in concrete.nodes.values() if node.op.identity_key(with_io=True, with_knobs=True) is not None)
         else:
             n = 1
         if n == produced:
@@ -1027,7 +1027,7 @@ def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:
     # every matched node so rule rewrites can read per-buffer Tensors
     # straight off the op without re-querying the graph.
     for node in matched_nodes:
-        node.op.populate_io(graph, node)
+        node.op = node.op.with_io(graph, node)
     return Match(
         graph=graph,
         root_node_id=start,

@@ -34,6 +34,10 @@ dependencies = [
     "numpy",
     "pyyaml",
     "catboost",
+    # Immutable io maps on Op (ir/base). Python 3.15 ships a BUILTIN frozendict; this package
+    # backfills 3.12-3.14. NOTE for the eventual stdlib switch: the builtin is NOT a dict
+    # subclass, this package (on CPython) is.
+    "frozendict",
 ]
 
 [project.optional-dependencies]

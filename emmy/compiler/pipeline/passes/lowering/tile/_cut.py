@@ -569,7 +569,7 @@ def realize(
             produced = Fold.projection(body=Body((*prefix, produced)), results=names)
         axes = _workspace_axes(seam, produced)
         index = tuple(Var(axis.name) for axis in axes)
-        token = digest(tile.structural_key(), seam.spelling)[:10]
+        token = digest(tile.identity_key(structural=False) or "", seam.spelling)[:10]
         buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
 
         loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))
@@ -618,7 +618,7 @@ def realize(
             ),
             placement_decided=placement_decided,
         )
-        producer.knobs = consume_kernel_row(producer.knobs)
+        producer = replace(producer, knobs=consume_kernel_row(producer.knobs))
         shape = tuple(axis.extent for axis in axes)
         workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
         reads = {load.input for load in Body.coerce(produced.lower()).loads}
@@ -640,7 +640,7 @@ def realize(
         output_specs=parent_stores,
         placement_decided=placement_decided,
     )
-    consumer.knobs = consume_kernel_row(consumer.knobs)
+    consumer = replace(consumer, knobs=consume_kernel_row(consumer.knobs))
     output_tensors = (
         replace(root.outputs[0], name=root.outputs[0].name),
         *(replace(tensor, name=renamed_outputs[name]) for name, tensor in zip(root.buffer_names()[1:], root.outputs[1:], strict=True)),

@@ -70,7 +70,7 @@ class _CountingBackend:
         cuda = [n for n in graph.nodes.values() if isinstance(n.op, CudaOp)]
         per: list[LaunchTime] = []
         for i, n in enumerate(cuda):
-            us = 1.0 + (zlib.crc32(n.op.cache_key().encode()) % 100)
+            us = 1.0 + (zlib.crc32(n.op.identity_key(with_io=True, with_knobs=True).encode()) % 100)
             per.append(LaunchTime(idx=i, kernel_name=getattr(n.op, "kernel_name", "k"), time_ms=us / 1000.0, samples=(us / 1000.0,)))
         return BenchmarkResult(time_ms=sum(p.time_ms for p in per), num_launches=len(per), per_launch=per)
 
@@ -90,7 +90,7 @@ class _RouteBackend(_CountingBackend):
         self.calls += 1
         cuda = [n for n in graph.nodes.values() if isinstance(n.op, CudaOp)]
         if len(cuda) > 1:
-            route = tuple(node.op.cache_key() for node in cuda)
+            route = tuple(node.op.identity_key(with_io=True, with_knobs=True) for node in cuda)
             first = cuda[0].op.knobs
             fast_route = first.get("WORK") == "t16x8" and first.get("STAGE") == "d1/smem-async"
             if fast_route:

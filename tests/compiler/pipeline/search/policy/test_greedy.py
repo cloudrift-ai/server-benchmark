@@ -77,7 +77,7 @@ def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) ->
         root_op=TileOp(op=Fold.projection(body=Body())),
     )
     record = SimpleNamespace(name="recorded-golden", knobs={"RASTER": "", "TILE": "recorded"}, emmy_us=1.25)
-    monkeypatch.setattr(greedy, "deploy_identity", lambda _op: "identity")
+    monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
 
     leaf, price, knobs = _verified_pick(point, {"identity": [record]}, None)
 
@@ -102,7 +102,7 @@ def test_verified_pick_defers_a_structural_fork(monkeypatch) -> None:
         root_op=TileOp(op=Fold.projection(body=Body())),
     )
     record = SimpleNamespace(name="recorded-golden", knobs={"TILE": "recorded"}, emmy_us=1.25)
-    monkeypatch.setattr(greedy, "deploy_identity", lambda _op: "identity")
+    monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
 
     assert _verified_pick(point, {"identity": [record]}, None) is None
 
@@ -294,3 +294,48 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="no live complete row"):
         _stream_tiers(blocked_point, _CountingPrior(), blocked, {})
     assert len(wrapper.expansions) == 1  # no retry and no exhaustive fallback
+
+
+# ---------------------------------------------------------------------------
+# _price_kernel — the price memo must share across identically computing kernels.
+# ---------------------------------------------------------------------------
+
+
+def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> None:
+    """Pricing a fused matmul chain probes its cut pieces, and mirror pieces (a depth-i prefix
+    cone vs a depth-i suffix cone) are the same computation spelled through different term-axis
+    ranges: their ``cache_key``s all differ while the α-invariant exact identity unifies them.
+    The memo must key on the identity — re-keying it on the term hash re-prices every mirror
+    piece and this cardinality gap closes."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.db import SearchDB
+
+    identity_keys, memo_keys, calls = set(), set(), []
+    orig = greedy._price_kernel
+
+    def spy(graph, nid, ctx, prior, memo, db=None, decisions=None):
+        op = graph.nodes[nid].op
+        calls.append(nid)
+        identity_keys.add(op.identity_key(structural=False, with_io=True, with_knobs=True))
+        out = orig(graph, nid, ctx, prior, memo, db, decisions)
+        memo_keys.update(memo)
+        return out
+
+    monkeypatch.setattr(greedy, "_price_kernel", spy)
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (16, 32), "f16"), node_id="x")
+    prev = "x"
+    for i in range(4):
+        g.add_node(InputOp(), [], Tensor(f"w{i}", (32, 32), "f16"), node_id=f"w{i}")
+        g.add_node(MatmulOp(), [prev, f"w{i}"], Tensor(f"o{i}", (16, 32), "f16"), node_id=f"o{i}")
+        prev = f"o{i}"
+    g.inputs, g.outputs = ["x"] + [f"w{i}" for i in range(4)], [prev]
+    Pipeline.build(TILE_PASSES).run(g, ctx=Context.from_target((12, 0)), db=SearchDB())
+
+    assert identity_keys, "the chain must offer structural forks whose pricing probes fire"
+    assert len(identity_keys) < len(calls), "mirror cut pieces must unify under the exact identity"
+    assert memo_keys == identity_keys, "the memo must key on the exact identity"

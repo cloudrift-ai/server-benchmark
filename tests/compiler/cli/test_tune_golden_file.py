@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -128,7 +129,7 @@ def test_multi_cuda_realized_knobs_must_be_conflict_free():
     graph.add_node(op=CudaOp(kernel_name="b", knobs={"TILE": "f4x2"}), inputs=[], output=Tensor("b", (1,)), node_id="b")
     assert realized_tuning_knobs(graph) is None
 
-    graph.nodes["b"].op.knobs["TILE"] = "f2x2"
+    graph.nodes["b"].op = replace(graph.nodes["b"].op, knobs={"TILE": "f2x2"})
     assert realized_tuning_knobs(graph)["TILE"] == "f2x2"
 
 
@@ -379,8 +380,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
             event = SimpleNamespace(graph=loop_graph)
             for strategy in self.strategies:
                 strategy.on_pass_end(event)
-            route_parent = TileOp(knobs=dict(live_features))
-            route_parent.knobs.update(active_route)
+            route_parent = TileOp(knobs={**live_features, **active_route})
             fragment = Graph()
             splice = SimpleNamespace(root_op=route_parent, fragment=fragment)
             for strategy in self.strategies:
@@ -432,10 +432,10 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     assert branch.features["REDUCE"] == "g4k"
     assert branch.value_us == pytest.approx(59.61)
     route_parent = TileOp(knobs={**live_features, **route})
-    assert route_parent.cache_key() != original_loop.cache_key()
-    perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.cache_key(), backend="cuda")
+    assert route_parent.identity_key(with_io=True, with_knobs=True) != original_loop.identity_key(with_io=True, with_knobs=True)
+    perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.identity_key(with_io=True, with_knobs=True), backend="cuda")
     assert perf is None
-    assert reloaded_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
+    assert reloaded_db.lookup_perf(ctx.structural_key(), original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
     reloaded_db.close()
 
     # A later ordinary search keeps its own whole-slice bookkeeping and lowering
@@ -446,9 +446,16 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     monolithic = PerfStats(median=153.45, min=153.45, max=153.45, mean=153.45, variance=0.0, n_samples=1)
     fallback = {**route, "REDUCE": ""}
     fallback_key = "monolithic-cuda"
-    db.record_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda", status="ok", stats=bookkeeping, captured=True)
+    db.record_perf(
+        ctx.structural_key(),
+        original_loop.identity_key(with_io=True, with_knobs=True),
+        backend="cuda",
+        status="ok",
+        stats=bookkeeping,
+        captured=True,
+    )
     db.record_lowering(
-        original_loop.cache_key(),
+        original_loop.identity_key(with_io=True, with_knobs=True),
         "loop",
         fallback_key,
         "cuda",
@@ -466,11 +473,11 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     )
     db.close()
     reloaded_db = SearchDB.open_readonly(db_path)
-    route_perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.cache_key(), backend="cuda")
-    loop_perf = reloaded_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda")
+    route_perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.identity_key(with_io=True, with_knobs=True), backend="cuda")
+    loop_perf = reloaded_db.lookup_perf(ctx.structural_key(), original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda")
     assert route_perf is None
     assert loop_perf is not None and loop_perf.stats.median == pytest.approx(106.95)
-    lowering = reloaded_db.lookup_lowering(original_loop.cache_key())
+    lowering = reloaded_db.lookup_lowering(original_loop.identity_key(with_io=True, with_knobs=True))
     assert lowering is not None and lowering.child_key == fallback_key
     candidates = [{**live_features, **fallback}, {**live_features, **route}]
     assert _db_measured_pick(_db_measured_index(reloaded_db, ctx), candidates) == (0, 153.45)
@@ -497,7 +504,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
             run_id="proposal-run",
         )
     )
-    assert negative_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
+    assert negative_db.lookup_perf(ctx.structural_key(), original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
     negative_db.close()
     assert ambiguous["status"] == "ambiguous_multi_kernel"
     assert ambiguous["measured_knobs"] is None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 
@@ -20,7 +21,6 @@ from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.identity import deploy_identity
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
@@ -165,13 +165,15 @@ def _computed_value_expectation_tile() -> TileOp:
         place=Placement(free=(query, column)),
         output_specs=(OutputSpec(Write(output="out", index=(Var("q"), Var("n")), value="out")),),
     )
-    tile.inputs = {
-        "x": Tensor("x", (8, 16), F16),
-        "w": Tensor("w", (16, 16), F16),
-        "scores": Tensor("scores", (4, 8), F16),
-    }
-    tile.outputs = {"out": Tensor("out", (4, 16), F16)}
-    return tile
+    return replace(
+        tile,
+        inputs={
+            "x": Tensor("x", (8, 16), F16),
+            "w": Tensor("w", (16, 16), F16),
+            "scores": Tensor("scores", (4, 8), F16),
+        },
+        outputs={"out": Tensor("out", (4, 16), F16)},
+    )
 
 
 def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
@@ -504,7 +506,7 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     it, and the verified-tier join reads the stored identity instead of the pre-cut lift."""
     fields = _receipt_fields()
     parent = GoldenRecord(knobs={}, **fields)
-    lift_identity = deploy_identity(_lifted_target(parent))
+    lift_identity = _lifted_target(parent).identity_key(with_io=True)
     children = {i: rows for i, rows in _candidate_rows(parent).items() if i is not None and i != lift_identity}
     assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
     (id_a, rows_a), (id_b, rows_b) = sorted(children.items())
@@ -568,3 +570,25 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -
     document["configs"][0]["realizations"][0]["identity"] = "0" * 64
     validate_golden_file(document)
     assert _pins_live({"PLACE@a3": "cut"}), "a receipt's routing pins are replay context, never a dead env regime"
+
+
+def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
+    """``pool_group`` composes the target kernels' identity keys, so two recordings of ONE
+    program whose node ids differ (separate recording sessions) fuse into one enumeration
+    group — the wire digest this replaced split them — while a different pin regime still
+    keys apart."""
+    fields = _receipt_fields()
+    respelled = _sdpa_graph(False)
+    for nid in [n for n in respelled.nodes if n not in respelled.inputs]:
+        respelled.rename_node(nid, f"session2_{nid}")
+    twin_fields = {
+        **fields,
+        "program_wire": graph_to_wire(respelled),
+        "origins": tuple(f"session2_{o}" for o in fields["origins"]),
+    }
+    a = GoldenRecord(knobs={}, **fields)
+    b = GoldenRecord(knobs={}, **twin_fields)
+    assert a.pool_group == b.pool_group, "node-id spelling must not split an enumeration group"
+
+    unpinned = GoldenRecord(knobs={}, **{**fields, "pins": ()})
+    assert unpinned.pool_group != a.pool_group, "the pin regime is a group-key term"

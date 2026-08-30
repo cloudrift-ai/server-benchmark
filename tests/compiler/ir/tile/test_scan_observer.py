@@ -95,7 +95,7 @@ def test_scan_keys_apart_from_sum_and_alpha_invariantly() -> None:
     renamed = _observed(_sum_fold(acc="total"), obs="total__obs")
     assert scan.structural_key() == renamed.structural_key(), "SSA spelling must not enter identity"
     other_axis = _observed(_sum_fold(axis_name="j"))
-    assert scan.structural_key() != other_axis.structural_key(), "axis names are recognition-canonical identity"
+    assert scan.structural_key() == other_axis.structural_key(), "axis spelling must not enter identity"
 
 
 def test_rewrite_threads_the_observer() -> None:

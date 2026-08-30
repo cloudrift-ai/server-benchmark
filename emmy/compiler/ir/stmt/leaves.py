@@ -7,7 +7,7 @@ Tile / Cond) live in ``blocks``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 
 from emmy.compiler.dtype import F32, DataType
@@ -189,6 +189,10 @@ class Load(Stmt):
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.input,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.input, self.input)
+        return self if new == self.input else replace(self, input=new)
 
     def exprs(self) -> tuple[Expr, ...]:
         return self.index
@@ -797,6 +801,10 @@ class Write(Stmt):
     def external_writes(self) -> tuple[str, ...]:
         return (self.output,)
 
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.output, self.output)
+        return self if new == self.output else replace(self, output=new)
+
     def exprs(self) -> tuple[Expr, ...]:
         return self.index
 
@@ -975,6 +983,10 @@ class ZeroPrologue(Stmt):
 
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.dst, self.dst)
+        return self if new == self.dst else replace(self, dst=new)
 
     @cached_property
     def has_side_effects(self) -> bool:

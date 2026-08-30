@@ -519,6 +519,17 @@ class Stmt(Structural):
         about the surrounding declarations."""
         return ()
 
+    def rename_buffers(self, rename) -> Stmt:  # noqa: ANN001 — any str->str mapping
+        """This stmt with every external-buffer field renamed through ``rename`` (a
+        ``str -> str`` mapping; absent names keep). Default: identity — the counterpart of
+        :meth:`external_reads` / :meth:`external_writes`, overridden by exactly the leaves that
+        override those (``Load.input``, ``Write.output``, ``ZeroPrologue.dst``,
+        ``CpAsyncCopy.src``, ``TmaDescriptor.src_buf``, ``FragmentLoad.input``). Wrapper stmts
+        need no override: callers rename whole bodies through ``Body.rename_buffers``, whose
+        recursive ``map`` reaches every nested leaf."""
+        del rename
+        return self
+
     def external_writes(self) -> tuple[str, ...]:
         """External-buffer names this stmt writes to. Default: ``()``.
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -52,7 +53,7 @@ def _working_loop(path, *, state="inventory", pins=None):
             "reference_backend": "torch",
         }
     loop = loop_graph_from_wire(document["loops"][entry["target"]["loop"]])
-    loop.nodes["y"].op.name = "working_exact_loop"
+    loop.nodes["y"].op = replace(loop.nodes["y"].op, name="working_exact_loop")
     document["loops"][entry["target"]["loop"]] = loop_graph_to_wire(loop)
     dump_golden_file(document, path, overwrite=True)
     return document
@@ -185,7 +186,7 @@ def test_duplicate_name_requires_target_scoped_working_file(tmp_path, caplog):
     document = _working_loop(path)
     second = copy.deepcopy(document["configs"][0])
     loop = loop_graph_from_wire(document["loops"][second["target"]["loop"]])
-    loop.nodes["y"].op.name = "working_second_loop"
+    loop.nodes["y"].op = replace(loop.nodes["y"].op, name="working_second_loop")
     second["target"]["loop"] = len(document["loops"])
     document["loops"].append(loop_graph_to_wire(loop))
     document["configs"].append(second)

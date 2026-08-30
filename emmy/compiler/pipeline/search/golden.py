@@ -14,7 +14,7 @@ import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import cached_property
 from numbers import Real
@@ -22,7 +22,6 @@ from pathlib import Path
 
 import yaml
 
-from emmy.compiler.ir.tile.identity import deploy_identity
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
@@ -187,7 +186,7 @@ class GoldenRecord:
     ranking: dict | None
     loop_index: int | None = None
     loop_wire: dict | None = None
-    #: The record's stored ``deploy_identity`` (see :func:`kernel_identity`), when the file keeps
+    #: The record's stored the deploy identity (``identity_key(with_io=True)``) (see :func:`kernel_identity`), when the file keeps
     #: one. Model inventories mostly do not; the realization corpus does, because a new fingerprint
     #: fact must show up as a diff there rather than silently re-key a checked-in reproducer. A
     #: stored identity is authoritative for the deploy join, and it is how a **child-identity
@@ -211,24 +210,46 @@ class GoldenRecord:
         return self.identity is not None and not self.is_routing and pins_freeze_cut(dict(self.pins))
 
     @cached_property
-    def pool_key(self) -> tuple:
+    def pool_group(self) -> tuple:
         """Which candidate pool this record belongs to — the ONE place that question is answered, so every
-        consumer that groups goldens groups them the same way.
+        consumer that groups goldens groups them the same way. (A grouping key over RECORDS —
+        distinct from the scheduler's per-compile ``pool_id`` stamp.)
 
-        Derived today, because nothing records it: ``enumerate_graph(self.target_program, ctx)`` under
-        ``self.pin_map`` reads the card, the wire the target specializes from, which node it selects, the
-        bindings and the pins, and records agreeing on all five run the same enumeration. Two consequences
-        worth knowing before relying on it. It is SUFFICIENT, not necessary — it never fuses two pools that
-        differ, but it splits two recordings of one program made in different sessions, whose node ids differ
-        and whose pools do not. And it keys on what the enumeration READS, never on what it produced, so it
-        does not go stale when the scheduler changes.
+        Composed from the target kernels' identity keys — the one identity function — around the
+        card and the record's pin regime: per fused kernel, the structural variant key
+        (``identity_key(with_io=True, with_knobs=True)`` — cluster siblings share a schedule
+        space, so they rightly share a pool) folded with the symbolic-dim hints the enumeration
+        sizes against. Node-id spelling never enters, so two recordings of one program made in
+        different sessions FUSE — the wire-digest key this replaces split them — and any fact
+        that changes the kernels shows up in their keys, so the key stays sufficient. It keys on
+        what the enumeration READS, never on what it produced, so it does not go stale when the
+        scheduler changes; bindings stay out (they bind replay values, not the space).
 
-        When a group identity is recorded with the golden instead, this property returns it and its callers
-        do not change."""
-        wire = self.loop_wire if self.loop_wire is not None else self.program_wire
-        kind = "loop" if self.loop_wire is not None else "prog"
-        digest = hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest()
-        return (self.gpu_name, tuple(self.compute_cap), kind, digest, tuple(self.origins), tuple(self.bindings), self.pin_key)
+        Best-effort like every record-side derivation: a target the current compiler no longer
+        lowers falls back to the persisted wire's digest, so a stale record still groups
+        deterministically (alone) instead of breaking a fit."""
+        from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+
+        try:
+            _lowered, nodes = _target_kernel_nodes(self)
+            kernels = tuple(
+                sorted(
+                    digest(
+                        op.identity_key(with_io=True, with_knobs=True) or "",
+                        tuple(
+                            d.hint or DEFAULT_SEQ_HINT
+                            for t in (*op.inputs.values(), *op.outputs.values())
+                            for d in t.shape
+                            if not d.is_static
+                        ),
+                    )
+                    for op in (node.op for node in nodes)
+                )
+            )
+        except Exception:  # noqa: BLE001 — a stale record must never break the fit's dataset build
+            wire = self.loop_wire if self.loop_wire is not None else self.program_wire
+            kernels = (hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest(), tuple(self.origins))
+        return (self.gpu_name, tuple(self.compute_cap), kernels, self.pin_key)
 
     @cached_property
     def pin_key(self) -> tuple:
@@ -761,12 +782,11 @@ def _lifted_target(record: GoldenRecord):
     if len(nodes) != 1:
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
-    node.op.populate_io(lowered, node)
+    node.op = node.op.with_io(lowered, node)
     tile = lift_loop_op(node.op, name=node.id)
     # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
-    # half of the identity (``deploy_identity``) reads the same output fingerprint.
-    tile.outputs = {node.output.name: node.output}
-    return tile
+    # half of the identity (the deploy identity (``identity_key(with_io=True)``)) reads the same output fingerprint.
+    return replace(tile, outputs={node.output.name: node.output})
 
 
 def decode_record(record: GoldenRecord) -> str | None:
@@ -816,7 +836,7 @@ def decode_record(record: GoldenRecord) -> str | None:
         return _remember_verdict(verdict_key, None)
     candidates = _candidate_rows(record)
     row = schedule_row_key(record.knobs)
-    if record.is_receipt and (tile is None or record.identity != deploy_identity(tile)):
+    if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
         child_rows = candidates.get(record.identity)
         if child_rows is None:
             reason = f"stored identity equals none of the {len(candidates)} kernel identities resolved under the record's pins"
@@ -842,7 +862,7 @@ def _remember_verdict(key: str, reason: str | None) -> str | None:
 
 def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
     """Every schedule-row identity the record's target can realize under its pins, bucketed by the
-    ``deploy_identity`` of the kernel that offers it (``None`` for forks whose root is not a
+    the deploy identity (``identity_key(with_io=True)``) of the kernel that offers it (``None`` for forks whose root is not a
     recognized ``TileOp``): the fork leaves' rows, PLUS each resolved kernel's own realized row — a
     forkless kernel (the schedule space collapsed to one row, often the all-OFF anchor) never opens
     a fork, so its one row is read off the resolved op instead. Under pinned cuts the buckets are
@@ -867,7 +887,7 @@ def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
     buckets: dict[str | None, set] = {}
 
     def _identity_of(op) -> str | None:
-        return deploy_identity(op) if isinstance(op, TileOp) and op.op is not None else None
+        return op.identity_key(with_io=True) if isinstance(op, TileOp) else None
 
     def decide(fp):
         leaves = flatten_leaves(fp.options)
@@ -891,7 +911,7 @@ def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
 
 def kernel_identity(record: GoldenRecord) -> str | None:
     """The record's kernel identity under the CURRENT compiler — the verified-tier join key
-    (``_schedule.deploy_identity``). A STORED identity is authoritative and returned as-is: it is
+    (``identity_key(with_io=True)``). A STORED identity is authoritative and returned as-is: it is
     how a child-identity receipt names the one split child its schedule decorates (the target's own
     lift stops at the pre-cut kernel and cannot say), and the deploy join is fail-closed, so a
     stale stored identity matches no live fork and decides nothing — the strict decode is where it
@@ -913,7 +933,7 @@ def kernel_identity(record: GoldenRecord) -> str | None:
         _IDENTITY_CACHE[key] = identity
         return identity
     try:
-        identity = deploy_identity(_lifted_target(record))
+        identity = _lifted_target(record).identity_key(with_io=True)
     except Exception:  # noqa: BLE001 — see the docstring; the decode tripwire re-derives loudly
         identity = None
     _IDENTITY_CACHE[key] = identity

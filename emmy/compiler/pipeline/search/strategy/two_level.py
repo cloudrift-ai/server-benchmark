@@ -21,7 +21,7 @@
   evidence, not reward terms: the parent slice's Σ already priced them, so they stay out of
   ``per_op`` / ``total_us`` (and out of ``searched_winner()``, which golden seeding reads).
 
-Results key structurally (:meth:`~emmy.compiler.ir.base.Op.cache_key`), so inner-tuned ``perf``
+Results key structurally (:meth:`~emmy.compiler.ir.base.Op.identity_key`), so inner-tuned ``perf``
 / ``lowering`` rows transfer to the assembled graph unchanged AND are shared across outer
 terminals (a shared op is a DB hit). The inner search runs for **every** op on every pass — it is
 never skipped on prior effort; replay is cheap (the per-variant ``perf`` cache serves
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Lowering-only passes (post-fusion): ``tile → kernel → cuda``. The inner per-op search runs
-# these on a single-node slice so the finalized LoopOp body — and thus its ``Op.cache_key`` — is
+# these on a single-node slice so the finalized LoopOp body — and thus its ``identity_key(with_io=True, with_knobs=True)`` — is
 # never re-touched by ``loop/fusion``, which is what keeps inner-tuned ``perf`` / ``lowering``
 # rows transferable to the assembled graph. Sliced as the tail of ``CUDA_PASSES`` so it tracks
 # pass-list edits automatically.
@@ -67,7 +67,7 @@ def outer_pipeline() -> Pipeline:
     """The graph-changing passes the outer search drives: ``frontend`` + ``loop`` (the fusion
     forks). An outer terminal is a post-fusion graph of finalized ``LoopOp``\\ s; the strategy's
     separable ``evaluate`` picks each up as its own slice (own patience, own progress leaf,
-    deduped by ``Op.cache_key``) and tunes it via :data:`LOWERING_PASSES`."""
+    deduped by ``identity_key(with_io=True, with_knobs=True)``) and tunes it via :data:`LOWERING_PASSES`."""
     passes = [Pass.load(name, i) for i, name in enumerate(TwoLevelStrategy.OUTER_PASSES)]
     return Pipeline(passes=passes, strategies=discovered_strategies())
 
@@ -181,7 +181,7 @@ class _Work:
     """One inner tuning target: an outer kernel (counts toward the terminal reward) or an
     enrolled minted kernel (evidence only)."""
 
-    key: str  # ``Op.cache_key`` — the perf-row key
+    key: str  # ``identity_key(with_io=True, with_knobs=True)`` — the perf-row key
     nid: str
     op: object
     src_graph: Graph  # what the slice is cut from: the fused graph, or the minting fragment
@@ -355,12 +355,12 @@ class TwoLevelStrategy(SearchStrategy):
         identity = _identity()
         ctx_key = ctx.structural_key()
         backend_name = getattr(self.pool[0], "name", "cuda")
-        # Group structurally-identical kernel roots under one ``Op.cache_key`` — insertion order =
+        # Group structurally-identical kernel roots under one ``identity_key(with_io=True, with_knobs=True)`` — insertion order =
         # first occurrence (drives the progress tail name). Ops with no cache key are
         # unreachable through the bench path so they don't enter the dedup map at all.
         unique: OrderedDict[str, tuple[str, object, int]] = OrderedDict()
         for nid, op in _kernel_nodes(fused_graph):
-            key = op.cache_key()
+            key = op.identity_key(with_io=True, with_knobs=True)
             if key is None:
                 continue
             if key in unique:
@@ -497,7 +497,7 @@ class TwoLevelStrategy(SearchStrategy):
                 wave = [
                     _Work(key=key, nid=nid, op=op, src_graph=frag, count=0, enrolled=True)
                     for nid, op, frag in minted
-                    if (key := op.cache_key()) is not None
+                    if (key := op.identity_key(with_io=True, with_knobs=True)) is not None
                 ]
                 minted.clear()
         finally:

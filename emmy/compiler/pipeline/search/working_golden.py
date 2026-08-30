@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from emmy.compiler.pipeline.search.golden import (
@@ -209,7 +209,7 @@ def _append_trace_inventory(
     }
 
     for node_id, node, origins in inventory:
-        key = node.op.cache_key()
+        key = node.op.identity_key(with_io=True, with_knobs=True)
         suffix = key[:12] if key is not None else node_id
         name = f"{node.op.name or node_id}.{suffix}"
         if name_prefix:
@@ -366,7 +366,7 @@ class _ProposalLoopIdentity(PipelineStrategy):
             return
         identity = next(strategy for strategy in discovered_strategies() if isinstance(strategy, IdentityStrategy))
         stamped = {key: float(value) for key, value in loops[0].knobs.items() if key.startswith(STRUCT_PREFIX)}
-        cache_key = loops[0].cache_key()
+        cache_key = loops[0].identity_key(with_io=True, with_knobs=True)
         if stamped and cache_key is not None:
             self.value = identity.op_sig(loops[0], graph), cache_key, stamped
 
@@ -384,11 +384,10 @@ class _ProposalLoopIdentity(PipelineStrategy):
         route = TuningSearch._structural_row(parent_knobs)
         if route is None:
             return
-        parent = copy.copy(event.root_op)
-        parent.knobs = {**parent_knobs, **route}
+        parent = replace(event.root_op, knobs={**parent_knobs, **route})
         if not any(key.startswith("S_") for key in parent.knobs):
             return
-        key = parent.cache_key()
+        key = parent.identity_key(with_io=True, with_knobs=True)
         if key is None:
             return
         receipt = (dict(route), key, dict(parent.knobs))

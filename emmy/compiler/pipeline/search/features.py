@@ -373,12 +373,11 @@ def knob_features(knobs: dict) -> dict[str, float]:
     - Unregistered, non-structural knobs are best-effort float-coerced (skipped
       when non-numeric); other ``STR`` knobs have no generic encoding.
 
-    The schedule-geometry block (``D_*`` / ``MMA_*``) is featurized **per node** and **sum-pooled**: a
-    multi-node kernel (flash) groups its ``FAMILY@<axis>`` codecs by axis into :func:`node_slices`, featurizes each
-    (:func:`_schedule_node_features`), and sums the blocks into the fixed-width vector. A single-node
-    kernel has one group, so the sum is that one node's block — **byte-identical** to the pre-loop
-    singleton featurizer (the migration is invisible until a kernel actually has two nodes). Per-node
-    attribution / transfer is the gated per-node-predict follow-up; pool is the smallest change."""
+    The schedule-geometry block (``D_*`` / ``MMA_*``) is featurized **per node** and **sum-pooled**.
+    A multi-node kernel groups each exact ``NodeId`` and its incident ``EdgeSite`` choices through
+    :func:`node_slices`, featurizes every group with :func:`_schedule_node_features`, and sums the
+    blocks into the fixed-width vector. A single-node kernel has one group, so the sum is that one
+    node's block. Per-node attribution remains outside this whole-kernel feature contract."""
     feats: dict[str, float] = {}
     for name, val in knobs.items():
         if name.startswith(STRUCT_PREFIX) or name.startswith(CTX_PREFIX):
@@ -485,7 +484,7 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
 def tile_signature(knobs: dict) -> tuple:
     """Schema-agnostic structural identity of a tile config: the free-axis slots, the slab
     K-chunk, the primary reduce decomposition, and the atom kind — read from the native codec
-    knobs (``TILE`` / ``REDUCE`` / ``STAGE``, bare or ``@<axis>``-suffixed alike). Two configs
+    knobs (``TILE`` / ``REDUCE`` / ``STAGE``, either exact-site or bare analytical values). Two configs
     with equal signatures are the same kernel variant whichever key form spelled them, so this
     is the bridge for matching a recorded golden YAML row against the native enumeration's
     candidate rows (``emmy fit``'s golden group builder / ``search/golden_eval.evaluate_record``).

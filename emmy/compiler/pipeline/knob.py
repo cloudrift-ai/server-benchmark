@@ -260,13 +260,17 @@ def context_view(knobs: dict) -> dict:
 
 
 def family_of(key: str) -> str:
-    """The knob family — the part before an ``@<axis>`` suffix (``TILE@d`` → ``TILE``); the whole key
-    when unsuffixed."""
+    """The knob family — the part before an ``@<scope>`` suffix (``TILE@n0`` → ``TILE``); the
+    whole key when unsuffixed."""
     return key.split("@", 1)[0]
 
 
 def axis_of(key: str) -> str | None:
-    """The ``@<axis>`` element of a knob key (``TILE@d`` → ``d``), or ``None`` when bare."""
+    """The generic ``@<scope>`` element of a knob key, or ``None`` when bare.
+
+    Classic schedules use an exact ``NodeId`` or ``EdgeSite`` scope. The historical function name
+    remains internal to the schema-agnostic feature machinery; it does not imply axis identity.
+    """
     return key.split("@", 1)[1] if "@" in key else None
 
 
@@ -518,18 +522,18 @@ def consume_kernel_row(knobs: dict) -> dict:
 #: and ``@``-keyed) plus the precision gates the scheduler's catalog arm reads through
 #: ``precision_pin`` (the precise ``F16_MMA_F32_ACC`` / ``FP8_MMA`` pins and their ``FAST_MATH`` umbrella —
 #: they decide whether the f16-accumulate / native-fp8 atom rows are OFFERED, so they change the
-#: pool exactly like a family pin). The pool cache's pin
-#: fingerprint must cover exactly this set; a knob outside it cannot change which rows enumerate.
+#: schedule space exactly like a family pin). The schedule-space fingerprint must cover exactly
+#: this set; a knob outside it cannot change which rows enumerate.
 _ENUMERATION_PIN_KNOBS = (*SCHEDULE_FAMILIES, "F16_MMA_F32_ACC", "FP8_MMA", "FAST_MATH")
 
 
 def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
     """Every live env pin the schedule enumeration can read (:data:`_ENUMERATION_PIN_KNOBS`) as
-    sorted ``(env var, raw value)`` pairs. The schedule pool cache folds this into its key: a pin
-    changes which rows enumerate, so two pin states must never share a pool. The environ scan is
-    this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one exception to
-    ``config.py``'s env ownership), and the ``@``-keyed pins land there via the ``EMMY_KNOBS``
-    splat."""
+    sorted ``(env var, raw value)`` pairs. The scheduler folds this into its schedule-space stamp:
+    a pin changes which rows enumerate, so two pin states must never share a stamp. The environ
+    scan is this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one
+    exception to ``config.py``'s env ownership), and the ``@``-keyed pins land there via the
+    ``EMMY_KNOBS`` splat."""
     import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above
 
     prefixes = tuple(config.knob_var(name) for name in _ENUMERATION_PIN_KNOBS)

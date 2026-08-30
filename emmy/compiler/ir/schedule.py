@@ -615,8 +615,8 @@ def plan_workers(plan: Tile | None) -> Work | None:
 
 
 def derive_workers(tiles) -> Work | None:
-    """Fold the worker inventory out of a kernel's resolved ``TILE`` slices (``Tile`` values,
-    any iterable) — ``None`` when no slice tiles (the per-cell / pure-reduce forms keep their
+    """Fold the worker inventory out of a kernel's typed ``Tile`` choices (any iterable) —
+    ``None`` when no choice tiles (the per-cell / pure-reduce forms keep their
     derived launch geometry). Raises on DISAGREEMENT between sites: one kernel has ONE worker
     inventory (the flash QK/PV pair shares the warp map by construction; a pin pair that
     disagrees must fail loudly, never be half-ignored)."""
@@ -633,7 +633,7 @@ def derive_workers(tiles) -> Work | None:
 
 
 def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Work | None:
-    """The kernel's ONE worker inventory, folded out of its resolved ``TILE`` slices and then
+    """The kernel's ONE worker inventory, folded out of its typed ``Tile`` choices and then
     reconciled with a cooperative ``REDUCE`` width and a ``+p`` producer band. ``None`` when
     nothing tiles and no band cooperates (the per-cell / pure-reduce forms keep their derived
     launch geometry).
@@ -896,8 +896,8 @@ class WarpSpec:
 
 @dataclass(frozen=True)
 class Raster:
-    """The CTA rasterization order — the ``RASTER`` codec, kernel-scoped like ``WSPEC`` (one launch
-    order per grid; no ``@<axis>`` key). It changes NO per-CTA work, layout, or schedule — only
+    """The CTA rasterization order — the bare kernel-scoped ``RASTER`` choice (one launch order
+    per grid). It changes NO per-CTA work, layout, or schedule — only
     which flat CTA id maps to which ``(m, n)`` output block tile: ``gm<G>`` iterates ``G`` M
     block-tiles fastest within each launch stripe (consecutive CTAs then share the streamed B
     slab, so its repeat reads hit L2 instead of DRAM — the 2026-07-12 4090 NCU finding measured

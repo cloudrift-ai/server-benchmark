@@ -72,6 +72,8 @@ class OnlinePrior(Prior):
             return
         x = np.array([[f.get(c, np.nan) for c in cols] for f in feats], dtype=float)
         y = np.log(np.array([lab for _, lab in rows], dtype=float))
+        if np.ptp(y) == 0:
+            return
         model = CatBoostRegressor(
             iterations=self._iterations,
             depth=self.DEPTH,

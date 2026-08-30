@@ -188,8 +188,12 @@ class TuningSearch(Search):
         exempt from the strict knob-pin validator — it explores tier-foreign forks and steers
         heterogeneous multi-op graphs with a union pin vector (each op takes its tier's subset).
         A per-op contradiction is a pruned branch here, not the loud user error the greedy
-        compile wants."""
-        return replace(ctx, validate_pins=False) if ctx.validate_pins else ctx
+        compile wants. The session kernel cache is stripped for the same reason it is
+        greedy-only: an artifact bakes a schedule conclusion, and exploration must not inherit
+        conclusions."""
+        if ctx.validate_pins or ctx.kernel_cache is not None:
+            ctx = replace(ctx, validate_pins=False, kernel_cache=None)
+        return ctx
 
     async def evaluate(self, token: object | None, cand, *, backend, db) -> None:
         """Value one terminal the engine's loop yielded — the whole of what a terminal is worth

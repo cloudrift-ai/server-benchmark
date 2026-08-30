@@ -301,6 +301,19 @@ def test_ab_samples_parse_label_and_shape():
     }
 
 
+def test_ab_replay_retains_scoped_off_exception_to_bare_pin():
+    """A scoped OFF overrides a non-OFF bare pin at that exact site."""
+    from emmy.commands.run import _ab_samples, _sample_replay_knobs
+
+    (sample,) = _ab_samples(["REDUCE=coop,REDUCE@a.fold.a3=,REDUCE@a7="])
+
+    assert _sample_replay_knobs(sample) == {
+        "REDUCE": "coop",
+        "REDUCE@a.fold.a3": "",
+        "REDUCE@a7": "",
+    }
+
+
 def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
     """The re-lowered IR path must use the same merged input-and-schedule pin map."""
     import contextlib

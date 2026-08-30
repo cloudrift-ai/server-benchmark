@@ -1,5 +1,5 @@
-"""Shared base class for body-carrying IR ops (``LoopOp`` / ``TileOp`` /
-``KernelOp``).
+"""Shared base class for body-carrying IR ops (``LoopOp`` / ``KernelOp``;
+``TileOp`` stores a pure term instead and subclasses ``Op`` directly).
 
 Lives inside the ``ir.stmt`` package — and imports its dependencies
 (``Body``, ``Load``, ``Write``, ``Stmt``, ``pretty_body``) from their leaf
@@ -13,7 +13,9 @@ them touches ``ir.tile``.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+
+from frozendict import frozendict
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.base import ConstantOp, Op
@@ -21,15 +23,14 @@ from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.base import pretty_body as _pretty_body_stmts
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Load, Write
-from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 
 
-@dataclass
+@dataclass(frozen=True)
 class BodyOp(Op):
     """Shared base for IR ops that carry a structured :class:`Body` of
-    stmts plus a kernel name — ``LoopOp`` (loop IR), ``TileOp`` (tile IR),
-    ``KernelOp`` (kernel IR). Provides:
+    stmts plus a kernel name — ``LoopOp`` (loop IR), ``KernelOp`` (kernel
+    IR). Provides:
 
     - ``body`` / ``name`` fields, plus a ``__post_init__`` that coerces
       tuple-bodies to :class:`Body`,
@@ -47,7 +48,7 @@ class BodyOp(Op):
     :meth:`Stmt.external_writes` / :meth:`Stmt.local_decls`, and
     ``BodyOp`` aggregates them (filtering reads / writes that name a
     locally-declared buffer like an ``Smem`` or ``Stage``). The
-    matcher's :meth:`populate_io` hook then overrides each entry with
+    matcher's :meth:`with_io` rebind then overrides each entry with
     the real graph-sourced ``Tensor`` and sanity-checks that the body
     has no Load / Write naming a buffer the dict doesn't cover."""
 
@@ -55,8 +56,9 @@ class BodyOp(Op):
     name: str = ""
 
     def __post_init__(self) -> None:
+        Op.__post_init__(self)
         if not isinstance(self.body, Body):
-            self.body = Body.coerce(self.body)
+            object.__setattr__(self, "body", Body.coerce(self.body))
         self._seed_io_placeholders()
 
     def _seed_io_placeholders(self) -> None:
@@ -65,9 +67,9 @@ class BodyOp(Op):
         either dict if the caller already supplied entries."""
         in_names, out_names = self._derive_io_names()
         if not self.inputs:
-            self.inputs = {n: Tensor(n, (), F32) for n in in_names}
+            object.__setattr__(self, "inputs", frozendict({n: Tensor(n, (), F32) for n in in_names}))
         if not self.outputs:
-            self.outputs = {n: Tensor(n, (), F32) for n in out_names}
+            object.__setattr__(self, "outputs", frozendict({n: Tensor(n, (), F32) for n in out_names}))
 
     def _derive_io_names(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Walk the body once; aggregate per-stmt
@@ -100,10 +102,10 @@ class BodyOp(Op):
     def writes(self) -> tuple[Write, ...]:
         return self.body.iter_of_type(Write)
 
-    def populate_io(self, graph, node) -> None:  # noqa: ANN001, ARG002 — matches Op.populate_io signature
-        """Override :meth:`Op.populate_io`. Sanity-checks that every body
-        external read / write names a buffer already covered by
-        ``inputs`` / ``outputs`` (caught early — a rule that mutated the
+    def with_io(self, graph, node):  # noqa: ANN001 — matches Op.with_io signature
+        """Override :meth:`Op.with_io` — a pure builder like the base. Sanity-checks that every
+        body external read / write names a buffer already covered by
+        ``inputs`` / ``outputs`` (caught early — a rule that rebuilt the
         body without re-seeding I/O surfaces here, not on a later mystery
         KeyError), then replaces each entry's placeholder Tensor with the
         real graph-sourced one when the buffer is a graph node."""
@@ -133,8 +135,11 @@ class BodyOp(Op):
         # Keep matcher-known external/delegated buffers that are not graph ports.
         refreshed_inputs.update((name, tensor) for name, tensor in self.inputs.items() if name not in refreshed_inputs)
         refreshed_outputs.update((name, tensor) for name, tensor in self.outputs.items() if name not in refreshed_outputs)
-        self.inputs = refreshed_inputs
-        self.outputs = refreshed_outputs
+        inputs, outputs = frozendict(refreshed_inputs), frozendict(refreshed_outputs)
+        if inputs == self.inputs and outputs == self.outputs:
+            return self
+        # See ``Op.with_io``: an origin's refresh threads itself into ``source``.
+        return replace(self, inputs=inputs, outputs=outputs, source=self.source if self.source is not None else self)
 
     def pretty_body(self) -> str:
         """Indented body listing — one stmt per line via per-stmt
@@ -143,11 +148,9 @@ class BodyOp(Op):
         label themselves; duplicating it here would just rot."""
         return "\n".join(_pretty_body_stmts(self.body, "    "))
 
-    def cache_key(self) -> str | None:
-        """Override :meth:`Op.cache_key`: digest of the dialect tag plus the canonical body
-        (:meth:`Body.structural_key` — SSA / axis / commutative-arg / external-buffer names
-        normalized away) plus the knob dict."""
-        return digest(type(self).__name__, self.body.structural_key(), self._knob_key())
+    def _body_identity(self, *, structural: bool = True) -> str | None:
+        """Override :meth:`Op._body_identity`: the stored body IS this op's Loop-IR body."""
+        return self.body.structural_key(structural=structural)
 
 
 def _tensor_for_buffer(graph, name: str) -> Tensor | None:  # noqa: ANN001 — Graph lives in compiler.graph; would cycle to import.

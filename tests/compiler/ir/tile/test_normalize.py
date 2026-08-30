@@ -11,9 +11,11 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Channel, Fold, Lambda, M, is_contraction
+from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lambda_equivalent_clusters
-from emmy.compiler.ir.tile.path import family_sites, resolve, sites
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile.normalize import _share_common_cones
+from emmy.compiler.ir.tile.path import family_sites, sites
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
 from emmy.compiler.pipeline.search.golden import _lifted_target, load_golden_file, load_golden_records
@@ -49,6 +51,28 @@ def test_tile_post_init_canonicalizes_contraction() -> None:
     assert tile.op.a.input == "x"
     assert tile.op.b.input == "w"
     assert TileOp(op=tile.op, place=tile.place).op == tile.op
+
+
+def test_tile_post_init_canonicalizes_broadcast_batched_contraction() -> None:
+    axis = Axis("k", Dim(32))
+    body = Body(
+        (
+            Load(name="left", input="x", index=(Var("k"), Var("batch") * 8 + Var("m"))),
+            Load(name="right", input="w", index=(Var("n"), Var("k"))),
+            Assign(name="product", op="multiply", args=("left", "right")),
+        )
+    )
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    planar = Fold(axis=axis, lift=Lambda(params=("k",), body=body, results=("product",)), init=init, combine=combine)
+
+    tile = TileOp(
+        op=planar,
+        place=Placement(free=(Axis("batch", 4), Axis("m", 8), Axis("n", 16))),
+    )
+
+    assert tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.a.input == "w"
+    assert tile.op.b.input == "x"
 
 
 def test_tile_post_init_recovers_an_elided_unit_contraction_row() -> None:
@@ -263,11 +287,11 @@ def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -
     assert tuple(axis.name for axis in tile.place.free) == ("a0", "a1", "a6")
     assert all(spec.sweep is None for spec in tile.output_specs)
     assert reconstructed.op is tile.op
-    # The previously offered edge is still addressable: its cone folded into the value cluster,
-    # so the seam that covers it names it among the representative's siblings.
-    site = resolve(tile.op, "PLACE@map.fold.a.fold.b1")
-    covered = {id(node) for seam in cuttable_seams(tile) for node in (seam.node, *(sibling for sibling, _ in seam.siblings))}
-    assert site is not None and id(site.node) in covered
+    # The authored seam carries the lexical provider closure needed to cut the input projection
+    # without duplicating the statistic.
+    seams = {seam.spelling: seam for seam in cuttable_seams(tile)}
+    seam = seams["PLACE@map.fold.a.fold.b1"]
+    assert seam.requires
 
 
 def _key_swept_score(shared_reader: bool = False) -> TileOp:
@@ -363,13 +387,16 @@ def test_normalization_shares_structurally_identical_cones() -> None:
                 folds(stmt, out)
         return out
 
+    def unify_key(node: Fold):
+        return Closure(Lambda(params=(), body=Body((node,)), results=node.defines()), ()).canonical()
+
     by_identity = folds(tile.op, {})
     by_value: dict[tuple, list[Fold]] = {}
     for node in by_identity.values():
-        by_value.setdefault((node.structural_key(), node.deps()), []).append(node)
+        by_value.setdefault((node.structural_key(), node.deps(), node.defines()), []).append(node)
     for twins in by_value.values():
-        distinct_equals = [(a, b) for index, a in enumerate(twins) for b in twins[index + 1 :] if a == b]
-        assert not distinct_equals, "normalization left structurally equal cones as distinct objects"
+        distinct_equals = [(a, b) for index, a in enumerate(twins) for b in twins[index + 1 :] if unify_key(a) == unify_key(b)]
+        assert not distinct_equals, "normalization left same-value cones as distinct objects"
 
 
 def test_reduced_qk_attention_offers_the_statistic_arm_b_seams_idempotently() -> None:
@@ -380,14 +407,78 @@ def test_reduced_qk_attention_offers_the_statistic_arm_b_seams_idempotently() ->
     tile = _lifted_target(record)
     seams = {seam.spelling: seam for seam in cuttable_seams(tile)}
     seam = seams["PLACE@map.fold.a.map.fold.fold.b1"]
-    # The score contractions' K cones are one VALUE. Name-identical copies (the second-path
-    # duplicates of each statistic arm) collapse into shared objects at normalization, so only
-    # the copies captured under DIFFERENT axis names — the sum arm and the softmax-V arm — remain
-    # clustering siblings, each with its capture correspondence.
-    assert len(seam.siblings) == 2
+    # The score contractions' K cones are one VALUE. Retaining the shared statistic at its
+    # defining scope lets normalization collapse one more duplicate, leaving one sibling whose
+    # differently named key axis is recorded by the capture correspondence.
+    assert len(seam.siblings) == 1
     assert all(dict(pairs).keys() == dict(seam.siblings[0][1]).keys() for _, pairs in seam.siblings)
     assert "PLACE@map.fold.a.map.fold.fold.b2" not in seams
     assert TileOp(op=tile.op, name=tile.name, place=tile.place, output_specs=tile.output_specs).op is tile.op
+
+
+def _statistic_under_two_binders() -> TileOp:
+    """A row statistic feeding a contraction nested under a separate fold binder."""
+    r, k, t = Axis("r", Dim(16)), Axis("k", Dim(16)), Axis("t", Dim(4))
+    stat_init, stat_combine = M(ElementwiseImpl("add"), names=("ss",))
+    stat = Fold(
+        axis=r,
+        lift=Lambda(
+            params=("r",),
+            body=Body(
+                (
+                    Load(name="xr", input="x", index=(Var("m"), Var("r"))),
+                    Assign(name="sq", op="multiply", args=("xr", "xr")),
+                )
+            ),
+            results=("sq",),
+        ),
+        init=stat_init,
+        combine=stat_combine,
+    )
+    inv = Assign(name="inv", op="rsqrt", args=("ss",))
+    b_cone = Fold.projection(
+        body=Body(
+            (
+                Load(name="wv", input="w", index=(Var("t"), Var("k"))),
+                Assign(name="wn", op="multiply", args=("wv", "inv")),
+            )
+        ),
+        results=("wn",),
+    )
+    score = Fold.contraction(
+        k_axis=k,
+        a=Load(name="qv", input="q", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=b_cone, acc="acc"),),
+    )
+    sweep_init, sweep_combine = M(ElementwiseImpl("maximum"), names=("mx",))
+    sweep = Fold(
+        axis=t,
+        lift=Lambda(params=("t",), body=Body((score,)), results=("acc",)),
+        init=sweep_init,
+        combine=sweep_combine,
+    )
+    return TileOp(op=Fold.projection(body=Body((stat, inv, sweep))), place=Placement(free=(Axis("m", 4),)))
+
+
+def _loop_scopes(stmts, enclosing: tuple[str, ...] = ()) -> list[tuple[str, tuple[str, ...]]]:
+    """Each synthesized loop axis paired with its enclosing loop axes."""
+    out: list[tuple[str, tuple[str, ...]]] = []
+    for stmt in stmts:
+        axis = getattr(stmt, "axis", None)
+        inner = (*enclosing, axis.name) if axis is not None else enclosing
+        if axis is not None:
+            out.append((axis.name, enclosing))
+        for body in stmt.nested():
+            out.extend(_loop_scopes(list(body), inner))
+    return out
+
+
+def test_a_statistic_is_not_sunk_beneath_new_binders() -> None:
+    """Projection closure must preserve the statistic's evaluation multiplicity."""
+    tile = _statistic_under_two_binders()
+
+    scopes = [enclosing for name, enclosing in _loop_scopes(tile.op.lower()) if name == "r"]
+    assert scopes == [()], scopes
 
 
 def test_a_fold_reading_a_sweep_axis_stays_a_body_member() -> None:
@@ -686,7 +777,41 @@ def test_contraction_preserves_computed_operand_statement_order() -> None:
     assert TileOp(op=tile.op, place=tile.place).op is tile.op
 
 
-def test_lambda_equivalent_clusters_include_captured_axes() -> None:
+def test_share_common_cones_unifies_internally_renamed_copies() -> None:
+    """Alpha-equal cones with identical captures and interface names collapse to one object even
+    when their internal binder spelling differs — plain structural equality would keep them
+    distinct and silently sever the sharing."""
+
+    def cone(load: str, product: str, row: str = "m") -> Fold:
+        body = Body(
+            (
+                Load(name=load, input="x", index=(Var(row), Var("k"))),
+                Assign(name=product, op="multiply", args=(load, load)),
+            )
+        )
+        init, combine = M(ElementwiseImpl("add"), names=("acc",))
+        return Fold(axis=Axis("k", Dim(8)), lift=Lambda(params=("k",), body=body, results=(product,)), init=init, combine=combine)
+
+    def consumer(inner: Fold, out: str) -> Fold:
+        return Fold.projection(operands=(inner,), body=Body((Assign(name=out, op="exp", args=("acc",)),)), results=(out,))
+
+    def rooted(second: Fold) -> Fold:
+        return _share_common_cones(
+            Fold.projection(
+                operands=(consumer(cone("l1", "p1"), "u"), consumer(second, "v")),
+                body=Body((Assign(name="w", op="add", args=("u", "v")),)),
+                results=("w",),
+            )
+        )
+
+    unified = rooted(cone("l2", "p2"))
+    assert unified.operands[0].operands[0] is unified.operands[1].operands[0]
+
+    distinct = rooted(cone("l2", "p2", row="q"))  # same form, different capture — a different value
+    assert distinct.operands[0].operands[0] is not distinct.operands[1].operands[0]
+
+
+def test_equivalent_clusters_include_captured_axes() -> None:
     first = Lambda(
         params=("k",),
         body=Body((Load(name="x", input="q", index=(Var("row"), Var("k"))),)),
@@ -698,7 +823,9 @@ def test_lambda_equivalent_clusters_include_captured_axes() -> None:
         results=("value",),
     )
 
-    assert lambda_equivalent_clusters(((first, ("row", "k")), (second, ("unused", "query", "depth")))) == ((0, 1),)
+    assert Closure(first, ("row", "k")) == Closure(second, ("unused", "query", "depth"))  # equality is alpha-invariant
+    assert equivalent_clusters((Closure(first, ("row", "k")), Closure(second, ("unused", "query", "depth")))) == ((0, 1),)
+    assert Closure(first, ("row", "k")) != Closure(first, ("k", "row"))  # capture order is the positional identity
 
 
 def test_total_lift_produces_canonical_contraction() -> None:

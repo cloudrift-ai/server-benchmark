@@ -104,7 +104,11 @@ kernel-boundary `TileOp.output_specs` are reconstituted at their owning projecti
 (a STREAMED store — one whose values are an observed fold's observer results — rides the recursion down to the leaf
 instead and splices into the reduce loop after the observer stmts), so everything below the peel — the sinks,
 cooperative loop distribution, and split realizers — consumes the identical statement stream that entered total
-lift. The
+lift. An output sweep whose axis the peeled root's cone reads cannot wrap at the peel (the root binds outside the
+projection, so no wrap position encloses it): the serial fold binds the projection UNPEELED so the sweep loop wraps
+operand and projection together, and a cooperative / ILP row — whose lanes the sweep would be distributed across —
+declines via `UnbindableProjection` (`RuleSkipped(reject=True)` at the pass boundary; the greedy retries the next
+row). The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
 node kinds, no algebra, no `Ctx`. That is the decide/realize seam: the tile schedule picks the plan, `_tiling` is
@@ -194,8 +198,8 @@ merged / reshaped weight row), and left unbound it would emit the unsplit axis n
 `ResolvedStage` in `ClassicMaterialization` arrives **already resolved** by the scheduler (transport eligibility, the
 slab names, K-chunk `bk_elems`, and depth clamps). A direct edge has an explicit direct `Stage` choice and no resolved
 materialization. The `state` builder (which slots the operand fragments) and shared `reduce` (which emits the loop)
-apply the resolved facts verbatim. The `Stage` choice names the intermediate storage and its fill mechanism — `smem` (the synchronous
-thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all (gmem→register on
+apply the resolved facts verbatim. The `Stage` choice names the intermediate storage and its fill mechanism — `smem`
+(the synchronous thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all (gmem→register on
 a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
 `d<depth>` is the gmem→smem ring (blocking synchronous slot fill / cp.async commit group / TMA mbarrier-phased
 prefetch over the K-slab loop),

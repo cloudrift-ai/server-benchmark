@@ -90,7 +90,7 @@ class TerminalBench:
 
     def _record_op_inventory(self, op) -> None:
 
-        key = op.cache_key()
+        key = op.identity_key(with_io=True, with_knobs=True)
         if key is None:
             return
         if isinstance(op, CudaOp):
@@ -109,7 +109,7 @@ class TerminalBench:
             self.db.record_loop_op(key, self._body_json(op, "loop"), op.pretty_body())
 
     def _persist(self, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None) -> None:
-        cuda_key = cuda_op.cache_key()
+        cuda_key = cuda_op.identity_key(with_io=True, with_knobs=True)
         if cuda_key is None:
             return
         chain = [op for op in cuda_op.source_chain() if op.dialect is not None]
@@ -132,8 +132,8 @@ class TerminalBench:
                 # masquerading as the whole op. The decomposition's cost
                 # is a Σ, owned by the two-level tuner, never this table.
                 continue
-            p_key = parent_op.cache_key()
-            c_key = child_op.cache_key()
+            p_key = parent_op.identity_key(with_io=True, with_knobs=True)
+            c_key = child_op.identity_key(with_io=True, with_knobs=True)
             if p_key is None or c_key is None:
                 continue
             p_knobs = getattr(parent_op, "knobs", None) or {}
@@ -194,7 +194,7 @@ class TerminalBench:
         # useful here because ``backend.benchmark`` runs the whole graph.
         cached_rows = []
         for node in self.cuda_nodes:
-            key = node.op.cache_key()
+            key = node.op.identity_key(with_io=True, with_knobs=True)
             row = self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
             if row is None:
                 cached_rows = None

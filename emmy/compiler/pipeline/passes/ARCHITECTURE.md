@@ -82,16 +82,17 @@ whose workspace dtypes stay undetermined).
 A contraction-operand seam stands for a VALUE, not only an object: closed cones that are alpha-equivalent up to
 their captured axis names (attention's normalized K cone, once per score contraction) fold into one seam, each
 duplicate carried as a sibling with its capture correspondence, and the cut replaces every one with workspace loads
-spelled through its own axes. A body-member fold capturing host-provided names is cuttable through PROVIDER
-CLOSURE: a capture whose producer chain is pure `Load`/`Assign` stmts joins the produced piece verbatim, and a
-capture only a sibling fold defines makes the seam DEPENDENT — its piece reads the name back through that producer's
-workspace, so cutting it composes the producer's cut in (attention's second softmax-statistics pass reading the
-first's accumulator; a pinned dependent cut pulls its producers in transitively, and pinning a producer `fuse`
-beside it is an error). This is what lets the row statistics materialize once per query row instead of once per
-output weight. Provider-closed and dependent seams are SCOPED-PIN-ONLY: the unpinned fork and bare `PLACE=cut`
-never select them, because nearly every kernel — and every fresh cut piece, which copies its providers — hosts
-some, so offering them would make recursive placement inexhaustible and the candidate walk explode. A route through
-them is spelled by authored or golden-decoded pins.
+spelled through its own axes. Any stored fold capturing enclosing-scope names — operand edge or body member — is
+cuttable through PROVIDER CLOSURE. Each occurrence resolves captures outward through its lexical environment,
+nearest scope first; every occurrence must resolve to equal straight-line providers and the same Fold producers. A
+pure `Load`/`Assign` chain joins the produced piece verbatim, while a Fold producer makes the seam DEPENDENT: its piece
+reads the name through that producer's workspace, so cutting it composes the producer's cut in. Dtypes for capturing
+seams come from inference rooted at the Tile tree, where the enclosing bindings are visible. This is what lets row
+statistics materialize once per query row instead of being copied into a contraction's evaluation domain.
+Provider-closed and dependent seams are SCOPED-PIN-ONLY: the unpinned fork and bare `PLACE=cut` never select them,
+because nearly every kernel — and every fresh cut piece, which copies its providers — hosts some, so offering them
+would make recursive placement inexhaustible and the candidate walk explode. A route through them is spelled by
+authored or golden-decoded pins.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (attention's statistics cone contains the score dots whose operand cones are
@@ -216,7 +217,7 @@ one zero-axis `TILE` site (`path.family_sites`); the `map_tile_moves` ladder off
 tile wherever `r` divides the static inner free extent (a masked overhang is refused because the slid last cell is no
 longer a provably aligned affine base, which defeats the load/store vectorizers the strip exists to feed — measured,
 see `_strip_refusal`), and a row whose root `TILE` names a width unrolls the cell into `r` grouped loads · computes ·
-writes at materialization — a different term, hence a different structural identity and `Op.cache_key`.
+writes at materialization — a different term, hence a different structural identity and the variant key (`identity_key(with_io=True, with_knobs=True)`).
 
 **`RASTER` leads the walk as its own fork level.** The CTA launch-order codec is kernel-global with nothing for
 the partial assignment to reconcile, so it is decided once per kernel, ahead of the sites: each candidate value is one
@@ -245,32 +246,24 @@ from a kernel-set decision (`search/golden_eval` filters on it). The same reason
 the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot erase "tensor cores were on offer here"
 from the rows it does enumerate.
 
-**The pool memo and the sampled draw.** The prescan — each node's option list — is memoized in the Context's
-session cache, keyed by the scheduler's own `pool_key` (the term and its knobs plus every enumeration input the
-term omits: operand/output dtypes, per-axis extents, buffer shapes, stores, symbolic hints) folded with the live
-env-pin fingerprint, two facts the walk consumes directly and therefore keys explicitly — the split receipt
-(`carries_partition`, which strips a `REDUCE` pin's `g`-half where a receipt-free twin must raise) and the spelled
-key vocabulary (the decided-empty OFF map the rows decode under) — so that soundness never rides on how the term
-digest happens to serialize the `compare=False` `Axis.window` or the recognition-canonical axis names, which do
-cover both today — and, when sampling, the sample's identity; target facts need no key
-part because the cache lives ON the Context and one instance never spans two fact sets. What is shared is
-immutable and op-independent — frozen options over read-only knob mappings; options are a function of the node
-and the live pins — so a hit replays the walk over the memo, and every leaf row is a fresh dict the CURRENT
-kernel's own materialization decodes. The memo sits below the search policies — greedy and MCTS hit it alike —
-and holds no ranking and consults no evidence; a prescan that raises (a pin naming nothing) is never memoized.
-The composed digest is also the pool's MINTED identity: `schedule()` stamps it on the shared walk state, every
-Fork of the tree exposes it as `pool_id`, and consumers (the greedy decision memo) key on the stamp instead of
-re-deriving a weaker identity — one minting site, so a decision memo and this pool memo cannot key differently.
-Offline sampling (`emmy fit`, via `ctx.pool_sample`) is the one path that does not return the lazy fork: the
-walk's leaf stream is sampled by single-pass reservoir sampling (`search/pool.py` — nothing proportional to the
-pool is ever retained, and the exact pool size is known when the stream ends), and the drawn complete rows ride
-the memo beside that exact total, keyed apart by the sample's identity, so a sampled Context sharing a session
-cache with a live one can never serve it a draw.
+**The session kernel cache.** Greedy lowering of one fused kernel is a function — Loop-IR program in,
+lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `lowering/tile/005`
+fetches a finished lowering (io rebound through `Stmt.rename_buffers`) before the lift, and
+`lowering/cuda/001` harvests every single-kernel lowering just before the per-graph negotiations
+(zero-init delegation, rendering) that deliberately sit below the boundary. Caller-owned on
+`Context.kernel_cache` (nothing installs it by default), greedy-only (tune strips it, pricing probes
+strip it), multi-kernel origins poison their key. A twin program compiles ~750x faster than cold.
+
+**The prescan and the sampled draw.** The prescan — each node's option list — is computed fresh per
+`schedule()` call: options are a pure function of the node and the live pins. `Fork.pool_id` stamps the
+variant key, hints, pins, and sample identity; it keys the greedy decision memo and seeds the budgeted
+descent, with drift failing safe into a re-decide. Under `ctx.pool_sample` the walk's leaf stream is
+reservoir-sampled and the exact pool size is reported through `sample.totals`.
 
 **Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
 alternative's latency. A cut's — and a cross-CTA split's — cost is the minimum sum over the kernels it produces,
 which is why each is a separate structural decision with a separate scoring rule (`policy/greedy._resolved_price`,
-memoized per `Op.cache_key` so a piece appearing in several partitions is solved once) rather than something the
+memoized per the variant key (`identity_key(with_io=True, with_knobs=True)`) so a piece appearing in several partitions is solved once) rather than something the
 per-row prior can rank.
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree.
@@ -305,6 +298,12 @@ How to comply:
 Multi-source `IndexMapOp` lifting preserves predicate dtype: an explicit source predicate is substituted unchanged,
 and an unconditional fallback is a boolean `Literal(True, "bool")`. The rendered CUDA condition remains `1`, while
 Loop IR persistence and vectorized reference evaluation retain the boolean type required by `Select`.
+
+Before fusion, `090_spell_store_rounding` turns a public narrowing reduction store into a typed `copy` value. A
+decomposition may place one transient, shape-only buffer between the accumulator and its public pass-through store;
+that direct private copy inherits the same accumulator dtype. Actual computation over private reduction state remains
+untyped, so normalization and softmax keep their f32 state until their own public result store. Fusion and placement
+then preserve the typed `copy` as an ordinary statement rather than reconstructing a boundary from graph topology.
 
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized
@@ -502,11 +501,11 @@ the consumer-die ccs only (`_F16ACC_CCS`); a `TILE` pin naming the atom bypasses
 The realized fork is identified by the `TILE`
 codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync has no bf16-accumulate form).
 
-**The move catalog** (`search/space.py`) is the permitted-move enumeration the schedule emit forks over, keyed on
-`AxisRole`: `scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤
-1024`) with the per-cell `""` tile as one more member, crossed with the warp / reduce / stage move families
-for an unpinned contraction so `compile` / `tune` explores the space (each row → a structural
-contraction-fold leaf keyed `TILE@<axis>` in a hierarchical `build_fork_tree`; an env pin wins via `Knob.narrow`).
+**The move catalog** (`search/space.py`) supplies the static choices projected into the classic domains.
+`scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤ 1024`) with
+the per-cell `""` tile as one more member; the scheduler projects it alongside the warp, reduction, and transport
+catalogs. Every accepted leaf is a complete `ClassicSchedule` with exact `NodeId` and `EdgeSite` keys. Environment
+pins narrow those exact domains before the complete compatibility relation is checked.
 The producer band is the fourth level (`""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization

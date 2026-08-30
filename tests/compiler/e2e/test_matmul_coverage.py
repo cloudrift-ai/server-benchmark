@@ -1441,7 +1441,7 @@ def test_masked_symbolic_m_structure(transport, monkeypatch):
         # Per-element row guards from the RegStore (both fragment row blocks).
         assert "+ _g < (seq_len)" in src and "+ _g + 8 < (seq_len)" in src, "fragment store must row-guard against seq_len"
     else:
-        # STAGE is stamped per-node (axis-keyed ``STAGE@<k_axis>``), not bare — find this node's.
+        # STAGE is stamped at the exact operand edge, not bare — this single contraction uses one value.
         stage = next((v for k, v in kop.knobs.items() if k.split("@")[0] == "STAGE"), "")
         assert stage.endswith("/smem-tma"), f"symbolic-M with static innermost dim must stage via TMA: {stage!r}"
         assert "cp.async.bulk.tensor" in src, "A operand must stage via TMA"

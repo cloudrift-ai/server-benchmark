@@ -106,9 +106,32 @@ that's the standard pattern for frozen dataclasses that still need light normali
 add `try/except TypeError` fallbacks around structural caches to tolerate unhashable stmts; fix the unhashable stmt
 instead.
 
-Op subclasses don't have to be frozen (the engine mutates `op.source` / `op.knobs` / `op.inputs` / `op.outputs` post-
-construction). Just make sure no Op ends up as a *field value* of a Stmt — `Assign.op` / `Accum.op` / `Select.op` take
-an `ElementwiseImpl` (the lightweight value object, already hashable), never an `ElementwiseOp` wrapper.
+Every `Op` dataclass is `frozen=True` as well (an architecture test ratchets it), and its maps (`knobs`,
+`inputs`, `outputs`, a `TileOp`'s `schedule`) land as `frozendict` via `Op.__post_init__` — a rewrite is always a
+`dataclasses.replace` + graph-node rebind, never an edit. The one sanctioned bypass is the spelling-preserving
+clone in `LoopOp.rename_buffers` (field-level `object.__setattr__`, no `__init__`): a buffer rename must not
+renormalize, since commutative-arg order sorts by buffer name. Ops stay UNHASHABLE (`__hash__ = None`) — semantic
+comparison is `identity_key`, never `hash`. Also make sure no Op ends up as a *field value* of a Stmt —
+`Assign.op` / `Accum.op` / `Select.op` take an `ElementwiseImpl` (the lightweight value object, already hashable),
+never an `ElementwiseOp` wrapper.
+
+### Immutable mappings are `frozendict`
+
+When a mapping must not be mutable in place (the `Op.inputs` / `Op.outputs` io maps), use `frozendict` — a builtin
+in Python 3.15, provided by the `frozendict` package on our 3.12+ floor (`from frozendict import frozendict`; on
+CPython the package's type is a `dict` subclass, so pickling, deepcopy, `isinstance` and serializers behave like the
+dict it replaces — note the 3.15 builtin is NOT a `dict` subclass, which the eventual stdlib switch must audit).
+Don't hand-roll immutable dict subclasses, and don't use `types.MappingProxyType` — it can't be pickled or
+deep-copied and is not a `dict`.
+
+### Derived values are first-class members, not `__dict__` stashes
+
+A derived value another module reads (a lowered body, an identity digest, a canonical rendering) is part of the
+owning type's interface: declare it as a `functools.cached_property` (mutable classes) or, on a frozen dataclass,
+through `structural.instance_memo` — the ONE sanctioned memo-table mechanism, whose owner's `__getstate__` strips it.
+Never invent a private slot with `obj.__dict__.get(...)` / `object.__setattr__(obj, "_my_cache", ...)` at a call
+site: an undeclared attribute is invisible to readers of the class, dodges pickling rules, and grows a second
+spelling of the same fact.
 
 ### Dependency Injection for Testability
 

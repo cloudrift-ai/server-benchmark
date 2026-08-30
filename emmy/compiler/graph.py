@@ -393,6 +393,7 @@ def _stmt_eval_scope() -> dict:
     # ``_deserialize_op`` route it through the strict site codec instead. Auto-populate every
     # public class from these modules (``setdefault`` so explicit stmt/expr entries win on a name
     # clash); a new ordinary IR field needs no edit here.
+    import emmy.compiler.ir.atom as _atom_mod  # noqa: PLC0415
     import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
@@ -400,7 +401,10 @@ def _stmt_eval_scope() -> dict:
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_axis_mod, _kernel_mod, _sched_mod, _fold_mod, _tile_mod, _cuda_mod):
+    # Kernel IR owns the bare ``Tile(...)`` repr used in body fields. The classic ``Tile`` choice
+    # never enters this eval path (it uses ``ClassicScheduleCodec``), so kernel must precede the
+    # schedule module when their class names collide.
+    for _mod in (_atom_mod, _axis_mod, _kernel_mod, _sched_mod, _fold_mod, _tile_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):
@@ -456,7 +460,11 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
     fields = {key: _deserialize_field(key, value) for key, value in raw.items()}
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
-    if not issubclass(op_cls, TileOp) or classic_row is None:
+    if not issubclass(op_cls, TileOp):
+        return op_cls(**fields) if fields else op_cls()
+    if classic_row is None:
+        if materialization_row is not None:
+            raise ValueError("classic materialization requires a classic schedule")
         return op_cls(**fields) if fields else op_cls()
     from emmy.compiler.ir.classic_schedule import (  # noqa: PLC0415
         ClassicMaterialization,
@@ -469,19 +477,52 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
     from emmy.compiler.ir.schedule import PlacedTile, ResolvedStage  # noqa: PLC0415
 
     codec = ClassicScheduleCodec(ClassicProblem(fields["op"], target=None))
-    schedule = codec.decode(classic_row)
+    schedule = codec.decode(_wire_mapping(classic_row, "classic schedule"))
     fields["classic"] = schedule
-    if materialization_row is not None:
-        tiles = {}
-        for spelling, axes in materialization_row.get("tiles", {}).items():
-            site = NodeSite(NodeId.parse(spelling))
-            tiles[site] = PlacedTile(schedule.nodes[site].tile, tuple(_maybe_eval_ctor(axis) for axis in axes))
-        stages = {}
-        for spelling, facts in materialization_row.get("stages", {}).items():
-            edge = EdgeSite.parse(spelling)
-            stages[edge] = ResolvedStage(schedule.edges[edge].stage, tuple(facts["smem"]), int(facts["bk_elems"]))
-        fields["materialization"] = ClassicMaterialization(tiles, stages)
+    materialization = _exact_wire_mapping(materialization_row, {"tiles", "stages"}, "classic materialization")
+    tile_rows = _wire_mapping(materialization["tiles"], "classic materialization tiles")
+    stage_rows = _wire_mapping(materialization["stages"], "classic materialization stages")
+    tiles = {}
+    for spelling, axes in tile_rows.items():
+        if not isinstance(spelling, str) or not isinstance(axes, list) or len(axes) != 2 or not all(isinstance(axis, str) for axis in axes):
+            raise ValueError("classic materialization tiles must map NodeId spellings to two serialized axes")
+        site = NodeSite(NodeId.parse(spelling))
+        if site not in schedule.nodes:
+            raise ValueError(f"classic materialization names unknown node site {spelling}")
+        tiles[site] = PlacedTile(schedule.nodes[site].tile, tuple(_maybe_eval_ctor(axis) for axis in axes))
+    stages = {}
+    for spelling, raw_facts in stage_rows.items():
+        if not isinstance(spelling, str):
+            raise ValueError("classic materialization stage keys must be EdgeSite spellings")
+        facts = _exact_wire_mapping(raw_facts, {"smem", "bk_elems"}, f"classic materialization stage {spelling}")
+        if not isinstance(facts["smem"], list) or not all(isinstance(name, str) for name in facts["smem"]):
+            raise ValueError(f"classic materialization stage {spelling} smem must be a list of strings")
+        edge = EdgeSite.parse(spelling)
+        if edge not in schedule.edges:
+            raise ValueError(f"classic materialization names unknown edge site {spelling}")
+        stages[edge] = ResolvedStage(schedule.edges[edge].stage, tuple(facts["smem"]), facts["bk_elems"])
+    fields["materialization"] = ClassicMaterialization(tiles, stages)
     return op_cls(**fields)
+
+
+def _wire_mapping(value, where: str) -> dict:
+    """Require a plain string-keyed wire mapping."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} must be a mapping")
+    if any(not isinstance(key, str) for key in value):
+        raise ValueError(f"{where} keys must be strings")
+    return value
+
+
+def _exact_wire_mapping(value, expected: set[str], where: str) -> dict:
+    """Require exactly the named wire fields; classic serialization has no permissive path."""
+    mapping = _wire_mapping(value, where)
+    actual = set(mapping)
+    if missing := expected - actual:
+        raise ValueError(f"{where} is missing {', '.join(sorted(missing))}")
+    if extra := actual - expected:
+        raise ValueError(f"{where} has unknown fields {', '.join(sorted(extra))}")
+    return mapping
 
 
 @dataclass(frozen=True)
@@ -1173,13 +1214,13 @@ class Graph:
                 from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
                 def _field_key(o: object, name: str) -> str:
-                    # A ``TileOp``'s term digests α-invariantly (``TileOp.structural_key`` —
-                    # the bottom-up term key); a nested ``Graph`` field
+                    # A ``TileOp``'s term digests α-invariantly (``Fold.structural_key`` — the
+                    # exact-flavor digest of its lowered body); a nested ``Graph`` field
                     # (``ConstantOp.source_graph``) digests by its own structural key
                     # (its default repr carries the object address); every other field
                     # keeps its repr.
                     if name == "op" and isinstance(o, TileOp):
-                        return o.structural_key()
+                        return o.op.structural_key() if o.op is not None else ""
                     val = getattr(o, name)
                     if isinstance(val, Graph):
                         return val.structural_key()
@@ -1400,7 +1441,10 @@ def _rename_buf_in_op(op, old: str, new: str):
         }
 
     if isinstance(op, LoopOp):
-        renamed = op.rename_buffers({old: new})
+        # ``LoopOp.rename_buffers`` is the spelling-preserving clone: fields carried whole
+        # (name / knobs / source identity preserved), io renamed, and NO ``__post_init__`` — a
+        # rename must never renormalize (``sort_commutative_args`` orders by buffer name).
+        return op.rename_buffers({old: new})
     else:
 
         def rename_body(body):
@@ -1430,12 +1474,7 @@ def _rename_buf_in_op(op, old: str, new: str):
             op=rename_term(op.op),
             output_specs=tuple(replace(store, write=fn(store.write)) for store in op.output_specs),
         )
-    renamed.inputs = renamed_io(op.inputs)
-    renamed.outputs = renamed_io(op.outputs)
-    renamed.name = op.name
-    renamed.knobs = dict(op.knobs)
-    renamed.source = op.source
-    return renamed
+    return replace(renamed, inputs=renamed_io(op.inputs), outputs=renamed_io(op.outputs))
 
 
 # ---------------------------------------------------------------------------

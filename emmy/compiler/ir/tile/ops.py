@@ -75,8 +75,15 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     return (pro, cell, stats) if stats else ((), cell, ())
 
 
-def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None) -> tuple:
-    """Infer a pure operand edge's result dtypes from its typed leaves and SSA program."""
+def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict | None = None) -> tuple:
+    """Infer an edge's result dtypes in the lexical scope where the edge occurs.
+
+    A capturing Fold cannot be typed in an empty environment. Starting this walk at the root and
+    threading each enclosing environment produces one dtype table for every stored edge. The
+    ``cache`` is keyed by object identity, so a SHARED node keeps the dtypes of the first
+    environment reached — sound for placement's consumers because provider closure only offers a
+    capturing seam whose occurrences resolve to equal providers, and equal providers type equally.
+    """
     cache = {} if cache is None else cache
     if id(edge) in cache:
         return cache[id(edge)]
@@ -90,15 +97,15 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None) -> tuple:
         cache[id(edge)] = result
         return result
 
-    env = {}
+    env = dict(scope or {})
     for operand in edge.operands:
-        env.update(zip(_operand_result_names(operand), edge_dtypes(operand, inputs, cache), strict=True))
+        env.update(zip(_operand_result_names(operand), edge_dtypes(operand, inputs, cache, env), strict=True))
     for stmt in edge.lift.body:
         if isinstance(stmt, Load):
             tensor = inputs.get(stmt.input) if inputs else None
             env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
         elif isinstance(stmt, Fold):
-            env.update(zip(_operand_result_names(stmt), edge_dtypes(stmt, inputs, cache), strict=True))
+            env.update(zip(_operand_result_names(stmt), edge_dtypes(stmt, inputs, cache, env), strict=True))
         elif isinstance(stmt, Assign):
             args = [env.get(name) for name in stmt.args]
             env[stmt.name] = stmt.dtype or (get_dtype(dtype_promote(stmt.op.name, [dtype.name for dtype in args])) if all(args) else None)
@@ -111,7 +118,11 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None) -> tuple:
             env.update((name, None) for name in stmt.defines())
 
     lifted = tuple(env.get(result) if isinstance(result, str) else F32 for result in edge.lift.results)
-    result = lifted if edge.axis is None else lifted[: len(edge.combine.results)]
+    if edge.axis is None:
+        result = lifted
+    else:
+        carried = lifted[: len(edge.combine.results)]
+        result = carried + tuple(env.get(name) for name in _operand_result_names(edge)[len(carried) :])
     cache[id(edge)] = result
     return result
 
@@ -540,7 +551,7 @@ def reduce_plan(tile):
 
 # Kernel identity lives in its own module (``tile/_key.py``) — it is not a compute read — and its
 # ONE public name is the ``Structural`` method, ``Fold.structural_key()`` / ``TileOp.structural_key()``
-# (``Op.cache_key`` / ``Graph.structural_key`` reach it there). The structural dump is NOT re-exported:
+# (``identity_key(with_io=True, with_knobs=True)`` / ``Graph.structural_key`` reach it there). The structural dump is NOT re-exported:
 # it has no consumer outside ``_dump`` itself, so a shim here would serve nothing.
 
 __all__ = [

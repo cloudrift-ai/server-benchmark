@@ -2,6 +2,7 @@
 
 import json
 import pickle
+from itertools import permutations
 
 import pytest
 
@@ -174,7 +175,7 @@ def _finite_domains(problem: ClassicProblem) -> ClassicDomains:
 
 
 def _schedule_signature(schedule: ClassicSchedule) -> tuple:
-    return schedule.kernel, tuple(schedule.nodes.items()), tuple(schedule.edges.items())
+    return schedule.kernel, tuple(sorted(schedule.nodes.items())), tuple(sorted(schedule.edges.items()))
 
 
 def test_domains_are_independent_projections_of_static_support() -> None:
@@ -201,18 +202,14 @@ def test_reference_is_the_compatible_cartesian_subset() -> None:
     assert len(assignments) == domains.product_size == 24
 
 
-def test_lazy_traversals_equal_the_cartesian_reference() -> None:
+def test_every_lazy_traversal_equals_the_cartesian_reference() -> None:
     problem = ClassicProblem(_contraction(), target=object())
     context = ClassicScheduleContext(problem)
     domains = _finite_domains(problem)
     reference = {_schedule_signature(schedule) for schedule in enumerate_reference(problem, domains)}
-    node_first = {_schedule_signature(schedule) for schedule in enumerate_classic(problem, domains=domains)}
-    edge_first = {
-        _schedule_signature(schedule)
-        for schedule in enumerate_classic(problem, (*context.index.edges, *reversed(context.index.nodes)), domains)
-    }
 
-    assert node_first == edge_first == reference
+    for traversal in permutations((*context.index.nodes, *context.index.edges)):
+        assert {_schedule_signature(schedule) for schedule in enumerate_classic(problem, traversal, domains)} == reference
 
 
 def test_lazy_enumerator_rejects_incomplete_or_duplicate_traversals() -> None:
@@ -372,6 +369,8 @@ def test_tile_requires_complete_materialization() -> None:
 
 
 def test_tile_graph_round_trip_uses_the_strict_schedule_codec() -> None:
+    import copy
+
     root = _contraction()
     m, n = Axis("m", 8), Axis("n", 8)
     context = ClassicScheduleContext(ClassicProblem(root, target=None))
@@ -400,3 +399,13 @@ def test_tile_graph_round_trip_uses_the_strict_schedule_codec() -> None:
     assert restored.classic == schedule
     assert restored.materialization == tile.materialization
     assert "schedule" not in payload["nodes"]["out"]["op_fields"]
+
+    unknown = copy.deepcopy(payload)
+    unknown["nodes"]["out"]["op_fields"]["materialization"]["alias"] = {}
+    with pytest.raises(ValueError, match="unknown fields alias"):
+        Graph.from_dict(unknown)
+
+    missing = copy.deepcopy(payload)
+    del missing["nodes"]["out"]["op_fields"]["materialization"]["stages"]
+    with pytest.raises(ValueError, match="missing stages"):
+        Graph.from_dict(missing)

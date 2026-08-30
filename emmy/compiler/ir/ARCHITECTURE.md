@@ -61,9 +61,9 @@ subtree per ancestor. `__getstate__` strips them: every memo recomputes after tr
 id-keyed cache carried across processes could collide with a fresh object's id. A memo holds only
 values derivable from the term — never decisions, never mutable policy.
 
-**Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term and pure projection regions; the schedule
-slices, output specifications and knobs are the `TileOp`'s, not the term's. So
-`Fold` lives in `ir/pure/fold.py` and is not a `Stmt`.
+**Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term and pure projection regions; the typed classic
+schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in
+`ir/pure/fold.py` and is not a `Stmt`.
 
 ## Classic schedule model
 
@@ -97,11 +97,13 @@ the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step
 need to be a statement to get there. The tree already carries it: a composed node is an entry in
 `operands`, and its position is produced by the derivation — `_twisted_derived_step` PLACES each
 inline-node edge before the first stmt that reads its bound name (lift body or merge), and
-`splice_operands` applies the same first-use rule to every other edge. Placement, not prepending, is
-what lets a step whose pure prologue precedes its producer (a loop-invariant scale `Load` ahead of
-attention's score contraction) re-derive to the program it was read from. `Fold.loop` passes that
-mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the only place terms become statements
-is `Fold.lower()`.
+`splice_operands` applies the same first-use rule to every other edge. A sibling edge that provides a
+value to another operand inherits that consumer's insertion point and precedes it; otherwise the
+provider could land after its only use when the projection body reads only the consumer. Placement,
+not prepending, is what lets a step whose pure prologue precedes its producer (a loop-invariant scale
+`Load` ahead of attention's score contraction) re-derive to the program it was read from. `Fold.loop`
+passes that mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the only place terms become
+statements is `Fold.lower()`.
 
 `Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
 children, `rewrite()` for α-renaming, and `defines()` for its result names.
@@ -169,7 +171,7 @@ lowered `CudaOp` carries the full chain back to its originating
 pass it explicitly. The base-class field is keyword-only and
 `compare=False`, so subclass positional construction and equality
 keep working unchanged. `source` is excluded from
-`Graph.structural_key` and from `Op.cache_key` — kernels rendered
+`Graph.structural_key` and from the variant key (`identity_key(with_io=True, with_knobs=True)`) — kernels rendered
 along different lowering paths still dedup in the tuning cache.
 
 **Stmt subclasses are `@dataclass(frozen=True)`** — every concrete Loop-IR
@@ -309,7 +311,11 @@ type to dispatch on and no second place for a fact to live.
 `Fold.lower()` flattens the term to the loop nest: `Fold.loop` reconstructs the annotated reduce `Loop`
 from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO
 algebra — a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
-what makes kernel identity the α-invariant TERM HASH (`Fold.structural_key`) rather than the lowered nest.
+what makes every identity of the term a digest of its lowered body — there is no separate term hasher.
+`Fold.structural_key` is the exact-flavor canonical digest of the nest `lower()` derives (the body is the
+term's normal form); the variant key (`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body identity with the knobs; and the deploy
+join key (the deploy identity (`identity_key(with_io=True)`), over `TileOp.loop_body`) adds the io fingerprint, so term re-spellings and
+cluster-sibling ops that lower alike share schedule evidence.
 `Fold.deps()` exposes names captured outside the lift params, including captures reached recursively through operand
 edges. A contraction deliberately hides its pure lift body from generic nested-body walks, so this direct dependency
 surface is what keeps an operand's captured statistic ordered before the contraction that reads it.
@@ -341,7 +347,7 @@ emitter's use of it: a degenerate fold dissolves into its `Accum`s and takes eac
 its `op.identity`, and a twisted fold's streaming merge regenerates its own (`_reduction` reads the
 generated merge's `Accum`s, never the stored `init`'s `−inf`). So `init` is algebra the term owes
 its own definition, not a value the lowering path consults — which is why removing it would change
-every `structural_key`, and with it every `Op.cache_key` the tune DB's measurement replay and the cubin
+every `structural_key`, and with it every the variant key (`identity_key(with_io=True, with_knobs=True)`) the tune DB's measurement replay and the cubin
 cache are keyed on, in exchange for a field nothing reads.
 
 **The twisted combine — generated, not hand-authored.** Transport of structure: a monoid `(·, e)`
@@ -366,7 +372,11 @@ binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF
 `Load`/`Assign`/`Select` and the structural `Fold` and `ProjectionRegion` nodes opt in; `Accum`/`Write`/`Init`/`Loop`
 never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
-(`Lambda.canonical` — free names never renumbered). `Lambda.__post_init__` invokes `ir/pure/normalize.py` to install a
+(`Lambda.canonical` — free names never renumbered). The scope-aware half lives in `ir/pure/closure.py`: a `Closure`
+pairs a lambda with the enclosing iteration axes it may capture — an INDEX-SPACE environment, never values — and its
+alpha-invariant equality (with `canonical`/`equivalent_clusters`) is the one cross-scope equivalence the Tile canonical forms and the
+lowering passes (semiring A-merge, twisted-pair recognition, seam value clustering) all consult.
+`Lambda.__post_init__` invokes `ir/pure/normalize.py` to install a
 dependency-safe body order and commutative argument order, so these context-independent storage invariants do not
 belong to `Fold`, `TileOp`, or the structural-key path. Contraction operand roles live on Fold edges, so sorting a
 commutative product's arguments does not change them. Formation is strict: a kernel's writes ride
@@ -414,6 +424,9 @@ recurse via `pretty_body`).
 CUDA scalar rendering goes through `stmt.base.op_to_expr`. Boolean masks retain the historical f32 SSA convention,
 so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values use the
 same semantics. Integer complement is not inferred from that name and fails closed until it has a typed consumer.
+The optional readable-source fold keeps a single-use `Assign` named when any argument's stamped dtype differs from
+the result dtype, so the target-aware `Assign.render` path remains responsible for conversions such as
+`__half2float`.
 
 Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` / `Body.forward_cone(seeds)` build a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound
@@ -559,13 +572,13 @@ splicer refuses that shape whether it is the merged root or a producer edge: dep
 the reduce loop and move the `Write` after it, changing every prefix value into the final reduction. Such an
 effectful inner loop is not valid input to total lift.
 
-An `Accum` stores its value into the producing tensor before a distinct frontend operation loads that tensor. When the
-declared tensor dtype differs from the accumulator dtype (implicitly f32 until Kernel IR), `splice_graph` keeps that
-boundary as a typed `copy` alias. Nodes created by decomposing and rewriting one frontend operation share the ultimate
-`Op.source` object and may reconstruct their private edge directly. A private output stays recognizable even when its
-consumer fragment already mixes origins: it is absent from the ultimate frontend source's declared outputs. Missing
-or unrelated source chains preserve the conversion. Equal-dtype reductions and non-`Accum` producers keep the
-ordinary untyped alias, so fusion does not duplicate a conversion already carried by the defining statement.
+Before splicing, `loop/lifting/090_spell_store_rounding` turns a public store that narrows an `Accum` into an ordinary
+typed `copy` statement. A decomposition may route that accumulator through one transient, shape-only buffer before a
+pass-through LoopOp writes the public buffer; that direct load retains the accumulator's implicit f32 dtype, so the
+same rule spells its public conversion. An actual `Assign` computation over private reduction state remains untyped:
+normalization and softmax therefore retain f32 internal state rather than narrowing it at an inferred projection edge.
+`splice_graph` then preserves the explicit conversion through its ordinary statement path and reconstructs no dtype
+boundary from source provenance or graph topology.
 
 Construction is bounded per statement: the dedup table shares each `(stmt, emit scope, σ)` binding, and in
 every legitimate splice no single statement takes more than a handful of distinct bindings. A recurrence-shaped

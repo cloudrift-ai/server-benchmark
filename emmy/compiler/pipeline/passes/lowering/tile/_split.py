@@ -381,8 +381,7 @@ def _piece(body, free, *, output_specs: tuple = ()) -> TileOp:
     # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
     # identity. Built fresh here, so this states the contract rather than doing work — and the rule
     # that mints a kernel is where that has to be said.
-    piece.knobs = consume_kernel_row(piece.knobs)
-    return piece
+    return replace(piece, knobs=consume_kernel_row(piece.knobs))
 
 
 def _state_fold(axis: Axis, algebra: Fold, loads: tuple[Load, ...]) -> Fold:

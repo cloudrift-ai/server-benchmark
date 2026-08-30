@@ -26,7 +26,7 @@ Numbered 032 runs after arithmetic normalization and before the sibling merge an
 
 from __future__ import annotations
 
-import copy
+from dataclasses import replace
 from math import prod
 
 from emmy.compiler.dtype import get as get_dtype
@@ -218,8 +218,7 @@ def rewrite(match: Match, root: Node, out: Tensor) -> Graph:
         if nid not in cone:
             continue
         node = match.graph.nodes[nid]
-        op = copy.copy(node.op)
-        op.inputs, op.outputs, op.knobs, op.source = {}, {}, {}, None
+        op = replace(node.op, inputs={}, outputs={}, knobs={}, source=None)
         record.add_node(
             op=op,
             inputs=list(node.inputs),

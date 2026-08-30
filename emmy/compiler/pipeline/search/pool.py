@@ -61,11 +61,9 @@ class PoolSample:
     """How many candidates a pool contributes, which of them must survive, and where each pool
     reports its exact size.
 
-    Carried on :class:`~emmy.compiler.context.Context` and folded into the schedule pool's cache
-    key. That key part is not decoration: ``dataclasses.replace`` SHARES a Context's session cache,
-    so a sampled compile and a live one sit on one memo, and a flag that did not key the cache would
-    serve a sampled pool to a live compile. ``None`` on the Context means live, and live never
-    samples.
+    Carried on :class:`~emmy.compiler.context.Context` and folded into the schedule-space stamp.
+    That stamp distinguishes a sampled draw from the live space while keeping equal sampled
+    problems reproducible. ``None`` on the Context means live, and live never samples.
     """
 
     #: Candidates to draw. ``0`` (or a pool no larger than it) means the whole pool.
@@ -73,17 +71,16 @@ class PoolSample:
     seed: int = 0
     #: The ``tile_signature`` values the draw may not drop.
     keep: frozenset = frozenset()
-    #: Where each drawn pool reports its EXACT size, keyed by that pool's cache key. The sampled
+    #: Where each drawn pool reports its EXACT size, keyed by that pool's schedule-space stamp. The sampled
     #: rows cannot carry it and the fork tree has no channel for it, so the enumerator writes here
     #: and the caller that asked for the sample reads it back. Keyed rather than appended so a
-    #: re-entered pool overwrites instead of double-counting. EXCLUDED from the value
-    #: (``compare=False``): a sink is not part of a sample's identity, and the pool cache keys on
-    #: that identity.
+    #: equal pool overwrites instead of double-counting. EXCLUDED from the value
+    #: (``compare=False``): a sink is not part of a sample's identity.
     totals: dict[str, int] = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def key(self) -> str:
-        """This sample's cache identity. The keep-set is SORTED into it: a ``frozenset``'s
+        """This sample's stable identity. The keep-set is SORTED into it: a ``frozenset``'s
         iteration order follows string hashing, which is randomized per process, so its ``repr``
         would key the same sample differently on two runs."""
         return digest(self.rows, self.seed, sorted(str(s) for s in self.keep))

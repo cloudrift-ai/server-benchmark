@@ -86,6 +86,20 @@ def test_an_unfit_online_half_answers_a_constant_rather_than_failing():
     assert OnlinePrior().score_rows(_group([{"D_a": 1.0}, {"D_a": 2.0}])).tolist() == [0.0, 0.0]
 
 
+def test_the_online_half_waits_for_label_variation_before_fitting():
+    """One equal-latency batch cannot rank anything; keep it pending until another measurement adds information."""
+    prior = OnlinePrior(iterations=5, min_rows=2, refit_every=1)
+    prior.add_rows([(_stamp() | {"BM": 8.0}, 10.0)] * 2)
+
+    assert not prior.maybe_refit()
+    assert not prior.fitted
+
+    prior.add_rows([(_stamp() | {"BM": 64.0}, 5.0)])
+
+    assert prior.maybe_refit()
+    assert prior.fitted
+
+
 def test_the_composite_answers_with_the_half_that_owns_deploys():
     """``FallbackPrior`` forwards to whichever half is live, exactly as its other scoring surfaces do — so a
     report over the deployed prior decomposes the model that actually makes decisions."""

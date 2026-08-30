@@ -120,7 +120,7 @@ def _toolkit_tag() -> str:
     return hashlib.sha1(ver.encode()).hexdigest()[:12]
 
 
-def _cache_key(source: str, name: str, arch: str) -> str:
+def _cubin_key(source: str, name: str, arch: str) -> str:
     # Content-addressed: identical (source, name, arch, toolkit, flags) → same
     # cubin, so the persistent cache is safe to share across (even concurrent)
     # runs. Toolkit + flags are in the key so an nvcc / opt-level / flags change
@@ -149,7 +149,7 @@ def compile_to_cubin(source: str, name: str, *, arch: str) -> Path:
         raise RuntimeError("nvcc unavailable")
     cache = cubin_cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
-    out = cache / f"{_cache_key(source, name, arch)}.cubin"
+    out = cache / f"{_cubin_key(source, name, arch)}.cubin"
     if out.exists():
         return out
     with tempfile.TemporaryDirectory(dir=cache) as td:

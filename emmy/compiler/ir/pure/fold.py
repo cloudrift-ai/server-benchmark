@@ -21,6 +21,7 @@ and kernel identity (:meth:`Fold.structural_key`) is the algebra alone.
 
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 
@@ -37,18 +38,50 @@ from emmy.compiler.ir.stmt.base import _axis_identity
 
 def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
     """Splice each operand edge's producing stmts into ``stmts`` immediately BEFORE the first stmt
-    that reads the operand's bound name (appended when nothing reads it), ties resolved in operand
-    TUPLE order. This is the one lowering rule that turns the stored operands + derived step back
-    into the flat loop body — deterministic, so the derived loop (and with it ``Op.cache_key``)
-    depends only on the stored params."""
+    that reads the operand's bound name, directly or through another operand. A provider inherits
+    its dependent's insertion point and precedes it; otherwise an unread edge appends. Independent
+    ties retain operand TUPLE order. This is the one lowering rule that turns the stored operands +
+    derived step back into the flat loop body — deterministic, so the derived loop (and with it
+    ``identity_key(with_io=True, with_knobs=True)``) depends only on the stored params."""
     operands = _unique_edges(operands)
     if not operands:
         return stmts
-    at: dict[int, list] = {}
-    for edge in operands:  # first-use indexes against the ORIGINAL stmts — ties keep tuple order
+
+    results = tuple(frozenset(_operand_result_names(edge)) for edge in operands)
+    dependencies = []
+    for index, edge in enumerate(operands):
+        body = Body(operand_body(edge))
+        external = body.backward_cone(_operand_result_names(edge)).external_reads
+        dependencies.append(tuple(provider for provider, names in enumerate(results) if provider != index and names & external))
+
+    incoming = [set(providers) for providers in dependencies]
+    outgoing: list[list[int]] = [[] for _ in operands]
+    for dependent, providers in enumerate(dependencies):
+        for provider in providers:
+            outgoing[provider].append(dependent)
+    ready = [index for index, providers in enumerate(incoming) if not providers]
+    heapq.heapify(ready)
+    order: list[int] = []
+    while ready:
+        index = heapq.heappop(ready)
+        order.append(index)
+        for dependent in outgoing[index]:
+            incoming[dependent].remove(index)
+            if not incoming[dependent]:
+                heapq.heappush(ready, dependent)
+    assert len(order) == len(operands), "operand edges are acyclic SSA cones — a cyclic provider dependency is not constructible"
+
+    indexes = []
+    for edge in operands:
         names = set(_operand_result_names(edge))
-        idx = next((i for i, st in enumerate(stmts) if names & deep_reads([st])), len(stmts))
-        at.setdefault(idx, []).append(edge)
+        indexes.append(next((i for i, st in enumerate(stmts) if names & deep_reads([st])), len(stmts)))
+    for dependent in reversed(order):
+        for provider in dependencies[dependent]:
+            indexes[provider] = min(indexes[provider], indexes[dependent])
+
+    at: dict[int, list] = {}
+    for index in order:
+        at.setdefault(indexes[index], []).append(operands[index])
     out: list[Stmt] = []
     for i, st in enumerate((*stmts, None)):
         for edge in at.get(i, ()):
@@ -164,6 +197,24 @@ def _operand_binding(fold: Fold) -> dict:
     return out
 
 
+def _expectation_bindings(fold: Fold) -> tuple[tuple[str, str, object], ...]:
+    """The twisted carrier's ``(state, injected term, operand edge)`` expectation channels.
+
+    This is the one structural reading shared by derived evaluation and placement: every named
+    non-pivot lift result bound to an operand becomes a synthesized expectation contraction when
+    that edge is materialized as a :class:`Load`. A computed edge is the same future contraction
+    operand before placement cuts it.
+    """
+    if fold.axis is None or not fold.family.twisted:
+        return ()
+    by_param = _operand_binding(fold)
+    return tuple(
+        (state, term, by_param[term])
+        for state, term in zip(fold.combine.results[1:], fold.lift.results[1:], strict=True)
+        if isinstance(term, str) and term in by_param
+    )
+
+
 def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     """The DERIVED blocked evaluation of a λ-spelled TWISTED fold: the INLINE-NODE operand edges
     at the head in operand order (flash's ``Σ_dd Q·K`` score, ahead of the lift body), the lift
@@ -176,11 +227,7 @@ def _twisted_derived_step(fold: Fold) -> tuple[Stmt, ...]:
     names = tuple(fold.combine.results)
     terms = tuple(lam.results)
     merge = list(exp_merge(names, terms, key=names[0]))
-    by_param = _operand_binding(fold)
-    for i, (nm, term) in enumerate(zip(names, terms, strict=True)):
-        if i == 0 or not isinstance(term, str):
-            continue  # the pivot / a literal denominator — only EXPECTATION components split
-        edge = by_param.get(term)
+    for nm, term, edge in _expectation_bindings(fold):
         if isinstance(edge, Load):
             merge = _split_expect(merge, nm, term, edge)
     # The inline-node edges are PLACED, not prepended: each lands immediately before the first
@@ -274,7 +321,7 @@ class Fold:
 
     The reduce PARTITION (:class:`Reduce` — GRID split / BLOCK coop / REG ILP) is the schedule's,
     not the node's: it is selected for the node site in ``TileOp.classic`` and read through
-    ``ops.Sched``, which is why ``lower`` cannot see it and ``Op.cache_key`` stays byte-identical
+    ``ops.Sched``, which is why ``lower`` cannot see it and ``identity_key(with_io=True, with_knobs=True)`` stays byte-identical
     whichever partition the fork picked. See the NO-schedule-fields note on ``operands`` below."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
@@ -635,12 +682,9 @@ class Fold:
         twice."""
         consumed = {id(s) for s in self.step_stmts()}
         if self.family.twisted and not _identity_lift(self):
-            by_param = _operand_binding(self)
-            for term in self.lift.results[1:]:  # EXPECTATION components: a str-injected non-pivot
-                if isinstance(term, str):
-                    edge = by_param.get(term)
-                    if isinstance(edge, Load):
-                        consumed.add(id(edge))
+            for _, _, edge in _expectation_bindings(self):
+                if isinstance(edge, Load):
+                    consumed.add(id(edge))
         return _unique_edges(tuple(e for e in self.operands if id(e) not in consumed))
 
     @cached_property
@@ -752,12 +796,28 @@ class Fold:
 
     def structural_key(self) -> str:
         """The α-invariant identity digest of this term — the
-        :class:`~emmy.compiler.structural.Structural` implementation, computed BOTTOM-UP from
-        the children's cached keys (``tile/_key.py``). The term is immutable across the whole
-        schedule search, so the per-node memo is sound and a shared subtree keys once."""
-        from emmy.compiler.ir.tile._key import structural_key  # noqa: PLC0415
+        :class:`~emmy.compiler.structural.Structural` implementation: the EXACT-flavor canonical
+        digest of the Loop-IR body the term lowers to (``Body.structural_key(structural=False)``
+        — SSA / axis / buffer spelling normalized away, op kinds kept, since consumers like the
+        sharing unification replace occurrences with one representative and must never merge
+        distinct computations). The term is pure algebra and its lowered body is its normal
+        form, so no separate term hasher exists. Cached: the term is immutable across the whole
+        schedule search."""
+        return self._lowered_key
 
-        return structural_key(self)
+    @cached_property
+    def _lowered_key(self) -> str:
+        # Through the ONE reconstitution spelling (with no output specs — a bare term), so a
+        # ``ProjectionRegion`` in a projection body expands exactly as materialization expands it.
+        # The per-step observer is folded in beside the body: a bare lowering carries observer
+        # stmts only when reconstituted with their stream store, and a scan must never key as its
+        # plain fold (the sharing unification would merge them).
+        from emmy.compiler.ir.tile.ir import lower_with_output_specs  # noqa: PLC0415 — region expansion lives with the region type
+        from emmy.compiler.structural import digest  # noqa: PLC0415
+
+        body = Body.coerce(lower_with_output_specs(self, ())).structural_key(structural=False)
+        observed = "" if self.observe is None else Body.coerce(self.observe.body).structural_key(structural=False)
+        return digest(body, observed)
 
     def deps(self) -> tuple[str, ...]:
         """SSA names captured by the term rather than supplied through its ``lift`` params."""

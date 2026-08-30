@@ -14,7 +14,7 @@ import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import cached_property
 from numbers import Real
@@ -22,7 +22,6 @@ from pathlib import Path
 
 import yaml
 
-from emmy.compiler.ir.tile.identity import deploy_identity
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
@@ -144,6 +143,14 @@ def precision_trading_pins(pins: Mapping) -> bool:
     return any(bool(pins.get(name, umbrella)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
 
 
+def pins_freeze_cut(pins: Mapping) -> bool:
+    """Whether the input pins freeze any placement cut (a ``PLACE…=cut`` pin) — the ONE spelling
+    of the predicate behind both the loader's receipt validation and :attr:`GoldenRecord.is_receipt`."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    return any(family_of(str(name)) == "PLACE" and str(value) == "cut" for name, value in pins.items())
+
+
 def golden_entry_state(entry: Mapping) -> GoldenEntryState:
     has_knobs = "knobs" in entry
     has_measurements = "measurements" in entry
@@ -179,7 +186,7 @@ class GoldenRecord:
     ranking: dict | None
     loop_index: int | None = None
     loop_wire: dict | None = None
-    #: The record's stored ``deploy_identity`` (see :func:`kernel_identity`), when the file keeps
+    #: The record's stored the deploy identity (``identity_key(with_io=True)``) (see :func:`kernel_identity`), when the file keeps
     #: one. Model inventories mostly do not; the realization corpus does, because a new fingerprint
     #: fact must show up as a diff there rather than silently re-key a checked-in reproducer. A
     #: stored identity is authoritative for the deploy join, and it is how a **child-identity
@@ -196,25 +203,53 @@ class GoldenRecord:
         """Whether this row records a kernel-placement decision rather than a kernel schedule."""
         return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
 
+    @property
+    def is_receipt(self) -> bool:
+        """Whether this row is a child-identity schedule receipt: a schedule row recorded behind
+        pinned cut(s), whose stored ``identity`` names the child kernel the row decorates."""
+        return self.identity is not None and not self.is_routing and pins_freeze_cut(dict(self.pins))
+
     @cached_property
-    def pool_key(self) -> tuple:
+    def pool_group(self) -> tuple:
         """Which candidate pool this record belongs to — the ONE place that question is answered, so every
-        consumer that groups goldens groups them the same way.
+        consumer that groups goldens groups them the same way. (A grouping key over RECORDS —
+        distinct from the scheduler's per-compile ``pool_id`` stamp.)
 
-        Derived today, because nothing records it: ``enumerate_graph(self.target_program, ctx)`` under
-        ``self.pin_map`` reads the card, the wire the target specializes from, which node it selects, the
-        bindings and the pins, and records agreeing on all five run the same enumeration. Two consequences
-        worth knowing before relying on it. It is SUFFICIENT, not necessary — it never fuses two pools that
-        differ, but it splits two recordings of one program made in different sessions, whose node ids differ
-        and whose pools do not. And it keys on what the enumeration READS, never on what it produced, so it
-        does not go stale when the scheduler changes.
+        Composed from the target kernels' identity keys — the one identity function — around the
+        card and the record's pin regime: per fused kernel, the structural variant key
+        (``identity_key(with_io=True, with_knobs=True)`` — cluster siblings share a schedule
+        space, so they rightly share a pool) folded with the symbolic-dim hints the enumeration
+        sizes against. Node-id spelling never enters, so two recordings of one program made in
+        different sessions FUSE — the wire-digest key this replaces split them — and any fact
+        that changes the kernels shows up in their keys, so the key stays sufficient. It keys on
+        what the enumeration READS, never on what it produced, so it does not go stale when the
+        scheduler changes; bindings stay out (they bind replay values, not the space).
 
-        When a group identity is recorded with the golden instead, this property returns it and its callers
-        do not change."""
-        wire = self.loop_wire if self.loop_wire is not None else self.program_wire
-        kind = "loop" if self.loop_wire is not None else "prog"
-        digest = hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest()
-        return (self.gpu_name, tuple(self.compute_cap), kind, digest, tuple(self.origins), tuple(self.bindings), self.pin_key)
+        Best-effort like every record-side derivation: a target the current compiler no longer
+        lowers falls back to the persisted wire's digest, so a stale record still groups
+        deterministically (alone) instead of breaking a fit."""
+        from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+
+        try:
+            _lowered, nodes = _target_kernel_nodes(self)
+            kernels = tuple(
+                sorted(
+                    digest(
+                        op.identity_key(with_io=True, with_knobs=True) or "",
+                        tuple(
+                            d.hint or DEFAULT_SEQ_HINT
+                            for t in (*op.inputs.values(), *op.outputs.values())
+                            for d in t.shape
+                            if not d.is_static
+                        ),
+                    )
+                    for op in (node.op for node in nodes)
+                )
+            )
+        except Exception:  # noqa: BLE001 — a stale record must never break the fit's dataset build
+            wire = self.loop_wire if self.loop_wire is not None else self.program_wire
+            kernels = (hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest(), tuple(self.origins))
+        return (self.gpu_name, tuple(self.compute_cap), kernels, self.pin_key)
 
     @cached_property
     def pin_key(self) -> tuple:
@@ -508,8 +543,7 @@ def validate_golden_file(
                 families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
                 if "PLACE" in families and families != {"PLACE"}:
                     raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
-                pins_cut = any(str(name).split("@", 1)[0] == "PLACE" and str(value) == "cut" for name, value in pins.items())
-                if families and "PLACE" not in families and pins_cut and "identity" not in realization:
+                if families and "PLACE" not in families and pins_freeze_cut(pins) and "identity" not in realization:
                     raise ValueError(
                         f"{realization_where} schedules a kernel behind pinned cut(s) without naming it; "
                         "a child-identity schedule receipt must store the child kernel's identity"
@@ -588,6 +622,22 @@ def load_golden_records(document: Mapping) -> list[GoldenRecord]:
     return [
         golden_record_from_entry(document, entry, realization) for entry in document["configs"] for realization in entry["realizations"]
     ]
+
+
+def shared_placement_pins(matches: list[GoldenRecord]) -> dict:
+    """The placement pins every matching working-file realization shares, or ``{}``.
+
+    An explicit working target's shared placement regime is part of the target, not unverified
+    schedule evidence: the ordinary compile applies it while the remaining schedule families stay
+    free for the normal deploy evidence hierarchy. When same-name realizations disagree on any
+    input pin the target stays unpinned — choosing one regime would silently change which
+    realization was requested."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    regimes = {match.pins for match in matches}
+    if len(regimes) != 1:
+        return {}
+    return {key: value for key, value in regimes.pop() if family_of(key) == "PLACE"}
 
 
 _STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
@@ -687,10 +737,10 @@ def _record_fingerprint(record: GoldenRecord) -> str:
     return digest(cached[1], str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
 
 
-#: Enumerated rows per (target, pins), bucketed by kernel identity — sibling realizations of one
-#: config decode against one enumeration (the tripwire and the migration validator walk whole
-#: files) — and ONE Context per card, so same-shape targets share the schedule pool cache across
-#: configs and files.
+#: Enumerated rows per exact target and pins, bucketed by kernel identity. Sibling realizations of
+#: one config decode against one enumeration because the tripwire and migration validator walk
+#: whole files. Context construction is also shared per card; neither cache changes schedule-space
+#: membership.
 _DECODE_ROWS_CACHE: dict[tuple, dict[str | None, frozenset]] = {}
 _DECODE_CTX_CACHE: dict[tuple, object] = {}
 
@@ -740,35 +790,35 @@ def _lifted_target(record: GoldenRecord):
     if len(nodes) != 1:
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
-    node.op.populate_io(lowered, node)
+    node.op = node.op.with_io(lowered, node)
     tile = lift_loop_op(node.op, name=node.id)
     # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
-    # half of the identity (``deploy_identity``) reads the same output fingerprint.
-    tile.outputs = {node.output.name: node.output}
-    return tile
+    # half of the identity (the deploy identity (``identity_key(with_io=True)``)) reads the same output fingerprint.
+    return replace(tile, outputs={node.output.name: node.output})
 
 
 def decode_record(record: GoldenRecord) -> str | None:
     """STRICTLY decode one record against the current compiler — ``None`` on success, else the
     failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
-    program selects exactly one kernel; a routing record names a legal closed Fold seam; a SCHEDULE record's spelled row
-    equals one enumerated
-    leaf (``canonical_row_key`` equality under the record's own pins) — no prefix matching, no
-    any-of, no classified shape. A child-identity schedule receipt (a stored identity that is not
-    the target's own lift) is stricter still: its identity must equal one kernel resolved under the
-    record's pins, and the spelled row must equal one of THAT kernel's rows — a sibling child's row
-    must not vouch for it."""
+    program selects exactly one kernel, except that a child-identity schedule receipt may select its
+    kernel from a multi-kernel target by stored identity; a routing record names a legal closed Fold
+    seam; a SCHEDULE record's spelled row equals one enumerated leaf (``canonical_row_key`` equality
+    under the record's own pins) — no prefix matching, no any-of, no classified shape. A receipt's
+    identity must equal one kernel resolved under the record's pins, and the spelled row must equal
+    one of THAT kernel's rows — a sibling child's row must not vouch for it."""
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
 
-    try:
-        tile = _lifted_target(record)
-    except Exception as exc:  # noqa: BLE001 — the reason IS the product here
-        return f"{type(exc).__name__}: {exc}"
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins), record.identity or "")
     store = _identity_store()
     verdicts = store.setdefault("verdicts", {})
     if verdict_key in verdicts:
         return verdicts[verdict_key]
+    tile = None
+    try:
+        tile = _lifted_target(record)
+    except Exception as exc:  # noqa: BLE001 — the reason IS the product here
+        if not record.is_receipt:
+            return _remember_verdict(verdict_key, f"{type(exc).__name__}: {exc}")
     if record.is_routing:
         from dataclasses import replace  # noqa: PLC0415
 
@@ -794,7 +844,7 @@ def decode_record(record: GoldenRecord) -> str | None:
         return _remember_verdict(verdict_key, None)
     candidates = _candidate_rows(record)
     row = schedule_row_key(record.knobs)
-    if record.identity is not None and record.identity != deploy_identity(tile):
+    if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
         child_rows = candidates.get(record.identity)
         if child_rows is None:
             reason = f"stored identity equals none of the {len(candidates)} kernel identities resolved under the record's pins"
@@ -820,7 +870,7 @@ def _remember_verdict(key: str, reason: str | None) -> str | None:
 
 def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
     """Every schedule-row identity the record's target can realize under its pins, bucketed by the
-    ``deploy_identity`` of the kernel that offers it (``None`` for forks whose root is not a
+    the deploy identity (``identity_key(with_io=True)``) of the kernel that offers it (``None`` for forks whose root is not a
     recognized ``TileOp``): the fork leaves' rows, PLUS each resolved kernel's own realized row — a
     forkless kernel (the schedule space collapsed to one row, often the all-OFF anchor) never opens
     a fork, so its one row is read off the resolved op instead. Under pinned cuts the buckets are
@@ -845,7 +895,7 @@ def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
     buckets: dict[str | None, set] = {}
 
     def _identity_of(op) -> str | None:
-        return deploy_identity(op) if isinstance(op, TileOp) and op.op is not None else None
+        return op.identity_key(with_io=True) if isinstance(op, TileOp) else None
 
     def decide(fp):
         leaves = flatten_leaves(fp.options)
@@ -869,7 +919,7 @@ def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
 
 def kernel_identity(record: GoldenRecord) -> str | None:
     """The record's kernel identity under the CURRENT compiler — the verified-tier join key
-    (``_schedule.deploy_identity``). A STORED identity is authoritative and returned as-is: it is
+    (``identity_key(with_io=True)``). A STORED identity is authoritative and returned as-is: it is
     how a child-identity receipt names the one split child its schedule decorates (the target's own
     lift stops at the pre-cut kernel and cannot say), and the deploy join is fail-closed, so a
     stale stored identity matches no live fork and decides nothing — the strict decode is where it
@@ -891,7 +941,7 @@ def kernel_identity(record: GoldenRecord) -> str | None:
         _IDENTITY_CACHE[key] = identity
         return identity
     try:
-        identity = deploy_identity(_lifted_target(record))
+        identity = _lifted_target(record).identity_key(with_io=True)
     except Exception:  # noqa: BLE001 — see the docstring; the decode tripwire re-derives loudly
         identity = None
     _IDENTITY_CACHE[key] = identity

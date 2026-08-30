@@ -47,7 +47,7 @@ configs:
     - out
     - qn
   realizations:
-  - name: k_sdpa_rms_norm_reduce_dd476e.6741552db729
+  - name: k_sdpa_rms_norm_reduce_dd476e.ce158ebf780e
     bindings: {}
     pins:
       FAST_MATH: false
@@ -55,19 +55,20 @@ configs:
     knobs:
       WORK: t16
       RASTER: ''
-      REDUCE@n3: coop
       TILE@n2: ''
       TILE@n6: ''
-      TILE@n9: ''
+      TILE@n10: ''
       REDUCE@n1: coop
       REDUCE@n2: coop
+      REDUCE@n3: coop
       REDUCE@n5: coop
       REDUCE@n6: coop
       REDUCE@n9: coop
+      REDUCE@n10: coop
       STAGE@n2.e0: ''
       STAGE@n2.e1: ''
       STAGE@n6.e0: ''
       STAGE@n6.e1: ''
-      STAGE@n9.e0: ''
-      STAGE@n9.e1: ''
-    identity: 83e4f2a6fa484a4b2a50babe833fc9cf35021c1f551fcfabaf496658c24d055f
+      STAGE@n10.e0: ''
+      STAGE@n10.e1: ''
+    identity: f1ad5cd0046f299018abb0a3b43bb2d3e005f6b036f1d11c8d1522f2486ff4f0

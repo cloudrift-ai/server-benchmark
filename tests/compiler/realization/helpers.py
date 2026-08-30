@@ -432,10 +432,12 @@ def bench_command(case: Case, output: Path) -> list[str]:
     A corpus case is deliberately not `VERIFIED` — filling `measurements` would auto-pin it in
     `emmy run --golden` and fold test data into the replay tooling's trusted evidence — so the
     authored row is pinned with `--ab`, which is exactly "bench this row beside the greedy pick".
+    Include the input pins in that explicit row: the golden target context selects the ordinary
+    compile, while each A/B variant re-lowers independently under its own pin context.
     """
     import sys  # noqa: PLC0415
 
-    row = ",".join(f"{name}={value}" for name, value in case.record.knobs.items())
+    row = ",".join(f"{name}={value}" for name, value in case.pinned.items())
     return [
         sys.executable,
         "-m",

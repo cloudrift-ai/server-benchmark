@@ -11,10 +11,13 @@ this pass the rounding is a VALUE fact, and every later transform preserves it f
 splicer inlines the conversion through its ordinary plain-stmt path, total lift carries it into the
 projection epilogue, and no pass needs a private channel for "this edge also converts".
 
-**Which stores round.** Only a store whose value is an ``Accum``: a reduce accumulates in f32 until
-``030_stamp_types`` stamps a dtype, so its value is provably wider than a 16-bit destination. An
-``Assign`` chain already carries its inputs' width, so narrowing it here would introduce a rounding
-the reference never performed.
+**Which stores round.** A store whose value is an ``Accum``: a reduce accumulates in f32 until
+``030_stamp_types`` stamps a dtype, so its value is provably wider than a 16-bit destination. The
+same boundary can appear one node later when a decomposition writes the accumulator to a transient
+shape buffer and a pass-through LoopOp copies it to the public buffer. The transient never stored,
+so that direct load still carries the accumulator's width and the public copy performs the source
+program's rounding. An ``Assign`` chain already carries its inputs' width, so narrowing it here
+would introduce a rounding the reference never performed.
 
 **Which stores need it spelled.** Only one whose buffer something READS. The rounding has to
 survive fusion, and fusion is what deletes the store — but a buffer with no consumer is never
@@ -37,10 +40,29 @@ from dataclasses import replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
+from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", LoopOp)]
+
+
+def _accum_dtype(graph, meta, write: Write):
+    """The accumulator dtype reaching ``write`` directly or through one private copy."""
+    value = meta.defs.get(write.value)
+    if isinstance(value, Accum):
+        return value.dtype or F32
+    if not isinstance(value, Load):
+        return None
+    source = graph.buffer(value.input)
+    producer = graph.producer(value.input)
+    if source is None or not source.transient or producer is None or not isinstance(producer.op, LoopOp):
+        return None
+    producer_meta = producer.op.analyze()
+    produced = [candidate for candidate, _scope in producer_meta.writes if candidate.output == value.input]
+    if len(produced) != 1 or not produced[0].is_scalar:
+        return None
+    accumulated = producer_meta.defs.get(produced[0].value)
+    return (accumulated.dtype or F32) if isinstance(accumulated, Accum) else None
 
 
 def rewrite(match: Match, root: Node) -> LoopOp:
@@ -53,13 +75,11 @@ def rewrite(match: Match, root: Node) -> LoopOp:
     for write, _scope in meta.writes:
         if not write.is_scalar:
             continue
-        value = meta.defs.get(write.value)
-        if not isinstance(value, Accum):
+        value_dtype = _accum_dtype(graph, meta, write)
+        if value_dtype is None:
             continue
         buffer = graph.buffer(write.output)
-        # ``value.dtype or F32``: an Accum is unstamped in canonical Loop IR, and unstamped IS
-        # f32 — the accumulation dtype, not a missing value.
-        if buffer is None or buffer.transient or buffer.dtype == (value.dtype or F32):
+        if buffer is None or buffer.transient or buffer.dtype == value_dtype:
             continue
         if not graph.buffer_users(write.output):
             continue  # nothing reads it, so no fusion can delete the store that rounds

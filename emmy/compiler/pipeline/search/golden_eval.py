@@ -38,13 +38,12 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
 
     Returns :class:`~.pool.Candidates` — the rows beside the size of the pools they came from.
     Under ``ctx.pool_sample`` the rows are a DRAW and ``total`` is the exact size, and BOTH count
-    the same population: distinct candidate pools. N same-shape kernels share one pool (the
-    schedule pool memo answers the later ones), so its draw is collected once and its size counted
-    once — a rank against ``total`` is a rank within the pool the fit actually ranks. With no
-    sample the rows are every kernel's fork rows and ``total`` is ``len(rows)``, so a caller that
-    reports both prints today's numbers unchanged."""
+    the same population: distinct schedule-space stamps. Equal problems produce the same stamp,
+    so their identical draw and total are collected once — a rank against ``total`` is a rank
+    within the space the fit actually ranks. With no sample the rows are every kernel's fork rows
+    and ``total`` is ``len(rows)``, so a caller that reports both prints today's numbers unchanged."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import Fork, iter_leaves, leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
@@ -61,9 +60,9 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
 
     def decide(fp):
         if sample is not None:
-            # One contribution per POOL, matching the totals sink's keyed dedupe: a fork whose
-            # kernel re-entered an already-drawn pool wrote no new totals entry, and appending its
-            # (identical) draw again would make ``rows`` and ``total`` count different populations.
+            # One contribution per schedule-space stamp, matching the totals sink's keyed dedupe:
+            # an equal problem overwrites the same total, and appending its identical draw again
+            # would make ``rows`` and ``total`` count different populations.
             opened = set(sample.totals) - seen_pools
             seen_pools.update(opened)
             if not opened:
@@ -80,18 +79,12 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
         return _first(fp.options)
 
     def _first(options):
-        # A pin that admits nothing at this fork leaves no option to walk into. Say so: the bare
-        # `IndexError` this used to raise names neither the pin nor the fork, and it reaches
-        # callers that are asking a perfectly ordinary question — "is this schedule offered?" —
-        # for which "no" is a legitimate answer rather than a crash.
-        if not options:
+        # A pin may empty an early lazy branch while leaving a later sibling live. Walk to the
+        # first complete leaf across the whole sibling set, matching the resolver's own traversal;
+        # only an entirely empty fork means the schedule is not offered.
+        option = next(iter_leaves(options), None)
+        if option is None:
             raise ValueError("the live pins admit no option at this fork, so no candidate row can be enumerated")
-        option = options[0]
-        while isinstance(option, Fork) and not option.is_leaf:
-            expanded = option.expand()
-            if not expanded:
-                raise ValueError("the live pins admit no option at this fork, so no candidate row can be enumerated")
-            option = expanded[0]
         return option
 
     terminal, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)

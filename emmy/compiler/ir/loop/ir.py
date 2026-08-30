@@ -33,10 +33,12 @@ Free-function companions (used by passes that work on raw
 
 from __future__ import annotations
 
-from copy import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
+
+from frozendict import frozendict
 
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)
     Accum,
@@ -53,7 +55,6 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)
     pretty_body,
 )
 from emmy.compiler.ir.stmt.ir import BodyOp
-from emmy.compiler.tensor import Tensor
 
 # ---------------------------------------------------------------------------
 # Scope — a path of enclosing axes
@@ -87,7 +88,7 @@ class Scope:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class LoopOp(BodyOp):
     """One kernel's worth of computation as an SSA program over named axes.
 
@@ -97,10 +98,11 @@ class LoopOp(BodyOp):
     ``accums`` are computed properties derived from that tree;
     ``inputs`` / ``outputs`` are seeded from body Loads / Writes by
     :class:`BodyOp` and later snapped to real graph Tensors by the
-    matcher's ``populate_io``.
+    matcher's ``with_io`` rebind.
     """
 
     def __post_init__(self) -> None:
+        Op.__post_init__(self)  # BodyOp's coerce+seed is REPLACED below (normalize-then-seed), not chained
         from emmy.compiler.ir.stmt import normalize_body
 
         # Body is a tuple subclass; coerce so ``Op(body=tuple_value)``
@@ -108,7 +110,7 @@ class LoopOp(BodyOp):
         # every rule's rewrite site.
         coerced = Body.coerce(self.body)
         normalized = normalize_body(coerced)
-        self.body = normalized if isinstance(normalized, Body) else Body(normalized)
+        object.__setattr__(self, "body", normalized if isinstance(normalized, Body) else Body(normalized))
         # Seed before validating so ``_validate`` can read
         # ``loop.outputs`` (populated from body-derived names) rather
         # than the now-gone ``body_outputs`` property.
@@ -124,22 +126,22 @@ class LoopOp(BodyOp):
         normalized body instead of running every normalization pass again.
         """
 
-        def rename_stmt(stmt: Stmt) -> Stmt:
-            if isinstance(stmt, Load) and stmt.input in rename:
-                return replace(stmt, input=rename[stmt.input])
-            if isinstance(stmt, Write) and stmt.output in rename:
-                return replace(stmt, output=rename[stmt.output])
-            return stmt
+        def rename_io(io) -> frozendict:
+            return frozendict(
+                {rename.get(buffer, buffer): replace(tensor, name=rename.get(tensor.name, tensor.name)) for buffer, tensor in io.items()}
+            )
 
-        def rename_io(io: dict[str, Tensor]) -> dict[str, Tensor]:
-            return {rename.get(buffer, buffer): replace(tensor, name=rename.get(tensor.name, tensor.name)) for buffer, tensor in io.items()}
-
-        renamed = copy(self)
-        renamed.body = self.body.map(rename_stmt)
-        renamed.inputs = rename_io(self.inputs)
-        renamed.outputs = rename_io(self.outputs)
-        renamed.knobs = dict(self.knobs)
-        return renamed
+        # A SPELLING-preserving clone — field-level, no ``__init__``: renaming must not
+        # renormalize (``sort_commutative_args`` orders by buffer name, so renormalizing a
+        # renamed body could reorder it mid-pipeline; a graph-level rename is a spelling edit,
+        # never a rebuild). Fresh ``__dict__``: no cached digest rides along.
+        clone = object.__new__(type(self))
+        for f in fields(self):
+            object.__setattr__(clone, f.name, getattr(self, f.name))
+        object.__setattr__(clone, "body", self.body.rename_buffers(rename))
+        object.__setattr__(clone, "inputs", rename_io(self.inputs))
+        object.__setattr__(clone, "outputs", rename_io(self.outputs))
+        return clone
 
     @property
     def axes(self) -> tuple[Axis, ...]:
@@ -335,12 +337,14 @@ def _specialize_symbolic_axes(loop: LoopOp, input_arrays: dict) -> LoopOp:
             new.append(s)
         return Body(tuple(new))
 
-    specialized = LoopOp(body=_sub_body(loop.body), name=loop.name)
-    specialized.inputs = dict(loop.inputs)
-    specialized.outputs = dict(loop.outputs)
-    specialized.knobs = dict(loop.knobs)
-    specialized.source = loop.source
-    return specialized
+    return LoopOp(
+        body=_sub_body(loop.body),
+        name=loop.name,
+        inputs=dict(loop.inputs),
+        outputs=dict(loop.outputs),
+        knobs=dict(loop.knobs),
+        source=loop.source,
+    )
 
 
 # ---------------------------------------------------------------------------

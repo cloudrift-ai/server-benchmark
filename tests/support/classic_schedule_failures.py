@@ -337,26 +337,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-matvec-reshaped-output-tma.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-matvec-reshaped-output-tma.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-masked-n-staged_xfail_offered.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-cp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-cp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-gmem.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-gmem.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-tma.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-tma.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-b-gmem.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-b-gmem.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-b-tma.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-b-tma.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-slice-a-cp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-slice-a-cp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-slice-a-gmem.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-slice-a-gmem.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-slice-a-tma.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-slice-a-tma.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-transpose-a-gmem.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-transpose-a-gmem.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-transpose-a-tma.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-transpose-a-tma.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s128.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s128.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s128.yaml-realized]",
@@ -573,7 +553,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 464
+REMAINING_FAILURE_COUNT = 444
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

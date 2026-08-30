@@ -269,15 +269,16 @@ class TerminalBench:
             )
             return self._point_stats(0.0), "compile_timeout"
         fail_us = float(self.backend.bench_run_timeout_s) * 1_000_000.0
+        blamed = self._blamed(exc)
         logger.warning(
-            "[tune] backend.benchmark failed (%s) — pinning bench_fail @ %.1f us for %d kernel(s)",
+            "[tune] backend.benchmark failed (%s) — pinning bench_fail @ %.1f us for %d of %d kernel(s)",
             exc,
             fail_us,
+            len(blamed),
             len(self.cuda_nodes),
         )
         s = self._point_stats(fail_us)
         agg = None
-        blamed = self._blamed(exc)
         for node in self.cuda_nodes:
             if id(node) in blamed:
                 self._persist(node.op, stats=s, status="bench_fail", error=f"{type(exc).__name__}: {exc}")

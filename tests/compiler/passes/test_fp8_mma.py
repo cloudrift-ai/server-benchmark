@@ -36,7 +36,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
-from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sched
+from emmy.compiler.pipeline.passes.lowering.tile import _classic as sched
 from tests.compiler.helpers import classic_row, requires_cuda
 
 K32 = "mma_m16n8k32_e4m3_f32"

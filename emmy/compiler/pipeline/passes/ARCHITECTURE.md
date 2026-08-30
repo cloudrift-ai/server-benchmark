@@ -101,9 +101,11 @@ not exist on a kernel addresses another kernel of the graph; a kernel none of th
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Unpinned cuts and bare
 `PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
-`040_schedule` maps the free axes and enumerates classic assignments. Structural rewrites have finished before it
-constructs sites. Every leaf is a complete typed `ClassicSchedule`; only the search boundary encodes its exact
-`NodeId` / `EdgeSite` keys, and only materialization derives placed geometry and resolved transport facts.
+`040_schedule` is the clean-slate reconstruction boundary for classic assignments. The former `_schedule.py` was
+deleted rather than adapted; `_classic.py` currently raises `ClassicScheduleUnavailable` while recovery proceeds in
+coherent phases. The fixed completion contract is that structural rewrites finish before site construction, every leaf
+is a complete typed `ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only
+materialization derives placed geometry and resolved transport facts.
 
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so `035_split_reduce` stands beside the cut, BEFORE scheduling: the
@@ -125,20 +127,19 @@ projection, an output that rounds once) sit beside the offer in `tile/_split.py`
 lone unsplit arm, a pinned `PLACE` fuse, a fully forced schedule walk — and the engine records a one-option fork as
 a decision, so a fully pinned kernel's row is keyed into the trace and the evidence exactly like a contested one.
 
-**The enumeration is a recursive walk of the stored Fold tree.** A Fold offers its own options; each option extends a
-context of what the kernel has already agreed; the subtree below is walked under that extended context, and siblings
-thread left to right, so a choice anywhere restricts everything enumerated after it:
+**Enumeration is the compatible subset of independent domains.** Kernel, node, and edge domains are projected from
+static offers without reading another selected choice. Their Cartesian product defines the candidate space;
+`ClassicScheduleContext.accepts` is the compatibility relation. A production traversal may prune incompatible partial
+assignments, but order may affect only evaluation cost, never membership:
 
     S(node, ctx) = for each option o of node under ctx:  o x S(children(node), ctx + o)
 
-Semantically, kernel, node, and edge choices are independent domains and the schedule set is their Cartesian product
-filtered by `ClassicScheduleContext.accepts`. The production walk does not construct or join that flat product. It
-projects the factors from static per-node offers and applies their support through the private partial assignment,
-so an incompatible prefix is never built. Every leaf crosses the complete context relation exactly once at the strict
-codec boundary, then carries that accepted typed assignment and canonical row through search and materialization;
-downstream reads never repeat the compatibility walk. Bounded spaces are exhaustively compared with the literal
-Cartesian reference. That pruning matters because on flash attention the unconstrained product is 8.9e6 against
-13,280 legal rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
+A rebuilt production walk need not construct or join that flat product. It may apply static support through a private
+partial assignment so an incompatible prefix is never built. Every leaf still crosses the complete context relation
+exactly once at the strict codec boundary, then carries that accepted typed assignment and canonical row through search
+and materialization; downstream reads never repeat the compatibility walk. Bounded spaces are exhaustively compared
+with the literal Cartesian reference. That pruning matters because on flash attention the unconstrained product is
+8.9e6 against 13,280 legal rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
 
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated
@@ -146,7 +147,7 @@ under the CTA thread budget, so no member can exceed it; the stage catalog filte
 `Stage.available_on`, so a target without TMA never sees a TMA move — the atom registry's own shape); constraints that
 are a function of the NODE live beside the moves they filter — the warp tier's eligible atoms are read once per node
 from its algebra, its operand dtypes and the gmem addressing its fragment loaders and fragment store must reach, and
-the fragment seam's refusals (the paired register bound included) sit beside the option builder in `_schedule`.
+the fragment seam's refusals (the paired register bound included) sit beside the option builder in `_classic`.
 `tile/_staging.py` is not a legality layer: it holds the three stage RESOLVERS (whose legal answer is a size) plus the
 compute fill's own node refusals, which live there because the fill is the move they filter. Nothing may narrow for
 SPEED — a slow candidate is a fork the evidence decides, never a row withheld. One acknowledged exception, labeled as

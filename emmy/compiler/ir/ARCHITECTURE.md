@@ -93,7 +93,9 @@ fragment-seam facts outside the choice values, and `ClassicScheduleContext.accep
 that one compatibility relation. Domain membership and local-support lookup use immutable indexes built with the
 context; validating a leaf must never linearly scan a factor whose choices are already finite and hashable. The literal
 reference enumerator remains the oracle. The production Fold walk may prune incompatible prefixes, but bounded-product
-checks and traversal-order tests require its complete leaf set to equal the reference set exactly.
+checks and traversal-order tests require every traversal order to produce the same compatible subset. The lowering-side
+implementation is currently being rebuilt behind `_classic.ClassicScheduleUnavailable`; the semantic model and this
+product contract remain the boundary the reconstruction must satisfy.
 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not

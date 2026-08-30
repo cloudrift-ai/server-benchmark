@@ -1,8 +1,9 @@
 """The ONE walk over a stored Fold tree.
 
-Both tile passes read the same tree and differ only in what they take from it: ``030_cut`` keeps the
-cut forks, while ``040_schedule`` constructs classic sites in the same preorder. The walk itself
-answers which Folds are stored under this one and what axes are in scope where each is read.
+``030_cut`` uses this walk to find structural seams. Classic scheduling may use the same walk to
+discover sites, but its candidate set is the compatible subset of independent node and edge
+domains: preorder may affect evaluation cost, never membership. The walk answers which Folds are
+stored under this one and what axes are in scope where each is read.
 
 Three rules that are easy to get wrong separately, which is why they are written once:
 
@@ -59,8 +60,8 @@ def children(node, axes: tuple = ()) -> tuple[tuple[Fold, tuple], ...]:
 def walk(node, axes: tuple = ()) -> Iterator[tuple[object, tuple]]:
     """``node`` and every stored Fold under it, preorder, each with its axes in scope.
 
-    Preorder is not incidental: it is the order the schedule walk decides in and the order
-    materialization re-resolves in, so the two cannot disagree about a Fold."""
+    Preorder is a stable discovery order, not schedule semantics. Any scheduling consumer must
+    produce the same compatible assignment set under another traversal."""
     yield node, axes
     for child, inner in children(node, axes):
         yield from walk(child, inner)

@@ -4,8 +4,11 @@ scheduling fork — the second half of the Loop-IR → Tile-IR boundary.
 ``010_lift`` is purely structural: it reads the algebra off a ``LoopOp`` and emits an UNMAPPED
 :class:`~emmy.compiler.ir.tile.ir.TileOp` (its ``op`` set, ``place`` carrying just the free axes).
 THIS rule picks that up and decides the schedule — the free-axis → grid mapping plus the per-node
-``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families — through the ``_schedule``
-helper's ONE recursive row enumerator over the term's own site tree.
+``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families through ``_classic``.
+
+The classic scheduler is being reconstructed behind an explicit unavailable boundary. Its fixed
+candidate-space contract is the compatible subset of independently projected kernel, node, and
+edge domains; a traversal may prune that product but cannot make traversal order semantic.
 
 Splitting the two halves is what makes the fork ONE thing: a kernel reaches scheduling by
 several routes — the ordinary lift and a cross-CTA split's partial and finalize — and all converge here. The engine restarts its
@@ -14,10 +17,9 @@ matched here on the next sweep, and so is every unmapped ``TileOp`` a structural
 That is exactly why none of them needs a special case: each arrives as a kernel with no schedule,
 like any other, and this rule cannot tell them apart.
 
-**Empty enumeration is a skip, not a failure.** A term the enumerator cannot schedule leaves the
-``TileOp`` unmapped and the materializer lowers it on its per-cell path. That is the guardrail
-contract: the enumeration returns ``[]``, never raises, and this rule never guesses a schedule it
-could not enumerate.
+Once reconstruction reaches this rule, empty enumeration remains a skip rather than a guessed
+schedule. During reconstruction, ``ClassicScheduleUnavailable`` is intentionally loud and is the
+only failure accepted by the exact test registry.
 """
 
 from __future__ import annotations
@@ -32,8 +34,8 @@ from emmy.compiler.pipeline.fork import Fork
 # pass. Pin reads / knob-key spelling ride the enumerator's helpers instead; the family NAMES below
 # are plain strings and a function, which that scan does not see.
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
+from emmy.compiler.pipeline.passes.lowering.tile._classic import PinRefused, schedule
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
-from emmy.compiler.pipeline.passes.lowering.tile._schedule import PinRefused, schedule
 
 PATTERN = [Pattern("root", TileOp)]
 

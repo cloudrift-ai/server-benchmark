@@ -7,6 +7,6 @@ to a ``Fold``. ``020_twisted`` rewrites equivalent exp-family siblings into one 
 admits (both structural: a chosen cut or split replaces the kernel with fresh unmapped pieces that
 re-enter this pass), and ``040_schedule`` schedules the stored tree.
 
-``030_cut`` and ``040_schedule`` read the tree through the ONE walk in ``_tree``, and differ only in
-what they take from it — the cut forks and the schedule forks respectively.
+``030_cut`` reads the structural tree through ``_tree``. The rebuilt ``040_schedule`` may reuse
+that traversal mechanically, but schedule membership must remain independent of traversal order.
 """

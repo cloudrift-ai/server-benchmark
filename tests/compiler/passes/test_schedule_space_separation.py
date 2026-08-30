@@ -61,7 +61,7 @@ def test_transposed_free_extents_stamp_different_spaces() -> None:
     differ by 7x — the enumeration sizes the coop band against ``_inner_free`` and the fragment
     store against the free axes. Their space stamps must preserve that distinction.
     """
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
+    from emmy.compiler.pipeline.passes.lowering.tile._classic import schedule
 
     ctx = Context.from_target((12, 0))
     wide, tall = _unmapped_tile(8, 512), _unmapped_tile(512, 8)
@@ -88,8 +88,8 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     on the flat kernel is never handed to a kernel that cannot realize its row.
     """
     from emmy.commands.trace import graph_from_code
+    from emmy.compiler.pipeline.passes.lowering.tile._classic import schedule
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
 
     matmul = "(torch.randn(128,64,dtype=torch.float16) @ torch.randn(64,128,dtype=torch.float16))"
     ctx = Context.from_target((12, 0))
@@ -126,8 +126,8 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.sigma import Sigma
     from emmy.compiler.ir.tile.ir import TileOp
+    from emmy.compiler.pipeline.passes.lowering.tile._classic import schedule
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
 
     norm = "(lambda t: t*torch.rsqrt((t.float()*t.float()).mean(-1,keepdim=True)+1e-6).to(t.dtype))"
     code = f"torch.nn.functional.linear({norm}(torch.randn(128, 256, dtype=torch.float16)), torch.randn(256, 256, dtype=torch.float16))"

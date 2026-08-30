@@ -1,6 +1,6 @@
 """Structural-coverage test for the permitted-move catalog (``search/space.py``).
 
-The tile schedule (``040_schedule`` → ``_schedule``) enumerates the catalog into the tile fork; this
+The tile schedule (``040_schedule`` → ``_classic``) enumerates the catalog into the tile fork; this
 file pins the catalog's **legal set** three ways:
 
 - the catalog function ``scalar_tile_moves()`` equals the hand-computed ``(par × reg)`` grid plus the
@@ -248,7 +248,7 @@ def _computed_a_term() -> TileOp:
 def _rows_of(tile, ctx=None) -> list[dict]:
     """Every row ``tile`` enumerates — the leaves of the walk's own fork (a fully forced walk is
     still a one-leaf fork, so the engine records its row as a decision)."""
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
+    from emmy.compiler.pipeline.passes.lowering.tile._classic import schedule
 
     out = schedule(tile, "k", {}, ctx or Context.from_target((12, 0)))
     return [dict(leaf.knobs) for leaf in iter_leaves(out)]

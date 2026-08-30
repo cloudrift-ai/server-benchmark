@@ -852,11 +852,9 @@ def test_run_ab_bench_unmatched_pin_fails_loudly(run_cli):
     is NOT benched — the row fails loudly (``unreproducible pin`` on the row, no timing)
     and the run exits non-zero, instead of silently benching the planner's own pick
     under the pin's name (the pin-spelling trap the golden sweeps kept hitting)."""
-    rc, stdout, _stderr = run_cli(
-        "run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "BM=8,BN=16"
-    )
+    rc, stdout, stderr = run_cli("run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "BM=8,BN=16")
     assert rc != 0, "an unmatched --ab pin must fail the run"
-    assert "unreproducible pin" in stdout, stdout
+    assert "unreproducible pin" in stdout, f"stdout: {stdout}\nstderr: {stderr}"
     assert "! ab BM=8,BN=16" in stdout, stdout
 
 

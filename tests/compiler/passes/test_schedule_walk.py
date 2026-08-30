@@ -19,7 +19,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
 from emmy.compiler.pipeline.knob import family_of
-from emmy.compiler.pipeline.passes.lowering.tile import _schedule
+from emmy.compiler.pipeline.passes.lowering.tile import _classic
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pool import PoolSample
 
@@ -118,13 +118,13 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
     leaf, so a reintroduced per-branch re-ask shows up here as a repeated question, not as a slow
     test somebody eventually notices."""
     asked: list[tuple] = []
-    original = _schedule._options
+    original = _classic._options
 
     def spy(state, node):
         asked.append((state.tile, node))  # strong refs, so ids below cannot alias freed objects
         return original(state, node)
 
-    monkeypatch.setattr(_schedule, "_options", spy)
+    monkeypatch.setattr(_classic, "_options", spy)
     assert _rows(FIXTURES[case]())
     assert asked, "the fixture built no catalog at all"
     keys = [(id(tile), id(node)) for tile, node in asked]
@@ -137,13 +137,13 @@ def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> N
     from emmy.compiler.pipeline.passes.lowering.tile import _staging  # noqa: PLC0415
 
     calls: list[tuple] = []
-    original = _schedule.cone_seam
+    original = _classic.cone_seam
 
     def spy(cone, k_name):
         calls.append((cone, k_name))
         return original(cone, k_name)
 
-    monkeypatch.setattr(_schedule, "cone_seam", spy)
+    monkeypatch.setattr(_classic, "cone_seam", spy)
     monkeypatch.setattr(
         _staging,
         "cone_seam",
@@ -313,6 +313,6 @@ def test_a_sweep_reading_fold_offers_only_the_serial_reduce(unpinned) -> None:
     def state(specs):
         return SimpleNamespace(tile=SimpleNamespace(output_specs=specs), work_pin=None, transposed_ok=False)
 
-    assert _schedule._reduce_moves(state((sweep_spec,)), red, None) == [Reduce()]
+    assert _classic._reduce_moves(state((sweep_spec,)), red, None) == [Reduce()]
     # Without the sweep read the catalog stays whole.
-    assert len(_schedule._reduce_moves(state(()), red, None)) > 1
+    assert len(_classic._reduce_moves(state(()), red, None)) > 1

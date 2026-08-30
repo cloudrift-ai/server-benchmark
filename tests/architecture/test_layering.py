@@ -307,12 +307,12 @@ def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
     """Identity readers import ``ir/tile/identity``, never a lowering pass's private module.
 
     ``search/golden.py`` and ``search/policy/greedy.py`` used to import ``deploy_identity`` and
-    ``pool_key`` from ``passes/lowering/tile/_schedule`` — inside functions, with ``noqa: PLC0415``,
-    because the module-level direction is a cycle (``_schedule`` imports ``search.space``). A
+    ``pool_key`` from the private tile scheduler — inside functions, with ``noqa: PLC0415``,
+    because the module-level direction is a cycle (the scheduler imports ``search.space``). A
     deferred import with a lint suppression is what a layering inversion looks like when the code
     has not moved yet.
     """
-    forbidden = re.compile(r"lowering\.tile\._schedule\s+import\s+.*\b(?:deploy_identity|pool_key)\b")
+    forbidden = re.compile(r"lowering\.tile\._classic\s+import\s+.*\b(?:deploy_identity|pool_key)\b")
     offenders: list[str] = []
     for py in sorted((_REPO_ROOT / "emmy").rglob("*.py")):
         for lineno, line in enumerate(py.read_text().splitlines(), start=1):

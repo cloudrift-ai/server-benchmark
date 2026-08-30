@@ -204,7 +204,7 @@ its normal form). The named lattice points are spelled at call sites: the deploy
 (`with_io=True` — the durable join key) and the variant key (`with_io=True, with_knobs=True` —
 the search tree and measurement stores). There is no schedule-space key on
 the interface: the enumeration's `pool_id` stamp is minted at its one site in
-`lowering/tile/_schedule` (the variant key + hints + pins + sample identity) — a stamp for the
+`lowering/tile/_classic` (the variant key + hints + pins + sample identity) — a stamp for the
 greedy decision memo and the budgeted descent seed, not a cache key: nothing stores pools.
 
 Identity has two flavors: the default `structural=True` is schedule-equivalent (compute-unit op
@@ -250,9 +250,15 @@ its edge's choice. Construction rejects missing, extra, mismatched, or partly at
   without mutating the problem or assignment.
 - The production walk keeps its catalogs and partial-assignment pruning private. Every leaf is decoded into one typed
   schedule and accepted by the context before search can observe it; an encoded dictionary is never a semantic leaf.
+- Kernel, node, and edge domains are projected independently. Enumeration is the compatible subset of their Cartesian
+  product, so changing traversal order may change work but can never change membership.
 - `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`; node keys are exact
   `TILE@n<N>` / `REDUCE@n<N>` sites; transport keys are exact `STAGE@n<N>.e<M>` edge sites. Decode requires the full
   key set and rejects aliases, missing direct values, unknown keys, and semantically refused assignments.
+
+The lowering implementation is currently being rebuilt in `lowering/tile/_classic`. Until it satisfies these
+invariants, that boundary raises `ClassicScheduleUnavailable` and the exact strict test registry records every affected
+acceptance obligation.
 
 Structural choices are deliberately outside this algebra. A cut or split changes the kernel set first; every fresh
 kernel then constructs a fresh problem and fresh sites. Search ranks encoded accepted leaves and materialization

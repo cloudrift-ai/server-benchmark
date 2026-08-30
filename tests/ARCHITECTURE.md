@@ -43,7 +43,7 @@ Three small organizing directories are also intentional:
 |---|---|
 | `benchmark/models/` | named-model configuration contracts spanning recipes, experiments, and runtime images |
 | `serving/generation/` | the generation runner, loop, capture, and vLLM generation adapter as one serving workflow |
-| `support/` | ordinary data builders shared across source-subsystem boundaries; never tests or pytest hooks |
+| `support/` | suite-wide data shared across source-subsystem boundaries; never tests or pytest hooks |
 
 Do not add a directory merely to shorten a file listing. These directories exist because their tests share one workflow
 or span several source trees. `compiler/passes/` and `perf/` carry their own `ARCHITECTURE.md`; read those before adding
@@ -143,7 +143,9 @@ directly; they never import from another test module or from `conftest.py`.
   removed or broken and when it should come back. For a deliberate whole-subsystem removal whose casualties span
   dozens of files, prefer one registry module of exact node ids applied as a **strict** xfail from the root
   `conftest.py` — exact ids, never path globs, so each id is an acceptance obligation and the list shrinking to
-  empty is the completion gate (the tile-scheduler rebuild ran this way; the registry was deleted when it emptied).
+  empty is the completion gate. The classic-scheduler reconstruction registry additionally freezes its initial count,
+  audits every entry against one exact full-suite collection, and accepts only failures that expose
+  `ClassicScheduleUnavailable`; unrelated failures stay visible and strict XPASS closes recovered obligations.
 - **Card-conditional expectations stay inline**, non-strict, at their own test — a flaky or SKU-specific failure
   needs a reason that names the condition.
 

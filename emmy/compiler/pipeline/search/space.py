@@ -313,20 +313,20 @@ LOOPIFY = Knob(
 
 # --- Enumeration value grids -------------------------------------------------
 #
-# The permitted-move catalog: the bounded, legality-guarded candidate values the ``_schedule`` emit
+# The permitted-move catalog: the bounded, legality-guarded candidate values the classic scheduler
 # enumerates into the scheduling fork. A move is the **typed schedule slice** itself — a
 # :class:`Tile` / :class:`Reduce` built structurally, never a parsed literal — so the
-# enumeration never speaks a codec spelling: ``_schedule`` spells each row ONCE, site-local, at the
+# enumeration never speaks a codec spelling: ``_classic`` spells each row ONCE, site-local, at the
 # boundary where it becomes stored state. One invariant bounds what may live here:
 #
 # - **Static-value legality only.** Guards evaluable from the values alone (the scalar block-thread
 #   budget, the C-fragment register budget) apply here; per-node guards (warp static-K divisibility,
-#   stage resolver eligibility) live with their moves in ``_schedule``. An env pin still wins via
+#   stage resolver eligibility) live with their moves in ``_classic``. An env pin still wins via
 #   ``Knob.narrow`` at the call site — the catalog is the *unpinned* candidate set. Nothing else
 #   filters: a catalog entry is dropped for illegality, never for measured speed.
 
 # The scalar block-thread budget (CUDA's 1024-thread/CTA hardware limit); a scalar tile launches
-# ``par_n·par_m`` threads (one per parallel output cell). The same limit ``_schedule`` enforces on a
+# ``par_n·par_m`` threads (one per parallel output cell). The same limit ``_classic`` enforces on a
 # pinned tile (imported there — one constant, two enforcement points).
 MAX_BLOCK_THREADS = 1024
 

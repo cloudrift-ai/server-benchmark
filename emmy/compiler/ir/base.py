@@ -160,7 +160,7 @@ class Op:
     # measurement stores — knobs included because same-body / different-knobs variants must not
     # collide with their parent, and a measurement belongs to (kernel, knob row)). There is
     # deliberately NO schedule-space key here: the enumeration stamp is scheduler plumbing,
-    # minted at its one site (``lowering/tile/_schedule``).
+    # minted at its one site (``lowering/tile/_classic``).
     # A fact a schedule reads that neither the body nor the io carries is a modeling gap to fix
     # there, never a side-channel fingerprint. ---- #
 

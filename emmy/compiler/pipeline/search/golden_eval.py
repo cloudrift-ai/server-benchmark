@@ -71,7 +71,7 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
             row = leaf_knobs(leaf)
             # A schedule row always spells the kernel-global ``WORK``; a structural arm's knob
             # delta (a cut, the cross-CTA split's g-half or the unsplit receipt) never does — the
-            # stated row-identity marker (``_schedule._step``, the tile scheduler architecture).
+            # stated row-identity marker (the classic scheduler's leaf boundary).
             if WORK.name not in row:
                 continue
             if any(family_of(k) in wanted for k in row):

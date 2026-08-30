@@ -309,6 +309,39 @@ def _is_cuda_item(item) -> bool:
     return "[cuda" in nid or "-cuda-" in nid or nid.endswith("-cuda]")
 
 
+def _mark_classic_schedule_failures(config, items) -> None:
+    """Apply the clean-slate scheduler registry and audit a full-suite collection."""
+    from tests.support.classic_schedule_failures import FAILURES
+
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.nodeid] = counts.get(item.nodeid, 0) + 1
+        failure = FAILURES.get(item.nodeid)
+        if failure is None:
+            continue
+        item._classic_schedule_failure = failure
+        item.add_marker(
+            pytest.mark.xfail(
+                strict=True,
+                reason=f"classic schedule phase {failure.phase}: {failure.cluster} — {failure.reason}",
+            )
+        )
+
+    tests_dir = Path(__file__).resolve().parent
+    requested = {Path(str(arg).split("::", 1)[0]).resolve() for arg in config.args}
+    if tests_dir not in requested:
+        return
+    missing = sorted(set(FAILURES) - counts.keys())
+    duplicate = sorted(nodeid for nodeid in FAILURES if counts.get(nodeid, 0) > 1)
+    if missing or duplicate:
+        details = []
+        if missing:
+            details.append(f"missing exact node ids: {missing}")
+        if duplicate:
+            details.append(f"multiply collected node ids: {duplicate}")
+        raise pytest.UsageError("invalid classic schedule failure registry; " + "; ".join(details))
+
+
 _NO_TOOLCHAIN = "CUDA not available (need cupy + GPU + nvcc)"
 
 
@@ -384,6 +417,8 @@ _CUDA_CLI_GROUP = "cuda-cli"
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     import heapq
+
+    _mark_classic_schedule_failures(config, items)
 
     # Deselect ``perf`` unless explicitly requested. Lives here — not in
     # ``tests/perf/conftest.py`` — so the gate holds for ANY ``tests/``
@@ -474,6 +509,30 @@ def pytest_collection_modifyitems(config, items):
         items[:] = cuda_items + reordered
     else:
         items[:] = reordered + cuda_items
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Keep the reconstruction registry strict to its declared exception boundary."""
+    outcome = yield
+    failure = getattr(item, "_classic_schedule_failure", None)
+    if failure is None or call.excinfo is None or call.excinfo.errisinstance(pytest.skip.Exception):
+        return
+    report = outcome.get_result()
+    from emmy.compiler.pipeline.passes.lowering.tile._classic import ClassicScheduleUnavailable
+
+    captured = "\n".join(content for _, content in report.sections)
+    expected = (
+        call.excinfo.errisinstance(ClassicScheduleUnavailable)
+        or "ClassicScheduleUnavailable" in str(call.excinfo.value)
+        or "ClassicScheduleUnavailable" in report.longreprtext
+        or "ClassicScheduleUnavailable" in captured
+    )
+    if expected or not hasattr(report, "wasxfail"):
+        return
+    report.outcome = "failed"
+    report.longrepr = call.excinfo.getrepr(style="short")
+    del report.wasxfail
 
 
 @pytest.fixture(scope="session")

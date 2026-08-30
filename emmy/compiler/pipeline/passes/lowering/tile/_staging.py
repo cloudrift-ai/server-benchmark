@@ -1,8 +1,8 @@
 r"""Operand-stage RESOLUTION — the sizing arithmetic behind the schedule's ``STAGE`` family.
 
 Exactly three resolvers live here — :func:`resolve_warp_stage`, :func:`resolve_scalar_stage`,
-:func:`resolve_fill_stage` — plus the compute fill's own node refusals. The walk's option builder
-(``_schedule``) offers a staged transport only when it RESOLVES here, and the row carries the
+:func:`resolve_fill_stage` — plus the compute fill's own node refusals. The classic scheduler
+offers a staged transport only when it RESOLVES here, and the row carries the
 resolved spelling, so the fork, the stamped knobs and the kernel agree. A resolver is not a
 predicate and this is not a legality layer: for the shared-memory budget the legal answer is a
 SIZE — the resolved ``bk_elems`` slab chunk and the deepest ring the budget affords — so each
@@ -17,7 +17,7 @@ because the fill is the move they filter, one statement each so the unpinned enu
 and a pin's raise share it. What deliberately does NOT live here: the transport/target rule
 (MOVE×target — ``Stage.available_on``, filtered in the ``stage_moves`` catalog; the scheduler's
 pin path reads its message through :func:`stage_target`) and the fragment-seam legality (the
-paired register bound), which lives beside the other refusal functions in ``_schedule``. Nothing
+paired register bound), which lives beside the other refusal functions in ``_classic``. Nothing
 here ranks or narrows for speed."""
 
 from __future__ import annotations

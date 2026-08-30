@@ -14,6 +14,12 @@ piece inputs and producer ordering. The former route now carries all 23 required
 and has a focused regression test. The combined branch gate passed 3,993 tests with 1,012 skips and five expected
 failures on the qualification host; local focused replay passed 22 tests with one skip, and lint is clean.
 
+A second bounded reduction found that legal placement sites beneath a projection region were absent from provider
+closure: the lexical-environment walk only visited direct Fold members while placement used the complete stored-child
+walk. Commit `8c2bb5cb` shares that traversal. The current s512 normalized-K projection plus rotary seam now lowers as
+two kernels, materializing the value once and reading its workspace in the consumer. This is a real new route, but a
+complete correct s512 assembly still has another child that exceeds the 15-second bound.
+
 Manually selected A100 child rows demonstrate that schedule quality is not the immediate blocker:
 
 | child role | best correct O3 latency | schedule highlight |
@@ -29,16 +35,25 @@ either expose no applicable MMA schedule or take 10-15 seconds per launch. The n
 value materialization across independent projection regions, not a larger schedule search.
 
 The V100 manual screen found one correct and repeatable schedule improvement. The standalone model-sized Volta
-projection fell from 3,571.7 µs to 1,871.9-1,876.0 µs with `WORK=w4x2`, f16 MMA `f2x4/k4`, and `STAGE=d1/smem`;
-`torch.compile` measured 758.8-764.9 µs. This is a 1.9x Emmy improvement but remains about 2.5x behind. Its CUDA uses
-two CTA barriers in a 192-iteration K loop, 123 registers per thread, and 25% occupancy, so the remaining gap needs a
-better SM70 blocking-copy software pipeline rather than another currently offered schedule.
+projection fell from 3,571.7 µs to 1,868.8 µs with `WORK=w4x2`, f16 MMA `f2x4/k4`, and `STAGE=d1/smem`, while
+`torch.compile` measured 756.736 µs. A fresh repeat measured 1,881.088 versus 757.760 µs with strict zero error. The
+exact-card CLI recorded the first pair in the realization case. This is a 1.9x Emmy improvement but remains about
+2.5x behind. Its CUDA uses two CTA barriers in a 192-iteration K loop, 123 registers per thread, and 25% occupancy, so
+the remaining gap needs a better SM70 blocking-copy software pipeline rather than another currently offered schedule.
 
 The V100 linear-cut diagnostic fell from 1,160.2 µs to 247.0-247.8 µs by selecting the unsplit child, versus
 65.7-66.0 µs for `torch.compile`, but it is not admissible: both strict repeats fail with 26,441 mismatches and maximum
 absolute error 0.25. Eight tensor-core schedules failed identically, and a plain large FP16 `F.linear` reproducer
 without placement or residual addition has the same numerical character. That row is retained only as diagnostic
 evidence and must not be promoted under the strict contract.
+
+The numerical discrepancy reduces to FP16 `[1,17,1536] × [17,1536]`. Emmy emits FP32-accumulating Volta MMA across
+the complete K dimension and performs one final FP32-to-FP16 store. Disabling PyTorch's reduced-precision FP16 GEMM
+reduction makes the unchanged Emmy row pass the strict comparison, identifying reference reduction policy—not an
+intermediate Emmy FP16 carrier, split-K, or store—as the distinguishing semantic. A proposed `_xfail_correct` corpus
+case correctly XPASSed because corpus correctness uses the NumPy backend and its documented narrow-operand tolerance;
+it cannot encode a PyTorch-eager policy mismatch. Reproducing cuBLAS's reduced-precision chunking would require an
+explicit compiler numerical-policy decision, so no tolerance or speculative code change was committed.
 
 The RTX 4090 selector again found zero exact sm89 corpus cases. A fresh Qwen3-0.6B s512 trace produced six targets;
 the 29-origin target exceeded a six-second watchdog, while manual cuts produced best measured child totals of about
@@ -49,7 +64,8 @@ promoted without repeated correct reference measurements.
 Manual scheduling therefore improved the measured ceilings and exposed one fixed compiler bug, but did not establish
 parity. Across Ampere and Ada the next shared problem is forming reusable value boundaries before child scheduling;
 on Volta the independent remaining problems are synchronous staging efficiency and the strict large-linear numerical
-contract. The A100 VM remains running.
+contract. After integrating both placement fixes and the recorded Volta row, the combined local gate passed 3,994
+tests with 1,012 skips and five expected failures; lint remained clean. The A100 VM remains running.
 
 ## Post-#689 structural-identity qualification (2026-08-29)
 

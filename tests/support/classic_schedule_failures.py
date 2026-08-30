@@ -428,37 +428,7 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-splitk.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-symbolic-m-cp.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-symbolic-m-cp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-epilogue-bias.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-epilogue-bias.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-epilogue-relu.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-epilogue-relu.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-epilogue-residual.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-epilogue-residual.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-epilogue-scale.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-epilogue-scale.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-mixed-dtype-slabs.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-mixed-dtype-slabs.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-reduce-coop-ilp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-reduce-coop-ilp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-reduce-coop.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-reduce-coop.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-reduce-ilp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-reduce-ilp.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-masked-n-staged_xfail_offered.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-d1-128x128x128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-d1-128x128x128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-d1-64x64x64.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-d1-64x64x64.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-d2-128x128x128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-d2-128x128x128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-d2-64x64x64.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-d2-64x64x64.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-gmem-128x128x128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-gmem-128x128x128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-gmem-64x64x64.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-staging-gmem-64x64x64.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-tma-staged.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-tma-staged.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-cp.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-cp.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-gmem.yaml-built]",
@@ -695,7 +665,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 586
+REMAINING_FAILURE_COUNT = 556
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

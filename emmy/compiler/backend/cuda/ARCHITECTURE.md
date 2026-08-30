@@ -301,11 +301,13 @@ The wall-clock cap is `asyncio.wait_for`; on overrun the child is SIGKILLed and 
 device. Because the persistent worker is reused across configs, an illegal / misaligned access is a hazard: that error
 is **sticky** — it corrupts the CUDA context so every later call returns the same status until the process dies, which
 would cascade identical false `bench_fail`s across all subsequent configs. So after any failure the worker probes its
-context (`_context_dirty` — a cheap `deviceSynchronize`) and *exits* if it's poisoned; `run_job` respawns a clean
-context on the next request (the dead-proc check before `await self._spawn()`). Benign failures (NVRTC compile errors,
-cleaned-up OOM) leave the context healthy and keep the worker alive, so they pay no respawn cost. A stale-worker race
-on the send (a `BrokenPipeError`/`ConnectionResetError` from `stdin.drain` after the worker's dirty-context exit)
-triggers one respawn + resend before surfacing as `bench worker died during request send`. Error paths `await aclose()`
+context (`_context_dirty` — a cheap `deviceSynchronize`) and hard-exits after writing its response if it's poisoned;
+the hard exit bypasses CUDA's process-exit handlers, which otherwise wait forever on a reported hung kernel. `run_job`
+respawns a clean context on the next request (the dead-proc check before `await self._spawn()`). Benign failures (NVRTC
+compile errors, cleaned-up OOM) leave the context healthy and keep the worker alive, so they pay no respawn cost. A
+stale-worker race on the send (a `BrokenPipeError`/`ConnectionResetError` from `stdin.drain` after the worker's
+dirty-context exit) triggers one respawn + resend before surfacing as `bench worker died during request send`. Error
+paths `await aclose()`
 (SIGKILL + reap) so the subprocess transport is cleaned before the loop closes.
 
 Three transport behaviors worth knowing: (1) the child's **stderr is drained continuously** by a background task into

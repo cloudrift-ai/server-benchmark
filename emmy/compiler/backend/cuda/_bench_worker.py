@@ -320,8 +320,10 @@ def main() -> None:
         if dirty:
             # Corrupted context — don't serve more requests from it. Exit so the
             # parent respawns a fresh context on its next bench (program.py
-            # ``_AsyncBenchWorker.run_job`` re-spawns when the proc is dead).
-            return
+            # ``_AsyncBenchWorker.run_job`` re-spawns when the proc is dead). A hung
+            # kernel also makes CUDA's normal process-exit handlers wait forever, so
+            # bypass Python teardown after the response has been written with os.write.
+            os._exit(0)
 
 
 if __name__ == "__main__":

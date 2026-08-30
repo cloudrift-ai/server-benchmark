@@ -1,5 +1,48 @@
 # Golden-bench kernel corpus
 
+## Post-#689 structural-identity qualification (2026-08-29)
+
+The draft was rebased cleanly onto main `e782e991`; exact qualification source was `79f14e3b`. Main's canonical
+Loop-IR identity migration deliberately orphans earlier tune-DB rows. `make test-corpus-regen` reported the realization
+corpus current, and its GPU-free replay passed 623 cases with 424 skips and five expected failures, so its 210 identity
+stamps need no branch-local regeneration.
+
+The two staged A100 experiment goldens do need more than a key update. Reconstructing their embedded stable Torch IR
+on current main yields four s1 targets and six s512 targets, instead of the nine provenance targets in each checked
+file. The s1 layer now has three small targets plus one 73-origin fused target. The s512 layer has four small targets
+plus 53-origin and 29-origin fused targets. The old provenance selections therefore cannot be renamed onto the new
+identities.
+
+A fresh, isolated O3 A100 tune used a four-candidate cap and patience two. The three s1 small targets completed in
+3.5-29.2 seconds with 1.1-2.0 µs winners. Four s512 small targets completed in 4.5-5.8 seconds with 1.684-3.081 µs
+winners. The first candidate for every fused target exceeded the 60-second kernel watchdog: the s1 73-origin target,
+the s512 53-origin target, and the s512 29-origin target. None produced a measured cut assembly or child schedule
+receipts. The regenerated working files are retained as host-local evidence, but were not promoted because an
+incomplete file would replace replayable goldens with unqualified fused rows. Current regeneration therefore needs
+the tuner to select a cut before benchmarking the fused terminal, then tune and persist the resulting child identities
+as one replayable assembly.
+
+The exact post-rebase A100 realization corpus retained two wins, three losses, and the existing stat-fill watchdog:
+
+| A100 case | Emmy | `torch.compile` | result |
+| --- | ---: | ---: | --- |
+| GQA B cut | 7.026 µs | 10.030 µs | 1.43x faster |
+| computed-value attention cut | 6.072 µs | 8.018 µs | 1.32x faster |
+| Q/K workspace chain | 84.224 µs | 11.947 µs | 7.05x slower |
+| unit-row split-K | 9.113 µs | 2.856 µs | 3.19x slower |
+| batched PV transpose | 17.682 µs | 11.658 µs | 1.52x slower |
+| stat-fill | watchdog | — | unchanged failure |
+
+Both current SM70 cases passed correctness on V100. Linear-cut measured 1,160.192 µs versus 66.048 µs for
+`torch.compile`; Volta MMA measured 3,129.344 µs versus 754.688 µs. The command's nonzero status was only the
+missing-duration guard for these newly measured rows. The regenerated corpus still contains no exact SM89 closed case.
+
+The failed fused candidates exposed one independent bounded-tuning bug: after reporting `HungKernelError`, the child
+returned through normal Python teardown, where CUDA waited forever for the still-running kernel. The worker now
+hard-exits after writing the failure response, and a CPU-only regression test proves that Python exit handlers cannot
+wedge the next candidate. This restores the existing clean-worker continuation contract; it does not improve a kernel.
+No new golden or large serving result was promoted, and the retained A100 remains running.
+
 ## Post-merge qualification and measured-row replay fix (2026-08-29)
 
 Qualification resumed from merged main `5f0a2076` on branch `codex/post-679-corpus-qualification`. The exact-main

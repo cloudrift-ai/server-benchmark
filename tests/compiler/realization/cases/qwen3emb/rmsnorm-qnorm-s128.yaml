@@ -27,9 +27,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
+      REDUCE@n1: coop
       RASTER: ''
       WORK: t128
     identity: 5565513ac63870cc5897f7446cac852f1200920cb048113720da31026d4a681f

@@ -28,7 +28,7 @@ class M(torch.nn.Module):
         return x + 1
 
 g = trace_module(M().eval(), (torch.zeros(8, 64),))
-with pinned_knobs({"TILE": "f2"}):
+with pinned_knobs({"TILE@n0": "f2"}):
     c = CudaBackend().compile(g)
 for _nid, node in sorted(c.nodes.items()):
     src = getattr(node.op, "kernel_source", None)

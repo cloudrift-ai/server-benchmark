@@ -94,7 +94,20 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
             option = expanded[0]
         return option
 
-    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)
+    terminal, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)
+    if sample is None:
+        # A fully pinned classic problem can collapse without opening a policy-visible fork. Its
+        # complete row still belongs to the enumeration: read it from the realized kernel set so
+        # multi-kernel structural targets expose every independently scheduled problem.
+        from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+        from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES  # noqa: PLC0415
+
+        for node in terminal.nodes.values():
+            if not isinstance(node.op, TileOp) or WORK.name not in node.op.knobs:
+                continue
+            row = {key: value for key, value in node.op.knobs.items() if family_of(key) in SCHEDULE_FAMILIES}
+            if any(family_of(key) in wanted for key in row) and row not in rows:
+                rows.append(row)
     return Candidates(rows, sum(sample.totals.values()) if sample is not None else len(rows))
 
 

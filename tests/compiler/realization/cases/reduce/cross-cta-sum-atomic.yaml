@@ -25,7 +25,9 @@ configs:
       FAST_MATH: false
       PLACE: fuse
     knobs:
-      REDUCE: g2a
+      WORK: ''
+      RASTER: ''
+      REDUCE@n0: ''
     identity: 0c009627a43d16ae681f3d3d5ce3a825eb7c3faecf29f3f54b02983657d854a7
     latency:
       NVIDIA GeForce RTX 5090:

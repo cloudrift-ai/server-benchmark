@@ -68,9 +68,21 @@ configs:
       FAST_MATH: false
       PLACE@map.fold.a.fold.b1: cut
     knobs:
-      TILE: ''
       WORK: t128
-      REDUCE: coop
-      STAGE: ''
       RASTER: ''
+      REDUCE@n3: coop
+      TILE@n2: ''
+      TILE@n6: ''
+      TILE@n9: ''
+      REDUCE@n1: coop
+      REDUCE@n2: coop
+      REDUCE@n5: coop
+      REDUCE@n6: coop
+      REDUCE@n9: coop
+      STAGE@n2.e0: ''
+      STAGE@n2.e1: ''
+      STAGE@n6.e0: ''
+      STAGE@n6.e1: ''
+      STAGE@n9.e0: ''
+      STAGE@n9.e1: ''
     identity: 4b19684899ef6e89de01f2500058a17a014bb0ff1831d92c12fa6c2c4ffd18ec

@@ -13,8 +13,10 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.space import MAX_FRAGMENT_REGISTERS, warp_tile_moves
 from emmy.compiler.target import set_target
+from tests.compiler.helpers import pin_classic
 
 VOLTA = "mma_m8n8k4_f16_f32"
 AMPERE = "mma_m16n8k16_f16_f32"
@@ -45,10 +47,10 @@ def _norm_linear_graph(*, m: int = 16, n: int = 16, k: int = 16) -> Graph:
 
 
 def _pin(monkeypatch, atom: str, *, tile: str = "f1x1", stage: str = "") -> None:
-    monkeypatch.setenv("EMMY_TILE", f"{atom}/{tile}")
+    pin_classic(monkeypatch, {"TILE": f"{atom}/{tile}"})
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    monkeypatch.setenv("EMMY_STAGE", stage)
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    pin_classic(monkeypatch, {"STAGE": stage})
+    pin_classic(monkeypatch, {"REDUCE": ""})
 
 
 def _source(graph: Graph, ctx: Context) -> tuple[str, dict]:
@@ -120,8 +122,8 @@ def test_volta_warp_tiles_respect_accumulator_register_budget() -> None:
 def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     _pin(monkeypatch, VOLTA)
     src, knobs = _source(_graph(trans=trans), Context(compute_capability=(7, 0)))
-    assert knobs["TILE"] == f"{VOLTA}/f1x1"
-    assert knobs["STAGE"] == ""
+    assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
+    assert family_value(knobs, "STAGE") == ""
     assert "mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32" in src
     assert "unsigned _a0[2]" in src and "unsigned _b0[2]" in src
     assert "float _c0_0[8]" in src
@@ -138,7 +140,7 @@ def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
     """
     _pin(monkeypatch, VOLTA, tile="f1x1", stage="")
     src, knobs = _source(_graph(m=1, n=16, k=16, trans=True), Context(compute_capability=(7, 0)))
-    assert knobs["TILE"] == f"{VOLTA}/f1x1"
+    assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
     assert knobs["WORK"] == "w1x1"
     assert "emmy_mma_m8n8k4_f16_f32" in src
     assert "_um_b" in src and "< (1)" in src
@@ -148,7 +150,7 @@ def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
 def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch, trans) -> None:
     _pin(monkeypatch, VOLTA, stage="d1/smem")
     src, knobs = _source(_graph(k=16, trans=trans), Context(compute_capability=(7, 0)))
-    assert knobs["STAGE"] == "d1/smem"
+    assert family_value(knobs, "STAGE") == "d1/smem"
     assert "__shared__ __half _a_smem[64]" in src
     assert "__shared__ __half _b_smem[64]" in src
     assert "emmy_mma884_load_a_smem(_a0, &_a_smem" in src
@@ -162,8 +164,8 @@ def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch,
 def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:
     _pin(monkeypatch, VOLTA, tile="f1x1/k2", stage="d2/smem/p2")
     src, knobs = _source(_graph(k=32), Context(compute_capability=(7, 0)))
-    assert knobs["TILE"] == f"{VOLTA}/f1x1/k2"
-    assert knobs["STAGE"] == "d2/smem/p2"
+    assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1/k2"
+    assert family_value(knobs, "STAGE") == "d2/smem/p2"
     assert "__shared__ __half _a_smem[256]" in src
     assert "__shared__ __half _b_smem[256]" in src
     for fragment in ("_a0_s0", "_a0_s1", "_b0_s0", "_b0_s1"):
@@ -197,8 +199,8 @@ def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch, 
     _pin(monkeypatch, VOLTA, tile="f1x1", stage=stage)
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     src, knobs = _source(_norm_linear_graph(), Context(compute_capability=(7, 0)))
-    assert knobs["TILE"] == f"{VOLTA}/f1x1"
-    assert knobs["STAGE"] == stage
+    assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
+    assert family_value(knobs, "STAGE") == stage
     assert "emmy_mma884_load_a_smem(_a0, &_a_smem" in src
     assert "emmy_mma884_load_b_smem_trans(_b0, &_b_smem" in src
     assert "rsqrtf" in src  # the norm cone itself, evaluated into the A slab

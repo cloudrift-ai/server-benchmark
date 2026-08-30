@@ -27,7 +27,7 @@ from emmy.compiler.ir.stmt import Load
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 from emmy.compiler.pipeline.search.space import stage_moves
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import classic_row, requires_cuda
 
 K16 = "mma_m16n8k16_f16_f32"
 K32 = "mma_m16n8k32_e4m3_f32"
@@ -200,7 +200,7 @@ def _run_w8a16(backend, stage_pin, x, bits, scale, m, n, k):
 
     from .test_fp8_operand_binding import _fp8_linear_graph
 
-    pins = {"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}
+    pins = classic_row({"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}, node=1)
     with pinned_knobs(pins):
         compiled = backend.compile(_fp8_linear_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
@@ -268,7 +268,7 @@ def test_canonical_byte_b_and_splitk_compose_cuda():
     backend = CudaBackend()
 
     def run(stage, red):
-        with pinned_knobs({"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": red, "STAGE": stage}):
+        with pinned_knobs(classic_row({"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": red, "STAGE": stage})):
             compiled = backend.compile(graph())
         srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
         src = next((s for s in srcs if "mma.sync" in s), "")
@@ -301,7 +301,7 @@ def test_k32_staged_bit_identical_to_gmem_direct_cuda():
     backend = CudaBackend()
 
     def run(stage_pin):
-        pins = {"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}
+        pins = classic_row({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""})
         with pinned_knobs(pins):
             compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
         srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]

@@ -103,7 +103,7 @@ def test_trace_records_partition_fork(monkeypatch) -> None:
     depending on schedule enumeration order."""
     from emmy.compiler.pipeline.knob import family_of
 
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "")
     g = _f32_matmul_graph()
     run = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((8, 0)))
     terminal, trace = run.resolve(g, _option0)

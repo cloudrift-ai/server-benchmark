@@ -45,12 +45,14 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.classic_schedule import (
+    CLASSIC_NODE_FAMILIES,
     ClassicMaterialization,
     ClassicProblem,
     ClassicSchedule,
     ClassicScheduleContext,
     EdgeSchedule,
     KernelSchedule,
+    NodeId,
     Projection,
     ProjectionSchedule,
     ReductionSchedule,
@@ -77,9 +79,9 @@ from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.identity import hint_extent, pool_key
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, cone_seam, edge_dtypes, projection_tail, scheduled
-from emmy.compiler.ir.tile.path import SLICE_FAMILIES, sites
+from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.fork import Fork, iter_leaves
-from emmy.compiler.pipeline.knob import axis_of, schedule_pin_fingerprint
+from emmy.compiler.pipeline.knob import axis_of, family_pins, schedule_pin_fingerprint
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_axis_step, split_addressable
 from emmy.compiler.pipeline.passes.lowering.tile import _staging as staging
 from emmy.compiler.pipeline.passes.lowering.tile._tree import children, walk
@@ -151,13 +153,11 @@ class PinRefused(ValueError):
 
 
 def _pin(knob, key: str | None) -> str | None:
-    """The live env pin addressing ``key`` — ``EMMY_KNOBS``'s ``FAMILY@<element>`` entry, falling
-    back to the bare ``EMMY_<FAMILY>``. Unset reads ``None``, which is the distinction the
-    enumeration keys on: an unset family offers its catalog, a set one is authoritative."""
+    """The live pin addressing exactly ``key``; aliases and bare fallbacks are not accepted."""
     if key is None:
         return None
     element = axis_of(key)
-    return knob.narrow_at(element) if element else knob.raw()
+    return knob.pin_at(element) if element else knob.raw()
 
 
 def _supports_scalar(node) -> bool:
@@ -222,12 +222,12 @@ def _contraction_options(state: _State, node) -> list[_Option]:
     sched = state.sched
     facts = state.facts[id(node)]
     key = sched.key("TILE", node)
-    stage_key = sched.key("STAGE", node)
+    stage_keys = sched.edge_keys(node)
     red_key = sched.key("REDUCE", node)
-    stage_pin = _pin(STAGE, stage_key)
-    # Whether the STAGE pin addressed THIS site (``STAGE@<element>``) or is the bare graph-wide
-    # fallback — the distinction the fill's transport arm drops or raises on.
-    stage_scoped = stage_pin is not None and (element := axis_of(stage_key)) is not None and STAGE.pin_at(element) is not None
+    pinned_stages = {pin for stage_key in stage_keys if (pin := _pin(STAGE, stage_key)) is not None}
+    if len(pinned_stages) > 1:
+        raise ValueError(f"STAGE edge pins at {', '.join(stage_keys)} disagree: {sorted(pinned_stages)!r}")
+    stage_pin = next(iter(pinned_stages), None)
     tile_pin = _pin(TILE, key)
     red_pin = _pin(REDUCE, red_key)
     opts: list[_Option] = []
@@ -253,13 +253,13 @@ def _contraction_options(state: _State, node) -> list[_Option]:
                 f"per-cell tile realizes — the tiled {plan.spell() or 'scalar'} tile contracts K serially per register cell"
             )
             continue
-        for stage in _stage_options(state, node, plan, placed, stage_pin, stage_scoped, refused):
+        for stage in _stage_options(state, node, plan, placed, stage_pin, stage_pin is not None, refused):
             # The ADDITIVE producer/consumer bound: a compute fill keeps the consuming fragments
             # live while it builds one scheduled producer block, so the pair's registers sum.
             why = _paired_budget_refusal(node, facts.producer, placed, stage)
             if why is not None:
                 refused.append(why)
-                if tile_pin is not None:
+                if tile_pin is not None and state.ctx.validate_pins:
                     # PinRefused: the bound exists because the PAIR's registers sum — cutting the
                     # producer into its own kernel removes the pairing, so another set may realize.
                     raise PinRefused(why)
@@ -267,8 +267,7 @@ def _contraction_options(state: _State, node) -> list[_Option]:
             knobs = {}
             if key is not None:
                 knobs[key] = plan.spell()
-            if stage_key is not None:
-                knobs[stage_key] = stage.spell() if stage is not None else ""
+            knobs.update((stage_key, stage.spell() if stage is not None else "") for stage_key in stage_keys)
             tile = placed if plan.is_tiled else None
             seam = _seam_entries(state, node, key, plan, placed, stage)
             for red in reduces:
@@ -283,14 +282,14 @@ def _contraction_options(state: _State, node) -> list[_Option]:
                     for band in _producer_bands(work, stage, plan.block_threads)
                 )
     if not opts:
-        if tile_pin is not None and tile_refused:
+        if tile_pin is not None and tile_refused and state.ctx.validate_pins:
             raise PinRefused(f"TILE pin {tile_pin!r} at {key or 'TILE'} names no schedule this site can realize: {tile_refused[-1]}")
-        if red_pin and red_refused:
+        if red_pin and red_refused and state.ctx.validate_pins:
             # PinRefused: the coop/ILP partition rides the per-cell tier, which turns on the plans
             # THIS node offers — a cut that leaves a single-channel contraction restores it.
             raise PinRefused(red_refused[-1])
-        if stage_pin and refused:
-            key_name = stage_key or "STAGE"
+        if stage_pin and refused and state.ctx.validate_pins:
+            key_name = ", ".join(stage_keys)
             raise PinRefused(f"STAGE pin {stage_pin!r} at {key_name} names no stage this contraction can realize: {refused[-1]}")
     return opts
 
@@ -630,7 +629,8 @@ def _tile_moves(state: _State, node, key: str | None) -> list[Tile]:
         out.append(plan)
     if not out:
         detail = refused[-1] if refused else "no inventory this site can spell resolves it"
-        raise PinRefused(f"TILE pin {pin!r} at {key or 'TILE'} names no schedule this site can realize: {detail}")
+        if state.ctx.validate_pins:
+            raise PinRefused(f"TILE pin {pin!r} at {key or 'TILE'} names no schedule this site can realize: {detail}")
     return out
 
 
@@ -745,7 +745,12 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[Reduce]:
         return [Reduce()]
     if pin is None:
         return _reduce_catalog(state, extent)
-    return [_parsed_reduce_pin(state, pin, key)]
+    try:
+        return [_parsed_reduce_pin(state, pin, key)]
+    except PinRefused:
+        if state.ctx.validate_pins:
+            raise
+        return []
 
 
 def _parsed_reduce_pin(state: _State, pin: str, key: str | None) -> Reduce:
@@ -761,8 +766,9 @@ def _parsed_reduce_pin(state: _State, pin: str, key: str | None) -> Reduce:
         raise ValueError(f"REDUCE pin {pin!r} at {key or 'REDUCE'} does not resolve: {e}") from None
     if plan.needs_split:
         if not state.carries_partition:
-            # plain: only a SPLIT mints the receipt this pin names; a cut never does
-            raise ValueError(
+            # A split in another structural alternative may mint this receipt.  Strict compile
+            # reports the contradiction; union-pin enumeration prunes this kernel.
+            raise PinRefused(
                 f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a cross-CTA split, which only the structural "
                 f"035_split_reduce fork realizes on a kernel's head fold — this kernel realized none"
             )
@@ -1376,14 +1382,39 @@ def _off(sched: Sched, root) -> dict:
     absent — otherwise two rows of one kernel would carry different family vocabularies. A family
     with no keyed site keeps its bare key, for the same reason."""
     out: dict[str, str] = {}
-    for family in SLICE_FAMILIES:
+    for family in CLASSIC_NODE_FAMILIES:
         keys = [key for node in _nodes(root) if (key := sched.key(family, node)) is not None]
-        out.update(dict.fromkeys(keys or [family], ""))
+        out.update(dict.fromkeys(keys, ""))
+    edge_keys = [key for node in _nodes(root) for key in sched.edge_keys(node)]
+    out.update(dict.fromkeys(edge_keys, ""))
     # Kernel-global like WORK. The walk decides it once per kernel (:func:`_raster_values` — the
     # flat order on every kernel the swizzle cannot mean), and the OFF entry keeps the family in
     # every row's vocabulary for the same reason as the site families.
     out["RASTER"] = ""
     return out
+
+
+def _validate_classic_pins() -> None:
+    """Reject bare classic families and every noncanonical site suffix.
+
+    Membership is a property of one complete problem row and is checked by
+    :class:`ClassicScheduleCodec`. Environment pins span all kernel problems in a graph, so this
+    boundary checks only the one node/edge identity grammar shared by those rows.
+    """
+    for family in (*CLASSIC_NODE_FAMILIES, "STAGE"):
+        for key, _value in family_pins(family):
+            _family, at, site = key.partition("@")
+            try:
+                node, dot, edge = site.partition(".e")
+                NodeId.parse(node)
+                if family == "STAGE":
+                    if dot != ".e" or not edge.isdigit():
+                        raise ValueError
+                elif dot:
+                    raise ValueError
+            except ValueError:
+                expected = f"{family}@n<ordinal>.e<operand>" if family == "STAGE" else f"{family}@n<ordinal>"
+                raise ValueError(f"classic schedule pin {key!r} is not canonical; expected {expected}") from None
 
 
 def _raster_values(state: _State) -> tuple[str, ...]:
@@ -1531,7 +1562,10 @@ def _materialize(state: _State, row: dict) -> TileOp:
         plan = resolve_site_tile(row.get(sched.key("TILE", node) or "") or None, work, red.coop)
         if plan.is_tiled:
             slices.append(("TILE", node, plan))
-            spec = row.get(sched.key("STAGE", node) or "") or ""
+            specs = {row.get(key, "") for key in sched.edge_keys(node)}
+            if len(specs) > 1:
+                raise ValueError(f"STAGE edge choices disagree at {sched.key('TILE', node)}: {sorted(specs)!r}")
+            spec = next(iter(specs), "")
             if spec:
                 slices.append(("STAGE", node, _stage_of(state, node, plan, spec)))
         else:
@@ -1647,6 +1681,9 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     the walk's leaf stream is reservoir-sampled (:meth:`~…search.pool.PoolSample.take`), the pool's
     exact size is reported through ``sample.totals``, and the drawn rows come back as leaf forks."""
     sched = Sched(tile.op, {}, place=tile.place.on_grid())
+    off = _off(sched, tile.op)
+    if ctx.validate_pins:
+        _validate_classic_pins()
     # The per-kernel FACTS, computed once: the projection tail and what it permits (the fragment
     # epilogue, the transposed band's sweep + per-cell conditions), the per-contraction facts
     # (atom families, reduction domain, seam, producer, fragment edges), and the parsed WORK pin —
@@ -1656,7 +1693,6 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     transposed_ok = _inner_free(tile) is not None and not any(isinstance(s, Loop) for s in tail) and not has_contraction_tail(tail)
     facts = _site_facts(tile, ctx, sched, tail, frag_ok)
     raw = WORK.raw()
-    off = _off(sched, tile.op)
     # The IR receipt (the sliced axis's partition Window), or the flag receipt a piece with no
     # sliced axis carries (a realized split's independent projection sibling — ``split_consumed``):
     # both mean the kernel-set decision was consumed, so a ``REDUCE`` pin's ``g`` half strips.

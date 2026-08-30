@@ -50,7 +50,12 @@ configs:
       PLACE: fuse
     knobs:
       WORK: w2x2
-      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      RASTER: ''
+      TILE@n1: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE@n1: ''
+      STAGE@n1.e0: d1/smem
+      STAGE@n1.e1: d1/smem
+      STAGE@n1.e2: d1/smem
     identity: 8ede64c06e50b998a4d924aaa6d23520d7df4e476e9f1a4e7f5b46259cdb624d
     latency:
       NVIDIA GeForce RTX 5090:

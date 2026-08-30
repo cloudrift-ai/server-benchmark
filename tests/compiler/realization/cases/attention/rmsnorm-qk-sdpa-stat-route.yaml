@@ -59,9 +59,17 @@ configs:
       PLACE@map.fold.a.map.fold.a31: cut
       PLACE@map.fold.a.map.fold.a32: cut
     knobs:
-      TILE: ''
       WORK: ''
-      REDUCE: ''
-      STAGE: ''
       RASTER: ''
+      REDUCE@n3: ''
+      REDUCE@n0: ''
+      TILE@n0: ''
+      TILE@n2: ''
+      REDUCE@n1: ''
+      REDUCE@n2: ''
+      STAGE@n2.e0: ''
+      STAGE@n2.e1: ''
+      TILE@n1: ''
+      STAGE@n1.e0: ''
+      STAGE@n1.e1: ''
     identity: 83e4f2a6fa484a4b2a50babe833fc9cf35021c1f551fcfabaf496658c24d055f

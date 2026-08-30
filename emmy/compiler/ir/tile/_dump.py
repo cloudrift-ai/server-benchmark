@@ -6,12 +6,12 @@ reads made ``ops`` half presentation."""
 
 from __future__ import annotations
 
+from emmy.compiler.ir.classic_schedule import CLASSIC_FAMILIES, CLASSIC_NODE_FAMILIES
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Body, Load
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.tile.ir import ProjectionRegion
 from emmy.compiler.ir.tile.ops import axis_names, sched_of
-from emmy.compiler.ir.tile.path import SLICE_FAMILIES
 
 
 def unplaced_slices(tile) -> list[tuple[str, object]]:
@@ -29,7 +29,8 @@ def unplaced_slices(tile) -> list[tuple[str, object]]:
 
     sched = sched_of(tile)
     stored = [s.node for s in sites(tile.op) if not s.derived]
-    claimed = {k for nd in stored for f in SLICE_FAMILIES if (k := sched.key(f, nd)) is not None}
+    claimed = {k for nd in stored for family in CLASSIC_NODE_FAMILIES if (k := sched.key(family, nd)) is not None}
+    claimed.update(key for node in stored for key in sched.edge_keys(node))
     return sorted((k, v) for k, v in tile.schedule.items() if k not in claimed)
 
 
@@ -91,7 +92,7 @@ class _Ctx:
         if self.sched is None:
             return ""
         bits = []
-        for family in SLICE_FAMILIES:
+        for family in CLASSIC_FAMILIES:
             slice_ = self.sched.get(family, node)
             if slice_ is not None:
                 bits.append(f"{family}={slice_.spell() or '·'}")

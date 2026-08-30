@@ -881,7 +881,7 @@ def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
 
     def computed_b_leaf(fp):
         return _prefer_mma_leaf(fp)
@@ -922,7 +922,7 @@ def test_computed_b_split_k_matches_decoded_linear(monkeypatch):
         pytest.skip("the computed-B tensor-core lane requires SM80 or newer")
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
     tensors, decoded = exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
     picked: list[dict] = []
 

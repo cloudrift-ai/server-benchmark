@@ -21,7 +21,7 @@ from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import canonical_row_key, family_of
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.space import REDUCE, TILE
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 
 def _matmul_graph(n: int = 1, dtype: str = "f32") -> Graph:
@@ -130,7 +130,7 @@ def test_a_live_pin_keys_a_different_pool() -> None:
     unpinned = _resolve(ctx, _matmul_graph())
     (unpinned_pool,) = ctx.session_cache._store.values()
     before = set(ctx.session_cache._store)
-    with TILE.pinned("f2x8"):
+    with pinned_knobs({"TILE@n0": "f2x8"}):
         _resolve(ctx, _matmul_graph())
     (pinned_key,) = set(ctx.session_cache._store) - before
     pinned_pool = ctx.session_cache._store[pinned_key]
@@ -158,7 +158,7 @@ def test_a_live_context_never_samples() -> None:
     sampled = replace(ctx, pool_sample=PoolSample(rows=8))
     assert sampled.session_cache is ctx.session_cache, "the shared memo is the hazard this test exists for"
 
-    with REDUCE.pinned(""):
+    with pinned_knobs({"REDUCE@n0": ""}):
         drawn = _resolve(sampled, _matmul_graph())
         (drawn_pool,) = ctx.session_cache._store.values()
         assert 0 < len(drawn_pool.rows) <= 8 < drawn_pool.total, "the sampled Context sees a draw, never the pool"
@@ -269,7 +269,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
 def test_a_split_receipt_never_shares_a_pool_with_its_receipt_free_twin(monkeypatch) -> None:
     """A kernel that realized a cross-CTA split carries the sliced axis's partition ``Window``
     receipt, and the walk consumes a live ``REDUCE`` pin's ``g``-half against it — so under
-    ``EMMY_REDUCE=g2k`` the partial piece memoizes its STRIPPED options while a receipt-free twin
+    ``EMMY_REDUCE@n0=g2k`` the partial piece memoizes its STRIPPED options while a receipt-free twin
     of the same algebra must RAISE, never hit that memo. The receipt separates the two keys twice
     over (it is an explicit key term, and ``form``'s field walk happens to serialize the
     ``compare=False`` ``Axis.window`` into the term digest); this holds whichever layer does it."""
@@ -280,7 +280,7 @@ def test_a_split_receipt_never_shares_a_pool_with_its_receipt_free_twin(monkeypa
     from emmy.compiler.ir.tile.ops import carries_partition
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import schedule
 
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2k")
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (Dim(4), Dim(512)), dtype="f32"), node_id="x")
     g.add_node(ReduceOp(axis=1), ["x"], Tensor("s", (Dim(4), Dim(1)), dtype="f32"), node_id="s")
@@ -313,12 +313,8 @@ def test_a_split_receipt_never_shares_a_pool_with_its_receipt_free_twin(monkeypa
     assert ctx.session_cache.hits > hits, "…and it replays from its own memo entry"
 
 
-def test_an_axis_renamed_twin_enumerates_its_own_spellings() -> None:
-    """The spelled key vocabulary is a pool-key term: tree-path keys spell axis names, so a twin
-    differing only in an axis name must enumerate rows under ITS spellings — replaying the other
-    kernel's memo would hand materialization keys its own tree cannot decode. (Axis names are
-    recognition-canonical identity, so the term digest also separates the twins today; the
-    explicit key term and this test hold if that ever changes.)"""
+def test_an_axis_renamed_twin_keeps_the_same_site_spellings() -> None:
+    """Node and edge identities depend on canonical traversal, not iteration-variable names."""
     from dataclasses import replace
 
     from emmy.commands.trace import graph_from_code
@@ -348,6 +344,4 @@ def test_an_axis_renamed_twin_enumerates_its_own_spellings() -> None:
     twin = TileOp(op=twin_op, place=tile.place, output_specs=tile.output_specs)
     twin.knobs, twin.inputs, twin.outputs = dict(tile.knobs), dict(tile.inputs), dict(tile.outputs)
     twin_row = dict(next(iter_leaves(schedule(twin, "t", twin.knobs, ctx))).knobs)
-    family = spelled.split("@", 1)[0]
-    assert f"{family}@{new}" in twin_row, "the twin must enumerate under its own vocabulary"
-    assert spelled not in twin_row, "…and never replay the other kernel's spellings"
+    assert {key for key in twin_row if "@" in key} == {key for key in row if "@" in key}

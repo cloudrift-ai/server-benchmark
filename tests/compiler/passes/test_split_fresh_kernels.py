@@ -32,7 +32,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
-from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, STRUCT_PREFIX, decision_view, family_of
+from emmy.compiler.pipeline.knob import STRUCT_PREFIX, decision_view, family_of
 from emmy.compiler.pipeline.pipeline import Run
 
 _CTX = Context.from_target((12, 0))
@@ -100,15 +100,15 @@ def test_the_split_returns_two_kernels(monkeypatch) -> None:
     rewrite returns a GRAPH — including the one-node atomic arm, which replaces the kernel rather
     than deciding it further. An op rebind would merge the replaced kernel's knobs forward and
     would not restart the pass scan, so the piece would never reach its own schedule fork."""
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2k")
     assert set(_kernels(_resolve(CUDA_PASSES)[0])) == {"o", "o__partial"}
-    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2a")
     assert set(_kernels(_resolve(CUDA_PASSES, _matmul(out_dtype=F32))[0])) == {"o"}
 
 
 def test_split_preserves_every_fused_output(monkeypatch) -> None:
     """The finalize kernel retains all ports of the fused kernel, not only its primary output."""
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
     out, _ = _resolve(TILE_PASSES, _multi_output_matmul())
     assert out.outputs == ["o", "o_neg"]
     owner = out.producer("o")
@@ -121,7 +121,7 @@ def test_split_preserves_every_fused_output(monkeypatch) -> None:
 @pytest.mark.parametrize("dtype", [F16, BF16])
 def test_low_precision_output_refuses_direct_atomic_split(monkeypatch, dtype) -> None:
     """F16/BF16 outputs would round every CTA partial; contraction and plain reduce fail closed."""
-    monkeypatch.setenv("EMMY_REDUCE", "g2a")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2a")
     for graph in (_matmul(out_dtype=dtype), _sum(dtype=dtype)):
         with pytest.raises(ValueError, match="direct atomic REDUCE.*output storage"):
             _resolve(TILE_PASSES, graph)
@@ -134,7 +134,7 @@ def test_finalize_keeps_projection_input_edges(monkeypatch) -> None:
     graph.add_node(InputOp(), [], Tensor("bias", (Dim(128),), dtype=F16), node_id="bias")
     graph.add_node(ElementwiseOp("add"), ["o", "bias"], Tensor("biased", (Dim(128), Dim(128)), dtype=F16), node_id="biased")
     graph.inputs, graph.outputs = ["a", "b", "bias"], ["biased"]
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
 
     out, _ = _resolve(CUDA_PASSES, graph)
     finalize = out.nodes["biased"]
@@ -147,7 +147,7 @@ def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
     and a structural stamp of their own. (The partial used to arrive wearing the pre-split kernel's
     whole row — 21 ``S_*`` features describing a body it no longer had — and the finalize
     already-placed with no knobs at all: no fork, no identity, untunable.)"""
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2k")
     pieces = _tile_pieces()
     assert len(pieces) == 2, "the split must have produced two kernels"
     for piece in pieces:
@@ -162,7 +162,7 @@ def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
 @pytest.mark.parametrize("graph", [_matmul(), _sum()])
 def test_split_reductions_remain_fold_trees(monkeypatch, graph) -> None:
     """Both split-K and plain-reduce pieces preserve Fold trees without embedded Loop IR."""
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2k")
     pieces = _tile_pieces(graph)
     assert len(pieces) == 2
     assert not any(_contains_raw_loop(piece.op) for piece in pieces)
@@ -172,12 +172,13 @@ def test_each_piece_decides_its_own_row(monkeypatch) -> None:
     """The pieces reach the schedule fork independently — each gets its own decision in the trace
     and leaves with a full schedule row. (Before, the partial arrived pre-decided and the finalize
     arrived with no row at all; neither was ever offered a fork.)"""
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2k")
     out, trace = _resolve(CUDA_PASSES)
     kernels = _kernels(out)
     assert set(kernels) == {"o", "o__partial"}
     for row in kernels.values():
-        assert set(SCHEDULE_FAMILIES) <= {family_of(k) for k in row}, row
+        families = {family_of(k) for k in row}
+        assert {"WORK", "RASTER", "REDUCE"} <= families, row
     scheduled = {d.node_id for d in trace if "schedule" in d.rule_name}
     assert scheduled >= {"o", "o__partial"}, f"each piece must be offered its own schedule fork, saw {scheduled}"
 
@@ -186,7 +187,7 @@ def test_each_piece_carries_its_own_structural_identity(monkeypatch) -> None:
     """A piece featurizes as ITSELF. Without this the partial joined the pre-split kernel's
     evidence — the same signature for a kernel doing half the reduction. The identity strategy
     stamps each fragment at the splice boundary."""
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2k")
     stamps = [{k: v for k, v in row.items() if k.startswith(STRUCT_PREFIX)} for row in _kernels(_resolve(CUDA_PASSES)[0]).values()]
     assert all(stamps), "every piece must carry a structural stamp"
     assert stamps[0] != stamps[1], "the pieces are structurally different kernels"
@@ -210,7 +211,7 @@ def test_a_pieces_features_are_read_off_its_reconstituted_body(monkeypatch) -> N
 
     Read against the pieces' known geometry: the partial's frees are ``(ksplit=2, m=128, n=128)``
     and the finalize's the grid ``(m=128, n=128)`` over a 2-wide fold."""
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2k")
     kernels = _kernels(_resolve(CUDA_PASSES)[0])
     partial, finalize = kernels["o__partial"], kernels["o"]
     for name, row in (("partial", partial), ("finalize", finalize)):
@@ -226,7 +227,7 @@ def test_the_split_is_consumed_by_the_kernel_that_realizes_it(monkeypatch, pin) 
     applies to fresh kernels applies to them too — and the sliced axis is the only thing that
     records the partition already happened. Without that reading the partial re-splits its own
     slice on every sweep: K=512 → 256 → … → 1, ending in a raise."""
-    monkeypatch.setenv("EMMY_REDUCE", pin)
+    monkeypatch.setenv("EMMY_REDUCE@N0", pin)
     graph = _matmul(out_dtype=F32) if pin.endswith("a") else _matmul()
     kernels = _kernels(_resolve(CUDA_PASSES, graph)[0])
     assert len(kernels) <= 2, f"{pin}: the split must not cascade — {sorted(kernels)}"
@@ -237,7 +238,7 @@ def test_a_pin_hands_its_remaining_row_to_the_pieces(monkeypatch) -> None:
     """Only the cross-CTA half is consumed. ``g2k/coop`` splits the kernel AND asks each piece for
     the cooperative fold — which is what a pin means: a statement about how kernels run, minus the
     part that has already been realized."""
-    monkeypatch.setenv("EMMY_REDUCE", "g2k/coop")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2k/coop")
     monkeypatch.setenv("EMMY_WORK", "t64")
     from emmy.compiler.ir.tensor.ir import ReduceOp
 
@@ -257,7 +258,7 @@ def test_the_split_node_is_priced_as_the_sum_of_its_pieces(monkeypatch) -> None:
     rows that keep one kernel."""
     from emmy.compiler.pipeline.search.policy import greedy
 
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "g2k")
     terminal, trace = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=_CTX).resolve(_matmul(), greedy.greedy_decide(prior=None))
     kernels = [nid for nid, n in terminal.nodes.items() if isinstance(n.op, TileOp)]
     assert len(kernels) == 2, "the pinned split must produce two kernels to price"
@@ -295,7 +296,7 @@ def test_chain_split_carries_the_captured_prologue_and_strips_the_finalize(monke
     from emmy.compiler.ir.stmt import Body
     from emmy.compiler.ir.tile.path import sites
 
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
     out, _ = _resolve(TILE_PASSES, _softmax_scale_chain())
     tiles = {nid: n.op for nid, n in out.nodes.items() if isinstance(n.op, TileOp)}
     partial = next(op for nid, op in tiles.items() if nid.endswith("__partial"))
@@ -365,10 +366,10 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     why = _projection_refusal(tile, node)
     assert why is not None and "cannot strip" in why
     root = SimpleNamespace(op=tile, id="o")
-    for var in ("EMMY_REDUCE", "EMMY_WORK"):
+    for var in ("EMMY_REDUCE@N1", "EMMY_WORK"):
         monkeypatch.delenv(var, raising=False)
     options = split_forks(None, root)
     assert options is not None and len(options) == 1, "only the unsplit arm may survive the residence refusal"
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
     with pytest.raises(ValueError, match="cannot strip"):
         split_forks(None, root)

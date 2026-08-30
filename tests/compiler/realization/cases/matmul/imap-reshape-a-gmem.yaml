@@ -5,15 +5,17 @@
 # f16 with no quantization in sight. The contract now is that the row stride is DERIVED from
 # the index, the columns must be gmem-contiguous, and a form no loader can read falls back.
 #
-# The re-strided A under a TMA box, which deposits a dense rectangle in the DESCRIPTOR's own
-# coordinates. 83% of the output is wrong: the descriptor is built from the declared shape.
+# A's rows re-strided to 128 against a declared trailing extent of 256, read gmem-direct: the
+# mma fragment loader steps rows by a scalar leading dimension, and it takes the DECLARED
+# extent rather than the one derived from the index. 80% of the output is wrong.
 #
-# evidence: imap-reshape-a-cp.yaml is the same program on the sibling staged transport and is
-# correct; imap-slice-a-tma.yaml is this transport on a canonical index and is correct. The
-# source test additionally asserted this row should DECLINE the box and fall back — that
-# assertion has its own standing xfail ('nvcc rejects the fallback kernel'), so the pin
-# reaching a TMA box at all is part of the same gap. This row does not fault: it launches
-# cleanly and returns a wrong answer, which the source test's fault-worded marker never said.
+# evidence: imap-reshape-a-cp.yaml is the SAME program under the cp.async transport and is
+# correct, so the derived row stride is recoverable from this index; and imap-slice-a-gmem.yaml
+# is the same transport on a canonical index and is correct, so the loader itself is sound.
+# The source test carried this whole matrix as one xfail(run=False) reading 'reshape index-map
+# accuracy faults (misaligned address) and poisons the CUDA context'. That is NOT what this row
+# does: it launches cleanly, returns, and computes a wrong answer. A silent wrong answer is a
+# different and worse finding than a fault, which is why the rows are recorded one at a time.
 compute_cap:
 - 12
 - 0
@@ -49,5 +51,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      STAGE: d2/smem-tma
+      WORK: ''
+      RASTER: ''
+      TILE@n0: ''
+      REDUCE@n0: ''
+      STAGE@n0.e0: ''
+      STAGE@n0.e1: ''
     identity: 09ca8ac30e5a4f056ce71f077b8e83e309bd1b25db4828f0b5ee5f3030099777

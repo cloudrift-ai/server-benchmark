@@ -34,7 +34,9 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f2x2/k8
-      STAGE: d2/smem
-      REDUCE: ''
+      RASTER: ''
+      TILE@n0: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE@n0: ''
+      STAGE@n0.e0: d2/smem
+      STAGE@n0.e1: d2/smem
     identity: 0dea019b122e91e51eebb12f63ee59ed77496f83b56e8922a6b7a1ca5bce7a7f

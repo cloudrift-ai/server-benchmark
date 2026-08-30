@@ -36,10 +36,9 @@ from emmy.compiler.pipeline.search.golden import (
 )
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import direct_classic_leaf, requires_cuda
 
 _CTX = Context.from_target((12, 0))
-_OFF = {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}
 _CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
 
 
@@ -145,11 +144,15 @@ def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
     return offered
 
 
-def _lower_cut(graph: Graph, spelling: str) -> Graph:
-    with pinned_knobs({spelling: "cut", **_OFF}):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=_CTX)
+def _lower(graph: Graph, placement: dict[str, str]) -> Graph:
+    with pinned_knobs(placement):
+        lowered, _ = Run(Pipeline.build(CUDA_PASSES), _CTX).resolve(graph, direct_classic_leaf)
     lowered.validate()
     return lowered
+
+
+def _lower_cut(graph: Graph, spelling: str) -> Graph:
+    return _lower(graph, {spelling: "cut"})
 
 
 def _nested_attention_cut(pins: dict[str, str]) -> Graph:
@@ -190,8 +193,7 @@ def test_cut_workspace_retains_static_unit_axes() -> None:
 
 
 def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:
-    with pinned_knobs({"PLACE": "fuse", **_OFF}):
-        lowered = Pipeline.build(CUDA_PASSES).run(_computed_operand_graph("a"), ctx=_CTX)
+    lowered = _lower(_computed_operand_graph("a"), {"PLACE": "fuse"})
     assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 1
 
 
@@ -366,7 +368,7 @@ def test_dependent_seam_pins_pull_their_producer_into_the_composed_cut() -> None
     structural, so the pin cannot decline it."""
     match, graph = _composed_case_match()
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
-    with pinned_knobs({"PLACE@map.fold.a.map.fold.a32": "cut", **_OFF}):
+    with pinned_knobs({"PLACE@map.fold.a.map.fold.a32": "cut"}):
         fork = _CUT.rewrite(match, node)
     assert set(fork.knobs) == {"PLACE@map.fold.a.map.fold.a32", "PLACE@map.fold.a.map.fold.a31"}
 
@@ -391,7 +393,7 @@ def test_statistics_route_shares_the_row_reduction_across_output_keys() -> None:
                 stack.extend(current.lift.body)
         return out
 
-    with pinned_knobs({**_STAT_PINS, **_OFF}):
+    with pinned_knobs(_STAT_PINS):
         fragment = _CUT.rewrite(match, node).expand()[0]
     pieces = [piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp)]
     assert len(pieces) == 7  # six workspaces plus the consumer

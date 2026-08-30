@@ -6,6 +6,7 @@ import contextlib
 import os
 
 from emmy import config
+from emmy.compiler.ir.classic_schedule import CLASSIC_FAMILIES
 from emmy.compiler.ir.schedule import Level, Reduce, Work
 from emmy.compiler.pipeline.knob import axis_of, family_of, get, is_off_value, pin_key_matches, values_equal
 
@@ -89,7 +90,7 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_co
                 break
         if hit and (not reject_conflicts or not conflicts):
             continue
-        if not others and not saw_off and get(fam) is not None:
+        if not others and not saw_off and get(fam) is not None and fam not in CLASSIC_FAMILIES:
             continue
         ran_values = conflicts if reject_conflicts and conflicts else others
         ran = "/".join(ran_values) if ran_values else ("(off)" if saw_off else "(unset)")

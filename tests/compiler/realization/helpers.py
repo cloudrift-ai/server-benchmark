@@ -8,7 +8,7 @@ expected to realize. Everything here is GPU-free except :func:`built` and :func:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -73,6 +73,15 @@ class Case:
         """The case's own context — its declared capability, never the live card's. This is what
         makes stages 1 and 2 machine-independent, so an sm_70 lockout is exercised on any box."""
         return Context.from_target(self.compute_cap)
+
+    def union_context(self) -> Context:
+        """The case context for applying its kernel row across structural alternatives.
+
+        Site identities are local to one classic problem.  A corpus row therefore prunes a peer
+        kernel whose coincident identity cannot realize its exact pin, while the collective
+        oracle below still requires every pin to occur in the resolved kernel set.
+        """
+        return replace(self.context(), validate_pins=False)
 
 
 def case_files() -> list[Path]:
@@ -228,10 +237,13 @@ def offered(case: Case) -> str | None:
     pinned = case.pinned
     try:
         with pinned_knobs(pinned):
-            rows = enumerate_graph(case.record.target_program.copy(), case.context()).rows
+            rows = enumerate_graph(case.record.target_program.copy(), case.union_context()).rows
     except Exception as exc:  # noqa: BLE001 — a pin the enumeration refuses outright is not offered
         return f"{type(exc).__name__}: {exc}"
-    if any(unreproducible_pin_flag(pinned, [row]) is None for row in rows):
+    # Site identities are problem-local, so one structural target may contain several fresh
+    # classic problems whose exact pins are realized by different kernel rows. Every schedule pin
+    # must appear somewhere in the offered kernel set; no family-wide alias is used to bridge it.
+    if rows and unreproducible_pin_flag(pinned, rows) is None:
         return None
     if not case.record.knobs:
         # A FORKLESS kernel: its schedule space collapsed to one row, so it opens no fork and the
@@ -255,7 +267,7 @@ def realized(case: Case) -> str | None:
     pinned = case.pinned
     try:
         with pinned_knobs(pinned):
-            lowered = Pipeline.build(CUDA_PASSES).run(case.record.target_program.copy(), ctx=case.context())
+            lowered = Pipeline.build(CUDA_PASSES).run(case.record.target_program.copy(), ctx=case.union_context())
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         return f"{type(exc).__name__}: {exc}"
     rows = [dict(node.op.knobs or {}) for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
@@ -288,7 +300,8 @@ def built(case: Case):
     from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
 
     with pinned_knobs(case.pinned):
-        lowered = CudaBackend().compile(case.record.target_program.copy())
+        live = replace(Context.probe(), validate_pins=False)
+        lowered = CudaBackend().compile(case.record.target_program.copy(), ctx=live)
         with gpu_lock():
             CompiledProgram.build(lowered, seeded_inputs(case.record.target_program))
     return lowered

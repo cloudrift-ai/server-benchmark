@@ -84,8 +84,7 @@ def _matmul_graph() -> Graph:
 
 def test_schedule_leaves_key_tile_canonically():
     """Each emitted contraction leaf keys its output tile by the CANONICAL codec spelling
-    (phase 3): a single-contraction kernel's shortest unique key is bare ``TILE`` — the exact
-    spelling the golden/DB corpus stores, so the stamped row IS the stored row."""
+    (phase 3): even a single-contraction kernel names its stable node site explicitly."""
     axes: set[str | None] = set()
 
     def decide(fp):
@@ -96,7 +95,7 @@ def test_schedule_leaves_key_tile_canonically():
         return leaf
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_matmul_graph(), decide)
-    assert axes == {None}  # one contraction -> the bare canonical spelling, never axis-suffixed
+    assert axes == {"n0"}
 
 
 def _fp16_matmul_graph() -> Graph:
@@ -125,9 +124,9 @@ def test_tile_pin_forces_the_named_warp_row(monkeypatch):
     claim this fixture was built for (the known over-budget 128 KiB slot on sm_89 must offer no
     staged sibling)."""
     ctx = Context.from_target((8, 9))  # the issue's sm_89 cap (101376 B)
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f4x8/k8")
+    monkeypatch.setenv("EMMY_TILE@N0", "mma_m16n8k16_f16_f32/f4x8/k8")
     monkeypatch.setenv("EMMY_WORK", "w4x4")
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "")
     rows: list[dict] = []
 
     def decide(fp):
@@ -360,7 +359,7 @@ def test_matmul_leaf_set_equals_the_scalar_catalog(monkeypatch):
     structurally, without lowering a kernel. Membership, never position. Restricted to the
     serial-fold rows: the per-cell tier also offers its cooperative / ILP K partitions, whose
     ``WORK`` is the reduce band's thread inventory, not a tile move."""
-    for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_REDUCE"):
+    for var in ("EMMY_TILE@N0", "EMMY_WORK", "EMMY_REDUCE@N0"):
         monkeypatch.delenv(var, raising=False)
     rows = _rows_of(_plain_matmul_term())
     assert rows, "the term enumerated nothing"

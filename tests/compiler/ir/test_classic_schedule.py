@@ -178,8 +178,8 @@ def test_codec_round_trips_one_canonical_complete_row() -> None:
     assert row == {
         "WORK": "",
         "RASTER": "",
-        "TILE": "",
-        "REDUCE": "",
+        "TILE@n0": "",
+        "REDUCE@n0": "",
         "STAGE@n0.e0": "",
         "STAGE@n0.e1": "",
     }

@@ -18,7 +18,7 @@ from functools import lru_cache
 from types import MappingProxyType
 
 from emmy.compiler.pipeline.knob import (
-    _AXIS_FAMILIES,
+    _SITE_FAMILIES,
     CTX_PREFIX,
     STRUCT_PREFIX,
     KnobType,
@@ -270,7 +270,7 @@ def node_slices(knobs: dict) -> tuple[NodeSlice, ...]:
     seen: set[str] = set()
     has_bare = False
     for k in knobs:
-        if family_of(k) not in _AXIS_FAMILIES:
+        if family_of(k) not in _SITE_FAMILIES:
             continue
         ax = axis_of(k)
         if ax is None:
@@ -284,7 +284,7 @@ def node_slices(knobs: dict) -> tuple[NodeSlice, ...]:
 
     def bare_slice(work_by_presence: bool) -> NodeSlice:
         sub = dict(context)
-        for fam in _AXIS_FAMILIES:
+        for fam in _SITE_FAMILIES:
             if fam in knobs:
                 sub[fam] = knobs[fam]
         # The bare group carries the bare REDUCE, so ``resolve_site_tile``'s coop-vs-tile
@@ -298,7 +298,7 @@ def node_slices(knobs: dict) -> tuple[NodeSlice, ...]:
     out: list[NodeSlice] = []
     for axis in axes:
         sub = dict(context)
-        for fam in _AXIS_FAMILIES:
+        for fam in _SITE_FAMILIES:
             key = f"{fam}@{axis}"
             if key in knobs:
                 sub[key] = knobs[key]

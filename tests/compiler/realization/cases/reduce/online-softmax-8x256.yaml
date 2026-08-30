@@ -37,9 +37,9 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE: ''
-      REDUCE: coop
       WORK: t128
+      RASTER: ''
+      REDUCE@n1: coop
     identity: 3d7036c5bf2eb88505fcb550f04ee525f2dc04ba44e4dc54a32ec028474fd984
     latency:
       NVIDIA GeForce RTX 5090:

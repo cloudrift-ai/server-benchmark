@@ -1,10 +1,10 @@
-"""The schedule walk's enumeration contracts — what outlived the deleted addressable product.
+"""The schedule walk's enumeration contracts.
 
-The walk has no product space and no ``space[i]``: one recursive traversal IS the enumeration, the
-prescan is the one place a catalog question is asked, and sampling is a reservoir over the leaf
-stream (``search/pool.py``). What survives of the old space's contract is pinned here: one prescan
-per term, computed and derived fold sites keyed as schedule sites, the paired mma row on the flash
-pair, and the structural split fork standing beside the walk with both finalize arms on offer.
+One recursive traversal enumerates the compatible subset of the classic schedule product. The
+prescan asks each domain catalog once, and sampling is a reservoir over the leaf stream
+(``search/pool.py``). These tests pin the traversal contract: every node and operand-use edge has a
+stable schedule-site identity, the flash pair can select its paired mma choices, and structural
+split choices remain separate from classic schedule choices.
 """
 
 from __future__ import annotations
@@ -79,6 +79,29 @@ def _rows(graph) -> list[dict]:
     return enumerate_graph(graph, ctx).rows
 
 
+def _pin(monkeypatch, **pins: str) -> None:
+    """Pin canonical classic schedule keys without a family-wide fallback."""
+    for key, value in pins.items():
+        monkeypatch.setenv(f"EMMY_{key.upper()}", value)
+
+
+def _pin_sdpa(monkeypatch) -> None:
+    _pin(
+        monkeypatch,
+        **{
+            "TILE@n3": "mma_m16n8k16_f16_f32/f1x2",
+            "TILE@n4": "mma_m16n8k16_f16_f32/f1x1",
+            "REDUCE@n1": "",
+            "REDUCE@n3": "",
+            "REDUCE@n4": "",
+            "STAGE@n3.e0": "",
+            "STAGE@n3.e1": "",
+            "STAGE@n4.e0": "",
+            "STAGE@n4.e1": "",
+        },
+    )
+
+
 @pytest.fixture
 def unpinned(monkeypatch):
     for var in _PIN_VARS:
@@ -135,7 +158,7 @@ def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> N
 @pytest.mark.parametrize("case, tile_sites, reduce_sites", (("fused_norm_linear", 1, 2), ("flash_pair", 2, 3)))
 def test_computed_fold_sites_are_keyed_schedule_sites(case, tile_sites, reduce_sites, unpinned) -> None:
     """A computed cone's fold and a derived site (flash's synthesized PV) are real schedule sites:
-    every row spells them, keyed by the tree-path codec, so nothing nested is silently undecided."""
+    every row spells them with stable node identities, so nothing nested is silently undecided."""
     row = _rows(FIXTURES[case]())[0]
     assert sum(key == "TILE" or key.startswith("TILE@") for key in row) == tile_sites
     assert sum(key == "REDUCE" or key.startswith("REDUCE@") for key in row) == reduce_sites
@@ -145,14 +168,18 @@ def test_sdpa_fold_tree_offers_a_paired_mma_row(unpinned, monkeypatch) -> None:
     """The walk reaches a row where BOTH flash contractions ride the tensor core — the score's N
     tile feeding the value contraction's streamed K block through the fragment seam."""
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    # The score's N tile is the value contraction's streamed K block.
-    monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f1x2")
-    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f1x1")
-    monkeypatch.setenv("EMMY_STAGE", "")
+    _pin_sdpa(monkeypatch)
     monkeypatch.setenv("EMMY_RASTER", "")
-    monkeypatch.setenv("EMMY_REDUCE", "")
     rows = _rows(_sdpa_graph())
     assert any(sum(key.startswith("TILE@") and "mma_" in str(value) for key, value in row.items()) == 2 for row in rows)
+
+
+@pytest.mark.parametrize("pin", ["EMMY_TILE", "EMMY_TILE@A2", "EMMY_STAGE", "EMMY_REDUCE@K"])
+def test_classic_pins_require_exact_site_identities(pin, unpinned, monkeypatch) -> None:
+    """Bare families and retired structural suffixes are not a second classic schedule codec."""
+    monkeypatch.setenv(pin, "")
+    with pytest.raises(ValueError, match="classic schedule pin.*is not canonical"):
+        _rows(_matmul_graph(64, 64, 64, "f16"))
 
 
 def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
@@ -212,14 +239,11 @@ def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkey
     )
 
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f1x2")
-    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f1x1")
-    monkeypatch.setenv("EMMY_STAGE", "")
+    _pin_sdpa(monkeypatch)
     monkeypatch.setenv("EMMY_RASTER", "")
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
-    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target(_CC)).resolve(
-        _sdpa_graph(), lambda fp: next(iter_leaves(fp.options))
-    )
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
+    union_ctx = dc_replace(Context.from_target(_CC), validate_pins=False)
+    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=union_ctx).resolve(_sdpa_graph(), lambda fp: next(iter_leaves(fp.options)))
     partial = next(n.op for nid, n in out.nodes.items() if nid.endswith("__partial") and isinstance(n.op, TileOp))
     assert partial.place.is_mapped, "the partial piece must decide its own row"
     assert sum(key.startswith("TILE@") and "mma_" in str(value) for key, value in partial.knobs.items()) == 2, (
@@ -237,14 +261,19 @@ def test_an_observed_fold_offers_only_the_serial_reduce(unpinned) -> None:
         assert not offending, f"a partitioned REDUCE row reached an observed fold: {offending}"
 
 
-def test_computed_b_statistic_is_a_keyed_schedule_site(unpinned, monkeypatch) -> None:
+def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> None:
     """A score contraction's computed B operand cone closes over its per-key statistic
     (``normalize_fold_tree``'s reduce-body closing), and the walk keys that relocated fold as an
-    ordinary schedule site — nothing nested inside a B edge is silently undecided."""
-    monkeypatch.setenv("EMMY_TILE", "")
-    monkeypatch.setenv("EMMY_STAGE", "")
+    ordinary schedule site. Its identity is independent of its changing structural path."""
+    _pin(
+        monkeypatch,
+        **{
+            **{f"TILE@n{i}": "" for i in (2, 6, 13)},
+            **{f"REDUCE@n{i}": "" for i in (1, 2, 5, 6, 10, 13, 17)},
+            **{f"STAGE@n{i}.e{edge}": "" for i in (2, 6, 13) for edge in (0, 1)},
+        },
+    )
     monkeypatch.setenv("EMMY_RASTER", "")
-    monkeypatch.setenv("EMMY_REDUCE", "")
     graph = _code_graph(
         "torch.nn.functional.scaled_dot_product_attention("
         f"{_NORM}(torch.randn(1, 2, 8, 16, dtype=torch.float16)), "
@@ -253,5 +282,5 @@ def test_computed_b_statistic_is_a_keyed_schedule_site(unpinned, monkeypatch) ->
     )
     rows = _rows(graph)
     assert rows, "the fused attention kernel must still enumerate"
-    keyed_under_b = [key for row in rows for key in row if key.split("@", 1)[0] == "REDUCE" and "b" in key.split("@", 1)[-1].split(".")]
-    assert keyed_under_b, "no REDUCE site was keyed inside a computed B operand cone"
+    reduce_keys = {key for row in rows for key in row if key.startswith("REDUCE@")}
+    assert reduce_keys == {f"REDUCE@n{i}" for i in (1, 2, 5, 6, 10, 13, 17)}

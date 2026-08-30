@@ -205,7 +205,7 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
     key = Sched(tile.op, {}).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(tile, split_consumed=True), {key: ""})
     element = axis_of(key)
-    pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
+    pin = REDUCE.pin_at(element) if element else None
     tail = projection_tail(tile)
     if pin is not None:
         plan = Reduce.parse(pin, Work.parse(WORK.raw()))

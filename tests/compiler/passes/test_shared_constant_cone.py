@@ -29,6 +29,7 @@ from emmy.compiler.ir.stmt import Body, Load
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.target import set_target
+from tests.compiler.helpers import pin_classic
 
 materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
 
@@ -74,8 +75,7 @@ def _gate_up_graph() -> Graph:
 @pytest.fixture
 def _scalar_tier(monkeypatch):
     """Pin the mma family off — the channels then fold serially in ONE loop body, the scope that clashes."""
-    monkeypatch.setenv("EMMY_TILE", "")
-    monkeypatch.setenv("EMMY_STAGE", "")
+    pin_classic(monkeypatch, {"TILE": "", "STAGE": ""}, node=1, stage_edges=(0, 1, 2))
 
 
 def test_sibling_cones_share_one_declaration_of_a_broadcast_constant(_scalar_tier) -> None:

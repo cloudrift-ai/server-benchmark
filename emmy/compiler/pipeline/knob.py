@@ -33,7 +33,7 @@ from functools import lru_cache
 from typing import Any
 
 from emmy import config
-from emmy.compiler.ir.tile.path import SLICE_FAMILIES
+from emmy.compiler.ir.classic_schedule import CLASSIC_FAMILIES
 
 # Reserved prefix for the structural-feature knobs stamped by
 # the ``IdentityStrategy`` (``passes/identity.py``) — distinct from any tuning Knob
@@ -234,32 +234,12 @@ class Knob:
         matching the lowercase element spelling producers use."""
         return config.knob_raw(f"{self.name}@{element}")
 
-    def narrow_at(self, element: str) -> str | None:
-        """The env pin for this knob's ``<NAME>@<element>`` key, falling back to the bare
-        ``<NAME>`` pin — the per-element read mirroring :func:`family_value`'s precedence
-        (``TILE@d`` > bare ``TILE``). Returns the raw pin string (``None`` when neither is
-        set); the caller resolves vocabulary."""
-        value = self.pin_at(element)
-        if value is not None:
-            return value
-        return self.raw()
 
-
-# --- Axis-named schedule keys ----------------------------------------------
+# --- Site-scoped schedule keys ---------------------------------------------
 #
-# A per-node schedule codec is keyed ``FAMILY@<axis>`` — ``TILE@<k_axis>`` / ``STAGE@<axis>`` /
-# ``REDUCE@<axis>`` — so a multi-node kernel (flash) can address each schedule-bearing node by the
-# reduce/contraction axis it schedules. The **bare** form (``TILE`` with no suffix) stays first-class:
-# it resolves to the unique eligible axis for that family, so the common single-node kernel — and every
-# existing pin / recipe / golden — keeps working unchanged (the suffix disambiguates only a kernel with
-# two eligible nodes). ``TILE`` / ``STAGE`` / ``REDUCE`` all carry the suffix: the schedule reduce
-# partition IS the axis-named reduce decision (there is no separate native ``REDUCE@`` family — the
-# reduce/split-K partition is the one reduce family). ``WORK`` / ``RASTER`` stay root-global (always
-# bare). Readers use :func:`family_value` so a bare and a suffixed key featurize / match identically.
-
-# The per-node schedule codec families that carry an ``@<axis>`` element (``WORK`` / ``RASTER`` are
-# root-global, always bare).
-_AXIS_FAMILIES = SLICE_FAMILIES  # the one list, defined in ``ir/tile/path.py``
+# Node families carry ``@n<ordinal>`` and edge families carry ``@n<ordinal>.e<operand>``. Kernel
+# families remain bare. There is no family-wide classic spelling.
+_SITE_FAMILIES = CLASSIC_FAMILIES
 
 
 def decision_view(knobs: dict) -> dict:
@@ -291,13 +271,11 @@ def axis_of(key: str) -> str | None:
 
 
 def family_value(knobs: dict, family: str):
-    """The value of a per-node schedule codec ``family`` in ``knobs``, keyed bare (``TILE``) or
-    axis-suffixed (``TILE@<axis>``). ``None`` when absent. A single-node kernel has exactly one match;
-    a multi-node kernel (flash) has one key per node — this returns the first (a pooled read; a
-    per-node featurizer reads each node's slice via a group-by-axis loop)."""
-    v = knobs.get(family)
-    if v is not None:
-        return v
+    """Return the first site-scoped value in ``family`` or ``None`` when absent.
+
+    This pooled read is only for diagnostics that deliberately collapse a family. Semantic
+    consumers address a concrete node or edge key through :class:`ClassicSchedule`.
+    """
     prefix = family + "@"
     for k, val in knobs.items():
         if k.startswith(prefix):
@@ -351,11 +329,8 @@ def apply_off_defaults(knobs: dict, declared: Iterable[Knob]) -> dict:
 
 
 def pin_key_matches(pinned: str, realized: str) -> bool:
-    """Whether a realized same-family key satisfies a pinned key: exact, or one side
-    bare — a bare env pin fans out to every eligible axis, and a bare golden spelling
-    matches whatever axis the lowering stamped (``TILE`` ↔ ``TILE@dd``). Two
-    *differing* explicit axes never match."""
-    return pinned == realized or axis_of(pinned) is None or axis_of(realized) is None
+    """Whether a realized key is the exact canonical key that was pinned."""
+    return pinned == realized
 
 
 def canon_family_value(name: str, value, *, strict: bool = False) -> str:
@@ -417,7 +392,7 @@ def values_equal(name: str, want, got) -> bool:
     w, g = str(want).strip(), str(got).strip()
     if w.casefold() == g.casefold():
         return True
-    if family_of(name) in _AXIS_FAMILIES:
+    if family_of(name) in _SITE_FAMILIES:
         return canon_family_value(name, w) == canon_family_value(name, g)
     if family_of(name) == "WORK":
         from emmy.compiler.ir.schedule import Work  # noqa: PLC0415

@@ -19,7 +19,16 @@ from __future__ import annotations
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
-from emmy.compiler.ir.classic_schedule import ReductionSchedule, SiteIndex
+from emmy.compiler.ir.classic_schedule import (
+    ClassicProblem,
+    ClassicScheduleContext,
+    ReductionSchedule,
+    edge_key,
+    node_key,
+    reduction_sites,
+    stage_edges,
+    tile_sites,
+)
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -36,7 +45,7 @@ from emmy.compiler.ir.schedule import PlacedTile, Reduce, derive_inventory
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
-from emmy.compiler.ir.tile.path import UnknownSiteError, resolve, sites, spell
+from emmy.compiler.ir.tile.path import UnknownSiteError, sites
 
 
 def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -182,19 +191,20 @@ def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tup
 
 
 class Sched:
-    """Read/write view of one kernel's schedule slices — the ``TileOp.schedule`` dict (1r:
-    ``{codec key → resolved Tile / Reduce / Stage}``) bound to the op tree the keys spell
-    against. The ONE accessor pair every reader (the materializer) and stamper
-    (the ``_schedule`` option builders) goes through, so a slice has exactly one home and the key
-    spelling is always the tree-path codec's canonical one (:mod:`~emmy.compiler.ir.tile.path`).
-    A node that is not a site of the family reads ``None`` and refuses writes loudly."""
+    """Read/write view of one kernel's schedule choices and materialization facts.
+
+    Node families use the classic problem's stable :class:`NodeId`; transport is keyed per
+    :class:`EdgeSite`. ``PLACE`` is structural and remains outside this view. A node outside the
+    problem, or a family outside that node's classified schedule sum, fails loudly.
+    """
 
     def __init__(self, root, table: dict | None, place=None, classic=None, materialization=None) -> None:
         self.root = root
         self.table = table if table is not None else {}
         self.classic = classic
         self.materialization = materialization
-        self.index = SiteIndex(root) if classic is not None else None
+        self.context = ClassicScheduleContext(ClassicProblem(root, target=None))
+        self.index = self.context.index
         #: The kernel's free→grid :class:`~emmy.compiler.ir.schedule.Placement`. A ``TILE`` slice
         #: is geometry over an ``(m, n)`` output pair, and WHICH pair is a function of the site's
         #: position in the tree — so the binding belongs here, on the scheduling structure, and
@@ -229,12 +239,29 @@ class Sched:
         return site
 
     def key(self, family: str, node) -> str | None:
-        """The canonical codec key addressing ``node`` under ``family`` — ``None`` when the node
-        is not a site of that family on this tree (nothing to key)."""
+        """The canonical node-family key, or ``None`` when the family does not apply."""
         try:
-            return spell(self.root, family, node, all_sites=self._all_sites())
-        except ValueError:
-            return None
+            site = self.index.site(node)
+        except KeyError as error:
+            raise UnknownSiteError(str(error)) from None
+        if family == "TILE":
+            family_sites = tile_sites(self.context)
+        elif family == "REDUCE":
+            family_sites = reduction_sites(self.context)
+        elif family == "STAGE":
+            raise ValueError("STAGE is an edge family; use edge_keys(node)")
+        else:
+            raise ValueError(f"unknown classic schedule family {family!r}")
+        return node_key(family, site, family_sites) if site in family_sites else None
+
+    def edge_keys(self, node) -> tuple[str, ...]:
+        """Canonical transport keys for every schedulable operand edge of ``node``."""
+        try:
+            site = self.index.site(node)
+        except KeyError as error:
+            raise UnknownSiteError(str(error)) from None
+        edges = stage_edges(self.context)
+        return tuple(edge_key(edge, edges) for edge in edges if edge.consumer == site)
 
     def get(self, family: str, node):
         if self.classic is not None:
@@ -254,6 +281,11 @@ class Sched:
                     raise ValueError("current kernel lowering requires one resolved transport across a node's operand edges")
                 return next(iter(stages), None)
             raise ValueError(f"unknown classic schedule family {family!r}")
+        if family == "STAGE":
+            values = {self.table[key] for key in self.edge_keys(node) if key in self.table}
+            if len(values) > 1:
+                raise ValueError("current kernel lowering requires one resolved transport across a node's operand edges")
+            return next(iter(values), None)
         k = self.key(family, node)
         return self.table.get(k) if k is not None else None
 
@@ -262,9 +294,15 @@ class Sched:
         the decided-empty)."""
         if value is None:
             return
+        if family == "STAGE":
+            keys = self.edge_keys(node)
+            if not keys:
+                raise ValueError(f"STAGE does not apply to this {type(node).__name__} — no edge site to key the choice on")
+            self.table.update((key, value) for key in keys)
+            return
         k = self.key(family, node)
         if k is None:
-            raise ValueError(f"{family} does not apply to this {type(node).__name__} — no site to key the slice on")
+            raise ValueError(f"{family} does not apply to this {type(node).__name__} — no site to key the choice on")
         self.table[k] = value
 
     def tile_of(self, node):
@@ -374,7 +412,6 @@ def scheduled(
 
     ``slices`` are ``(family, node, value)`` triples keyed on the way in. ``None`` slice values
     are skipped, so a resolver that declined needs no guard."""
-    source = Sched(op, {}, place=place)
     out = TileOp(
         op=op,
         name=name,
@@ -386,10 +423,7 @@ def scheduled(
     sched = sched_of(out)
     for family, node, value in slices:
         if value is not None:
-            key = source.key(family, node)
-            if key is None:
-                raise ValueError(f"{family} does not apply to this {type(node).__name__} — no site to key the slice on")
-            sched.put(family, resolve(out.op, key).node, value)
+            sched.put(family, node, value)
     seal_workers(out)
     return out
 

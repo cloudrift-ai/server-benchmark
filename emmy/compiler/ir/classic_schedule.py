@@ -16,6 +16,10 @@ from types import MappingProxyType
 from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.ir.schedule import PlacedTile, Raster, Reduce, ResolvedStage, Stage, Tile, Work
 
+CLASSIC_NODE_FAMILIES = ("TILE", "REDUCE")
+CLASSIC_EDGE_FAMILIES = ("STAGE",)
+CLASSIC_FAMILIES = (*CLASSIC_NODE_FAMILIES, *CLASSIC_EDGE_FAMILIES)
+
 
 @dataclass(frozen=True, order=True)
 class NodeId:
@@ -288,9 +292,9 @@ class ClassicScheduleContext:
 class ClassicScheduleCodec:
     """Strict wire boundary for complete classic schedules.
 
-    Kernel families are bare. Node and edge families use their bare spelling only when the family
-    has exactly one site; otherwise the one canonical suffix is a :class:`NodeId`, with ``.e<N>``
-    for an operand edge. Decoding accepts no aliases, missing direct values, or unknown fields.
+    Kernel families are bare. Every node and edge family carries the one canonical site suffix: a
+    :class:`NodeId`, with ``.e<N>`` for an operand edge. Decoding accepts no aliases, missing
+    direct values, or unknown fields.
     """
 
     def __init__(self, problem: ClassicProblem) -> None:
@@ -408,13 +412,15 @@ def reduction_sites(context: ClassicScheduleContext) -> tuple[NodeSite, ...]:
 
 def node_key(family: str, site: NodeSite, family_sites: Sequence[NodeSite]) -> str:
     """Return the sole canonical codec key for a node family site."""
-    return family if len(family_sites) == 1 else f"{family}@{site.id.spell()}"
+    if site not in family_sites:
+        raise ValueError(f"{site.id.spell()} is not a {family} site")
+    return f"{family}@{site.id.spell()}"
 
 
 def edge_key(edge: EdgeSite, family_edges: Sequence[EdgeSite]) -> str:
     """Return the sole canonical codec key for an edge family site."""
-    if len(family_edges) == 1:
-        return "STAGE"
+    if edge not in family_edges:
+        raise ValueError(f"{edge.consumer.id.spell()}.e{edge.operand} is not a STAGE site")
     return f"STAGE@{edge.consumer.id.spell()}.e{edge.operand}"
 
 
@@ -549,6 +555,9 @@ def _walk(root: Fold) -> Iterator[Fold]:
 
 __all__ = [
     "Acceptance",
+    "CLASSIC_EDGE_FAMILIES",
+    "CLASSIC_FAMILIES",
+    "CLASSIC_NODE_FAMILIES",
     "ClassicProblem",
     "ClassicMaterialization",
     "ClassicSchedule",

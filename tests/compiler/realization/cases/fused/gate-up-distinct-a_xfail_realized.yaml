@@ -63,5 +63,13 @@ configs:
       PLACE: fuse
     knobs:
       WORK: w2x2
-      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      RASTER: ''
+      TILE@n1: mma_m16n8k16_f16_f32/f2x2/k2
+      TILE@n2: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE@n1: ''
+      REDUCE@n2: ''
+      STAGE@n1.e0: ''
+      STAGE@n1.e1: ''
+      STAGE@n2.e0: ''
+      STAGE@n2.e1: ''
     identity: c1c5e4f2e252739223679856d774744278596955b42b18202a6463e4ec28cd85

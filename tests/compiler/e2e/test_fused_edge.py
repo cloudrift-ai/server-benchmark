@@ -25,7 +25,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, ReshapeOp, RmsNormOp, SdpaOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from tests.compiler.helpers import requires_cuda, requires_sm90
+from tests.compiler.helpers import pin_classic, requires_cuda, requires_sm90
 
 F16 = _dt.get("f16")
 _M, _K, _N = 32, 64, 32  # M != K so the row / col broadcasts are unambiguous
@@ -39,8 +39,7 @@ _WARP_WORK = "w1x1"
 
 def _pin_warp(monkeypatch) -> None:
     """Pin the one-warp mma tier — the TILE value at its site, the warps in WORK."""
-    monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
-    monkeypatch.setenv("EMMY_WORK", _WARP_WORK)
+    pin_classic(monkeypatch, {"TILE": _WARP_TILE, "WORK": _WARP_WORK})
 
 
 def _sigmoid(x):
@@ -143,7 +142,8 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     # to a (legal) 2-kernel split row (seen on sm_89). The split form has its own test
     # (test_fused_cone_splitk_matches_reference); the free pick, test_fused_rmsnorm_linear_unpinned.
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "")
+    monkeypatch.setenv("EMMY_REDUCE@N3", "")
     S, H, inter = 32, 1024, 3072
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
@@ -219,9 +219,8 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     the same static 2-D block-tile grid, and the grouped launch order is its B-re-streaming
     fix): the ``_rsub`` grouped decode must be emitted, not silently degraded to flat."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_TILE", tile)
-    monkeypatch.setenv("EMMY_WORK", work)
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the swizzle inspection needs the ONE fused kernel
+    pin_classic(monkeypatch, {"TILE": tile, "WORK": work, "REDUCE": ""})
+    monkeypatch.setenv("EMMY_REDUCE@N3", "")  # serial fold — the swizzle inspection needs the ONE fused kernel
     if tile.endswith("k4"):
         monkeypatch.setenv("EMMY_RASTER", "gn8")
     S, H, inter = 64, 1024, 3072
@@ -253,7 +252,8 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
 def test_place_cone_cut_splits_norm_from_linear_and_matches_reference(rows, place, monkeypatch):
     """The restored placement cut covers both decode M=1 and a regular norm→linear tile."""
     monkeypatch.setenv(f"EMMY_{place.upper()}", "cut")
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "")
+    monkeypatch.setenv("EMMY_REDUCE@N3", "")
     hidden, intermediate = 64, 64
     graph = _rmsnorm_linear_graph(rows, hidden, intermediate)
     _rmsnorm_linear_check(graph, rows, hidden, intermediate, want_mma=False, kernels=(2,))
@@ -268,9 +268,11 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
     the sync compute-fill / stat-prologue σ clamp the overhanging rows and the ``RegStore`` guard
     discards their store."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")  # tile 64×32 — every runtime S is masked
-    monkeypatch.setenv("EMMY_WORK", "w2x2")
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — the ONE-masked-kernel contract is what's under test
+    pin_classic(
+        monkeypatch,
+        {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "REDUCE": ""},
+    )  # tile 64×32 — every runtime S is masked
+    monkeypatch.setenv("EMMY_REDUCE@N3", "")  # serial fold — the ONE-masked-kernel contract is what's under test
     H, inter = 256, 512
     g = _rmsnorm_linear_graph(Dim("seq_len", hint=64), H, inter)
     _rmsnorm_linear_check(g, runtime_s, H, inter, want_mma=True)
@@ -298,9 +300,12 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
     fragment epilogue; the seq axis is symbolic with a masked M tail (31 under / 130 over the
     64-row tile)."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
-    monkeypatch.setenv("EMMY_WORK", "w2x2")
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial fold — ONE masked kernel is the contract; the split form has its own test
+    pin_classic(
+        monkeypatch,
+        {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "REDUCE": ""},
+        node=1,
+        stage_edges=(0, 1, 2),
+    )  # serial fold — ONE masked kernel is the contract; the split form has its own test
     S, H, inter = runtime_s, 256, 512
     Sd = Dim("seq_len", hint=64)
     g = Graph()
@@ -414,10 +419,10 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     depths (``d1`` + the asymmetric B-only prefetch ring ``d2``). The decode-M shape class
     (M=32) is where this split pays: the un-split cone grid starves the SMs."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
-    monkeypatch.setenv("EMMY_WORK", "w1x4")
-    monkeypatch.setenv("EMMY_REDUCE", "g4k")
-    monkeypatch.setenv("EMMY_STAGE", stage)
+    pin_classic(
+        monkeypatch,
+        {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x4", "REDUCE": "g4k", "STAGE": stage},
+    )
     S, H, inter = 32, 1024, 3072
     # CANONICAL-B matmul (w shaped (H, inter)) rather than the transposed-B linear: a
     # transposed B clamps the sync ring back to d1 (nothing async to overlap), so the d2
@@ -454,9 +459,12 @@ def test_fused_gate_up_splitk_matches_reference(monkeypatch):
     the cross-partition sums — the output must match the fp32 reference. The decode-M shape
     class (M=32) is where the multi-channel split pays (the gemma gate⊗up twin)."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
-    monkeypatch.setenv("EMMY_WORK", "w1x4")
-    monkeypatch.setenv("EMMY_REDUCE", "g4k")
+    pin_classic(
+        monkeypatch,
+        {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x4", "REDUCE": "g4k"},
+        node=1,
+        stage_edges=(0, 1, 2),
+    )
     S, H, inter = 32, 256, 512
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")

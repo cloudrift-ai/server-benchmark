@@ -28,7 +28,11 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: t128
-      REDUCE: coop-t
+      RASTER: ''
+      TILE@n0: ''
+      REDUCE@n0: coop-t
+      STAGE@n0.e0: ''
+      STAGE@n0.e1: ''
     identity: 2217b7f5011b3b4d08b1e2250e30ec5c6a3ff8325fa553369ea4603e22f3fb15
     latency:
       NVIDIA GeForce RTX 5090:

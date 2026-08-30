@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import pin_classic, requires_cuda
 
 
 def _run_with_knobs(graph, inputs: dict[str, np.ndarray], out_name: str, knobs: dict, monkeypatch) -> np.ndarray:
@@ -31,8 +31,7 @@ def _run_with_knobs(graph, inputs: dict[str, np.ndarray], out_name: str, knobs: 
     + run via the CUDA backend."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
-    for k, v in knobs.items():
-        monkeypatch.setenv(f"EMMY_{k}", str(v))
+    pin_classic(monkeypatch, knobs)
 
     be = CudaBackend()
     compiled = be.compile(graph)
@@ -56,8 +55,7 @@ def test_warp_tma_pin_refuses_oversized_box(monkeypatch):
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 
     g = _build_f16_matmul_graph(512, 512, 512)
-    for k, v in _OVERSIZED_BOX_KNOBS.items():
-        monkeypatch.setenv(f"EMMY_{k}", str(v))
+    pin_classic(monkeypatch, _OVERSIZED_BOX_KNOBS)
     with pytest.raises(ValueError, match="does not resolve"):
         Pipeline.build(TILE_PASSES).run(g, ctx=Context.from_target((9, 0)))
 
@@ -92,8 +90,7 @@ def test_sgemm_inner_reduce_is_unrolled(monkeypatch):
     from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
 
     g = _build_2d_matmul_graph(_ARTICLE_DIMS)
-    for k, v in {"TILE": "f4x26", "WORK": "t32x8", "STAGE": "d2/smem-tma"}.items():
-        monkeypatch.setenv(f"EMMY_{k}", str(v))
+    pin_classic(monkeypatch, {"TILE": "f4x26", "WORK": "t32x8", "STAGE": "d2/smem-tma"})
     res = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(g, ctx=Context.from_target((12, 0)))
     src = "\n".join(n.op.kernel_source for n in res.nodes.values() if isinstance(n.op, CudaOp))
     assert "#pragma unroll" in src, "the small FMA inner reduce must be marked for #pragma unroll"
@@ -106,19 +103,21 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
     import torch
     import torch.nn as nn
 
-    for key, value in {
-        "WORK": "t16x8",
-        "TILE": "f2x2",
-        "STAGE": "",
-        # Serial K: the subject is the sweep's bound coordinate in ONE kernel, and an unpinned
-        # REDUCE leaves the cross-CTA split fair game — a split's pieces are new kernels with
-        # their own sweeps.
-        "REDUCE": "",
-        "LOOPIFY": "0",
-        "INTERLEAVE_LOADS": "1",
-        "VECTORIZE_LOADS": "1",
-    }.items():
-        monkeypatch.setenv(f"EMMY_{key}", value)
+    pin_classic(
+        monkeypatch,
+        {
+            "WORK": "t16x8",
+            "TILE": "f2x2",
+            "STAGE": "",
+            # Serial K: the subject is the sweep's bound coordinate in ONE kernel, and an unpinned
+            # REDUCE leaves the cross-CTA split fair game — a split's pieces are new kernels with
+            # their own sweeps.
+            "REDUCE": "",
+            "LOOPIFY": "0",
+            "INTERLEAVE_LOADS": "1",
+            "VECTORIZE_LOADS": "1",
+        },
+    )
 
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
@@ -195,15 +194,17 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkey
     from emmy.compiler.ir.frontend.ir import LinearOp
     from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
 
-    for key, value in {
-        "WORK": "w1x1",
-        "TILE": "mma_m8n8k4_f16_f32/f4x4/k8",
-        "REDUCE": "",
-        "STAGE": "",
-        "LOOPIFY": "0",
-        "RASTER": "",
-    }.items():
-        monkeypatch.setenv(f"EMMY_{key}", value)
+    pin_classic(
+        monkeypatch,
+        {
+            "WORK": "w1x1",
+            "TILE": "mma_m8n8k4_f16_f32/f4x4/k8",
+            "REDUCE": "",
+            "STAGE": "",
+            "LOOPIFY": "0",
+            "RASTER": "",
+        },
+    )
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (1, 8, 32), {"f8": F8E4M3, "f32": F32}[a_dtype]), node_id="x")
@@ -241,7 +242,7 @@ def test_unstaged_atom_lowers_gmem_direct(monkeypatch):
     # tile + atom-K chunk) and leave STAGE unpinned — an explicit STAGE pin is authoritative (no
     # budget filter), but here we want the budget-aware filter to decline the over-budget staging so
     # the operands fall to the gmem-direct path. The ``a:<atom>`` token forces the warp (mma) tier.
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f26x4/k2")
+    pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16_f32/f26x4/k2"})
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     compiled = CudaBackend().compile(g)  # no longer raises
     src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))

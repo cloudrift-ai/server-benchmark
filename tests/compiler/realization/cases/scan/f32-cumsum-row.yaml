@@ -25,7 +25,6 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
+      RASTER: ''
+      REDUCE@n1: ''
     identity: 9849e7d94aa17db710830cc00d88b7fe287f0d0e0c772f1fe912e7434b2de42b

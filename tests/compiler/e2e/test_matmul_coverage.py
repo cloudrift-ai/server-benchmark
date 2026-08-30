@@ -41,7 +41,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.features import mma_atom
-from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm90
+from tests.compiler.helpers import dyn_M, pin_classic, requires_cuda, requires_sm90
 
 
 def _has_cuda() -> bool:
@@ -91,7 +91,7 @@ def _pin_tile(monkeypatch, pin: tuple[str, str]) -> None:
     """Pin an output tile: the site-local ``TILE`` value plus the ``WORK`` inventory its unit
     widths live in (the two halves of one tile — a fixture spells them as one pair)."""
     value, work = pin
-    monkeypatch.setenv("EMMY_TILE", value)
+    pin_classic(monkeypatch, {"TILE": value})
     monkeypatch.setenv("EMMY_WORK", work)
 
 
@@ -209,7 +209,7 @@ def test_matmul_reg_tile_epilogue(epilogue, monkeypatch):
 
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     _pin_tile(monkeypatch, _EPILOGUE_TILE)
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the fused epilogue, not the restored split-K fork
+    pin_classic(monkeypatch, {"REDUCE": ""})  # serial K: the subject is the fused epilogue, not the restored split-K fork
     m = _DYN_M
     rng = np.random.default_rng(0)
     feed = {"a": rng.standard_normal((1, m, _K), dtype=np.float32), "b": rng.standard_normal((_K, _N), dtype=np.float32)}
@@ -269,10 +269,10 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     actually has."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
-    monkeypatch.setenv("EMMY_TILE", "f2x2")
+    pin_classic(monkeypatch, {"TILE": "f2x2"})
     monkeypatch.setenv("EMMY_WORK", "t16x16")
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is stage resolution, not the split fork
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
+    pin_classic(monkeypatch, {"REDUCE": ""})  # serial K: the subject is stage resolution, not the split fork
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-tma"})
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     # ``STAGE`` is keyed ``@<k_axis>`` (axis-named schedule knob); ``family_value`` reads it.
@@ -282,7 +282,7 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     assert stage.depth == 2, stage  # the scalar ring honors the pinned depth (slots fit 48 KiB)
     assert stage.bk_elems == 64, stage  # derived depth-aware fit-to-smem K-chunk (K=64 divides)
 
-    monkeypatch.setenv("EMMY_STAGE", "d1/smem")  # reg needs a computed edge — declines on a materialized contraction
+    pin_classic(monkeypatch, {"STAGE": "d1/smem"})  # reg needs a computed edge — declines on a materialized contraction
     with pytest.raises(ValueError, match="does not resolve"):
         Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
 
@@ -293,11 +293,11 @@ def test_scalar_masked_n_stage_pin_refuses(monkeypatch) -> None:
     hang the kernel on the misaligned 16 B copy. An explicit pin refuses instead of silently
     selecting gmem-direct."""
 
-    monkeypatch.setenv("EMMY_TILE", "f2x2")  # tile_n=32 overhangs N=48 ⇒ masked-N
+    pin_classic(monkeypatch, {"TILE": "f2x2"})  # tile_n=32 overhangs N=48 ⇒ masked-N
     monkeypatch.setenv("EMMY_WORK", "t16x16")
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: isolate the stage resolution
+    pin_classic(monkeypatch, {"REDUCE": ""})  # serial K: isolate the stage resolution
     for stage in ("d1/smem-async", "d2/smem-async", "d2/smem-tma"):
-        monkeypatch.setenv("EMMY_STAGE", stage)
+        pin_classic(monkeypatch, {"STAGE": stage})
         with pytest.raises(ValueError, match="does not resolve"):
             Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(M=64, N=48, K=64), ctx=Context.from_target((9, 0)))
 
@@ -307,15 +307,15 @@ def test_tma_stage_pin_refuses_below_sm90(monkeypatch) -> None:
     at sm_90 resolves, and cp.async staging still rings below sm_90."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
-    monkeypatch.setenv("EMMY_TILE", "f2x2")
+    pin_classic(monkeypatch, {"TILE": "f2x2"})
     monkeypatch.setenv("EMMY_WORK", "t16x16")
-    monkeypatch.setenv("EMMY_REDUCE", "")
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
+    pin_classic(monkeypatch, {"REDUCE": ""})
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-tma"})
     with pytest.raises(ValueError, match="requires sm_90"):
         Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((8, 9)))
 
     # Control: cp.async is unaffected by the gate — a d2/smem-async pin still rings at sm_89.
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-async"})
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((8, 9)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     stage = _node_stage(tile_op)
@@ -337,11 +337,11 @@ def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):
     b = rng.standard_normal((K, N), dtype=np.float32)
 
     def _go(st: str | None) -> tuple[np.ndarray, str]:
-        monkeypatch.setenv("EMMY_TILE", "f2x2")
+        pin_classic(monkeypatch, {"TILE": "f2x2"})
         monkeypatch.setenv("EMMY_WORK", "t16x16")
-        monkeypatch.setenv("EMMY_REDUCE", "")
+        pin_classic(monkeypatch, {"REDUCE": ""})
         # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
-        monkeypatch.setenv("EMMY_STAGE", st if st else "")
+        pin_classic(monkeypatch, {"STAGE": st if st else ""})
         be = CudaBackend()
         compiled = be.compile(_scalar_stage_graph(M, N, K))
         src = compiled.nodes["o"].op.kernel_source
@@ -364,10 +364,10 @@ def test_warp_matmul_stamps_the_producer_band(monkeypatch) -> None:
     (the producer/compute band split in ``_stage._producer_band_kloop``)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")  # warp (mma) tier
+    pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16/f2x2/k2"})  # warp (mma) tier
     monkeypatch.setenv("EMMY_WORK", "w2x2+p1")
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the band, not the split fork
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
+    pin_classic(monkeypatch, {"REDUCE": ""})  # serial K: the subject is the band, not the split fork
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-tma"})
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(dtype=F16), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     assert "WSPEC" not in tile_op.knobs, tile_op.knobs  # the band spells on WORK, never a row key
@@ -382,9 +382,9 @@ def test_producer_band_without_a_driveable_stage_enumerates_nothing(monkeypatch)
     contract) rather than silently dropping the band the pin asked for."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")
+    pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16/f2x2/k2"})
     monkeypatch.setenv("EMMY_WORK", "w2x2+p2")
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-async"})
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(dtype=F16), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     assert tile_op.workers is None and not tile_op.place.is_mapped
@@ -578,7 +578,7 @@ def test_matmul_mma_coverage(M, N, K, out, trans, monkeypatch):
     # Pin the REDUCE codec serial: the split-K f32 workspace legalized ``g<w>k`` for f16 output,
     # and an unpinned greedy pick can split this shape (partials + tail kernel), moving the
     # ``__floats2half2_rn`` downconvert out of the fused epilogue these source assertions check.
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    pin_classic(monkeypatch, {"REDUCE": ""})
     run_m = M + 2
     rng = np.random.default_rng(0)
     a = (rng.standard_normal((run_m, K)) * 0.1).astype(np.float16)
@@ -615,8 +615,8 @@ def test_mma_static_k_tail_zero_fills(K, masked, monkeypatch):
     K=136 is a multiple of ``atom_k`` (16) but not of the row's ``atom_k·bk`` = 32 chunk — the
     K-STEP divisibility the warp tier used to refuse, which the gmem-direct loop never needed."""
     _pin_tile(monkeypatch, _WARP_PIN)
-    monkeypatch.setenv("EMMY_REDUCE", "")
-    monkeypatch.setenv("EMMY_STAGE", "")  # gmem-direct: the masked-K tier (a staged K chunk must divide K)
+    pin_classic(monkeypatch, {"REDUCE": ""})
+    pin_classic(monkeypatch, {"STAGE": ""})  # gmem-direct: the masked-K tier (a staged K chunk must divide K)
     src = _render_src(_mma_matmul_graph("static", 128, 128, K, "f32", False))
     body = src[src.index('extern "C"') :]
     assert "mma.sync.aligned.m16n8k16" in src, "the row must still reach the mma tier"
@@ -658,15 +658,15 @@ def test_matmul_mma_trans_b_staged(transport, monkeypatch):
     transport — the gap class the gmem-direct-only enumeration left 1.3–2.75× behind cuBLAS."""
     M = N = K = 128
     _pin_tile(monkeypatch, _WARP_PIN)
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    pin_classic(monkeypatch, {"REDUCE": ""})
     run_m = M + 2
     rng = np.random.default_rng(2)
     a = (rng.standard_normal((run_m, K)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((N, K)) * 0.1).astype(np.float16)
 
-    monkeypatch.setenv("EMMY_STAGE", "")
+    pin_classic(monkeypatch, {"STAGE": ""})
     gmem, gmem_src = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, _F16, True), {"a": a, "b": b})
-    monkeypatch.setenv("EMMY_STAGE", _TRANS_STAGES[transport])
+    pin_classic(monkeypatch, {"STAGE": _TRANS_STAGES[transport]})
     staged, src = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, _F16, True), {"a": a, "b": b})
 
     # Call-site patterns (`helper(_b…`) — the preamble defines every helper unconditionally,
@@ -733,7 +733,7 @@ def test_matmul_mma_f16acc_coverage(stage, monkeypatch):
     if stage == "smem-tma" and not _supports_tma():
         pytest.skip("TMA needs sm_90+")
     M = N = K = 128
-    monkeypatch.setenv("EMMY_STAGE", _F16ACC_STAGES[stage])
+    pin_classic(monkeypatch, {"STAGE": _F16ACC_STAGES[stage]})
     run_m = M + 2
     rng = np.random.default_rng(0)
     a = (rng.standard_normal((run_m, K)) * 0.1).astype(np.float16)
@@ -764,7 +764,7 @@ def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
     it at the symbol's 512 hint, which is a whole number of promote periods; K=70 is off both the
     16-step grid and the promote period, and there is no way to store "compile at the hint, run
     at 70"."""
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f16/f1x1")
+    pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16_f16/f1x1"})
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.delenv("EMMY_STAGE", raising=False)
     M = N = 128
@@ -895,7 +895,7 @@ def test_matmul_mma_epilogue_coverage(epilogue, mode, monkeypatch):
     epilogue into the ONE mma.sync kernel (the per-element ``RegStore`` chain)."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     _pin_tile(monkeypatch, _WARP_PIN)
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the fused epilogue, not the restored split-K fork
+    pin_classic(monkeypatch, {"REDUCE": ""})  # serial K: the subject is the fused epilogue, not the restored split-K fork
     M = N = K = 128
     run_m = M if mode == "static" else M + 2
     rng = np.random.default_rng(1)
@@ -954,11 +954,11 @@ def transport(request, monkeypatch) -> str:
     """Pin the warp tile (``WARP`` codec) + the operand-staging transport (``STAGE`` codec —
     ``d2/smem-async`` = cp.async, ``d2/smem-tma`` = cp.async.bulk.tensor). The "pinned knobs" fixture."""
     _pin_tile(monkeypatch, _WARP_CODEC)
-    monkeypatch.setenv("EMMY_STAGE", f"d2/{request.param}")
+    pin_classic(monkeypatch, {"STAGE": f"d2/{request.param}"})
     # REDUCE pinned serial: without it the pick may ride a g<w>k split sibling (a partial +
     # finalize PAIR — these tests assert on the single ``o`` kernel), depending on how the
     # live prior ranks the split rows. The pinned path must not hang on prior rank order.
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    pin_classic(monkeypatch, {"REDUCE": ""})
     return request.param
 
 
@@ -1020,9 +1020,9 @@ def test_staged_matches_gmem_direct_bit_for_bit(monkeypatch, M):
 
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
         _pin_tile(monkeypatch, _WARP_CODEC)
-        monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the baseline must not reroute through the restored split-K fork
+        pin_classic(monkeypatch, {"REDUCE": ""})  # serial K: the baseline must not reroute through the restored split-K fork
         # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
-        monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
+        pin_classic(monkeypatch, {"STAGE": stage if stage else ""})
         be = CudaBackend()
         compiled = be.compile(_parity_mma_graph("static", M=M))
         src = compiled.nodes["o"].op.kernel_source
@@ -1057,8 +1057,8 @@ def test_register_double_buffer_matches_single_buffer_bit_for_bit(monkeypatch, t
 
     def _go(stage: str) -> tuple[np.ndarray, str]:
         _pin_tile(monkeypatch, _WARP_CODEC)
-        monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the p2 double-buffer, not the split fork
-        monkeypatch.setenv("EMMY_STAGE", stage)
+        pin_classic(monkeypatch, {"REDUCE": ""})  # serial K: the subject is the p2 double-buffer, not the split fork
+        pin_classic(monkeypatch, {"STAGE": stage})
         be = CudaBackend()
         compiled = be.compile(_parity_mma_graph("static", M=M))
         src = compiled.nodes["o"].op.kernel_source
@@ -1089,9 +1089,9 @@ def test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, 
 
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
         _pin_tile(monkeypatch, _WARP_CODEC)
-        monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the baseline must not reroute through the restored split-K fork
+        pin_classic(monkeypatch, {"REDUCE": ""})  # serial K: the baseline must not reroute through the restored split-K fork
         # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
-        monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
+        pin_classic(monkeypatch, {"STAGE": stage if stage else ""})
         be = CudaBackend()
         compiled = be.compile(_parity_mma_graph("static", M=M))
         src = compiled.nodes["o"].op.kernel_source
@@ -1126,9 +1126,9 @@ def test_tma_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, M):
 
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
         _pin_tile(monkeypatch, _WARP_CODEC)
-        monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the baseline must not reroute through the restored split-K fork
+        pin_classic(monkeypatch, {"REDUCE": ""})  # serial K: the baseline must not reroute through the restored split-K fork
         # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
-        monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
+        pin_classic(monkeypatch, {"STAGE": stage if stage else ""})
         be = CudaBackend()
         compiled = be.compile(_parity_mma_graph("static", M=M))
         src = compiled.nodes["o"].op.kernel_source
@@ -1151,8 +1151,8 @@ def test_tma_staged_slab_is_swizzled(monkeypatch):
     ON (the rebuilt transport shipped NONE-swizzle slabs and the conflict-bound drain cost the
     fp16 squares ~1.3-1.5× vs the pre-rebuild swizzled bar)."""
     _pin_tile(monkeypatch, _WARP_CODEC)
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-tma"})
+    pin_classic(monkeypatch, {"REDUCE": ""})
     lowered = Pipeline.build(CUDA_PASSES).run(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(12, 0)))
     op = lowered.nodes["o"].op
     modes = {d.name: d.swizzle for d in op.tma_descriptors}
@@ -1174,8 +1174,8 @@ def test_cp_staged_slab_is_swizzled(monkeypatch):
     8-way (128 B rows) bank-conflicted — the measured sm_89 residual to cuBLAS (conflict
     replays were 81% of the gate_up fm golden's shared-mem wavefronts; the XOR won −12–17%)."""
     _pin_tile(monkeypatch, _WARP_CODEC)
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-async"})
+    pin_classic(monkeypatch, {"REDUCE": ""})
     lowered = Pipeline.build(CUDA_PASSES).run(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(8, 9)))
     op = lowered.nodes["o"].op
     src = op.kernel_source
@@ -1198,9 +1198,9 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
 
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_bf16/f2x2/k2")
+    pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_bf16/f2x2/k2"})
     monkeypatch.setenv("EMMY_WORK", "w2x2")
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-async"})
     M = 256
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("a", (M, _PK), dtype=BF16), node_id="a")
@@ -1257,12 +1257,12 @@ def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
 
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
-        monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")
+        pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16/f2x2/k2"})
         monkeypatch.setenv("EMMY_WORK", "w2x2")
-        monkeypatch.setenv("EMMY_REDUCE", "g2k")
+        pin_classic(monkeypatch, {"REDUCE": "g2k"})
         # The baseline pins STAGE="" (gmem-direct) explicitly — unpinned, the offline prior may
         # legitimately pick a staged row (D_stage_* terms), which is not the baseline this test wants.
-        monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
+        pin_classic(monkeypatch, {"STAGE": stage if stage else ""})
         be = CudaBackend()
         compiled = be.compile(_splitk_mma_graph(m, k, n))
         partial_src = compiled.nodes["o__partial"].op.kernel_source  # the deferred-finalize partial kernel
@@ -1305,7 +1305,7 @@ def test_warp_static_k_indivisible_is_masked(monkeypatch) -> None:
     partial step zero-fills the fragment halves past K, the same masking a symbolic K gets. The
     K-step used to be a hard divisibility gate, which put every such shape out of a golden's reach
     (the emitted zero-fill is asserted by ``test_mma_static_k_tail_zero_fills``)."""
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x1")  # K-step 16
+    pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16/f1x1"})  # K-step 16
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     _run_tile_pass(_guard_mm_graph(128, 128, 100))  # 100 % 16 == 4 — masked, no raise
     _run_tile_pass(_guard_mm_graph(128, 128, 128))  # 128 % 16 == 0 — exact, no mask
@@ -1314,7 +1314,7 @@ def test_warp_static_k_indivisible_is_masked(monkeypatch) -> None:
 def test_warp_symbolic_k_not_guarded(monkeypatch) -> None:
     """A symbolic K reaches the masked tier (ceil-div grid + zero-filled partial slab), so the
     static-K guard does not fire even when the hint is not a K-step multiple."""
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x1/k2")  # K-step 32
+    pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16/f1x1/k2"})  # K-step 32
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     _run_tile_pass(_guard_mm_graph(64, 128, Dim("seq_len")))  # symbolic K — no raise
 
@@ -1322,7 +1322,7 @@ def test_warp_symbolic_k_not_guarded(monkeypatch) -> None:
 def test_tile_block_over_thread_limit_rejected(monkeypatch) -> None:
     """A TILE parallel tile over the 1024-thread/CTA limit is rejected at compile time instead
     of failing the launch with an opaque ``CUDA_ERROR_INVALID_VALUE``."""
-    monkeypatch.setenv("EMMY_TILE", "")  # 16384 threads
+    pin_classic(monkeypatch, {"TILE": ""})  # 16384 threads
     monkeypatch.setenv("EMMY_WORK", "t128x128")
     with pytest.raises(ValueError, match="exceeds the 1024-thread/CTA limit"):
         _run_tile_pass(_guard_mm_graph(256, 256, 256, dtype=F32))
@@ -1330,7 +1330,7 @@ def test_tile_block_over_thread_limit_rejected(monkeypatch) -> None:
 
 def test_tile_block_within_limit_ok(monkeypatch) -> None:
     """A TILE parallel tile within the thread limit lowers without the guard firing."""
-    monkeypatch.setenv("EMMY_TILE", "")  # 64 threads
+    pin_classic(monkeypatch, {"TILE": ""})  # 64 threads
     monkeypatch.setenv("EMMY_WORK", "t8x8")
     _run_tile_pass(_guard_mm_graph(256, 256, 256, dtype=F32))
 
@@ -1426,8 +1426,7 @@ def test_masked_symbolic_m_structure(transport, monkeypatch):
     per-element row guards on the fragment store; TMA takes a ``CUtensorMap`` descriptor param and
     stages the A operand with ``cp.async.bulk.tensor`` (TMA zero-fills the masked overhang)."""
     knobs = _CP_KNOBS if transport == "smem-async" else _TMA_KNOBS
-    for k, v in knobs.items():
-        monkeypatch.setenv(f"EMMY_{k}", v)
+    pin_classic(monkeypatch, knobs)
     lowered = Pipeline.build(CUDA_PASSES).run(_symbolic_m_graph(), ctx=Context(compute_capability=(12, 0)))
     kop = lowered.nodes["o"].op
     assert mma_atom(kop.knobs) == "mma_m16n8k16_f16_f32"
@@ -1453,8 +1452,7 @@ def test_batched_symbolic_mk_reaches_warp(monkeypatch):
     """The batched masked-M + masked-K P@V consumer must reach the mma.sync tier (the
     ``classify_matmul_operands`` batch-aware B test), not stay a LoopOp."""
     # Both operands are direct graph inputs, so this case has no computed edge to stage.
-    for k, v in {**_CP_KNOBS, "STAGE": ""}.items():
-        monkeypatch.setenv(f"EMMY_{k}", v)
+    pin_classic(monkeypatch, {**_CP_KNOBS, "STAGE": ""})
     lowered = Pipeline.build(CUDA_PASSES).run(_batched_symbolic_mk_graph(), ctx=Context(compute_capability=(12, 0)))
     kop = lowered.nodes["o"].op
     assert mma_atom(kop.knobs) == "mma_m16n8k16_f16_f32", "batched symbolic M+K matmul must reach the warp tier"
@@ -1471,8 +1469,8 @@ def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
     B peer clamps its overhanging slab ROW the same way (K is that slab's outer dim, so the
     cp.async chunk stays contiguous). Without the mask the schedule refused the tier outright and
     this shape had only the scalar rows."""
-    for k, v in {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d1/smem", "REDUCE": ""}.items():
-        monkeypatch.setenv(f"EMMY_{k}", v)
+    pin_classic(monkeypatch, {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d1/smem", "REDUCE": ""}, node=2)
+    monkeypatch.setenv("EMMY_REDUCE@N1", "")
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     lowered = Pipeline.build(CUDA_PASSES).run(_pv_softmax_graph(), ctx=Context(compute_capability=(12, 0)))
     kop = lowered.nodes["o"].op
@@ -1671,8 +1669,7 @@ def test_masked_symbolic_accuracy(label, seq, monkeypatch):
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
     env, _seqs, make = _MASKED_CASES[label]
-    for k, v in env.items():
-        monkeypatch.setenv(f"EMMY_{k}", v)
+    pin_classic(monkeypatch, env)
 
     graph, feed, want = make(seq)
     be = CudaBackend()
@@ -1693,7 +1690,7 @@ _RASTER_TILE = ("mma_m16n8k16_f16_f32/f2x4/k2", "w2x2")  # M-tile 64, N-tile 64 
 
 def _raster_kop(monkeypatch, M: int, raster: str | None = None):
     _pin_tile(monkeypatch, _RASTER_TILE)
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-async"})
     if raster is not None:
         monkeypatch.setenv("EMMY_RASTER", raster)
     g = _mma_matmul_graph("static", M, 2048, 1024, "f16", False)
@@ -1856,7 +1853,7 @@ def test_operand_index_map_accuracy(form, monkeypatch):
     answer, which is why it must never be launched by the suite: it poisons the CUDA context for
     every later test in the process. The other ten cells of this matrix are corpus cases, and they
     record what the corpus found by actually running them — a silently wrong answer, not a fault."""
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-async"})
     g, ref = _imap_graph(form)
     got, _, ins = _imap_run(g)
     want = ref(ins)
@@ -1872,7 +1869,7 @@ def test_operand_index_map_accuracy(form, monkeypatch):
 def test_reshaped_a_fragment_takes_the_derived_row_stride(monkeypatch):
     """The gmem-direct mma fragment loader steps the reshaped A's rows at the DERIVED 128, not the
     buffer's declared trailing extent 256 — the ``ldm`` argument IS the bug, visible in the source."""
-    monkeypatch.setenv("EMMY_STAGE", "")
+    pin_classic(monkeypatch, {"STAGE": ""})
     _, src, _ = _imap_run(_imap_graph("reshape_a")[0])
     calls = [ln.strip() for ln in src.splitlines() if "emmy_mma_load_a_gmem" in ln and "(_a" in ln]
     assert calls, "the gmem-direct pin must reach the mma fragment loader"
@@ -1888,10 +1885,10 @@ def test_reshaped_a_declines_tma_and_falls_back(monkeypatch):
     """TMA's box is a rectangle in the DESCRIPTOR's coordinates, so a re-strided A has no
     descriptor — the pin DECLINES and the row falls back to a correct transport rather than
     copying the declared row pitch. The unmapped-falls-back half of the guardrail contract."""
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-tma"})
     _, imap_src, _ = _imap_run(_imap_graph("reshape_a")[0])
     assert "cp.async.bulk.tensor" not in imap_src, "a re-strided A must not reach a TMA box copy"
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
+    pin_classic(monkeypatch, {"STAGE": "d2/smem-tma"})
     _, plain_src, _ = _imap_run(_imap_graph("slice_a")[0])
     assert "cp.async.bulk.tensor" in plain_src, "the canonical (sliced) A still stages via TMA — the pin is not dead"
 
@@ -1900,7 +1897,7 @@ def test_transposed_a_warp_pin_raises(monkeypatch) -> None:
     """A WARP pin on a transposed A RAISES the layout reason instead of lowering a kernel that
     reads columns at the wrong stride — the other half of the contract: an unschedulable form is
     refused loudly under a pin, and dropped silently (onto the scalar tier) without one."""
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x1")
+    pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16_f32/f1x1"})
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     with pytest.raises(ValueError, match="columns CONTIGUOUSLY"):
         _run_tile_pass(_imap_graph("transpose_a")[0])

@@ -88,7 +88,7 @@ class _RouteBackend(_CountingBackend):
         if len(cuda) > 1:
             route = tuple(node.op.cache_key() for node in cuda)
             first = cuda[0].op.knobs
-            fast_route = first.get("WORK") == "t16x8" and first.get("STAGE") == "d1/smem-async"
+            fast_route = first.get("WORK") == "t16x8" and first.get("STAGE@n0.e0") == "d1/smem-async"
             if fast_route:
                 self.measured_route = route
             us = 1.0 if fast_route else 20.0
@@ -202,7 +202,7 @@ def test_run_drives_outer_scores_separably_and_assembles() -> None:
 
 def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt(monkeypatch, tmp_path) -> None:
     """A measured route stays search evidence until its exact child tree can replay."""
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "")
     graph = _graph(("x", 64, 128, 48))
     graph.add_node(InputOp(), [], Tensor("residual", (64, 48)), node_id="residual")
     graph.add_node(ElementwiseOp("add"), ["xc", "residual"], Tensor("out", (64, 48)), node_id="out")
@@ -233,7 +233,7 @@ def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog)
     """A pinned cross-CTA split mints pieces inside the inner loops; the splice watcher reports
     them and the strategy enrolls each — tuned in its own slice, logged as enrolled — while the
     terminal reward keeps only the OUTER kernel (pieces are evidence, not reward terms)."""
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
     fused = _fuse(_graph(("x", 64, 512, 48)))
     backend = _CountingBackend()
     with caplog.at_level(logging.INFO, logger="emmy.compiler.pipeline.search.strategy.two_level"):

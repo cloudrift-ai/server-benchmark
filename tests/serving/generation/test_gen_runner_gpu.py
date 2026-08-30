@@ -847,7 +847,12 @@ def test_expert_program_fp8_indirect_compose(monkeypatch):
     ``STAGE`` is pinned off: an indirect build refuses (loudly, by design) any schedule that
     stages an indirect operand through a TMA descriptor, and whether the evidence hierarchy picks
     one is a per-machine fact this test does not protect — the serving tier owns that fallback."""
-    monkeypatch.setenv("EMMY_STAGE", "")
+    monkeypatch.setenv("EMMY_TILE@N1", "")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "")
+    monkeypatch.setenv("EMMY_STAGE@N1.E0", "")
+    monkeypatch.setenv("EMMY_STAGE@N1.E1", "")
+    monkeypatch.setenv("EMMY_WORK", "")
+    monkeypatch.setenv("EMMY_RASTER", "")
     pytest.importorskip("cupy")
     import cupy as cp
     import torch

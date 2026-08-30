@@ -1,10 +1,8 @@
-"""The tree-path knob codec (phase 2) — ONE walker + resolver over the stored Fold tree.
+"""The structural placement path codec over the stored Fold tree.
 
-Grammar: ``FAMILY@<node-path>[.<axis>][<n>] = value``. A schedule key addresses the node (or edge)
-it decorates by POSITION in the Fold tree — no parallel namespace of hand-invented site
-names. The walker (:func:`sites`) enumerates every ``(path, node, schedule-bearing axis)`` triple
-once; the resolver (:func:`resolve`) and the canonical speller (:func:`spell`) are total over the
-sugar forms and shared by the pin layer, the stampers (phase 3) and the seam enumerator (phase 4).
+Grammar: ``PLACE@<node-path>[.<axis>][<n>] = value``. Placement addresses a stored Fold edge by
+position because it is a structural decision made before a classic problem exists. Schedule
+choices do not use this codec: their sole identities are ``NodeId`` and ``EdgeSite``.
 
 Sugar levels, shortest first — **short paths are canonical** (stampers and ALL stored evidence use
 the shortest spelling unique for the kernel's tree, which is why every live golden spelling is
@@ -44,13 +42,8 @@ from itertools import combinations
 from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.structural import instance_memo
 
-#: The families that key a schedule SLICE on a node — the ONE list, since ``ir/`` never imports
-#: ``pipeline/`` and every reader on both sides of that line needs the same three.
-SLICE_FAMILIES = ("TILE", "REDUCE", "STAGE")
-
-#: What a tree path may address. ``PLACE`` addresses a non-root Fold's incoming edge; it is a
-#: kernel-boundary decision rather than a schedule slice.
-PATH_FAMILIES = (*SLICE_FAMILIES, "PLACE")
+#: The only family a tree path may address. Schedule identities belong to ``classic_schedule``.
+PATH_FAMILIES = ("PLACE",)
 
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
 _SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
@@ -178,30 +171,10 @@ def sites(root) -> tuple[Site, ...]:
 
 
 def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
-    """The sites ``family`` may decorate: every fold for ``REDUCE`` / ``STAGE``; ``TILE`` takes the
-    CONTRACTION folds (:func:`~emmy.compiler.ir.pure.fold.is_contraction` — the same question
-    :func:`_walk` asks, so the two cannot diverge on the split-K wrapper, which tiles nothing) plus
-    the pure pointwise ROOT zero-axis ``Fold`` (the register-strip tier — a non-root operandless
-    zero-axis fold is not a strip target).
-
-    Residence is an edge decision made by scheduling; it does not remove the producer Fold's own
-    schedule site. ``PLACE`` addresses every stored non-root Fold, excluding synthesized derived
-    evaluation nodes that have no replaceable edge in the term."""
+    """Stored non-root Fold edges eligible for structural placement."""
     if family not in PATH_FAMILIES:
-        raise ValueError(f"{family!r} is not a tree-path knob family (have {PATH_FAMILIES})")
-    if family == "PLACE":
-        return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
-    if family in ("REDUCE", "STAGE"):
-        return tuple(s for s in all_sites if isinstance(s.node, Fold) and s.node.axis is not None)
-    out = []
-    for s in all_sites:
-        if not isinstance(s.node, Fold):
-            continue
-        if s.node.axis is not None and is_contraction(s.node):
-            out.append(s)
-        elif s.node.axis is None and not s.node.operands and s.depth == 1:
-            out.append(s)
-    return tuple(out)
+        raise ValueError(f"{family!r} is not a structural path family (have {PATH_FAMILIES})")
+    return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
 
 
 def primary(family: str, fam_sites: tuple[Site, ...]) -> Site | None:
@@ -458,7 +431,6 @@ def canonical(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> s
 
 __all__ = [
     "PATH_FAMILIES",
-    "SLICE_FAMILIES",
     "MissingSiteError",
     "Site",
     "UnknownSiteError",

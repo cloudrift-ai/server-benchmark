@@ -43,15 +43,5 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      TILE@a3: ''
-      TILE@pj: ''
-      REDUCE: ''
-      REDUCE@a3: ''
-      REDUCE@pj: ''
-      STAGE: ''
-      STAGE@a3: ''
-      STAGE@pj: ''
-      RASTER: ''
-      WORK: t32x16
+    knobs: {}
     identity: c0666e5092a8645bd55578ac9a4da97a27afb6f9c74fee752084ee4ba2c5d588

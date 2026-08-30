@@ -37,9 +37,12 @@ configs:
       FAST_MATH: false
       PLACE: fuse
     knobs:
-      TILE: f2x2
       WORK: t16x16
-      REDUCE: ''
+      RASTER: ''
+      TILE@n1: f2x2
+      REDUCE@n1: ''
+      STAGE@n1.e0: ''
+      STAGE@n1.e1: ''
     identity: c93922e3cb1e210caf49b13ed013262c77ac72f3a8b121840f97839f5ab5ab38
     latency:
       NVIDIA GeForce RTX 5090:

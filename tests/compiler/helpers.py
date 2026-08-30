@@ -57,6 +57,51 @@ requires_sm90 = pytest.mark.skipif(
 )
 
 
+def classic_row(knobs: dict[str, str], *, node: int = 0, stage_edges: tuple[int, ...] = (0, 1)) -> dict[str, str]:
+    """Spell a single-contraction test row with canonical classic site identities."""
+    row: dict[str, str] = {}
+    for family, value in knobs.items():
+        if family in {"WORK", "RASTER"}:
+            row[family] = value
+        elif family in {"TILE", "REDUCE"}:
+            row[f"{family}@n{node}"] = value
+        elif family == "STAGE":
+            row.update((f"STAGE@n{node}.e{edge}", value) for edge in stage_edges)
+        else:
+            row[family] = value
+    return row
+
+
+def pin_classic(monkeypatch, knobs: dict[str, str], *, node: int = 0, stage_edges: tuple[int, ...] = (0, 1)) -> None:
+    """Publish a canonical single-contraction row for a compiler test."""
+    for key, value in classic_row(knobs, node=node, stage_edges=stage_edges).items():
+        monkeypatch.setenv(f"EMMY_{key.upper()}", str(value))
+
+
+def direct_classic_leaf(fork_point):
+    """Select the direct classic schedule without flattening the schedule tree."""
+    from emmy.compiler.pipeline.fork import Fork
+    from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of
+
+    def allowed(option) -> bool:
+        knobs = option.knobs if isinstance(option, Fork) else getattr(option, "knobs", {})
+        return all(family_of(key) not in SCHEDULE_FAMILIES or str(value) == "" for key, value in knobs.items())
+
+    def descend(options):
+        for option in options:
+            if not allowed(option):
+                continue
+            if not isinstance(option, Fork) or option.is_leaf:
+                return option
+            try:
+                return descend(option.expand())
+            except ValueError:
+                continue
+        raise ValueError("fork has no direct classic schedule")
+
+    return descend(fork_point.options)
+
+
 def dtype_tol(dtype) -> dict[str, float]:
     """Return default ``np.testing.assert_allclose`` tolerances for a compiler dtype."""
     return {"rtol": 5e-3, "atol": 5e-3} if dtype.name == "f16" else {"rtol": 1e-4, "atol": 1e-5}

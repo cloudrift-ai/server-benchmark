@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
+    from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph
     from emmy.compiler.pipeline.dump import CompilerDump
 
@@ -138,14 +139,14 @@ class CudaBackend(Backend):
         """Initialize the isolated worker before candidate timing begins."""
         await self._async_worker().warmup(wall_timeout_s=wall_timeout_s)
 
-    def compile(self, graph: Graph) -> Graph:
+    def compile(self, graph: Graph, *, ctx: Context | None = None) -> Graph:
         """Lower ``Graph`` → ``Graph[LoopOp]`` → ``Graph[TileOp]`` → ``Graph[CudaOp]``."""
         db = None
         if self.tune_db is not None and self.tune_db.exists():
             from emmy.compiler.pipeline.search.db import SearchDB
 
             db = SearchDB(path=self.tune_db)
-        return Pipeline.build(CUDA_PASSES).run(graph, db=db, dump=self.dump)
+        return Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=db, dump=self.dump)
 
     def run(
         self,

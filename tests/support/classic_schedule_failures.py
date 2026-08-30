@@ -370,24 +370,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-qproj-s32.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-qproj-s512.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/matmul-qproj-s512.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-knorm-s128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-knorm-s128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-knorm-s32.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-knorm-s32.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-knorm-s512.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-knorm-s512.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-layer-s128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-layer-s128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-layer-s32.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-layer-s32.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-layer-s512.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-layer-s512.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-qnorm-s128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-qnorm-s128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-qnorm-s32.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-qnorm-s32.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-qnorm-s512.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/rmsnorm-qnorm-s512.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/sdpa-s128.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/sdpa-s128.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/sdpa-s32.yaml-built]",
@@ -405,7 +387,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 296
+REMAINING_FAILURE_COUNT = 278
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

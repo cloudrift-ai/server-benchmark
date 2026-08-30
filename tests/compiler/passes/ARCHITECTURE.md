@@ -122,6 +122,8 @@ and edge domains, traversal-order-invariant compatible membership, computed and 
 and exact pins — without flattening a live space into test memory. The scalar-contraction boundary likewise compares
 production with the literal reference, proves the independent product is larger than the accepted set, and checks that
 a selected output tile alone produces placed materialization geometry.
+`test_move_catalog.py` also verifies that a matching `WORK` pin selects only existing rows and an unmatched pin returns
+no row, so pin filtering cannot manufacture a worker inventory.
 `test_schedule_pool_cache.py` pins the session memo:
 sharing, hit equality, read-only payloads, and the keying that holds pin states, dtypes, extents, stores and the
 sample apart. `test_move_catalog.py` checks that independent

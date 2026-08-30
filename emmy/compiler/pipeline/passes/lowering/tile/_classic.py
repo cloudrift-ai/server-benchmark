@@ -193,6 +193,17 @@ class _ScheduleLeaf(Fork):
         ]
 
 
+def _honors_pins(row: dict[str, str], pins: dict[str, tuple[tuple[str, str], ...]]) -> bool:
+    """Whether a complete canonical row satisfies every pin that addresses this kernel."""
+    for family, family_values in pins.items():
+        row_keys = tuple(key for key in row if key == family or key.startswith(family + "@"))
+        for key, value in family_values:
+            addressed = row_keys if key == family else ((key,) if key in row else ())
+            if addressed and any(row[row_key] != value for row_key in addressed):
+                return False
+    return True
+
+
 def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     """Enumerate the compatible subset of the independently projected classic domains."""
     problem = ClassicProblem(tile.op, ctx)
@@ -204,18 +215,14 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     observed = any(context.index.node(site).observed for site in context.index.nodes)
     if observed and getattr(ctx, "pool_sample", None) is not None:
         raise ClassicScheduleUnavailable("sampled lazy enumeration has not been reconstructed")
-    if pins["WORK"] and all(isinstance(view, Projection) for view in context.views.values()):
-        _key, raw = pins["WORK"][0]
-        if Work.parse(raw) != Work():
-            return []
-    if any(pins.values()) and not observed:
-        raise ClassicScheduleUnavailable("classic schedule pin narrowing has not been reconstructed")
     domains = project_domains(tile, ctx)
     codec = ClassicScheduleCodec(problem, domains)
-    return [
-        _ScheduleLeaf(tile, name, dict(knobs), assignment, MappingProxyType(codec.encode(assignment)))
-        for assignment in enumerate_classic(problem, domains=domains)
-    ]
+    leaves = []
+    for assignment in enumerate_classic(problem, domains=domains):
+        row = codec.encode(assignment)
+        if observed or _honors_pins(row, pins):
+            leaves.append(_ScheduleLeaf(tile, name, dict(knobs), assignment, MappingProxyType(row)))
+    return leaves
 
 
 def _removed(*args, **kwargs):

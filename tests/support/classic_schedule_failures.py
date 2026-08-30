@@ -42,15 +42,9 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_batched_symbolic_mk_reaches_warp",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_computed_a_symbolic_k_reaches_warp",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_f16acc_enumeration_policy",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_reg_tile_epilogue[bias]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_reg_tile_epilogue[relu]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_reg_tile_epilogue[residual]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_reg_tile_epilogue[scale]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[none]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_2d]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_f3]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_inner]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[single_cta]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[dynamic-smem-async]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[static-smem-async]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_default_is_the_flat_order",
@@ -61,15 +55,11 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_register_double_buffer_matches_single_buffer_bit_for_bit[256-smem-async]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_scalar_matmul_stages_through_pipeline",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_tile_block_over_thread_limit_rejected",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_tile_block_within_limit_ok",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_transposed_a_warp_pin_raises",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_transposed_b_symbolic_k_zero_fills",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_warp_matmul_stamps_the_producer_band",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_warp_static_k_indivisible_is_masked",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_warp_symbolic_k_not_guarded",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_warp_tier_is_offered_at_a_static_k_the_step_does_not_tile",
                 "tests/compiler/passes/test_move_catalog.py::test_tile_pin_forces_the_named_warp_row",
-                "tests/compiler/passes/test_move_catalog.py::test_work_pin_never_widens_a_site_catalog",
             )
         ),
     ),
@@ -1260,7 +1250,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 1151
+REMAINING_FAILURE_COUNT = 1141
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

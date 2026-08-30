@@ -343,6 +343,7 @@
   "tests/compiler/passes/test_move_catalog.py::test_warp_staged_rows_fit_the_smem_budget": 3.56,
   "tests/compiler/passes/test_placement_routing.py::test_contraction_operand_seam_takes_the_output_dtype": 2.3,
   "tests/compiler/passes/test_placement_routing.py::test_norm_linear_cone_cut_recurses_to_the_full_cascade": 5.05,
+  "tests/compiler/passes/test_placement_routing.py::test_scoped_cut_preserves_every_multi_output_parent_port": 6.08,
   "tests/compiler/passes/test_pool_space.py::test_a_real_space_addresses_what_it_iterates[flash_pair]": 1.26,
   "tests/compiler/passes/test_pool_space.py::test_a_real_space_addresses_what_it_iterates[fused_norm_linear]": 1.65,
   "tests/compiler/passes/test_pool_space.py::test_a_real_space_addresses_what_it_iterates[reduce_matvec]": 0.02,

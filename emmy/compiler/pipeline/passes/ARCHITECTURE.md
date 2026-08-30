@@ -102,8 +102,9 @@ so the unpinned placement fork never returns under a pin-driven compile. A pin t
 realizes is an addressing error. Unpinned cuts and bare
 `PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
 `040_schedule` is the clean-slate reconstruction boundary for classic assignments. The former `_schedule.py` was
-deleted rather than adapted. `_classic.py` now realizes direct projection, plain-reduction, scalar-contraction, and
-gmem-direct tensor-core domains; staged transport, composed contractions, and sampled lazy enumeration raise
+deleted rather than adapted. `_classic.py` now realizes direct projection, plain-reduction, scalar-contraction,
+precision-gated gmem-direct tensor-core, and kernel-global raster domains; staged transport, composed contractions,
+and sampled lazy enumeration raise
 `ClassicScheduleUnavailable` until their coherent recovery phases land. A plain reduction projects serial,
 cooperative and ILP choices independently from its node, while the kernel domain projects the union of their worker
 inventories; the compatibility relation is the only join between them. A scalar contraction projects its complete
@@ -111,11 +112,15 @@ output-tile catalog as one node factor, materializes placed geometry only after 
 claims to make independently projected sites agree. A tensor-core node domain is projected from the contraction's
 semiring, typed operands, target atom availability, fragment addressing, and the same output-tile catalog; no selected
 edge or kernel choice participates in that projection. The
+kernel raster domain is projected separately from static grid facts. The compatibility relation admits a grouped
+choice only beside a tiled contraction; symbolic grids expose only the direct choice. A valid pin-only raster spelling
+enters that same kernel factor before complete rows are filtered, rather than creating a separate path. The
 fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete typed
 `ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization derives
-placed geometry and resolved transport facts. Pins filter those complete canonical rows after domain projection; they
-cannot add a choice, widen a site catalog, or create another enumerator. A scoped pin that does not address the current
-kernel is inert, which lets graph-wide compilation route each exact site to its own kernel.
+placed geometry and resolved transport facts. Authoritative pin-only spellings first enter the independently projected
+factor they address, but only when static legality admits them; pins then filter complete canonical rows and never
+create another enumerator or override target, shape, addressing, or compatibility constraints. A scoped pin that does
+not address the current kernel is inert, which lets graph-wide compilation route each exact site to its own kernel.
 
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so `035_split_reduce` stands beside the cut, BEFORE scheduling: the

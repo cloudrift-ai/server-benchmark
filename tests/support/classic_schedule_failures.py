@@ -40,14 +40,12 @@ RECOVERY_CLUSTERS = (
         nodeids=frozenset(
             (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_computed_a_symbolic_k_reaches_warp",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_f16acc_enumeration_policy",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_2d]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_f3]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_inner]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[dynamic-smem-async]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[static-smem-async]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_default_is_the_flat_order",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_raster_fork_offers_both_orders",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gm_pin_groups_the_launch_order",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gn_pin_groups_the_transpose",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_register_double_buffer_matches_single_buffer_bit_for_bit[128-smem-async]",
@@ -158,9 +156,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_trans_b_offers_staged_rows",
                 "tests/compiler/e2e/test_warp_specialize_deadlock.py::test_mlp_slice_completes_and_matches",
                 "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_symbolic_linear_traced_and_run",
-                "tests/compiler/passes/test_fp8_mma.py::test_k32_enumeration_requires_the_precision_gate",
-                "tests/compiler/passes/test_fp8_mma.py::test_k32_enumeration_structural_requirements",
-                "tests/compiler/passes/test_fp8_mma.py::test_k32_never_offered_on_16bit_operands",
                 "tests/compiler/passes/test_fp8_mma.py::test_w8a8_dynamic_per_token_amax_cuda",
                 "tests/compiler/passes/test_fp8_operand_binding.py::test_fp8_b_matmul_reaches_warp_tier_cuda",
                 "tests/compiler/passes/test_fp8_staged.py::test_canonical_byte_b_and_splitk_compose_cuda",
@@ -1209,7 +1204,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 1100
+REMAINING_FAILURE_COUNT = 1095
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

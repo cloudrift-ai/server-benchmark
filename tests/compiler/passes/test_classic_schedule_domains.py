@@ -103,7 +103,9 @@ def test_scalar_contraction_enumeration_is_the_compatible_independent_product() 
     leaves = schedule(tile, "matmul", {}, target)
     codec = ClassicScheduleCodec(problem, domains)
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
-    assert domains.product_size > len(reference) == len(choices)
+    assert domains.product_size > len(reference)
+    assert {choice.raster.spell() for choice in domains.kernel} == {"", "gm8"}
+    assert all(assignment.kernel.raster.is_direct for assignment in reference if not assignment.nodes[site].tile.is_tiled)
 
     tiled = next(leaf for leaf in leaves if leaf.schedule.nodes[site].tile.is_tiled)
     materialized = tiled.expand()[0]
@@ -137,7 +139,9 @@ def test_tensor_core_enumeration_is_the_compatible_independent_product() -> None
     leaves = schedule(tile, "matmul", {}, target)
     codec = ClassicScheduleCodec(problem, domains)
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
-    assert domains.product_size > len(reference) == len(domains.nodes[site])
+    assert domains.product_size > len(reference)
+    assert {choice.raster.spell() for choice in domains.kernel} == {"", "gm8"}
+    assert all(assignment.kernel.raster.is_direct for assignment in reference if not assignment.nodes[site].tile.is_tiled)
 
     warp = next(leaf for leaf in leaves if leaf.schedule.nodes[site].tile.is_warp)
     assert warp.expand()[0].materialization.tiles[site].choice == warp.schedule.nodes[site].tile

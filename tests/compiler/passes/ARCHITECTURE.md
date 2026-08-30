@@ -123,9 +123,11 @@ and exact pins — without flattening a live space into test memory. The scalar-
 production with the literal reference, proves the independent product is larger than the accepted set, and checks that
 a selected output tile alone produces placed materialization geometry.
 The gmem-direct tensor-core boundary repeats that proof over a typed f16 contraction and asserts that the independent
-kernel domain contains the warp inventories which compatibility joins to tensor-core node choices.
+kernel domain contains both warp inventories and raster choices. It also proves that compatibility rejects grouped
+rasterization beside every untiled node choice.
 `test_move_catalog.py` also verifies that a matching `WORK` pin selects only existing rows and an unmatched pin returns
-no row, so pin filtering cannot manufacture a worker inventory.
+no row, so pin filtering cannot manufacture a worker inventory. Precision-gated atom and raster tests cover the
+explicit exception: a legal pin-only spelling enters its addressed independent factor before complete-row filtering.
 `test_schedule_pool_cache.py` pins the session memo:
 sharing, hit equality, read-only payloads, and the keying that holds pin states, dtypes, extents, stores and the
 sample apart. `test_move_catalog.py` checks that independent

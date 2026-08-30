@@ -65,6 +65,20 @@ values derivable from the term — never decisions, never mutable policy.
 slices, output specifications and knobs are the `TileOp`'s, not the term's. So
 `Fold` lives in `ir/pure/fold.py` and is not a `Stmt`.
 
+## Classic schedule model
+
+`classic_schedule.py` owns the semantic model for the ordinary grid/CTA/warp/thread/register schedule. A
+`ClassicProblem` contains only an unscheduled `Fold` tree and target. Its immutable `SiteIndex` assigns one stable
+`NodeSite` to each Fold identity and one `EdgeSite` to every consumer operand position, so a shared producer is
+scheduled once while each use receives an independent transport choice. Site classification reads only the Fold at a
+node site; target facts cannot affect whether that site is a projection, reduction, or contraction-capable reduction.
+
+`ClassicSchedule` is an immutable, complete assignment of kernel, node, and edge choices. Choice values never carry
+site identities, paths, target facts, encodings, or materialization results. Completeness and node-sum agreement need
+the problem, so `ClassicScheduleContext.accepts` is their one semantic authority; the schedule data cannot validate
+itself. Enumeration, codecs, search policy, and lowering consume this boundary and may not define another membership
+relation.
+
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not
 need to be a statement to get there. The tree already carries it: a composed node is an entry in
@@ -98,25 +112,25 @@ in Loop IR until total lift; there is no impure `Lambda` construction path.
 - **Loop → tile** (after `lowering/tile`): `LoopOp` nodes replaced by
   `TileOp` holding the structural-IR root `op` directly (`tile/ir` —
   one `Fold` kind) plus the root-global schedule fields
-  (`place` / `work` / `workers`, with every per-node slice — `TilePlan` / `ReducePlan` / `Stage` — keyed into
+  (`place` / `work` / `workers`, with every per-node slice — `Tile` / `Reduce` / `Stage` — keyed into
   the `schedule` dict); a kernel's structure is read off the node's derived role, not a Python
   type. `010_lift` lifts the `Fold` tree (the loop nest reconstructed on demand, each reduce `Loop`
   carrying its `AxisRole` — the ONLY loop annotation; the algebra is the term's own
   `lift` / `(init, combine)`) with an UNMAPPED `Placement`;
   The tile schedule maps the free
-  axes onto the grid and decides the reduce `ReducePlan` via the single
+  axes onto the grid and decides the reduce `Reduce` via the single
   `REDUCE` codec knob (`g<n>` cta / `coop` (its width in `WORK`) / `r<n>` reg; the
   decision hierarchy = env pin > the deploy evidence hierarchy, and nothing
   else — there is no default partition). The knob is ephemeral — resolved here
   into the schedule's
-  `ReducePlan`; the combine stays the `Fold` node's stored program. Any static
+  `Reduce`; the combine stays the `Fold` node's stored program. Any static
   `PLANAR` / `TWISTED` reduce is cooperation-eligible (degenerate
   `sum`/`max`/`mean` AND twisted online-softmax, scalar AND
   full-row outputs), and the schedule enumerates the serial fold beside every
   band the reduce extent can feed, whatever the grid measures.
 - **Tile → kernel** (after `lowering/kernel`): `TileOp` materialized to
   `KernelOp` whose body is a `Tile` (the thread-grid decode) over the
-  lowered op tree. A cooperative `ReducePlan` lowers the reduce as a
+  lowered op tree. A cooperative `Reduce` lowers the reduce as a
   `StridedLoop` (lane-strided fold) + the derived algebra-generic
   cross-thread combine (`_factor.emit_combine`, reading the fold node
   through the lowering-side `Reduction` view → `WarpShuffle` /

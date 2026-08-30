@@ -34,7 +34,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.ir.schedule import ReducePlan, Workers
+from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.pipeline.knob import (
     canonical_row_key,
     context_view,
@@ -283,8 +283,8 @@ class TuningSearch(Search):
         placement = {key: value for key, value in row.items() if family_of(key) == "PLACE" and value == "cut"}
         if placement:
             return placement
-        work = Workers.parse(row.get("WORK"))
-        if any(ReducePlan.parse(value, work).needs_split for key, value in row.items() if family_of(key) == "REDUCE"):
+        work = Work.parse(row.get("WORK"))
+        if any(Reduce.parse(value, work).needs_split for key, value in row.items() if family_of(key) == "REDUCE"):
             return stamp_schedule_families(row)
         return None
 

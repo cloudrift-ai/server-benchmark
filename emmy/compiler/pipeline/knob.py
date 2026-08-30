@@ -384,15 +384,15 @@ def canon_family_value(name: str, value, *, strict: bool = False) -> str:
 
 @lru_cache(maxsize=8192)
 def _canon_family_cached(fam: str, v: str, strict: bool = False) -> str:
-    from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan, Workers  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import Reduce, Stage, Tile, Work  # noqa: PLC0415
 
     try:
         if fam == "WORK":
-            return Workers.parse(v).spell()
+            return Work.parse(v).spell()
         if fam == "TILE":
-            return TilePlan.parse(v, Workers(kind="warp", units=(1, 1))).spell()
+            return Tile.parse(v, Work(kind="warp", units=(1, 1))).spell()
         if fam == "REDUCE":
-            return ReducePlan.parse(v, Workers(kind="thread", units=(2, 1))).spell()
+            return Reduce.parse(v, Work(kind="thread", units=(2, 1))).spell()
         if fam == "STAGE":
             return Stage.parse(v).spell()
     except ValueError:
@@ -420,10 +420,10 @@ def values_equal(name: str, want, got) -> bool:
     if family_of(name) in _AXIS_FAMILIES:
         return canon_family_value(name, w) == canon_family_value(name, g)
     if family_of(name) == "WORK":
-        from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415
+        from emmy.compiler.ir.schedule import Work  # noqa: PLC0415
 
         try:
-            return Workers.parse(w) == Workers.parse(g)
+            return Work.parse(w) == Work.parse(g)
         except ValueError:
             return False
     kn = get(family_of(name))

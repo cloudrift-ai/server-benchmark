@@ -57,7 +57,7 @@ from emmy.compiler.ir.pure.fold import Fold, _unique_edges, is_contraction
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
+from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs, observed_result_names
 from emmy.compiler.ir.tile.ops import cone_seam, projection_regions, sched_of
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
@@ -359,7 +359,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
       :func:`reduce_codegen`, and ``store`` the per-cell sink (default :func:`store_sink`). Its projection
       arrives as ``tail`` — peeled off the wrapping zero-axis fold, the ONE home for a projection; the bare
       grid-``Write`` glue is synthesized here (it needs ``ctx.output``, so it can't ride the node).
-    - a :class:`Fold` whose :class:`ReducePlan` cooperates tiles its REDUCE axis instead
+    - a :class:`Fold` whose :class:`Reduce` cooperates tiles its REDUCE axis instead
       (:func:`_tile_reduce_axis` — ``coop`` lanes at the unit level, ``reg`` ILP chains at the
       register level, the carrier merge closing the fold). The output stays one cell per thread:
       the 1×1 ``atomize`` with the whole grid riding ``lead_axes`` untiled.
@@ -423,7 +423,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduction is a
         # ``Fold`` node (a projecting zero-axis
         # ``Fold`` was already peeled off by :func:`_factorize`).
-        plan = (ctx.sched.get("REDUCE", op) or ReducePlan()) if isinstance(op, Fold) else None
+        plan = (ctx.sched.get("REDUCE", op) or Reduce()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
         if plan is None or (plan.coop <= 1 and plan.reg <= 1):
             body = [*_emit(op, ctx, output_specs).body, *tail]
@@ -747,7 +747,7 @@ def _tile_reduce_axis_transposed(
 
 
 def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
-    """Tile the REDUCE axis per the node's cooperating :class:`ReducePlan` — the reduce counterpart
+    """Tile the REDUCE axis per the node's cooperating :class:`Reduce` — the reduce counterpart
     of the output ``unit_tile`` / ``register_tile`` levels: ``coop`` lanes across threads (the
     ``_co`` lane axis, the axis's UNIT level) and ``reg`` ILP chains across per-thread accumulators
     (its REGISTER level — cyclic, copy ``r`` offset by ``r·coop``, the loop striding ``coop·reg``).

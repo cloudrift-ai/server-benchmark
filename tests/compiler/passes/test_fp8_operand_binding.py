@@ -29,7 +29,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction
-from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
+from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
@@ -209,7 +209,7 @@ def _warp_contraction():
     a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F16)
     b = Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3)
     node = Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),))
-    tile = TilePlan.parse("mma_m16n8k16_f16_f32/f4x1/k4", Workers.parse("w1x8")).at(m, n)
+    tile = Tile.parse("mma_m16n8k16_f16_f32/f4x1/k4", Work.parse("w1x8")).at(m, n)
     return node, tile
 
 

@@ -32,7 +32,7 @@ it seals through the one `grid_tile` finalizer (the article's "schedule separate
   (mma / scalar). A contraction without an applicable output tile takes the ordinary Fold path. The schedule only
   places the algebra and declines with `LoweringError` when there is no `(m, n)` grid pair to place onto.
 - **REDUCE-tiled** (`_tile_reduce_axis`, a `PLANAR` / `TWISTED` reduce — or a non-output-tiled `CONTRACTION` — whose
-  `ReducePlan` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
+  `Reduce` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
   (its unit level) and `reg` ILP chains across per-thread accumulators (its register level), then a REG-tree fold, the
   cross-thread combine (`emit_combine`), and the projection. It reads the reduce straight off the `Fold` node (no
   `lower`-then-refind) and builds its per-cell body via the recursion (`_emit`, below); the output stays one cell per
@@ -53,17 +53,17 @@ NODE. This is the
 tile-IR-rebuild mandate's *one hierarchical emitter, no divergent codegen path*: `_emit(node).body` is byte-identical to
 `node.lower()` for a scalar-nested (block=1) node today. `Handle` carries `name` + `residence` (a scalar
 register value); the **tensor-core seam** is the view arm in `_bind` — an output-warp-tiled contraction (an mma
-`TilePlan`) emits through the register-tile pipeline + the accumulator→operand fragment recast there, where the rebuild
+`Tile`) emits through the register-tile pipeline + the accumulator→operand fragment recast there, where the rebuild
 extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
 the inbound `wires`.
 
 A materialized Fold-edge cut reaches this walk as an ordinary `Load` operand. `_emit` preserves that load and returns
 its bound value as the wire, so cut and fused trees use the same parent emission path.
 
-The output-tiled arm travels as **`(node, tile)`** — the stored `Fold` (bilinear reading) and its PLACED `TilePlan`
+The output-tiled arm travels as **`(node, tile)`** — the stored `Fold` (bilinear reading) and its PLACED `Tile`
 slice. There is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "`is_contraction(op)` with a
 TILE slice over a grid with an `(m, n)` pair" and threads the two on; the slice arrives ALREADY PLACED from
-`Sched.tile_of`, which binds the caller's `(m, n)` through `TilePlan.at`. It is
+`Sched.tile_of`, which binds the caller's `(m, n)` through `Tile.at`. It is
 binding-driven for both atoms, with **no per-atom subclass**, and cleanly
 splits the **placement/schedule the slice owns** (its `axes` and the `Side`
 geometry derived from them — the tiled CELL and nothing outside it, so the kernel's leading batch axes stay the
@@ -73,11 +73,11 @@ contract: the reduce `axis`, the shared `a` operand edge plus the product `chann
 field, its one home is the wrapping zero-axis `Fold.lift`. The edges share ONE type. Canonicalization places the
 argument shared across channels in `a`; `Sched.tile_of` then orients algebraic M toward the physical output axis that
 edge references and N toward the other axis. Either side may be computed and use the synchronous compute fill)
-from the **schedule** (the `TilePlan` slice carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
+from the **schedule** (the `Tile` slice carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
 `ScalarAtom`, `ir/atom.py` — plus the unit/register widths + K-chunk). The per-CTA geometry (the `(m, n)` `Side` pair —
 tile width / mask / block+unit var names — plus `launch_threads`) is **derived on the slice**, from its widths × its
 own `axes` (`@property`). Keeping the schedule a single swappable
-slice is what lets the same operand/`acc` params be tiled by a *different* `TilePlan`.
+slice is what lets the same operand/`acc` params be tiled by a *different* `Tile`.
 
 A symbolic / non-divisible tail is **clamp-to-identity** (the masked overhang folds a no-op or guards its store); the
 dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `int seq_len` arg.

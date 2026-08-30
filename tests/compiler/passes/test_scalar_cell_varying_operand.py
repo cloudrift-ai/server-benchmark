@@ -18,13 +18,13 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Channel, Fold
-from emmy.compiler.ir.schedule import TilePlan
+from emmy.compiler.ir.schedule import Tile
 from emmy.compiler.ir.stmt import Assign, Body, Load, Stmt, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 
 _M, _N, _K = Axis("m", 8), Axis("n", 8), Axis("k", 4)
-_PLAN = TilePlan(units=(2, 2), regs=(2, 2))  # a scalar 2×2 thread tile of 2×2 register cells
+_PLAN = Tile(units=(2, 2), regs=(2, 2))  # a scalar 2×2 thread tile of 2×2 register cells
 
 
 def _a_load() -> Load:

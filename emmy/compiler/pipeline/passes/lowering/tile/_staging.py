@@ -26,7 +26,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.pure.fold import Fold, operand_name
-from emmy.compiler.ir.schedule import Stage, TilePlan
+from emmy.compiler.ir.schedule import Stage, Tile
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
@@ -95,7 +95,7 @@ def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: i
     return all(x % _TMA_ALIGN == 0 for x in inner)
 
 
-def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, inputs=None) -> Stage | None:
+def resolve_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, inputs=None) -> Stage | None:
     """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — synchronous copy,
     cp.async, TMA, or gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth``
     clamped so the ring's slots fit ``budget``, and ``reg_depth`` clamped to ``bk``. A tile whose
@@ -165,7 +165,7 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     return replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
 
 
-def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: int) -> Stage | None:
+def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int) -> Stage | None:
     """Resolve an operand ``Stage`` against the scalar register-tile contraction ``c``, or ``None``
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
@@ -231,7 +231,7 @@ def converting_a(node: Fold, atom, inputs) -> bool:
     return t is not None and t.dtype.nbytes >= 2 and t.dtype != atom.operand_dtype("a")
 
 
-def computed_operand_cover(c: Fold, tile: TilePlan, *, converting: bool = False, k_axis: Axis | None = None) -> str | None:
+def computed_operand_cover(c: Fold, tile: Tile, *, converting: bool = False, k_axis: Axis | None = None) -> str | None:
     """Geometry required by a smem compute-filled contraction operand.
 
     A computed A leaves B on the async-copy path, whose contiguous N-vector copy cannot clamp a
@@ -273,7 +273,7 @@ def computed_operand_cover(c: Fold, tile: TilePlan, *, converting: bool = False,
     return None
 
 
-def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs, *, converting: bool = False) -> str | None:
+def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool = False) -> str | None:
     """Every BYTE-COPIED edge of a compute-filled contraction must already have the atom dtype.
 
     The ``smem`` stage evaluates computed (and converting) operands into their typed shared-memory
@@ -303,7 +303,7 @@ def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs, *, converting: 
 
 def resolve_fill_stage(
     c: Fold,
-    tile: TilePlan,
+    tile: Tile,
     budget: int,
     want_depth: int = 1,
     inputs=None,

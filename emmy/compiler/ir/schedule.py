@@ -8,14 +8,14 @@ beside :mod:`~emmy.compiler.ir.atom`, not under ``ir/tile``.
 **The schedule is separate from the combine.** The combine (the ⊕) lives in the op tree
 (:mod:`emmy.compiler.ir.pure.algebra` + :mod:`~emmy.compiler.ir.tile.ir`); the
 schedule — which axes are parallel, how the reduce axis partitions across hardware levels — is the
-**codec value types** here (:class:`ReducePlan` / :class:`TilePlan` / :class:`Stage` /
+**codec value types** here (:class:`Reduce` / :class:`Tile` / :class:`Stage` /
 :class:`WarpSpec` + :class:`Placement`). The per-node slices live in ``TileOp.schedule`` (1r —
 keyed by the tree-path codec, read through ``ops.Sched`` — the term itself carries no schedule
 field) beside the thin root :class:`~emmy.compiler.ir.tile.ir.TileOp`
 fields (``place`` / ``work`` / ``workers``).
 
 A reduction's only freedom is **how the reduce axis is partitioned across hardware levels**
-(:class:`ReducePlan`); the combine *mechanism* at each level is **derived** from the level
+(:class:`Reduce`); the combine *mechanism* at each level is **derived** from the level
 (:meth:`ReduceStage.combine`), and the combine *algebra* rides the carrier (the ``Twist``). So the
 same op + the same materializer extend across kernel kinds — only the carrier and the partition
 change.
@@ -28,9 +28,9 @@ optional ``workers: WarpSpec | None`` root field (``None`` = uniform SIMT), a pr
 *over* the fixed pipeline.
 
 **The codec values are SITE-LOCAL**: a kernel's worker inventory is spelled exactly once, in the
-``WORK`` family (:class:`Workers`), so a ``TILE`` value carries no unit widths
+``WORK`` family (:class:`Work`), so a ``TILE`` value carries no unit widths
 (``<atom>/f<FM>x<FN>[/k<bk>]`` warp | ``f<fn>[x<fm>]`` scalar) and a ``REDUCE`` value no coop width
-(``[g<n>[a|k]][/coop[-t]][/r<n>]``). Both therefore ``parse`` **against** a :class:`Workers` and are
+(``[g<n>[a|k]][/coop[-t]][/r<n>]``). Both therefore ``parse`` **against** a :class:`Work` and are
 hand-written here; :func:`resolve_site_tile` is the one rule resolving the single ambiguity that
 spelling has (an empty ``TILE`` beside a thread inventory). There is no second, self-contained
 reading — the retired embedded-worker grammar (``a:<atom>/w../f..``, ``n../f..``, ``b<n>``) raises.
@@ -60,7 +60,7 @@ from emmy.compiler.ir.expr import Expr, Literal
 
 # ===========================================================================================
 # The one rule every codec below shares. Each value type parses and spells its own grammar by
-# hand — the site-local TILE / REDUCE against a Workers inventory, STAGE on its own.
+# hand — the site-local TILE / REDUCE against a Work inventory, STAGE on its own.
 # ===========================================================================================
 
 
@@ -155,7 +155,7 @@ class ReduceStage:
 
 
 @dataclass(frozen=True)
-class ReducePlan:
+class Reduce:
     """The kernel's single reduce partition — the **tuned widths only**, coarse→fine.
 
     There is one reduce fold per kernel (1:1 and singular — the fold owns the axis),
@@ -166,7 +166,7 @@ class ReducePlan:
     stages: tuple[ReduceStage, ...] = ()
 
     @classmethod
-    def of(cls, *, cta: int = 1, coop: int = 1, reg: int = 1, finalize: str = "kernel", coop_transposed: bool = False) -> ReducePlan:
+    def of(cls, *, cta: int = 1, coop: int = 1, reg: int = 1, finalize: str = "kernel", coop_transposed: bool = False) -> Reduce:
         """Build a plan from per-level widths (1 = absent). Order is coarse→fine:
         GRID (cta) → BLOCK (coop) → REG (reg). ``finalize`` rides the GRID stage;
         ``coop_transposed`` rides the BLOCK stage (the ``b<n>t`` k-major lane swap)."""
@@ -197,7 +197,7 @@ class ReducePlan:
         return "/".join(parts)
 
     @classmethod
-    def parse(cls, spec: str | None, work: Workers | None) -> ReducePlan:
+    def parse(cls, spec: str | None, work: Work | None) -> Reduce:
         """Decode a ``REDUCE`` value against the kernel's ``WORK`` inventory (inverse of
         :meth:`spell` — the coop width is ``work.count``, never the string). Empty / ``None`` =
         the scalar serial fold. An unknown token raises, so a width-carrying spelling (the retired
@@ -274,7 +274,7 @@ class ReducePlan:
 #: Pin-input aliases for the scalar tier — an explicit ``a:``-prefixed spelling of the (atom-less)
 #: scalar output tile, symmetric with the warp form's ``a:<atom>``. ``a:scalar`` names the scalar atom
 #: (:data:`~emmy.compiler.ir.atom.SCALAR_ATOM`'s name); ``a:none`` is an alias. **Pin vocabulary only**
-#: — a producer never emits these: :meth:`TilePlan.parse` strips them, so the alias never rides a
+#: — a producer never emits these: :meth:`Tile.parse` strips them, so the alias never rides a
 #: stored knob dict. Lets a pin force the scalar tier explicitly instead of the invisible empty
 #: string.
 _SCALAR_ATOM_ALIASES = frozenset({"a:scalar", "a:none"})
@@ -289,7 +289,7 @@ def _strip_scalar_atom(spec: str | None) -> str:
 
 
 @dataclass(frozen=True)
-class TilePlan:
+class Tile:
     """The contraction's output tile — **one descriptor for both tiers**, discriminated by
     :attr:`atom`: a tensor-core :class:`AtomKind` (the warp mma tile) or the scalar
     :class:`~emmy.compiler.ir.atom.ScalarAtom` (the register sub-tile, the ``Scalar``
@@ -334,7 +334,7 @@ class TilePlan:
         return f"f{self.reg_n}" if self.reg_m == 1 else f"f{self.reg_n}x{self.reg_m}"
 
     @classmethod
-    def parse(cls, spec: str | None, work: Workers | None) -> TilePlan:
+    def parse(cls, spec: str | None, work: Work | None) -> Tile:
         """Decode a ``TILE`` value against the kernel's ``WORK`` inventory (inverse of
         :meth:`spell` — the unit widths come from ``work``, never the string): the warp form
         ``<atom>/f<FM>x<FN>[/k<bk>]`` or the scalar ``f<fn>[x<fm>]``. Empty / ``None`` is the
@@ -348,7 +348,7 @@ class TilePlan:
         if not s:
             return cls()
         tokens = s.split("/")
-        # ``Workers.units`` is the WORK codec's own order (warp m-then-n, thread n-then-m); a plan
+        # ``Work.units`` is the WORK codec's own order (warp m-then-n, thread n-then-m); a plan
         # stores (m, n), so the thread inventory transposes on the way in.
         units = (1, 1) if work is None else (tuple(work.units) if work.kind == "warp" else (work.units[1], work.units[0]))
         atom = None
@@ -429,14 +429,14 @@ class TilePlan:
         bt = self.block_threads
         return bt if bt > 1 else None
 
-    def at(self, m_axis: Axis, n_axis: Axis) -> TilePlan:
+    def at(self, m_axis: Axis, n_axis: Axis) -> Tile:
         """This tile BOUND to its placement — the ``(m, n)`` output axes it tiles. The caller that
         owns the grid decides them (the trailing grid pair for a root kernel; a flash consumer
         supplies its own), so a plan travels axis-free through the enumeration and picks up its
         placement where the geometry is actually read."""
         return dc_replace(self, axes=(m_axis, n_axis))
 
-    def placed_on(self, place: Placement) -> TilePlan:
+    def placed_on(self, place: Placement) -> Tile:
         """This tile bound to the ROOT contraction's ``(m, n)`` — :attr:`Placement.root_mn` — and
         left UNPLACED when the grid cannot supply the pair. The scheduler binds through here at
         option assembly and :meth:`Sched.tile_of` re-derives the same pair for a reader that takes
@@ -452,7 +452,7 @@ class TilePlan:
         """The ``(m, n)`` output :class:`Side` pair — each placed axis with its derived geometry.
         Requires :meth:`at` to have bound the placement; :attr:`m` / :attr:`n` index it."""
         if self.axes is None:
-            raise ValueError("TilePlan.mn: the tile is unplaced — bind the (m, n) output axes with .at(m, n) first")
+            raise ValueError("Tile.mn: the tile is unplaced — bind the (m, n) output axes with .at(m, n) first")
         dims = ((self.tile_m, self.units_m, self.reg_m), (self.tile_n, self.units_n, self.reg_n))
         return tuple(
             Side(axis=ax, tile=tile, units=units, reg=reg, block=ax.name + "_b", unit=ax.name + "_u")
@@ -469,7 +469,7 @@ class TilePlan:
 
 
 @dataclass(frozen=True)
-class Workers:
+class Work:
     """The kernel's ONE worker inventory (1r in-memory; the step-7 ``WORK`` wire family) — the
     per-site ``w``/``n`` worker tokens factored out of the ``TILE`` values into a single
     kernel-global slot (``w4x1`` warps for the mma tier / ``t16x8`` threads for the scalar tier /
@@ -486,7 +486,7 @@ class Workers:
 
     @property
     def count(self) -> int:
-        """Workers in the inventory (warps or threads, by ``kind``) — the COMPUTE band; the
+        """Work in the inventory (warps or threads, by ``kind``) — the COMPUTE band; the
         producer band is on top."""
         return self.units[0] * self.units[1]
 
@@ -502,7 +502,7 @@ class Workers:
         return f"t{self.units[0]}x{self.units[1]}"
 
     @classmethod
-    def parse(cls, spec: str | None) -> Workers | None:
+    def parse(cls, spec: str | None) -> Work | None:
         """Decode a ``WORK`` codec string (inverse of :meth:`spell`); ``""`` / ``None`` = no
         inventory (the per-cell / pure-reduce forms keep their derived launch geometry)."""
         if not spec:
@@ -528,8 +528,8 @@ class Workers:
         return cls(kind=kind, units=units, producer=producer)
 
 
-def resolve_site_tile(spec: str | None, work: Workers | None, coop: int = 1) -> TilePlan:
-    """The :class:`TilePlan` a row denotes — :meth:`TilePlan.parse` plus the ONE ambiguity the
+def resolve_site_tile(spec: str | None, work: Work | None, coop: int = 1) -> Tile:
+    """The :class:`Tile` a row denotes — :meth:`Tile.parse` plus the ONE ambiguity the
     site spelling has: an EMPTY ``TILE`` beside a THREAD ``WORK`` inventory is the unit-register
     parallel thread tile (a tile whose register sub-tile is ``f1x1`` spells ``""``), UNLESS the
     row's ``REDUCE`` claims those threads as a cooperative band — then ``TILE`` stays the per-cell
@@ -537,33 +537,33 @@ def resolve_site_tile(spec: str | None, work: Workers | None, coop: int = 1) -> 
     featurizers) resolves through this one rule.
 
     ``coop`` is the reduce's cooperative WIDTH, not its spelling: every caller with a resolved
-    ``ReducePlan`` in hand passes ``red.coop``, and the one caller holding only strings parses it
+    ``Reduce`` in hand passes ``red.coop``, and the one caller holding only strings parses it
     once, where it already handles a malformed value."""
-    plan = TilePlan.parse(spec, work)
+    plan = Tile.parse(spec, work)
     if (spec or "").strip() or work is None or work.kind != "thread" or coop > 1:
         return plan  # a claimed thread inventory IS the coop band — TILE stays per-cell
-    return TilePlan(units=(work.units[1], work.units[0]))  # WORK's t<n>x<m> onto the plan's (m, n)
+    return Tile(units=(work.units[1], work.units[0]))  # WORK's t<n>x<m> onto the plan's (m, n)
 
 
-def plan_workers(plan: TilePlan | None) -> Workers | None:
+def plan_workers(plan: Tile | None) -> Work | None:
     """The worker inventory ONE tile plan implies — ``None`` for an untiled plan or a 1-thread
     thread inventory (a bare register strip: the per-cell forms keep their derived launch
-    geometry). A plan stores ``(m, n)``; ``Workers.units`` is the ``WORK`` codec's own order, so
-    the thread inventory transposes on the way out — the inverse of :meth:`TilePlan.parse`."""
+    geometry). A plan stores ``(m, n)``; ``Work.units`` is the ``WORK`` codec's own order, so
+    the thread inventory transposes on the way out — the inverse of :meth:`Tile.parse`."""
     if plan is None or not plan.is_tiled:
         return None
     units = (plan.units_m, plan.units_n) if plan.is_warp else (plan.units_n, plan.units_m)
-    w = Workers(kind="warp" if plan.is_warp else "thread", units=units)
+    w = Work(kind="warp" if plan.is_warp else "thread", units=units)
     return None if (w.kind == "thread" and w.count == 1) else w
 
 
-def derive_workers(tiles) -> Workers | None:
-    """Fold the worker inventory out of a kernel's resolved ``TILE`` slices (``TilePlan`` values,
+def derive_workers(tiles) -> Work | None:
+    """Fold the worker inventory out of a kernel's resolved ``TILE`` slices (``Tile`` values,
     any iterable) — ``None`` when no slice tiles (the per-cell / pure-reduce forms keep their
     derived launch geometry). Raises on DISAGREEMENT between sites: one kernel has ONE worker
     inventory (the flash QK/PV pair shares the warp map by construction; a pin pair that
     disagrees must fail loudly, never be half-ignored)."""
-    work: Workers | None = None
+    work: Work | None = None
     for plan in tiles:
         w = plan_workers(plan)
         if w is None:
@@ -575,7 +575,7 @@ def derive_workers(tiles) -> Workers | None:
     return work
 
 
-def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Workers | None:
+def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Work | None:
     """The kernel's ONE worker inventory, folded out of its resolved ``TILE`` slices and then
     reconciled with a cooperative ``REDUCE`` width and a ``+p`` producer band. ``None`` when
     nothing tiles and no band cooperates (the per-cell / pure-reduce forms keep their derived
@@ -591,7 +591,7 @@ def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Workers | No
     ``ops.seal_workers`` lets it raise, so the two can no longer answer differently."""
     work = derive_workers(tiles)
     if coop > 1:
-        band = Workers(kind="thread", units=(coop, 1))
+        band = Work(kind="thread", units=(coop, 1))
         if work is not None and work != band:
             raise ValueError(f"disagreeing worker geometry: TILE workers {work.spell()} vs coop width {coop} — one kernel, one inventory")
         work = band
@@ -629,7 +629,7 @@ class Placement:
     def root_mn(self) -> tuple[Axis, Axis] | None:
         """The ``(m, n)`` output axes a ROOT (depth-1) contraction tiles — the grid's TRAILING
         pair — or ``None`` when the grid cannot supply them (unmapped, or rank < 2: the caller's
-        untiled path). The one home of the depth-1 rule; :meth:`TilePlan.placed_on` and
+        untiled path). The one home of the depth-1 rule; :meth:`Tile.placed_on` and
         :meth:`Sched._mn_for` both read it."""
         grid = tuple(self.grid)
         return (grid[-2], grid[-1]) if len(grid) >= 2 else None
@@ -678,7 +678,7 @@ class Stage:
     nothing. Two fields are derived at resolution and never spelled by the codec: ``smem`` (empty
     for a contraction pipeline — both operands stage; the ONE detected row buffer for the
     shared-row stage) and ``bk_elems`` (the contraction slab's K-chunk in elements — the
-    codec-spelled ``TilePlan.bk · atom_k`` on the warp tier, the fit-to-smem derivation on the
+    codec-spelled ``Tile.bk · atom_k`` on the warp tier, the fit-to-smem derivation on the
     scalar tier; 0 for the 1-D shared row).
 
     The pipeline has two buffering levels down the memory hierarchy, each with its own depth:
@@ -687,7 +687,7 @@ class Stage:
     fragment-load ping-pong over the inner atom-K steps, breaking the WAR hazard on the operand fragments). They are
     orthogonal — ``d3/smem-async/p2`` is a 3-deep gmem ring feeding a 2-deep register ping-pong.
     ``reg_depth = 1`` (the default) is the "optional register" OFF point (no inner prefetch).
-    The slab K-*granularity* (how much K is resident) is ``TilePlan.bk``, NOT a third depth
+    The slab K-*granularity* (how much K is resident) is ``Tile.bk``, NOT a third depth
     here — granularity and buffer depth are kept distinct.
 
     Rotation and refill discipline are NOT fields: the staged K-loop derives the slot count from
@@ -781,12 +781,12 @@ class WarpSpec:
     """The producer band — the dedicated warps split off the uniform pipeline to drive the
     ``Stage`` gmem→smem load half, ORTHOGONAL to the pipeline (``reduce`` / ``tile`` / ``stage``):
     it adds no pipeline parameter, only the warp split. The COMPUTE (mma-consumer) warps are
-    implicit, sized by ``TilePlan.units``, so the CTA launches ``TilePlan.block_threads +
+    implicit, sized by ``Tile.units``, so the CTA launches ``Tile.block_threads +
     32·producer_warps`` threads. ``workers is None`` on the schedule is uniform SIMT (every warp
     does every role's work, software-pipelined in-warp); a constructed ``WarpSpec`` means
     specialization is on.
 
-    The band is DECIDED as inventory — it rides ``WORK``'s ``+p<n>`` (``Workers.producer``), which
+    The band is DECIDED as inventory — it rides ``WORK``'s ``+p<n>`` (``Work.producer``), which
     is where the retired ``WSPEC`` knob's one live decision went. Whether a row may offer it at all
     is ``_legality.producer_transport``: a resolved TMA stage, un-split, on a kernel that is not
     split across CTAs. That is the whole legality rule — the box copy is issued by one elected
@@ -854,12 +854,12 @@ def _overhangs(axis: Axis, tile: int) -> bool:
 class Side:
     """One tiled output axis of a contraction — the outer ``m`` or inner ``n`` — paired with its
     derived per-CTA tile geometry. The two ride as a ``(m, n)`` pair (:attr:`Fold.mn`)
-    mirroring :class:`TilePlan`'s own ``units`` / ``regs`` tuples, so the factorizer
+    mirroring :class:`Tile`'s own ``units`` / ``regs`` tuples, so the factorizer
     threads one object per axis instead of a dozen loose ``*_m`` / ``*_n`` args. The tile width,
     unit / register counts, and bound block/unit var names are derived from an axis + a
-    :class:`TilePlan`; the ``mask`` / ``ext`` follow from the axis + width.
+    :class:`Tile`; the ``mask`` / ``ext`` follow from the axis + width.
 
-    Lives here, beside ``TilePlan``, because it is SCHEDULE geometry, not algebra: ``ir/tile/ir.py``
+    Lives here, beside ``Tile``, because it is SCHEDULE geometry, not algebra: ``ir/tile/ir.py``
     already imports this module, so a tile-side home would make the schedule slice unable to derive
     its own ``(m, n)`` reading."""
 
@@ -891,12 +891,12 @@ __all__ = [
     "Level",
     "Placement",
     "Side",
-    "ReducePlan",
+    "Reduce",
     "ReduceStage",
     "Raster",
     "Stage",
-    "TilePlan",
+    "Tile",
     "WarpSpec",
-    "Workers",
+    "Work",
     "derive_workers",
 ]

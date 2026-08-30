@@ -31,7 +31,7 @@ from emmy.compiler.ir.pure.fold import (
     splice_operands,
     stmt_axis_names,
 )
-from emmy.compiler.ir.schedule import ReducePlan, derive_inventory
+from emmy.compiler.ir.schedule import Reduce, derive_inventory
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
@@ -182,7 +182,7 @@ def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tup
 
 class Sched:
     """Read/write view of one kernel's schedule slices — the ``TileOp.schedule`` dict (1r:
-    ``{codec key → resolved TilePlan / ReducePlan / Stage}``) bound to the op tree the keys spell
+    ``{codec key → resolved Tile / Reduce / Stage}``) bound to the op tree the keys spell
     against. The ONE accessor pair every reader (the materializer) and stamper
     (the ``_schedule`` option builders) goes through, so a slice has exactly one home and the key
     spelling is always the tree-path codec's canonical one (:mod:`~emmy.compiler.ir.tile.path`).
@@ -248,7 +248,7 @@ class Sched:
 
     def tile_of(self, node):
         """The node's ``TILE`` slice, ALREADY PLACED — its ``(m, n)`` output axes bound
-        (:attr:`TilePlan.axes`), so a reader gets the geometry off the slice and never re-derives
+        (:attr:`Tile.axes`), so a reader gets the geometry off the slice and never re-derives
         placement of its own. ``axes`` stays ``compare=False`` / ``repr=False``, so binding it here
         cannot reach ``spell()``, a stamped row, a golden or a prior key.
 
@@ -507,7 +507,7 @@ def carries_partition(op) -> bool:
 
 
 def reduce_plan(tile):
-    """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.ReducePlan`), read from
+    """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.Reduce`), read from
     ``TileOp.schedule`` for the PRIMARY :class:`~emmy.compiler.ir.pure.fold.Fold` — when ``tile.op``
     is a ``Fold`` (bare, or wrapped via ``operands``), else ``None`` (a pure pointwise / scalar
     per-cell zero-axis ``Fold`` has no partition). An unstamped fold reads the empty plan (the scalar serial
@@ -516,7 +516,7 @@ def reduce_plan(tile):
     if node is None:
         return None
     plan = sched_of(tile).get("REDUCE", node)
-    return plan if plan is not None else ReducePlan()
+    return plan if plan is not None else Reduce()
 
 
 # Kernel identity lives in its own module (``tile/_key.py``) — it is not a compute read — and its

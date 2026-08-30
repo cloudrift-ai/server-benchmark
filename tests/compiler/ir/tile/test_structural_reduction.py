@@ -8,9 +8,9 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
-from emmy.compiler.ir.schedule import TilePlan
+from emmy.compiler.ir.schedule import Tile
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, ReducePlan, TileOp, apply_output_specs
+from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp, apply_output_specs
 from emmy.compiler.ir.tile.ops import reduce_plan
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
@@ -66,7 +66,7 @@ def _tile(op) -> TileOp:
 def test_reduce_plan_reads_the_partition_off_the_schedule_dict() -> None:
     from emmy.compiler.ir.tile.ops import sched_of
 
-    plan = ReducePlan.of(coop=128)
+    plan = Reduce.of(coop=128)
     red = fold_from_loop(_sum_loop())
     assert red is not None
     # A bare reduce root and a zero-axis projection both surface the partition keyed on the fold.
@@ -198,7 +198,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     assert red.role is AxisRole.PLANAR
     assert red.composed is inner
     t = _tile(red)
-    sched_of(t).put("REDUCE", red, ReducePlan.of(cta=2, finalize="atomic"))
+    sched_of(t).put("REDUCE", red, Reduce.of(cta=2, finalize="atomic"))
     assert reduce_plan(t).cta == 2
     lo = red.lower()
     assert len(lo) == 1 and isinstance(lo[0], Loop) and lo[0].axis.name == "k_ks"
@@ -424,22 +424,22 @@ def test_workers_derive_from_tile_slices_and_disagreement_is_loud() -> None:
     (today an inconsistent ``TILE@dd``/``TILE@pj`` pin pair could only miss rows silently)."""
     import pytest
 
-    from emmy.compiler.ir.schedule import Workers, derive_workers
+    from emmy.compiler.ir.schedule import Work, derive_workers
 
-    warp = TilePlan.parse("mma_m16n8k16_f16_f32/f1x2/k8", Workers.parse("w4x1"))
-    assert derive_workers([warp, warp]) == Workers(kind="warp", units=(4, 1))
-    assert derive_workers([TilePlan.parse("f4x8", Workers.parse("t16x8"))]) == Workers(kind="thread", units=(16, 8))
-    assert derive_workers([TilePlan()]) is None  # per-cell — no inventory to factor
+    warp = Tile.parse("mma_m16n8k16_f16_f32/f1x2/k8", Work.parse("w4x1"))
+    assert derive_workers([warp, warp]) == Work(kind="warp", units=(4, 1))
+    assert derive_workers([Tile.parse("f4x8", Work.parse("t16x8"))]) == Work(kind="thread", units=(16, 8))
+    assert derive_workers([Tile()]) is None  # per-cell — no inventory to factor
     with pytest.raises(ValueError, match="disagreeing worker geometry"):
-        derive_workers([warp, TilePlan.parse("mma_m16n8k16_f16_f32/f1x2/k8", Workers.parse("w2x1"))])
+        derive_workers([warp, Tile.parse("mma_m16n8k16_f16_f32/f1x2/k8", Work.parse("w2x1"))])
 
 
 def test_seal_workers_fills_the_slot_off_the_schedule_dict() -> None:
-    from emmy.compiler.ir.schedule import Workers
+    from emmy.compiler.ir.schedule import Work
     from emmy.compiler.ir.tile.ops import sched_of, seal_workers
 
     c = _contraction()
     t = _tile(c)
-    sched_of(t).put("TILE", c, TilePlan.parse("f2", Workers.parse("t2")))
+    sched_of(t).put("TILE", c, Tile.parse("f2", Work.parse("t2")))
     seal_workers(t)
-    assert t.work == Workers(kind="thread", units=(2, 1))
+    assert t.work == Work(kind="thread", units=(2, 1))

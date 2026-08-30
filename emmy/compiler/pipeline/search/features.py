@@ -35,7 +35,7 @@ from emmy.compiler.pipeline.knob import (
 # prior checkpoint's reservoir, the autotune DB's ``node`` rows) is stamped with this version, and
 # readers drop rows from another version. Version 1 is the retired pre-rebuild vocabulary (old
 # artifacts carry no stamp and default to it). Version 2 is the retired blind encoding of the
-# codec vocabulary: the warp ``TilePlan.bk`` never reached the features, ``_free_slots`` sorted
+# codec vocabulary: the warp ``Tile.bk`` never reached the features, ``_free_slots`` sorted
 # the warp grid wide-is-n (transposed siblings collapsed; ``tile_m``/``tile_n`` mislabelled),
 # warp rows dropped the split-K finalize letter, and the ``STAGE`` group-granularity / ``REDUCE``
 # ``coop-t`` letters were unfeaturized — same raw knobs, different emitted VALUES, so artifacts fit
@@ -96,7 +96,7 @@ def _row_values(knobs: dict) -> tuple:
 
 
 def _tile_plan(knobs: dict):
-    """The row's resolved :class:`TilePlan`, or ``None`` for the per-cell / untiled forms and for a
+    """The row's resolved :class:`Tile`, or ``None`` for the per-cell / untiled forms and for a
     row that does not resolve — a geometry featurizer degrades to "no tile geometry" rather than
     failing a whole fit on one unreadable row. Resolving through ``resolve_site_tile`` is what
     disambiguates the empty-``TILE``-beside-thread-``WORK`` unit-register tile from the coop tier."""
@@ -110,12 +110,12 @@ def _resolved_tile(work: str, tile: str, reduce: str):
     (dozens of distinct spellings) beside the row count (~100k per pool), and one row's
     featurization reaches this parse through several independent features, so the memo removes
     the dominant per-row cost of a scoring or fit pass. Safe to share the returned plan: every
-    schedule value type is frozen and placement binds by COPY (``TilePlan.at`` is a replace)."""
-    from emmy.compiler.ir.schedule import ReducePlan, Workers, resolve_site_tile  # noqa: PLC0415
+    schedule value type is frozen and placement binds by COPY (``Tile.at`` is a replace)."""
+    from emmy.compiler.ir.schedule import Reduce, Work, resolve_site_tile  # noqa: PLC0415
 
     try:
-        inv = Workers.parse(work)
-        plan = resolve_site_tile(tile, inv, ReducePlan.parse(reduce, inv).coop)
+        inv = Work.parse(work)
+        plan = resolve_site_tile(tile, inv, Reduce.parse(reduce, inv).coop)
     except ValueError:
         return None
     return plan if plan.is_tiled else None
@@ -191,12 +191,12 @@ def _parsed_stage(spec: str):
 
 @lru_cache(maxsize=1024)
 def _parsed_reduce(reduce: str, work: str):
-    """``ReducePlan.parse`` against the row's inventory, memoized on the spelling pair —
+    """``Reduce.parse`` against the row's inventory, memoized on the spelling pair —
     ``ValueError`` maps to ``None`` (the caller owns the coop-without-inventory degrade)."""
-    from emmy.compiler.ir.schedule import ReducePlan, Workers  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import Reduce, Work  # noqa: PLC0415
 
     try:
-        return ReducePlan.parse(reduce, Workers.parse(work))
+        return Reduce.parse(reduce, Work.parse(work))
     except ValueError:
         return None
 
@@ -471,7 +471,7 @@ class _Decomp:
     plus the cross-CTA ``finalize`` codec letter. The per-thread serial remainder is derived by
     the materializer (``ceil(extent / parallel)``), never spelled by the ``REDUCE`` codec, so it
     is NOT a field here — a ``serial`` field defaulting to 1 is what silently fed the warp
-    K-chunk features for a year (the K-chunk lives on the ``TILE`` codec, ``TilePlan.bk``)."""
+    K-chunk features for a year (the K-chunk lives on the ``TILE`` codec, ``Tile.bk``)."""
 
     fold: int = 1
     cta: int = 1
@@ -489,7 +489,7 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
     tier's one decomposition knob, decided in the ``_schedule`` helper). The ``serial``
     remainder is derived from the schedule (``ceil(extent / parallel)``), not a knob, so it
     stays the ``_Decomp`` default."""
-    from emmy.compiler.ir.schedule import ReducePlan, Workers  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import Reduce, Work  # noqa: PLC0415
 
     spec = family_value(knobs, "REDUCE")
     work, _tile, _stage, reduce = _row_values(knobs)
@@ -500,7 +500,7 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
             # above the WORK level, or a stripped evidence dict): the width is genuinely
             # unknown — degrade to the serial decomposition rather than raise mid-featurize.
             return _Decomp()
-        ReducePlan.parse(reduce, Workers.parse(work))  # re-raise the original error, uncached
+        Reduce.parse(reduce, Work.parse(work))  # re-raise the original error, uncached
         raise AssertionError("unreachable — the uncached parse must raise what the memo mapped to None")
     # ``finalize`` must be forwarded here AND by every ``_geom_feats`` caller: dropping it leaves
     # a default "atomic" in place, so ``D_finalize_kernel`` goes dead (0.0) on the affected rows
@@ -516,7 +516,7 @@ def tile_signature(knobs: dict) -> tuple:
     with equal signatures are the same kernel variant whichever key form spelled them, so this
     is the bridge for matching a recorded golden YAML row against the native enumeration's
     candidate rows (``emmy fit``'s golden group builder / ``search/golden_eval.evaluate_record``).
-    The K-chunk (``TilePlan.bk``) is part of the identity — without it every ``k<n>`` sibling in
+    The K-chunk (``Tile.bk``) is part of the identity — without it every ``k<n>`` sibling in
     a warp pool joined ambiguously (a golden recorded at ``k4`` matched the ``k1`` candidate).
     Operand staging (the ``STAGE`` codec) is part of the identity — a staged and a gmem-direct
     config are different variants — but defaults to ``None`` when absent, so a golden recorded
@@ -525,7 +525,7 @@ def tile_signature(knobs: dict) -> tuple:
 
 
 def _tile_bk(knobs: dict) -> int:
-    """The warp tile's slab K-chunk (``TilePlan.bk``, atom_k multiples) for ``tile_signature``;
+    """The warp tile's slab K-chunk (``Tile.bk``, atom_k multiples) for ``tile_signature``;
     1 on the scalar tier / per-cell / unparseable rows (the scalar codec spells no K token).
     Decoded via ``_tile_plan`` — site values (the step-7 grammar) and legacy spellings alike."""
     plan = _tile_plan(knobs)
@@ -829,7 +829,7 @@ def _warp_tile_features(knobs: dict) -> dict[str, float]:
         splitk=d.cta,
         bn=0,  # OFF sentinels: the BN/BM bands don't fire on a warp row
         bm=0,
-        # The slab K-chunk is the TILE codec's ``k<n>`` token (``TilePlan.bk``, atom_k multiples —
+        # The slab K-chunk is the TILE codec's ``k<n>`` token (``Tile.bk``, atom_k multiples —
         # the codec's native unit, matching the shallow ``D_w_near_bk`` ≈2 target). It used to read
         # the never-set ``_Decomp.serial`` (always 1), so every ``D_w_*_bk`` was constant and
         # k-chunk siblings featurized byte-identically.

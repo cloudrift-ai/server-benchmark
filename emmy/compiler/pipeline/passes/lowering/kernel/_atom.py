@@ -51,7 +51,7 @@ from emmy.compiler.ir.kernel.ir import (
 )
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_body, operand_name, subst_free
-from emmy.compiler.ir.schedule import Side, Stage, TilePlan
+from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.passes import rename_free
@@ -751,7 +751,7 @@ class _BlockCols:
 def _child_contraction_block(
     *,
     child: Fold,
-    tile: TilePlan,
+    tile: Tile,
     k0: Expr,
     lead: tuple,
     ns: str,
@@ -1099,7 +1099,7 @@ def _scalar_bound(mn, offset, i: int, j: int):
     return cond
 
 
-def _scalar_protected(c: Fold, tile: TilePlan, lead: tuple = (), *, body: Body | tuple = ()) -> frozenset[str]:
+def _scalar_protected(c: Fold, tile: Tile, lead: tuple = (), *, body: Body | tuple = ()) -> frozenset[str]:
     """The shared iteration coordinates — the block / unit / loop / extent vars excluded from the
     per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names).
     ``lead`` is the kernel's leading (batch / ksplit) grid axes: one coordinate for the whole cell
@@ -1167,7 +1167,7 @@ class _AtomOps:
     descriptor" seam: one factory (:func:`_atom_ops`), no scattered ``isinstance``."""
 
     c: Fold  # the ALGEBRA — operand edges, K axis, channels
-    tile: TilePlan  # the SCHEDULE slice, PLACED (``TilePlan.at``): the atom + the ``(m, n)`` geometry
+    tile: Tile  # the SCHEDULE slice, PLACED (``Tile.at``): the atom + the ``(m, n)`` geometry
     stage: Stage | None = None
     inputs: object = None
     workers: object = None  # the resolved WarpSpec (None = uniform SIMT) — consumed by _staged
@@ -1642,7 +1642,7 @@ class _ScalarOps(_AtomOps):
 
 def _atom_ops(
     c: Fold,
-    tile: TilePlan,
+    tile: Tile,
     stage: Stage | None = None,
     inputs=None,
     workers=None,
@@ -1653,7 +1653,7 @@ def _atom_ops(
     slabs: tuple = (None, None),
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
-    stored algebra, ``tile`` the PLACED schedule slice (``TilePlan.at``) the geometry derives from.
+    stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from.
 
     A CONVERTING materialized ``a`` — an ``smem`` stage on a load whose dtype differs from the
     atom's — is normalized to its one-``Load`` cone HERE, at the decode boundary: the synchronous
@@ -1988,7 +1988,7 @@ def _fold_staged(
 
 def reduce_codegen(
     c: Fold,
-    tile: TilePlan,
+    tile: Tile,
     stage: Stage | None = None,
     inputs=None,
     workers=None,
@@ -2042,7 +2042,7 @@ def fold_store_tail(tail: tuple, fold: Fold, c: _ScheduledContraction) -> tuple:
 
 
 def fold_store_sink(
-    tile: TilePlan,
+    tile: Tile,
     effects: tuple,
     carried: dict[str, Value],
     frag_ns: str = "",
@@ -2094,7 +2094,7 @@ def fold_store_sink(
     return store
 
 
-def store_sink(c: Fold, tile: TilePlan, epilogue: Body | None = None, lead: tuple = (), frag_ns: str = ""):
+def store_sink(c: Fold, tile: Tile, epilogue: Body | None = None, lead: tuple = (), frag_ns: str = ""):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's zero-axis ``Fold`` wrapper + the store glue). A caller may replace

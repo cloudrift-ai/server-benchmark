@@ -1590,7 +1590,7 @@ via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `E
 re-stamped, each scheduled at its own fork; a split node is priced as the Σ of its pieces' bests, and the split is
 CONSUMED by the kernel that realizes it (the sliced axis is a `Window` of its parent, so nothing partitions it
 twice). See [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the invariant. The
-letter round-trips through `ReducePlan.parse`/`spell` and reads back as `ReducePlan.finalize`. The atomic finalize
+letter round-trips through `Reduce.parse`/`spell` and reads back as `Reduce.finalize`. The atomic finalize
 applies the kernel's projection epilogue **per partition** before the `atomicAdd`, so it is only correct when that
 projection *distributes* over the add (`Σ φ(xₛ) = φ(Σ xₛ)`): a constant scale like `mean`'s `×1/N` distributes and
 rides the atomic; a non-distributive epilogue (`l2`'s `sqrt`, a fused bias/activation) is refused

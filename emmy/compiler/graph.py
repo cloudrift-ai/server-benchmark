@@ -239,7 +239,7 @@ def _deserialize_field(k, v):
         # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
         return _eval_stmt(v) if "(" in v else ElementwiseImpl(v)
     # ``TileOp``'s schedule descriptors serialize as constructor-repr strings
-    # (``Placement(...)`` / ``TilePlan(...)`` / ``ReducePlan(...)`` / ``Stage(...)`` /
+    # (``Placement(...)`` / ``Tile(...)`` / ``Reduce(...)`` / ``Stage(...)`` /
     # ``WarpSpec(...)``); ``None`` fields round-trip as JSON null. Eval a string only when it
     # opens with a constructor whose name is a known IR class — so a plain string field
     # (a name / path / C source) that merely looks like ``Name(...)`` is never eval'd.
@@ -267,9 +267,13 @@ def _deserialize_field(k, v):
         # dump's ``json.dumps(default=str)``), which a plain ``tuple(v)`` left as strings.
         return tuple(_maybe_eval_ctor(e) if isinstance(e, str) else e for e in v)
     if isinstance(v, dict):
-        # Dict-valued op fields (``TileOp.schedule`` — codec key → resolved slice) round-trip
-        # their VALUES as constructor reprs under the same known-class guard.
-        return {dk: (_maybe_eval_ctor(dv) if isinstance(dv, str) else dv) for dk, dv in v.items()}
+        # Schedule choices and Kernel IR both have a ``Tile`` type. The op field is the type
+        # boundary: a schedule mapping decodes against the schedule algebra, while statement
+        # bodies decode against Kernel IR through ``_stmt_eval_scope``. Constructor names remain
+        # unqualified in dumps, so trying to keep one merged eval scope would make one of those
+        # two meanings depend on import order.
+        decode = _maybe_eval_schedule_choice if k == "schedule" else _maybe_eval_ctor
+        return {dk: (decode(dv) if isinstance(dv, str) else dv) for dk, dv in v.items()}
     return v
 
 
@@ -283,15 +287,32 @@ def _maybe_eval_ctor(s: str):
     return _eval_stmt(s) if m and m.group(1) in _stmt_eval_scope() else s
 
 
+def _maybe_eval_schedule_choice(s: str):
+    """Evaluate a constructor repr from ``TileOp.schedule`` in the schedule algebra's scope."""
+    import re as _re
+
+    import emmy.compiler.ir.schedule as _schedule
+
+    m = _re.match(r"([A-Z]\w*)\(", s)
+    choice = getattr(_schedule, m.group(1), None) if m else None
+    if not isinstance(choice, type):
+        return s
+    scope = {**_stmt_eval_scope(), m.group(1): choice, "__builtins__": {}}
+    return eval(_evalable_enum_reprs(s), scope)
+
+
 def _eval_stmt(s: str):
     scope = _stmt_eval_scope()
-    # ``repr(enum_value)`` produces ``<SwizzleMode.NONE: 'NONE'>`` which
-    # isn't eval-able. Rewrite to the dotted form before eval.
-    if "<" in s and ":" in s:
-        import re as _re
+    return eval(_evalable_enum_reprs(s), scope)
 
-        s = _re.sub(r"<([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*): [^>]+>", r"\1.\2", s)
-    return eval(s, scope)
+
+def _evalable_enum_reprs(s: str) -> str:
+    """Rewrite dataclass enum reprs to the dotted form accepted by the IR eval scopes."""
+    if "<" not in s or ":" not in s:
+        return s
+    import re as _re
+
+    return _re.sub(r"<([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*): [^>]+>", r"\1.\2", s)
 
 
 _STMT_EVAL_SCOPE: dict | None = None
@@ -389,7 +410,7 @@ def _stmt_eval_scope() -> dict:
         "__builtins__": {},
     }
     # The stored term (the ``Fold`` node, in ``ir/pure/fold``) and the
-    # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
+    # schedule descriptors (``Placement`` / ``Tile`` / ``Reduce`` / ``Stage`` /
     # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
     # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /
     # ``workers``), and the cuda stage's ``CudaOp.tma_descriptors`` round-trips its
@@ -404,7 +425,9 @@ def _stmt_eval_scope() -> dict:
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_axis_mod, _sched_mod, _fold_mod, _tile_mod, _kernel_mod, _cuda_mod):
+    # Kernel IR owns the bare ``Tile(...)`` spelling in statement bodies. Schedule mappings use
+    # ``_maybe_eval_schedule_choice`` above, which deliberately overrides that one collision.
+    for _mod in (_axis_mod, _kernel_mod, _sched_mod, _fold_mod, _tile_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):

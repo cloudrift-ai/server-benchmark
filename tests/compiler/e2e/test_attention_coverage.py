@@ -647,7 +647,7 @@ def test_flash_transposed_output_matches_torch(monkeypatch):
 # =========================================================================== #
 # These cases expect a fp16/bf16 SDPA to lower to a single ``mma.sync`` kernel (the warp chain:
 # tiled + atomized contractions, fragment online-softmax, C->A register repack) — realized through the
-# ONE pipeline: the twisted warp enumeration stamps the mma ``TilePlan``\ s on the Q@K / P@V
+# ONE pipeline: the twisted warp enumeration stamps the mma ``Tile``\ s on the Q@K / P@V
 # bilinear ``Fold``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
 # (``_twist``). No private emitter exists; a bespoke path would be the mandate violation the
 # demolition removed. Unpinned, the warp rows are fork SIBLINGS of the chain / reduce-partition

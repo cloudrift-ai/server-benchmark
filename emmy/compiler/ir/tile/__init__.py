@@ -9,7 +9,7 @@ node's derived ``Fold.role``, no per-kind type.
 """
 
 from emmy.compiler.ir.pure.fold import Channel, Fold
-from emmy.compiler.ir.schedule import FoldMove, Level, Placement, ReducePlan, ReduceStage
+from emmy.compiler.ir.schedule import FoldMove, Level, Placement, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import (
     OutputSpec,
     ProjectionRegion,
@@ -27,7 +27,7 @@ __all__ = [
     "FoldMove",
     "Level",
     "Placement",
-    "ReducePlan",
+    "Reduce",
     "ReduceStage",
     "OutputSpec",
     "ProjectionRegion",

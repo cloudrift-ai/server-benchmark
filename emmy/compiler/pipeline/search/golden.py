@@ -121,14 +121,14 @@ class GoldenFileValidation(StrEnum):
 
 def fast_math_knobs(knobs: Mapping) -> bool:
     """Whether recorded knobs select a precision-trading realization."""
-    from emmy.compiler.ir.schedule import TilePlan, Workers  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import Tile, Work  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import FAST_EXP  # noqa: PLC0415
 
     for key, value in knobs.items():
         spelling = str(value).strip()
         if str(key).split("@", 1)[0] == "TILE" and spelling:
             try:
-                plan = TilePlan.parse(spelling, Workers(kind="warp", units=(1, 1)))
+                plan = Tile.parse(spelling, Work(kind="warp", units=(1, 1)))
             except ValueError:
                 plan = None
             if plan is not None and plan.is_warp and plan.atom.operand_dtype("c").nbytes == 2:

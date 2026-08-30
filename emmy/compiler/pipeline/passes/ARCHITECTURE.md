@@ -471,7 +471,7 @@ schedule enumeration may hide a legal kernel set.
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`
 is the plain scalar fma cell). The contraction binder (`bind_bilinear`) reads any lifted fold, so a nested
 contraction reached through a composed edge binds through the same path (`_bound_producer`) — a tier is a node
-gaining a `TilePlan`, never a new path.
+gaining a `Tile`, never a new path.
 
 An atom's logical cell and PTX instruction shape are separate. The Volta `mma_m8n8k4_f16_f32` atom is one logical
 16×16×4 warp cell because one instruction performs four independent 8×8×4 operations; its fragment layout maps those

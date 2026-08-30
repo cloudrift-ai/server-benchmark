@@ -31,7 +31,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction
-from emmy.compiler.ir.schedule import Placement, TilePlan, Workers
+from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
@@ -138,10 +138,10 @@ def test_k32_atom_registry_and_geometry():
 
 def test_k32_tile_codec_round_trips():
     """The ``TILE`` codec names the atom by registry key and the spelling round-trips."""
-    work = Workers.parse("w1x8")
-    plan = TilePlan.parse(f"{K32}/f2x2/k2", work)
+    work = Work.parse("w1x8")
+    plan = Tile.parse(f"{K32}/f2x2/k2", work)
     assert plan.atom is ATOM_REGISTRY[K32] and plan.bk == 2
-    assert TilePlan.parse(plan.spell(), work) == plan
+    assert Tile.parse(plan.spell(), work) == plan
     assert atom_for(K32) is ATOM_REGISTRY[K32]
 
 
@@ -240,7 +240,7 @@ def test_k32_enumeration_structural_requirements(monkeypatch):
     # the sm_89 hardware floor is absolute (the bare PTX form does not compile below)
     assert _offered_atoms(*_f8_term(cap=(8, 6))) == ()
     # a symbolic K declines — no masked-K byte gather
-    plan = TilePlan.parse(f"{K32}/f2x2/k2", Workers.parse("w1x8"))
+    plan = Tile.parse(f"{K32}/f2x2/k2", Work.parse("w1x8"))
     sym = Fold.contraction(
         k_axis=Axis("k", Dim("seq")),
         a=Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=F8E4M3),
@@ -267,7 +267,7 @@ def test_f8_atoms_offer_staged_byte_slabs():
     from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 
     _tile, _ctx, node = _f8_term()
-    tile = TilePlan.parse(f"{K32}/f4x1/k4", Workers.parse("w1x8")).at(Axis("m", Dim(512)), Axis("n", Dim(512)))
+    tile = Tile.parse(f"{K32}/f4x1/k4", Work.parse("w1x8")).at(Axis("m", Dim(512)), Axis("n", Dim(512)))
     inputs = {"a_bits": Tensor("a_bits", (512, 512), F8E4M3), "w_bits": Tensor("w_bits", (512, 512), F8E4M3)}
     for spec in ("d2/smem-async", "d2/smem-tma"):
         assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is not None

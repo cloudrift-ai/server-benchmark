@@ -259,7 +259,7 @@ class Fold:
     (``PLANAR`` / ``TWISTED`` / ``CONTRACTION``) is **derived** from those params (:attr:`role`),
     never stored. The fold ``Loop`` is **synthesized on
     demand** (:attr:`loop`), never stored — so the same node tiles under any
-    :class:`~emmy.compiler.ir.schedule.ReducePlan`, which is not a field here: the reduce
+    :class:`~emmy.compiler.ir.schedule.Reduce`, which is not a field here: the reduce
     partition is a SLICE in ``TileOp.schedule``, read through ``ops.Sched``.
 
     A reduce whose per-step partial COMPOSES another node — split-K's ``Fold ⊃ Fold``
@@ -273,7 +273,7 @@ class Fold:
     in the lift's structural sequence without becoming a ``Stmt``; :meth:`lower` is the one boundary
     that flattens it to the synthesized loop.
 
-    The reduce PARTITION (:class:`ReducePlan` — GRID split / BLOCK coop / REG ILP) is the schedule's,
+    The reduce PARTITION (:class:`Reduce` — GRID split / BLOCK coop / REG ILP) is the schedule's,
     not the node's: it is keyed into ``TileOp.schedule`` and read through ``ops.Sched``, which is why
     ``lower`` cannot see it and ``Op.cache_key`` stays byte-identical whichever partition the fork
     picked. See the NO-schedule-fields note on ``operands`` below."""

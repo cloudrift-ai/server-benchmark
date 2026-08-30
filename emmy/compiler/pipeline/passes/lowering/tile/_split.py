@@ -38,7 +38,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.algebra import component_ops
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, edge_refs_axis, is_contraction
-from emmy.compiler.ir.schedule import ReducePlan, Workers
+from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
@@ -208,7 +208,7 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
     pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
     tail = projection_tail(tile)
     if pin is not None:
-        plan = ReducePlan.parse(pin, Workers.parse(WORK.raw()))
+        plan = Reduce.parse(pin, Work.parse(WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
         _enforce(splitk_width(node.axis, plan.cta))
@@ -233,7 +233,7 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
 
 
 def _split_fork(match: Match, root: Node, key: str, cta: int, finalize: str) -> Fork:
-    spelling = ReducePlan.of(cta=cta, finalize=finalize).spell()
+    spelling = Reduce.of(cta=cta, finalize=finalize).spell()
     return DeferredFork(lambda: realize_split(match, root, cta, finalize), {key: spelling}, structural=True)
 
 

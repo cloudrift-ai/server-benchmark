@@ -24,7 +24,7 @@ takes whatever the enumeration emitted first. That pick being slow is an accepte
 a default, a lead value, or a filter to improve it is not.
 
 The ``TILE`` / ``REDUCE`` grids hand out the **typed schedule slices** themselves
-(:class:`~emmy.compiler.ir.schedule.TilePlan` / :class:`~emmy.compiler.ir.schedule.ReducePlan`,
+(:class:`~emmy.compiler.ir.schedule.Tile` / :class:`~emmy.compiler.ir.schedule.Reduce`,
 built structurally — never a parsed literal), so the enumeration never speaks a codec spelling; the
 scheduler spells each row ONCE, site-local, where it becomes stored state. ``STAGE`` hands out typed
 :class:`~emmy.compiler.ir.schedule.Stage` slices in the same currency; ``RASTER`` stays a codec string
@@ -35,7 +35,7 @@ Two groups:
 - **Schedule codec knobs** (``WORK`` / ``REDUCE`` / ``TILE`` / ``STAGE`` / ``RASTER``) — the tile-lowering schedule
   fork points that spell the ir schedule codecs (:mod:`emmy.compiler.ir.schedule`). Decided by the
   tile schedule and materialized in ``lowering/kernel/010_materialize``. Each is the **ephemeral** codec spelling: it resolves into a
-  schedule slice (``ReducePlan`` / ``TilePlan`` / ``Stage`` / ``WarpSpec``) and rides on ``TileOp.knobs``
+  schedule slice (``Reduce`` / ``Tile`` / ``Stage`` / ``WarpSpec``) and rides on ``TileOp.knobs``
   so the online prior featurizes / tunes the decision. ``off=""`` (the serial / per-cell /
   gmem-direct / uniform spelling) is auto-stamped on kernels the pass doesn't schedule.
 - **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen
@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import logging
 
-from emmy.compiler.ir.schedule import ReducePlan, Stage, TilePlan
+from emmy.compiler.ir.schedule import Reduce, Stage, Tile
 from emmy.compiler.pipeline.knob import Knob, KnobType
 from emmy.compiler.pipeline.search.domain import Bound, Dimension, Space
 
@@ -116,10 +116,10 @@ def _work_features(val) -> dict[str, float]:
     ``TILE``/``REDUCE`` values against WORK (``features._tile_plan`` / ``_reduce_decomp``)."""
     if not val:
         return {"D_wspec_warps": 0.0}
-    from emmy.compiler.ir.schedule import Workers  # noqa: PLC0415 — deferred: schedule imports this module
+    from emmy.compiler.ir.schedule import Work  # noqa: PLC0415 — deferred: schedule imports this module
 
     try:
-        w = Workers.parse(str(val))
+        w = Work.parse(str(val))
     except ValueError:
         return {"D_wspec_warps": 0.0}
     return {"D_wspec_warps": float(w.producer if w is not None else 0)}
@@ -317,7 +317,7 @@ LOOPIFY = Knob(
 #
 # The permitted-move catalog: the bounded, legality-guarded candidate values the ``_schedule`` emit
 # enumerates into the scheduling fork. A move is the **typed schedule slice** itself — a
-# :class:`TilePlan` / :class:`ReducePlan` built structurally, never a parsed literal — so the
+# :class:`Tile` / :class:`Reduce` built structurally, never a parsed literal — so the
 # enumeration never speaks a codec spelling: ``_schedule`` spells each row ONCE, site-local, at the
 # boundary where it becomes stored state. One invariant bounds what may live here:
 #
@@ -370,12 +370,12 @@ _SCALAR_TILE_SPACE = Space(
 )
 
 
-def scalar_tile_moves() -> list[TilePlan]:
+def scalar_tile_moves() -> list[Tile]:
     """The scalar-contraction output-tile candidates: the untiled per-cell tile, plus every point
     of :data:`_SCALAR_TILE_SPACE` (parallel widths varying slowest — a generation order, not a
     ranking)."""
-    moves = [TilePlan()]
-    moves.extend(TilePlan(units=(p["par_m"], p["par_n"]), regs=(p["reg_m"], p["reg_n"])) for p in _SCALAR_TILE_SPACE)
+    moves = [Tile()]
+    moves.extend(Tile(units=(p["par_m"], p["par_n"]), regs=(p["reg_m"], p["reg_n"])) for p in _SCALAR_TILE_SPACE)
     return moves
 
 
@@ -410,7 +410,7 @@ _WARP_TILE_SPACE = Space(
 )
 
 
-def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
+def warp_tile_moves(atom_names: tuple[str, ...]) -> list[Tile]:
     """The warp-contraction output-tile candidates over the (already dtype-eligible)
     ``atom_names``: :data:`_WARP_TILE_SPACE`'s points per atom. There is no untiled member here —
     these EXTEND :func:`scalar_tile_moves`, which carries the per-cell tile."""
@@ -420,14 +420,14 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[TilePlan]:
     for name in atom_names:
         atom = ATOM_REGISTRY[name]
         moves.extend(
-            TilePlan(atom=atom, units=(p["wm"], p["wn"]), regs=(p["fm"], p["fn"]), bk=p["bk"])
+            Tile(atom=atom, units=(p["wm"], p["wn"]), regs=(p["fm"], p["fn"]), bk=p["bk"])
             for p in _WARP_TILE_SPACE
             if p["fm"] * p["fn"] * atom.accumulator_registers_per_lane <= MAX_FRAGMENT_REGISTERS
         )
     return moves
 
 
-def map_tile_moves() -> list[TilePlan]:
+def map_tile_moves() -> list[Tile]:
     """The pointwise-map register-strip candidates — the **scalar output tile** (the same ``f<fn>``
     register sub-tile a contraction's output rides, here with no ``n`` unit-tile / atom since the
     grid already parallelizes a pure pointwise cell). ``f<r>`` hands each thread ``r`` CONTIGUOUS
@@ -438,7 +438,7 @@ def map_tile_moves() -> list[TilePlan]:
     inner free axis divisible by r) is the scheduler's. The full legal ladder is offered — ``f8`` has
     measured slower than ``f4`` on past pointwise goldens (register pressure outweighed the wider
     access), but a domain is not a preference history: evidence ranks it, never the ladder."""
-    return [TilePlan(regs=(1, 2)), TilePlan(regs=(1, 4)), TilePlan(regs=(1, 8))]  # (m, n): the strip widens the INNER axis
+    return [Tile(regs=(1, 2)), Tile(regs=(1, 4)), Tile(regs=(1, 8))]  # (m, n): the strip widens the INNER axis
 
 
 def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
@@ -483,7 +483,7 @@ def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
 SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8, 16, 32)
 
 
-def splitk_moves() -> list[ReducePlan]:
+def splitk_moves() -> list[Reduce]:
     """The cross-CTA split ``REDUCE`` candidates, both finalizes each width: the deferred kernel
     (an f32 workspace + sibling combine kernel) and the in-place atomic (one kernel — the partial
     ``atomicAdd``\\ s into the zero-init'd output; the mma tier rides ``RegStore.atomic``'s
@@ -491,10 +491,10 @@ def splitk_moves() -> list[ReducePlan]:
     unsplit tree beside them — a split changes the kernel SET, so it is never a schedule row. The
     fork's ``atomic_finalize`` refusal keeps atomic members off multi-component-carrier /
     non-distributive-projection nodes; per-node legality lives beside that offer, not here."""
-    return [ReducePlan.of(cta=w, finalize=f) for w in SPLITK_WIDTHS for f in ("kernel", "atomic")]
+    return [Reduce.of(cta=w, finalize=f) for w in SPLITK_WIDTHS for f in ("kernel", "atomic")]
 
 
-def coop_reduce_moves() -> list[ReducePlan]:
+def coop_reduce_moves() -> list[Reduce]:
     """The cooperative / ILP K-partition ``REDUCE`` candidates for a NON-output-tiled contraction
     (the coop reduce spec's contract — the per-cell tier folds K across the coop threads / ILP
     register chains). These EXTEND the serial fold the scheduler offers beside them. The 16- /
@@ -512,13 +512,13 @@ def coop_reduce_moves() -> list[ReducePlan]:
     the old grid+transposed composites (the long-K matvec winners, ``g32k`` + ``coop-t``) are the
     split fork's wide widths composed with the pieces' own transposed bands here."""
     return [
-        *(ReducePlan.of(coop=n) for n in (4, 8, 16, 32, 64, 128, 256, 512)),
-        ReducePlan.of(reg=2),
-        ReducePlan.of(reg=4),
-        ReducePlan.of(coop=4, reg=2),
+        *(Reduce.of(coop=n) for n in (4, 8, 16, 32, 64, 128, 256, 512)),
+        Reduce.of(reg=2),
+        Reduce.of(reg=4),
+        Reduce.of(coop=4, reg=2),
         # The transposed band: the k-major-B matvec partition. A bare transposed fold is
         # latency-bound on long-K matvecs (120 CTAs of serial K); the deployable winners pair it
         # with a deferred-kernel grid split (down g32k/b256t 75.7 us = the row-major floor on
         # k-major B), which the split fork's partial reaches by picking a band from THIS list.
-        *(ReducePlan.of(coop=n, coop_transposed=True) for n in (32, 64, 128, 256)),
+        *(Reduce.of(coop=n, coop_transposed=True) for n in (32, 64, 128, 256)),
     ]

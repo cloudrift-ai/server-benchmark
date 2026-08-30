@@ -24,7 +24,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.pure.fold import Channel, Fold
-from emmy.compiler.ir.schedule import ReducePlan, TilePlan, Workers, plan_workers, resolve_site_tile
+from emmy.compiler.ir.schedule import Reduce, Tile, Work, plan_workers, resolve_site_tile
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
@@ -55,7 +55,7 @@ def _reg_spelling(rn: int, rm: int) -> str:
 _EXPECTED_MOVES = [("", "")] + [(_reg_spelling(*reg), f"t{pn}x{pm}") for pn, pm in _PARS for reg in _REGS]
 
 
-def _stored(plan: TilePlan) -> tuple[str, str]:
+def _stored(plan: Tile) -> tuple[str, str]:
     """The (site ``TILE`` value, ``WORK`` inventory) pair a tile move stores."""
     work = plan_workers(plan)
     return plan.spell(), (work.spell() if work is not None else "")
@@ -64,12 +64,12 @@ def _stored(plan: TilePlan) -> tuple[str, str]:
 def test_scalar_tile_moves_equals_hand_product():
     moves = scalar_tile_moves()
     assert [_stored(p) for p in moves] == _EXPECTED_MOVES
-    assert TilePlan() in moves  # the untiled per-cell tile is a member; where it sits is not a rule
+    assert Tile() in moves  # the untiled per-cell tile is a member; where it sits is not a rule
     assert len(set(moves)) == len(moves)  # no duplicate candidates
     # Every move round-trips its stored spelling and stays inside the thread budget.
     for plan in moves:
         site, work = _stored(plan)
-        assert resolve_site_tile(site, Workers.parse(work)) == plan
+        assert resolve_site_tile(site, Work.parse(work)) == plan
         assert plan.units_n * plan.units_m <= _MAX_BLOCK_THREADS
 
 
@@ -188,7 +188,7 @@ def test_bare_reduce_forks_the_coop_catalog():
     # shared-row stage, static K, 32-divisible free grid), so the FULL catalog is offered —
     # bt/g-composites included. Rows that fail the gate (softmax/rms shapes) drop the band;
     # that arm is covered by the schedule tests, not this catalog assertion.
-    def site_of(plan: ReducePlan) -> tuple[str, str]:
+    def site_of(plan: Reduce) -> tuple[str, str]:
         return plan.spell(), (f"t{plan.coop}" if plan.coop > 1 else "")
 
     assert set(offered) == {("", ""), *(site_of(p) for p in coop_reduce_moves())}, f"catalog rows missing: {offered}"
@@ -255,9 +255,9 @@ def test_independent_roots_only_cross_physically_compatible_tiles():
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import Ctx, _Option
 
     m, n = Axis("m", 8), Axis("n", 8)
-    first = TilePlan(regs=(1, 2)).at(m, n)  # physical m 1 wide, n 2 wide
-    compatible = TilePlan(regs=(2, 1)).at(n, m)  # under (n, m): physical n 2 wide, m 1 wide
-    incompatible = TilePlan(regs=(1, 2)).at(n, m)  # under (n, m): physical n 1 wide, m 2 wide
+    first = Tile(regs=(1, 2)).at(m, n)  # physical m 1 wide, n 2 wide
+    compatible = Tile(regs=(2, 1)).at(n, m)  # under (n, m): physical n 2 wide, m 1 wide
+    incompatible = Tile(regs=(1, 2)).at(n, m)  # under (n, m): physical n 1 wide, m 2 wide
 
     ctx = Ctx().extend(_Option({"TILE@first": first.spell()}, tile=first))
     assert ctx is not None
@@ -272,12 +272,12 @@ def test_one_fold_reached_twice_is_one_decision():
     """
     from emmy.compiler.pipeline.passes.lowering.tile._schedule import Ctx, _Option
 
-    ctx = Ctx().extend(_Option({"REDUCE@k": "coop"}, work=Workers.parse("t32")))
+    ctx = Ctx().extend(_Option({"REDUCE@k": "coop"}, work=Work.parse("t32")))
     assert ctx is not None
-    assert ctx.extend(_Option({"REDUCE@k": "coop"}, work=Workers.parse("t32"))) is not None
+    assert ctx.extend(_Option({"REDUCE@k": "coop"}, work=Work.parse("t32"))) is not None
     assert ctx.extend(_Option({"REDUCE@k": "r2"})) is None
     # One kernel, one worker inventory — a second claim that disagrees is the same refusal.
-    assert ctx.extend(_Option({"REDUCE@j": "coop"}, work=Workers.parse("t64"))) is None
+    assert ctx.extend(_Option({"REDUCE@j": "coop"}, work=Work.parse("t64"))) is None
 
 
 # --- WORK pin narrowing -------------------------------------------------------------------------- #
@@ -322,7 +322,7 @@ def test_work_pin_never_widens_a_site_catalog(monkeypatch):
 
     # A pin the site DOES offer narrows to it alone.
     def width(w: str) -> int:
-        parsed = Workers.parse(w or None)
+        parsed = Work.parse(w or None)
         return parsed.count if parsed is not None else 0
 
     widest = max(offered, key=width)
@@ -375,9 +375,9 @@ def test_f32_computed_a_contraction_offers_a_tiled_scalar_row():
     rows = _rows_of(_computed_a_term())
     assert rows, "the term enumerated nothing"
 
-    def tile_of(row) -> TilePlan:
-        work = Workers.parse(str(row.get("WORK", "")))
-        reduce = ReducePlan.parse(str(family_value(row, "REDUCE") or ""), work)
+    def tile_of(row) -> Tile:
+        work = Work.parse(str(row.get("WORK", "")))
+        reduce = Reduce.parse(str(family_value(row, "REDUCE") or ""), work)
         return resolve_site_tile(str(family_value(row, "TILE") or ""), work, reduce.coop)
 
     plans = [tile_of(row) for row in rows]
@@ -438,6 +438,6 @@ def test_a_cooperative_row_spells_its_own_inventory(monkeypatch):
             coop = [v for k, v in row.items() if family_of(k) == "REDUCE" and isinstance(v, str) and "coop" in v]
             if not coop:
                 continue
-            parsed = Workers.parse(work or None)
+            parsed = Work.parse(work or None)
             assert parsed is not None and parsed.kind == "thread", f"{label}: {coop} rides WORK={work!r}, not a thread band"
-            assert ReducePlan.parse(coop[0], parsed).coop == parsed.units[0], f"{label}: {coop} disagrees with WORK={work!r}"
+            assert Reduce.parse(coop[0], parsed).coop == parsed.units[0], f"{label}: {coop} disagrees with WORK={work!r}"

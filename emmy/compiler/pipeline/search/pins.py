@@ -6,19 +6,19 @@ import contextlib
 import os
 
 from emmy import config
-from emmy.compiler.ir.schedule import Level, ReducePlan, Workers
+from emmy.compiler.ir.schedule import Level, Reduce, Work
 from emmy.compiler.pipeline.knob import axis_of, family_of, get, is_off_value, pin_key_matches, values_equal
 
-#: A synthetic thread inventory so ``ReducePlan.parse`` accepts a ``coop`` token here. The width
+#: A synthetic thread inventory so ``Reduce.parse`` accepts a ``coop`` token here. The width
 #: value never matters — ``spell`` is site-local and drops it — but a count > 1 is load-bearing:
 #: at ``units=(1, 1)`` the parsed ``coop`` collapses to 1 and ``spell`` drops the token entirely,
 #: silently reading ``g2k/coop`` as ``""``.
-_ANY_THREAD_WORK = Workers(kind="thread", units=(1, 32))
+_ANY_THREAD_WORK = Work(kind="thread", units=(1, 32))
 
 
 def _stampable_reduce(want: str) -> str | None:
     """The part of a ``REDUCE`` pin a kernel can still stamp, or ``None`` if it carries no
-    cross-CTA stage. Read through :class:`ReducePlan` — the same typed reading the schedule
+    cross-CTA stage. Read through :class:`Reduce` — the same typed reading the schedule
     walk's pin path consumes the ``g`` half with — so the rule has one statement; a value the
     codec does not parse answers ``None`` and is probed as-is.
 
@@ -33,12 +33,12 @@ def _stampable_reduce(want: str) -> str | None:
     by the piece on its own body and stamped there, so it stays gateable.
     """
     try:
-        plan = ReducePlan.parse(str(want), _ANY_THREAD_WORK)
+        plan = Reduce.parse(str(want), _ANY_THREAD_WORK)
     except ValueError:
         return None
     if not plan.needs_split:
         return None
-    return ReducePlan(tuple(st for st in plan.stages if st.level is not Level.GRID)).spell()
+    return Reduce(tuple(st for st in plan.stages if st.level is not Level.GRID)).spell()
 
 
 def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_conflicts: bool = False) -> str | None:

@@ -22,7 +22,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold
-from emmy.compiler.ir.schedule import Placement, ReducePlan, TilePlan
+from emmy.compiler.ir.schedule import Placement, Reduce, Tile
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.ir.tile._dump import pretty, unplaced_slices
@@ -192,13 +192,13 @@ def test_a_slice_keyed_against_derived_material_prints_in_the_schedule_region() 
     reconstructed to hang it on."""
     fold = _stat_fold()
     tile = TileOp(op=fold, name="k_stat")
-    tile.schedule["TILE@pj"] = TilePlan(regs=(1, 64))  # a key no stored node claims
+    tile.schedule["TILE@pj"] = Tile(regs=(1, 64))  # a key no stored node claims
     assert unplaced_slices(tile) == [("TILE@pj", tile.schedule["TILE@pj"])]
     text = tile.pretty_body()
     assert "    schedule" in text and "└─ TILE@pj = f64" in text
     # A kernel whose every key lands on a stored node has no such region at all.
     plain = TileOp(op=fold, name="k_stat")
-    Sched(plain.op, plain.schedule).put("REDUCE", fold, ReducePlan.of(reg=4))
+    Sched(plain.op, plain.schedule).put("REDUCE", fold, Reduce.of(reg=4))
     assert unplaced_slices(plain) == [] and "schedule" not in plain.pretty_body()
 
 
@@ -260,7 +260,7 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
     assert "REDUCE=" not in bare.pretty_body()
 
     scheduled = TileOp(op=fold, name="k_stat")
-    Sched(scheduled.op, scheduled.schedule).put("REDUCE", fold, ReducePlan.of(reg=4))
+    Sched(scheduled.op, scheduled.schedule).put("REDUCE", fold, Reduce.of(reg=4))
     assert "⟨REDUCE=r4⟩" in scheduled.pretty_body()
     # The annotation is the TileOp's; the term is untouched by it.
     assert "REDUCE=" not in "\n".join(pretty(fold))

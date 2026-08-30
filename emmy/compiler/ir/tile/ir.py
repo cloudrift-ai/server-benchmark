@@ -13,8 +13,8 @@ everything the term deliberately does not carry:
 
 - the root-global schedule fields — the free-axis → grid :class:`~.schedule.Placement` (``place``),
   the ONE worker inventory (``work``) and the warp-spec split (``workers``);
-- the per-node schedule SLICES in ``TileOp.schedule`` (``{codec key → resolved TilePlan /
-  ReducePlan / Stage}``, keyed by the tree-path codec and read through ``ops.Sched``);
+- the per-node schedule SLICES in ``TileOp.schedule`` (``{codec key → resolved Tile /
+  Reduce / Stage}``, keyed by the tree-path codec and read through ``ops.Sched``);
 - the kernel's EFFECTS — the :class:`OutputSpec` decorations and the ``apply_output_specs`` /
   ``extract_output_specs`` pair that reconstitutes the effectful stmt stream from them.
 
@@ -418,7 +418,7 @@ class TileOp(Op):
     There is **no** let table: a computed operand is stored inline on its edge, and sharing is the
     product contraction's arity (see the module docstring), so stored trees are already
     resolved and every walk is a plain tree walk. The per-node schedule SLICES live in
-    ``schedule``: ``{codec key → resolved TilePlan / ReducePlan / Stage}``, keyed by the
+    ``schedule``: ``{codec key → resolved Tile / Reduce / Stage}``, keyed by the
     tree-path codec's canonical key (:mod:`~emmy.compiler.ir.tile.path` — a fold may carry all
     three families at once, so the path alone cannot key the map; the family selects the slice
     kind, so key and value agree by construction). The ``op`` term is pure algebra, IMMUTABLE
@@ -437,7 +437,7 @@ class TileOp(Op):
     # stays the materializer's default glue (``_factor.with_store``). Consumers reconstitute
     # the effectful stmt stream via ``apply_output_specs`` — never read a ``Write`` out of the term.
     output_specs: tuple[OutputSpec, ...] = ()
-    # The ONE worker inventory (``ir.schedule.Workers``): the ``w``/``n`` worker
+    # The ONE worker inventory (``ir.schedule.Work``): the ``w``/``n`` worker
     # tokens factored out of the per-site TILE values, derived at option assembly
     # (``ops.Sched.seal_workers`` — loud on cross-site disagreement). ``None`` = the per-cell /
     # pure-reduce forms (derived launch geometry). The wire format spells the inventory ONCE, in

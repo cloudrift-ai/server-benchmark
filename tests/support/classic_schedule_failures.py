@@ -43,14 +43,9 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_2d]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_f3]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_tile_coverage[reg_inner]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[dynamic-smem-async]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[static-smem-async]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_default_is_the_flat_order",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gm_pin_groups_the_launch_order",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gn_pin_groups_the_transpose",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_register_double_buffer_matches_single_buffer_bit_for_bit[128-smem-async]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_register_double_buffer_matches_single_buffer_bit_for_bit[256-smem-async]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_scalar_matmul_stages_through_pipeline",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_tile_block_over_thread_limit_rejected",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_transposed_a_warp_pin_raises",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_warp_matmul_stamps_the_producer_band",
@@ -63,12 +58,6 @@ RECOVERY_CLUSTERS = (
         reason="restore tensor-core atoms, staging, and edge transport",
         nodeids=frozenset(
             (
-                "tests/compiler/e2e/test_matmul_coverage.py::test_bf16_operands_stage_via_cp_async",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit[128-2]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit[128-3]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit[256-2]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit[256-3]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_cp_staged_slab_is_swizzled",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[batched_mk-130]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[batched_mk-16]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[batched_mk-31]",
@@ -125,35 +114,16 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_f16acc_coverage[smem-async]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_f16acc_coverage[smem-tma]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_f16acc_symbolic_k",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_trans_b_staged[smem-async]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_trans_b_staged[smem-tma]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_mma_static_k_tail_zero_fills[128-False]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_mma_static_k_tail_zero_fills[132-True]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_mma_static_k_tail_zero_fills[136-True]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[dynamic-smem-tma]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_pinned_transport_and_shape_fire[static-smem-tma]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_producer_band_without_a_driveable_stage_enumerates_nothing",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_register_double_buffer_matches_single_buffer_bit_for_bit[128-smem-tma]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_register_double_buffer_matches_single_buffer_bit_for_bit[256-smem-tma]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_reshaped_a_declines_tma_and_falls_back",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_scalar_masked_n_stage_pin_refuses",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_scalar_ring_matches_gmem_direct_bit_for_bit[d2/smem-async]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_scalar_ring_matches_gmem_direct_bit_for_bit[d3/smem-async]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_staged_matches_gmem_direct_bit_for_bit[128]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_staged_matches_gmem_direct_bit_for_bit[256]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_staged_splitk_matches_gmem_direct_bit_for_bit[smem-async]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_staged_splitk_matches_gmem_direct_bit_for_bit[smem-tma]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_symbolic_mma_accuracy_across_transports[smem-async-256]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_symbolic_mma_accuracy_across_transports[smem-async-512]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_symbolic_mma_accuracy_across_transports[smem-tma-256]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_symbolic_mma_accuracy_across_transports[smem-tma-512]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_tma_deep_ring_matches_gmem_direct_bit_for_bit[128-2]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_tma_deep_ring_matches_gmem_direct_bit_for_bit[128-3]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_tma_deep_ring_matches_gmem_direct_bit_for_bit[256-2]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_tma_deep_ring_matches_gmem_direct_bit_for_bit[256-3]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_tma_stage_pin_refuses_below_sm90",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_tma_staged_slab_is_swizzled",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_trans_b_offers_staged_rows",
                 "tests/compiler/e2e/test_warp_specialize_deadlock.py::test_mlp_slice_completes_and_matches",
                 "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_symbolic_linear_traced_and_run",
                 "tests/compiler/passes/test_fp8_mma.py::test_w8a8_dynamic_per_token_amax_cuda",
@@ -1204,7 +1174,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 1095
+REMAINING_FAILURE_COUNT = 1065
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

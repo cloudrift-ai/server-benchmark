@@ -103,8 +103,8 @@ realizes is an addressing error. Unpinned cuts and bare
 `PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
 `040_schedule` is the clean-slate reconstruction boundary for classic assignments. The former `_schedule.py` was
 deleted rather than adapted. `_classic.py` now realizes direct projection, plain-reduction, scalar-contraction,
-precision-gated gmem-direct tensor-core, and kernel-global raster domains; staged transport, composed contractions,
-and sampled lazy enumeration raise
+precision-gated tensor-core, materialized-operand copy staging, and kernel-global raster domains; compute-filled
+transport, composed contractions, and sampled lazy enumeration raise
 `ClassicScheduleUnavailable` until their coherent recovery phases land. A plain reduction projects serial,
 cooperative and ILP choices independently from its node, while the kernel domain projects the union of their worker
 inventories; the compatibility relation is the only join between them. A scalar contraction projects its complete
@@ -115,6 +115,11 @@ edge or kernel choice participates in that projection. The
 kernel raster domain is projected separately from static grid facts. The compatibility relation admits a grouped
 choice only beside a tiled contraction; symbolic grids expose only the direct choice. A valid pin-only raster spelling
 enters that same kernel factor before complete rows are filtered, rather than creating a separate path. The
+stage domain is projected once per operand edge from target-filtered transport choices. Local support records retain
+the resolved node–edge tuples without putting slab sizes into either public factor; compatibility therefore rejects
+mixed transport assignments, and selected non-direct edges are resolved again only during materialization. The
+production traversal follows support-compatible prefixes, while bounded tests compare its complete set against the
+literal node × edge × kernel product.
 fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete typed
 `ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization derives
 placed geometry and resolved transport facts. Authoritative pin-only spellings first enter the independently projected

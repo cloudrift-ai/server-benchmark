@@ -12,9 +12,10 @@ from emmy.compiler.ir.classic_schedule import (
 )
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Channel, Fold
-from emmy.compiler.ir.schedule import Reduce
+from emmy.compiler.ir.schedule import Reduce, Stage
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
+from emmy.compiler.pipeline.passes.lowering.tile import _classic as classic
 from emmy.compiler.pipeline.passes.lowering.tile._classic import project_domains, schedule
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.search.space import coop_reduce_moves, scalar_tile_moves
@@ -113,7 +114,7 @@ def test_scalar_contraction_enumeration_is_the_compatible_independent_product() 
 
 
 def test_tensor_core_enumeration_is_the_compatible_independent_product() -> None:
-    m, n, k = Axis("m", 128), Axis("n", 128), Axis("k", 136)
+    m, n, k = Axis("m", 128), Axis("n", 128), Axis("k", 132)
     root = Fold.contraction(
         k_axis=k,
         a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
@@ -122,7 +123,7 @@ def test_tensor_core_enumeration_is_the_compatible_independent_product() -> None
     tile = TileOp(
         op=root,
         place=Placement(free=(m, n)),
-        inputs={"a": Tensor("a", (128, 136), "f16"), "b": Tensor("b", (136, 128), "f16")},
+        inputs={"a": Tensor("a", (128, 132), "f16"), "b": Tensor("b", (132, 128), "f16")},
         outputs={"out": Tensor("out", (128, 128), "f16")},
     )
     target = Context.from_target((12, 0))
@@ -145,3 +146,37 @@ def test_tensor_core_enumeration_is_the_compatible_independent_product() -> None
 
     warp = next(leaf for leaf in leaves if leaf.schedule.nodes[site].tile.is_warp)
     assert warp.expand()[0].materialization.tiles[site].choice == warp.schedule.nodes[site].tile
+
+
+def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
+    m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
+    root = Fold.contraction(
+        k_axis=k,
+        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m, n)),
+        inputs={"a": Tensor("a", (64, 64), "f32"), "b": Tensor("b", (64, 64), "f32")},
+        outputs={"out": Tensor("out", (64, 64), "f32")},
+    )
+    target = Context.from_target((12, 0))
+    monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [Stage.parse("d1/smem-async")])
+    problem = ClassicProblem(tile.op, target)
+    domains = project_domains(tile, target)
+    context = ClassicScheduleContext(problem, domains)
+
+    assert len(domains.edges) == 2
+    assert all({choice.stage.spell() for choice in choices} == {"", "d1/smem-async"} for choices in domains.edges.values())
+    reference = tuple(enumerate_reference(problem, domains))
+    leaves = schedule(tile, "matmul", {}, target)
+    codec = ClassicScheduleCodec(problem, domains)
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
+    assert domains.product_size > len(reference)
+    assert all(len({choice.stage for choice in assignment.edges.values()}) == 1 for assignment in reference)
+
+    staged = next(leaf for leaf in leaves if all(not choice.stage.is_direct for choice in leaf.schedule.edges.values()))
+    materialized = staged.expand()[0]
+    assert set(materialized.materialization.stages) == set(context.index.edges)
+    assert all(stage.choice == staged.schedule.edges[edge].stage for edge, stage in materialized.materialization.stages.items())

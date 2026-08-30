@@ -6,11 +6,11 @@ scheduling fork — the second half of the Loop-IR → Tile-IR boundary.
 THIS rule picks that up and decides the schedule — the free-axis → grid mapping plus the per-node
 ``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families through ``_classic``.
 
-Direct projection, plain-reduction, scalar-contraction, precision-gated gmem-direct tensor-core,
-and kernel-global raster schedules are live while the remaining classic domains are being
-reconstructed behind an explicit unavailable boundary. The fixed candidate-space contract is the
-compatible subset of independently projected kernel, node, and edge domains; a traversal may
-prune that product but cannot make traversal order semantic.
+Direct projection, plain-reduction, scalar-contraction, precision-gated tensor-core,
+materialized-operand copy staging, and kernel-global raster schedules are live while the remaining
+classic domains are being reconstructed behind an explicit unavailable boundary. The fixed
+candidate-space contract is the compatible subset of independently projected kernel, node, and
+edge domains; a traversal may prune that product but cannot make traversal order semantic.
 
 Splitting the two halves is what makes the fork ONE thing: a kernel reaches scheduling by
 several routes — the ordinary lift and a cross-CTA split's partial and finalize — and all converge here. The engine restarts its

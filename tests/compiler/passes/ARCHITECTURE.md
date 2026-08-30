@@ -125,6 +125,9 @@ a selected output tile alone produces placed materialization geometry.
 The gmem-direct tensor-core boundary repeats that proof over a typed f16 contraction and asserts that the independent
 kernel domain contains both warp inventories and raster choices. It also proves that compatibility rejects grouped
 rasterization beside every untiled node choice.
+The staged-edge boundary limits the transport catalog to one copy choice, projects that choice independently onto both
+operand edges, and compares production against the literal product. Only equal edge choices survive compatibility,
+and expanding a selected staged row derives one `ResolvedStage` per edge without changing the typed schedule.
 `test_move_catalog.py` also verifies that a matching `WORK` pin selects only existing rows and an unmatched pin returns
 no row, so pin filtering cannot manufacture a worker inventory. Precision-gated atom and raster tests cover the
 explicit exception: a legal pin-only spelling enters its addressed independent factor before complete-row filtering.

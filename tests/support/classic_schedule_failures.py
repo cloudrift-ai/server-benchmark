@@ -398,22 +398,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-offered]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-realized]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-flash-kernel.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-flash-kernel.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-matmul-atomic.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-matmul-atomic.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-matmul-kernel.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-matmul-kernel.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-sum-atomic.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-sum-atomic.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-sum-kernel.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-sum-kernel.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-l2-kernel.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-l2-kernel.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-mean-atomic.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-mean-atomic.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-mean-kernel.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/split-reduce-mean-kernel.yaml-correct]",
             )
         ),
     ),
@@ -421,7 +405,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 312
+REMAINING_FAILURE_COUNT = 296
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

@@ -259,7 +259,6 @@ RECOVERY_CLUSTERS = (
         nodeids=frozenset(
             (
                 "tests/compiler/backend/test_source_determinism.py::test_kernel_source_identical_across_processes",
-                "tests/compiler/cli/test_compile.py::test_compile_code_fp32_stat_free_cone_demotes",
                 "tests/compiler/cli/test_compile.py::test_compile_golden_substring_resolves_dynamic",
                 "tests/compiler/cli/test_eval.py::test_offer_audit_flags_unrealized_entries_and_fall_through",
                 "tests/compiler/cli/test_golden_file_replay.py::test_working_shared_placement_pins_select_the_exact_compile_target[explicit]",
@@ -279,7 +278,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/cli/test_run.py::test_run_code_sdpa_tinyllama_per_head",
                 "tests/compiler/cli/test_run.py::test_run_code_target_override",
                 "tests/compiler/pipeline/test_kernel_cache.py::test_twin_replay_renders_byte_identical_source",
-                "tests/compiler/pipeline/test_kernel_cache.py::test_without_a_cache_nothing_changes",
             )
         ),
     ),
@@ -351,7 +349,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 242
+REMAINING_FAILURE_COUNT = 240
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

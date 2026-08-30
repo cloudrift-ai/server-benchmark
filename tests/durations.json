@@ -489,7 +489,7 @@
   "tests/compiler/pipeline/search/test_two_level_strategy.py::test_scoring_is_separable_over_unique_kernels": 5.29,
   "tests/compiler/pipeline/search/test_two_level_strategy.py::test_single_node_slice_declares_unregistered_input_boundaries_in_the_runtime_plan": 0.18,
   "tests/compiler/pipeline/test_kernel_cache.py::test_twin_replay_renders_byte_identical_source": 7.5,
-  "tests/compiler/pipeline/test_kernel_cache.py::test_without_a_cache_nothing_changes": 3.6,
+  "tests/compiler/pipeline/test_kernel_cache.py::test_without_a_cache_nothing_changes": 23.5,
   "tests/compiler/pipeline/test_knob.py::test_registry_complete_in_a_bare_process": 0.13,
   "tests/compiler/pipeline/test_resolve.py::test_decide_score_lands_on_trace": 0.11,
   "tests/compiler/pipeline/test_resolve.py::test_option0_decide_matches_no_prior_greedy": 0.12,

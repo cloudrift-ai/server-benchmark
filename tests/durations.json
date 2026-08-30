@@ -305,6 +305,7 @@
  "tests/compiler/pipeline/search/policy/test_db_evidence.py::test_db_index_skips_failed_rows": 0.08,
  "tests/compiler/pipeline/search/policy/test_decision_memo.py::test_golden_probe_decides_without_flattening": 1.04,
  "tests/compiler/pipeline/search/policy/test_decision_memo.py::test_second_same_shape_kernel_replays_the_first_decision": 0.33,
+ "tests/compiler/pipeline/search/policy/test_greedy.py::test_price_memo_keys_on_exact_identity_not_the_term_hash": 1.9,
  "tests/compiler/pipeline/search/policy/test_verified_tier.py::test_bare_place_record_cuts_the_shallowest_seam": 4.63,
  "tests/compiler/pipeline/search/policy/test_verified_tier.py::test_drift_is_fail_closed": 6.05,
  "tests/compiler/pipeline/search/policy/test_verified_tier.py::test_extent_disjoint_records_key_apart": 8.44,

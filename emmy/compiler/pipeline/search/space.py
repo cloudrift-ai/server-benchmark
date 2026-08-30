@@ -361,20 +361,23 @@ MAX_REGISTERS_PER_THREAD = 255
 MAX_REGISTERS_PER_CTA = 64 * 1024
 
 # The scalar register-tile candidate spaces. ``_SCALAR_REGISTER_SPACE`` is the pure register-only
-# grid (one thread owns the output tile); ``_SCALAR_PARALLEL_TILE_SPACE`` crosses parallel thread-
-# tile widths with per-thread register sub-tiles. The parallel space is generated from the one
-# constraint that bounds it — the CTA thread budget, which a scalar tile spends
-# ``par_n·par_m`` of. The register widths carry no budget (the register file is unmodeled
-# everywhere in scheduling), so their dimensions are the value ladders themselves: the square /
-# skewed core plus the deep-FM and deep-FN points recorded in the realization corpus.
+# grid (one thread owns the output tile); ``_SCALAR_1D_TILE_SPACE`` spreads threads along N;
+# ``_SCALAR_PARALLEL_TILE_SPACE`` crosses two-dimensional thread tiles with per-thread register
+# sub-tiles. The parallel space is generated from the one constraint that bounds it — the CTA
+# thread budget, which a scalar tile spends ``par_n·par_m`` of. The register widths carry no budget
+# (the register file is unmodeled everywhere in scheduling), so their dimensions are the value
+# ladders themselves: the square / skewed core plus the deep-FM and deep-FN points recorded in the
+# realization corpus.
 #
-# ``test_move_catalog.py`` recomputes both products independently, including their exact ladders.
+# ``test_move_catalog.py`` recomputes all three products independently, including their exact ladders.
 _SCALAR_REGISTER_SPACE = Space(
     dims=(
         Dimension("reg_n", (1, 2, 3, 4)),
         Dimension("reg_m", (1, 2, 4)),
     )
 )
+
+_SCALAR_1D_TILE_SPACE = Space(dims=(Dimension("par_n", (32, 64, 128, 256, 512)),))
 
 _SCALAR_PARALLEL_TILE_SPACE = Space(
     dims=(
@@ -389,8 +392,10 @@ _SCALAR_PARALLEL_TILE_SPACE = Space(
 
 def scalar_tile_moves() -> list[Tile]:
     """The scalar-contraction output-tile candidates: the untiled per-cell tile, every nontrivial
-    pure register tile, and every parallel register tile. Domain order is not a ranking."""
+    pure register tile, every one-dimensional thread tile, and every parallel register tile.
+    Domain order is not a ranking."""
     moves = [Tile()]
+    moves.extend(Tile(units=(1, p["par_n"])) for p in _SCALAR_1D_TILE_SPACE)
     moves.extend(Tile(regs=(p["reg_m"], p["reg_n"])) for p in _SCALAR_REGISTER_SPACE if (p["reg_m"], p["reg_n"]) != (1, 1))
     moves.extend(Tile(units=(p["par_m"], p["par_n"]), regs=(p["reg_m"], p["reg_n"])) for p in _SCALAR_PARALLEL_TILE_SPACE)
     return moves

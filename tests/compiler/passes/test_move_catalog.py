@@ -3,10 +3,11 @@
 The tile schedule (``040_schedule`` → ``_classic``) enumerates the catalog into the tile fork; this
 file pins the catalog's **legal set** three ways:
 
-- the catalog function ``scalar_tile_moves()`` equals the hand-computed pure-register and
-  ``(par × reg)`` grids plus the per-cell tile, legality-guarded (``par_n·par_m ≤ 1024``), read
-  through the SITE spelling each move stores as (its site ``TILE`` value + the ``WORK`` inventory
-  it implies). Membership is what is pinned, never position — the catalogs rank nothing;
+- the catalog function ``scalar_tile_moves()`` equals the hand-computed pure-register,
+  one-dimensional thread, and ``(par × reg)`` grids plus the per-cell tile, legality-guarded
+  (``par_n·par_m ≤ 1024``), read through the SITE spelling each move stores as (its site ``TILE``
+  value + the ``WORK`` inventory it implies). Membership is what is pinned, never position — the
+  catalogs rank nothing;
 - the **leaf set** the walk actually emits over an f32 matmul / bare-reduce fixture equals that
   catalog, so a missing / extra move is caught structurally, without lowering a kernel;
 - the complete leaf set the scheduler emits, including multi-site worker agreement.
@@ -32,14 +33,15 @@ from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
 from emmy.compiler.pipeline.search.space import scalar_tile_moves
 
-# The hand-computed legal products as explicit literals — the per-cell tile, pure-register box, and
-# (par × reg) box
+# The hand-computed legal products as explicit literals — the per-cell tile, one-dimensional thread
+# ladder, pure-register box, and (par × reg) box
 # as the pair each move STORES: its site-local ``TILE`` value (the register sub-tile; the default
 # ``f1x1`` spells ``f1`` on a parallel tile and a unit ``reg_m`` drops the ``x`` half) and the ``WORK`` thread
 # inventory its parallel widths imply. The two ladders and the one bound are restated by hand here —
 # NOT recomputed from the implementation spaces — so a change to any dimension, to the thread
 # budget, or to the enumeration order is caught explicitly.
 _PARS = [(pn, pm) for pn in (16, 32, 64) for pm in (8, 16) if pn * pm <= _MAX_BLOCK_THREADS]
+_PAR_1D = (32, 64, 128, 256, 512)
 _PURE_REGS = [(rn, rm) for rn in (1, 2, 3, 4) for rm in (1, 2, 4) if (rn, rm) != (1, 1)]
 _PARALLEL_REGS = [(rn, rm) for rn in (1, 2, 4, 26) for rm in (1, 2, 4, 6, 8, 10, 12, 14, 26)]
 
@@ -54,6 +56,7 @@ def _reg_spelling(rn: int, rm: int) -> str:
 
 _EXPECTED_MOVES = [
     ("", ""),
+    *(("f1", f"t{pn}") for pn in _PAR_1D),
     *((_reg_spelling(*reg), "") for reg in _PURE_REGS),
     *((_reg_spelling(*reg), f"t{pn}x{pm}") for pn, pm in _PARS for reg in _PARALLEL_REGS),
 ]

@@ -140,10 +140,10 @@ The producer-band boundary projects uniform, `+p1`, and `+p2` kernel choices bef
 `WORK` parameter leaves that domain unchanged, and checks that only compatible TMA edge assignments survive.
 The shared-constant cone fixture also pins a multi-channel contraction to the scalar tier: every channel remains in one
 serial Fold body, so independently spliced operand cones share the one legal broadcast binding.
-`test_move_catalog.py` also pins the pure-register, parallel-register, and cooperative-width × ILP catalog products,
-then verifies that a matching `WORK` pin selects only existing rows and an unmatched pin returns no row, so restriction
-cannot manufacture a worker inventory. Precision gates restrict atom choices that remain in the fixed domain; exact
-raster parameters likewise cannot add a value outside the static raster catalog.
+`test_move_catalog.py` also pins the pure-register, one-dimensional thread, parallel-register, and cooperative-width ×
+ILP catalog products, then verifies that a matching `WORK` pin selects only existing rows and an unmatched pin returns
+no row, so restriction cannot manufacture a worker inventory. Precision gates restrict atom choices that remain in the
+fixed domain; exact raster parameters likewise cannot add a value outside the static raster catalog.
 `test_schedule_pool_cache.py` pins the session memo:
 sharing, hit equality, read-only payloads, and the keying that holds pin states, dtypes, extents, stores and the
 sample apart. `test_move_catalog.py` checks that independent

@@ -330,10 +330,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[fused/gate-up-distinct-a_xfail_realized.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[fused/gate-up-shared-a.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[fused/gate-up-shared-a.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[fused/norm-linear-f16-scalar-reduce.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[fused/norm-linear-f16-scalar-reduce.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[fused/norm-linear-f16-scalar-reduce.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[fused/norm-linear-f16-scalar-reduce.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[fused/norm-linear-f16-warp-masked-m.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[fused/norm-linear-f16-warp-masked-m.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[fused/norm-weight-linear-f16-computed-b.yaml-built]",
@@ -721,7 +717,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 612
+REMAINING_FAILURE_COUNT = 608
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

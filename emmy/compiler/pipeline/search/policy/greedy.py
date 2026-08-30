@@ -31,15 +31,28 @@ degenerates to the enumeration's first leaf, which carries no meaning and can
 be arbitrarily slow. That is the accepted cost of the rule, not a defect to
 patch: a bad unmeasured pick is fixed by measuring (a tune, a recorded golden)
 or by fitting the prior better, never by teaching this module a preference.
+
+**A measurement can also DISQUALIFY.** The three tiers above all RANK, and a
+ranking needs a latency — which a ``bench_fail`` row does not have, only the
+watchdog's timeout sentinel. Those rows are still a recording of something that
+ran (or failed to), so they are read, but as an elimination rather than a score:
+where every measured variant of one structural signature failed, a slice
+containing that kernel prices ``inf`` (:func:`_resolved_price`) and any
+structural arm holding it loses the kernel-set argmin. Still evidence, still no
+preference — the alternative is that an all-failed kernel has no ``ok`` row,
+therefore no evidence at all, and falls through to the prior as though nothing
+were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
+every benched variant hung.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from contextlib import contextmanager
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves, iter_leaves, leaf_knobs
@@ -194,8 +207,15 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
     )
 
 
-def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior) -> float | None:
+def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: dict | None = None) -> float | None:
     """Σ over a resolved slice's kernels of each one's estimated µs — the ONE cost rule.
+
+    ``failed`` is the measured DISQUALIFICATION (:class:`_Measured`): the structural signatures
+    whose every benched variant failed. A slice containing one prices ``inf``, so a structural arm
+    holding a kernel the tune watched hang loses the argmin to any arm that does not. That is not
+    a preference, it is the measurement — and without it those rows are invisible at deploy,
+    because the ranking index carries ``ok`` rows only, so an all-failed kernel has NO evidence
+    and falls through to the prior.
 
     Per kernel: the price the resolution's own fork stamped (the winning leaf's µs, which the
     deploy evidence hierarchy chose), or — where the trace carries no score for it: a decide that
@@ -220,6 +240,11 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior) -> float 
     for nid, node in terminal.nodes.items():
         if node.op.identity_key(with_io=True, with_knobs=True) is None:
             continue
+        if failed:
+            knobs = getattr(node.op, "knobs", None) or {}
+            sig = frozenset((k, str(v)) for k, v in knobs.items() if k.startswith("S_"))
+            if _sig_groups(failed, sig):
+                return math.inf
         us = scored.get(nid)
         if us is None:
             rows = [{**ctx.features(), **(getattr(node.op, "knobs", None) or {})}]
@@ -263,7 +288,8 @@ def _price_kernel(
 
             ctx = _replace(ctx, kernel_cache=None)  # a replayed kernel offers no fork to price
         terminal, trace = Run(pipeline=_tile_pipeline(), ctx=ctx).resolve(single_node_graph(graph, nid), nested)
-        us = _resolved_price(terminal, trace, ctx, prior)
+        failed = _db_measured_index(db, ctx).failed if db is not None else None
+        us = _resolved_price(terminal, trace, ctx, prior, failed=failed)
     except Exception:  # noqa: BLE001 — a price-probe failure must never break compile
         us = None
     memo[key] = us
@@ -352,7 +378,7 @@ def _priced_pick(
 _DB_INDEX_CACHE: dict = {}
 
 
-def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
+def _db_measured_index(db, ctx) -> _Measured:
     """Caching wrapper over :func:`_db_measured_index_build` — memoizes the built
     index per process on ``(db path, mtime, context keys)``, invalidated when the
     DB file's mtime changes. An in-memory DB (no ``_path``) or an unstatable file
@@ -380,23 +406,49 @@ def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
     return index
 
 
-def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
-    """The tune DB's measured ``ok`` CUDA perf rows for this compile's regime.
+class _Measured(NamedTuple):
+    """One DB scan's two answers, because the scan is expensive and both come from the same rows.
+
+    ``ok`` RANKS — the measured rows a pick argmins over. ``failed`` DISQUALIFIES — the structural
+    signatures whose every measured variant failed, which is a different kind of answer and cannot
+    be expressed as a latency: a watchdog kill has no meaningful µs to rank with, only a sentinel."""
+
+    ok: dict[frozenset, list[tuple[dict, float]]]
+    failed: dict[frozenset, list[float]]
+
+
+def _db_measured_index_build(db, ctx) -> _Measured:
+    """The tune DB's measured CUDA perf rows for this compile's regime, split into what ranks and
+    what disqualifies.
 
     Rows are indexed by their ``S_*`` structural signature (stringified values because perf knobs
     round-trip JSON). One context key is sufficient: tune measures in the deployable regime, and
     ``Context.structural_key`` gives that regime one key however its flags are spelled. Rows from a
     deliberately non-deployable compile key elsewhere and are not consulted.
 
+    A non-``ok`` row is evidence too — the bench watchdog measured that variant not finishing — but
+    it is evidence a ranker cannot use, since its sentinel latency is a timeout constant rather
+    than a speed. It lands in ``failed`` instead, and only where NO variant of that signature was
+    measured ``ok``: one surviving row means the shape is realizable and merely has bad rows.
+    Failures are collected BEFORE the placement-route filter below, because a route's latency is
+    unattributable without a child-schedule receipt while a kernel that hung is attributable to
+    the kernel whatever route produced it.
+
     Best-effort: any failure returns an empty index so deploy falls back to the prior.
     """
 
     index: dict[frozenset, list[tuple[dict, float]]] = {}
+    survived: set[frozenset] = set()
+    failures: dict[frozenset, list[float]] = {}
     try:
         for row in db.iter_perf(ctx.structural_key(), backend="cuda"):
-            if row.status != "ok" or row.stats.median <= 0:
-                continue
             sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
+            if row.status != "ok":
+                failures.setdefault(sig, []).append(float(getattr(row.stats, "median", 0.0) or 0.0))
+                continue
+            survived.add(sig)
+            if row.stats.median <= 0:
+                continue
             tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
             # A placement route's latency belongs to the exact ordered child schedule tree that
             # ran. The perf schema carries no such receipt, so legacy route rows cannot be direct
@@ -405,8 +457,8 @@ def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float]
                 continue
             index.setdefault(sig, []).append((tun, float(row.stats.median)))
     except Exception:  # noqa: BLE001 — a DB consult failure must never break compile
-        return {}
-    return index
+        return _Measured({}, {})
+    return _Measured(index, {sig: us for sig, us in failures.items() if sig not in survived})
 
 
 def _sig_groups(index: dict[frozenset, list[tuple[dict, float]]], sig: frozenset) -> list[list[tuple[dict, float]]]:
@@ -1002,7 +1054,7 @@ def greedy_decide(
     verified_state: list = [None]
 
     def db_index() -> dict:
-        return db_state[0] or {}
+        return (db_state[0].ok if db_state[0] is not None else None) or {}
 
     def decide(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior

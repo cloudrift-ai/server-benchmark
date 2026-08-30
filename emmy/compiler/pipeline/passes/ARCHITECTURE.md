@@ -102,11 +102,13 @@ so the unpinned placement fork never returns under a pin-driven compile. A pin t
 realizes is an addressing error. Unpinned cuts and bare
 `PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
 `040_schedule` is the clean-slate reconstruction boundary for classic assignments. The former `_schedule.py` was
-deleted rather than adapted. `_classic.py` now realizes the direct projection domain; reduction, contraction and pin
-domains raise `ClassicScheduleUnavailable` until their coherent recovery phases land. The fixed completion contract is
-that structural rewrites finish before site construction, every leaf is a complete typed `ClassicSchedule`, only the
-search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization derives placed geometry and resolved
-transport facts.
+deleted rather than adapted. `_classic.py` now realizes direct projection and plain-reduction domains; contraction,
+pin narrowing and sampled lazy enumeration raise `ClassicScheduleUnavailable` until their coherent recovery phases
+land. A plain reduction projects serial, cooperative and ILP choices independently from its node, while the kernel
+domain projects the union of their worker inventories; the compatibility relation is the only join between them. The
+fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete typed
+`ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization derives
+placed geometry and resolved transport facts.
 
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so `035_split_reduce` stands beside the cut, BEFORE scheduling: the

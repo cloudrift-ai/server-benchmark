@@ -400,26 +400,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-serial.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-serial.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-coop-hier-symbolic.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-coop-hier-symbolic.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-coop-hier.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-coop-hier.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-coop-warp-symbolic.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-coop-warp-symbolic.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-coop-warp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-coop-warp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-ilp-coop-symbolic.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-ilp-coop-symbolic.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-ilp-coop.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-ilp-coop.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-ilp-symbolic.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-ilp-symbolic.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-ilp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-ilp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-serial-symbolic.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-serial-symbolic.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-serial.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/combine-sumsq-serial.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n33.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n33.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n500.yaml-built]",
@@ -473,7 +453,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 364
+REMAINING_FAILURE_COUNT = 344
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

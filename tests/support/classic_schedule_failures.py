@@ -44,7 +44,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gn_pin_groups_the_transpose",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_tile_block_over_thread_limit_rejected",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_transposed_a_warp_pin_raises",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_warp_matmul_stamps_the_producer_band",
             )
         ),
     ),
@@ -425,22 +424,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-mn-gmem.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-pv-materialized-warp.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-pv-materialized-warp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d1-m128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d1-m128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d1-m128.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d1-m128.yaml-realized]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d2-m100.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d2-m100.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d2-m100.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d2-m100.yaml-realized]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d2-m128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d2-m128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d2-m128.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p1-tma-d2-m128.yaml-realized]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p2-tma-d2-m128.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p2-tma-d2-m128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p2-tma-d2-m128.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-band-p2-tma-d2-m128.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-gmem-direct.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-gmem-direct.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-k-split-staged.yaml-built]",
@@ -738,7 +721,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 629
+REMAINING_FAILURE_COUNT = 612
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

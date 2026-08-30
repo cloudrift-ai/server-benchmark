@@ -135,6 +135,8 @@ The schedule-restriction boundary proves that exact `WORK` and addressed `TILE` 
 factor unchanged, then compares production with Algorithm 1 under the same restriction. The test deliberately bounds
 the factor catalogs so the literal oracle remains fast. Composed GPU cases cover nested and sibling fragment
 agreements; no composed-only enumerator or post-product membership rule exists.
+The producer-band boundary projects uniform, `+p1`, and `+p2` kernel choices before reading parameters, proves an exact
+`WORK` parameter leaves that domain unchanged, and checks that only compatible TMA edge assignments survive.
 The shared-constant cone fixture also pins a multi-channel contraction to the scalar tier: every channel remains in one
 serial Fold body, so independently spliced operand cones share the one legal broadcast binding.
 `test_move_catalog.py` also pins the pure-register, parallel-register, and cooperative-width × ILP catalog products,

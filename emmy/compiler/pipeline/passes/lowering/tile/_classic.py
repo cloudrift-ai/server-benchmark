@@ -45,6 +45,7 @@ from emmy.compiler.ir.schedule import (
     ResolvedStage,
     Stage,
     Tile,
+    WarpSpec,
     Work,
     derive_inventory,
 )
@@ -66,6 +67,7 @@ from emmy.compiler.pipeline.search.space import (
     WARP_LANES,
     coop_reduce_moves,
     precision_pin,
+    producer_band_moves,
     raster_moves,
     scalar_tile_moves,
     stage_moves,
@@ -524,8 +526,9 @@ def _enumerate_supported(problem: ClassicProblem, domains: ClassicDomains, restr
         if position == len(sites):
             claimed_work = work or Work()
             for kernel in domains.kernel:
+                kernel_work = Work(kernel.work.kind, kernel.work.units)
                 if (
-                    kernel.work != claimed_work
+                    kernel_work != claimed_work
                     or (not kernel.raster.is_direct and not raster_eligible)
                     or not restriction.allows_kernel(kernel)
                 ):
@@ -682,10 +685,15 @@ def project_domains(tile: TileOp, target) -> ClassicDomains:
         and all(axis.extent.is_static for axis in tile.place.free)
         else [""]
     )
+    kernel_work_domain = {
+        Work(kind=work.kind, units=work.units, producer=producer)
+        for work in work_domain
+        for producer in (producer_band_moves() if work.kind == "warp" else (0,))
+    }
     return ClassicDomains(
         kernel=tuple(
             KernelSchedule(work, Raster.parse(raster))
-            for work in sorted(work_domain, key=lambda work: work.spell())
+            for work in sorted(kernel_work_domain, key=lambda work: work.spell())
             for raster in raster_values
         ),
         nodes=nodes,
@@ -751,7 +759,7 @@ class _ScheduleLeaf(Fork):
                 output_specs=self.tile.output_specs,
                 classic=self.schedule,
                 materialization=ClassicMaterialization(placed, resolved),
-                workers=None,
+                workers=WarpSpec(self.schedule.kernel.work.producer) if self.schedule.kernel.work.producer else None,
             )
         ]
 

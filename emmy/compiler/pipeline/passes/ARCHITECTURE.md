@@ -544,10 +544,10 @@ more member. The normal cooperative-reduction catalog is likewise the fixed coop
 scheduler projects these alongside the warp and transport catalogs. Every accepted leaf is a complete
 `ClassicSchedule` with exact `NodeId` and `EdgeSite` keys. Schedule parameters restrict complete assignments without
 changing those exact domains.
-The producer band is the fourth level (`""` = uniform SIMT — since step 7 a resolved band
-is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
-resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
-(an ineligible spec degrades to uniform). A single-channel computed-A (fused-cone) contraction enumerates scalar
+The producer band is a fixed kernel-domain factor (`""`, `+p1`, `+p2`; since step 7 a resolved band is spelled in
+`WORK`, never a per-row `WSPEC` key). Compatibility accepts a nonzero member only on a warp row over resolved **TMA**
+transport without a cross-CTA split and within the thread budget; a parameter can restrict this factor but cannot add
+another width. A single-channel computed-A (fused-cone) contraction enumerates scalar
 register-tile rows with staging off: the scalar atom evaluates the cone once per operand row or column and reuses it
 across the sibling register cells. It also enumerates its warp rows with the mandatory resolved `sync` compute-fill
 stage at BOTH depths

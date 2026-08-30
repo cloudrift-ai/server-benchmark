@@ -153,6 +153,51 @@ def test_tensor_core_enumeration_is_the_compatible_independent_product() -> None
     assert warp.expand()[0].materialization.tiles[site].choice == warp.schedule.nodes[site].tile
 
 
+def test_producer_band_is_a_restricted_kernel_domain_choice(monkeypatch) -> None:
+    """Producer bands belong to the fixed kernel factor; edge compatibility admits only TMA."""
+    m, n, k = Axis("m", 128), Axis("n", 128), Axis("k", 128)
+    root = Fold.contraction(
+        k_axis=k,
+        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m, n)),
+        inputs={"a": Tensor("a", (128, 128), "f16"), "b": Tensor("b", (128, 128), "f16")},
+        outputs={"out": Tensor("out", (128, 128), "f16")},
+    )
+    target = Context.from_target((12, 0))
+    plan = Tile.parse("mma_m16n8k16_f16_f32/f2x2/k2", Work.parse("w2x2"))
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [plan] if plan.atom.name in atoms else [])
+    monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [Stage.parse("d2/smem-tma")])
+    problem = ClassicProblem(tile.op, target)
+    domains = project_domains(tile, target)
+
+    works = {choice.work.spell() for choice in domains.kernel}
+    assert {"w2x2", "w2x2+p1", "w2x2+p2"} <= works
+    reference = tuple(_reference(problem, domains))
+    assert any(assignment.kernel.work.producer for assignment in reference)
+    assert all(
+        all(choice.stage.transport == "smem-tma" for choice in assignment.edges.values())
+        for assignment in reference
+        if assignment.kernel.work.producer
+    )
+
+    monkeypatch.setenv("EMMY_WORK", "w2x2+p1")
+    monkeypatch.setenv("EMMY_TILE@n0", plan.spell())
+    monkeypatch.setenv("EMMY_REDUCE@n0", "")
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
+    assert project_domains(tile, target) == domains
+    leaves = schedule(tile, "matmul", {}, target)
+    codec = ClassicScheduleCodec(problem, domains)
+    restricted = tuple(enumerate_reference(problem, domains, restriction=schedule_restriction(problem, domains)))
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in restricted}
+    assert restricted and all(assignment.kernel.work.spell() == "w2x2+p1" for assignment in restricted)
+    assert leaves[0].expand()[0].workers.producer_warps == 1
+
+
 def test_schedule_parameters_restrict_algorithm_one_without_changing_domains(monkeypatch) -> None:
     """Exact parameters filter Algorithm 1; they never replace its independent factors."""
     m, n, k = Axis("m", 128), Axis("n", 128), Axis("k", 128)

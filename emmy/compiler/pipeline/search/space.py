@@ -175,6 +175,16 @@ def raster_moves() -> list[str]:
     return ["", "gm8", "gn4", "gn8"]
 
 
+def producer_band_moves() -> tuple[int, ...]:
+    """The bounded producer-band domain, including uniform execution.
+
+    A complete assignment may use a nonzero member only when compatibility finds a warp compute
+    inventory, TMA transport at every tiled consumer, and enough CTA threads. The catalog itself
+    is fixed and parameter-independent.
+    """
+    return (0, 1, 2)
+
+
 # --- Kernel-lowering policy knobs -------------------------------------------
 #
 # Boolean codegen policies recorded on the kernel op — on by default, not search dimensions

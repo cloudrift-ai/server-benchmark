@@ -577,7 +577,8 @@ def _accepts_domains(context: ClassicScheduleContext, schedule: ClassicSchedule)
         raster_eligible: bool,
     ) -> bool:
         if position == len(candidates):
-            return (work or Work()) == schedule.kernel.work and (schedule.kernel.raster.is_direct or raster_eligible)
+            kernel_work = Work(schedule.kernel.work.kind, schedule.kernel.work.units)
+            return (work or Work()) == kernel_work and (schedule.kernel.raster.is_direct or raster_eligible)
         _site, supports = candidates[position]
         for support in supports:
             next_work = work

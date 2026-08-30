@@ -1,5 +1,56 @@
 # Golden-bench kernel corpus
 
+## Manual child-schedule qualification after #689 (2026-08-29)
+
+Manual route selection confirmed that child scheduling works once placement exposes ordinary kernels. The exact source
+was `226619ca`; the retained A100, V100, and RTX 4090 lanes used deployable O3, bounded searches, strict eager
+correctness for admissible rows, and fresh `torch.compile` measurements where the current CLI could produce them.
+
+The A100 s512 attention all-four cut produced five kernels, but initially failed before launch with
+`KeyError: linear_1_wt`. Cut-piece graph inputs came from lowered root statements, which omit contraction operands
+retained structurally beneath a projection region even though kernel materialization later expands and reads them.
+Commit `a9672422` now collects buffer reads from the complete structural Fold tree and uses the same inventory for
+piece inputs and producer ordering. The former route now carries all 23 required inputs, exercises tuning on the A100,
+and has a focused regression test. The combined branch gate passed 3,993 tests with 1,012 skips and five expected
+failures on the qualification host; local focused replay passed 22 tests with one skip, and lint is clean.
+
+Manually selected A100 child rows demonstrate that schedule quality is not the immediate blocker:
+
+| child role | best correct O3 latency | schedule highlight |
+| --- | ---: | --- |
+| s512 attention statistics | 2.322 µs | `WORK=t128`, cooperative reduction |
+| s512 elementwise split | 5.3 µs | `WORK=t128`, cooperative reduction |
+| s512 MLP product | 86.229 µs | `WORK=w2x2`, f16 MMA `f4x8/k8` |
+| s1 final consumer | 60.536 µs | `WORK=w1x1`, f16 MMA `f1x4/k8`, synchronous shared-memory stages |
+
+No complete A100 route is promotable yet. Every legal composed cut retains at least one large child that recomputes a
+Q/K/V projection, rotary transform, SDPA, or output projection inside another projection region. Those children
+either expose no applicable MMA schedule or take 10-15 seconds per launch. The next compiler boundary is therefore
+value materialization across independent projection regions, not a larger schedule search.
+
+The V100 manual screen found one correct and repeatable schedule improvement. The standalone model-sized Volta
+projection fell from 3,571.7 µs to 1,871.9-1,876.0 µs with `WORK=w4x2`, f16 MMA `f2x4/k4`, and `STAGE=d1/smem`;
+`torch.compile` measured 758.8-764.9 µs. This is a 1.9x Emmy improvement but remains about 2.5x behind. Its CUDA uses
+two CTA barriers in a 192-iteration K loop, 123 registers per thread, and 25% occupancy, so the remaining gap needs a
+better SM70 blocking-copy software pipeline rather than another currently offered schedule.
+
+The V100 linear-cut diagnostic fell from 1,160.2 µs to 247.0-247.8 µs by selecting the unsplit child, versus
+65.7-66.0 µs for `torch.compile`, but it is not admissible: both strict repeats fail with 26,441 mismatches and maximum
+absolute error 0.25. Eight tensor-core schedules failed identically, and a plain large FP16 `F.linear` reproducer
+without placement or residual addition has the same numerical character. That row is retained only as diagnostic
+evidence and must not be promoted under the strict contract.
+
+The RTX 4090 selector again found zero exact sm89 corpus cases. A fresh Qwen3-0.6B s512 trace produced six targets;
+the 29-origin target exceeded a six-second watchdog, while manual cuts produced best measured child totals of about
+152,231 + 64 µs and 153,764 + 56 µs. The dominant child preserves the same repeated attention computation as the
+A100 route, so further knob search is not a plausible route to parity. No sm89 realization or canonical golden was
+promoted without repeated correct reference measurements.
+
+Manual scheduling therefore improved the measured ceilings and exposed one fixed compiler bug, but did not establish
+parity. Across Ampere and Ada the next shared problem is forming reusable value boundaries before child scheduling;
+on Volta the independent remaining problems are synchronous staging efficiency and the strict large-linear numerical
+contract. The A100 VM remains running.
+
 ## Post-#689 structural-identity qualification (2026-08-29)
 
 The draft was rebased cleanly onto main `e782e991`; exact qualification source was `79f14e3b`. Main's canonical

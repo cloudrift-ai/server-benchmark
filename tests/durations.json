@@ -575,6 +575,7 @@
   "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-demoted-pv-greedy.yaml-built]@cuda": 0.12,
   "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-demoted-pv-greedy.yaml-correct]@cuda": 1.33,
   "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-demoted-pv-greedy.yaml-realized]": 0.07,
+  "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-m-residual-cp.yaml-built]@cuda": 9.17,
   "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-m-residual-cp.yaml-correct]@cuda": 0.62,
   "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-m-residual-cp.yaml-realized]": 5.67,
   "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-m-tma.yaml-correct]@cuda": 0.61,

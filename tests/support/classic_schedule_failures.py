@@ -336,26 +336,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[fused/norm-weight-linear-f16-computed-b.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-matvec-reshaped-output-tma.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-matvec-reshaped-output-tma.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-batched-mk-greedy.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-batched-mk-greedy.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-computed-a-k-warp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-computed-a-k-warp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-demoted-n-greedy.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-demoted-n-greedy.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-demoted-pv-greedy.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-demoted-pv-greedy.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-k-gmem.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-k-gmem.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-k-trans.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-k-trans.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-m-residual-cp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-m-residual-cp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-m-tma.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-m-tma.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-mn-gmem.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-mn-gmem.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-pv-materialized-warp.yaml-built]",
-                "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-symbolic-pv-materialized-warp.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-masked-n-staged_xfail_offered.yaml-offered]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-cp.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-cp.yaml-correct]",
@@ -593,7 +573,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 484
+REMAINING_FAILURE_COUNT = 464
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

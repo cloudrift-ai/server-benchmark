@@ -222,13 +222,10 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/loader/test_exl3.py::test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds",
                 "tests/compiler/passes/test_cut_forks.py::test_sdpa_score_cut_is_offered_and_pinned_cut_lowers[False]",
                 "tests/compiler/passes/test_cut_forks.py::test_sdpa_score_cut_is_offered_and_pinned_cut_lowers[True]",
-                "tests/compiler/passes/test_fuse_split_free_axes.py::test_warp_split_store_legality",
                 "tests/compiler/passes/test_placement_routing.py::test_pinned_transposed_coop_band_still_refuses_without_a_free_axis",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_a_pin_hands_its_remaining_row_to_the_pieces",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_decides_its_own_row",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_no_piece_inherits_the_kernel_it_replaces",
-                "tests/compiler/passes/test_twisted_rewrite.py::test_sdpa_fold_tree_reaches_both_mma_sites[False]",
-                "tests/compiler/passes/test_twisted_rewrite.py::test_sdpa_fold_tree_reaches_both_mma_sites[True]",
                 "tests/serving/generation/test_exl3_head.py::test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers",
             )
         ),
@@ -295,20 +292,13 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/cli/test_run.py::test_run_code_sdpa_tinyllama_per_head",
                 "tests/compiler/cli/test_run.py::test_run_code_target_override",
                 "tests/compiler/pipeline/search/policy/test_greedy.py::test_price_memo_keys_on_exact_identity_not_the_term_hash",
-                "tests/compiler/pipeline/search/test_two_level_strategy.py::test_identical_kernels_dedup_with_multiplicity",
                 "tests/compiler/pipeline/search/test_two_level_strategy.py::test_persisted_unscheduled_tile_child_tunes_and_replays_in_parent_cut",
                 "tests/compiler/pipeline/search/test_two_level_strategy.py::test_pinned_placement_route_tunes_and_assembles_child_schedules",
                 "tests/compiler/pipeline/search/test_two_level_strategy.py::test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt",
-                "tests/compiler/pipeline/search/test_two_level_strategy.py::test_run_drives_outer_scores_separably_and_assembles",
                 "tests/compiler/pipeline/search/test_two_level_strategy.py::test_scheduled_tile_child_is_not_reenrolled_or_rescheduled",
                 "tests/compiler/pipeline/search/test_two_level_strategy.py::test_scoring_is_separable_over_unique_kernels",
-                "tests/compiler/pipeline/search/test_two_level_strategy.py::test_single_node_slice_declares_unregistered_input_boundaries_in_the_runtime_plan",
                 "tests/compiler/pipeline/test_kernel_cache.py::test_twin_replay_renders_byte_identical_source",
                 "tests/compiler/pipeline/test_kernel_cache.py::test_without_a_cache_nothing_changes",
-                "tests/compiler/pipeline/test_resolve.py::test_decide_score_lands_on_trace",
-                "tests/compiler/pipeline/test_resolve.py::test_option0_decide_matches_no_prior_greedy",
-                "tests/compiler/pipeline/test_resolve.py::test_resolve_applies_in_place",
-                "tests/compiler/pipeline/test_resolve.py::test_trace_records_partition_fork",
             )
         ),
     ),
@@ -1148,7 +1138,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 1039
+REMAINING_FAILURE_COUNT = 1029
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

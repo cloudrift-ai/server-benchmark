@@ -1632,27 +1632,29 @@ class _Branch(_WalkFork):
 
 @dataclass(frozen=True)
 class _Leaf(_WalkFork):
-    """A validated typed schedule plus non-semantic search features."""
+    """A validated typed schedule, its canonical row, and non-semantic search features."""
 
     schedule: ClassicSchedule
+    row: Mapping
     features: Mapping
     is_leaf = True
 
     @property
     def knobs(self) -> dict:
-        """Encode the typed schedule only at the search boundary."""
-        return {**self.features, **self.state.codec.encode(self.schedule)}
+        """Return the canonical row established at the validation boundary."""
+        return {**self.features, **self.row}
 
     def expand(self) -> list[TileOp]:
-        return [_materialize(self.state, self.schedule, self.features)]
+        return [_materialize(self.state, self.schedule, self.row, self.features)]
 
 
 def _leaf(state: _State, row: Mapping) -> _Leaf:
     """Construct the semantic value at the enumeration boundary and reject any invalid leaf."""
     keys = state.codec.keys()
-    schedule = state.codec.decode({key: row[key] for key in keys})
+    canonical = MappingProxyType({key: row[key] for key in keys})
+    schedule = state.codec.decode(canonical)
     features = MappingProxyType({key: value for key, value in row.items() if key not in keys})
-    return _Leaf(state, schedule, features)
+    return _Leaf(state, schedule, canonical, features)
 
 
 def _stage_of(state: _State, node, plan: Tile, spec: str) -> ResolvedStage | None:
@@ -1661,24 +1663,24 @@ def _stage_of(state: _State, node, plan: Tile, spec: str) -> ResolvedStage | Non
     return _resolve_stage(state, node, plan, state.sched.placed(node, plan), Stage.parse(spec))
 
 
-def _materialize(state: _State, schedule: ClassicSchedule, features: Mapping) -> TileOp:
+def _materialize(state: _State, schedule: ClassicSchedule, row: Mapping, features: Mapping) -> TileOp:
     """Materialize one accepted semantic assignment without re-decoding its wire representation."""
     sched, tile = state.sched, state.tile
     work = schedule.kernel.work
-    row = {**features, **state.codec.encode(schedule)}
+    knobs = {**features, **row}
     root = tile.op
     if isinstance(root, Fold) and root.axis is None and not root.operands:
         # The register strip is a TERM VARIANT: a row whose root ``TILE`` names a width unrolls
         # the cell rather than decorating it with a scheduled tile.
         plan = schedule.nodes[state.codec.context.index.site(root)].tile
         if _strip_width(plan) > 1:
-            return _strip_variant(state, plan, row, schedule)
+            return _strip_variant(state, plan, knobs, schedule)
     workers = WarpSpec(work.producer) if work.producer else None
     return scheduled(
         tile.op,
         name=state.name,
         place=sched.place,
-        knobs={**state.knobs, **row},
+        knobs={**state.knobs, **knobs},
         output_specs=tile.output_specs,
         classic=schedule,
         materialization=_materialization(state, schedule),
@@ -1687,11 +1689,8 @@ def _materialize(state: _State, schedule: ClassicSchedule, features: Mapping) ->
 
 
 def _materialization(state: _State, schedule: ClassicSchedule) -> ClassicMaterialization:
-    """Derive lowering facts from an accepted assignment without mutating its choices."""
+    """Derive lowering facts from a leaf already accepted by the strict codec boundary."""
     context = state.codec.context
-    verdict = context.accepts(schedule)
-    if not verdict:
-        raise ValueError(f"cannot materialize a refused schedule: {verdict.refusal}")
     placed = {}
     resolved = {}
     for site in context.index.nodes:

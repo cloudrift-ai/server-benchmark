@@ -190,6 +190,28 @@ def test_domains_are_independent_projections_of_static_support() -> None:
     assert edge_domain(problem, edge, domains) == domains.edges[edge]
 
 
+def test_context_indexes_finite_domain_membership(monkeypatch) -> None:
+    problem = ClassicProblem(_contraction(), target=object())
+    domains = _finite_domains(problem)
+    many_kernel_choices = tuple(KernelSchedule(Work(kind="thread", units=(width, 1)), Raster()) for width in range(1, 65)) + (
+        KernelSchedule(Work(), Raster()),
+    )
+    domains = ClassicDomains(many_kernel_choices, domains.nodes, domains.edges, domains.supports)
+    context = ClassicScheduleContext(problem, domains)
+    equals = KernelSchedule.__eq__
+    calls = 0
+
+    def counted(left, right):
+        nonlocal calls
+        calls += 1
+        return equals(left, right)
+
+    monkeypatch.setattr(KernelSchedule, "__eq__", counted)
+
+    assert context.accepts(_direct(context))
+    assert calls <= 2
+
+
 def test_reference_is_the_compatible_cartesian_subset() -> None:
     problem = ClassicProblem(_contraction(), target=object())
     domains = _finite_domains(problem)
@@ -252,7 +274,26 @@ def test_codec_round_trips_one_canonical_complete_row() -> None:
         "STAGE@n0.e0": "",
         "STAGE@n0.e1": "",
     }
+    assert tuple(row) == codec.keys()
     assert codec.decode(row) == schedule
+
+
+def test_codec_decode_checks_compatibility_once(monkeypatch) -> None:
+    codec = ClassicScheduleCodec(ClassicProblem(_contraction(), target=object()))
+    schedule = _direct(codec.context)
+    row = codec.encode(schedule)
+    accepts = codec.context.accepts
+    calls = 0
+
+    def counted(candidate):
+        nonlocal calls
+        calls += 1
+        return accepts(candidate)
+
+    monkeypatch.setattr(codec.context, "accepts", counted)
+
+    assert codec.decode(row) == schedule
+    assert calls == 1
 
 
 def test_codec_resolves_explicit_unit_register_tile_against_kernel_work() -> None:

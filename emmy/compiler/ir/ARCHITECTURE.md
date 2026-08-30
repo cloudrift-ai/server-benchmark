@@ -82,15 +82,18 @@ parallel unit-register thread tile spells `f1`; `WORK` never changes the meaning
 geometry and `ResolvedStage` transport facts. Construction enforces the value types; completeness, site scope,
 node-sum agreement, worker inventory and thread limits, producer-band/TMA agreement, raster eligibility, target
 choice availability, and current per-contraction transport agreement need the problem and are enforced by
-`ClassicScheduleContext.accepts`. Every enumeration and decode leaf crosses that complete-assignment boundary before
-search or lowering can observe it.
+`ClassicScheduleContext.accepts`. Every enumeration and decode leaf crosses that complete-assignment boundary exactly
+once before search or lowering can observe it. A validated leaf retains its canonical codec row; inspection and
+materialization reuse that row and typed assignment instead of repeating the compatibility walk. Encoding an arbitrary
+schedule remains a validating public boundary.
 
 Kernel, node, and edge domains are independent projections of static offers; none reads another selected choice.
 Their Cartesian product is the definition of the candidate space. Static support retains derived physical-axis and
 fragment-seam facts outside the choice values, and `ClassicScheduleContext.accepts` filters the complete product by
-that one compatibility relation. The literal reference enumerator remains the oracle. The production Fold walk may
-prune incompatible prefixes, but bounded-product checks and traversal-order tests require its complete leaf set to
-equal the reference set exactly.
+that one compatibility relation. Domain membership and local-support lookup use immutable indexes built with the
+context; validating a leaf must never linearly scan a factor whose choices are already finite and hashable. The literal
+reference enumerator remains the oracle. The production Fold walk may prune incompatible prefixes, but bounded-product
+checks and traversal-order tests require its complete leaf set to equal the reference set exactly.
 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not

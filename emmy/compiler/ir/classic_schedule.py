@@ -421,17 +421,28 @@ class ClassicScheduleContext:
         self.problem = problem
         self.index = SiteIndex(problem.root)
         self.views = MappingProxyType({site: classify(self.index, site) for site in self.index.nodes})
+        self._node_sites = frozenset(self.index.nodes)
+        self._edge_sites = frozenset(self.index.edges)
+        self._tile_sites = frozenset(tile_sites(self))
+        self._stage_edges = frozenset(stage_edges(self))
+        self._incident_edges = {site: tuple(edge for edge in self.index.edges if edge.consumer == site) for site in self.index.nodes}
         self.domains = domains
+        self._kernel_domain = frozenset()
+        self._node_domains = {}
+        self._edge_domains = {}
         self._support_index = {}
         if domains is not None:
-            expected_nodes = set(self.index.nodes)
-            expected_edges = set(self.index.edges)
+            expected_nodes = self._node_sites
+            expected_edges = self._edge_sites
             if set(domains.nodes) != expected_nodes or set(domains.supports) != expected_nodes:
                 raise ValueError("classic domains must cover every node site exactly once")
             if set(domains.edges) != expected_edges:
                 raise ValueError("classic domains must cover every edge site exactly once")
+            self._kernel_domain = frozenset(domains.kernel)
+            self._node_domains = {site: frozenset(choices) for site, choices in domains.nodes.items()}
+            self._edge_domains = {edge: frozenset(choices) for edge, choices in domains.edges.items()}
             for site in self.index.nodes:
-                incident = tuple(edge for edge in self.index.edges if edge.consumer == site)
+                incident = self._incident_edges[site]
                 indexed: dict[tuple, list[LocalSupport]] = {}
                 for support in domains.supports[site]:
                     key = (support.node, *(support.edges[edge] for edge in incident))
@@ -444,15 +455,15 @@ class ClassicScheduleContext:
             return Acceptance(Refusal("assignment must be a ClassicSchedule"))
         if not isinstance(schedule.kernel.work, Work) or not isinstance(schedule.kernel.raster, Raster):
             return Acceptance(Refusal("kernel assignment must contain explicit Work and Raster choices"))
-        expected_nodes = set(self.index.nodes)
-        actual_nodes = set(schedule.nodes)
+        expected_nodes = self._node_sites
+        actual_nodes = schedule.nodes.keys()
         if missing := expected_nodes - actual_nodes:
             return Acceptance(Refusal("missing node assignment", min(missing)))
         if extra := actual_nodes - expected_nodes:
             return Acceptance(Refusal("node assignment is outside this problem", min(extra)))
 
-        expected_edges = set(self.index.edges)
-        actual_edges = set(schedule.edges)
+        expected_edges = self._edge_sites
+        actual_edges = schedule.edges.keys()
         if missing := expected_edges - actual_edges:
             return Acceptance(Refusal("missing edge assignment", min(missing)))
         if extra := actual_edges - expected_edges:
@@ -468,7 +479,7 @@ class ClassicScheduleContext:
                 return Acceptance(Refusal("reduction site requires a reduction schedule", site))
             if isinstance(assignment.tile, PlacedTile):
                 return Acceptance(Refusal("node choices cannot contain placed tile geometry", site))
-            if site not in tile_sites(self) and assignment.tile != Tile():
+            if site not in self._tile_sites and assignment.tile != Tile():
                 return Acceptance(Refusal("this node has no tile choice", site))
             if assignment.tile.is_warp and hasattr(self.problem.target, assignment.tile.atom.target_feature):
                 if not assignment.tile.atom.available_on(self.problem.target):
@@ -505,7 +516,7 @@ class ClassicScheduleContext:
             stage = edge_assignment.stage
             if not isinstance(stage, Stage):
                 return Acceptance(Refusal("edge assignment must contain an explicit Stage choice", edge))
-            if edge not in stage_edges(self) and not stage.is_direct:
+            if edge not in self._stage_edges and not stage.is_direct:
                 return Acceptance(Refusal("this edge has no staged transport choice", edge))
             assignment = schedule.nodes[edge.consumer]
             if not stage.is_direct and not assignment.tile.is_tiled:
@@ -513,7 +524,7 @@ class ClassicScheduleContext:
             if not stage.is_direct and hasattr(self.problem.target, "has_cp_async") and not stage.available_on(self.problem.target):
                 return Acceptance(Refusal("transport is unavailable on the target", edge))
         for site in self.index.nodes:
-            stages = {schedule.edges[edge].stage for edge in self.index.edges if edge.consumer == site}
+            stages = {schedule.edges[edge].stage for edge in self._incident_edges[site]}
             if len(stages) > 1:
                 return Acceptance(Refusal("one contraction currently requires one transport choice across its operands", site))
         if schedule.kernel.work.producer:
@@ -523,7 +534,7 @@ class ClassicScheduleContext:
                     continue
                 if isinstance(assignment, ReductionSchedule) and assignment.reduce.needs_split:
                     return Acceptance(Refusal("a producer band cannot accompany a cross-CTA reduction", site))
-                edges = tuple(edge for edge in self.index.edges if edge.consumer == site and edge in stage_edges(self))
+                edges = tuple(edge for edge in self._incident_edges[site] if edge in self._stage_edges)
                 if not edges or any(schedule.edges[edge].stage.transport != "smem-tma" for edge in edges):
                     return Acceptance(Refusal("a producer band requires TMA transport at every tiled consumer", site))
         if self.domains is not None:
@@ -535,20 +546,19 @@ class ClassicScheduleContext:
 
 def _accepts_domains(context: ClassicScheduleContext, schedule: ClassicSchedule) -> Acceptance:
     """Check one complete assignment against independent domains and their support relation."""
-    domains = context.domains
-    assert domains is not None
-    if schedule.kernel not in domains.kernel:
+    assert context.domains is not None
+    if schedule.kernel not in context._kernel_domain:
         return Acceptance(Refusal("kernel choice is outside its independent domain"))
     for site in context.index.nodes:
-        if schedule.nodes[site] not in domains.nodes[site]:
+        if schedule.nodes[site] not in context._node_domains[site]:
             return Acceptance(Refusal("node choice is outside its independent domain", site))
     for edge in context.index.edges:
-        if schedule.edges[edge] not in domains.edges[edge]:
+        if schedule.edges[edge] not in context._edge_domains[edge]:
             return Acceptance(Refusal("edge choice is outside its independent domain", edge))
 
     candidates: list[tuple[NodeSite, tuple[LocalSupport, ...]]] = []
     for site in context.index.nodes:
-        incident = tuple(edge for edge in context.index.edges if edge.consumer == site)
+        incident = context._incident_edges[site]
         key = (schedule.nodes[site], *(schedule.edges[edge] for edge in incident))
         matches = context._support_index[site].get(key, ())
         if not matches:
@@ -638,12 +648,24 @@ class ClassicScheduleCodec:
         self._tile_sites = tile_sites(self.context)
         self._reduce_sites = reduction_sites(self.context)
         self._stage_sites = stage_edges(self.context)
+        self._key_order = (
+            "WORK",
+            "RASTER",
+            *(self._node_key("TILE", site, self._tile_sites) for site in self._tile_sites),
+            *(self._node_key("REDUCE", site, self._reduce_sites) for site in self._reduce_sites),
+            *(self._edge_key(edge) for edge in self._stage_sites),
+        )
+        self._keys = frozenset(self._key_order)
 
     def encode(self, schedule: ClassicSchedule) -> dict[str, str]:
         """Encode one accepted typed schedule in canonical scope order."""
         verdict = self.context.accepts(schedule)
         if not verdict:
             raise ValueError(_refusal_message(verdict.refusal))
+        return self._encode_accepted(schedule)
+
+    def _encode_accepted(self, schedule: ClassicSchedule) -> dict[str, str]:
+        """Encode a schedule whose compatibility was already checked at this boundary."""
         row = {
             "WORK": schedule.kernel.work.spell(),
             "RASTER": schedule.kernel.raster.spell(),
@@ -660,12 +682,7 @@ class ClassicScheduleCodec:
 
     def decode(self, row: Mapping[str, str]) -> ClassicSchedule:
         """Decode one complete canonical row and reject every other key set or assignment."""
-        expected = self.keys()
-        actual = set(row)
-        if missing := expected - actual:
-            raise ValueError(f"classic schedule row is missing {', '.join(sorted(missing))}")
-        if extra := actual - expected:
-            raise ValueError(f"classic schedule row has unknown keys {', '.join(sorted(extra))}")
+        self._check_keys(row)
 
         work = Work.parse(row["WORK"])
         nodes: dict[NodeSite, NodeSchedule] = {}
@@ -692,23 +709,30 @@ class ClassicScheduleCodec:
                 for edge in self.context.index.edges
             },
         )
+        return self._validate_row(schedule, row)
+
+    def _validate_row(self, schedule: ClassicSchedule, row: Mapping[str, str]) -> ClassicSchedule:
+        """Validate a parsed assignment and its claimed canonical row exactly once."""
         verdict = self.context.accepts(schedule)
         if not verdict:
             raise ValueError(_refusal_message(verdict.refusal))
-        canonical = self.encode(schedule)
+        canonical = self._encode_accepted(schedule)
         if dict(row) != canonical:
             raise ValueError("classic schedule row is not its typed schedule's canonical encoding")
         return schedule
 
-    def keys(self) -> set[str]:
-        """Return the exact key set accepted by :meth:`decode`."""
-        return {
-            "WORK",
-            "RASTER",
-            *(self._node_key("TILE", site, self._tile_sites) for site in self._tile_sites),
-            *(self._node_key("REDUCE", site, self._reduce_sites) for site in self._reduce_sites),
-            *(self._edge_key(edge) for edge in self._stage_sites),
-        }
+    def _check_keys(self, row: Mapping[str, str]) -> None:
+        """Require the codec's exact key set before parsing or validating values."""
+        expected = self._keys
+        actual = set(row)
+        if missing := expected - actual:
+            raise ValueError(f"classic schedule row is missing {', '.join(sorted(missing))}")
+        if extra := actual - expected:
+            raise ValueError(f"classic schedule row has unknown keys {', '.join(sorted(extra))}")
+
+    def keys(self) -> tuple[str, ...]:
+        """Return accepted keys in canonical encoding order."""
+        return self._key_order
 
     @staticmethod
     def _node_key(family: str, site: NodeSite, family_sites: Sequence[NodeSite]) -> str:

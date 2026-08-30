@@ -134,9 +134,11 @@ thread left to right, so a choice anywhere restricts everything enumerated after
 Semantically, kernel, node, and edge choices are independent domains and the schedule set is their Cartesian product
 filtered by `ClassicScheduleContext.accepts`. The production walk does not construct or join that flat product. It
 projects the factors from static per-node offers and applies their support through the private partial assignment,
-so an incompatible prefix is never built. Every leaf still crosses the complete context relation, and bounded spaces
-are exhaustively compared with the literal Cartesian reference. That pruning matters because on flash attention the
-unconstrained product is 8.9e6 against 13,280 legal rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
+so an incompatible prefix is never built. Every leaf crosses the complete context relation exactly once at the strict
+codec boundary, then carries that accepted typed assignment and canonical row through search and materialization;
+downstream reads never repeat the compatibility walk. Bounded spaces are exhaustively compared with the literal
+Cartesian reference. That pruning matters because on flash attention the unconstrained product is 8.9e6 against
+13,280 legal rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
 
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated

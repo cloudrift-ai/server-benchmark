@@ -1,11 +1,15 @@
 """The classic scheduling problem, sites, classification, and complete assignment contract."""
 
+import pickle
+
 import pytest
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.classic_schedule import (
+    ClassicMaterialization,
     ClassicProblem,
     ClassicSchedule,
+    ClassicScheduleCodec,
     ClassicScheduleContext,
     Contraction,
     EdgeSchedule,
@@ -17,12 +21,18 @@ from emmy.compiler.ir.classic_schedule import (
     Reduction,
     ReductionSchedule,
     SiteIndex,
+    cartesian_assignments,
     classify,
+    edge_domain,
+    enumerate_classic,
+    enumerate_reference,
+    kernel_domain,
+    node_domain,
 )
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Channel, Fold, Lambda, M
-from emmy.compiler.ir.schedule import Reduce, Tile
+from emmy.compiler.ir.schedule import PlacedTile, Raster, Reduce, ResolvedStage, Stage, Tile, Work
 from emmy.compiler.ir.stmt import Assign, Body, Load
 
 
@@ -52,9 +62,9 @@ def _direct(context: ClassicScheduleContext) -> ClassicSchedule:
         for site, view in context.views.items()
     }
     return ClassicSchedule(
-        kernel=KernelSchedule(work=None, raster=None),
+        kernel=KernelSchedule(work=Work(), raster=Raster()),
         nodes=nodes,
-        edges={edge: EdgeSchedule(stage=None) for edge in context.index.edges},
+        edges={edge: EdgeSchedule(stage=Stage.direct()) for edge in context.index.edges},
     )
 
 
@@ -113,3 +123,93 @@ def test_context_rejects_a_node_schedule_from_the_wrong_sum_arm() -> None:
 def test_node_ids_reject_negative_ordinals() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         NodeId(-1)
+
+
+def _signature(schedule: ClassicSchedule) -> tuple:
+    return schedule.kernel, tuple(schedule.nodes.items()), tuple(schedule.edges.items())
+
+
+def test_direct_domains_are_explicit_and_independent() -> None:
+    problem = ClassicProblem(_contraction(), target=object())
+    context = ClassicScheduleContext(problem)
+    site = context.index.nodes[0]
+    edge = context.index.edges[0]
+
+    assert kernel_domain(problem) == (KernelSchedule(Work(), Raster()),)
+    assert node_domain(problem, site, context.views[site]) == (ReductionSchedule(Tile(), Reduce()),)
+    assert edge_domain(problem, edge) == (EdgeSchedule(Stage.direct()),)
+
+
+def test_reference_enumerator_is_the_accepted_cartesian_subset() -> None:
+    problem = ClassicProblem(_contraction(), target=object())
+
+    assignments = list(cartesian_assignments(problem))
+    assert [_signature(schedule) for schedule, verdict in assignments if verdict] == [
+        _signature(schedule) for schedule in enumerate_reference(problem)
+    ]
+
+
+def test_lazy_enumerator_is_order_independent_and_matches_reference() -> None:
+    problem = ClassicProblem(_contraction(), target=object())
+    context = ClassicScheduleContext(problem)
+    reference = {_signature(schedule) for schedule in enumerate_reference(problem)}
+    node_first = {_signature(schedule) for schedule in enumerate_classic(problem)}
+    edge_first = {_signature(schedule) for schedule in enumerate_classic(problem, (*context.index.edges, *reversed(context.index.nodes)))}
+
+    assert node_first == edge_first == reference
+
+
+def test_lazy_enumerator_rejects_incomplete_or_duplicate_traversals() -> None:
+    problem = ClassicProblem(_sum(), target=object())
+    site = ClassicScheduleContext(problem).index.nodes[0]
+
+    with pytest.raises(ValueError, match="exactly once"):
+        list(enumerate_classic(problem, (site, site)))
+
+
+def test_codec_round_trips_one_canonical_complete_row() -> None:
+    problem = ClassicProblem(_contraction(), target=object())
+    context = ClassicScheduleContext(problem)
+    codec = ClassicScheduleCodec(problem)
+    schedule = _direct(context)
+
+    row = codec.encode(schedule)
+
+    assert row == {
+        "WORK": "",
+        "RASTER": "",
+        "TILE": "",
+        "REDUCE": "",
+        "STAGE@n0.e0": "",
+        "STAGE@n0.e1": "",
+    }
+    assert codec.decode(row) == schedule
+
+
+def test_codec_has_no_missing_unknown_or_alias_key_path() -> None:
+    problem = ClassicProblem(_contraction(), target=object())
+    codec = ClassicScheduleCodec(problem)
+    row = codec.encode(_direct(codec.context))
+
+    with pytest.raises(ValueError, match="missing STAGE@n0.e0"):
+        codec.decode({key: value for key, value in row.items() if key != "STAGE@n0.e0"})
+    with pytest.raises(ValueError, match="unknown keys STAGE"):
+        codec.decode({**row, "STAGE": ""})
+
+
+def test_schedule_and_materialization_are_pickle_safe() -> None:
+    context = ClassicScheduleContext(ClassicProblem(_sum(), target=None))
+    schedule = _direct(context)
+    restored = pickle.loads(pickle.dumps(schedule))
+    assert restored.kernel == schedule.kernel
+    assert dict(restored.nodes) == dict(schedule.nodes)
+    assert dict(restored.edges) == dict(schedule.edges)
+
+    site = context.index.nodes[0]
+    edge = context.index.edges[0]
+    placed = Tile(regs=(2, 1)).at(Axis("m", 8), Axis("n", 8))
+    resolved = ResolvedStage(Stage(depth=1, transport="smem"), ("a_smem",), 8)
+    materialization = pickle.loads(pickle.dumps(ClassicMaterialization({site: placed}, {edge: resolved})))
+    assert materialization.tiles[site] == placed
+    assert materialization.stages[edge] == resolved
+    assert isinstance(materialization.tiles[site], PlacedTile)

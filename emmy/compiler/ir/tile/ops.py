@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
+from emmy.compiler.ir.classic_schedule import ReductionSchedule, SiteIndex
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -31,7 +32,7 @@ from emmy.compiler.ir.pure.fold import (
     splice_operands,
     stmt_axis_names,
 )
-from emmy.compiler.ir.schedule import Reduce, derive_inventory
+from emmy.compiler.ir.schedule import PlacedTile, Reduce, derive_inventory
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
@@ -188,9 +189,12 @@ class Sched:
     spelling is always the tree-path codec's canonical one (:mod:`~emmy.compiler.ir.tile.path`).
     A node that is not a site of the family reads ``None`` and refuses writes loudly."""
 
-    def __init__(self, root, table: dict | None, place=None) -> None:
+    def __init__(self, root, table: dict | None, place=None, classic=None, materialization=None) -> None:
         self.root = root
         self.table = table if table is not None else {}
+        self.classic = classic
+        self.materialization = materialization
+        self.index = SiteIndex(root) if classic is not None else None
         #: The kernel's free→grid :class:`~emmy.compiler.ir.schedule.Placement`. A ``TILE`` slice
         #: is geometry over an ``(m, n)`` output pair, and WHICH pair is a function of the site's
         #: position in the tree — so the binding belongs here, on the scheduling structure, and
@@ -233,6 +237,23 @@ class Sched:
             return None
 
     def get(self, family: str, node):
+        if self.classic is not None:
+            site = self.index.site(node)
+            assignment = self.classic.nodes[site]
+            if family == "TILE":
+                return assignment.tile if assignment.tile.is_tiled else None
+            if family == "REDUCE":
+                if not isinstance(assignment, ReductionSchedule) or not assignment.reduce.stages:
+                    return None
+                return assignment.reduce
+            if family == "STAGE":
+                if self.materialization is None:
+                    return None
+                stages = {stage for edge, stage in self.materialization.stages.items() if edge.consumer == site}
+                if len(stages) > 1:
+                    raise ValueError("current kernel lowering requires one resolved transport across a node's operand edges")
+                return next(iter(stages), None)
+            raise ValueError(f"unknown classic schedule family {family!r}")
         k = self.key(family, node)
         return self.table.get(k) if k is not None else None
 
@@ -254,6 +275,9 @@ class Sched:
 
         The pair is a function of the SITE (:meth:`_mn_for`), which is what makes one rule
         possible where there used to be three hand-written ``.at(...)`` calls."""
+        if self.classic is not None:
+            site = self.index.site(node)
+            return self.materialization.tiles.get(site) if self.materialization is not None else None
         return self.placed(node, self.get("TILE", node))
 
     def placed(self, node, plan):
@@ -261,7 +285,7 @@ class Sched:
         the same one rule :meth:`tile_of` reads through, offered to a caller holding a CANDIDATE
         plan the table does not carry yet (the enumeration, whose legality predicates read the
         placed geometry). Already-placed and unplaceable plans pass through."""
-        if plan is None or self.place is None or plan.axes is not None:
+        if plan is None or self.place is None or isinstance(plan, PlacedTile):
             return plan
         mn = self._mn_for(node)
         return plan.at(*mn) if mn is not None else plan
@@ -321,7 +345,13 @@ class Sched:
 
 def sched_of(tile) -> Sched:
     """The :class:`Sched` view of a ``TileOp`` (binds its ``schedule`` dict to its op tree)."""
-    return Sched(tile.op, tile.schedule, place=tile.place)
+    return Sched(
+        tile.op,
+        tile.schedule,
+        place=tile.place,
+        classic=tile.classic,
+        materialization=tile.materialization,
+    )
 
 
 def scheduled(

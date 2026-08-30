@@ -161,6 +161,6 @@ def grid_tile(
         block_threads=block_threads,
         aux_threads=aux_threads,
         raster_axes=raster_axes,
-        raster_group=(raster.group if raster is not None and raster_axes is not None else None),
-        raster_orient=(raster.orient if raster is not None else "m"),
+        raster_group=(raster.group if raster is not None and not raster.is_direct and raster_axes is not None else None),
+        raster_orient=(raster.orient if raster is not None and not raster.is_direct else "m"),
     )

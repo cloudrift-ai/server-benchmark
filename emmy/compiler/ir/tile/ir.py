@@ -11,23 +11,20 @@ combine.** The combine is not defined here — it is the :class:`~emmy.compiler.
 term (``ir/pure/fold.py``), which a ``TileOp`` holds whole in ``op``. What this module owns is
 everything the term deliberately does not carry:
 
-- the root-global schedule fields — the free-axis → grid :class:`~.schedule.Placement` (``place``),
-  the ONE worker inventory (``work``) and the warp-spec split (``workers``);
-- the per-node schedule SLICES in ``TileOp.schedule`` (``{codec key → resolved Tile /
-  Reduce / Stage}``, keyed by the tree-path codec and read through ``ops.Sched``);
+- the free-axis → grid :class:`~.schedule.Placement` (``place``), accepted site-indexed
+  ``ClassicSchedule`` choices, and separate ``ClassicMaterialization`` facts;
 - the kernel's EFFECTS — the :class:`OutputSpec` decorations and the ``apply_output_specs`` /
   ``extract_output_specs`` pair that reconstitutes the effectful stmt stream from them.
 
 That split is the layer's invariant, not a convenience. The stored term is pure algebra, IMMUTABLE
-across the whole schedule search — a fork is a different slice map, never a rebuilt tree — which is
-what makes kernel identity (``TileOp.structural_key``) the algebra alone, with placement, slices,
-workers and output specifications all excluded. Tile IR stores only pure terms; statements appear when the term is
+across the whole schedule search — a fork is a different assignment, never a rebuilt tree — which is
+what makes kernel identity (``TileOp.structural_key``) the algebra alone, with placement, schedule,
+materialization and output specifications all excluded. Tile IR stores only pure terms; statements appear when the term is
 lowered, never inside it (``ir/ARCHITECTURE.md``, "Pure terms vs statements").
 
 There is no per-kind kernel/schedule type: dispatch reads the role structurally off the node (a
 fold's role derives), so a projection, a reduction and a contraction all ride the same ``TileOp``.
-The kernel materializer reads the schedule off the slice beside the node — it never re-recognizes
-structure the tile IR already holds.
+The kernel materializer reads the schedule by site — it never re-recognizes structure the tile IR already holds.
 """
 
 from __future__ import annotations
@@ -37,6 +34,7 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
+from emmy.compiler.ir.classic_schedule import ClassicMaterialization, ClassicSchedule
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
@@ -417,20 +415,24 @@ class TileOp(Op):
 
     There is **no** let table: a computed operand is stored inline on its edge, and sharing is the
     product contraction's arity (see the module docstring), so stored trees are already
-    resolved and every walk is a plain tree walk. The per-node schedule SLICES live in
-    ``schedule``: ``{codec key → resolved Tile / Reduce / Stage}``, keyed by the
-    tree-path codec's canonical key (:mod:`~emmy.compiler.ir.tile.path` — a fold may carry all
-    three families at once, so the path alone cannot key the map; the family selects the slice
-    kind, so key and value agree by construction). The ``op`` term is pure algebra, IMMUTABLE
-    across the whole schedule search — a fork is a different map, never a rebuilt tree. Read /
-    write through :class:`~emmy.compiler.ir.tile.ops.Sched` (``ops.reduce_plan`` is the plan
-    accessor); ``lower`` never sees the slices, so kernel identity (``Op.cache_key``) is untouched."""
+    resolved and every walk is a plain tree walk. An accepted ``classic`` assignment contains
+    choices only; ``materialization`` separately contains placed geometry and resolved transport
+    facts. The ``schedule`` map is temporary migration storage for materializers not yet moved to
+    those typed fields and is not a semantic representation. The ``op`` term is pure algebra,
+    IMMUTABLE across the whole schedule search. Read through
+    :class:`~emmy.compiler.ir.tile.ops.Sched`; ``lower`` never sees the schedule, so kernel identity
+    (``Op.cache_key``) is untouched."""
 
     op: object = None
     name: str = ""
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
     schedule: dict = field(default_factory=dict)
+    # The accepted semantic assignment and its derived lowering facts. Unscheduled Tile IR carries
+    # neither; scheduling installs both together. The keyed ``schedule`` map remains only while the
+    # materializer readers are migrated to these typed fields.
+    classic: ClassicSchedule | None = field(default=None, compare=False, repr=False)
+    materialization: ClassicMaterialization | None = field(default=None, compare=False, repr=False)
     # The kernel's output specifications: every explicit ``Write`` (and the legacy rms/softmax
     # output-sweep spelling) as a kernel-boundary fact beside ``place``. Empty for a
     # bare reduction / contraction — its grid-cell store

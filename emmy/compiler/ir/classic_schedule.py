@@ -8,12 +8,13 @@ search state, and materialization data do not belong here.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import product
 from types import MappingProxyType
 
 from emmy.compiler.ir.pure.fold import Fold, is_contraction
-from emmy.compiler.ir.schedule import Raster, Reduce, Stage, Tile, Work
+from emmy.compiler.ir.schedule import PlacedTile, Raster, Reduce, ResolvedStage, Stage, Tile, Work
 
 
 @dataclass(frozen=True, order=True)
@@ -80,8 +81,8 @@ NodeView = Projection | Reduction
 class KernelSchedule:
     """Kernel-scoped choices."""
 
-    work: Work | None
-    raster: Raster | None
+    work: Work
+    raster: Raster
 
 
 @dataclass(frozen=True)
@@ -106,7 +107,7 @@ NodeSchedule = ProjectionSchedule | ReductionSchedule
 class EdgeSchedule:
     """The transport choice of one operand use."""
 
-    stage: Stage | None
+    stage: Stage
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,26 @@ class ClassicSchedule:
     def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", MappingProxyType(dict(self.nodes)))
         object.__setattr__(self, "edges", MappingProxyType(dict(self.edges)))
+
+    def __reduce__(self):
+        """Rebuild read-only mappings after process transport."""
+        return type(self), (self.kernel, dict(self.nodes), dict(self.edges))
+
+
+@dataclass(frozen=True)
+class ClassicMaterialization:
+    """Placed geometry and resolved transport facts derived from an accepted schedule."""
+
+    tiles: Mapping[NodeSite, PlacedTile]
+    stages: Mapping[EdgeSite, ResolvedStage]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tiles", MappingProxyType(dict(self.tiles)))
+        object.__setattr__(self, "stages", MappingProxyType(dict(self.stages)))
+
+    def __reduce__(self):
+        """Rebuild read-only mappings after process transport."""
+        return type(self), (dict(self.tiles), dict(self.stages))
 
 
 @dataclass(frozen=True)
@@ -228,6 +249,8 @@ class ClassicScheduleContext:
 
     def accepts(self, schedule: ClassicSchedule) -> Acceptance:
         """Accept a complete, in-scope, view-compatible assignment or return its first refusal."""
+        if not isinstance(schedule.kernel.work, Work) or not isinstance(schedule.kernel.raster, Raster):
+            return Acceptance(Refusal("kernel assignment must contain explicit Work and Raster choices"))
         expected_nodes = set(self.index.nodes)
         actual_nodes = set(schedule.nodes)
         if missing := expected_nodes - actual_nodes:
@@ -249,7 +272,237 @@ class ClassicScheduleContext:
                 return Acceptance(Refusal("projection site requires a projection schedule", site))
             if isinstance(view, Reduction) and not isinstance(assignment, ReductionSchedule):
                 return Acceptance(Refusal("reduction site requires a reduction schedule", site))
+            if isinstance(assignment.tile, PlacedTile):
+                return Acceptance(Refusal("node choices cannot contain placed tile geometry", site))
+            if site not in tile_sites(self) and assignment.tile != Tile():
+                return Acceptance(Refusal("this node has no tile choice", site))
+        for edge in self.index.edges:
+            stage = schedule.edges[edge].stage
+            if not isinstance(stage, Stage):
+                return Acceptance(Refusal("edge assignment must contain an explicit Stage choice", edge))
+            if edge not in stage_edges(self) and not stage.is_direct:
+                return Acceptance(Refusal("this edge has no staged transport choice", edge))
         return Acceptance()
+
+
+class ClassicScheduleCodec:
+    """Strict wire boundary for complete classic schedules.
+
+    Kernel families are bare. Node and edge families use their bare spelling only when the family
+    has exactly one site; otherwise the one canonical suffix is a :class:`NodeId`, with ``.e<N>``
+    for an operand edge. Decoding accepts no aliases, missing direct values, or unknown fields.
+    """
+
+    def __init__(self, problem: ClassicProblem) -> None:
+        self.context = ClassicScheduleContext(problem)
+        self._tile_sites = tile_sites(self.context)
+        self._reduce_sites = reduction_sites(self.context)
+        self._stage_sites = stage_edges(self.context)
+
+    def encode(self, schedule: ClassicSchedule) -> dict[str, str]:
+        """Encode one accepted typed schedule in canonical scope order."""
+        verdict = self.context.accepts(schedule)
+        if not verdict:
+            raise ValueError(_refusal_message(verdict.refusal))
+        row = {
+            "WORK": schedule.kernel.work.spell(),
+            "RASTER": schedule.kernel.raster.spell(),
+        }
+        for site in self._tile_sites:
+            row[self._node_key("TILE", site, self._tile_sites)] = schedule.nodes[site].tile.spell()
+        for site in self._reduce_sites:
+            assignment = schedule.nodes[site]
+            assert isinstance(assignment, ReductionSchedule)
+            row[self._node_key("REDUCE", site, self._reduce_sites)] = assignment.reduce.spell()
+        for edge in self._stage_sites:
+            row[self._edge_key(edge)] = schedule.edges[edge].stage.spell()
+        return row
+
+    def decode(self, row: Mapping[str, str]) -> ClassicSchedule:
+        """Decode one complete canonical row and reject every other key set or assignment."""
+        expected = self.keys()
+        actual = set(row)
+        if missing := expected - actual:
+            raise ValueError(f"classic schedule row is missing {', '.join(sorted(missing))}")
+        if extra := actual - expected:
+            raise ValueError(f"classic schedule row has unknown keys {', '.join(sorted(extra))}")
+
+        work = Work.parse(row["WORK"])
+        nodes: dict[NodeSite, NodeSchedule] = {}
+        for site in self.context.index.nodes:
+            view = self.context.views[site]
+            reduce = None
+            if isinstance(view, Reduction):
+                reduce = Reduce.parse(row[self._node_key("REDUCE", site, self._reduce_sites)], work)
+            tile = Tile.parse(row[self._node_key("TILE", site, self._tile_sites)], work) if site in self._tile_sites else Tile()
+            nodes[site] = ProjectionSchedule(tile) if reduce is None else ReductionSchedule(tile, reduce)
+        schedule = ClassicSchedule(
+            KernelSchedule(work, Raster.parse(row["RASTER"])),
+            nodes,
+            {
+                edge: EdgeSchedule(Stage.parse(row[self._edge_key(edge)])) if edge in self._stage_sites else EdgeSchedule(Stage.direct())
+                for edge in self.context.index.edges
+            },
+        )
+        verdict = self.context.accepts(schedule)
+        if not verdict:
+            raise ValueError(_refusal_message(verdict.refusal))
+        return schedule
+
+    def keys(self) -> set[str]:
+        """Return the exact key set accepted by :meth:`decode`."""
+        return {
+            "WORK",
+            "RASTER",
+            *(self._node_key("TILE", site, self._tile_sites) for site in self._tile_sites),
+            *(self._node_key("REDUCE", site, self._reduce_sites) for site in self._reduce_sites),
+            *(self._edge_key(edge) for edge in self._stage_sites),
+        }
+
+    @staticmethod
+    def _node_key(family: str, site: NodeSite, family_sites: Sequence[NodeSite]) -> str:
+        return node_key(family, site, family_sites)
+
+    def _edge_key(self, edge: EdgeSite) -> str:
+        return edge_key(edge, self._stage_sites)
+
+
+def _refusal_message(refusal: Refusal | None) -> str:
+    if refusal is None:
+        return "classic schedule refused"
+    if refusal.site is None:
+        return refusal.reason
+    if isinstance(refusal.site, NodeSite):
+        where = refusal.site.id.spell()
+    else:
+        where = f"{refusal.site.consumer.id.spell()}.e{refusal.site.operand}"
+    return f"{where}: {refusal.reason}"
+
+
+def tile_sites(context: ClassicScheduleContext) -> tuple[NodeSite, ...]:
+    """Node sites whose tile domain contains more than the fixed direct choice."""
+    out = []
+    for site in context.index.nodes:
+        view = context.views[site]
+        node = context.index.node(site)
+        if (isinstance(view, Reduction) and view.contraction is not None) or (
+            isinstance(view, Projection) and site == context.index.nodes[0] and not node.operands
+        ):
+            out.append(site)
+    return tuple(out)
+
+
+def stage_edges(context: ClassicScheduleContext) -> tuple[EdgeSite, ...]:
+    """Operand edges whose transport domain belongs to a contraction."""
+    return tuple(
+        edge
+        for edge in context.index.edges
+        if isinstance((view := context.views[edge.consumer]), Reduction) and view.contraction is not None
+    )
+
+
+def reduction_sites(context: ClassicScheduleContext) -> tuple[NodeSite, ...]:
+    """Node sites whose schedule includes a reduction choice."""
+    return tuple(site for site in context.index.nodes if isinstance(context.views[site], Reduction))
+
+
+def node_key(family: str, site: NodeSite, family_sites: Sequence[NodeSite]) -> str:
+    """Return the sole canonical codec key for a node family site."""
+    return family if len(family_sites) == 1 else f"{family}@{site.id.spell()}"
+
+
+def edge_key(edge: EdgeSite, family_edges: Sequence[EdgeSite]) -> str:
+    """Return the sole canonical codec key for an edge family site."""
+    if len(family_edges) == 1:
+        return "STAGE"
+    return f"STAGE@{edge.consumer.id.spell()}.e{edge.operand}"
+
+
+def kernel_domain(problem: ClassicProblem) -> tuple[KernelSchedule, ...]:
+    """Return the kernel choices available from static problem facts.
+
+    The direct choice is the base domain. Hardware work inventories and grouped raster choices are
+    added by their own recovery clusters; callers can rely on this function never reading a node or
+    edge assignment.
+    """
+    del problem
+    return (KernelSchedule(Work(), Raster()),)
+
+
+def node_domain(problem: ClassicProblem, site: NodeSite, view: NodeView) -> tuple[NodeSchedule, ...]:
+    """Return the site-local choices without inspecting any selected schedule."""
+    index = SiteIndex(problem.root)
+    if classify(index, site) != view:
+        raise ValueError(f"view does not classify {site.id.spell()} in this problem")
+    if isinstance(view, Projection):
+        return (ProjectionSchedule(Tile()),)
+    return (ReductionSchedule(Tile(), Reduce()),)
+
+
+def edge_domain(problem: ClassicProblem, edge: EdgeSite) -> tuple[EdgeSchedule, ...]:
+    """Return the edge-local transport choices without inspecting another choice."""
+    index = SiteIndex(problem.root)
+    index.operand(edge)  # scope check
+    return (EdgeSchedule(Stage.direct()),)
+
+
+def cartesian_assignments(problem: ClassicProblem) -> Iterator[tuple[ClassicSchedule, Acceptance]]:
+    """Enumerate the literal domain product and the semantic verdict for each complete assignment."""
+    context = ClassicScheduleContext(problem)
+    node_domains = tuple(node_domain(problem, site, context.views[site]) for site in context.index.nodes)
+    edge_domains = tuple(edge_domain(problem, edge) for edge in context.index.edges)
+    for kernel, node_values, edge_values in product(
+        kernel_domain(problem),
+        product(*node_domains),
+        product(*edge_domains),
+    ):
+        schedule = ClassicSchedule(
+            kernel,
+            dict(zip(context.index.nodes, node_values, strict=True)),
+            dict(zip(context.index.edges, edge_values, strict=True)),
+        )
+        yield schedule, context.accepts(schedule)
+
+
+def enumerate_reference(problem: ClassicProblem) -> Iterator[ClassicSchedule]:
+    """Yield the accepted subset of the literal Cartesian product."""
+    for schedule, verdict in cartesian_assignments(problem):
+        if verdict:
+            yield schedule
+
+
+def enumerate_classic(
+    problem: ClassicProblem,
+    traversal: Sequence[NodeSite | EdgeSite] | None = None,
+) -> Iterator[ClassicSchedule]:
+    """Lazily enumerate complete assignments in any site order, with acceptance at every leaf.
+
+    This deliberately carries no public partial context. Later pruning may reject prefixes through
+    a private propagator, but the complete leaf remains subject to :meth:`ClassicScheduleContext.accepts`.
+    """
+    context = ClassicScheduleContext(problem)
+    canonical = (*context.index.nodes, *context.index.edges)
+    order = tuple(canonical if traversal is None else traversal)
+    if len(order) != len(canonical) or set(order) != set(canonical):
+        raise ValueError("classic traversal must contain every node and edge site exactly once")
+
+    def visit(position: int, nodes: dict, edges: dict) -> Iterator[ClassicSchedule]:
+        if position == len(order):
+            for kernel in kernel_domain(problem):
+                schedule = ClassicSchedule(kernel, nodes, edges)
+                if context.accepts(schedule):
+                    yield schedule
+            return
+        site = order[position]
+        if isinstance(site, NodeSite):
+            domain: Iterable = node_domain(problem, site, context.views[site])
+            for choice in domain:
+                yield from visit(position + 1, {**nodes, site: choice}, edges)
+            return
+        for choice in edge_domain(problem, site):
+            yield from visit(position + 1, nodes, {**edges, site: choice})
+
+    yield from visit(0, {}, {})
 
 
 def _operand_position(node: Fold, wanted) -> int:
@@ -297,7 +550,9 @@ def _walk(root: Fold) -> Iterator[Fold]:
 __all__ = [
     "Acceptance",
     "ClassicProblem",
+    "ClassicMaterialization",
     "ClassicSchedule",
+    "ClassicScheduleCodec",
     "ClassicScheduleContext",
     "Contraction",
     "EdgeSchedule",
@@ -313,5 +568,16 @@ __all__ = [
     "ReductionSchedule",
     "Refusal",
     "SiteIndex",
+    "cartesian_assignments",
     "classify",
+    "edge_domain",
+    "edge_key",
+    "enumerate_classic",
+    "enumerate_reference",
+    "kernel_domain",
+    "node_domain",
+    "node_key",
+    "reduction_sites",
+    "stage_edges",
+    "tile_sites",
 ]

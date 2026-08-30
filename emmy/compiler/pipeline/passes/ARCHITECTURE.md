@@ -169,10 +169,11 @@ tree carries choices only. Traversal order is the fork order — there is no sep
 with the walk. `WORK` leads because the root owns the free axes it is read off, and it is stamped the moment an
 option claims an inventory, which `Ctx.extend` then refuses to change.
 
-**Operand staging is resolved at option construction.** A contraction's option carries its already-SIZED `Stage`: the
-resolvers (`tile/_staging.py`) answer with a size, not a yes/no — the resolved `bk_elems` slab chunk and the deepest
-ring the per-site smem budget (`ctx.max_dynamic_smem`) affords — so an over-budget row is never offered rather than
-failing at materialization, and the row's spelling is the RESOLVED one. Three transport families: the copy transports
+**Operand staging is resolved at option construction.** A contraction's option selects an axis- and size-free `Stage`
+choice. The resolvers (`tile/_staging.py`) answer with a separate `ResolvedStage` containing the slab names, resolved
+`bk_elems` chunk, and deepest ring the per-site smem budget (`ctx.max_dynamic_smem`) affords. An over-budget row is
+never offered rather than failing at materialization, while row identity reads only `ResolvedStage.choice`. Three
+transport families: the copy transports
 (the synchronous copy on atoms that stage that way, cp.async, TMA — gmem-direct `None` is their ever-present sibling),
 the fp8 byte slabs (a 1-byte operand staged as raw bytes and converted at the drain — the same `d<n>` fork family, no
 new knob), and the smem compute fill, which is MANDATORY for a computed operand, a multi-channel product, or a

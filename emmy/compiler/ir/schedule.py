@@ -51,7 +51,6 @@ from __future__ import annotations
 import enum
 import re
 from dataclasses import dataclass
-from dataclasses import field as dc_field
 from dataclasses import replace as dc_replace
 
 from emmy.compiler.ir.atom import SCALAR_ATOM, Atom, AtomKind, atom_for
@@ -311,13 +310,6 @@ class Tile:
     units: tuple[int, int] = (1, 1)  # (m, n): warp (WM, WN) / scalar (par_m, par_n)
     regs: tuple[int, int] = (1, 1)  # (m, n): warp (FM, FN) / scalar (reg_m, reg_n)
     bk: int = 1  # K-chunk per inner mma step, in atom_k units (mma only; 1 for scalar)
-    #: The PLACEMENT this tile is over — the ``(m, n)`` output axes the widths above tile. Bound by
-    #: the caller that owns the grid (:meth:`at`), so the slice derives its own ``(m, n)`` reading
-    #: (:attr:`mn`) instead of a separate view object carrying axes beside the plan.
-    #: ``compare=False``: the axes are placement, not a search dimension — two plans differing only
-    #: in placement are the SAME tile, so enumeration dedup, the stamped row and ``spell()`` (which
-    #: never reads them) are untouched, and no axis can leak into a knob value / golden / prior key.
-    axes: tuple[Axis, Axis] | None = dc_field(default=None, compare=False, repr=False)
 
     def spell(self) -> str:
         """The ``TILE`` codec value for this tile — SITE-LOCAL: the worker tokens live in the
@@ -429,20 +421,29 @@ class Tile:
         bt = self.block_threads
         return bt if bt > 1 else None
 
-    def at(self, m_axis: Axis, n_axis: Axis) -> Tile:
-        """This tile BOUND to its placement — the ``(m, n)`` output axes it tiles. The caller that
-        owns the grid decides them (the trailing grid pair for a root kernel; a flash consumer
-        supplies its own), so a plan travels axis-free through the enumeration and picks up its
-        placement where the geometry is actually read."""
-        return dc_replace(self, axes=(m_axis, n_axis))
+    def at(self, m_axis: Axis, n_axis: Axis) -> PlacedTile:
+        """Derive placed geometry without adding axes to this choice value."""
+        return PlacedTile(self, (m_axis, n_axis))
 
-    def placed_on(self, place: Placement) -> Tile:
+    def placed_on(self, place: Placement) -> PlacedTile | Tile:
         """This tile bound to the ROOT contraction's ``(m, n)`` — :attr:`Placement.root_mn` — and
         left UNPLACED when the grid cannot supply the pair. The scheduler binds through here at
         option assembly and :meth:`Sched.tile_of` re-derives the same pair for a reader that takes
         the slice off the tree, so the depth-1 rule and its degradation are stated ONCE."""
-        mn = place.root_mn
-        return self.at(*mn) if mn is not None else self
+        axes = place.root_mn
+        return self.at(*axes) if axes is not None else self
+
+
+@dataclass(frozen=True)
+class PlacedTile:
+    """Materialization geometry derived from an axis-free :class:`Tile` choice and two axes."""
+
+    choice: Tile
+    axes: tuple[Axis, Axis]
+
+    def __getattr__(self, name: str):
+        """Expose choice geometry to lowering without duplicating its fields."""
+        return getattr(object.__getattribute__(self, "choice"), name)
 
     # ---- the (m, n) output sides: each axis paired with its derived per-CTA tile geometry (width /
     # unit / register counts) + the bound block/unit var names (the original m/n names live in the
@@ -451,8 +452,6 @@ class Tile:
     def mn(self) -> tuple[Side, Side]:
         """The ``(m, n)`` output :class:`Side` pair — each placed axis with its derived geometry.
         Requires :meth:`at` to have bound the placement; :attr:`m` / :attr:`n` index it."""
-        if self.axes is None:
-            raise ValueError("Tile.mn: the tile is unplaced — bind the (m, n) output axes with .at(m, n) first")
         dims = ((self.tile_m, self.units_m, self.reg_m), (self.tile_n, self.units_n, self.reg_n))
         return tuple(
             Side(axis=ax, tile=tile, units=units, reg=reg, block=ax.name + "_b", unit=ax.name + "_u")
@@ -480,9 +479,24 @@ class Work:
     disagreement unrepresentable. Kernel-global-ness encodes today's TRUE invariant:
     fragment-resident dataflow between composed folds shares the warp map."""
 
-    kind: str  # "warp" (mma tier) | "thread" (scalar / coop tiers)
-    units: tuple[int, int]  # the native codec order of the TILE value the slot came from
+    kind: str = "direct"  # direct | warp (mma tier) | thread (scalar / coop tiers)
+    units: tuple[int, int] = (1, 1)  # the native codec order of the TILE value the slot came from
     producer: int = 0  # dedicated producer warps (the WSPEC absorb — ``+p<n>``; warp kind only)
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("direct", "warp", "thread"):
+            raise ValueError(f"bad Work kind {self.kind!r} (expect direct | warp | thread)")
+        if len(self.units) != 2 or any(width < 1 for width in self.units):
+            raise ValueError(f"Work units must be two positive widths, got {self.units!r}")
+        if self.kind == "direct" and (self.units != (1, 1) or self.producer):
+            raise ValueError("direct Work cannot carry worker geometry or a producer band")
+        if self.kind != "warp" and self.producer:
+            raise ValueError("a producer band requires warp Work")
+
+    @property
+    def is_direct(self) -> bool:
+        """Whether this choice leaves launch geometry to the direct per-cell path."""
+        return self.kind == "direct"
 
     @property
     def count(self) -> int:
@@ -494,6 +508,8 @@ class Work:
         """The ``WORK`` codec string: ``w<M>x<N>[+p<np>]`` (warps; both dims always) /
         ``t<N>x<M>`` (the scalar thread tile, native n-then-m order) / ``t<N>`` (the 1-D
         cooperative width — a trailing ``x1`` is suppressed for threads only)."""
+        if self.is_direct:
+            return ""
         if self.kind == "warp":
             base = f"w{self.units[0]}x{self.units[1]}"
             return f"{base}+p{self.producer}" if self.producer else base
@@ -502,11 +518,11 @@ class Work:
         return f"t{self.units[0]}x{self.units[1]}"
 
     @classmethod
-    def parse(cls, spec: str | None) -> Work | None:
+    def parse(cls, spec: str | None) -> Work:
         """Decode a ``WORK`` codec string (inverse of :meth:`spell`); ``""`` / ``None`` = no
         inventory (the per-cell / pure-reduce forms keep their derived launch geometry)."""
         if not spec:
-            return None
+            return cls()
         s = spec.strip()
         producer = 0
         if "+" in s:
@@ -654,7 +670,7 @@ class Placement:
 #: evaluating a computed edge into its slab), ``cp.async`` (``smem-async``) and TMA
 #: (``smem-tma``). An EMPTY ``STAGE`` is no intermediate at all: gmem→register on a
 #: materialized operand, register-to-register on a computed one.
-_TRANSPORTS = ("smem", "smem-async", "smem-tma")
+_TRANSPORTS = ("direct", "smem", "smem-async", "smem-tma")
 
 #: The ``STAGE`` grammar, rendered into every parse error so a bad pin names what it could have said.
 _STAGE_EXPECT = "expect d<n> / smem|smem-async|smem-tma / p<n>"
@@ -667,19 +683,11 @@ class Stage:
     operand-staging knob, decided by the tile schedule and materialized in
     ``010_materialize``.
 
-    A constructed ``Stage`` means staging is **on** (the reused gmem operands ride a shared-
-    memory slab); ``schedule.stage is None`` is the register / gmem-direct baseline (no
-    slab). Spelled by the ``STAGE`` codec ``d<depth>/sync|cp|tma[/split][/p<reg_depth>]``
-    (decided by the tile schedule). A stage stamped on a ``TileOp`` is **RESOLVED**, not the raw
-    pin: the scheduler runs eligibility + sizing against the node ONCE
-    (resolved schedule-side for a contraction's operand
-    pipeline, the shared-row detection for the reduce tier) and stamps the result — or ``None``
-    when the pin can't engage (gmem-direct) — so the materializer applies it verbatim, deciding
-    nothing. Two fields are derived at resolution and never spelled by the codec: ``smem`` (empty
-    for a contraction pipeline — both operands stage; the ONE detected row buffer for the
-    shared-row stage) and ``bk_elems`` (the contraction slab's K-chunk in elements — the
-    codec-spelled ``Tile.bk · atom_k`` on the warp tier, the fit-to-smem derivation on the
-    scalar tier; 0 for the 1-D shared row).
+    ``Stage.direct()`` is the register / gmem-direct baseline (no slab); every other ``Stage``
+    means staging is **on** (the reused gmem operands ride a shared-memory slab). Spelled by the
+    ``STAGE`` codec ``d<depth>/sync|cp|tma[/split][/p<reg_depth>]``
+    (decided by the tile schedule). Eligibility and sizing produce a separate
+    :class:`ResolvedStage`; this choice never stores shared-memory names or a derived K chunk.
 
     The pipeline has two buffering levels down the memory hierarchy, each with its own depth:
     ``depth`` is the **gmem→smem** ring (a synchronous slot fill or the cp.async / TMA prefetch
@@ -696,9 +704,7 @@ class Stage:
 
     depth: int = 1  # gmem→smem ring depth over the reduce loop (1 = single buffer, no prefetch)
     transport: str = "smem"  # smem | smem-async | smem-tma (the intermediate and its fill mechanism)
-    smem: tuple[str, ...] = ()  # operands staged through smem (derived at resolution; not in the codec)
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
-    bk_elems: int = 0  # contraction slab K-chunk, elements (derived at resolution; not in the codec)
 
     def __post_init__(self) -> None:
         if self.transport not in _TRANSPORTS:
@@ -707,6 +713,18 @@ class Stage:
             raise ValueError(f"Stage depth must be ≥ 1, got {self.depth}")
         if self.reg_depth < 1:
             raise ValueError(f"Stage reg_depth must be ≥ 1, got {self.reg_depth}")
+        if self.transport == "direct" and (self.depth != 1 or self.reg_depth != 1):
+            raise ValueError("direct Stage cannot carry pipeline depths")
+
+    @classmethod
+    def direct(cls) -> Stage:
+        """The explicit no-intermediate transport choice."""
+        return cls(transport="direct")
+
+    @property
+    def is_direct(self) -> bool:
+        """Whether the operand moves directly to registers."""
+        return self.transport == "direct"
 
     @classmethod
     def parse(cls, spec: str | None) -> Stage:
@@ -716,9 +734,8 @@ class Stage:
         materialized edge, evaluating a computed one, converting when the dtypes differ — the
         cp.async ring, or TMA; the ABSENCE of a stage means no intermediate at all — gmem→register
         for a materialized operand, register→register evaluation for a computed one), and an
-        optional ``p<reg_depth>`` (smem→register double-buffer depth). Empty / ``None`` = the depth-1 ``smem`` default (the
-        caller maps an empty ``STAGE`` to ``stage=None``, the gmem-direct baseline — ``parse`` is
-        only reached on a non-empty spec). ``smem`` is filled in later by the scheduler.
+        optional ``p<reg_depth>`` (smem→register double-buffer depth). Empty / ``None`` is the
+        explicit gmem-direct choice. ``smem`` is filled in later by the scheduler.
 
         Binding is order-free, but each token binds at most ONCE: a repeat has no last-one-wins
         reading a caller could have meant — ``d2/smem-async/d3`` would land ``d3/smem-async`` and ``smem/smem-tma``
@@ -726,6 +743,8 @@ class Stage:
         ``ValueError`` and only ``ValueError`` on any malformed input (the featurizers degrade on
         it), naming the codec so a bad pin names its knob."""
         s = (spec or "").strip()
+        if not s:
+            return cls.direct()
         seen: set[str] = set()
         depth, transport, reg_depth = 1, "smem", 1
 
@@ -752,6 +771,8 @@ class Stage:
         """The ``STAGE`` codec string for this stage (inverse of :meth:`parse`). ``smem`` is
         derived, so it is not spelled; ``reg_depth`` is spelled only when ≥ 2 (the ``p1``
         default is omitted, so an unstaged-register config round-trips byte-identical)."""
+        if self.is_direct:
+            return ""
         toks = [f"d{self.depth}", self.transport]
         if self.reg_depth > 1:
             toks.append(f"p{self.reg_depth}")
@@ -774,6 +795,25 @@ class Stage:
         if self.transport == "smem-tma":
             return ctx.has_tma
         return True
+
+
+@dataclass(frozen=True)
+class ResolvedStage:
+    """Materialization facts derived from a :class:`Stage` choice at one problem edge."""
+
+    choice: Stage
+    smem: tuple[str, ...] = ()
+    bk_elems: int = 0
+
+    def __post_init__(self) -> None:
+        if self.choice.is_direct:
+            raise ValueError("a direct Stage has no resolved materialization")
+        if self.bk_elems < 0:
+            raise ValueError(f"resolved stage bk_elems must be non-negative, got {self.bk_elems}")
+
+    def __getattr__(self, name: str):
+        """Expose the originating choice to lowering without copying its fields."""
+        return getattr(object.__getattribute__(self, "choice"), name)
 
 
 @dataclass(frozen=True)
@@ -815,19 +855,36 @@ class Raster:
     block-tiles fastest within each launch stripe (consecutive CTAs then share the streamed B
     slab, so its repeat reads hit L2 instead of DRAM — the 2026-07-12 4090 NCU finding measured
     the flat order streaming B once per M-row, ``A + C + B×2`` exactly); ``gn<G>`` is the
-    transpose (A the streamed operand). ``""`` / ``None`` = the flat N-fastest row-major order.
+    transpose (A the streamed operand). The explicit ``Raster()`` choice is the flat N-fastest row-major order.
     Eligible only on a 2-D-tiled contraction grid (``Tile.raster_axes``, stamped by the kernel
     materializer's ``grid_tile`` seal)."""
 
-    orient: str  # "m" (group M block-tiles) | "n" (group N block-tiles)
-    group: int  # stripe group size, ≥ 2
+    orient: str = "direct"  # direct | m (group M block-tiles) | n (group N block-tiles)
+    group: int = 1  # stripe group size, ≥ 2 when grouped
+
+    def __post_init__(self) -> None:
+        if self.orient == "direct":
+            if self.group != 1:
+                raise ValueError("direct Raster must have group 1")
+            return
+        if self.orient not in ("m", "n") or self.group < 2:
+            raise ValueError(f"grouped Raster requires m/n orientation and group >= 2, got {self.orient!r}/{self.group}")
+
+    @property
+    def is_direct(self) -> bool:
+        """Whether CTA ids use the ordinary flat row-major order."""
+        return self.orient == "direct"
+
+    def spell(self) -> str:
+        """Return the canonical ``RASTER`` value."""
+        return "" if self.is_direct else f"g{self.orient}{self.group}"
 
     @classmethod
-    def parse(cls, spec: str | None) -> Raster | None:
-        """Decode ``gm<G>`` / ``gn<G>`` (``""`` / ``None`` → ``None``, the flat order). Raises
+    def parse(cls, spec: str | None) -> Raster:
+        """Decode ``gm<G>`` / ``gn<G>`` (``""`` / ``None`` → explicit flat order). Raises
         ``ValueError`` on any other spelling — the loud pin contract."""
         if not spec:
-            return None
+            return cls()
         m = _RASTER_RE.fullmatch(spec)
         if m is None or int(m.group(2)) < 2:
             raise ValueError(f"RASTER: expected gm<G> / gn<G> with G >= 2 (or empty for the flat order), got {spec!r}")
@@ -890,10 +947,12 @@ __all__ = [
     "FoldMove",
     "Level",
     "Placement",
+    "PlacedTile",
     "Side",
     "Reduce",
     "ReduceStage",
     "Raster",
+    "ResolvedStage",
     "Stage",
     "Tile",
     "WarpSpec",

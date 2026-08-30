@@ -21,7 +21,7 @@ def test_work_codec_round_trips() -> None:
     for s in ("w4x1", "w1x8", "w4x1+p1", "w2x2+p2", "t16x8", "t512"):
         w = Work.parse(s)
         assert w is not None and w.spell() == s
-    assert Work.parse("") is None and Work.parse(None) is None
+    assert Work.parse("") == Work.parse(None) == Work()
     assert Work.parse("t512").units == (512, 1)  # the 1-D cooperative width
     assert Work.parse("w4x1+p1").producer == 1
 

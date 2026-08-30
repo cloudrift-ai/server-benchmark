@@ -197,8 +197,11 @@ while retaining exact values throughout the ordinary extent range.
 
 ## TileOp and scheduling
 
-`TileOp` owns facts deliberately excluded from the Fold tree: placement, workers, schedule slices, knobs, and output
-specifications. Schedule slices remain keyed by `path.py` and read through `ops.Sched`.
+`TileOp` owns facts deliberately excluded from the Fold tree: placement, the accepted `ClassicSchedule`, its separate
+`ClassicMaterialization`, knobs, and output specifications. The semantic assignment contains choices only;
+site-indexed placed tile geometry and resolved transport sizes are lowering facts and cannot enter a row identity.
+`ops.Sched` is the lowering view over those typed fields. The keyed slice map remains a migration detail until all
+materializers consume the typed fields; it is not a second semantic schedule.
 
 `lowering/tile/030_cut` offers kernel placement before scheduling. `PLACE` uses the same tree-path codec to address a
 stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling

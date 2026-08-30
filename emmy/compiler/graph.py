@@ -445,7 +445,7 @@ _STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta"})
 # pure runtime state (``source`` / ``knobs`` chain metadata, ``inputs`` /
 # ``outputs`` snapped by the matcher) — none of it belongs in the persisted
 # IR.
-_SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs", "meta"})
+_SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs", "meta", "classic", "materialization"})
 
 
 @dataclass(frozen=True)

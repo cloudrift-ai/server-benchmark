@@ -44,12 +44,25 @@ from types import MappingProxyType
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.classic_schedule import (
+    ClassicMaterialization,
+    ClassicProblem,
+    ClassicSchedule,
+    ClassicScheduleContext,
+    EdgeSchedule,
+    KernelSchedule,
+    Projection,
+    ProjectionSchedule,
+    ReductionSchedule,
+)
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure.fold import Fold, deep_reads, edge_refs_axis, is_contraction
 from emmy.compiler.ir.schedule import (
     Level,
+    PlacedTile,
     Raster,
     Reduce,
+    ResolvedStage,
     Stage,
     Tile,
     WarpSpec,
@@ -119,7 +132,7 @@ class _Option:
 
     knobs: Mapping
     work: Work | None = None
-    tile: Tile | None = None
+    tile: PlacedTile | None = None
     seam: tuple = ()
 
     def __post_init__(self) -> None:
@@ -223,7 +236,7 @@ def _contraction_options(state: _State, node) -> list[_Option]:
     red_refused: list[str] = []
     for plan in _tile_moves(state, node, key):
         placed = sched.placed(node, plan)  # bound ONCE per plan — every per-plan check below reads this binding
-        if plan.is_tiled and (placed is None or placed.axes is None):
+        if plan.is_tiled and not isinstance(placed, PlacedTile):
             continue  # a tile the grid cannot bind to an (m, n) pair has no geometry to realize
         why = _plan_node_refusal(state, node, plan, placed)
         if why is not None:
@@ -282,7 +295,7 @@ def _contraction_options(state: _State, node) -> list[_Option]:
     return opts
 
 
-def _resolve_stage(state: _State, node, plan: Tile, placed: Tile, want: Stage, why: list[str] | None = None) -> Stage | None:
+def _resolve_stage(state: _State, node, plan: Tile, placed: PlacedTile, want: Stage, why: list[str] | None = None) -> ResolvedStage | None:
     """The ONE resolve dispatch — enumeration and the leaf's re-resolution (:func:`_stage_of`) both
     take it, chosen by the same predicate (:func:`_needs_fill`), so the materialized slice always
     reproduces the one the row identity was built from. The fill branch reads only ``want.depth``
@@ -299,7 +312,9 @@ def _resolve_stage(state: _State, node, plan: Tile, placed: Tile, want: Stage, w
     return staging.resolve_scalar_stage(node, placed, want, state.tile.inputs, budget)
 
 
-def _stage_options(state: _State, node, plan: Tile, placed: Tile, pin: str | None, scoped: bool, refused: list[str]) -> list[Stage | None]:
+def _stage_options(
+    state: _State, node, plan: Tile, placed: PlacedTile, pin: str | None, scoped: bool, refused: list[str]
+) -> list[ResolvedStage | None]:
     """The RESOLVED operand stages one tile candidate offers — gmem-direct ``None`` first, then
     every catalog move that resolves against the node under this plan (deduped on the resolved
     spelling: a depth that clamps under the smem budget spells identically to its shallower
@@ -331,7 +346,7 @@ def _stage_options(state: _State, node, plan: Tile, placed: Tile, pin: str | Non
             refused.append(f"pinned STAGE {pin!r} does not resolve for this contraction")
             return []
         return [r]
-    out: list[Stage | None] = [None]
+    out: list[ResolvedStage | None] = [None]
     spelled = {""}
     for move in stage_moves(warp=plan.is_warp, ctx=state.ctx):  # target-filtered in the catalog (a pin RAISES instead)
         r = _resolve_stage(state, node, plan, placed, move)
@@ -341,7 +356,9 @@ def _stage_options(state: _State, node, plan: Tile, placed: Tile, pin: str | Non
     return out
 
 
-def _fill_options(state: _State, node, plan: Tile, placed: Tile, pin: str | None, scoped: bool, refused: list[str]) -> list[Stage | None]:
+def _fill_options(
+    state: _State, node, plan: Tile, placed: PlacedTile, pin: str | None, scoped: bool, refused: list[str]
+) -> list[ResolvedStage | None]:
     """The RESOLVED smem compute-fill stages a computed operand, multi-channel product or
     converting materialized ``a`` offers — its depths, and nothing else: the fill is MANDATORY
     (no gmem-direct sibling, no byte transport can evaluate a cone or carry several B/C channels),
@@ -376,7 +393,7 @@ def _fill_options(state: _State, node, plan: Tile, placed: Tile, pin: str | None
             pin = None
         else:
             depths = [want.depth]
-    out: list[Stage | None] = []
+    out: list[ResolvedStage | None] = []
     spelled: set[str] = set()
     for depth in depths:
         why: list[str] = []
@@ -402,7 +419,7 @@ def _fill_options(state: _State, node, plan: Tile, placed: Tile, pin: str | None
 # ---- the producer band: the +p inventory a resolved stage can drive ------------------------------ #
 
 
-def _band_transport_refusal(stage: Stage | None) -> str | None:
+def _band_transport_refusal(stage: ResolvedStage | None) -> str | None:
     """What a producer band can actually drive: a RESOLVED TMA stage (the band arms the box-copy
     mbarrier ring — cp.async's wait-group is issuing-thread-scoped and a smem compute fill has no
     async load half)."""
@@ -422,7 +439,7 @@ def _band_budget_refusal(band: int, block_threads: int) -> str | None:
     return None
 
 
-def _producer_bands(work: Work | None, stage: Stage | None, block_threads: int) -> tuple[int, ...]:
+def _producer_bands(work: Work | None, stage: ResolvedStage | None, block_threads: int) -> tuple[int, ...]:
     """The producer-band widths an option ALSO claims as inventory variants. The band is
     kernel-global, but every condition on it is a fact about the OPTION: it drives a resolved TMA
     stage and needs a warp inventory wide enough to spare it. Claiming it here is what makes the
@@ -450,7 +467,7 @@ def _producer_bands(work: Work | None, stage: Stage | None, block_threads: int) 
 # ---- the fragment seam: the producer/consumer cross-site rule ------------------------------------ #
 
 
-def _seam_entries(state: _State, node, key: str | None, plan: Tile, placed: Tile, stage: Stage | None) -> tuple:
+def _seam_entries(state: _State, node, key: str | None, plan: Tile, placed: PlacedTile, stage: ResolvedStage | None) -> tuple:
     """The fragment-seam stakes this option carries — an OFFER when the node produces a fragment
     operand for another contraction, a NEED when it consumes one — as ``(role, edge key, value)``
     triples :meth:`Ctx.extend` reconciles. Both are spelled off the option alone; the cross-site
@@ -489,7 +506,7 @@ def _frag_regs(atom: AtomKind, role: str) -> int:
     return m * n // (64 if dtype.nbytes == 2 else 32)
 
 
-def _paired_fragment_registers(node, producer, tile: Tile, stage: Stage | None) -> tuple[int, int] | None:
+def _paired_fragment_registers(node, producer, tile: PlacedTile, stage: ResolvedStage | None) -> tuple[int, int] | None:
     """``(required, available)`` peak registers/lane for two composed contractions.
 
     A computed fill keeps the consuming fragments live while it builds one scheduled producer
@@ -518,7 +535,7 @@ def _paired_fragment_registers(node, producer, tile: Tile, stage: Stage | None) 
     return max(outer, outer_c + producer_regs), available
 
 
-def _paired_budget_refusal(node, producer, tile: Tile, stage: Stage | None) -> str | None:
+def _paired_budget_refusal(node, producer, tile: PlacedTile, stage: ResolvedStage | None) -> str | None:
     """Why coexisting producer/consumer mma fragments exceed the CTA register-file envelope
     (``None`` when they fit) — the fragment seam's ADDITIVE bound. Not cross-site: the producer's
     fragment block is a function of the consumer's own stage (``bk_elems``), so the option builder
@@ -1342,7 +1359,7 @@ class _State:
         """Whether ``work`` is the inventory the live ``WORK`` pin named (vacuously true unpinned).
         Compared as parsed :class:`Work`, never as spellings — ``t16x1`` and ``t16`` are one
         inventory."""
-        return not self.work_pinned or work == self.work_pin
+        return not self.work_pinned or (work or Work()) == self.work_pin
 
     @property
     def observed(self) -> bool:
@@ -1484,7 +1501,7 @@ class _Leaf(_WalkFork):
         return [_materialize(self.state, self.knobs)]
 
 
-def _stage_of(state: _State, node, plan: Tile, spec: str) -> Stage | None:
+def _stage_of(state: _State, node, plan: Tile, spec: str) -> ResolvedStage | None:
     """The row's ``STAGE`` re-resolved against the node, through the enumeration's own dispatch
     (:func:`_resolve_stage`), so this reproduces the slice the leaf identity was built from."""
     return _resolve_stage(state, node, plan, state.sched.placed(node, plan), Stage.parse(spec))
@@ -1521,8 +1538,8 @@ def _materialize(state: _State, row: dict) -> TileOp:
             # The per-cell tier's cooperative / ILP K partition rides a REDUCE slice, exactly as
             # a plain fold's does (a decided-empty spelling resolves to no slice).
             slices.append(("REDUCE", node, red if red.stages else None))
-    workers = WarpSpec(work.producer) if work is not None and work.producer else None
-    return scheduled(
+    workers = WarpSpec(work.producer) if work.producer else None
+    out = scheduled(
         tile.op,
         name=state.name,
         place=sched.place,
@@ -1531,6 +1548,43 @@ def _materialize(state: _State, row: dict) -> TileOp:
         slices=slices,
         workers=workers,
     )
+    _attach_classic(out, state, row, slices, work)
+    return out
+
+
+def _attach_classic(out: TileOp, state: _State, row: dict, slices: list, work: Work) -> None:
+    """Install the typed complete assignment and separate derived materialization facts."""
+    del slices
+    problem = ClassicProblem(out.op, state.ctx)
+    context = ClassicScheduleContext(problem)
+    resolved_schedule = Sched(out.op, out.schedule, place=out.place)
+    nodes = {}
+    placed = {}
+    resolved = {}
+    for site in context.index.nodes:
+        node = context.index.node(site)
+        tile = resolved_schedule.get("TILE", node) or Tile()
+        reduce = resolved_schedule.get("REDUCE", node) or Reduce()
+        nodes[site] = ProjectionSchedule(tile) if isinstance(context.views[site], Projection) else ReductionSchedule(tile, reduce)
+        if tile.is_tiled:
+            geometry = resolved_schedule.placed(node, tile)
+            if isinstance(geometry, PlacedTile):
+                placed[site] = geometry
+        stage = resolved_schedule.get("STAGE", node)
+        for edge in (edge for edge in context.index.edges if edge.consumer == site):
+            if stage is not None:
+                resolved[edge] = stage
+
+    schedule = ClassicSchedule(
+        KernelSchedule(work, Raster.parse(row.get("RASTER"))),
+        nodes,
+        {edge: EdgeSchedule(resolved[edge].choice if edge in resolved else Stage.direct()) for edge in context.index.edges},
+    )
+    verdict = context.accepts(schedule)
+    if not verdict:
+        raise ValueError(f"materialized schedule was refused: {verdict.refusal}")
+    out.classic = schedule
+    out.materialization = ClassicMaterialization(placed, resolved)
 
 
 # ---- the pool memo: what one enumeration leaves for the next ------------------------------------- #

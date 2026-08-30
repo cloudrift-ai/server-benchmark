@@ -184,8 +184,9 @@ overlaid on top. The committed file exists because CI starts every job with an e
 bucketing never fired there and the long poles landed wherever chance put them. It records only entries at or above
 0.05 s (a few hundred lines rather than the full ~2600, and 99% of the suite's wall time); anything unlisted is
 assumed to cost 0.05 s. Regenerate it with `make test-durations` — which REPLACES the file with that run's timings, so
-renamed and deleted tests drop out instead of lingering as ghost slots the bucketer plans around. Point it at the whole
-suite, never a subset.
+renamed and deleted tests drop out instead of lingering as ghost slots the bucketer plans around. The refresh runs on
+one xdist loadgroup worker: execution stays serial, while CUDA node IDs keep the canonical ``@cuda`` / ``@cuda-cli``
+suffixes the parallel suite uses for lookup. Point it at the whole suite, never a subset.
 
 Two things keep it honest. `make test` passes `--durations=25`, so every run (CI included) prints its slowest tests and
 a new long pole shows up in the log immediately. And the session-end gate in `conftest.py` fails any run where a test

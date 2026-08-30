@@ -26,7 +26,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.pure.fold import Fold, operand_name
-from emmy.compiler.ir.schedule import Stage, Tile
+from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.tile.ops import cone_seam
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
@@ -95,7 +95,7 @@ def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: i
     return all(x % _TMA_ALIGN == 0 for x in inner)
 
 
-def resolve_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, inputs=None) -> Stage | None:
+def resolve_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, inputs=None) -> ResolvedStage | None:
     """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — synchronous copy,
     cp.async, TMA, or gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth``
     clamped so the ring's slots fit ``budget``, and ``reg_depth`` clamped to ``bk``. A tile whose
@@ -162,10 +162,11 @@ def resolve_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, inputs=No
     if slot_bytes > budget:
         return None
     depth = _clamp_depth(stage.depth, slot_bytes, budget)
-    return replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
+    choice = replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk))
+    return ResolvedStage(choice, bk_elems=bk_elems)
 
 
-def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int) -> Stage | None:
+def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int) -> ResolvedStage | None:
     """Resolve an operand ``Stage`` against the scalar register-tile contraction ``c``, or ``None``
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
@@ -210,7 +211,7 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int)
         depth -= 1
     if bk_elems < 4:
         return None
-    return replace(stage, depth=depth, reg_depth=1, bk_elems=bk_elems)
+    return ResolvedStage(replace(stage, depth=depth, reg_depth=1), bk_elems=bk_elems)
 
 
 # ---- the smem compute fill --------------------------------------------------------------------- #
@@ -311,7 +312,7 @@ def resolve_fill_stage(
     seam: tuple | None = None,
     k_axis: Axis | None = None,
     producer: Fold | None = None,
-) -> Stage | None:
+) -> ResolvedStage | None:
     """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under
     ``tile`` — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the
     byte-copy / cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it
@@ -376,7 +377,7 @@ def resolve_fill_stage(
     depth = _clamp_depth(want_depth, async_bytes, budget - fixed) if async_bytes else 1
     computed = [operand_name(c.a)] if a_converts or not isinstance(c.a, Load) else []
     computed.extend(operand_name(ch.b) for ch in c.channels if not isinstance(ch.b, Load))
-    return Stage(depth=depth, transport="smem", smem=tuple(computed), bk_elems=bk_elems)
+    return ResolvedStage(Stage(depth=depth, transport="smem"), smem=tuple(computed), bk_elems=bk_elems)
 
 
 __all__ = [

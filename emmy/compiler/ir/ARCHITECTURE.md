@@ -73,11 +73,13 @@ slices, output specifications and knobs are the `TileOp`'s, not the term's. So
 scheduled once while each use receives an independent transport choice. Site classification reads only the Fold at a
 node site; target facts cannot affect whether that site is a projection, reduction, or contraction-capable reduction.
 
-`ClassicSchedule` is an immutable, complete assignment of kernel, node, and edge choices. Choice values never carry
-site identities, paths, target facts, encodings, or materialization results. Completeness and node-sum agreement need
-the problem, so `ClassicScheduleContext.accepts` is their one semantic authority; the schedule data cannot validate
-itself. Enumeration, codecs, search policy, and lowering consume this boundary and may not define another membership
-relation.
+`ClassicSchedule` is an immutable, complete assignment of kernel, node, and edge choices. Direct work, flat raster,
+untiled nodes, serial reductions, and direct edges are explicit values rather than missing fields. Choice values never
+carry site identities, paths, target facts, encodings, or materialization results: `Tile` is axis-free and `Stage`
+contains no slab names or resolved K chunk. `ClassicMaterialization` separately maps accepted sites to `PlacedTile`
+geometry and `ResolvedStage` transport facts. Completeness and node-sum agreement need the problem, so
+`ClassicScheduleContext.accepts` is their one semantic authority; the schedule data cannot validate itself.
+Enumeration, codecs, search policy, and lowering consume this boundary and may not define another membership relation.
 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not

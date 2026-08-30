@@ -191,9 +191,10 @@ supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner 
 axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
 CTA-shared across the sibling, so a sibling var can only survive as a value-dead flat-index reshape residue (a
 merged / reshaped weight row), and left unbound it would emit the unsplit axis name the kernel no longer defines. The staging **decision** does not live here at all: the
-`Stage` on the `TileOp` arrives **already resolved** by the scheduler (transport eligibility, the slab K-chunk
-`bk_elems`, the depth clamps — or `None`, gmem-direct), and `state` (which slots the operand fragments) and the
-shared `reduce` (which emits the loop) apply it verbatim. The `Stage` names the intermediate storage and its fill mechanism — `smem` (the synchronous
+`ResolvedStage` in `ClassicMaterialization` arrives **already resolved** by the scheduler (transport eligibility, the
+slab names, K-chunk `bk_elems`, and depth clamps). A direct edge has an explicit direct `Stage` choice and no resolved
+materialization. The `state` builder (which slots the operand fragments) and shared `reduce` (which emits the loop)
+apply the resolved facts verbatim. The `Stage` choice names the intermediate storage and its fill mechanism — `smem` (the synchronous
 thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all (gmem→register on
 a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
 `d<depth>` is the gmem→smem ring (blocking synchronous slot fill / cp.async commit group / TMA mbarrier-phased

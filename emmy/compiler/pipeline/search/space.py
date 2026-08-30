@@ -146,7 +146,7 @@ def _raster_features(val) -> dict[str, float]:
         r = Raster.parse(str(val))
     except ValueError:
         return {"D_raster_group": 0.0, "D_raster_gn": 0.0}
-    if r is None:
+    if r.is_direct:
         return {"D_raster_group": 0.0, "D_raster_gn": 0.0}
     return {"D_raster_group": float(r.group), "D_raster_gn": 1.0 if r.orient == "n" else 0.0}
 

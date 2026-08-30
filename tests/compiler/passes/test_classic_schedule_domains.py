@@ -1,6 +1,7 @@
 """Production classic scheduling obeys the independent-domain contract."""
 
 from emmy.compiler.context import Context
+from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.classic_schedule import (
     ClassicProblem,
@@ -107,3 +108,36 @@ def test_scalar_contraction_enumeration_is_the_compatible_independent_product() 
     tiled = next(leaf for leaf in leaves if leaf.schedule.nodes[site].tile.is_tiled)
     materialized = tiled.expand()[0]
     assert materialized.materialization.tiles[site].choice == tiled.schedule.nodes[site].tile
+
+
+def test_tensor_core_enumeration_is_the_compatible_independent_product() -> None:
+    m, n, k = Axis("m", 128), Axis("n", 128), Axis("k", 136)
+    root = Fold.contraction(
+        k_axis=k,
+        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m, n)),
+        inputs={"a": Tensor("a", (128, 136), "f16"), "b": Tensor("b", (136, 128), "f16")},
+        outputs={"out": Tensor("out", (128, 128), "f16")},
+    )
+    target = Context.from_target((12, 0))
+    problem = ClassicProblem(tile.op, target)
+    domains = project_domains(tile, target)
+    context = ClassicScheduleContext(problem, domains)
+    site = context.index.nodes[0]
+
+    warp_choices = tuple(choice for choice in domains.nodes[site] if isinstance(choice, ReductionSchedule) and choice.tile.is_warp)
+    assert warp_choices
+    assert any(choice.work.kind == "warp" for choice in domains.kernel)
+
+    reference = tuple(enumerate_reference(problem, domains))
+    leaves = schedule(tile, "matmul", {}, target)
+    codec = ClassicScheduleCodec(problem, domains)
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
+    assert domains.product_size > len(reference) == len(domains.nodes[site])
+
+    warp = next(leaf for leaf in leaves if leaf.schedule.nodes[site].tile.is_warp)
+    assert warp.expand()[0].materialization.tiles[site].choice == warp.schedule.nodes[site].tile

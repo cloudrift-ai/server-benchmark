@@ -4,9 +4,9 @@ The scheduler has one candidate-space contract: kernel, node, and edge domains a
 independently from static facts, and enumeration is exactly the compatible subset of their
 Cartesian product. Traversal order may change evaluation cost, never membership.
 
-Projection, plain-reduction, and scalar-contraction choices are live. Later schedule families
-extend the same independent factors and the one compatibility relation; they do not add another
-enumerator.
+Projection, plain-reduction, scalar-contraction, and gmem-direct tensor-core choices are live.
+Later schedule families extend the same independent factors and the one compatibility relation;
+they do not add another enumerator.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.classic_schedule import (
     AxisAgreement,
     ClassicDomains,
@@ -31,15 +32,16 @@ from emmy.compiler.ir.classic_schedule import (
     ReductionSchedule,
     enumerate_classic,
 )
-from emmy.compiler.ir.pure.fold import edge_refs_axis
+from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis
 from emmy.compiler.ir.schedule import PlacedTile, Raster, Reduce, Stage, Tile, Work, derive_inventory
-from emmy.compiler.ir.stmt import Loop
+from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import Sched, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.knob import family_pins
-from emmy.compiler.pipeline.search.space import WARP_LANES, coop_reduce_moves, scalar_tile_moves
+from emmy.compiler.pipeline.passes.lowering._addr import gmem_axis_step, split_addressable
+from emmy.compiler.pipeline.search.space import WARP_LANES, coop_reduce_moves, scalar_tile_moves, warp_tile_moves
 
 
 class ClassicScheduleUnavailable(RuntimeError):
@@ -84,15 +86,80 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     )
 
 
-def _contraction_domain(tile: TileOp, node) -> tuple[ReductionSchedule, ...]:
-    """Project one single-channel contraction's locally realizable scalar choices."""
+def _fold_states(op) -> frozenset[str]:
+    """Return the Fold state names visible to the projection tail."""
+    if not isinstance(op, Fold):
+        return frozenset()
+    if op.axis is not None:
+        return frozenset(op.defines())
+    return frozenset(name for edge in (*op.operands, *op.body) if isinstance(edge, Fold) for name in edge.defines())
+
+
+def _fragment_epilogue_ok(tail: list, states: frozenset[str]) -> bool:
+    """Whether every output is a straight-line projection of a Fold state."""
+    definitions: set[str] = set()
+    for stmt in tail:
+        if isinstance(stmt, Loop):
+            return False
+        if isinstance(stmt, Load) and {name for index in stmt.index for name in index.free_vars()} & definitions:
+            return False
+        definitions.update(stmt.defines())
+    body = Body(tail)
+    return all(body.backward_cone(stmt.values).external_reads & states for stmt in tail if isinstance(stmt, Write))
+
+
+def _split_store_ok(tile: TileOp, atom_name: str) -> bool:
+    """Whether one atom's fragment coordinates address every tail load and store."""
+    atom = ATOM_REGISTRY[atom_name]
+    free = tile.place.free
+    shapes = {**tile.inputs, **tile.outputs}
+    roles = [(free[-1].name, atom.atom_n, True)]
+    if len(free) >= 2:
+        roles.append((free[-2].name, atom.atom_m, False))
+    for stmt in projection_tail(tile):
+        if not isinstance(stmt, (Load, Write)):
+            continue
+        buffer = stmt.input if isinstance(stmt, Load) else stmt.output
+        shape = getattr(shapes.get(buffer), "shape", None)
+        if any(not split_addressable(stmt.index, shape, name, extent, trailing) for name, extent, trailing in roles):
+            return False
+    return True
+
+
+def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
+    """Project direct tensor-core atoms from contraction, dtype, address, and target facts."""
+    ring = node.semiring
+    if (
+        len(node.channels) != 1
+        or ring is None
+        or tuple(operator.name for operator in ring) != ("multiply", "add")
+        or len(tile.place.free) < 2
+        or not tile.inputs
+        or not _fragment_epilogue_ok(projection_tail(tile), _fold_states(tile.op))
+        or not isinstance(node.a, Load)
+        or not isinstance(node.channels[0].b, Load)
+    ):
+        return ()
+    a_dtype = edge_dtypes(node.a, tile.inputs)[0]
+    b_dtype = edge_dtypes(node.channels[0].b, tile.inputs)[0]
+    if a_dtype != b_dtype:
+        return ()
+    step = gmem_axis_step(node.a, node.axis.name, tile.inputs)
+    return tuple(
+        name
+        for name in atoms_for(a_dtype, ctx=target)
+        if step is not None and step[0] == 1 and (step[1] == 0 or step[1] % ATOM_REGISTRY[name].atom_k == 0) and _split_store_ok(tile, name)
+    )
+
+
+def _contraction_domain(tile: TileOp, target, node) -> tuple[ReductionSchedule, ...]:
+    """Project one contraction's locally realizable direct scalar and tensor-core choices."""
     if len(node.channels) != 1:
         raise ClassicScheduleUnavailable("multi-channel contractions require tensor-core schedules")
     per_cell_reductions = _reduction_domain(tile, node) if node.axis.extent.is_static else (Reduce(),)
+    plans = (*scalar_tile_moves(), *warp_tile_moves(_warp_atoms(tile, target, node)))
     return tuple(
-        ReductionSchedule(plan, reduction)
-        for plan in scalar_tile_moves()
-        for reduction in (per_cell_reductions if not plan.is_tiled else (Reduce(),))
+        ReductionSchedule(plan, reduction) for plan in plans for reduction in (per_cell_reductions if not plan.is_tiled else (Reduce(),))
     )
 
 
@@ -117,7 +184,7 @@ def project_domains(tile: TileOp, target) -> ClassicDomains:
         else:
             node = context.index.node(site)
             choices = (
-                _contraction_domain(tile, node)
+                _contraction_domain(tile, target, node)
                 if view.contraction is not None
                 else tuple(ReductionSchedule(Tile(), reduction) for reduction in _reduction_domain(tile, node))
             )
@@ -232,8 +299,6 @@ def _removed(*args, **kwargs):
 
 
 _atom_families = _removed
-_fold_states = _removed
-_fragment_epilogue_ok = _removed
 _kstep_refusal = _removed
 _node_refusal = _removed
 _options = _removed

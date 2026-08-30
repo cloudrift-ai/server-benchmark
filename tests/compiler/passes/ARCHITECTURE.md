@@ -122,6 +122,8 @@ and edge domains, traversal-order-invariant compatible membership, computed and 
 and exact pins — without flattening a live space into test memory. The scalar-contraction boundary likewise compares
 production with the literal reference, proves the independent product is larger than the accepted set, and checks that
 a selected output tile alone produces placed materialization geometry.
+The gmem-direct tensor-core boundary repeats that proof over a typed f16 contraction and asserts that the independent
+kernel domain contains the warp inventories which compatibility joins to tensor-core node choices.
 `test_move_catalog.py` also verifies that a matching `WORK` pin selects only existing rows and an unmatched pin returns
 no row, so pin filtering cannot manufacture a worker inventory.
 `test_schedule_pool_cache.py` pins the session memo:

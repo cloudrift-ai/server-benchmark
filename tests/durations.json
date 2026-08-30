@@ -517,6 +517,7 @@
   "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-route.yaml-built]@cuda": 0.18,
   "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-route.yaml-offered]": 0.15,
   "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-route.yaml-realized]": 0.17,
+  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-computed-value-cut-mma.yaml-realized]": 5.3,
   "tests/compiler/realization/test_realization.py::test_realization[fused/gate-up-distinct-a_xfail_realized.yaml-realized]": 0.24,
   "tests/compiler/realization/test_realization.py::test_realization[fused/gate-up-shared-a.yaml-correct]@cuda": 0.16,
   "tests/compiler/realization/test_realization.py::test_realization[fused/linear-add-place-cut-sm70.yaml-built]": 26.5,

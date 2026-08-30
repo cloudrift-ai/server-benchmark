@@ -515,9 +515,11 @@ prior, never a preference written into a pass or into this policy.
    hint),
    derived record-side through the shared total lift (`_fromloop.lift_loop_op`) — equals the
    fork's, and whose spelled row (`knob.schedule_row_key`, the recording canonicalizer restricted to the schedule
-   families) equals EXACTLY one enumerated leaf. Fastest matching record first; a record that matches the identity
-   but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). A row containing `PLACE` is an exact
-   replay input, not implicit deploy evidence, until a durable receipt can bind its ordered child schedule tree.
+   families) equals EXACTLY one enumerated leaf. Branch descent projects every prefix through that same schedule-only
+   view, so an `S_*` or `H_*` feature can neither reject nor admit a recorded row. Fastest matching record first; a
+   record that matches the identity but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). A row
+   containing `PLACE` is an exact replay input, not implicit deploy evidence, until a durable receipt can bind its
+   ordered child schedule tree.
    The tier needs no prior, applies only at deployable
    `-O3` flags, and scopes records to the live card and the exact live pin regime;
 2. measured **reservoir** evidence (`Prior.evidence_pick`): the candidate that agrees with the fastest reservoir row

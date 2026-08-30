@@ -624,7 +624,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
 
     A SCHEDULE fork (the recognized ``TileOp`` root): the fork's the deploy identity (``identity_key(with_io=True)``) selects the
     records; the fastest record whose spelled row is EXACTLY one enumerated leaf
-    (``canonical_row_key`` equality — no prefix, no any-of) decides. A record that matches the
+    (``schedule_row_key`` equality — no prefix, no any-of) decides. A record that matches the
     identity but equals no leaf is DRIFT: warn loudly and decide nothing (fail-closed — the fuzzy
     acceptance this tier replaced is what deployed wrong kernels).
 
@@ -650,7 +650,8 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
             if _is_structural_option(option):
                 return None
             if isinstance(option, Fork) and not option.is_leaf:
-                if all(key in record and values_equal(key, record[key], value) for key, value in option.knobs.items()):
+                prefix = dict(schedule_row_key(option.knobs))
+                if all(key in record and values_equal(key, record[key], value) for key, value in prefix.items()):
                     found = find_recorded(option.expand(), target)
                     if found is not None:
                         return found

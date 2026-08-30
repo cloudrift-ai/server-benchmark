@@ -164,13 +164,15 @@ RASTER = Knob(
 
 
 def raster_moves() -> list[str]:
-    """The ``RASTER`` codec candidates — the flat N-fastest order ``""`` and the
-    CUTLASS/Triton-conventional grouped-M stripe of 8. Wall-time effect is shape-dependent and
-    small (±2–4% measured on sm_89: qkv −4%, gate_up fm +2.4%, most shapes neutral) while DRAM
-    traffic on wide-N shapes halves (503.6 → 261.6 MB on mlp_gate_up, the theoretical floor) — so
-    the family is enumerated for the evidence to arbitrate per shape, never a blanket policy.
-    ``gn<G>`` spellings are pin-only until a shape wants them."""
-    return ["", "gm8"]
+    """The bounded ``RASTER`` domain: flat order and measured M/N grouped stripes.
+
+    Wall-time effect is shape-dependent and small (±2–4% measured on sm_89: qkv −4%, gate_up fm
+    +2.4%, most shapes neutral) while DRAM traffic on wide-N shapes halves (503.6 → 261.6 MB on
+    mlp_gate_up, the theoretical floor). The schedule restriction keeps the transposed choices out
+    of an unparameterized enumeration; an exact ``RASTER`` parameter can select them because they
+    already belong to this fixed domain.
+    """
+    return ["", "gm8", "gn4", "gn8"]
 
 
 # --- Kernel-lowering policy knobs -------------------------------------------

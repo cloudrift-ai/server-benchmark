@@ -1528,26 +1528,18 @@ Two equivalent forms:
   `apply_knobs_env()`, which splats each entry into the corresponding `EMMY_<K>` var
   (`config.set_knob(..., overwrite=False)`). An explicit per-knob var wins over the aggregate.
 
-Pinning replaces tuner choice (the rule emits exactly that variant instead of forking) and is **authoritative** — an
-env value outside the knob's hint tuple is honored, not silently dropped (`Knob.narrow` returns `(pinned,)` regardless
-of hint membership). Downstream structural gates (divisibility, threads-per-CTA budget, TMA eligibility) still apply,
-so a structurally invalid pin yields an empty enumeration and the per-call-site fallback takes over. This lets a tile
-shape the planner wouldn't reach on its own be explored manually. The replay paths (`run --bench --golden` / `--ab`)
-can't accept that silent fallback — it would substitute the planner's own pick and turn the A/B into greedy-vs-greedy
-— so they verify realized-vs-pinned knobs on every pinned row right after the pinned compile and FAIL a mismatched
-row (`unreproducible pin … NOT benched`) instead of benching the fallback (see the integrity gates in Part 7).
+For structural and kernel-lowering knobs, pinning replaces tuner choice through `Knob.narrow`; a value outside the
+knob's hint tuple can therefore remain authoritative while downstream structural gates still apply. Classic schedule
+parameters are deliberately stricter: `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` restrict Algorithm 1's fixed
+domains and never add a member. A value absent from the applicable factor yields no schedule row. The replay paths
+(`run --bench --golden` / `--ab`) verify realized-vs-pinned knobs on every pinned row right after the pinned compile
+and fail a mismatch (`unreproducible pin … NOT benched`) instead of benching a fallback (see Part 7).
 
-A few pins are rejected outright (a clear `ValueError`) rather than silently degraded — they would otherwise lower to
-a wrong or un-launchable kernel:
-
-- A codec width must be `≥ 1` (a degenerate `b0` / `f0` / `n0` no longer parses to a silently-dropped level).
-- A warp `TILE` pin on an **fp8** atom needs a static contraction K that the inner mma K-step (`atom_k·bk`) tiles —
-  the byte-gather fragment loaders have no masked-K zero-fill family. Every other atom takes any K: the warp K-loop
-  zero-fills the fragment halves past K on its final partial step, static and symbolic alike.
-- A warp `TILE` atom must belong to the target's selected MMA family. On SM70, newer `m16n8k16` atoms and `cp.async`
-  or TMA `STAGE` pins fail explicitly; the Volta m8n8k4 atom accepts global-memory-direct or `d<n>/smem` staging.
-- A scalar `TILE` parallel block (`par_n·par_m`) is capped at the 1024-thread/CTA hardware limit.
-- A `BOOL` knob rejects an unrecognized value instead of coercing a typo (`ture`) to `False`.
+Classic schedule parameters use exact canonical spelling. Invalid widths, unavailable atoms or transports, K-step
+mismatches, and over-budget scalar tiles are absent from their static factors, so those values match no row. Persistent
+rows still pass through `ClassicScheduleCodec`, which rejects aliases, malformed values, and incompatible complete
+assignments. Outside the classic schedule families, each owning `Knob` retains its parser; for example, a `BOOL` knob
+rejects an unrecognized value instead of coercing a typo (`ture`) to `False`.
 
 ### Registered knobs
 
@@ -1646,19 +1638,21 @@ launch stripe so consecutive CTAs share the streamed B slab (L2 reuse — the fl
 M-row: `A + C + B×2` measured on the 4090's `mlp_gate_up`, 503.6 vs cuBLAS's 365.8 MB); `gn<G>` is the transpose
 (A streamed); empty = the flat N-fastest row-major order. Changes
 no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `Tile.render`, `Tile.raster_axes` the
-`grid_tile` eligibility). Enumerated `('', 'gm8')` on 2-D contraction rows; wall-time effect is small and
-shape-dependent (±2–4% measured), so golden evidence arbitrates per shape.
+`grid_tile` eligibility). The fixed 2-D contraction domain is `('', 'gm8', 'gn4', 'gn8')`; the schedule restriction
+keeps `gn4` and `gn8` out unless an exact `RASTER` parameter selects one. Wall-time effect is small and shape-dependent
+(±2–4% measured), so golden evidence arbitrates per shape.
 
 **`S_*`** (FLOAT, the `IdentityStrategy` — `passes/identity.py`) — a kernel's structural features (statement/op
 histogram + loop extents + operand dtypes). A fresh Tile fragment is temporarily lowered only for this feature read.
 Not tunable — identity facts that make a knob dict a complete variant identity (the online prior's feature vector).
 Skipped by `format_tuning_knobs`.
 
-**`FAST_MATH` / `F16_MMA_F32_ACC` / `FAST_EXP`** (BOOL, pin-only, the f16-accumulate enumeration gate /
-`lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own
-pin > the `FAST_MATH` umbrella > off (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
-`F16_MMA_F32_ACC` offers the f16-accumulate mma atom forks (`mma_m16n8k16_f16_f16` — chunked f32 register promote;
-its own pin offers on any target, the umbrella only on the consumer dies where f32-accumulate is half rate).
+**`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `FAST_EXP`** (BOOL, pin-only precision restrictions /
+`lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own pin
+> the `FAST_MATH` umbrella > off (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
+`F16_MMA_F32_ACC` admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32
+register promote), while `FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's restriction
+excludes those choices before the production traversal expands them.
 `FAST_MATH` is a meta gate over the others — `unfeatured`, never stamped/enumerated/featurized (the realized fork is
 identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token).
 

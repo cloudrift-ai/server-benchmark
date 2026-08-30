@@ -131,15 +131,23 @@ and expanding a selected staged row derives one `ResolvedStage` per edge without
 The compute-fill boundary makes the same bounded comparison with direct, `d1/smem`, and `d2/smem` edge factors. A
 warp node that needs the fill accepts only equal smem edges, while scalar support keeps direct transport in each
 independent public factor.
+The schedule-restriction boundary proves that exact `WORK` and addressed `TILE` parameters leave every independent
+factor unchanged, then compares production with Algorithm 1 under the same restriction. The test deliberately bounds
+the factor catalogs so the literal oracle remains fast. Composed GPU cases cover nested and sibling fragment
+agreements; no composed-only enumerator or post-product membership rule exists.
+The shared-constant cone fixture also pins a multi-channel contraction to the scalar tier: every channel remains in one
+serial Fold body, so independently spliced operand cones share the one legal broadcast binding.
 `test_move_catalog.py` also verifies that a matching `WORK` pin selects only existing rows and an unmatched pin returns
-no row, so pin filtering cannot manufacture a worker inventory. Precision-gated atom and raster tests cover the
-explicit exception: a legal pin-only spelling enters its addressed independent factor before complete-row filtering.
+no row, so restriction cannot manufacture a worker inventory. Precision gates restrict atom choices that remain in the
+fixed domain; exact raster parameters likewise cannot add a value outside the static raster catalog.
 `test_schedule_pool_cache.py` pins the session memo:
 sharing, hit equality, read-only payloads, and the keying that holds pin states, dtypes, extents, stores and the
 sample apart. `test_move_catalog.py` checks that independent
 roots with reversed M/N readings combine only when their tile
 widths and unit counts match on the physical output axes, and that f32 computed-A contractions retain scalar
-output-tile rows when no MMA atom applies. `test_cut_forks.py` checks fused and closed Fold-edge choices for SDPA score
+output-tile rows when no MMA atom applies. `test_cut_forks.py` proves that `040_schedule` does not call the schedule
+enumerator while an undecided cuttable seam remains, and calls it once placement is decided. It also checks fused and
+closed Fold-edge choices for SDPA score
 production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA lowering, and proves
 child-identity schedule receipts round-trip: under a pinned cut each child's stored identity decodes only its own
 kernel's schedule rows and joins the verified tier as-is, including when target-boundary drift makes the regenerated

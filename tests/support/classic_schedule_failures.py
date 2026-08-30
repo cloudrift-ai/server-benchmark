@@ -139,9 +139,7 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_attention_coverage.py::test_flash_transposed_output_matches_torch",
                 "tests/compiler/e2e/test_attention_coverage.py::test_full_self_attn_tinyllama",
                 "tests/compiler/e2e/test_attention_coverage.py::test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates",
-                "tests/compiler/e2e/test_attention_coverage.py::test_fused_causal_sdpa_sweeps_the_score_once",
                 "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_split_partition_merges_monoid_states",
-                "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_stages_the_nested_score",
                 "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_sweeps_the_score_once[cfg0]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_sweeps_the_score_once[cfg1]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_fused_single_kernel_sdpa_matches_torch[cfg0]",
@@ -169,23 +167,17 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[warp-multiply]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[warp-relu]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[warp-sigmoid]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear[scalar]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear[warp]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_symbolic_m[130]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_symbolic_m[31]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_unpinned",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_sync_fill_slab_swizzle[mma_m16n8k16_f16_f32/f2x2/k2-w2x2]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_sync_fill_slab_swizzle[mma_m16n8k16_f16_f32/f2x4/k4-w2x4]",
                 "tests/compiler/e2e/test_fused_edge.py::test_mixed_dtype_matmul_demotes_a_to_mma[scalar]",
                 "tests/compiler/e2e/test_fused_edge.py::test_mixed_dtype_matmul_demotes_a_to_mma[warp]",
                 "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_norm_from_linear_and_matches_reference[1-PLACE@a0]",
                 "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_norm_from_linear_and_matches_reference[8-PLACE]",
-                "tests/compiler/e2e/test_fused_edge.py::test_sdpa_consumer_projection_reaches_mma",
                 "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa]",
                 "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa_causal]",
                 "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa_gqa]",
                 "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_sdpa_over_symbolic_seq_len",
-                "tests/compiler/passes/test_shared_constant_cone.py::test_sibling_cones_share_one_declaration_of_a_broadcast_constant",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_rider_split_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_run_device_aliased_input_backing_replays_live",
@@ -255,8 +247,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_knob_pinning.py::test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid[f8]",
                 "tests/compiler/e2e/test_knob_pinning.py::test_unstaged_atom_lowers_gmem_direct",
                 "tests/compiler/e2e/test_knob_pinning.py::test_warp_tma_pin_refuses_oversized_box",
-                "tests/compiler/passes/test_schedule_space_separation.py::test_split_dim_store_does_not_share_an_identity",
-                "tests/compiler/passes/test_schedule_space_separation.py::test_transposed_free_extents_stamp_different_spaces",
                 "tests/compiler/passes/test_schedule_walk.py::test_a_sweep_reading_fold_offers_only_the_serial_reduce",
                 "tests/compiler/passes/test_schedule_walk.py::test_an_observed_fold_offers_only_the_serial_reduce",
                 "tests/compiler/passes/test_schedule_walk.py::test_classic_pins_require_exact_site_identities[EMMY_REDUCE@K]",
@@ -1158,7 +1148,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 1049
+REMAINING_FAILURE_COUNT = 1039
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

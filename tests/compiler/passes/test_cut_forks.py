@@ -42,6 +42,7 @@ from tests.compiler.helpers import direct_classic_leaf, requires_cuda
 
 _CTX = Context.from_target((12, 0))
 _CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
+_SCHEDULE = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule")
 
 
 def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
@@ -367,6 +368,34 @@ def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
     assert not node.op.placement_decided
     options = _CUT.rewrite(match, node)
     assert {"fuse", "cut"} <= {value for option in options for value in option.knobs.values()}
+
+
+def test_cut_enumeration_finishes_before_schedule_enumeration(monkeypatch) -> None:
+    tile = replace(_computed_value_expectation_tile(), knobs={"S_test": 1})
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
+    node = graph.nodes[tile.name]
+    match = Match(graph=graph, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    called = False
+
+    def enumerate_schedule(*args, **kwargs):
+        nonlocal called
+        del args, kwargs
+        called = True
+        return []
+
+    monkeypatch.setattr(_SCHEDULE, "schedule", enumerate_schedule)
+    with pytest.raises(RuleSkipped, match="cut enumeration precedes"):
+        _SCHEDULE.rewrite(match, node, _CTX)
+    assert not called
+
+    decided = replace(tile, placement_decided=True)
+    node.op = decided
+    with pytest.raises(RuleSkipped, match="no enumerable schedule"):
+        _SCHEDULE.rewrite(match, node, _CTX)
+    assert called
 
 
 def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() -> None:

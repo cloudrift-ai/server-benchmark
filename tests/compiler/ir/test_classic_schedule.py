@@ -234,6 +234,21 @@ def test_every_lazy_traversal_equals_the_cartesian_reference() -> None:
         assert {_schedule_signature(schedule) for schedule in enumerate_classic(problem, traversal, domains)} == reference
 
 
+def test_every_lazy_traversal_equals_algorithm_one_under_a_restriction() -> None:
+    problem = ClassicProblem(_contraction(), target=object())
+    context = ClassicScheduleContext(problem)
+    domains = _finite_domains(problem)
+
+    def restriction(schedule):
+        return schedule.kernel.raster.is_direct
+
+    reference = {_schedule_signature(schedule) for schedule in enumerate_reference(problem, domains, restriction=restriction)}
+
+    for traversal in permutations((*context.index.nodes, *context.index.edges)):
+        actual = enumerate_classic(problem, traversal, domains, restriction=restriction)
+        assert {_schedule_signature(schedule) for schedule in actual} == reference
+
+
 def test_lazy_enumerator_rejects_incomplete_or_duplicate_traversals() -> None:
     problem = ClassicProblem(_sum(), target=object())
     site = ClassicScheduleContext(problem).index.nodes[0]

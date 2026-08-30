@@ -104,8 +104,8 @@ realizes is an addressing error. Unpinned cuts and bare
 `040_schedule` is the clean-slate reconstruction boundary for classic assignments. The former `_schedule.py` was
 deleted rather than adapted. `_classic.py` now realizes direct projection, plain-reduction, scalar-contraction,
 precision-gated tensor-core, materialized-operand copy staging, computed-operand and multi-channel smem compute-fill
-staging, and kernel-global raster domains; composed contractions and sampled lazy enumeration raise
-`ClassicScheduleUnavailable` until their coherent recovery phases land. A plain reduction projects serial,
+staging, fragment-compatible composed contractions, and kernel-global raster domains; sampled lazy enumeration raises
+`ClassicScheduleUnavailable` until its coherent recovery phase lands. A plain reduction projects serial,
 cooperative and ILP choices independently from its node, while the kernel domain projects the union of their worker
 inventories; the compatibility relation is the only join between them. A scalar contraction projects its complete
 output-tile catalog as one node factor, materializes placed geometry only after selection, and uses physical-axis
@@ -113,19 +113,20 @@ claims to make independently projected sites agree. A tensor-core node domain is
 semiring, typed operands, target atom availability, fragment addressing, and the same output-tile catalog; no selected
 edge or kernel choice participates in that projection. The
 kernel raster domain is projected separately from static grid facts. The compatibility relation admits a grouped
-choice only beside a tiled contraction; symbolic grids expose only the direct choice. A valid pin-only raster spelling
-enters that same kernel factor before complete rows are filtered, rather than creating a separate path. The
+choice only beside a tiled contraction; symbolic grids expose only the direct choice. Static 2-D grids project direct,
+`gm8`, `gn4`, and `gn8`; the schedule restriction excludes the transposed values unless an exact parameter selects one.
+The
 stage domain is projected once per operand edge from target-filtered transport choices. Local support records retain
 the resolved node–edge tuples without putting slab sizes into either public factor; compatibility therefore rejects
 mixed transport assignments, and selected non-direct edges are resolved again only during materialization. The
 production traversal follows support-compatible prefixes, while bounded tests compare its complete set against the
 literal node × edge × kernel product.
-The fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete typed
-`ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization derives
-placed geometry and resolved transport facts. Authoritative pin-only spellings first enter the independently projected
-factor they address, but only when static legality admits them; pins then filter complete canonical rows and never
-create another enumerator or override target, shape, addressing, or compatibility constraints. A scoped pin that does
-not address the current kernel is inert, which lets graph-wide compilation route each exact site to its own kernel.
+The fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete
+typed `ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization
+derives placed geometry and resolved transport facts. Schedule parameters restrict Algorithm 1 without changing any
+factor or overriding target, shape, addressing, or compatibility constraints. A partial row containing scoped keys is
+inert on a kernel where all of those keys are foreign; its bare kernel values travel with it instead of accidentally
+restricting every cut piece.
 
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so `035_split_reduce` stands beside the cut, BEFORE scheduling: the
@@ -147,20 +148,26 @@ projection, an output that rounds once) sit beside the offer in `tile/_split.py`
 lone unsplit arm, a pinned `PLACE` fuse, a fully forced schedule walk — and the engine records a one-option fork as
 a decision, so a fully pinned kernel's row is keyed into the trace and the evidence exactly like a contested one.
 
-**Enumeration is the compatible subset of independent domains.** Kernel, node, and edge domains are projected from
-static facts without reading another selected choice. For a problem `p`, these domains define exactly one candidate set
-and one accepted set:
+**Enumeration is Algorithm 1 from the introduction: the restricted compatible subset of independent domains.**
+Kernel, node, and edge domains are projected from static problem facts without reading parameters or another selected
+choice. For problem `p` and schedule-parameter restriction `r`, there is exactly one candidate set and one result:
 
     D(p) = K(p) × ∏ N(p, node) × ∏ E(p, edge)
-    S(p) = {assignment ∈ D(p) | accepts(p, assignment)}
+    S(p, r) = {assignment ∈ D(p) | r(assignment) ∧ accepts(p, assignment)}
 
 There is no production-specific product and no second notion of membership. A production traversal may use static
-support to avoid materializing an incompatible prefix, but it must enumerate exactly `S(p)`; traversal order can change
-only evaluation cost. Every leaf crosses the complete compatibility relation once at the strict codec boundary, then
-carries that accepted typed assignment and canonical row through search and materialization. Downstream reads never
-repeat the compatibility walk. Bounded spaces are exhaustively compared with the literal Cartesian reference. That
-pruning matters because on flash attention the unconstrained product is 8.9e6 against 13,280 compatible rows, and on
-an EXL3 coded linear 5.3e12 against 19,407,312.
+support and the restriction to avoid materializing an excluded or incompatible prefix, but it must enumerate exactly
+`S(p, r)`; traversal order can change only evaluation cost. Every leaf crosses the complete compatibility relation
+once at the strict codec boundary, then carries that accepted typed assignment and canonical row through search and
+materialization. Downstream reads never repeat the compatibility walk. Bounded spaces are exhaustively compared with
+the literal Cartesian reference. That pruning matters because on flash attention the unconstrained product is 8.9e6
+against 13,280 compatible rows, and on an EXL3 coded linear 5.3e12 against 19,407,312.
+
+Placement is the outer enumeration. `030_cut` projects the fused/cut choices and applies the `PLACE` restriction; each
+realized choice produces zero or more fresh kernel problems. Only after a kernel has no remaining cuttable seam, or
+its placement has been decided, may `040_schedule` evaluate `S(p, r)`. A fresh piece that enters the current sweep
+after `030_cut` is therefore skipped by `040_schedule` unconditionally until the next cut pass sees it. Schedule
+refusal is never used to discover that cut enumeration should have happened first.
 
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated
@@ -176,18 +183,14 @@ a bound and not a legality: the reduce catalog drops a band wider than the axis 
 fine — a pin still gets such a band; the drop only keeps a short axis from enumerating the whole band catalog to no
 effect).
 
-**A pin is authoritative over the VALUE, not over the catalog.** A site's spelling carries no worker widths — they are
-read off `WORK` — so one `TILE` pin names a different plan under each inventory, and it may well name a plan no ladder
-generates: fixing widths no catalog predicts is what a pin is for. A pin therefore REPLACES the site's candidates with
-what it names at each inventory the site can spell it against (the pinned one, when `WORK` is pinned too). An option
-the pin does not name is not offered, and its refusals are TWO-LAYERED: a pin whose named tier the node's algebra and
-operand dtypes do not select drops onto the guardrail (a graph-wide pin fans out to siblings it cannot mean; `REDUCE`
-has no such layer because it has no choice of tier), while a pin whose tier is selected but whose named plan cannot
-realize — an atom these fragments cannot bind, an inventory over the CTA thread budget, a band the fold has no
-geometry for — raises the recorded refusal rather than silently emptying the enumeration. `WORK` is different again:
-it is kernel-global and cannot be narrowed at any one site, so it lives as a parsed fact beside the walk — an option
-claiming a different inventory is refused where it is offered, and a walk that never claimed the pinned inventory is
-refused at the leaf, which leaves the term unmapped.
+**A schedule pin is a restriction, never a domain constructor.** `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` pins
+compare their exact canonical values with the applicable factors in Algorithm 1. They do not replace a factor or add a
+value the static catalog did not project. Precision gates are restrictions of the same enumeration: their atom choices
+remain in the fixed node domain, but a disabled gate excludes them before a production prefix is expanded. A malformed
+or unavailable exact value therefore names no member of `D(p)` and is refused; pinning cannot manufacture a worker
+inventory, tile, transport, or raster value. With only bare schedule pins, they restrict every applicable kernel. Once
+the parameter set contains scoped schedule pins, its bare kernel values travel with that partial row: they restrict a
+kernel where at least one scoped key resolves and are inert on kernels where every scoped key is foreign.
 
 **The walk IS the fork tree.** A branch holds the nodes still to decide, the context they must honour, and the row
 prefix decided so far; nothing below it exists until it expands. A level with one option is collapsed, so the fork
@@ -204,7 +207,8 @@ transport families: the copy transports
 the fp8 byte slabs (a 1-byte operand staged as raw bytes and converted at the drain — the same `d<n>` fork family, no
 new knob), and the smem compute fill, which is MANDATORY for a computed operand, a multi-channel product, or a
 materialized A the atom cannot bind (only the fill's typed slab store converts — byte transports move raw bits), so it
-has no gmem-direct sibling and a `STAGE` pin can only choose its depth. A NESTED-reduce B edge (the streamed
+has no gmem-direct sibling and a `STAGE` pin can only choose its depth. This requirement belongs to warp choices; the
+scalar contraction tier evaluates every channel serially and keeps direct edges. A NESTED-reduce B edge (the streamed
 computed-B decode cone) rides the same mandatory multi-channel fill — the fill evaluates every non-materialized B
 channel into its slab, nested reduce included — while a nested A, or a nested B on a single-channel node, keeps the
 refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. The fp8 (k32)
@@ -223,10 +227,11 @@ axis disagreement.
 **The fragment seam is a compatibility decision.** A fragment edge joins a consumer contraction to the one contraction
 producing its computed fragment operand — nested in its A cone, or a sibling in the enclosing fold's derived step
 (flash's PV reading the score). The walk decides the two at different steps, so each endpoint's option stakes a seam
-entry the context reconciles whichever side arrives second: an untiled producer composes with anything (it is
-evaluated elementwise into the consumer's synchronous slab); a TILED producer produces fragments, so it composes only
-with a warp consumer over an smem compute fill whose atom family matches and whose slab chunk the producer's
-single-unit N tile fills exactly. The paired producer/consumer register bound is NOT cross-site — the producer's
+entry the context reconciles whichever side arrives second: an untiled nested producer can be evaluated elementwise
+into the consumer's synchronous slab, but an untiled sibling-step result cannot be replayed outside its carrier stream.
+A TILED producer produces fragments, so it composes only with a warp consumer over an smem compute fill whose atom
+family matches and whose slab chunk the producer's single-unit N tile fills exactly. The paired producer/consumer
+register bound is NOT cross-site — the producer's
 fragment block is a function of the consumer's own stage — so it filters at option construction. Derived sites (the
 synthesized PV) join the one walk in `tile/_tree.py`; a derived unit-marker contraction inherits its enclosing fold's
 reduction domain, a prescan fact, never a rewritten tree.
@@ -261,12 +266,11 @@ the swizzle, so the flat `""` is the one honest value there and a live pin drops
 The row spells the codec value; the kernel materializer's grid_tile seal applies it where the 2-D `(m, n)` block
 grid exists.
 
-Because options are a function of the node and the live pins alone, a node that offers nothing offers it under every
-context: one pass over the tree says whether the term has a schedule at all. Past that check every node still has an
-option that composes with anything (the per-cell tile, the serial fold), so no branch can expand to nothing and promise
-leaves it does not have — a site pin that would empty a selected tier's offer raises there instead. A `WORK` pin can
-only be answered once the walk reaches a leaf, and a bare site pin can still be emptied by a sibling site's geometry
-(the fragment seam). A term with no schedule leaves the tile unmapped for the scalar materialization path.
+Because options are a function of static problem facts alone, a node that projects an empty factor does so under every
+restriction and context. Otherwise Algorithm 1 owns emptiness: a schedule parameter may exclude every member, and
+compatibility may reject every cross-factor combination. Both outcomes produce no schedule leaf; neither one changes
+a factor or falls back to an unrelated row. A term with no schedule remains unmapped for the scalar materialization
+path.
 
 A row is the kernel's WHOLE identity, so a family the walk decided nowhere is spelled at its declared OFF rather than
 left absent — otherwise two rows of one kernel would carry different family vocabularies and the evidence hierarchy
@@ -286,11 +290,11 @@ fetches a finished lowering (io rebound through `Stmt.rename_buffers`) before th
 `Context.kernel_cache` (nothing installs it by default), greedy-only (tune strips it, pricing probes
 strip it), multi-kernel origins poison their key. A twin program compiles ~750x faster than cold.
 
-**The prescan and the sampled draw.** The prescan — each node's option list — is computed fresh per
-`schedule()` call: options are a pure function of the node and the live pins. `Fork.pool_id` stamps the
-variant key, hints, pins, and sample identity; it keys the greedy decision memo and seeds the budgeted
-descent, with drift failing safe into a re-decide. Under `ctx.pool_sample` the walk's leaf stream is
-reservoir-sampled and the exact pool size is reported through `sample.totals`.
+**The domains and pool identity.** Each `schedule()` call projects fixed independent domains from the problem, then
+applies the live schedule restriction during Algorithm 1. `Fork.pool_id` stamps the deploy identity, target, ordered
+free-axis extents, exact codec vocabulary, schedule-parameter fingerprint, and split receipt; it keys the greedy
+decision memo without weakening any enumeration input. Sampled lazy enumeration remains behind the explicit classic
+reconstruction boundary.
 
 **Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
 alternative's latency. A cut's — and a cross-CTA split's — cost is the minimum sum over the kernels it produces,
@@ -479,9 +483,9 @@ that canonical input:
   them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
   unmapped TileOps, so further legal cuts and schedules use the same ordinary passes; a pinned cut therefore recurses
   exactly until a piece schedules (a scheduled piece is placed and never re-cut). A piece minted by a structural
-  apply joins the sweep after `030_cut`'s batch, so it reaches `040_schedule` first — when a pinned schedule REFUSES
-  there and the kernel's placement is undecided with a cuttable seam remaining, the schedule pass defers instead of
-  raising, and the next sweep's cut decomposes the kernel (each terminal piece answers the pin itself).
+  apply joins the sweep after `030_cut`'s batch, so it reaches `040_schedule` first. If its placement is undecided and
+  a cuttable seam remains, the schedule pass skips it without probing schedule parameters; the next sweep's cut pass
+  explores its placement first.
 
 - **The cross-CTA reduce split is not currently realized.** Splitting the reduce axis across CTAs into a partial +
   finalize is a *structural* alternative — it changes which kernels exist — but it used to be decided as a `REDUCE`
@@ -527,17 +531,17 @@ the consumer GeForce dies (sm_86/89/120)
 f32-accumulate HMMA runs at HALF the f16-accumulate rate, so this atom keeps the whole mma chain on the full-rate f16
 accumulator and the lowering promote-folds the packed f16 partials into f32 shadow fragments per K chunk
 (`FragmentPromote` — the staged bk slab is the cadence; gmem-direct promotes every `_atom._F16ACC_STEPS` steps plus a
-final fold). Precision-gated enumeration, off by default —
-the precise `EMMY_F16_MMA_F32_ACC` pin is authoritative on any target, else the `EMMY_FAST_MATH` umbrella offers it on
-the consumer-die ccs only (`_F16ACC_CCS`); a `TILE` pin naming the atom bypasses the gate — pins are authoritative.
+final fold). Precision-gated enumeration, off by default — the precise `EMMY_F16_MMA_F32_ACC` parameter admits it on
+any target where the atom is statically available, while the `EMMY_FAST_MATH` umbrella admits it on the consumer-die
+ccs only (`_F16ACC_CCS`). A `TILE` restriction must still compose with that precision restriction.
 The realized fork is identified by the `TILE`
 codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync has no bf16-accumulate form).
 
 **The move catalog** (`search/space.py`) supplies the static choices projected into the classic domains.
 `scalar_tile_moves()` is the legality-guarded scalar register-tile product (`par × reg`, `block_threads ≤ 1024`) with
 the per-cell `""` tile as one more member; the scheduler projects it alongside the warp, reduction, and transport
-catalogs. Every accepted leaf is a complete `ClassicSchedule` with exact `NodeId` and `EdgeSite` keys. Environment
-pins narrow those exact domains before the complete compatibility relation is checked.
+catalogs. Every accepted leaf is a complete `ClassicSchedule` with exact `NodeId` and `EdgeSite` keys. Schedule
+parameters restrict complete assignments without changing those exact domains.
 The producer band is the fourth level (`""` = uniform SIMT — since step 7 a resolved band
 is spelled in `WORK`'s `+p<n>` suffix, never a per-row `WSPEC` key) — offered only on a warp row over a
 resolved **TMA** stage without a cross-CTA split, and resolved/thread-budget-gated at materialization
@@ -558,11 +562,9 @@ channel's raw state to its `ws[comp, ksplit, *cell]` slice — no ⊗-combine in
 the partial — and the deferred finalize folds every component before applying the combine projection once.
 Multi-channel products still have no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge
 is the anticipated
-`RoleKind` extension. `TILE` pins narrow by matching each site's own catalog through the exact codec spelling: an
-explicit `TILE@n<ordinal>` pin names one site and is authoritative there, while a bare pin
-fans out to every eligible site and cannot say which it meant — so it narrows where it matches and leaves a site it
-names nothing at alone (`Knob.narrow`'s no-match-keeps-full-list). A bare pin that named nothing at a site decides
-nothing there, precision gates included. Staging additionally
+`RoleKind` extension. `TILE` parameters match each site's own catalog through the exact codec spelling: an explicit
+`TILE@n<ordinal>` parameter restricts one site, while a bare parameter restricts every applicable site. A value absent
+from an applicable factor leaves no assignment rather than changing that factor. Staging additionally
 requires the staged BUFFER dtypes to match the atom's operand dtypes — a slab fill byte-copies and cannot
 convert; gmem-direct fragment loads convert
 per element and keep the warp tier either way. To keep that gate from silently disabling staging on real models,

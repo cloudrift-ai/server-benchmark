@@ -88,14 +88,16 @@ materialization reuse that row and typed assignment instead of repeating the com
 schedule remains a validating public boundary.
 
 Kernel, node, and edge domains are independent projections of static offers; none reads another selected choice.
-Their Cartesian product is the definition of the candidate space. Static support retains derived physical-axis and
-fragment-seam facts outside the choice values, and `ClassicScheduleContext.accepts` filters the complete product by
-that one compatibility relation. Domain membership and local-support lookup use immutable indexes built with the
-context; validating a leaf must never linearly scan a factor whose choices are already finite and hashable. The literal
-reference enumerator remains the oracle. The production Fold walk may prune incompatible prefixes, but bounded-product
-checks and traversal-order tests require every traversal order to produce the same compatible subset. The lowering-side
-implementation is currently being rebuilt behind `_classic.ClassicScheduleUnavailable`; the semantic model and this
-product contract remain the boundary the reconstruction must satisfy.
+Their Cartesian product is the definition of the candidate space. Algorithm 1 takes a separate
+`ScheduleRestriction` parameter and returns exactly the assignments that satisfy both that predicate and
+`ClassicScheduleContext.accepts`; a restriction cannot mutate a domain or introduce a choice. Static support retains
+derived physical-axis and fragment-seam facts outside the choice values. Domain membership and local-support lookup
+use immutable indexes built with the context; validating a leaf must never linearly scan a factor whose choices are
+already finite and hashable. The literal reference enumerator remains the oracle. The production Fold walk may prune
+restricted or incompatible prefixes, but bounded-product checks and traversal-order tests require every traversal
+order to produce the same result. The lowering-side implementation is currently being rebuilt behind
+`_classic.ClassicScheduleUnavailable`; the semantic model and this product contract remain the boundary the
+reconstruction must satisfy.
 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not

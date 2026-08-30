@@ -483,13 +483,14 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
 
     Asserted structurally, because it is invisible to a numerics check: the score's slabs exist and
     no gmem fragment loader is CALLED (the helper definitions always ship)."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     _pin_sdpa_reductions(monkeypatch)
     monkeypatch.setenv("EMMY_WORK", "w2x1")
     monkeypatch.setenv("EMMY_TILE@N3", "mma_m16n8k16_f16_f32/f2x2")
     monkeypatch.setenv("EMMY_TILE@N4", "mma_m16n8k16_f16_f32/f2x2")
     for edge in (0, 1):
-        monkeypatch.setenv(f"EMMY_STAGE@N3.E{edge}", "d1/smem")
-        monkeypatch.setenv(f"EMMY_STAGE@N4.E{edge}", "d1/smem-async")
+        monkeypatch.setenv(f"EMMY_STAGE@N3.E{edge}", "d1/smem-async")
+        monkeypatch.setenv(f"EMMY_STAGE@N4.E{edge}", "d1/smem")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))

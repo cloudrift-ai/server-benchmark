@@ -15,9 +15,10 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, out
 PATTERN = [Pattern("root", TileOp)]
 
 
-def _pin(tile: TileOp, seams) -> tuple[tuple, str, bool] | None:
-    """The authoritative placement the live PLACE pins spell for THIS kernel, or ``None``.
+def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | None:
+    """The cut parameter restriction spelled by live PLACE pins, or ``None``.
 
+    This restriction is consumed entirely by the cut pass before classic schedule enumeration.
     Returns ``(seams, value, scoped)``: every scoped ``PLACE@site=cut`` pin that resolves on this
     kernel joins ONE composed decision — the seams all live on this kernel's tree, so one
     realization cuts them together and the pieces stay decided, which is what lets a pinned
@@ -106,7 +107,7 @@ def rewrite(match: Match, root: Node, ctx=None):
 
     renamed = output_map(root)
     match.output = renamed
-    pinned = _pin(tile, seams)
+    pinned = _placement_restriction(tile, seams)
     if pinned is not None:
         chosen, value, scoped = pinned
         if value == "fuse":

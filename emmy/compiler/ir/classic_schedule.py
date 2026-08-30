@@ -8,7 +8,7 @@ search state, and materialization data do not belong here.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import product
 from types import MappingProxyType
@@ -201,6 +201,10 @@ class ClassicSchedule:
     def __reduce__(self):
         """Rebuild read-only mappings after process transport."""
         return type(self), (self.kernel, dict(self.nodes), dict(self.edges))
+
+
+# A parameter predicate that restricts complete classic assignments during enumeration.
+ScheduleRestriction = Callable[[ClassicSchedule], bool]
 
 
 @dataclass(frozen=True)
@@ -843,6 +847,16 @@ def cartesian_assignments(
 ) -> Iterator[tuple[ClassicSchedule, Acceptance]]:
     """Enumerate the literal independent-domain product and each membership verdict."""
     context = ClassicScheduleContext(problem, domains)
+    for schedule in _cartesian_product(problem, context, domains):
+        yield schedule, context.accepts(schedule)
+
+
+def _cartesian_product(
+    problem: ClassicProblem,
+    context: ClassicScheduleContext,
+    domains: ClassicDomains | None,
+) -> Iterator[ClassicSchedule]:
+    """Enumerate ``K(p) × ∏ N(p, node) × ∏ E(p, edge)`` without filtering."""
     node_domains = tuple(node_domain(problem, site, context.views[site], domains) for site in context.index.nodes)
     edge_domains = tuple(edge_domain(problem, edge, domains) for edge in context.index.edges)
     for kernel, node_values, edge_values in product(
@@ -850,18 +864,24 @@ def cartesian_assignments(
         product(*node_domains),
         product(*edge_domains),
     ):
-        schedule = ClassicSchedule(
+        yield ClassicSchedule(
             kernel,
             dict(zip(context.index.nodes, node_values, strict=True)),
             dict(zip(context.index.edges, edge_values, strict=True)),
         )
-        yield schedule, context.accepts(schedule)
 
 
-def enumerate_reference(problem: ClassicProblem, domains: ClassicDomains | None = None) -> Iterator[ClassicSchedule]:
-    """Yield the compatible subset of the literal Cartesian product."""
-    for schedule, verdict in cartesian_assignments(problem, domains):
-        if verdict:
+def enumerate_reference(
+    problem: ClassicProblem,
+    domains: ClassicDomains | None = None,
+    restriction: ScheduleRestriction | None = None,
+) -> Iterator[ClassicSchedule]:
+    """Algorithm 1: restrict the literal product, then retain compatible assignments."""
+    context = ClassicScheduleContext(problem, domains)
+    for schedule in _cartesian_product(problem, context, domains):
+        if restriction is not None and not restriction(schedule):
+            continue
+        if context.accepts(schedule):
             yield schedule
 
 
@@ -869,6 +889,7 @@ def enumerate_classic(
     problem: ClassicProblem,
     traversal: Sequence[NodeSite | EdgeSite] | None = None,
     domains: ClassicDomains | None = None,
+    restriction: ScheduleRestriction | None = None,
 ) -> Iterator[ClassicSchedule]:
     """Lazily enumerate complete assignments in any site order.
 
@@ -886,7 +907,7 @@ def enumerate_classic(
         if position == len(order):
             for kernel in kernel_domain(problem, domains):
                 schedule = ClassicSchedule(kernel, nodes, edges)
-                if context.accepts(schedule):
+                if (restriction is None or restriction(schedule)) and context.accepts(schedule):
                     yield schedule
             return
         site = order[position]
@@ -969,6 +990,7 @@ __all__ = [
     "ProjectionSchedule",
     "Reduction",
     "ReductionSchedule",
+    "ScheduleRestriction",
     "Refusal",
     "SiteIndex",
     "classify",

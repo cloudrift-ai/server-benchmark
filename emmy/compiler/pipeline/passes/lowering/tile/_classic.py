@@ -298,9 +298,13 @@ def _warp_atoms(tile: TileOp, target, node, tile_pins: tuple[tuple[str, str], ..
         return ()
     offered, pin_only = _atom_families(tile, target, node, tail)
     site_key = f"TILE@{site.id.spell()}"
-    pinned_atoms = tuple(
-        atom for atom in pin_only if any(key in ("TILE", site_key) and value.split("/", 1)[0] == atom for key, value in tile_pins)
-    )
+    addressed_pins = tuple(value for key, value in tile_pins if key in ("TILE", site_key))
+    for value in addressed_pins:
+        atom = ATOM_REGISTRY.get(value.split("/", 1)[0])
+        if atom is not None and not atom.available_on(target):
+            cc = target.compute_capability
+            raise ValueError(f"atom {atom.name} requires target feature {atom.target_feature}, which is unavailable on sm_{cc[0]}{cc[1]}")
+    pinned_atoms = tuple(atom for atom in pin_only if any(value.split("/", 1)[0] == atom for value in addressed_pins))
     return tuple(dict.fromkeys((*offered, *pinned_atoms)))
 
 

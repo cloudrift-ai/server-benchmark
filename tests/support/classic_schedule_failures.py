@@ -93,8 +93,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_m_tma-700]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_mn_gmem-31]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_mn_gmem-700]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_m_structure[smem-async]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_m_structure[smem-tma]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-128-128-f16-False]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-128-128-f16-True]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-128-128-f32-False]",
@@ -126,17 +124,7 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_warp_specialize_deadlock.py::test_mlp_slice_completes_and_matches",
                 "tests/compiler/ir/test_dynamic_shapes.py::test_cuda_symbolic_linear_traced_and_run",
                 "tests/compiler/passes/test_fp8_mma.py::test_w8a8_dynamic_per_token_amax_cuda",
-                "tests/compiler/passes/test_fp8_operand_binding.py::test_fp8_b_matmul_reaches_warp_tier_cuda",
                 "tests/compiler/passes/test_fp8_staged.py::test_canonical_byte_b_and_splitk_compose_cuda",
-                "tests/compiler/passes/test_fp8_staged.py::test_k32_staged_bit_identical_to_gmem_direct_cuda",
-                "tests/compiler/passes/test_fp8_staged.py::test_w8a16_staged_bit_identical_to_gmem_direct_cuda",
-                "tests/compiler/passes/test_volta_mma.py::test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll",
-                "tests/compiler/passes/test_volta_mma.py::test_sm70_rejects_a_pinned_modern_atom",
-                "tests/compiler/passes/test_volta_mma.py::test_sm70_rejects_a_pinned_newer_stage[d1/smem-async-cp.async requires sm_80]",
-                "tests/compiler/passes/test_volta_mma.py::test_sm70_rejects_a_pinned_newer_stage[d1/smem-tma-TMA requires sm_90]",
-                "tests/compiler/passes/test_volta_mma.py::test_sm70_sync_copy_composes_ring_and_register_pipelines",
-                "tests/compiler/passes/test_volta_mma.py::test_sm70_sync_copy_stages_fragments_without_newer_instructions[False]",
-                "tests/compiler/passes/test_volta_mma.py::test_sm70_sync_copy_stages_fragments_without_newer_instructions[True]",
             )
         ),
     ),
@@ -1170,7 +1158,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 1061
+REMAINING_FAILURE_COUNT = 1049
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

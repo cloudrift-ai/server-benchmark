@@ -213,22 +213,43 @@ class GoldenRecord:
     def pool_group(self) -> tuple:
         """Which candidate pool this record belongs to — the ONE place that question is answered, so every
         consumer that groups goldens groups them the same way. (A grouping key over RECORDS —
-        distinct from the scheduler's session pool digest, ``_schedule._State.pool_id``.)
+        distinct from the scheduler's per-compile ``pool_id`` stamp.)
 
-        Derived today, because nothing records it: ``enumerate_graph(self.target_program, ctx)`` under
-        ``self.pin_map`` reads the card, the wire the target specializes from, which node it selects, the
-        bindings and the pins, and records agreeing on all five run the same enumeration. Two consequences
-        worth knowing before relying on it. It is SUFFICIENT, not necessary — it never fuses two pools that
-        differ, but it splits two recordings of one program made in different sessions, whose node ids differ
-        and whose pools do not. And it keys on what the enumeration READS, never on what it produced, so it
-        does not go stale when the scheduler changes.
+        Composed from the target kernels' identity keys — the one identity function — around the
+        card and the record's pin regime: per fused kernel, the structural variant key
+        (``identity_key(with_io=True, with_knobs=True)`` — cluster siblings share a schedule
+        space, so they rightly share a pool) folded with the symbolic-dim hints the enumeration
+        sizes against. Node-id spelling never enters, so two recordings of one program made in
+        different sessions FUSE — the wire-digest key this replaces split them — and any fact
+        that changes the kernels shows up in their keys, so the key stays sufficient. It keys on
+        what the enumeration READS, never on what it produced, so it does not go stale when the
+        scheduler changes; bindings stay out (they bind replay values, not the space).
 
-        When a group identity is recorded with the golden instead, this property returns it and its callers
-        do not change."""
-        wire = self.loop_wire if self.loop_wire is not None else self.program_wire
-        kind = "loop" if self.loop_wire is not None else "prog"
-        digest = hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest()
-        return (self.gpu_name, tuple(self.compute_cap), kind, digest, tuple(self.origins), tuple(self.bindings), self.pin_key)
+        Best-effort like every record-side derivation: a target the current compiler no longer
+        lowers falls back to the persisted wire's digest, so a stale record still groups
+        deterministically (alone) instead of breaking a fit."""
+        from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+
+        try:
+            _lowered, nodes = _target_kernel_nodes(self)
+            kernels = tuple(
+                sorted(
+                    digest(
+                        op.identity_key(with_io=True, with_knobs=True) or "",
+                        tuple(
+                            d.hint or DEFAULT_SEQ_HINT
+                            for t in (*op.inputs.values(), *op.outputs.values())
+                            for d in t.shape
+                            if not d.is_static
+                        ),
+                    )
+                    for op in (node.op for node in nodes)
+                )
+            )
+        except Exception:  # noqa: BLE001 — a stale record must never break the fit's dataset build
+            wire = self.loop_wire if self.loop_wire is not None else self.program_wire
+            kernels = (hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest(), tuple(self.origins))
+        return (self.gpu_name, tuple(self.compute_cap), kernels, self.pin_key)
 
     @cached_property
     def pin_key(self) -> tuple:

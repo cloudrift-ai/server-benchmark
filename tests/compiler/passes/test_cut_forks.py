@@ -570,3 +570,25 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -
     document["configs"][0]["realizations"][0]["identity"] = "0" * 64
     validate_golden_file(document)
     assert _pins_live({"PLACE@a3": "cut"}), "a receipt's routing pins are replay context, never a dead env regime"
+
+
+def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
+    """``pool_group`` composes the target kernels' identity keys, so two recordings of ONE
+    program whose node ids differ (separate recording sessions) fuse into one enumeration
+    group — the wire digest this replaced split them — while a different pin regime still
+    keys apart."""
+    fields = _receipt_fields()
+    respelled = _sdpa_graph(False)
+    for nid in [n for n in respelled.nodes if n not in respelled.inputs]:
+        respelled.rename_node(nid, f"session2_{nid}")
+    twin_fields = {
+        **fields,
+        "program_wire": graph_to_wire(respelled),
+        "origins": tuple(f"session2_{o}" for o in fields["origins"]),
+    }
+    a = GoldenRecord(knobs={}, **fields)
+    b = GoldenRecord(knobs={}, **twin_fields)
+    assert a.pool_group == b.pool_group, "node-id spelling must not split an enumeration group"
+
+    unpinned = GoldenRecord(knobs={}, **{**fields, "pins": ()})
+    assert unpinned.pool_group != a.pool_group, "the pin regime is a group-key term"

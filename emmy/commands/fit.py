@@ -238,11 +238,11 @@ def build_golden_groups(
     key_counts: dict[str, int] = {}
     matched = 0
     pools: dict[tuple, _Pool] = {}  # packed-pool identity -> the pool and every golden found in it
-    # ONE Context per card: the per-card facts are identical across its goldens, and sharing the
-    # instance shares its schedule pool cache — the std / parity / fm siblings of one shape
-    # re-enumerate byte-identical pools (490 matmul goldens collapse to ~313 distinct), so the
-    # dataset build pays each pool once. The fm-pinned enumeration keys apart on its own: the
-    # precision gate rides the pool key's pin fingerprint.
+    # ONE Context per card: the per-card facts are identical across its goldens. Cross-record
+    # enumeration dedup is the GROUPING's job — ``pool_group`` composes the target kernels'
+    # identity keys, so the std / parity siblings of one shape (and cross-session re-recordings)
+    # land in one group and the dataset build pays each pool once; the fm-pinned enumeration
+    # keys apart on its own, since the record's pin regime is a group-key term.
     ctxs: dict[tuple, Context] = {}
     # The keep-sets are precomputed BEFORE the loop because a bucket's obligation spans the whole
     # corpus: the pool a golden opens may also carry a later golden's recorded row.

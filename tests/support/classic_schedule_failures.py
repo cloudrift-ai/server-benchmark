@@ -229,9 +229,7 @@ RECOVERY_CLUSTERS = (
         nodeids=frozenset(
             (
                 "tests/compiler/e2e/test_knob_pinning.py::test_flat_output_sweep_lowers_with_its_axis_bound",
-                "tests/compiler/e2e/test_knob_pinning.py::test_output_sweep_declines_the_warp_tier",
                 "tests/compiler/e2e/test_knob_pinning.py::test_scalar_cpasync_pin_refuses_odd_stride",
-                "tests/compiler/e2e/test_knob_pinning.py::test_sgemm_inner_reduce_is_unrolled",
                 "tests/compiler/e2e/test_knob_pinning.py::test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid[f32]",
                 "tests/compiler/e2e/test_knob_pinning.py::test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid[f8]",
                 "tests/compiler/e2e/test_knob_pinning.py::test_unstaged_atom_lowers_gmem_direct",
@@ -356,7 +354,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 247
+REMAINING_FAILURE_COUNT = 245
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

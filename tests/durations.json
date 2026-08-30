@@ -238,6 +238,7 @@
   "tests/compiler/e2e/test_fused_edge.py::test_sdpa_consumer_projection_reaches_mma@cuda": 9.3,
   "tests/compiler/e2e/test_knob_pinning.py::test_output_sweep_declines_the_warp_tier": 0.06,
   "tests/compiler/e2e/test_knob_pinning.py::test_sgemm_inner_reduce_is_unrolled": 0.05,
+  "tests/compiler/e2e/test_knob_pinning.py::test_warp_tma_pin_refuses_oversized_box": 35.7,
   "tests/compiler/e2e/test_matmul_coverage.py::test_bf16_operands_stage_via_cp_async": 10.26,
   "tests/compiler/e2e/test_matmul_coverage.py::test_bf16_operands_stage_via_cp_async@cuda": 10.26,
   "tests/compiler/e2e/test_matmul_coverage.py::test_computed_a_symbolic_k_reaches_warp": 0.06,

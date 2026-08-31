@@ -53,15 +53,6 @@ RECOVERY_CLUSTERS = (
         reason="restore tensor-core atoms, staging, and edge transport",
         nodeids=frozenset(
             (
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-128-128-f16-False]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-128-128-f16-True]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-128-128-f32-False]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-128-128-f32-True]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-128-132-f32-False]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-128-132-f32-True]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-128-136-f32-False]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[128-256-128-f16-False]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_coverage[256-256-128-f32-False]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_epilogue_coverage[bias-dynamic]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_epilogue_coverage[causal-dynamic]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_matmul_mma_epilogue_coverage[causal-static]",
@@ -308,7 +299,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 199
+REMAINING_FAILURE_COUNT = 190
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

@@ -171,8 +171,6 @@ RECOVERY_CLUSTERS = (
             (
                 "tests/compiler/backend/test_source_determinism.py::test_kernel_source_identical_across_processes",
                 "tests/compiler/cli/test_eval.py::test_offer_audit_flags_unrealized_entries_and_fall_through",
-                "tests/compiler/cli/test_run.py::test_run_ab_bench_shows_pinned_row",
-                "tests/compiler/cli/test_run.py::test_run_ab_bench_unmatched_pin_fails_loudly",
                 "tests/compiler/cli/test_run.py::test_run_code_fp16_matmul_accuracy",
             )
         ),
@@ -244,7 +242,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 135
+REMAINING_FAILURE_COUNT = 133
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

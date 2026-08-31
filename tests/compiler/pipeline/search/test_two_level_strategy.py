@@ -41,6 +41,18 @@ from tests.compiler.helpers import run_inner_reward, run_two_level
 # backend gives a stable but arbitrary per-variant signal).
 _PATIENCE = 8
 
+_CHILD_WINNER = {
+    "WORK": "t32",
+    "TILE@n0": "f1",
+    "STAGE@n0.e0": "",
+    "STAGE@n0.e1": "",
+}
+
+
+def _is_child_winner(knobs) -> bool:
+    """Whether a row is the early non-default child schedule priced by the fake backends."""
+    return all(knobs.get(key) == value for key, value in _CHILD_WINNER.items())
+
 
 @pytest.fixture(autouse=True)
 def _force_target(monkeypatch, tmp_path):
@@ -92,14 +104,14 @@ class _RouteBackend(_CountingBackend):
         if len(cuda) > 1:
             route = tuple(node.op.identity_key(with_io=True, with_knobs=True) for node in cuda)
             first = cuda[0].op.knobs
-            fast_route = first.get("WORK") == "t16x8" and first.get("STAGE@n0.e0") == "d1/smem-async"
+            fast_route = _is_child_winner(first)
             if fast_route:
                 self.measured_route = route
             us = 1.0 if fast_route else 20.0
         else:
             knobs = cuda[0].op.knobs
             fused = knobs.get("S_n_accum") == 1.0 and knobs.get("S_pw_add") == 1.0
-            us = 100.0 if fused else (0.25 if knobs.get("WORK") == "" and knobs.get("STAGE@n0.e0") == "" else 10.0)
+            us = 100.0 if fused else (0.25 if _is_child_winner(knobs) else 10.0)
         per = [
             LaunchTime(idx=i, kernel_name=getattr(node.op, "kernel_name", "k"), time_ms=us / 1000.0, samples=(us / 1000.0,))
             for i, node in enumerate(cuda)
@@ -113,7 +125,7 @@ class _ChildScheduleBackend(_CountingBackend):
     def benchmark(self, graph, num_iters="auto") -> BenchmarkResult:  # noqa: ARG002
         self.calls += 1
         (cuda,) = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
-        fast = cuda.knobs.get("WORK") == "t16x8" and cuda.knobs.get("STAGE@n0.e0") == "d1/smem-async"
+        fast = _is_child_winner(cuda.knobs)
         us = 0.25 if fast else 10.0
         return BenchmarkResult(
             time_ms=us / 1000.0,
@@ -264,12 +276,10 @@ def test_persisted_unscheduled_tile_child_tunes_and_replays_in_parent_cut(tmp_pa
     assert len(direct.best_reward.per_op) == 1
     direct_cuda = [node.op for node in direct.assembled.nodes.values() if isinstance(node.op, CudaOp)]
     assert len(direct_cuda) == 1
-    assert direct_cuda[0].knobs["WORK"] == "t16x8"
-    assert direct_cuda[0].knobs["STAGE@n0.e0"] == "d1/smem-async"
+    assert _is_child_winner(direct_cuda[0].knobs)
     parent_cuda = [node.op for node in parent.nodes.values() if isinstance(node.op, CudaOp)]
     producer = next(op for op in parent_cuda if "__place_" in op.kernel_name)
-    assert producer.knobs["WORK"] == "t16x8"
-    assert producer.knobs["STAGE@n0.e0"] == "d1/smem-async"
+    assert _is_child_winner(producer.knobs)
     db.close()
 
 
@@ -343,7 +353,7 @@ def test_pinned_placement_route_tunes_and_assembles_child_schedules(monkeypatch,
     assembled = [node.op for node in result.assembled.nodes.values() if isinstance(node.op, CudaOp)]
     assert len(assembled) == 2
     assert sum("enrolled minted kernel" in record.message for record in caplog.records) >= 2
-    assert assembled[0].knobs["WORK"] == "t16x8" and assembled[0].knobs["STAGE@n0.e0"] == "d1/smem-async"
+    assert _is_child_winner(assembled[0].knobs)
     assert assembled[1].knobs["WORK"] == "" and assembled[1].knobs.get("STAGE@n0.e0", "") == ""
 
 

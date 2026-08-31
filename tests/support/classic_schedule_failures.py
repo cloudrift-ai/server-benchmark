@@ -44,7 +44,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_default_is_the_flat_order",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gm_pin_groups_the_launch_order",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gn_pin_groups_the_transpose",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_tile_block_over_thread_limit_rejected",
             )
         ),
     ),
@@ -118,12 +117,10 @@ RECOVERY_CLUSTERS = (
         reason="restore schedules after structural cuts and fresh-kernel rewrites",
         nodeids=frozenset(
             (
-                "tests/compiler/loader/test_exl3.py::test_computed_b_lane_offers_the_cross_cta_split",
                 "tests/compiler/loader/test_exl3.py::test_computed_b_split_k_matches_decoded_linear",
                 "tests/compiler/loader/test_exl3.py::test_computed_b_split_partial_reindexes_the_cone",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[2-0-16-mma]",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[5-2-1-coop]",
-                "tests/compiler/loader/test_exl3.py::test_input_spelling_streams_computed_b_through_tensor_cores",
                 "tests/compiler/passes/test_placement_routing.py::test_pinned_transposed_coop_band_still_refuses_without_a_free_axis",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_decides_its_own_row",
             )
@@ -246,7 +243,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 126
+REMAINING_FAILURE_COUNT = 123
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

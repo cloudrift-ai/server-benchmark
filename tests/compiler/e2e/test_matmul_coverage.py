@@ -1322,12 +1322,15 @@ def test_warp_symbolic_k_not_guarded(monkeypatch) -> None:
 
 
 def test_tile_block_over_thread_limit_rejected(monkeypatch) -> None:
-    """A TILE parallel tile over the 1024-thread/CTA limit is rejected at compile time instead
-    of failing the launch with an opaque ``CUDA_ERROR_INVALID_VALUE``."""
+    """A TILE parallel tile over the 1024-thread/CTA limit has no compatible schedule instead of
+    reaching a launch that fails with an opaque ``CUDA_ERROR_INVALID_VALUE``."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
     pin_classic(monkeypatch, {"TILE": "f1"})  # 16384 threads
     monkeypatch.setenv("EMMY_WORK", "t128x128")
-    with pytest.raises(ValueError, match="exceeds the 1024-thread/CTA limit"):
-        _run_tile_pass(_guard_mm_graph(256, 256, 256, dtype=F32))
+    lowered = _run_tile_pass(_guard_mm_graph(256, 256, 256, dtype=F32))
+    tile = next(node.op for node in lowered.nodes.values() if isinstance(node.op, TileOp))
+    assert not tile.place.is_mapped and tile.classic is None
 
 
 def test_tile_block_within_limit_ok(monkeypatch) -> None:

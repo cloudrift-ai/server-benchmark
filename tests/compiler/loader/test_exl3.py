@@ -617,7 +617,12 @@ def _prefer_mma_leaf(fp):
 
 
 def test_input_spelling_streams_computed_b_through_tensor_cores():
-    """A generic expanding B cone compute-fills a canonical slab and drains through mma.sync."""
+    """A generic expanding B cone compute-fills a canonical slab and drains through mma.sync.
+
+    The assertion is about one schedule, so ``c`` names that complete schedule. Leaving any key
+    open asks Algorithm 1 for unrelated members of the large independent product before this
+    source assertion can run.
+    """
     from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
@@ -626,6 +631,7 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
     from emmy.compiler.loader.quant import spell_trellis_inputs
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16, 128), "f16"), node_id="x")
@@ -641,7 +647,33 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
     def choose_sync_mma(fp):
         return _prefer_mma_leaf(fp)
 
-    lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(graph, choose_sync_mma)
+    row = {
+        "WORK": "w1x1",
+        "RASTER": "",
+        "TILE@n1": "mma_m16n8k16_f16_f32/f1x2",
+        "TILE@n2": "mma_m16n8k16_f16_f32/f1x2",
+        "TILE@n6": "",
+        "TILE@n9": "mma_m16n8k16_f16_f32/f1x2",
+        "TILE@n12": "",
+        "REDUCE@n1": "",
+        "REDUCE@n2": "",
+        "REDUCE@n6": "",
+        "REDUCE@n9": "",
+        "REDUCE@n12": "",
+        "STAGE@n1.e0": "d1/smem",
+        "STAGE@n1.e1": "d1/smem",
+        "STAGE@n1.e2": "d1/smem",
+        "STAGE@n2.e0": "d1/smem",
+        "STAGE@n2.e1": "d1/smem",
+        "STAGE@n6.e0": "",
+        "STAGE@n6.e1": "",
+        "STAGE@n9.e0": "d1/smem",
+        "STAGE@n9.e1": "d1/smem",
+        "STAGE@n12.e0": "",
+        "STAGE@n12.e1": "",
+    }
+    with pinned_knobs(row):
+        lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(graph, choose_sync_mma)
     cuda = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     streamed = [op for op in cuda if "emmy_bitcast" in op.kernel_source and "mma.sync.aligned" in op.kernel_source]
     assert len(streamed) == 1
@@ -850,13 +882,17 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     captured = []
 
+    class _Captured(Exception):
+        pass
+
     def decide(fp):
         if fp.structural:
             captured.append((fp.match, fp.match.graph.nodes[fp.node_id]))
-            return fp.options[0]  # keep the one-kernel fused arm; the offer is inspected below
+            raise _Captured
         return next(iter_leaves(fp.options))
 
-    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_trellis_linear_graph(), decide)
+    with pytest.raises(_Captured):
+        Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_trellis_linear_graph(), decide)
     assert captured, "the trellis linear must surface its structural fork"
     match, node = captured[0]
     options = split_forks(match, node)

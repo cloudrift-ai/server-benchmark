@@ -226,6 +226,25 @@ class ScheduleRestriction:
         """Whether this complete assignment satisfies ``c``."""
         return bool(self._predicate(schedule))
 
+    def singleton(self, codec: ClassicScheduleCodec) -> tuple[ClassicSchedule, ...] | None:
+        """Return the complete restricted set when ``c`` can prove it has at most one member.
+
+        ``None`` means the proof is unavailable and Algorithm 1 must traverse the product. An
+        empty tuple means the restriction is provably empty. The predicate owns this optional
+        proof; callers never inspect its representation or alter an independent domain.
+        """
+        prove = getattr(self._predicate, "singleton", None)
+        if prove is None:
+            return None
+        schedules = prove(codec)
+        if schedules is None:
+            return None
+        if not isinstance(schedules, tuple) or any(not isinstance(schedule, ClassicSchedule) for schedule in schedules):
+            raise TypeError("classic schedule restriction singleton proof must return a tuple of schedules")
+        if len(schedules) > 1:
+            raise ValueError("classic schedule restriction singleton proof returned more than one schedule")
+        return schedules
+
 
 @dataclass(frozen=True)
 class AxisAgreement:

@@ -75,6 +75,7 @@ def test_production_visit_evaluates_opaque_c_only_on_complete_assignments(monkey
         seen.append(assignment)
         return True
 
+    assert ScheduleRestriction(accepts).singleton(codec) is None
     actual = tuple(
         classic._enumerate_supported(
             ScheduleRestriction(accepts),
@@ -88,6 +89,38 @@ def test_production_visit_evaluates_opaque_c_only_on_complete_assignments(monkey
 
     assert {_signature(codec, assignment) for assignment, _row in actual} == {_signature(codec, assignment) for assignment in reference}
     assert seen == [assignment for assignment, _row in actual]
+
+
+def test_complete_c_proves_its_singleton_without_changing_domains() -> None:
+    root = fold_from_loop(
+        Loop(
+            axis=Axis("k", 64),
+            body=Body(
+                (
+                    Load(name="xv", input="x", index=(Var("k"),)),
+                    Accum(name="acc", value="xv", op="add", axes=("k",)),
+                )
+            ),
+            role=AxisRole.PLANAR,
+        )
+    )
+    assert root is not None
+    tile = TileOp(op=root, place=Placement(free=(Axis("n", 64),)))
+    target = Context.from_target((12, 0))
+    problem = ClassicProblem(root, target)
+    domains = project_domains(tile, target)
+    codec = ClassicScheduleCodec(problem, domains)
+    candidates = tuple(enumerate_reference(ScheduleRestriction(), root, target, domains=domains))
+    wanted = candidates[-1]
+    pins = {family: [] for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
+    for key, value in codec.encode(wanted).items():
+        pins[key.partition("@")[0]].append((key, value))
+    c = schedule_restriction(root, target, domains, pins={family: tuple(values) for family, values in pins.items()})
+
+    assert len(candidates) > 1
+    assert project_domains(tile, target) == domains
+    assert c.singleton(codec) == (wanted,)
+    assert tuple(enumerate_reference(c, root, target, domains=domains)) == (wanted,)
 
 
 def test_reduction_enumeration_filters_the_independent_product_by_compatibility() -> None:

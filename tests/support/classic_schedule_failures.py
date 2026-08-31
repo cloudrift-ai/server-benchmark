@@ -21,6 +21,7 @@ class RecoveryCluster:
     phase: int
     reason: str
     nodeids: frozenset[str]
+    accepted: tuple[str, ...] = ("ClassicScheduleUnavailable",)
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class ReconstructionFailure:
     cluster: str
     phase: int
     reason: str
+    accepted: tuple[str, ...]
 
 
 RECOVERY_CLUSTERS = (
@@ -230,6 +232,15 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-realized]",
             )
         ),
+        accepted=(
+            "ClassicScheduleUnavailable",
+            "no enumerated row carries the pin",
+            "unreproducible pin:",
+            "lowering produced no CUDA kernel",
+            "pinned but unstamped:",
+            "cp.async / TMA staging is single-fold",
+            "kernel binder refuses this row's projection ownership",
+        ),
     ),
 )
 
@@ -244,7 +255,7 @@ def _failures() -> Mapping[str, ReconstructionFailure]:
         for nodeid in cluster.nodeids:
             if nodeid in failures:
                 raise RuntimeError(f"duplicate classic schedule reconstruction failure: {nodeid}")
-            failures[nodeid] = ReconstructionFailure(cluster.name, cluster.phase, cluster.reason)
+            failures[nodeid] = ReconstructionFailure(cluster.name, cluster.phase, cluster.reason, cluster.accepted)
     if len(failures) != REMAINING_FAILURE_COUNT:
         raise RuntimeError(
             f"classic schedule reconstruction registry has {len(failures)} entries; REMAINING_FAILURE_COUNT is {REMAINING_FAILURE_COUNT}"

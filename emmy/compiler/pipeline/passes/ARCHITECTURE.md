@@ -122,8 +122,10 @@ The
 stage domain is projected once per operand edge from target-filtered transport choices. Local support records retain
 the resolved node–edge tuples without putting slab sizes into either public factor; compatibility therefore rejects
 mixed transport assignments, and selected non-direct edges are resolved again only during materialization. The
-production traversal follows support-compatible prefixes, while bounded tests compare its complete set against the
-literal node × edge × kernel product.
+production traversal follows support-compatible prefixes. When `c` can prove that it names at most one complete
+assignment, the scheduler validates that assignment directly against the unchanged domains and compatibility
+relation; an opaque or partial `c` supplies no such proof and follows Algorithm 1's traversal. Bounded tests compare
+the complete set against the literal node × edge × kernel product.
 The fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete
 typed `ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization
 derives placed geometry and resolved transport facts. Schedule parameters restrict Algorithm 1 without changing any

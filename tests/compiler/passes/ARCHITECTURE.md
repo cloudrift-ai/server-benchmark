@@ -134,8 +134,9 @@ independent public factor.
 The schedule-restriction boundary proves that exact `WORK` and addressed `TILE` parameters leave every independent
 factor unchanged, then compares production with Algorithm 1(c, p, t) under the same immutable `c`. The production
 visitor carries that context intact and evaluates it only on complete assignments. The test deliberately bounds the
-factor catalogs so the literal oracle remains fast. Composed GPU cases cover nested and sibling fragment agreements;
-no composed-only enumerator or post-product membership rule exists.
+factor catalogs so the literal oracle remains fast. A complete `c` also proves its singleton without changing a
+factor, while an opaque predicate exposes no proof and is observed only at complete assignments. Composed GPU cases
+cover nested and sibling fragment agreements; no composed-only enumerator or post-product membership rule exists.
 The structural-split boundary proves that the outer pass consumes a pinned GRID stage before constructing `c` for a
 fresh piece. The piece's schedule restriction therefore compares only the remaining schedule stages. Sampled walks
 and composed cross-CTA split pieces remain exact `ClassicScheduleUnavailable` obligations and fail before entering an

@@ -806,8 +806,25 @@ class _ScheduleParameters:
             for edge, choice in assignment.edges.items()
         )
 
+    def singleton(self, codec: ClassicScheduleCodec) -> tuple[ClassicSchedule, ...] | None:
+        """Prove a fully specified ``c`` has at most one member of the unchanged product."""
+        row = {}
+        for key in codec.keys():
+            family = key.partition("@")[0]
+            values = {value for pin_key, value in self.pins[family] if pin_key in (family, key)}
+            if not values:
+                return None
+            if len(values) > 1:
+                return ()
+            row[key] = values.pop()
+        try:
+            assignment = codec.decode(row)
+        except (TypeError, ValueError):
+            return ()
+        return (assignment,) if self(assignment) else ()
 
-def schedule_restriction(p: Fold, t, domains: ClassicDomains, *, pins=None) -> ScheduleRestriction:
+
+def schedule_restriction(p: Fold, t, domains: ClassicDomains, *, pins=None, split_consumed: bool = False) -> ScheduleRestriction:
     """Build the immutable ``c`` input to Algorithm 1 from schedule parameters."""
     problem = ClassicProblem(p, t)
     codec = ClassicScheduleCodec(problem, domains)
@@ -817,7 +834,7 @@ def schedule_restriction(p: Fold, t, domains: ClassicDomains, *, pins=None) -> S
     # the receipt that the GRID stage was consumed, so c restricts only the schedule stages that
     # remain. This is parameter normalization at c's construction boundary, never an inspection
     # of c by Algorithm 1's traversal.
-    if carries_partition(p):
+    if carries_partition(p) or split_consumed:
         requested = {
             **requested,
             "REDUCE": tuple(
@@ -853,7 +870,7 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     codec = ClassicScheduleCodec(problem, domains)
     if carries_partition(p) and len(tile_sites(codec.context)) > 1:
         raise ClassicScheduleUnavailable("scheduling a composed cross-CTA split piece has not been reconstructed")
-    c = schedule_restriction(p, t, domains)
+    c = schedule_restriction(p, t, domains, split_consumed=tile.split_consumed)
     pool_id = digest(
         tile.identity_key(with_io=True) or "",
         ctx.structural_key(),
@@ -863,8 +880,14 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         tile.split_consumed,
     )
     prefix = {"S_warp_eligible": 1.0} if any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices) else {}
+    restricted = c.singleton(codec)
+    assignments = (
+        ((assignment, codec._encode_accepted(assignment)) for assignment in restricted)
+        if restricted is not None
+        else _enumerate_supported(c, p, t, domains=domains, codec=codec)
+    )
     leaves = []
-    for assignment, row in _enumerate_supported(c, p, t, domains=domains, codec=codec):
+    for assignment, row in assignments:
         leaves.append(_ScheduleLeaf(tile, name, dict(knobs), ctx, assignment, MappingProxyType({**prefix, **row}), pool_id))
     return leaves
 

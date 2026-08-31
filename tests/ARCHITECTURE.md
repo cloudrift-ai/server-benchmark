@@ -143,9 +143,10 @@ directly; they never import from another test module or from `conftest.py`.
   removed or broken and when it should come back. For a deliberate whole-subsystem removal whose casualties span
   dozens of files, prefer one registry module of exact node ids applied as a **strict** xfail from the root
   `conftest.py` — exact ids, never path globs, so each id is an acceptance obligation and the list shrinking to
-  empty is the completion gate. The classic-scheduler reconstruction registry additionally freezes its initial count,
-  audits every entry against one exact full-suite collection, and accepts only failures that expose
-  `ClassicScheduleUnavailable`; unrelated failures stay visible and strict XPASS closes recovered obligations.
+  empty is the completion gate. The classic-scheduler reconstruction registry additionally freezes its initial count
+  and audits every entry against one exact full-suite collection. Its default boundary is
+  `ClassicScheduleUnavailable`; corpus replay entries also admit only the realization helper's named membership and
+  replay refusals. Arbitrary assertion failures stay visible, and strict XPASS closes recovered obligations.
 - **Card-conditional expectations stay inline**, non-strict, at their own test — a flaky or SKU-specific failure
   needs a reason that names the condition.
 

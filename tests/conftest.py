@@ -522,12 +522,8 @@ def pytest_runtest_makereport(item, call):
     from emmy.compiler.pipeline.passes.lowering.tile._classic import ClassicScheduleUnavailable
 
     captured = "\n".join(content for _, content in report.sections)
-    expected = (
-        call.excinfo.errisinstance(ClassicScheduleUnavailable)
-        or "ClassicScheduleUnavailable" in str(call.excinfo.value)
-        or "ClassicScheduleUnavailable" in report.longreprtext
-        or "ClassicScheduleUnavailable" in captured
-    )
+    failure_text = "\n".join((str(call.excinfo.value), report.longreprtext, captured))
+    expected = call.excinfo.errisinstance(ClassicScheduleUnavailable) or any(boundary in failure_text for boundary in failure.accepted)
     if expected or not hasattr(report, "wasxfail"):
         return
     report.outcome = "failed"

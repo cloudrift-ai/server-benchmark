@@ -81,8 +81,19 @@ Search-selection drift (the `v_proj` class — schedule realizes, search stops p
 corpus case (its ARCHITECTURE excludes search shortfalls); the recorded model golden (2.3) is the tracker for
 that, plus `make bench-kernels` drift findings.
 
-If 2.5 fails on tuning alone, backlog items (q/k binding, per-kernel `PLACE`) get pulled into a step 2b —
-decided then, with numbers in hand.
+**Step 2b is no longer conditional — the trigger fired structurally on 2026-08-31**, from the workstation
+manual sweep (`_tune/run1/`, 112 offerability-verified proposals over all 32 serving twin kernels): the
+block-scaled cell is offered on only 2 of 8 serving matmul shapes (unfused `v_proj`/`down_proj`, static widths
+only), and every FUSED linear (q+norm, k+norm, o+residual+norm+requant, gate+up+SiLU+requant — the shapes
+serving compiles) refuses the warp tier outright, at every width, as does every symbolic twin. Tuned bests
+show the consequence: pre graphs land at 11-35 us across tiers, post graphs at 48-330 ms — a scalar-tier
+floor no schedule search can cross. Giving the fused shapes a tensor-core tier is the critical path to any
+honest speed number; q/k binding is a sub-case of it.
+
+Findings logged along the way, each needing its own fix: the coded-trunk weight load takes 23 minutes for the
+6 GB 8B (host-side, independent of kernel picks); `--dump-dir`'s frontend-reproducer capture crashes on a
+spelled W4A4 graph (`Input buffer 'attn_out_static_fp4_bits' does not exist` — slice taken over the pre-spell
+input graph); an expected `bench_fail` watchdog verdict prints a full child traceback and reads like a crash.
 
 ## Step 3 — hybrid serving (Qwen3.6-27B-NVFP4) — stacked on step 2
 

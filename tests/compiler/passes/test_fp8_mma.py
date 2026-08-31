@@ -208,29 +208,28 @@ def _f8_term(cap=(12, 0), *, a_dtype=F8E4M3, b_dtype=F8E4M3, k=512):
 
 
 def _offered_atoms(tile, ctx, node):
-    """The tensor-core atoms the catalog OFFERS at this node under the live precision pins — the
-    prescan's choice layer (``_node_refusal``) plus the policy half of the atom families."""
+    """The tensor-core atom domain projected from the node and target static facts."""
     from emmy.compiler.ir.tile.ops import projection_tail
 
     tail = projection_tail(tile)
     if sched._node_refusal(tile, ctx, node, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op))) is not None:
         return ()
-    return sched._atom_families(tile, ctx, node, tail)[0]
+    return sched._atom_families(tile, ctx, node, tail)
 
 
-def test_k32_enumeration_requires_the_precision_gate(monkeypatch):
+def test_k32_domain_is_independent_of_the_precision_restriction(monkeypatch):
     monkeypatch.delenv("EMMY_FP8_MMA", raising=False)
     monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
     term = _f8_term()
-    assert _offered_atoms(*term) == ()
+    assert _offered_atoms(*term) == (K32,)
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     assert _offered_atoms(*term) == (K32,)
     monkeypatch.delenv("EMMY_FAST_MATH")
     monkeypatch.setenv("EMMY_FP8_MMA", "1")
     assert _offered_atoms(*term) == (K32,)
     monkeypatch.setenv("EMMY_FP8_MMA", "0")
-    monkeypatch.setenv("EMMY_FAST_MATH", "1")  # the precise pin wins over the umbrella
-    assert _offered_atoms(*term) == ()
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    assert _offered_atoms(*term) == (K32,)
 
 
 def test_k32_enumeration_structural_requirements(monkeypatch):

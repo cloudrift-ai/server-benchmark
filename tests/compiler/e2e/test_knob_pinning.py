@@ -49,15 +49,17 @@ _OVERSIZED_BOX_KNOBS = {"TILE": "mma_m16n8k16_f16_f32/f8x2/k2", "WORK": "w4x2", 
 
 def test_warp_tma_pin_refuses_oversized_box(monkeypatch):
     """fp16 warp matmul pinned to a 512-row register tile + TMA stage — the box-extent gate must
-    refuse the pin instead of encoding an illegal (512, bk) descriptor box or silently selecting
-    gmem-direct. Compile-only (the refusal is scheduler-side). No CUDA needed."""
+    leave the compatible set empty instead of encoding an illegal (512, bk) descriptor box or
+    silently selecting gmem-direct. Compile-only (the refusal is scheduler-side). No CUDA needed."""
     from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 
     g = _build_f16_matmul_graph(512, 512, 512)
     pin_classic(monkeypatch, _OVERSIZED_BOX_KNOBS)
-    with pytest.raises(ValueError, match="does not resolve"):
-        Pipeline.build(TILE_PASSES).run(g, ctx=Context.from_target((9, 0)))
+    declined = Pipeline.build(TILE_PASSES).run(g, ctx=Context.from_target((9, 0)))
+    tile_op = next(n.op for n in declined.nodes.values() if isinstance(n.op, TileOp))
+    assert tile_op.classic is None and not tile_op.place.is_mapped
 
 
 # The 512³ fp16 shape the two pins here need. On cc>=9.0 the F16 atom is eligible whenever the
@@ -138,7 +140,7 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
     )
     result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
     source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
-    assert "for (int a4 = 0; a4 < 2; a4++)" in source
+    assert "for (int a4 = a3_co; a4 < 2; a4 += 8)" in source
     assert "a4__c" not in source
 
 

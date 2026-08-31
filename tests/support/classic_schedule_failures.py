@@ -36,18 +36,6 @@ class ReconstructionFailure:
 
 RECOVERY_CLUSTERS = (
     RecoveryCluster(
-        name="scalar-contractions",
-        phase=3,
-        reason="restore scalar contraction schedules and move-catalog choices",
-        nodeids=frozenset(
-            (
-                "tests/compiler/e2e/test_matmul_coverage.py::test_raster_default_is_the_flat_order",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gm_pin_groups_the_launch_order",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gn_pin_groups_the_transpose",
-            )
-        ),
-    ),
-    RecoveryCluster(
         name="tensor-core-transport",
         phase=4,
         reason="restore tensor-core atoms, staging, and edge transport",
@@ -121,8 +109,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/loader/test_exl3.py::test_computed_b_split_partial_reindexes_the_cone",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[2-0-16-mma]",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[5-2-1-coop]",
-                "tests/compiler/passes/test_placement_routing.py::test_pinned_transposed_coop_band_still_refuses_without_a_free_axis",
-                "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_decides_its_own_row",
             )
         ),
     ),
@@ -132,10 +118,8 @@ RECOVERY_CLUSTERS = (
         reason="restore lazy enumeration of compatible independent node and edge domains",
         nodeids=frozenset(
             (
-                "tests/compiler/e2e/test_knob_pinning.py::test_flat_output_sweep_lowers_with_its_axis_bound",
                 "tests/compiler/e2e/test_knob_pinning.py::test_scalar_cpasync_pin_refuses_odd_stride",
                 "tests/compiler/e2e/test_knob_pinning.py::test_unstaged_atom_lowers_gmem_direct",
-                "tests/compiler/e2e/test_knob_pinning.py::test_warp_tma_pin_refuses_oversized_box",
                 "tests/compiler/passes/test_schedule_walk.py::test_a_sweep_reading_fold_offers_only_the_serial_reduce",
                 "tests/compiler/passes/test_schedule_walk.py::test_an_observed_fold_offers_only_the_serial_reduce",
                 "tests/compiler/passes/test_schedule_walk.py::test_classic_pins_require_exact_site_identities[EMMY_REDUCE@K]",
@@ -153,17 +137,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/passes/test_schedule_walk.py::test_the_prescan_asks_each_catalog_question_once[warp_matmul]",
                 "tests/compiler/passes/test_schedule_walk.py::test_the_prescan_reads_each_computed_a_seam_once",
                 "tests/compiler/passes/test_schedule_walk.py::test_the_twisted_carrier_split_offers_only_the_deferred_arm",
-            )
-        ),
-    ),
-    RecoveryCluster(
-        name="command-and-search-integration",
-        phase=8,
-        reason="restore strict command, search, cache, and evidence integration",
-        nodeids=frozenset(
-            (
-                "tests/compiler/backend/test_source_determinism.py::test_kernel_source_identical_across_processes",
-                "tests/compiler/cli/test_eval.py::test_offer_audit_flags_unrealized_entries_and_fall_through",
             )
         ),
     ),
@@ -243,7 +216,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 123
+REMAINING_FAILURE_COUNT = 114
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

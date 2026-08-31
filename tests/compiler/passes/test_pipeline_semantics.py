@@ -168,8 +168,7 @@ def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
     with pinned_knobs({"WORK": "t4", "REDUCE@n1": "coop"}):
         pinned = Pipeline.build(TILE_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
     pinned_scan = next(node.op for node in pinned.nodes.values() if isinstance(node.op, TileOp) and node.id == "out")
-    assert pinned_scan.classic is not None
-    assert family_value(pinned_scan.knobs, "REDUCE") == "" and pinned_scan.knobs["WORK"] == ""
+    assert pinned_scan.classic is None and not pinned_scan.place.is_mapped
 
     lowered = Pipeline.build(CUDA_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
     source = next(

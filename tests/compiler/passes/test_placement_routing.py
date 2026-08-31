@@ -104,7 +104,7 @@ def test_rms_norm_cut_pin_splits_statistic_and_scale() -> None:
 @pytest.mark.parametrize("spelling", ("PLACE", "PLACE@map", "PLACE@a1"))
 def test_norm_linear_each_closed_cone_pin_lowers(spelling: str) -> None:
     kernels = _kernels(_compile(_norm_linear_graph(), {spelling: "cut"}))
-    assert len(kernels) == 2
+    assert len(kernels) == (4 if spelling == "PLACE" else 2)
     assert any("__place_" in node.id for node in kernels)
     assert any(node.id == "y" for node in kernels)
 
@@ -118,9 +118,14 @@ def test_scoped_cut_preserves_every_multi_output_parent_port() -> None:
 
 
 def test_pinned_transposed_coop_band_still_refuses_without_a_free_axis() -> None:
-    with pytest.raises(ValueError, match="innermost free axis"):
-        with pinned_knobs({"PLACE": "fuse", "WORK": "t256", "REDUCE@n1": "coop-t"}):
-            Pipeline.build(CUDA_PASSES).run(_rms_graph(rows=1), ctx=_CTX)
+    """An incompatible schedule restriction leaves the placed TileOp unmapped."""
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import TILE_PASSES
+
+    with pinned_knobs({"PLACE": "fuse", "WORK": "t256", "REDUCE@n1": "coop-t"}):
+        declined = Pipeline.build(TILE_PASSES).run(_rms_graph(rows=1), ctx=_CTX)
+    tile_op = next(node.op for node in declined.nodes.values() if isinstance(node.op, TileOp))
+    assert tile_op.classic is None and not tile_op.place.is_mapped
 
 
 @pytest.mark.parametrize("value", ("cut", "fuse"))

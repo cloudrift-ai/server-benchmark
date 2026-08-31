@@ -263,7 +263,8 @@ one zero-axis `TILE` site (`path.family_sites`); the `map_tile_moves` ladder off
 tile wherever `r` divides the static inner free extent (a masked overhang is refused because the slid last cell is no
 longer a provably aligned affine base, which defeats the load/store vectorizers the strip exists to feed — measured,
 see `_strip_refusal`), and a row whose root `TILE` names a width unrolls the cell into `r` grouped loads · computes ·
-writes at materialization — a different term, hence a different structural identity and the variant key (`identity_key(with_io=True, with_knobs=True)`).
+writes at materialization — a different term, hence a different structural identity and the variant key
+(`identity_key(with_io=True, with_knobs=True)`).
 
 **`RASTER` leads the walk as its own fork level.** The CTA launch-order codec is kernel-global with nothing for
 the partial assignment to reconcile, so it is decided once per kernel, ahead of the sites: each candidate value is one
@@ -308,8 +309,8 @@ reconstruction boundary.
 **Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
 alternative's latency. A cut's — and a cross-CTA split's — cost is the minimum sum over the kernels it produces,
 which is why each is a separate structural decision with a separate scoring rule (`policy/greedy._resolved_price`,
-memoized per the variant key (`identity_key(with_io=True, with_knobs=True)`) so a piece appearing in several partitions is solved once) rather than something the
-per-row prior can rank.
+memoized per the variant key (`identity_key(with_io=True, with_knobs=True)`) so a piece appearing in several
+partitions is solved once) rather than something the per-row prior can rank.
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree.
 

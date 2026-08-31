@@ -199,8 +199,8 @@ merged / reshaped weight row), and left unbound it would emit the unsplit axis n
 slab names, K-chunk `bk_elems`, and depth clamps). A direct edge has an explicit direct `Stage` choice and no resolved
 materialization. The `state` builder (which slots the operand fragments) and shared `reduce` (which emits the loop)
 apply the resolved facts verbatim. The `Stage` choice names the intermediate storage and its fill mechanism — `smem`
-(the synchronous thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all (gmem→register on
-a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
+(the synchronous thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all
+(gmem→register on a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
 `d<depth>` is the gmem→smem ring (blocking synchronous slot fill / cp.async commit group / TMA mbarrier-phased
 prefetch over the K-slab loop),
 `p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps). Staging is a

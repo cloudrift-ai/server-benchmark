@@ -325,9 +325,10 @@ from the stored params, splicing each operand's body before the first read of it
 algebra — a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
 what makes every identity of the term a digest of its lowered body — there is no separate term hasher.
 `Fold.structural_key` is the exact-flavor canonical digest of the nest `lower()` derives (the body is the
-term's normal form); the variant key (`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body identity with the knobs; and the deploy
-join key (the deploy identity (`identity_key(with_io=True)`), over `TileOp.loop_body`) adds the io fingerprint, so term re-spellings and
-cluster-sibling ops that lower alike share schedule evidence.
+term's normal form); the variant key (`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body
+identity with the knobs; and the deploy join key (the deploy identity (`identity_key(with_io=True)`), over
+`TileOp.loop_body`) adds the io fingerprint, so term re-spellings and cluster-sibling ops that lower alike share
+schedule evidence.
 `Fold.deps()` exposes names captured outside the lift params, including captures reached recursively through operand
 edges. A contraction deliberately hides its pure lift body from generic nested-body walks, so this direct dependency
 surface is what keeps an operand's captured statistic ordered before the contraction that reads it.
@@ -358,9 +359,9 @@ The neutral element IS stored, as `Fold.init` — a monoid is `(S, ⊕, e)`, and
 emitter's use of it: a degenerate fold dissolves into its `Accum`s and takes each fold's seed from
 its `op.identity`, and a twisted fold's streaming merge regenerates its own (`_reduction` reads the
 generated merge's `Accum`s, never the stored `init`'s `−inf`). So `init` is algebra the term owes
-its own definition, not a value the lowering path consults — which is why removing it would change
-every `structural_key`, and with it every the variant key (`identity_key(with_io=True, with_knobs=True)`) the tune DB's measurement replay and the cubin
-cache are keyed on, in exchange for a field nothing reads.
+its own definition, not a value the lowering path consults — which is why removing it would change every
+`structural_key` and, with it, every variant key (`identity_key(with_io=True, with_knobs=True)`) used by tune DB
+measurement replay and the cubin cache, in exchange for a field nothing reads.
 
 **The twisted combine — generated, not hand-authored.** Transport of structure: a monoid `(·, e)`
 conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`. Generation

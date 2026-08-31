@@ -51,8 +51,8 @@ predicts kernel latency from a variant's features (Part 5).
 knowledge recorded earlier, in a fixed order — best evidence first:
 
 1. **The verified goldens** recorded for this GPU — reviewed measurements that ship with the repository, joined by
-   STRICT structural identity (the deploy identity (`identity_key(with_io=True)`): the digest of the complete schedule-free Loop-IR body + the io
-   dtypes/shapes, derived record-side from the record's own persisted program) and
+   STRICT structural identity (the deploy identity (`identity_key(with_io=True)`): the digest of the complete
+   schedule-free Loop-IR body + the io dtypes/shapes, derived record-side from the record's own persisted program) and
    decoded by EXACT spelled-row equality (Part 7).
    Fail-closed: a record that matches the identity but equals no enumerated row is drift — a loud warning, never a
    fuzzy acceptance.
@@ -508,8 +508,9 @@ and that is an accepted outcome of the design — the fix is a measurement, a re
 prior, never a preference written into a pass or into this policy.
 
 1. the **verified goldens** recorded for this GPU (`greedy._verified_index` / `_verified_pick`): the record whose
-   the deploy identity (`identity_key(with_io=True)`) — the canonical digest of the complete schedule-free Loop-IR body the lifted term lowers
-   to (free grid loops + `Fold.lower()` + the reconstituted output writes, through `Body.structural_key`'s
+   deploy identity (`identity_key(with_io=True)`) — the canonical digest of the complete schedule-free Loop-IR body
+   the lifted term lowers to (free grid loops + `Fold.lower()` + the reconstituted output writes, through
+   `Body.structural_key`'s
    canonicalization, so term re-spellings and compute-unit cluster siblings that lower alike share it), folded
    with the io dtype/shape fingerprint (hint-free — a symbolic record is the symbolic kernel's identity at every
    hint),
@@ -744,8 +745,9 @@ Greedy benches nothing, so it can only *use* a prior, never train one.
 **And it scores each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
 factory call — one compile attempt; never shared ambient state, which would hand MCTS cached picks): the memo
 keys on the minted pool identity (`Fork.pool_id` — the deploy identity plus the knob / hint / pin
-discriminators it excludes) plus the node's blocklist content, so N same-shape kernels score once and the rest replay by descending the lazy tree's
-level keys to the one matching leaf (`_find_decided_leaf` — the O(path) descent `build_fork_tree` was built for),
+discriminators it excludes) plus the node's blocklist content, so N same-shape kernels score once and the rest replay
+by descending the lazy tree's level keys to the one matching leaf (`_find_decided_leaf` — the O(path) descent
+`build_fork_tree` was built for),
 while a validate-retry with a blocked tile is a different key and re-decides.
 
 **Every deploy pick breaks ties by candidate content, never enumeration order.** The model can score many
@@ -762,8 +764,9 @@ bytes are independently pinned across fresh interpreters by `test_source_determi
 **Structural options are priced, never raw-scored.** A `Graph` leaf carries no knob row, so the per-op prior cannot
 score it; `greedy_decide` asks the same evidence a different way instead. The splices (top-level siblings by
 construction) are each priced by a nested `resolve` per fragment kernel over a `lowering/tile`-only pipeline, the
-price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per the variant key (`identity_key(with_io=True, with_knobs=True)`) with the
-compile's decision memo shared into the nested resolves; the keep-fused side prices by ONE nested resolve of the
+price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per the variant key
+(`identity_key(with_io=True, with_knobs=True)`) with the compile's decision memo shared into the nested resolves; the
+keep-fused side prices by ONE nested resolve of the
 streamed scan's winning leaf (the scan already found the best row, so pricing is one resolve, not one per enumerated
 leaf), and the argmin across the two decides. One price definition holds throughout: a price is the Σ of a
 resolution's trace, never a fork-local score — so the two sides of a kernel-set comparison are always the same
@@ -863,19 +866,21 @@ child-identity evidence that a later parent cut can consume. A Tile root whose w
 scheduled; it remains lowering-only and is never enrolled or scheduled again.
 
 - The slice keeps the root kernel + its leaf-op closure and turns every other kernel-input into a synthetic `InputOp`.
-  The root op is shared **by reference**, so its body — and thus the variant key (`identity_key(with_io=True, with_knobs=True)`) — is byte-for-byte the full-graph op's.
+  The root op is shared **by reference**, so its body — and thus the variant key
+  (`identity_key(with_io=True, with_knobs=True)`) — is byte-for-byte the full-graph op's.
   It filters the graph's canonical topological order rather than iterating its set-backed ancestor closure, so slice
   inputs and persisted Loop programs stay byte-identical across fresh Python processes. Every retained `InputOp` is
   registered as a slice input even when a minting fragment did not list the boundary in its own `Graph.inputs`.
 - Because the inner tree holds one op, MCTS explores only that op's forks with `patience` as the op's own budget —
   `Σ_k n_k` benches total, never the product.
-- **Leaves are deduped by the variant key (`identity_key(with_io=True, with_knobs=True)`)**: 24 RMSNorm LoopOps across 24 layers collapse to one work unit, and the
-  outer `total_us` accumulates `best * multiplicity` so the reward stays multiplicity-weighted. The progress
+- **Leaves are deduped by the variant key (`identity_key(with_io=True, with_knobs=True)`)**: 24 RMSNorm LoopOps across
+  24 layers collapse to one work unit, and the outer `total_us` accumulates `best * multiplicity` so the reward stays
+  multiplicity-weighted. The progress
   denominator is the deduped count, so Qwen3-Embedding-0.6B's ~14 unique kernels show as 14/14, not 14/337.
-- **Minted kernels are enrolled as first-class targets.** The strategy's private splice watcher (`_KernelInventory`, in `two_level.py`)
-  rides every inner run and reports each genuinely NEW kernel a splice mints (a cut's fragments, a split's
-  pieces), deduped by structural identity across the whole session, outer kernels included. Each reported kernel
-  is enrolled in a wave after the current wave completes: tuned in its own slice cut from the minting fragment,
+- **Minted kernels are enrolled as first-class targets.** The strategy's private splice watcher (`_KernelInventory`,
+  in `two_level.py`) rides every inner run and reports each genuinely NEW kernel a splice mints (a cut's fragments,
+  a split's pieces), deduped by structural identity across the whole session, outer kernels included. Each reported
+  kernel is enrolled in a wave after the current wave completes: tuned in its own slice cut from the minting fragment,
   its `perf` rows keyed under its own `cache_key`, its node rows under its own `op_sig` — and its own inner run
   may mint further pieces, which the same inventory catches for the next wave (waves terminate: cut/split trees
   strictly shrink and the seen-set dedups). Enrolled kernels are evidence, never reward terms — the parent
@@ -887,8 +892,9 @@ scheduled; it remains lowering-only and is never enrolled or scheduled again.
   ranking, and parent-linked node diagnostics; independently measured child kernels keep their ordinary perf rows.
 
 **Separability + the structural handoff.** Op-variant forks are separable: every multi-option fork is an in-place `Op`
-rebind that leaves the graph unchanged, so whole-graph time is `Σ_k t_k`. Results key structurally (the variant key (`identity_key(with_io=True, with_knobs=True)`) =
-name-invariant body+knobs digest), so a kernel tuned in its slice transfers to the assembled graph unchanged **and**
+rebind that leaves the graph unchanged, so whole-graph time is `Σ_k t_k`. Results key structurally (the variant key
+(`identity_key(with_io=True, with_knobs=True)`) = name-invariant body+knobs digest), so a kernel tuned in its slice
+transfers to the assembled graph unchanged **and**
 is shared across outer terminals — two fusion candidates sharing an identical op reuse its tuning (a DB hit). After
 the best fusion is picked, the assembled `Graph[CudaOp]` is benched **once** for the real in-context whole-graph
 latency; comparing it to the `Σ` estimate is the **separability check** — a gap exposes L2 / clock / launch coupling
@@ -1102,7 +1108,8 @@ don't invent a third:
 
 **`SearchDB`** (`db.py`) is a SQLite store partitioned into:
 
-- **Four op-inventory tables** — one row per op encountered along any lowering chain, keyed by the variant key (`identity_key(with_io=True, with_knobs=True)`).
+- **Four op-inventory tables** — one row per op encountered along any lowering chain, keyed by the variant key
+  (`identity_key(with_io=True, with_knobs=True)`).
 - **A `lowering` edge table** — one row per rewrite hop carrying the knob delta plus a best-median upsert
   (`best_per_op_time` walks the chain to resolve a pre-final op's measured cost; loop→loop source hops are skipped as
   structural/decision hops).

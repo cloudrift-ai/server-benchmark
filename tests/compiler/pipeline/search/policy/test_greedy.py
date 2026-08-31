@@ -9,6 +9,7 @@ from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key, schedule_row_key
+from emmy.compiler.pipeline.pipeline import NO_OPTION
 from emmy.compiler.pipeline.search.policy import greedy
 from emmy.compiler.pipeline.search.policy.greedy import (
     _db_measured_index_build,
@@ -292,8 +293,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     wrapper = _BoundedFork(inner=blocked_point.options[0])
     blocked_point.options = [wrapper]
     blocked = {tile_identity(dict(row)) for row in rows}
-    with pytest.raises(RuntimeError, match="no live complete row"):
-        _stream_tiers(blocked_point, _CountingPrior(), blocked, {})
+    assert _stream_tiers(blocked_point, _CountingPrior(), blocked, {}) == (NO_OPTION, None, None)
     assert len(wrapper.expansions) == 1  # no retry and no exhaustive fallback
 
 

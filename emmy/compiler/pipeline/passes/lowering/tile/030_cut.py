@@ -99,7 +99,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | Non
 def rewrite(match: Match, root: Node, ctx=None):
     del ctx
     tile: TileOp = root.op
-    if tile.op is None or tile.place.is_mapped or tile.classic is not None or tile.placement_decided:
+    if tile.op is None or tile.place.is_mapped or tile.schedule is not None or tile.placement_decided:
         raise RuleSkipped("TileOp already placed / scheduled")
     seams = cuttable_seams(tile)
     if not seams:

@@ -45,7 +45,6 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      REDUCE: coop
       WORK: t32
-      RASTER: ''
-      REDUCE@n1: coop
     identity: 9cf15d576d9daf566cb32f5e2a662570d454b8e278777af0b34333b5e091be30

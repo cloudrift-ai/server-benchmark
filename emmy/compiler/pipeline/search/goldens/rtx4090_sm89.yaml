@@ -724,6 +724,25 @@ programs:
     inputs: [x0, x1, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
 configs:
+- program: 0
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 10.1
+      reference_us: 10.8
+      reference_backend: cublas
 - program: 1
   target:
     origins:
@@ -734,12 +753,11 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: f4x10
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: t32x8
+      TILE: f4x10
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 58.5
       reference_us: 45.4
@@ -754,12 +772,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: f4x8
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: t32x16
+      TILE: f4x8
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 359.1
       reference_us: 320.0
@@ -774,12 +790,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: f4x26
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: t32x8
+      TILE: f4x26
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 2727.9
       reference_us: 2458.6
@@ -794,12 +808,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async/p2
-      STAGE@n0.e1: d2/smem-async/p2
       WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
       RASTER: ''
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 4.9
       reference_us: 5.8
@@ -809,14 +821,13 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f2x2/k4
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async/p2
-      STAGE@n0.e1: d2/smem-async/p2
       WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f4x2/k2
+      REDUCE: g2k
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
-      emmy_us: 4.9
+      emmy_us: 6.0
       reference_us: 5.8
       reference_backend: cublas
   - name: matmul.square.512.fp16
@@ -824,12 +835,11 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f16/f2x2/k4
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async/p2
-      STAGE@n0.e1: d2/smem-async/p2
       WORK: w1x2
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 4.8
       reference_us: 5.8
@@ -844,12 +854,11 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f4x4/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 20.4
       reference_us: 18.1
@@ -859,12 +868,11 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f16/f4x4/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w1x2
+      TILE: mma_m16n8k16_f16_f16/f4x4/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 15.8
       reference_us: 18.1
@@ -879,12 +887,11 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f4x4
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 123.4
       reference_us: 115.2
@@ -894,12 +901,11 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f16/f4x8/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 82.7
       reference_us: 115.2
@@ -914,12 +920,11 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f4x8
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 869.4
       reference_us: 822.3
@@ -929,15 +934,33 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f16/f4x8/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 603.1
       reference_us: 822.3
+      reference_backend: cublas
+- program: 8
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 10.6
+      reference_us: 10.8
       reference_backend: cublas
 - program: 9
   target:
@@ -949,12 +972,11 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f4x4/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 343.7
       reference_us: 328.0
@@ -962,16 +984,29 @@ configs:
   - name: matmul.qkv.h4096
     bindings: {}
     pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: gm8
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 267.7
+      reference_us: 328.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f4x4/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: g2k
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
-      emmy_us: 343.7
+      emmy_us: 362.0
       reference_us: 328.0
       reference_backend: cublas
 - program: 10
@@ -984,14 +1019,13 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f4x4/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async/p2
-      STAGE@n0.e1: d2/smem-async/p2
-      WORK: w2x2
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: g2k
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
-      emmy_us: 108.7
+      emmy_us: 119.9
       reference_us: 119.0
       reference_backend: cublas
   - name: matmul.o_proj.h4096
@@ -999,14 +1033,27 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f4x4/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async/p2
-      STAGE@n0.e1: d2/smem-async/p2
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 108.7
+      reference_us: 119.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 88.4
       reference_us: 119.0
       reference_backend: cublas
 - program: 11
@@ -1019,12 +1066,11 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f2x8/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x8/k2
+      REDUCE: ''
       RASTER: gm8
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 803.8
       reference_us: 721.0
@@ -1034,14 +1080,13 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f16/f4x8/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async/p2
-      STAGE@n0.e1: d2/smem-async/p2
       WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
-      emmy_us: 648.2
+      emmy_us: 664.6
       reference_us: 721.0
       reference_backend: cublas
   - name: matmul.mlp_gate_up.h4096
@@ -1049,15 +1094,47 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f16/f4x8/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async/p2
-      STAGE@n0.e1: d2/smem-async/p2
       WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async/p2
     measurements:
       emmy_us: 648.2
       reference_us: 721.0
+      reference_backend: cublas
+- program: 12
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 371.0
+      reference_us: 388.0
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 274.0
+      reference_us: 388.0
       reference_backend: cublas
 - program: 13
   target:
@@ -1069,15 +1146,61 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f4x4/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 343.0
       reference_us: 330.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 298.9
+      reference_us: 330.0
+      reference_backend: cublas
+- program: 14
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 119.5
+      reference_us: 112.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 89.3
+      reference_us: 112.0
       reference_backend: cublas
 - program: 15
   target:
@@ -1089,12 +1212,11 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f32/f4x8/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 923.6
       reference_us: 742.0
@@ -1104,15 +1226,47 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n0: mma_m16n8k16_f16_f16/f4x8/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: d2/smem-async
-      STAGE@n0.e1: d2/smem-async
       WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
       RASTER: ''
+      STAGE: d2/smem-async
     measurements:
       emmy_us: 665.6
       reference_us: 742.0
+      reference_backend: cublas
+- program: 16
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 376.4
+      reference_us: 388.0
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 275.5
+      reference_us: 388.0
       reference_backend: cublas
 - program: 17
   target:
@@ -1124,9 +1278,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: ''
       WORK: ''
-      RASTER: ''
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       VECTORIZE_LOADS: true
@@ -1144,9 +1296,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: f4
       WORK: ''
-      RASTER: ''
+      TILE: f4
     measurements:
       emmy_us: 16.3
       reference_us: 18.0
@@ -1161,9 +1312,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: f2
       WORK: ''
-      RASTER: ''
+      TILE: f2
     measurements:
       emmy_us: 4.6
       reference_us: 5.0
@@ -1178,9 +1328,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: f4
       WORK: ''
-      RASTER: ''
+      TILE: f4
     measurements:
       emmy_us: 16.5
       reference_us: 19.0
@@ -1195,9 +1344,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 3.5
       reference_us: 6.0
@@ -1212,9 +1360,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t512
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 12.4
       reference_us: 14.0
@@ -1229,9 +1376,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t128
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 3.6
       reference_us: 6.0
@@ -1246,9 +1392,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 13.2
       reference_us: 14.0
@@ -1264,9 +1409,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n0: coop
       WORK: t128
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 2.1
       reference_us: 4.0
@@ -1282,9 +1426,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n0: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 4.5
       reference_us: 7.0
@@ -1300,9 +1443,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n0: coop
       WORK: t128
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 2.1
       reference_us: 4.0
@@ -1318,9 +1460,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n0: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 4.6
       reference_us: 7.0
@@ -1335,9 +1476,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 4.1
       reference_us: 4.0
@@ -1352,9 +1492,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 7.2
       reference_us: 7.0
@@ -1369,9 +1508,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 13.8
       reference_us: 13.0
@@ -1386,9 +1524,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 4.1
       reference_us: 4.0
@@ -1403,9 +1540,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 7.2
       reference_us: 7.0
@@ -1420,9 +1556,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 13.8
       reference_us: 13.0
@@ -1437,9 +1572,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 6.9
       reference_us: 7.0
@@ -1454,9 +1588,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t64
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 3.7
       reference_us: 5.0
@@ -1471,9 +1604,8 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@n1: coop
       WORK: t256
-      RASTER: ''
+      REDUCE: coop
     measurements:
       emmy_us: 6.9
       reference_us: 7.0
@@ -1487,11 +1619,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n1: mma_m16n8k16_f16_f32/f1x8/k8
-      REDUCE@n1: ''
-      STAGE@n1.e0: d2/smem-async
-      STAGE@n1.e1: d2/smem-async
       WORK: w8x1
+      TILE: mma_m16n8k16_f16_f32/f1x8/k8
+      REDUCE: ''
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 10.6
@@ -1502,15 +1633,46 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n1: mma_m16n8k16_f16_f16/f1x8/k8
-      REDUCE@n1: ''
-      STAGE@n1.e0: d2/smem-async/p2
-      STAGE@n1.e1: d2/smem-async/p2
       WORK: w8x1
+      TILE: mma_m16n8k16_f16_f16/f1x8/k8
+      REDUCE: ''
+      STAGE: d2/smem-async/p2
       RASTER: ''
     measurements:
       emmy_us: 10.4
       reference_us: 22.1
+      reference_backend: emmy-greedy
+- program: 38
+  target:
+    loop: 1
+  realizations:
+  - name: attention.hd128.pv
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f1x4/k4
+      REDUCE: g2a
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 13.9
+      reference_us: 24.1
+      reference_backend: emmy-greedy
+  - name: attention.hd128.pv
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f16/f1x4/k4
+      REDUCE: g2a
+      STAGE: d1/smem
+      RASTER: gm8
+    measurements:
+      emmy_us: 13.7
+      reference_us: 24.2
       reference_backend: emmy-greedy
 - program: 39
   target:
@@ -1521,11 +1683,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n1: mma_m16n8k16_f16_f32/f4x8/k8
-      REDUCE@n1: ''
-      STAGE@n1.e0: ''
-      STAGE@n1.e1: ''
       WORK: w2x1
+      TILE: mma_m16n8k16_f16_f32/f4x8/k8
+      REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 20.49
@@ -1536,11 +1697,10 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n1: mma_m16n8k16_f16_f32/f4x8/k8
-      REDUCE@n1: ''
-      STAGE@n1.e0: ''
-      STAGE@n1.e1: ''
       WORK: w2x1
+      TILE: mma_m16n8k16_f16_f32/f4x8/k8
+      REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 20.42
@@ -1555,12 +1715,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n2: mma_m16n8k16_f16_f32/f2x1/k4
-      REDUCE@n1: ''
-      REDUCE@n2: ''
-      STAGE@n2.e0: d1/smem
-      STAGE@n2.e1: d1/smem
       WORK: w1x16
+      TILE: mma_m16n8k16_f16_f32/f2x1/k4
+      REDUCE: ''
+      STAGE: d1/smem
       RASTER: ''
     measurements:
       emmy_us: 10.25
@@ -1571,12 +1729,10 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n2: mma_m16n8k16_f16_f16/f2x1/k4
-      REDUCE@n1: ''
-      REDUCE@n2: ''
-      STAGE@n2.e0: d1/smem
-      STAGE@n2.e1: d1/smem
       WORK: w1x16
+      TILE: mma_m16n8k16_f16_f16/f2x1/k4
+      REDUCE: ''
+      STAGE: d1/smem
       RASTER: ''
     measurements:
       emmy_us: 9.52
@@ -1591,11 +1747,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n1: mma_m16n8k16_f16_f32/f4x8/k2
-      REDUCE@n1: ''
-      STAGE@n1.e0: ''
-      STAGE@n1.e1: ''
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 49.64
@@ -1606,11 +1761,10 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n1: mma_m16n8k16_f16_f32/f4x8/k2
-      REDUCE@n1: ''
-      STAGE@n1.e0: ''
-      STAGE@n1.e1: ''
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 49.56
@@ -1625,12 +1779,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n3: mma_m16n8k16_f16_f32/f1x8/k8
-      REDUCE@n1: ''
-      REDUCE@n3: ''
-      STAGE@n3.e0: d1/smem
-      STAGE@n3.e1: d1/smem
       WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f1x8/k8
+      REDUCE: ''
+      STAGE: d1/smem
       RASTER: ''
     measurements:
       emmy_us: 34.5
@@ -1641,12 +1793,10 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n3: mma_m16n8k16_f16_f32/f1x8/k8
-      REDUCE@n1: ''
-      REDUCE@n3: ''
-      STAGE@n3.e0: d1/smem
-      STAGE@n3.e1: d1/smem
       WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f1x8/k8
+      REDUCE: ''
+      STAGE: d1/smem
       RASTER: ''
     measurements:
       emmy_us: 34.32
@@ -1661,11 +1811,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n1: mma_m16n8k16_f16_f32/f1x8/k4
-      REDUCE@n1: ''
-      STAGE@n1.e0: d2/smem-async
-      STAGE@n1.e1: d2/smem-async
       WORK: w8x1
+      TILE: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE: ''
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 8.9
@@ -1676,15 +1825,46 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n1: mma_m16n8k16_f16_f16/f1x8/k4
-      REDUCE@n1: ''
-      STAGE@n1.e0: d2/smem-async
-      STAGE@n1.e1: d2/smem-async
       WORK: w8x1
+      TILE: mma_m16n8k16_f16_f16/f1x8/k4
+      REDUCE: ''
+      STAGE: d2/smem-async
       RASTER: ''
     measurements:
       emmy_us: 8.7
       reference_us: 14.7
+      reference_backend: emmy-greedy
+- program: 41
+  target:
+    loop: 6
+  realizations:
+  - name: attention.hd64.pv
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x8/k8
+      REDUCE: g4k
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 20.7
+      reference_us: 25.8
+      reference_backend: emmy-greedy
+  - name: attention.hd64.pv
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f1x8/k8
+      REDUCE: g4k
+      STAGE: d1/smem
+      RASTER: ''
+    measurements:
+      emmy_us: 20.3
+      reference_us: 25.9
       reference_backend: emmy-greedy
 - program: 42
   target:
@@ -1695,11 +1875,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n1: mma_m16n8k16_f16_f32/f8x4/k4
-      REDUCE@n1: ''
-      STAGE@n1.e0: ''
-      STAGE@n1.e1: ''
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f8x4/k4
+      REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 16.7
@@ -1714,12 +1893,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n2: mma_m16n8k16_f16_f32/f1x4/k8
-      REDUCE@n1: ''
-      REDUCE@n2: ''
-      STAGE@n2.e0: d1/smem
-      STAGE@n2.e1: d1/smem
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
+      REDUCE: ''
+      STAGE: d1/smem
       RASTER: ''
     measurements:
       emmy_us: 13.81
@@ -1730,12 +1907,10 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      TILE@n2: mma_m16n8k16_f16_f16/f1x4/k8
-      REDUCE@n1: ''
-      REDUCE@n2: ''
-      STAGE@n2.e0: d1/smem
-      STAGE@n2.e1: d1/smem
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f1x4/k8
+      REDUCE: ''
+      STAGE: d1/smem
       RASTER: ''
     measurements:
       emmy_us: 13.26

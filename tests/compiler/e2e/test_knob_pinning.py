@@ -65,7 +65,7 @@ def test_warp_tma_pin_refuses_oversized_box(monkeypatch):
     pin_classic(monkeypatch, _OVERSIZED_BOX_KNOBS)
     declined = Pipeline.build(TILE_PASSES).run(g, ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in declined.nodes.values() if isinstance(n.op, TileOp))
-    assert tile_op.classic is None and not tile_op.place.is_mapped
+    assert tile_op.schedule is None and not tile_op.place.is_mapped
 
 
 # The 512³ fp16 shape the two pins here need. On cc>=9.0 the F16 atom is eligible whenever the
@@ -146,7 +146,7 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
     )
     result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
     source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
-    assert "for (int a4 = a3_co; a4 < 2; a4 += 8)" in source
+    assert "for (int a4 = 0; a4 < 2; a4++)" in source
     assert "a4__c" not in source
 
 

@@ -23,27 +23,25 @@ from emmy.compiler.ir.schedule.classic import (
     ClassicSchedule,
     ClassicScheduleCodec,
     ClassicScheduleContext,
-    Contraction,
     EdgeSchedule,
-    EdgeSite,
     KernelSchedule,
     LocalSupport,
-    NodeId,
-    NodeSite,
-    Projection,
     ProjectionSchedule,
-    Reduction,
     ReductionSchedule,
     ScheduleRestriction,
     SiteIndex,
     cartesian_assignments,
-    classify,
     edge_domain,
+    edge_site_spelling,
     enumerate_classic,
     enumerate_reference,
     kernel_domain,
     node_domain,
+    node_id_spelling,
+    parse_edge_site,
+    parse_node_id,
 )
+from emmy.compiler.ir.schedule.views import Contraction, Projection, Reduction, node_view, schedule_edges, schedule_nodes
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import TileOp
 
@@ -90,14 +88,14 @@ def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
     assert len(index.nodes) == 4
     shared_site = index.site(shared)
     uses = tuple(edge for edge in index.edges if index.producer(edge) == shared_site)
-    assert uses == (EdgeSite(index.site(left), 0), EdgeSite(index.site(right), 0))
+    assert uses == ((index.site(left), 0), (index.site(right), 0))
 
 
 def test_classification_binds_contraction_roles_to_consumer_operands() -> None:
     contraction = _contraction()
     index = SiteIndex(contraction)
 
-    view = classify(index, index.nodes[0])
+    view = node_view(index.node(index.nodes[0]))
     assert view == Reduction(Contraction(a=1, channels=(0,)))
 
 
@@ -105,7 +103,7 @@ def test_classification_does_not_read_the_target() -> None:
     root = Fold.projection(body=Body((Assign("y", "add", ("x", "x")),)))
     index = SiteIndex(root)
 
-    assert classify(index, index.nodes[0]) == Projection()
+    assert node_view(index.node(index.nodes[0])) == Projection()
 
 
 def test_context_requires_complete_node_and_edge_coverage() -> None:
@@ -274,20 +272,21 @@ def test_algorithm_one_requires_one_immutable_restriction_context() -> None:
         ScheduleRestriction()._predicate = lambda _schedule: False
 
 
-def test_node_ids_reject_negative_ordinals() -> None:
+def test_node_ids_are_integers_with_one_wire_spelling() -> None:
+    assert parse_node_id(node_id_spelling(3)) == 3
     with pytest.raises(ValueError, match="non-negative"):
-        NodeId(-1)
+        node_id_spelling(-1)
     with pytest.raises(ValueError, match="non-negative"):
-        NodeId(True)
+        node_id_spelling(True)
     with pytest.raises(ValueError, match="n<ordinal>"):
-        NodeId.parse("n00")
+        parse_node_id("n00")
 
 
 def test_edge_sites_have_one_spelling() -> None:
-    edge = EdgeSite(NodeSite(NodeId(3)), 2)
-    assert EdgeSite.parse(edge.spell()) == edge
+    edge = (3, 2)
+    assert parse_edge_site(edge_site_spelling(edge)) == edge
     with pytest.raises(ValueError, match="n<ordinal>.e<operand>"):
-        EdgeSite.parse("n3.e02")
+        parse_edge_site("n3.e02")
 
 
 def test_codec_round_trips_one_canonical_complete_row() -> None:
@@ -301,10 +300,9 @@ def test_codec_round_trips_one_canonical_complete_row() -> None:
     assert row == {
         "WORK": "",
         "RASTER": "",
-        "TILE@n0": "",
-        "REDUCE@n0": "",
-        "STAGE@n0.e0": "",
-        "STAGE@n0.e1": "",
+        "TILE": "",
+        "REDUCE": "",
+        "STAGE": "",
     }
     assert tuple(row) == codec.keys()
     assert codec.decode(row) == schedule
@@ -332,7 +330,7 @@ def test_codec_resolves_explicit_unit_register_tile_against_kernel_work() -> Non
     codec = ClassicScheduleCodec(ClassicProblem(_contraction(), target=object()))
     row = codec.encode(_direct(codec.context))
     row["WORK"] = "t4x2"
-    row["TILE@n0"] = "f1"
+    row["TILE"] = "f1"
 
     schedule = codec.decode(row)
 
@@ -344,10 +342,10 @@ def test_codec_has_no_missing_unknown_or_alias_key_path() -> None:
     codec = ClassicScheduleCodec(problem)
     row = codec.encode(_direct(codec.context))
 
-    with pytest.raises(ValueError, match="missing STAGE@n0.e0"):
-        codec.decode({key: value for key, value in row.items() if key != "STAGE@n0.e0"})
-    with pytest.raises(ValueError, match="unknown keys STAGE"):
-        codec.decode({**row, "STAGE": ""})
+    with pytest.raises(ValueError, match="missing STAGE"):
+        codec.decode({key: value for key, value in row.items() if key != "STAGE"})
+    with pytest.raises(ValueError, match="unknown keys STAGE@n0"):
+        codec.decode({**row, "STAGE@n0": ""})
 
 
 def test_codec_rejects_a_noncanonical_value_spelling() -> None:
@@ -450,12 +448,26 @@ def test_schedule_and_materialization_reject_untyped_entries() -> None:
 
     with pytest.raises(TypeError, match="kernel assignment must be KernelSchedule"):
         ClassicSchedule(object(), schedule.nodes, schedule.edges)  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="node assignments must be keyed by NodeSite"):
+    with pytest.raises(TypeError, match="keyed by non-negative integer node ids"):
         ClassicSchedule(schedule.kernel, {object(): next(iter(schedule.nodes.values()))}, schedule.edges)  # type: ignore[dict-item]
     with pytest.raises(TypeError, match="node assignments must contain"):
         ClassicSchedule(schedule.kernel, {context.index.nodes[0]: object()}, schedule.edges)  # type: ignore[dict-item]
-    with pytest.raises(TypeError, match="tiles must map NodeSite to PlacedTile"):
+    with pytest.raises(TypeError, match="tiles must map node ids to PlacedTile"):
         ClassicMaterialization({context.index.nodes[0]: Tile()}, {})  # type: ignore[dict-item]
+
+
+def test_tile_op_caches_the_stable_schedule_inventory() -> None:
+    shared = _sum()
+    left = Fold.projection(operands=(shared,), body=Body(), results=("sum",))
+    right = Fold.projection(operands=(shared,), body=Body(), results=("sum",))
+    root = Fold.projection(operands=(left, right), body=Body(), results=("sum", "sum"))
+    tile = TileOp(op=root)
+
+    assert tile.nodes == schedule_nodes(tile.op)
+    assert tile.nodes is tile.nodes
+    assert tile.node_edges == schedule_edges(tile.nodes)
+    assert tile.node_edges is tile.node_edges
+    assert tuple(tile.node_id(node) for node in tile.nodes) == tuple(range(len(tile.nodes)))
 
 
 def test_tile_requires_complete_materialization() -> None:
@@ -470,7 +482,7 @@ def test_tile_requires_complete_materialization() -> None:
     )
 
     with pytest.raises(ValueError, match="exactly the tiled node sites"):
-        TileOp(op=root, classic=schedule, materialization=ClassicMaterialization({}, {}))
+        TileOp(op=root, schedule=schedule, materialization=ClassicMaterialization({}, {}))
 
 
 def test_tile_graph_round_trip_uses_the_strict_schedule_codec() -> None:
@@ -490,7 +502,7 @@ def test_tile_graph_round_trip_uses_the_strict_schedule_codec() -> None:
         op=root,
         name="classic",
         place=Placement(free=(m, n), grid=(m, n), mapped=True),
-        classic=schedule,
+        schedule=schedule,
         materialization=ClassicMaterialization({site: plan.at(m, n)}, {}),
     )
     graph = Graph()
@@ -501,9 +513,9 @@ def test_tile_graph_round_trip_uses_the_strict_schedule_codec() -> None:
     payload = json.loads(json.dumps(graph.to_dict(), default=str))
     restored = Graph.from_dict(payload).nodes["out"].op
 
-    assert restored.classic == schedule
+    assert restored.schedule == schedule
     assert restored.materialization == tile.materialization
-    assert "schedule" not in payload["nodes"]["out"]["op_fields"]
+    assert "schedule" in payload["nodes"]["out"]["op_fields"]
 
     unknown = copy.deepcopy(payload)
     unknown["nodes"]["out"]["op_fields"]["materialization"]["alias"] = {}

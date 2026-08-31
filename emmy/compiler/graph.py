@@ -422,27 +422,35 @@ _STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta"})
 # pure runtime state (``source`` / ``knobs`` chain metadata, ``inputs`` /
 # ``outputs`` snapped by the matcher) — none of it belongs in the persisted
 # IR.
-_SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs", "meta", "classic", "materialization"})
+_SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs", "meta", "schedule", "materialization"})
 
 
 def _serialize_op_fields(op: Op) -> dict:
-    """Serialize one op, with the classic assignment using its strict codec boundary."""
+    """Serialize one op, with its schedule using the implementation's codec boundary."""
     from dataclasses import fields as dc_fields
 
     fields = {f.name: _serialize_field(getattr(op, f.name)) for f in dc_fields(op) if f.name not in _SERIALIZE_SKIP_FIELDS}
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
-    if not isinstance(op, TileOp) or op.classic is None:
+    if not isinstance(op, TileOp) or op.schedule is None:
         return fields
-    from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCodec  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.classic import (  # noqa: PLC0415
+        ClassicProblem,
+        ClassicSchedule,
+        ClassicScheduleCodec,
+        edge_site_spelling,
+        node_id_spelling,
+    )
 
+    if not isinstance(op.schedule, ClassicSchedule):
+        raise TypeError(f"no wire codec registered for {type(op.schedule).__name__}")
     codec = ClassicScheduleCodec(ClassicProblem(op.op, target=None))
-    fields["classic"] = codec.encode(op.classic)
+    fields["schedule"] = codec.encode(op.schedule)
     if op.materialization is not None:
         fields["materialization"] = {
-            "tiles": {site.id.spell(): [repr(axis) for axis in placed.axes] for site, placed in op.materialization.tiles.items()},
+            "tiles": {node_id_spelling(site): [repr(axis) for axis in placed.axes] for site, placed in op.materialization.tiles.items()},
             "stages": {
-                edge.spell(): {
+                edge_site_spelling(edge): {
                     "smem": list(stage.smem),
                     "bk_elems": stage.bk_elems,
                 }
@@ -453,51 +461,50 @@ def _serialize_op_fields(op: Op) -> dict:
 
 
 def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
-    """Deserialize one op and reconstruct typed classic values before construction."""
+    """Deserialize one op and reconstruct typed schedule values before construction."""
     raw = dict(raw_fields)
-    classic_row = raw.pop("classic", None)
+    schedule_row = raw.pop("schedule", None)
     materialization_row = raw.pop("materialization", None)
     fields = {key: _deserialize_field(key, value) for key, value in raw.items()}
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
     if not issubclass(op_cls, TileOp):
         return op_cls(**fields) if fields else op_cls()
-    if classic_row is None:
+    if schedule_row is None:
         if materialization_row is not None:
-            raise ValueError("classic materialization requires a classic schedule")
+            raise ValueError("schedule materialization requires a schedule")
         return op_cls(**fields) if fields else op_cls()
     from emmy.compiler.ir.schedule import PlacedTile, ResolvedStage  # noqa: PLC0415
     from emmy.compiler.ir.schedule.classic import (  # noqa: PLC0415
         ClassicMaterialization,
         ClassicProblem,
         ClassicScheduleCodec,
-        EdgeSite,
-        NodeId,
-        NodeSite,
+        parse_edge_site,
+        parse_node_id,
     )
 
     codec = ClassicScheduleCodec(ClassicProblem(fields["op"], target=None))
-    schedule = codec.decode(_wire_mapping(classic_row, "classic schedule"))
-    fields["classic"] = schedule
+    schedule = codec.decode(_wire_mapping(schedule_row, "classic schedule"))
+    fields["schedule"] = schedule
     materialization = _exact_wire_mapping(materialization_row, {"tiles", "stages"}, "classic materialization")
     tile_rows = _wire_mapping(materialization["tiles"], "classic materialization tiles")
     stage_rows = _wire_mapping(materialization["stages"], "classic materialization stages")
     tiles = {}
     for spelling, axes in tile_rows.items():
         if not isinstance(spelling, str) or not isinstance(axes, list) or len(axes) != 2 or not all(isinstance(axis, str) for axis in axes):
-            raise ValueError("classic materialization tiles must map NodeId spellings to two serialized axes")
-        site = NodeSite(NodeId.parse(spelling))
+            raise ValueError("classic materialization tiles must map node-id spellings to two serialized axes")
+        site = parse_node_id(spelling)
         if site not in schedule.nodes:
             raise ValueError(f"classic materialization names unknown node site {spelling}")
         tiles[site] = PlacedTile(schedule.nodes[site].tile, tuple(_maybe_eval_ctor(axis) for axis in axes))
     stages = {}
     for spelling, raw_facts in stage_rows.items():
         if not isinstance(spelling, str):
-            raise ValueError("classic materialization stage keys must be EdgeSite spellings")
+            raise ValueError("classic materialization stage keys must be edge-site spellings")
         facts = _exact_wire_mapping(raw_facts, {"smem", "bk_elems"}, f"classic materialization stage {spelling}")
         if not isinstance(facts["smem"], list) or not all(isinstance(name, str) for name in facts["smem"]):
             raise ValueError(f"classic materialization stage {spelling} smem must be a list of strings")
-        edge = EdgeSite.parse(spelling)
+        edge = parse_edge_site(spelling)
         if edge not in schedule.edges:
             raise ValueError(f"classic materialization names unknown edge site {spelling}")
         stages[edge] = ResolvedStage(schedule.edges[edge].stage, tuple(facts["smem"]), facts["bk_elems"])

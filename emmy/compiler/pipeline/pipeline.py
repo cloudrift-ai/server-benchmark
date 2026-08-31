@@ -648,6 +648,12 @@ class ForkPoint:
         return tuple(o for o in self.options if not _is_structural_option(o))
 
 
+#: A deterministic policy found no complete option below a lazy fork. Search drops such a branch
+#: naturally; resolve uses this explicit result to continue the current rule batch without applying
+#: a rewrite.
+NO_OPTION = object()
+
+
 @dataclass(frozen=True)
 class Decision:
     """One :meth:`Run.resolve` trace entry — what a deterministic
@@ -716,7 +722,12 @@ class Run:
     # stays 0 on the deterministic greedy path.
     _dropped_candidates: int = 0
 
-    def _step(self, cand: Candidate) -> tuple[Match, list, bool] | None:
+    def _step(
+        self,
+        cand: Candidate,
+        decide: Callable[[ForkPoint], object] | None = None,
+        trace: list[Decision] | None = None,
+    ) -> tuple[Match, list, bool] | None:
         """Run one rule batch against ``cand`` — the per-candidate engine
         body shared by :meth:`drive` and :meth:`resolve`. Single-option
         rewrites apply inline (via ``Candidate.try_rewrite``), empty /
@@ -724,10 +735,9 @@ class Run:
         offer site was already decided on this trajectory replays that
         side inline (:func:`_replay_structural_decision`). Returns ``None``
         when the batch completed with nothing left to decide, or
-        ``(match, options, structural)`` at the first undecided
-        multi-option fork — selection is the caller's job (``drive``
-        spawns ``LazyCandidate`` siblings for its search; ``resolve``
-        asks its ``decide`` callback)."""
+        ``(match, options, structural)`` at the first undecided multi-option fork when ``decide``
+        is absent. With ``decide``, resolve the fork in place; :data:`NO_OPTION` skips an empty
+        lazy subtree and continues with the remaining matches in the same batch."""
         cur = cand.cursor
         pass_ = cur.current_pass
         # Empty pass (e.g. all rules filtered out) OR no live matches →
@@ -762,6 +772,30 @@ class Run:
             if structural and (chosen := _replay_structural_decision(cand.graph, match.root.op, options)) is not None:
                 cand.apply(match, chosen)
                 continue
+            if decide is not None:
+                root_op = match.root.op
+                fp = ForkPoint(match=match, options=options, root_op=root_op, ctx=self.ctx)
+                choice = decide(fp)
+                if choice is NO_OPTION:
+                    cand._advance_if_last(match)
+                    continue
+                option = _concrete_option(choice)
+                if option is None:
+                    raise ValueError(f"decide returned a branch Fork at {match.rule.name!r} — return a concrete option or a leaf Fork")
+                knob_delta = _choice_knobs(choice, option, root_op)
+                cand.apply(match, option)
+                assert trace is not None
+                trace.append(
+                    Decision(
+                        rule_name=match.rule.name,
+                        node_id=fp.node_id,
+                        chosen_kind="graph" if isinstance(option, Graph) else "op",
+                        knob_delta=knob_delta,
+                        score=fp.score,
+                        n_options=len(options),
+                    )
+                )
+                return None
             return match, options, structural
         return None
 
@@ -797,28 +831,7 @@ class Run:
         cand = Candidate(run=self, graph=graph, cursor=Cursor(run=self))
         trace: list[Decision] = []
         while not cand.cursor.is_done:
-            step = self._step(cand)
-            if step is None:
-                continue
-            match, options, structural = step
-            root_op = match.root.op  # read before apply rebinds it
-            fp = ForkPoint(match=match, options=options, root_op=root_op, ctx=self.ctx)
-            choice = decide(fp)
-            option = _concrete_option(choice)
-            if option is None:
-                raise ValueError(f"decide returned a branch Fork at {match.rule.name!r} — return a concrete option or a leaf Fork")
-            knob_delta = _choice_knobs(choice, option, root_op)
-            cand.apply(match, option)
-            trace.append(
-                Decision(
-                    rule_name=match.rule.name,
-                    node_id=fp.node_id,
-                    chosen_kind="graph" if isinstance(option, Graph) else "op",
-                    knob_delta=knob_delta,
-                    score=fp.score,
-                    n_options=len(options),
-                )
-            )
+            self._step(cand, decide=decide, trace=trace)
         return cand.graph, trace
 
     def drive(self, graph: Graph) -> Iterator[tuple[object | None, Candidate]]:

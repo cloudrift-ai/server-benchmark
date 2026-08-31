@@ -1281,9 +1281,10 @@ explicit knob mapping (possibly empty for a forkless anchor) and paired positive
 every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before
 they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
 the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
-A promoted classic row is already complete: bare `WORK` and `RASTER`, exact `TILE@n<N>` / `REDUCE@n<N>` node
-sites, and exact `STAGE@n<N>.e<M>` operand edges, including explicit empty direct choices. Promotion rejects bare
-node or edge families, incomplete rows, aliases, and unknown sites. It never fills or repairs a recording.
+A promoted classic row is already complete: bare `WORK` and `RASTER`, with `TILE`, `REDUCE`, and `STAGE` bare when
+their family has one applicable node and `@n<N>`-qualified only when the family is ambiguous. `STAGE` records one
+transport choice per consumer node, including an explicit empty direct choice. Promotion rejects incomplete rows,
+aliases, and unknown sites. It never fills or repairs a recording.
 
 **A split's children persist as child-identity schedule receipts.** One flat `knobs` map decorates exactly one
 kernel, so a route whose cut splits the target into several kernels cannot record conflicting per-child schedules in
@@ -1663,18 +1664,19 @@ restriction excludes those choices when it evaluates a complete assignment.
 `FAST_MATH` is a meta gate over the others — `unfeatured`, never stamped/enumerated/featurized (the realized fork is
 identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token).
 
-### Exact classic site keys
+### Classic schedule keys
 
 Structural choices finish before `ClassicProblem` constructs its immutable site index. Each shared Fold object gets
-one preorder `NodeId`; every consumer operand position gets a distinct `EdgeSite`, even when two edges reach the same
-producer. The strict codec spells kernel choices as bare `WORK` / `RASTER`, node choices as `TILE@n<N>` and
-`REDUCE@n<N>`, and edge transport as `STAGE@n<N>.e<M>`. No short path, axis name, primary-node sugar, family fan-out,
-or alias is accepted. Empty direct values remain explicit, so every leaf has the same key vocabulary.
+one preorder integer id; every consumer operand position gets a distinct `(consumer id, operand position)` tuple, even
+when two edges reach the same producer. The strict codec spells kernel choices as bare `WORK` / `RASTER`. `TILE`,
+`REDUCE`, and `STAGE` are also
+bare when their family has one applicable consumer node; only an ambiguous family uses `@n<N>`. `STAGE` is one
+transport decision shared by the applicable operand edges at that consumer. Empty direct values remain explicit, so
+every leaf has the same key vocabulary.
 
 `PLACE` alone retains the Fold tree-path grammar because it changes kernel boundaries before classic sites exist.
-Repository goldens were regenerated in the exact grammar; mutable tune evidence is discarded after a re-key, never
-migrated. `tuning_knob_items` renders keys as stored and all decode paths use `ClassicScheduleCodec`. Family-level
-feature pooling may aggregate exact sites, but matching and replay never do.
+Repository goldens retain the shortest unambiguous grammar; mutable tune evidence is discarded after a re-key,
+never migrated. `tuning_knob_items` renders keys as stored and all decode paths use `ClassicScheduleCodec`.
 
 ### Odds and ends
 

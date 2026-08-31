@@ -127,7 +127,7 @@ assignment, the scheduler validates that assignment directly against the unchang
 relation; an opaque or partial `c` supplies no such proof and follows Algorithm 1's traversal. Bounded tests compare
 the complete set against the literal node × edge × kernel product.
 The fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete
-typed `ClassicSchedule`, only the search boundary encodes exact `NodeId` / `EdgeSite` keys, and only materialization
+typed `ClassicSchedule`, only the search boundary encodes exact node and consumer scopes, and only materialization
 derives placed geometry and resolved transport facts. Schedule parameters restrict Algorithm 1 without changing any
 factor or overriding target, shape, addressing, or compatibility constraints. A partial row containing scoped keys is
 inert on a kernel where all of those keys are foreign; its bare kernel values travel with it instead of accidentally
@@ -552,7 +552,8 @@ codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync 
 ladder, and two-dimensional thread tiles × per-thread register tiles (`block_threads ≤ 1024`), with the per-cell
 `""` tile as one more member. The normal cooperative-reduction catalog is likewise the fixed cooperative-width × ILP
 product. The scheduler projects these alongside the warp and transport catalogs. Every accepted leaf is a complete
-`ClassicSchedule` with exact `NodeId` and `EdgeSite` keys. Schedule parameters restrict complete assignments without
+`ClassicSchedule` with exact integer node ids and `(consumer, operand)` edge tuples. Schedule parameters restrict
+complete assignments without
 changing those exact domains.
 The producer band is a fixed kernel-domain factor (`""`, `+p1`, `+p2`; since step 7 a resolved band is spelled in
 `WORK`, never a per-row `WSPEC` key). Compatibility accepts a nonzero member only on a warp row over resolved **TMA**
@@ -575,8 +576,8 @@ the partial — and the deferred finalize folds every component before applying 
 Multi-channel products still have no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge
 is the anticipated
 `RoleKind` extension. `TILE` parameters match each site's own catalog through the exact codec spelling: an explicit
-`TILE@n<ordinal>` parameter restricts one site, while a bare parameter restricts every applicable site. A value absent
-from an applicable factor leaves no assignment rather than changing that factor. Staging additionally
+`TILE@n<ordinal>` restricts one site when the family is ambiguous, while the canonical bare spelling addresses its
+only applicable site. A value absent from an applicable factor leaves no assignment rather than changing that factor. Staging additionally
 requires the staged BUFFER dtypes to match the atom's operand dtypes — a slab fill byte-copies and cannot
 convert; gmem-direct fragment loads convert
 per element and keep the warp tier either way. To keep that gate from silently disabling staging on real models,

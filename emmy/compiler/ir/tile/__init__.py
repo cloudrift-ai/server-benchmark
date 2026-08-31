@@ -3,7 +3,7 @@
 See :mod:`.ir` and :mod:`.schedule`. The layer between Loop IR and Kernel IR: a
 :class:`TileOp` holds one structural-IR root ``op`` (a :class:`Fold`, with contractions derived
 from its algebra and computed operands stored inline on their edges), structural placement, one
-accepted ``ClassicSchedule``, separate materialization facts, and search knobs. The schedule stays
+accepted :class:`Schedule`, separate materialization facts, and search knobs. The schedule stays
 separate from the term; dispatch reads the node's derived classification, not a per-kind type.
 """
 

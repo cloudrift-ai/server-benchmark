@@ -37,11 +37,5 @@ configs:
     pins:
       FAST_MATH: false
       PLACE: cut
-    knobs:
-      WORK: ''
-      RASTER: ''
-      TILE@n0: ''
-      REDUCE@n0: ''
-      STAGE@n0.e0: ''
-      STAGE@n0.e1: ''
+    knobs: {}
     identity: 66934f327785a2a558139365cdd921cc02901fc063c17fd91dbac91b58809cb7

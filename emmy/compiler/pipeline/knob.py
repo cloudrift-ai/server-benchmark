@@ -234,6 +234,11 @@ class Knob:
         matching the lowercase element spelling producers use."""
         return config.knob_raw(f"{self.name}@{element}")
 
+    def narrow_at(self, element: str) -> str | None:
+        """Return the exact site pin, falling back to the global family pin."""
+        value = self.pin_at(element)
+        return value if value is not None else self.raw()
+
 
 # --- Site-scoped schedule keys ---------------------------------------------
 #
@@ -268,18 +273,20 @@ def family_of(key: str) -> str:
 def axis_of(key: str) -> str | None:
     """The generic ``@<scope>`` element of a knob key, or ``None`` when bare.
 
-    Classic schedules use an exact ``NodeId`` or ``EdgeSite`` scope. The historical function name
-    remains internal to the schema-agnostic feature machinery; it does not imply axis identity.
+    Classic schedules use an exact integer node scope. The historical function name remains internal to the
+    schema-agnostic feature machinery; it does not imply axis identity.
     """
     return key.split("@", 1)[1] if "@" in key else None
 
 
 def family_value(knobs: dict, family: str):
-    """Return the first site-scoped value in ``family`` or ``None`` when absent.
+    """Return the global or first site-scoped value in ``family``, or ``None`` when absent.
 
     This pooled read is only for diagnostics that deliberately collapse a family. Semantic
-    consumers address a concrete node or edge key through :class:`ClassicSchedule`.
+    consumers address a concrete site through :class:`Schedule`.
     """
+    if family in knobs:
+        return knobs[family]
     prefix = family + "@"
     for k, val in knobs.items():
         if k.startswith(prefix):
@@ -333,8 +340,8 @@ def apply_off_defaults(knobs: dict, declared: Iterable[Knob]) -> dict:
 
 
 def pin_key_matches(pinned: str, realized: str) -> bool:
-    """Whether a realized key is the exact canonical key that was pinned."""
-    return pinned == realized
+    """Whether ``realized`` is the exact site pin, or a site covered by a global pin."""
+    return pinned == realized or axis_of(pinned) is None
 
 
 def validate_family_value(name: str, value) -> str:
@@ -573,8 +580,8 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     ``TILE`` output-fragment knob is one column for both the scalar and warp tiers
     (the value self-describes), so there are no tier-foreign OFF knobs to hide.
 
-    Keys render as stored. Classic node and edge choices already carry their exact ``NodeId`` or
-    ``EdgeSite`` suffix, so this view performs no aliasing or scope collapse."""
+    Keys render as stored. Classic node choices and each edge choice's consumer already carry their exact integer node
+    suffix, so this view performs no aliasing or scope collapse."""
     rendered: list[tuple[str, str]] = []
     for k, v in knobs.items():
         if k.startswith(STRUCT_PREFIX) or k.startswith(CTX_PREFIX):
@@ -626,11 +633,12 @@ def evidence_row_vouches(cand_tun: dict, row_tun: dict, *, exact_families: froze
 
 
 def complete_kernel_row(knobs: dict) -> dict[str, str]:
-    """Return one realized kernel row, rejecting legacy or structurally incomplete schedules.
+    """Return one realized kernel row, rejecting structurally incomplete schedules.
 
     Exact coverage is problem-dependent and is enforced by :class:`ClassicScheduleCodec` at leaf
-    construction. This recording boundary enforces the context-free half: bare kernel families,
-    canonical node and edge sites, and at least one node assignment.
+    construction. This recording boundary enforces the context-free half: kernel families are
+    bare, node families may be bare or use canonical node sites, and at least one node assignment
+    is present.
     """
     out = dict(tuning_knob_items(knobs))
     present = {family_of(key) for key in out}
@@ -640,10 +648,7 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
             raise ValueError(
                 f"complete classic schedule row is missing {', '.join(sorted(missing))}; present keys: {', '.join(out) or '<none>'}"
             )
-        bare = sorted(key for key in out if key in {"TILE", "REDUCE", "STAGE"})
-        if bare:
-            raise ValueError(f"classic node and edge families require exact sites: {', '.join(bare)}")
-        from emmy.compiler.ir.schedule.classic import EdgeSite, NodeId  # noqa: PLC0415
+        from emmy.compiler.ir.schedule.classic import parse_node_id  # noqa: PLC0415
 
         node_keys = []
         for key in out:
@@ -654,14 +659,11 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
                 if separator:
                     raise ValueError(f"classic kernel family {family} must be bare, got {key}")
                 continue
-            try:
-                if family == "STAGE":
-                    EdgeSite.parse(site)
-                else:
-                    NodeId.parse(site)
-            except ValueError:
-                expected = f"{family}@n<ordinal>.e<operand>" if family == "STAGE" else f"{family}@n<ordinal>"
-                raise ValueError(f"classic schedule key {key!r} is not canonical; expected {expected}") from None
+            if separator:
+                try:
+                    parse_node_id(site)
+                except ValueError:
+                    raise ValueError(f"classic schedule key {key!r} is not canonical; expected {family}@n<ordinal>") from None
             if family in {"TILE", "REDUCE"}:
                 node_keys.append(key)
         if not node_keys:

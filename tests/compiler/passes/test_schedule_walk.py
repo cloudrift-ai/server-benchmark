@@ -91,13 +91,9 @@ def _pin_sdpa(monkeypatch) -> None:
         **{
             "TILE@n3": "mma_m16n8k16_f16_f32/f1x2",
             "TILE@n4": "mma_m16n8k16_f16_f32/f1x1",
-            "REDUCE@n1": "",
-            "REDUCE@n3": "",
-            "REDUCE@n4": "",
-            "STAGE@n3.e0": "",
-            "STAGE@n3.e1": "",
-            "STAGE@n4.e0": "",
-            "STAGE@n4.e1": "",
+            "REDUCE": "",
+            "STAGE@n3": "",
+            "STAGE@n4": "d1/smem",
         },
     )
 
@@ -174,12 +170,13 @@ def test_sdpa_fold_tree_offers_a_paired_mma_row(unpinned, monkeypatch) -> None:
     assert any(sum(key.startswith("TILE@") and "mma_" in str(value) for key, value in row.items()) == 2 for row in rows)
 
 
-@pytest.mark.parametrize("pin", ["EMMY_TILE", "EMMY_TILE@A2", "EMMY_STAGE", "EMMY_REDUCE@K"])
-def test_classic_pins_require_exact_site_identities(pin, unpinned, monkeypatch) -> None:
-    """Bare families and retired structural suffixes are not a second classic schedule codec."""
-    monkeypatch.setenv(pin, "")
-    with pytest.raises(ValueError, match="classic schedule pin.*is not canonical"):
-        _rows(_matmul_graph(64, 64, 64, "f16"))
+def test_global_classic_pins_restrict_every_applicable_site(unpinned, monkeypatch) -> None:
+    """Bare families form one immutable restriction without manufacturing domain choices."""
+    _pin(monkeypatch, WORK="", TILE="", REDUCE="", STAGE="", RASTER="")
+    rows = _rows(_matmul_graph(64, 64, 64, "f16"))
+    assert rows
+    for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER"):
+        assert all(all(value == "" for key, value in row.items() if family_of(key) == family) for row in rows)
 
 
 def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
@@ -252,10 +249,8 @@ def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkey
             "REDUCE@n0": "",
             "REDUCE@n2": "",
             "REDUCE@n3": "",
-            "STAGE@n2.e0": "",
-            "STAGE@n2.e1": "",
-            "STAGE@n3.e0": "",
-            "STAGE@n3.e1": "",
+            "STAGE@n2": "",
+            "STAGE@n3": "d1/smem",
         },
     )
     monkeypatch.setenv("EMMY_RASTER", "")
@@ -286,9 +281,9 @@ def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> N
     _pin(
         monkeypatch,
         **{
-            **{f"TILE@n{i}": "" for i in (2, 6, 13)},
-            **{f"REDUCE@n{i}": "" for i in (1, 2, 5, 6, 10, 13, 17)},
-            **{f"STAGE@n{i}.e{edge}": "" for i in (2, 6, 13) for edge in (0, 1)},
+            "TILE": "",
+            "REDUCE": "",
+            "STAGE": "",
         },
     )
     monkeypatch.setenv("EMMY_RASTER", "")

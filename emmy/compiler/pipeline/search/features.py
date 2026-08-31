@@ -374,8 +374,8 @@ def knob_features(knobs: dict) -> dict[str, float]:
       when non-numeric); other ``STR`` knobs have no generic encoding.
 
     The schedule-geometry block (``D_*`` / ``MMA_*``) is featurized **per node** and **sum-pooled**.
-    A multi-node kernel groups each exact ``NodeId`` and its incident ``EdgeSite`` choices through
-    :func:`node_slices`, featurizes every group with :func:`_schedule_node_features`, and sums the
+    A multi-node kernel groups each exact integer node id and its incident edge choices through :func:`node_slices`,
+    featurizes every group with :func:`_schedule_node_features`, and sums the
     blocks into the fixed-width vector. A single-node kernel has one group, so the sum is that one
     node's block. Per-node attribution remains outside this whole-kernel feature contract."""
     feats: dict[str, float] = {}

@@ -27,12 +27,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
       WORK: w2x2
-      RASTER: ''
-      TILE@n0: mma_m16n8k16_f16_f32/f2x2/k2
-      REDUCE@n0: ''
-      STAGE@n0.e0: ''
-      STAGE@n0.e1: ''
+      STAGE: ''
+      REDUCE: ''
     identity: 6c1231340d477209125618225db13039bce64ab5e8fab767182d9088af0b5376
     latency:
       NVIDIA GeForce RTX 5090:

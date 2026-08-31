@@ -43,9 +43,8 @@ _PATIENCE = 8
 
 _CHILD_WINNER = {
     "WORK": "t32",
-    "TILE@n0": "f1",
-    "STAGE@n0.e0": "",
-    "STAGE@n0.e1": "",
+    "TILE": "f1",
+    "STAGE": "",
 }
 
 
@@ -258,7 +257,7 @@ def test_persisted_unscheduled_tile_child_tunes_and_replays_in_parent_cut(tmp_pa
     child = _persisted_placement_child()
     backend = _ChildScheduleBackend()
 
-    with pinned_knobs({"REDUCE@n0": ""}):
+    with pinned_knobs({"REDUCE": ""}):
         direct = run_two_level(
             child,
             ctx=ctx,
@@ -269,7 +268,7 @@ def test_persisted_unscheduled_tile_child_tunes_and_replays_in_parent_cut(tmp_pa
             prior=None,
             manage_prior=False,
         )
-    with pinned_knobs({"PLACE": "cut", "REDUCE@n0": ""}):
+    with pinned_knobs({"PLACE": "cut", "REDUCE": ""}):
         parent = Pipeline.build(CUDA_PASSES).run(_placement_route_graph(), ctx=ctx, db=db)
 
     assert direct.best_reward is not None and direct.best_reward.ok
@@ -286,10 +285,10 @@ def test_persisted_unscheduled_tile_child_tunes_and_replays_in_parent_cut(tmp_pa
 def test_scheduled_tile_child_is_not_reenrolled_or_rescheduled() -> None:
     """A Tile root whose worker inventory is sealed is already decided."""
     child = _persisted_placement_child()
-    with pinned_knobs({"WORK": "t16x8", "STAGE@n0.e0": "d1/smem-async", "REDUCE@n0": ""}):
+    with pinned_knobs({"WORK": "t16x8", "STAGE": "d1/smem-async", "REDUCE": ""}):
         scheduled = Pipeline.build(["lowering/tile"]).run(child, ctx=Context.from_target((8, 0)), db=SearchDB())
     tile = next(node.op for node in scheduled.nodes.values() if isinstance(node.op, TileOp))
-    assert tile.classic is not None
+    assert tile.schedule is not None
     assert _kernel_nodes(scheduled) == []
 
     backend = _ChildScheduleBackend()
@@ -305,12 +304,12 @@ def test_scheduled_tile_child_is_not_reenrolled_or_rescheduled() -> None:
     assert backend.calls == 0
     (cuda,) = [node.op for node in result.assembled.nodes.values() if isinstance(node.op, CudaOp)]
     assert cuda.knobs["WORK"] == "t16x8"
-    assert cuda.knobs["STAGE@n0.e0"] == "d1/smem-async"
+    assert cuda.knobs["STAGE"] == "d1/smem-async"
 
 
 def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt(monkeypatch, tmp_path) -> None:
     """A measured route stays search evidence until its exact child tree can replay."""
-    monkeypatch.setenv("EMMY_REDUCE@N0", "")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     graph = _placement_route_graph()
     ctx = Context.from_target((8, 0))
     path = tmp_path / "route.db"
@@ -336,7 +335,7 @@ def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt
 def test_pinned_placement_route_tunes_and_assembles_child_schedules(monkeypatch, caplog) -> None:
     """A pinned cut freezes the kernel set; every minted child is then tuned independently and
     the assembled route reads each child's own schedule evidence."""
-    monkeypatch.setenv("EMMY_REDUCE@N0", "")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     backend = _RouteBackend()
     with caplog.at_level(logging.INFO, logger="emmy.compiler.pipeline.search.strategy.two_level"):
         with pinned_knobs({"PLACE": "cut"}):
@@ -354,7 +353,7 @@ def test_pinned_placement_route_tunes_and_assembles_child_schedules(monkeypatch,
     assert len(assembled) == 2
     assert sum("enrolled minted kernel" in record.message for record in caplog.records) >= 2
     assert _is_child_winner(assembled[0].knobs)
-    assert assembled[1].knobs["WORK"] == "" and assembled[1].knobs.get("STAGE@n0.e0", "") == ""
+    assert assembled[1].knobs["WORK"] == "" and assembled[1].knobs.get("STAGE", "") == ""
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:

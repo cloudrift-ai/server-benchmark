@@ -2,8 +2,16 @@
 # hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 32. One of the twelve layer-0
 # kernels the perf suite curated before the corpus became its case source.
 #
-# The case preserves the fused attention program; its schedule is selected afresh through exact
-# node and operand-edge sites.
+# The schedule is SITE-SCOPED (TILE@a3 is the score, TILE@pj the weighted sum) because a flash
+# tree decides per site. It is also the row a greedy compile REALIZES on this shape, read off
+# the resolved kernel.
+#
+# evidence: this exact row is one `enumerate_graph` itself emits for this exact program at
+# this exact capability (3050 rows offered unpinned, this among them). Pinning a row back to
+# the enumeration that produced it must be satisfiable by construction; instead the pinned
+# enumeration admits nothing at all and every fork empties. A row the planner offers and then
+# refuses to honour is a pin round-trip defect, not a schedule the compiler is right to
+# decline.
 compute_cap:
 - 12
 - 0
@@ -35,5 +43,15 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs: {}
+    knobs:
+      TILE@a3: ''
+      TILE@pj: ''
+      REDUCE: ''
+      REDUCE@a3: ''
+      REDUCE@pj: ''
+      STAGE: ''
+      STAGE@a3: ''
+      STAGE@pj: ''
+      RASTER: ''
+      WORK: t32x16
     identity: 04341d5a3418b7273bdda938a0d8b2b125b742b37b267f3057abfd9c5c8389bf

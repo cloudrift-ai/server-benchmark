@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
+
+from frozendict import frozendict
 
 
 @dataclass(frozen=True)
@@ -101,7 +102,6 @@ RECOVERY_CLUSTERS = (
         nodeids=frozenset(
             (
                 "tests/compiler/loader/test_exl3.py::test_computed_b_split_k_matches_decoded_linear",
-                "tests/compiler/loader/test_exl3.py::test_computed_b_split_partial_reindexes_the_cone",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[2-0-16-mma]",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[5-2-1-coop]",
             )
@@ -115,23 +115,6 @@ RECOVERY_CLUSTERS = (
             (
                 "tests/compiler/e2e/test_knob_pinning.py::test_scalar_cpasync_pin_refuses_odd_stride",
                 "tests/compiler/e2e/test_knob_pinning.py::test_unstaged_atom_lowers_gmem_direct",
-                "tests/compiler/passes/test_schedule_walk.py::test_a_sweep_reading_fold_offers_only_the_serial_reduce",
-                "tests/compiler/passes/test_schedule_walk.py::test_an_observed_fold_offers_only_the_serial_reduce",
-                "tests/compiler/passes/test_schedule_walk.py::test_classic_pins_require_exact_site_identities[EMMY_REDUCE@K]",
-                "tests/compiler/passes/test_schedule_walk.py::test_classic_pins_require_exact_site_identities[EMMY_STAGE]",
-                "tests/compiler/passes/test_schedule_walk.py::test_classic_pins_require_exact_site_identities[EMMY_TILE@A2]",
-                "tests/compiler/passes/test_schedule_walk.py::test_classic_pins_require_exact_site_identities[EMMY_TILE]",
-                "tests/compiler/passes/test_schedule_walk.py::test_computed_fold_sites_are_keyed_schedule_sites[flash_pair-2-3]",
-                "tests/compiler/passes/test_schedule_walk.py::test_computed_fold_sites_are_keyed_schedule_sites[fused_norm_linear-1-2]",
-                "tests/compiler/passes/test_schedule_walk.py::test_every_computed_statistic_receives_a_node_id",
-                "tests/compiler/passes/test_schedule_walk.py::test_sdpa_fold_tree_offers_a_paired_mma_row",
-                "tests/compiler/passes/test_schedule_walk.py::test_the_prescan_asks_each_catalog_question_once[flash_pair]",
-                "tests/compiler/passes/test_schedule_walk.py::test_the_prescan_asks_each_catalog_question_once[fused_norm_linear]",
-                "tests/compiler/passes/test_schedule_walk.py::test_the_prescan_asks_each_catalog_question_once[reduce_matvec]",
-                "tests/compiler/passes/test_schedule_walk.py::test_the_prescan_asks_each_catalog_question_once[scalar_matmul]",
-                "tests/compiler/passes/test_schedule_walk.py::test_the_prescan_asks_each_catalog_question_once[warp_matmul]",
-                "tests/compiler/passes/test_schedule_walk.py::test_the_prescan_reads_each_computed_a_seam_once",
-                "tests/compiler/passes/test_schedule_walk.py::test_the_twisted_carrier_split_offers_only_the_deferred_arm",
             )
         ),
     ),
@@ -152,24 +135,16 @@ RECOVERY_CLUSTERS = (
         reason="restore strict realization-corpus replay at every declared stage",
         nodeids=frozenset(
             (
-                "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-gqa-b-cut.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-gqa-b-cut.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-composed-cut.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-composed-cut.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-composed-cut.yaml-offered]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-composed-cut.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-output-axis.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-output-axis.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-output-axis.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-output-axis.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-b-cut.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-b-cut.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-b-cut.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-b-cut.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-cut.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-cut.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-cut.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-cut.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-route.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-stat-route.yaml-correct]",
                 "tests/compiler/realization/test_realization.py::test_realization[fused/gate-up-distinct-a_xfail_realized.yaml-realized]",
@@ -184,17 +159,12 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/realization/test_realization.py::test_realization[matmul/f32-scalar-masked-n-staged_xfail_offered.yaml-offered]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s128.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s128.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s128.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s32.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s32.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s32.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s512.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s512.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[qwen3emb/gated-mlp-s512.yaml-realized]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-built]",
                 "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-correct]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-offered]",
-                "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-coop-warp.yaml-realized]",
             )
         ),
         accepted=(
@@ -211,7 +181,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 109
+REMAINING_FAILURE_COUNT = 78
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:
@@ -227,7 +197,7 @@ def _failures() -> Mapping[str, ReconstructionFailure]:
         )
     if len(failures) > _INITIAL_FAILURE_COUNT:
         raise RuntimeError("classic schedule reconstruction failure registry may only shrink")
-    return MappingProxyType(failures)
+    return frozendict(failures)
 
 
 FAILURES = _failures()

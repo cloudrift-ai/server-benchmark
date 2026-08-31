@@ -84,12 +84,12 @@ def _document(*entries):
 
 
 def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
-    """One complete exact-site schedule for synthetic single-node CUDA graphs."""
+    """One complete global schedule for synthetic single-node CUDA graphs."""
     return {
         "WORK": work,
-        "TILE@n0": tile,
-        "REDUCE@n0": reduce,
-        "STAGE@n0.e0": stage,
+        "TILE": tile,
+        "REDUCE": reduce,
+        "STAGE": stage,
         "RASTER": raster,
     }
 
@@ -141,7 +141,7 @@ def test_multi_cuda_realized_knobs_must_be_conflict_free():
     assert realized_tuning_knobs(graph) is None
 
     graph.nodes["b"].op = replace(graph.nodes["b"].op, knobs=_classic_row(tile="f2x2"))
-    assert realized_tuning_knobs(graph)["TILE@n0"] == "f2x2"
+    assert realized_tuning_knobs(graph)["TILE"] == "f2x2"
 
 
 def test_working_file_rejects_legacy_reproducer_field(tmp_path):
@@ -347,7 +347,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     terminal.add_node(
         CudaOp(
             kernel_name="partial",
-            knobs={key: value for key, value in route.items() if key != "REDUCE"},
+            knobs={**route, "REDUCE": ""},
         ),
         [],
         Tensor("partial", (1,)),
@@ -460,7 +460,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     db = SearchDB(db_path)
     bookkeeping = PerfStats(median=106.95, min=106.95, max=106.95, mean=106.95, variance=0.0, n_samples=1)
     monolithic = PerfStats(median=153.45, min=153.45, max=153.45, mean=153.45, variance=0.0, n_samples=1)
-    fallback = {key: value for key, value in route.items() if key != "REDUCE"}
+    fallback = {**route, "REDUCE": ""}
     fallback_key = "monolithic-cuda"
     db.record_perf(
         ctx.structural_key(),

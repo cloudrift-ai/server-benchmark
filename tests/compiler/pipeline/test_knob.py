@@ -420,15 +420,15 @@ def test_family_and_axis_of():
 
 def test_family_value_reads_bare_or_suffixed():
     assert family_value({"TILE@d": "x"}, "TILE") == "x"
-    assert family_value({"TILE": "x"}, "TILE") is None
+    assert family_value({"TILE": "x"}, "TILE") == "x"
     assert family_value({"REDUCE": "coop"}, "TILE") is None
 
 
 def test_pin_key_matches():
-    """Pins match only the exact canonical key; there is no family-wide alias."""
+    """A global pin covers every site; a site pin matches only that exact site."""
     assert pin_key_matches("TILE", "TILE")
     assert pin_key_matches("TILE@n2", "TILE@n2")
-    assert not pin_key_matches("TILE", "TILE@n2")
+    assert pin_key_matches("TILE", "TILE@n2")
     assert not pin_key_matches("TILE@n2", "TILE")
     assert not pin_key_matches("TILE@n2", "TILE@n3")
 
@@ -613,27 +613,24 @@ def test_complete_kernel_row_requires_the_emitted_exact_schedule():
     row = {
         "WORK": "w1x1",
         "RASTER": "",
-        "TILE@n0": "mma_m16n8k16_f16_f32/f1x1",
-        "REDUCE@n0": "",
-        "STAGE@n0.e0": "",
-        "STAGE@n0.e1": "",
+        "TILE": "mma_m16n8k16_f16_f32/f1x1",
+        "REDUCE": "",
+        "STAGE": "",
         "S_ext_free_prod": 64.0,
     }
     out = complete_kernel_row(row)
-    assert out["TILE@n0"] == "mma_m16n8k16_f16_f32/f1x1"
+    assert out["TILE"] == "mma_m16n8k16_f16_f32/f1x1"
     assert "S_ext_free_prod" not in out
     assert complete_kernel_row(out) == out
 
     with pytest.raises(ValueError, match="missing RASTER"):
-        complete_kernel_row({"WORK": "", "REDUCE@n0": ""})
-    with pytest.raises(ValueError, match="require exact sites"):
-        complete_kernel_row({"WORK": "", "RASTER": "", "REDUCE": ""})
+        complete_kernel_row({"WORK": "", "REDUCE": ""})
     with pytest.raises(ValueError, match="not canonical"):
         complete_kernel_row({"WORK": "", "RASTER": "", "REDUCE@row": ""})
     with pytest.raises(ValueError, match="must be bare"):
-        complete_kernel_row({"WORK@n0": "", "WORK": "", "RASTER": "", "REDUCE@n0": ""})
+        complete_kernel_row({"WORK@n0": "", "WORK": "", "RASTER": "", "REDUCE": ""})
     with pytest.raises(ValueError, match="no node assignment"):
-        complete_kernel_row({"WORK": "", "RASTER": "", "STAGE@n0.e0": ""})
+        complete_kernel_row({"WORK": "", "RASTER": "", "STAGE": ""})
 
 
 def test_knob_features_geometry_memo_is_invisible():

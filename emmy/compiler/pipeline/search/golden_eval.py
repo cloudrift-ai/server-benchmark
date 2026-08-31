@@ -84,7 +84,9 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
         # only an entirely empty fork means the schedule is not offered.
         option = next(iter_leaves(options), None)
         if option is None:
-            raise ValueError("the live pins admit no option at this fork, so no candidate row can be enumerated")
+            from emmy.compiler.pipeline.pipeline import NO_OPTION  # noqa: PLC0415
+
+            return NO_OPTION
         return option
 
     terminal, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)

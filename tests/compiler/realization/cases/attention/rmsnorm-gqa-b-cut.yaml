@@ -1,9 +1,8 @@
 # Reduced Qwen3 decoder attention: fp16 RMSNorm feeding causal grouped-query attention.
 #
-# evidence: experiments/golden-bench-2026/kernels/golden/qwen3-06b-s512_a100.golden.yaml carries
-# PLACE@b=cut for the same RMSNorm-fed GQA B-operand structure on sm80, with a correct measured
-# k_sdpa_mean_reduce_29d3df realization. The current canonical spelling
-# PLACE@map.fold.a.fold.b1 must still address that previously offered Fold edge.
+# evidence: repeated strict O3 A100 measurements materialize the clustered normalized-K value
+# through PLACE@map.fold.a.map.fold.fold.b1 in one cooperative producer plus one consumer,
+# reaching 6.91-7.01 us against torch.compile's 10.09 us for this exact target.
 compute_cap:
 - 8
 - 0
@@ -65,29 +64,14 @@ configs:
   - name: k_sdpa_rms_norm_reduce_ca42d0.53de85802e53
     bindings: {}
     pins:
-      FAST_MATH: false
-      PLACE@map.fold.a.fold.b1: cut
+      FAST_MATH: true
+      PLACE@map.fold.a.map.fold.fold.b1: cut
     knobs:
-      WORK: t128
+      TILE: ''
+      WORK: t8
+      REDUCE: coop
+      REDUCE@n2: ''
+      REDUCE@n5: ''
+      STAGE: ''
       RASTER: ''
-      TILE@n0: ''
-      TILE@n2: ''
-      TILE@n3: ''
-      TILE@n4: ''
-      TILE@n8: ''
-      REDUCE@n1: coop
-      REDUCE@n2: coop
-      REDUCE@n3: coop
-      REDUCE@n4: coop
-      REDUCE@n7: coop
-      REDUCE@n8: coop
-      REDUCE@n12: coop
-      STAGE@n2.e0: ''
-      STAGE@n2.e1: ''
-      STAGE@n3.e0: ''
-      STAGE@n3.e1: ''
-      STAGE@n4.e0: ''
-      STAGE@n4.e1: ''
-      STAGE@n8.e0: ''
-      STAGE@n8.e1: ''
     identity: c652057d2830890026194bcbeebdb67469ea58631f93d28fb7cd832f531700f0

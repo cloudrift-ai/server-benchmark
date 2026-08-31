@@ -32650,13 +32650,12 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: ''
-      REDUCE@n0: coop
-      STAGE@n0.e0: ''
-      STAGE@n0.e1: ''
       WORK: t512
-      RASTER: ''
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
       LOOPIFY: '0'
+      RASTER: ''
     measurements:
       emmy_us: 13.877633591772804
       reference_us: 534.4560146331787
@@ -32670,16 +32669,34 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: ''
-      REDUCE@n0: coop
-      STAGE@n0.e0: ''
-      STAGE@n0.e1: ''
       WORK: t64
-      RASTER: ''
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
       LOOPIFY: '0'
+      RASTER: ''
     measurements:
       emmy_us: 12.10634155971248
       reference_us: 119.79600042104721
+      reference_backend: emmy-greedy
+- program: 1
+  target:
+    loop: 2
+  realizations:
+  - name: post1-dense-full@b2.k_matmul_reduce_a91b88.6f1209ddb350
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: g32k/coop-t
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 22.153191724565872
+      reference_us: 346.9280004501343
       reference_backend: emmy-greedy
 - program: 1
   target:
@@ -32690,13 +32707,12 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: ''
-      REDUCE@n0: coop
-      STAGE@n0.e0: ''
-      STAGE@n0.e1: ''
       WORK: t128
-      RASTER: ''
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
       LOOPIFY: '0'
+      RASTER: ''
     measurements:
       emmy_us: 129.62599843740463
       reference_us: 567.8079724311829
@@ -32710,16 +32726,34 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: ''
-      REDUCE@n0: coop
-      STAGE@n0.e0: ''
-      STAGE@n0.e1: ''
       WORK: t512
-      RASTER: ''
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
       LOOPIFY: '0'
+      RASTER: ''
     measurements:
       emmy_us: 101.54240131378174
       reference_us: 1405.4400324821472
+      reference_backend: emmy-greedy
+- program: 2
+  target:
+    loop: 5
+  realizations:
+  - name: post1-sparse-sliding@b2.k_matmul_reduce_f7578b.5519f1ed440e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      TILE: ''
+      REDUCE: g32k/coop-t
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    measurements:
+      emmy_us: 31.549626843591852
+      reference_us: 519.4399952888489
       reference_backend: emmy-greedy
 - program: 3
   target:
@@ -32730,13 +32764,12 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: ''
-      REDUCE@n0: coop
-      STAGE@n0.e0: ''
-      STAGE@n0.e1: ''
       WORK: t256
-      RASTER: ''
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
       LOOPIFY: '0'
+      RASTER: ''
     measurements:
       emmy_us: 67.09333260854086
       reference_us: 567.7280128002167
@@ -32750,13 +32783,12 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: ''
-      REDUCE@n0: coop
-      STAGE@n0.e0: ''
-      STAGE@n0.e1: ''
       WORK: t256
-      RASTER: ''
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
       LOOPIFY: '0'
+      RASTER: ''
     measurements:
       emmy_us: 98.7392008304596
       reference_us: 567.6720142364502

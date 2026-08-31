@@ -48,10 +48,5 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: ''
-      RASTER: ''
-      TILE@n0: ''
-      REDUCE@n0: ''
-      STAGE@n0.e0: ''
-      STAGE@n0.e1: ''
+      STAGE: d2/smem-tma
     identity: ceb95fc34d7e4c5a5a45a9cef8c157727e37a9b08ae7d1e37384cfa1b34d8c9d

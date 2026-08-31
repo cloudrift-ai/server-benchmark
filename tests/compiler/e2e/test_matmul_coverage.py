@@ -285,7 +285,7 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     pin_classic(monkeypatch, {"STAGE": "d1/smem"})  # reg needs a computed edge — declines on a materialized contraction
     declined = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in declined.nodes.values() if isinstance(n.op, TileOp))
-    assert tile_op.classic is None and not tile_op.place.is_mapped
+    assert tile_op.schedule is None and not tile_op.place.is_mapped
 
 
 def test_scalar_masked_n_stage_pin_refuses(monkeypatch) -> None:
@@ -303,7 +303,7 @@ def test_scalar_masked_n_stage_pin_refuses(monkeypatch) -> None:
         pin_classic(monkeypatch, {"STAGE": stage})
         declined = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(M=64, N=48, K=64), ctx=Context.from_target((9, 0)))
         tile_op = next(n.op for n in declined.nodes.values() if isinstance(n.op, TileOp))
-        assert tile_op.classic is None and not tile_op.place.is_mapped
+        assert tile_op.schedule is None and not tile_op.place.is_mapped
 
 
 def test_tma_stage_pin_refuses_below_sm90(monkeypatch) -> None:
@@ -318,7 +318,7 @@ def test_tma_stage_pin_refuses_below_sm90(monkeypatch) -> None:
     pin_classic(monkeypatch, {"STAGE": "d2/smem-tma"})
     declined = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((8, 9)))
     tile_op = next(n.op for n in declined.nodes.values() if isinstance(n.op, TileOp))
-    assert tile_op.classic is None and not tile_op.place.is_mapped
+    assert tile_op.schedule is None and not tile_op.place.is_mapped
 
     # Control: cp.async is unaffected by the gate — a d2/smem-async pin still rings at sm_89.
     pin_classic(monkeypatch, {"STAGE": "d2/smem-async"})
@@ -1338,7 +1338,7 @@ def test_tile_block_over_thread_limit_rejected(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_WORK", "t128x128")
     lowered = _run_tile_pass(_guard_mm_graph(256, 256, 256, dtype=F32))
     tile = next(node.op for node in lowered.nodes.values() if isinstance(node.op, TileOp))
-    assert not tile.place.is_mapped and tile.classic is None
+    assert not tile.place.is_mapped and tile.schedule is None
 
 
 def test_tile_block_within_limit_ok(monkeypatch) -> None:
@@ -1482,8 +1482,7 @@ def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
     B peer clamps its overhanging slab ROW the same way (K is that slab's outer dim, so the
     cp.async chunk stays contiguous). Without the mask the schedule refused the tier outright and
     this shape had only the scalar rows."""
-    pin_classic(monkeypatch, {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d1/smem", "REDUCE": ""}, node=2)
-    monkeypatch.setenv("EMMY_REDUCE@N1", "")
+    pin_classic(monkeypatch, {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d1/smem", "REDUCE": ""})
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     lowered = Pipeline.build(CUDA_PASSES).run(_pv_softmax_graph(), ctx=Context(compute_capability=(12, 0)))
     kop = lowered.nodes["o"].op
@@ -1916,4 +1915,4 @@ def test_transposed_a_warp_pin_restricts_the_schedule_to_empty(monkeypatch) -> N
     out = _run_tile_pass(_imap_graph("transpose_a")[0])
     tile = next(node.op for node in out.nodes.values() if isinstance(node.op, TileOp))
 
-    assert not tile.place.is_mapped and tile.classic is None
+    assert not tile.place.is_mapped and tile.schedule is None

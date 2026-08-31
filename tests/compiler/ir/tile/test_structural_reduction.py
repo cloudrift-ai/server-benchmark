@@ -87,7 +87,7 @@ def _with_reduce(tile: TileOp, node: Fold, plan: Reduce) -> TileOp:
         },
         {edge: EdgeSchedule(Stage.direct()) for edge in context.index.edges},
     )
-    return replace(tile, classic=classic, materialization=ClassicMaterialization({}, {}))
+    return replace(tile, schedule=classic, materialization=ClassicMaterialization({}, {}))
 
 
 def test_reduce_plan_reads_the_partition_from_the_classic_schedule() -> None:
@@ -486,7 +486,7 @@ def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b(mo
     stage = Stage(depth=1, transport="smem")
     context = ClassicScheduleContext(ClassicProblem(root, target=None))
     contraction_site = context.index.site(contraction)
-    staged_edges = tuple(edge for edge in context.index.edges if edge.consumer == contraction_site)
+    staged_edges = tuple(edge for edge in context.index.edges if edge[0] == contraction_site)
     classic = ClassicSchedule(
         KernelSchedule(work, Raster()),
         {
@@ -502,7 +502,7 @@ def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b(mo
         name="out",
         place=Placement(free=(m, n), grid=(m, n), mapped=True),
         output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="biased")),),
-        classic=classic,
+        schedule=classic,
         materialization=ClassicMaterialization(
             {contraction_site: plan},
             {edge: ResolvedStage(stage, smem=("scaled",), bk_elems=16) for edge in staged_edges},
@@ -601,11 +601,11 @@ def test_scheduled_uses_only_the_accepted_kernel_choice() -> None:
         name="typed",
         place=Placement(free=(m, n), grid=(m, n), mapped=True),
         knobs={"WORK": "t2"},
-        classic=classic,
+        schedule=classic,
         materialization=ClassicMaterialization({site: plan.at(m, n)}, {}),
     )
 
-    assert t.classic.kernel.work == Work(kind="thread", units=(2, 1))
+    assert t.schedule.kernel.work == Work(kind="thread", units=(2, 1))
     assert not hasattr(t, "work")
 
 

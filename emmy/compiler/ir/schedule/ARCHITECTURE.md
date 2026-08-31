@@ -2,8 +2,9 @@
 
 The schedule package separates the shared contract from concrete schedule implementations. `Schedule` is an immutable
 hardware-execution plan, `ScheduleContext` owns the problem and target facts that decide compatibility, and
-`ScheduleCodec` is the strict canonical wire boundary. A future implementation, such as a warp schedule, supplies all
-three without adding type branches to the classic model.
+`ScheduleCodec` is the strict canonical wire boundary. `ScheduleMaterialization` owns derived lowering facts and
+validates that they came from their schedule. A future implementation, such as a warp schedule, supplies these
+interfaces without adding type branches to Tile IR or the classic model.
 
 Schedule values never mutate. A schedule implementation returns a new value for every update, so enumeration,
 compatibility checks, serialization, and measurements can safely retain the original assignment. A context receives
@@ -13,6 +14,11 @@ complete rows, and exposes one canonical key order.
 Reusable leaf choices such as `Work`, `Tile`, `Reduce`, `Stage`, and `Raster` are independent of a concrete assignment
 model. They carry neither problem sites nor target facts. A concrete schedule may compose them, but does not add a
 second spelling or mutate them during validation.
+
+`views.py` owns reusable, target-independent Fold views. Node ids are non-negative integers in stable preorder, and an
+edge site is the `(consumer node id, operand position)` tuple. `TileOp.nodes` and `TileOp.node_edges` cache those stable
+inventories; codecs alone translate the identities to `n<N>` and `n<N>.e<M>` wire spellings. Projection, reduction,
+and contraction views are shared schedule input rather than classic schedule values.
 
 ## Classic schedule
 

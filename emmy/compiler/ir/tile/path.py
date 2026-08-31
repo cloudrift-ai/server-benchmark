@@ -5,8 +5,8 @@ position because it is a structural decision made before a classic problem exist
 unique path spelling is canonical; ambiguity and stale paths fail loudly. The retired
 ``in.<operand>`` prefix and leading-``=`` value-name form remain reserved.
 
-Classic choices never use this codec. A classic problem constructs sites only after every
-structural choice is consumed, and its strict codec addresses them by ``NodeId`` or ``EdgeSite``.
+Classic choices never use this codec. A classic problem constructs sites only after every structural choice is
+consumed, and its strict codec addresses integer node ids and ``(consumer, operand)`` edge tuples.
 """
 
 from __future__ import annotations

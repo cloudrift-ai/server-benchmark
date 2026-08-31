@@ -226,23 +226,24 @@ while retaining exact values throughout the ordinary extent range.
 
 ## TileOp and scheduling
 
-`TileOp` owns facts deliberately excluded from the Fold tree: placement, the accepted `ClassicSchedule`, its separate
-`ClassicMaterialization`, knobs, and output specifications. The semantic assignment contains choices only;
+`TileOp` owns facts deliberately excluded from the Fold tree: placement, an accepted `Schedule`, its separate
+`ScheduleMaterialization`, knobs, and output specifications. The semantic assignment contains choices only;
 site-indexed placed tile geometry and resolved transport sizes are lowering facts and cannot enter a row identity.
 `ops.Sched` is a read-only lowering view over those typed fields. There is no keyed slice map, per-node schedule
 field, compatibility adapter, alias codec, or dual reader.
 
-A scheduled `TileOp` must carry both typed fields. Its materialization contains exactly the contraction sites whose
-accepted tiles require placed geometry and exactly the edges whose accepted transport is non-direct. Every placed tile
-must equal the geometry derived from the structural placement and its axis-free choice; every resolved stage must retain
-its edge's choice. Construction rejects missing, extra, mismatched, or partly attached facts.
+A scheduled `TileOp` must carry both base-interface fields, and the materialization validates itself against the
+schedule. A classic materialization contains exactly the contraction sites whose accepted tiles require placed
+geometry and exactly the edges whose accepted transport is non-direct. Every placed tile must equal the geometry
+derived from the structural placement and its axis-free choice; every resolved stage must retain its edge's choice.
+Construction rejects missing, extra, mismatched, or partly attached facts.
 
 `ir/schedule/classic.py` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
 
-- `ClassicProblem` contains the unscheduled Fold root and target. `SiteIndex` assigns one stable `NodeSite` per Fold
-  identity and one distinct `EdgeSite` per consumer operand position, including multiple uses of one producer.
-- `classify` reads one node site without target input. A contraction records consumer-relative operand positions;
-  it does not mint alternate nodes or edge identities.
+- `ClassicProblem` contains the unscheduled Fold root and target. `SiteIndex` assigns one stable integer id per Fold
+  identity and one distinct `(consumer id, operand position)` tuple per edge, including multiple uses of one producer.
+- Reusable schedule views classify one Fold without target input. A contraction records consumer-relative operand
+  positions; it does not mint alternate nodes or edge identities. `TileOp` caches both stable inventories.
 - `KernelSchedule`, `ProjectionSchedule` / `ReductionSchedule`, and `EdgeSchedule` contain choices only. They do not
   cache paths, classifications, shapes, placed geometry, resolved shared-memory sizes, or codec spellings.
 - `ClassicScheduleContext.accepts` checks complete coverage, classification arms, worker inventory, target thread
@@ -252,9 +253,10 @@ its edge's choice. Construction rejects missing, extra, mismatched, or partly at
   schedule and accepted by the context before search can observe it; an encoded dictionary is never a semantic leaf.
 - Kernel, node, and edge domains are projected independently. Enumeration is the compatible subset of their Cartesian
   product, so changing traversal order may change work but can never change membership.
-- `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`; node keys are exact
-  `TILE@n<N>` / `REDUCE@n<N>` sites; transport keys are exact `STAGE@n<N>.e<M>` edge sites. Decode requires the full
-  key set and rejects aliases, missing direct values, unknown keys, and semantically refused assignments.
+- `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`. A node family is bare
+  when it has one applicable site and uses `@n<N>` only when ambiguous. `STAGE` is one value per consumer node and
+  follows the same rule. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
+  and semantically refused assignments.
 
 The lowering implementation is currently being rebuilt in `lowering/tile/_classic`. Until it satisfies these
 invariants, that boundary raises `ClassicScheduleUnavailable` and the exact strict test registry records every affected

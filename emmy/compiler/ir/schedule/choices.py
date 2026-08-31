@@ -7,7 +7,7 @@ one concrete schedule implementation.
 (:mod:`emmy.compiler.ir.pure.algebra` + :mod:`~emmy.compiler.ir.tile.ir`). This module owns the
 leaf choice types (:class:`Reduce` / :class:`Tile` / :class:`Stage` / :class:`WarpSpec` plus
 :class:`Placement`); :mod:`emmy.compiler.ir.schedule.classic` composes them into the accepted
-kernel, node, and edge assignment stored on ``TileOp.classic``. The Fold term itself carries no
+kernel, node, and edge assignment stored on ``TileOp.schedule``. The Fold term itself carries no
 schedule field.
 
 A reduction's only freedom is **how the reduce axis is partitioned across hardware levels**
@@ -414,6 +414,16 @@ class Tile:
         """True iff this materializes a tile: a warp tile always does; a scalar tile only when some
         unit / register width > 1 (else it is the per-cell tier — one thread per output cell)."""
         return self.is_warp or any(v > 1 for v in (*self.units, *self.regs))
+
+    def is_canonical_for(self, work: Work | None) -> bool:
+        """Whether this site-local value round-trips under the kernel ``WORK`` inventory."""
+        if not self.is_warp and self.units == (1, 1) and self.regs == (1, 1):
+            return True
+        if self.is_warp:
+            return work is not None and work.kind == "warp" and self.units == work.units
+        if work is None or work.kind == "direct":
+            return self.units == (1, 1)
+        return work.kind == "thread" and self.units == (work.units[1], work.units[0])
 
     @property
     def units_m(self) -> int:

@@ -30,9 +30,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: ''
-      RASTER: ''
-      REDUCE@n0: ''
+      REDUCE: ''
     identity: fec6a5461b5864504c75bbe352f7208308c76d8f0b3caef9b0a8d664886e05b9
     latency:
       NVIDIA GeForce RTX 5090:

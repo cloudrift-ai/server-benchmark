@@ -122,10 +122,10 @@ def test_pinned_transposed_coop_band_still_refuses_without_a_free_axis() -> None
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import TILE_PASSES
 
-    with pinned_knobs({"PLACE": "fuse", "WORK": "t256", "REDUCE@n1": "coop-t"}):
+    with pinned_knobs({"PLACE": "fuse", "WORK": "t256", "REDUCE": "coop-t"}):
         declined = Pipeline.build(TILE_PASSES).run(_rms_graph(rows=1), ctx=_CTX)
     tile_op = next(node.op for node in declined.nodes.values() if isinstance(node.op, TileOp))
-    assert tile_op.classic is None and not tile_op.place.is_mapped
+    assert tile_op.schedule is None and not tile_op.place.is_mapped
 
 
 @pytest.mark.parametrize("value", ("cut", "fuse"))

@@ -265,7 +265,7 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
     scheduled = TileOp(
         op=fold,
         name="k_stat",
-        classic=classic,
+        schedule=classic,
         materialization=ClassicMaterialization({}, {}),
     )
     assert "⟨REDUCE=r4⟩" in scheduled.pretty_body()

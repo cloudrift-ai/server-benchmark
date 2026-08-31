@@ -245,7 +245,7 @@ def test_tile_op_scalar_atom_schedule_roundtrip():
     g = Graph()
     x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1,), "f16"), node_id="x")
     g.add_node(
-        op=TileOp(op=fold, classic=classic, materialization=ClassicMaterialization({}, {})),
+        op=TileOp(op=fold, schedule=classic, materialization=ClassicMaterialization({}, {})),
         inputs=[x],
         output=Tensor("out", (1,), "f16"),
         node_id="out",
@@ -255,7 +255,7 @@ def test_tile_op_scalar_atom_schedule_roundtrip():
     loaded = Graph.from_dict(json.loads(json.dumps(g.to_dict(), default=str)))
     loaded_tile = loaded.nodes["out"].op
     loaded_context = ClassicScheduleContext(ClassicProblem(loaded_tile.op, target=None))
-    plan = loaded_tile.classic.nodes[loaded_context.index.nodes[0]].tile
+    plan = loaded_tile.schedule.nodes[loaded_context.index.nodes[0]].tile
     assert isinstance(plan, ScheduleTile)
     assert isinstance(plan.atom, ScalarAtom)
 

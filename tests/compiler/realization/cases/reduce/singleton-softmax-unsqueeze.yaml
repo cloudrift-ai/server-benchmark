@@ -56,8 +56,5 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      WORK: ''
-      RASTER: ''
-      TILE@n0: ''
+    knobs: {}
     identity: e46b033bddbfa0325f42beb22c15201e56ffc27f267533e6c9e828622dff0d50

@@ -57,24 +57,22 @@ requires_sm90 = pytest.mark.skipif(
 )
 
 
-def classic_row(knobs: dict[str, str], *, node: int = 0, stage_edges: tuple[int, ...] = (0, 1)) -> dict[str, str]:
-    """Spell a single-contraction test row with canonical classic site identities."""
+def classic_row(knobs: dict[str, str], *, node: int | None = None) -> dict[str, str]:
+    """Spell a classic test row, using global families unless a site is required."""
     row: dict[str, str] = {}
     for family, value in knobs.items():
         if family in {"WORK", "RASTER"}:
             row[family] = value
-        elif family in {"TILE", "REDUCE"}:
-            row[f"{family}@n{node}"] = value
-        elif family == "STAGE":
-            row.update((f"STAGE@n{node}.e{edge}", value) for edge in stage_edges)
+        elif family in {"TILE", "REDUCE", "STAGE"}:
+            row[family if node is None else f"{family}@n{node}"] = value
         else:
             row[family] = value
     return row
 
 
-def pin_classic(monkeypatch, knobs: dict[str, str], *, node: int = 0, stage_edges: tuple[int, ...] = (0, 1)) -> None:
-    """Publish a canonical single-contraction row for a compiler test."""
-    for key, value in classic_row(knobs, node=node, stage_edges=stage_edges).items():
+def pin_classic(monkeypatch, knobs: dict[str, str], *, node: int | None = None) -> None:
+    """Publish a classic row, using global families unless a site is required."""
+    for key, value in classic_row(knobs, node=node).items():
         monkeypatch.setenv(f"EMMY_{key.upper()}", str(value))
 
 

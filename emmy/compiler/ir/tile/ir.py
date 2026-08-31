@@ -11,15 +11,15 @@ combine.** The combine is not defined here — it is the :class:`~emmy.compiler.
 term (``ir/pure/fold.py``), which a ``TileOp`` holds whole in ``op``. What this module owns is
 everything the term deliberately does not carry:
 
-- the free-axis → grid :class:`~.schedule.Placement` (``place``), accepted site-indexed
-  ``ClassicSchedule`` choices, and separate ``ClassicMaterialization`` facts;
+- the free-axis → grid :class:`~.schedule.Placement` (``place``), an accepted site-indexed
+  :class:`Schedule`, and its separate :class:`ScheduleMaterialization`;
 - the kernel's EFFECTS — the :class:`OutputSpec` decorations and the ``apply_output_specs`` /
   ``extract_output_specs`` pair that reconstitutes the effectful stmt stream from them.
 
 That split is the layer's invariant, not a convenience. The stored term is pure algebra, IMMUTABLE
 across the whole schedule search — a fork is a different assignment, never a rebuilt tree — which is
 what keeps kernel identity (``Op.identity_key`` over the derived ``loop_body``) schedule-free, with
-the classic schedule, materialization, placement binding and workers excluded. Tile IR stores only
+the schedule, materialization, placement binding and workers excluded. Tile IR stores only
 pure terms; statements appear when the term is
 lowered, never inside it (``ir/ARCHITECTURE.md``, "Pure terms vs statements").
 
@@ -41,13 +41,15 @@ from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
-from emmy.compiler.ir.schedule.classic import ClassicMaterialization, ClassicSchedule
+from emmy.compiler.ir.schedule.base import Schedule, ScheduleMaterialization
+from emmy.compiler.ir.schedule.views import EdgeSite, NodeId, schedule_edges, schedule_nodes
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
 from emmy.compiler.ir.stmt.base import _axis_identity
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.path import sites
+from emmy.compiler.structural import instance_memo
 
 
 @dataclass(frozen=True)
@@ -416,7 +418,7 @@ class TileOp(Op):
 
     There is **no** let table: a computed operand is stored inline on its edge, and sharing is the
     product contraction's arity (see the module docstring), so stored trees are already
-    resolved and every walk is a plain tree walk. An accepted ``classic`` assignment contains
+    resolved and every walk is a plain tree walk. An accepted ``schedule`` assignment contains
     choices only; ``materialization`` separately contains placed geometry and resolved transport
     facts. There is no second schedule map or per-node schedule field. The ``op`` term is pure
     algebra, IMMUTABLE across the whole schedule search. Read through
@@ -429,8 +431,8 @@ class TileOp(Op):
     workers: WarpSpec | None = None
     # The accepted semantic assignment and its derived lowering facts. Unscheduled Tile IR carries
     # neither; scheduling installs both together.
-    classic: ClassicSchedule | None = field(default=None, compare=False, repr=False)
-    materialization: ClassicMaterialization | None = field(default=None, compare=False, repr=False)
+    schedule: Schedule | None = field(default=None, compare=False, repr=False)
+    materialization: ScheduleMaterialization | None = field(default=None, compare=False, repr=False)
     # The kernel's output specifications: every explicit ``Write`` (and the legacy rms/softmax
     # output-sweep spelling) as a kernel-boundary fact beside ``place``. Empty for a
     # bare reduction / contraction — its grid-cell store
@@ -467,8 +469,8 @@ class TileOp(Op):
             if any(is_contraction(site.node) for site in sites(candidate)):
                 normalized = candidate
                 object.__setattr__(self, "place", replace(self.place, free=candidate_free))
-        if self.classic is not None and normalized != self.op:
-            raise ValueError("cannot canonicalize a TileOp after a classic schedule has been attached")
+        if self.schedule is not None and normalized != self.op:
+            raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
         contractions = tuple(site.node for site in sites(normalized) if is_contraction(site.node))
@@ -479,7 +481,7 @@ class TileOp(Op):
             and any(any(edge_refs_axis(edge, store.sweep.name) for edge in contraction.operands) for contraction in contractions)
         }
         if not promoted:
-            self._validate_classic()
+            self._validate_schedule()
             return
         free_names = {axis.name for axis in self.place.free}
         extra = tuple(
@@ -511,47 +513,52 @@ class TileOp(Op):
         final_axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
         final_sweeps = frozenset(name for name in final_axes if name not in {axis.name for axis in self.place.free})
         renormalized = normalize_fold_tree(self.op, final_axes, sweep_axes=final_sweeps)
-        if self.classic is not None and renormalized != self.op:
-            raise ValueError("cannot canonicalize a TileOp after a classic schedule has been attached")
+        if self.schedule is not None and renormalized != self.op:
+            raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", renormalized)
-        self._validate_classic()
+        self._validate_schedule()
 
-    def _validate_classic(self) -> None:
-        """Enforce the typed schedule/materialization boundary on construction."""
-        if self.classic is None and self.materialization is None:
+    def _validate_schedule(self) -> None:
+        """Enforce the schedule/materialization boundary on construction."""
+        if self.schedule is None and self.materialization is None:
             return
-        if self.classic is None or self.materialization is None:
-            raise ValueError("a scheduled TileOp requires both ClassicSchedule and ClassicMaterialization")
-        from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleContext, Reduction  # noqa: PLC0415
-        from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
+        if self.schedule is None or self.materialization is None:
+            raise ValueError("a scheduled TileOp requires both a Schedule and ScheduleMaterialization")
+        self.materialization.validate(self.schedule, self.op, place=self.place, workers=self.workers)
 
-        context = ClassicScheduleContext(ClassicProblem(self.op, target=None))
-        verdict = context.accepts(self.classic)
-        if not verdict:
-            raise ValueError(f"TileOp carries a refused classic schedule: {verdict.refusal}")
-        expected_tiles = {
-            site
-            for site, assignment in self.classic.nodes.items()
-            if assignment.tile.is_tiled and isinstance(context.views[site], Reduction) and context.views[site].contraction is not None
-        }
-        if set(self.materialization.tiles) != expected_tiles:
-            raise ValueError("classic materialization must contain exactly the tiled node sites")
-        expected_stages = {edge for edge, assignment in self.classic.edges.items() if not assignment.stage.is_direct}
-        if set(self.materialization.stages) != expected_stages:
-            raise ValueError("classic materialization must contain exactly the staged edge sites")
-        placement = Sched(self.op, place=self.place)
-        for site, placed in self.materialization.tiles.items():
-            choice = self.classic.nodes[site].tile
-            expected = placement.placed(context.index.node(site), choice)
-            if placed.choice != choice or placed != expected:
-                raise ValueError(f"materialized tile at {site.id.spell()} does not derive from its classic choice")
-        for edge, resolved in self.materialization.stages.items():
-            if edge not in self.classic.edges or resolved.choice != self.classic.edges[edge].stage:
-                where = f"{edge.consumer.id.spell()}.e{edge.operand}"
-                raise ValueError(f"materialized stage at {where} does not derive from its classic choice")
-        producer = self.workers.producer_warps if self.workers is not None else 0
-        if self.classic.kernel.work.producer != producer:
-            raise ValueError(f"classic producer band {self.classic.kernel.work.producer} disagrees with WarpSpec producer band {producer}")
+    @property
+    def nodes(self) -> tuple[Fold, ...]:
+        """The term's Fold nodes in stable schedule order."""
+        memo = instance_memo(self, "_memo_schedule")
+        if "nodes" not in memo:
+            memo["nodes"] = schedule_nodes(self.op) if isinstance(self.op, Fold) else ()
+        return memo["nodes"]
+
+    @property
+    def node_edges(self) -> tuple[EdgeSite, ...]:
+        """Every consumer operand position in stable schedule order."""
+        memo = instance_memo(self, "_memo_schedule")
+        if "edges" not in memo:
+            memo["edges"] = schedule_edges(self.nodes)
+        return memo["edges"]
+
+    @property
+    def _node_ids(self) -> dict[int, NodeId]:
+        memo = instance_memo(self, "_memo_schedule")
+        if "node_ids" not in memo:
+            memo["node_ids"] = {id(node): node_id for node_id, node in enumerate(self.nodes)}
+        return memo["node_ids"]
+
+    def node_id(self, node: Fold) -> NodeId:
+        """Return ``node``'s schedule identity by object identity."""
+        try:
+            return self._node_ids[id(node)]
+        except KeyError:
+            raise KeyError("Fold is not a node of this TileOp") from None
+
+    def __getstate__(self):
+        """Pickle stored fields only; derived schedule inventories recompute after transport."""
+        return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
 
     def pretty_body(self) -> str:
         """The structural dump — delegated to :mod:`~emmy.compiler.ir.tile._dump`, which owns

@@ -171,7 +171,7 @@ def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
     ordinary parent-route replay already consumes. A Tile root carrying a ``ClassicSchedule`` is
     already decided and stays lowering-only; the typed assignment is the exact scheduled marker."""
     return [
-        (nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp) or (isinstance(n.op, TileOp) and n.op.classic is None)
+        (nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp) or (isinstance(n.op, TileOp) and n.op.schedule is None)
     ]
 
 

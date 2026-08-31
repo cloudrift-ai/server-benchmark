@@ -36,8 +36,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: f2x2
+      TILE: f2x2
       WORK: t16x8
-      STAGE@n0.e0: d1/smem-async
-      STAGE@n0.e1: d1/smem-async
+      STAGE: d1/smem-async
     identity: ff3ceb6c3d5e5495737be671f70d46ba40fed62262f99332bb7a079000f5e099

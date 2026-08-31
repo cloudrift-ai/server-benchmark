@@ -1,6 +1,6 @@
 """Schedule interfaces and reusable choices."""
 
-from .base import Schedule, ScheduleCodec, ScheduleContext
+from .base import Schedule, ScheduleCodec, ScheduleContext, ScheduleMaterialization
 from .choices import (
     AtomKind,
     FoldMove,
@@ -21,20 +21,28 @@ from .choices import (
     plan_workers,
     resolve_site_tile,
 )
+from .views import Contraction, EdgeSite, NodeId, NodeView, Projection, Reduction, node_view, schedule_edges, schedule_nodes
 
 __all__ = [
     "AtomKind",
+    "Contraction",
+    "EdgeSite",
     "FoldMove",
     "Level",
+    "NodeId",
+    "NodeView",
     "Placement",
     "PlacedTile",
+    "Projection",
     "Raster",
     "Reduce",
     "ReduceStage",
+    "Reduction",
     "ResolvedStage",
     "Schedule",
     "ScheduleCodec",
     "ScheduleContext",
+    "ScheduleMaterialization",
     "Side",
     "Stage",
     "Tile",
@@ -42,6 +50,9 @@ __all__ = [
     "Work",
     "derive_inventory",
     "derive_workers",
+    "node_view",
     "plan_workers",
     "resolve_site_tile",
+    "schedule_edges",
+    "schedule_nodes",
 ]

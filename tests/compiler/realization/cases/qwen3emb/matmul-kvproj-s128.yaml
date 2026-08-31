@@ -27,10 +27,9 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@n0: f2x4
-      REDUCE@n0: ''
-      STAGE@n0.e0: d1/smem-tma
-      STAGE@n0.e1: d1/smem-tma
+      TILE: f2x4
+      REDUCE: ''
+      STAGE: d1/smem-tma
       RASTER: ''
       WORK: t16x8
     identity: 77e7af5e3a407d991e87fa010b632073f3a584aff07d151ea833de37788cad43

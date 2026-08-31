@@ -35,7 +35,6 @@ from emmy.compiler.ir.schedule.classic import (
     ClassicProblem,
     ClassicScheduleContext,
     ReductionSchedule,
-    edge_key,
     node_key,
     reduction_sites,
     stage_edges,
@@ -203,14 +202,14 @@ def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tup
 class Sched:
     """Read-only view of one kernel's schedule choices and materialization facts.
 
-    Node families use the classic problem's stable :class:`NodeId`; transport is keyed per
-    :class:`EdgeSite`. ``PLACE`` is structural and remains outside this view. A node outside the
-    problem, or a family outside that node's classified schedule sum, fails loudly.
+    Node families use stable integer identities; transport is keyed by consumer and operand.
+    ``PLACE`` is structural and remains outside this view. A node outside the problem, or a family
+    outside that node's classified schedule sum, fails loudly.
     """
 
-    def __init__(self, root, place=None, classic=None, materialization=None) -> None:
+    def __init__(self, root, place=None, schedule=None, materialization=None) -> None:
         self.root = root
-        self.classic = classic
+        self.schedule = schedule
         self.materialization = materialization
         self.context = ClassicScheduleContext(ClassicProblem(root, target=None))
         self.index = self.context.index
@@ -258,25 +257,17 @@ class Sched:
         elif family == "REDUCE":
             family_sites = reduction_sites(self.context)
         elif family == "STAGE":
-            raise ValueError("STAGE is an edge family; use edge_keys(node)")
+            edges = stage_edges(self.context)
+            family_sites = tuple(dict.fromkeys(edge[0] for edge in edges))
         else:
             raise ValueError(f"unknown classic schedule family {family!r}")
         return node_key(family, site, family_sites) if site in family_sites else None
 
-    def edge_keys(self, node) -> tuple[str, ...]:
-        """Canonical transport keys for every schedulable operand edge of ``node``."""
-        try:
-            site = self.index.site(node)
-        except KeyError as error:
-            raise UnknownSiteError(str(error)) from None
-        edges = stage_edges(self.context)
-        return tuple(edge_key(edge, edges) for edge in edges if edge.consumer == site)
-
     def get(self, family: str, node):
-        if self.classic is None:
+        if self.schedule is None:
             return None
         site = self.index.site(node)
-        assignment = self.classic.nodes[site]
+        assignment = self.schedule.nodes[site]
         if family == "TILE":
             return assignment.tile if assignment.tile.is_tiled else None
         if family == "REDUCE":
@@ -286,7 +277,7 @@ class Sched:
         if family == "STAGE":
             if self.materialization is None:
                 return None
-            stages = {stage for edge, stage in self.materialization.stages.items() if edge.consumer == site}
+            stages = {stage for edge, stage in self.materialization.stages.items() if edge[0] == site}
             if len(stages) > 1:
                 raise ValueError("current kernel lowering requires one resolved transport across a node's operand edges")
             return next(iter(stages), None)
@@ -300,7 +291,7 @@ class Sched:
 
         The pair is a function of the SITE (:meth:`_mn_for`), which is what makes one rule
         possible where there used to be three hand-written ``.at(...)`` calls."""
-        if self.classic is None or self.materialization is None:
+        if self.schedule is None or self.materialization is None:
             return None
         return self.materialization.tiles.get(self.index.site(node))
 
@@ -372,7 +363,7 @@ def sched_of(tile) -> Sched:
     return Sched(
         tile.op,
         place=tile.place,
-        classic=tile.classic,
+        schedule=tile.schedule,
         materialization=tile.materialization,
     )
 
@@ -384,7 +375,7 @@ def scheduled(
     place,
     knobs: dict,
     output_specs: tuple = (),
-    classic=None,
+    schedule=None,
     materialization=None,
     workers=None,
 ):
@@ -393,12 +384,12 @@ def scheduled(
     The one constructor every row materializer shares (a split piece is not built here — it leaves
     ``035_split_reduce`` unscheduled and reaches this through its own row). The accepted assignment
     is the sole worker-inventory source; the encoded row must agree with it."""
-    if classic is None:
+    if schedule is None:
         raise ValueError("cannot construct a scheduled TileOp without a ClassicSchedule")
-    verdict = ClassicScheduleContext(ClassicProblem(op, target=None)).accepts(classic)
+    verdict = ClassicScheduleContext(ClassicProblem(op, target=None)).accepts(schedule)
     if not verdict:
         raise ValueError(f"cannot construct a scheduled TileOp from a refused assignment: {verdict.refusal}")
-    work = classic.kernel.work
+    work = schedule.kernel.work
     producer = workers.producer_warps if workers is not None else 0
     if work.producer != producer:
         raise ValueError(f"WORK producer band {work.producer} disagrees with WarpSpec producer band {producer}")
@@ -411,7 +402,7 @@ def scheduled(
         workers=workers,
         knobs=knobs,
         output_specs=tuple(output_specs),
-        classic=classic,
+        schedule=schedule,
         materialization=materialization,
     )
 
@@ -538,7 +529,7 @@ def carries_partition(op) -> bool:
 
 def reduce_plan(tile):
     """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.Reduce`), read from
-    ``TileOp.classic`` for the primary :class:`~emmy.compiler.ir.pure.fold.Fold` — when ``tile.op``
+    ``TileOp.schedule`` for the primary :class:`~emmy.compiler.ir.pure.fold.Fold` — when ``tile.op``
     is a ``Fold`` (bare, or wrapped via ``operands``), else ``None`` (a pure pointwise / scalar
     per-cell zero-axis ``Fold`` has no partition). An unscheduled fold reads the direct plan. The
     materializer's single accessor."""

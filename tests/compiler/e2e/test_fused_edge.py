@@ -304,7 +304,6 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
         monkeypatch,
         {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "REDUCE": ""},
         node=1,
-        stage_edges=(0, 1, 2),
     )  # serial fold — ONE masked kernel is the contract; the split form has its own test
     S, H, inter = runtime_s, 256, 512
     Sd = Dim("seq_len", hint=64)
@@ -463,7 +462,6 @@ def test_fused_gate_up_splitk_matches_reference(monkeypatch):
         monkeypatch,
         {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x4", "REDUCE": "g4k"},
         node=1,
-        stage_edges=(0, 1, 2),
     )
     S, H, inter = 32, 256, 512
     g = Graph()

@@ -16,12 +16,12 @@ from tests.compiler.helpers import requires_cuda
 
 
 def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
-    """One complete exact-site schedule for synthetic single-node CUDA graphs."""
+    """One complete global schedule for synthetic single-node CUDA graphs."""
     return {
         "WORK": work,
-        "TILE@n0": tile,
-        "REDUCE@n0": reduce,
-        "STAGE@n0.e0": stage,
+        "TILE": tile,
+        "REDUCE": reduce,
+        "STAGE": stage,
         "RASTER": raster,
     }
 
@@ -488,9 +488,9 @@ def test_unreproducible_pin_flag(monkeypatch):
     assert "(unset)" in unreproducible_pin_flag({"TIEL": "w2x1"}, [{"TILE": "w2x1"}])
     # Multi-kernel lowering (split main + finalize): honored on the second kernel.
     assert unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
-    # Site-scoped schedule choices match only their exact identity.
+    # A global parameter matches a realized site in the same family; exact parameters remain exact.
     assert unreproducible_pin_flag({"TILE@n2": "f2x2"}, [{"TILE@n2": "f2x2"}]) is None
-    assert "unreproducible pin" in unreproducible_pin_flag({"TILE": "f2x2"}, [{"TILE@n2": "f2x2"}])
+    assert unreproducible_pin_flag({"TILE": "f2x2"}, [{"TILE@n2": "f2x2"}]) is None
     # A keyed pin whose site differs: a genuine miss, but the
     # diagnostic names the family's realized value instead of (unset).
     flag = unreproducible_pin_flag({"TILE@n2": "mma_m16n8k16_f16_f32/f1x16"}, [{"TILE@n3": "mma_m16n8k16_f16_f32/f1x8"}])
@@ -840,10 +840,10 @@ def test_run_ab_bench_shows_pinned_row(run_cli):
     scalar-tile spelling for this shape) — an unmatched pin now fails its row loudly
     and exits non-zero instead of benching the planner's pick under the pin's name."""
     rc, stdout, stderr = run_cli(
-        "run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "TILE@n0=f2x2,WORK=t16x16"
+        "run", "--code", "torch.matmul(torch.randn(64, 64), torch.randn(64, 64))", "--bench", "--ab", "TILE=f2x2,WORK=t16x16"
     )
     assert rc == 0, f"stderr: {stderr}"
-    assert "ab TILE@n0=f2x2,WORK=t16x16" in stdout, stdout
+    assert "ab TILE=f2x2,WORK=t16x16" in stdout, stdout
 
 
 @requires_cuda

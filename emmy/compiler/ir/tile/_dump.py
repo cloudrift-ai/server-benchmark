@@ -223,8 +223,8 @@ def _pretty_place(tile) -> list[str]:
     if tile.place.free or tile.place.grid:
         grid = f"grid=({axes(tile.place.grid)})" if tile.place.is_mapped else "unmapped"
         out.append(f"place  free=({axes(tile.place.free)})  {grid}")
-    if tile.classic is not None and tile.classic.kernel.work.spell():
-        out.append(f"work   {tile.classic.kernel.work.spell()}")
+    if tile.schedule is not None and tile.schedule.kernel.work.spell():
+        out.append(f"work   {tile.schedule.kernel.work.spell()}")
     if tile.workers is not None:
         out.append(f"band   {tile.workers.spell()}")
     return out

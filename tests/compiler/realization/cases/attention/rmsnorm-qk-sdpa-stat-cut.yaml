@@ -50,13 +50,9 @@ configs:
       FAST_MATH: false
       PLACE: cut
     knobs:
+      TILE: f1
       WORK: t256
+      REDUCE: ''
+      STAGE: ''
       RASTER: ''
-      TILE@n3: f1
-      REDUCE@n1: ''
-      REDUCE@n2: ''
-      REDUCE@n3: ''
-      REDUCE@n7: ''
-      STAGE@n3.e0: ''
-      STAGE@n3.e1: ''
     identity: f1ad5cd0046f299018abb0a3b43bb2d3e005f6b036f1d11c8d1522f2486ff4f0

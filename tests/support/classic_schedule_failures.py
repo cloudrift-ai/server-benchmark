@@ -56,10 +56,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_reshaped_a_declines_tma_and_falls_back",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_staged_splitk_matches_gmem_direct_bit_for_bit[smem-async]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_staged_splitk_matches_gmem_direct_bit_for_bit[smem-tma]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_symbolic_mma_accuracy_across_transports[smem-async-256]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_symbolic_mma_accuracy_across_transports[smem-async-512]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_symbolic_mma_accuracy_across_transports[smem-tma-256]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_symbolic_mma_accuracy_across_transports[smem-tma-512]",
                 "tests/compiler/e2e/test_warp_specialize_deadlock.py::test_mlp_slice_completes_and_matches",
                 "tests/compiler/passes/test_fp8_mma.py::test_w8a8_dynamic_per_token_amax_cuda",
                 "tests/compiler/passes/test_fp8_staged.py::test_canonical_byte_b_and_splitk_compose_cuda",
@@ -287,7 +283,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 178
+REMAINING_FAILURE_COUNT = 174
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

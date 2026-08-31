@@ -88,7 +88,10 @@ only), and every FUSED linear (q+norm, k+norm, o+residual+norm+requant, gate+up+
 serving compiles) refuses the warp tier outright, at every width, as does every symbolic twin. Tuned bests
 show the consequence: pre graphs land at 11-35 us across tiers, post graphs at 48-330 ms — a scalar-tier
 floor no schedule search can cross. Giving the fused shapes a tensor-core tier is the critical path to any
-honest speed number; q/k binding is a sub-case of it.
+honest speed number; q/k binding is a sub-case of it. Two team invariants bound HOW (Ivan, 2026-08-31): no
+fusion stop-gaps — fuse everything, and where a boundary helps performance, CUT the graph (the `PLACE`
+lane), never refuse the fusion up front; and the resulting coverage is pinned as
+`tests/compiler/realization` cases (the 2.7 deliverable), not new custom Python tests.
 
 Findings logged along the way, each needing its own fix: the coded-trunk weight load takes 23 minutes for the
 6 GB 8B (host-side, independent of kernel picks); `--dump-dir`'s frontend-reproducer capture crashes on a

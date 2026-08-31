@@ -31,7 +31,7 @@ from emmy.compiler.ir.base import Op, _keepdim_axis
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class TransposeOp(Op):
     """Permute dimensions.
 
@@ -63,7 +63,7 @@ class TransposeOp(Op):
         return np.transpose(a, self.axes)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReshapeOp(Op):
     """Reshape tensor without changing data."""
 
@@ -98,7 +98,7 @@ class ReshapeOp(Op):
         return np.reshape(inputs[0], self.shape)
 
 
-@dataclass
+@dataclass(frozen=True)
 class SliceOp(Op):
     """Extract a sub-tensor along a dimension.
 
@@ -138,7 +138,7 @@ class SliceOp(Op):
         return tensor[tuple(slices)]
 
 
-@dataclass
+@dataclass(frozen=True)
 class CatOp(Op):
     """Concatenate tensors along a dimension.
 
@@ -180,7 +180,7 @@ class CatOp(Op):
         return np.concatenate(arrays, axis=dim)
 
 
-@dataclass
+@dataclass(frozen=True)
 class UnsqueezeOp(Op):
     """PyTorch aten.unsqueeze: add a size-1 dimension."""
 
@@ -202,7 +202,7 @@ class UnsqueezeOp(Op):
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class LinearOp(Op):
     """PyTorch aten.linear: output = x @ weight.T [+ bias]."""
 
@@ -221,7 +221,7 @@ class LinearOp(Op):
         return result
 
 
-@dataclass
+@dataclass(frozen=True)
 class MatmulOp(Op):
     """PyTorch aten.mm/matmul/addmm: output = A @ B [+ bias]."""
 
@@ -241,7 +241,7 @@ class MatmulOp(Op):
         return result
 
 
-@dataclass
+@dataclass(frozen=True)
 class SdpaOp(Op):
     """PyTorch scaled_dot_product_attention(Q, K, V, ...).
 
@@ -307,7 +307,7 @@ class SdpaOp(Op):
         return attn @ v
 
 
-@dataclass
+@dataclass(frozen=True)
 class MeanOp(Op):
     """PyTorch aten.mean.dim: reduction that averages along an axis.
 
@@ -324,7 +324,7 @@ class MeanOp(Op):
         return np.mean(inputs[0], axis=self.axis)
 
 
-@dataclass
+@dataclass(frozen=True)
 class RmsNormOp(Op):
     """PyTorch aten.rms_norm: ``x * rsqrt(mean(x*x) + eps) * weight``.
 
@@ -344,7 +344,7 @@ class RmsNormOp(Op):
         return (x / rms) * weight
 
 
-@dataclass
+@dataclass(frozen=True)
 class LayerNormOp(Op):
     """PyTorch aten.layer_norm: ``(x - mean(x)) * rsqrt(var(x) + eps) * weight + bias``.
 
@@ -371,7 +371,7 @@ class LayerNormOp(Op):
         return out
 
 
-@dataclass
+@dataclass(frozen=True)
 class SoftmaxOp(Op):
     """PyTorch aten.softmax.int: ``exp(x - max(x, dim)) / sum(exp(...), dim)``.
 
@@ -390,7 +390,7 @@ class SoftmaxOp(Op):
         return e / np.sum(e, axis=self.axis, keepdims=True)
 
 
-@dataclass
+@dataclass(frozen=True)
 class EinsumOp(Op):
     """PyTorch ``aten.einsum`` over exactly two operands.
 
@@ -423,7 +423,7 @@ class EinsumOp(Op):
         return np.einsum(self.equation, inputs[0], inputs[1])
 
 
-@dataclass
+@dataclass(frozen=True)
 class Conv1dOp(Op):
     """PyTorch ``aten.conv1d`` over ``(N, C_in, L)`` with a ``(C_out, C_in / groups, K)`` weight.
 

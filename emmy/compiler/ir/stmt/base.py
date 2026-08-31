@@ -525,6 +525,17 @@ class Stmt(Structural):
         about the surrounding declarations."""
         return ()
 
+    def rename_buffers(self, rename) -> Stmt:  # noqa: ANN001 — any str->str mapping
+        """This stmt with every external-buffer field renamed through ``rename`` (a
+        ``str -> str`` mapping; absent names keep). Default: identity — the counterpart of
+        :meth:`external_reads` / :meth:`external_writes`, overridden by exactly the leaves that
+        override those (``Load.input``, ``Write.output``, ``ZeroPrologue.dst``,
+        ``CpAsyncCopy.src``, ``TmaDescriptor.src_buf``, ``FragmentLoad.input``). Wrapper stmts
+        need no override: callers rename whole bodies through ``Body.rename_buffers``, whose
+        recursive ``map`` reaches every nested leaf."""
+        del rename
+        return self
+
     def external_writes(self) -> tuple[str, ...]:
         """External-buffer names this stmt writes to. Default: ``()``.
 
@@ -720,6 +731,10 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
 
     inlined: set[str] = set()
     if _readable():
+        # The readability scan runs before this body's Loads / Assigns render, so their dtypes are
+        # not in ``ctx.ssa_dtypes`` yet. Keep their stamped types locally: folding an expression
+        # that needs a target conversion would bypass ``Assign.render`` and drop that conversion.
+        local_dtypes = {name: s.dtype.name for s in body if isinstance(s, (Load, Assign)) and s.dtype is not None for name in s.defines()}
         from emmy.compiler.ir.expr import BinaryExpr, TernaryExpr, Var  # local — avoid cycle
 
         total = _read_counts(body, {})
@@ -744,6 +759,13 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
             # without substituting it, leaving an undefined reference.
             ri = next((j for j, r in enumerate(stmts) if s.name in r.deps()), None)
             if ri is None or not isinstance(stmts[ri], Assign):
+                continue
+            result_dt = s.dtype.name if s.dtype is not None else "f32"
+            arg_dtypes = [local_dtypes.get(arg, ctx.ssa_dtypes.get(arg, "f32")) for arg in s.args]
+            if any(dtype != result_dt for dtype in arg_dtypes):
+                # The named Assign's target-aware renderer inserts conversions (for example
+                # ``__half2float``). The readability-only fold renders a bare Expr tree, so keep
+                # the Assign named rather than silently changing its type semantics.
                 continue
             # Straddle guard: the fold moves this computation from its def site to the read site, so
             # every base operand — transitively, through already-inlined temps — must not be redefined

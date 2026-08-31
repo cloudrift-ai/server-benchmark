@@ -4,7 +4,8 @@ Pins the strategy's contract with a fake counting backend (no GPU): the outer ne
 into Tile IR and its scoring is DECLARED SEPARABLE (each unique Loop kernel measured in its own
 slice, Σ once all are measured); structurally identical kernels dedup with multiplicity; kernels
 minted during the inner loops (a pinned cross-CTA split's pieces) are ENROLLED as first-class
-tuning targets with their own identity — evidence, never reward terms.
+tuning targets with their own identity — evidence, never reward terms. A direct unscheduled Tile
+child enters that same per-kernel path, while a scheduled child stays lowering-only.
 
 Target forced to sm_80 so lowering is deterministic and GPU-independent — the fake backend never
 launches anything, it hands back per-launch latencies keyed off each CudaOp's structural key.
@@ -12,6 +13,7 @@ launches anything, it hands back per-launch latencies keyed off each CudaOp's st
 
 from __future__ import annotations
 
+import json
 import logging
 import zlib
 
@@ -27,10 +29,12 @@ from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.slice import single_node_graph
-from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult, _KernelInventory
+from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult, _kernel_nodes, _KernelInventory
 from tests.compiler.helpers import run_inner_reward, run_two_level
 
 # Moderate patience: each kernel explores several variants then stops on stagnation (the fake
@@ -66,7 +70,7 @@ class _CountingBackend:
         cuda = [n for n in graph.nodes.values() if isinstance(n.op, CudaOp)]
         per: list[LaunchTime] = []
         for i, n in enumerate(cuda):
-            us = 1.0 + (zlib.crc32(n.op.cache_key().encode()) % 100)
+            us = 1.0 + (zlib.crc32(n.op.identity_key(with_io=True, with_knobs=True).encode()) % 100)
             per.append(LaunchTime(idx=i, kernel_name=getattr(n.op, "kernel_name", "k"), time_ms=us / 1000.0, samples=(us / 1000.0,)))
         return BenchmarkResult(time_ms=sum(p.time_ms for p in per), num_launches=len(per), per_launch=per)
 
@@ -86,7 +90,7 @@ class _RouteBackend(_CountingBackend):
         self.calls += 1
         cuda = [n for n in graph.nodes.values() if isinstance(n.op, CudaOp)]
         if len(cuda) > 1:
-            route = tuple(node.op.cache_key() for node in cuda)
+            route = tuple(node.op.identity_key(with_io=True, with_knobs=True) for node in cuda)
             first = cuda[0].op.knobs
             fast_route = first.get("WORK") == "t16x8" and first.get("STAGE") == "d1/smem-async"
             if fast_route:
@@ -101,6 +105,21 @@ class _RouteBackend(_CountingBackend):
             for i, node in enumerate(cuda)
         ]
         return BenchmarkResult(time_ms=sum(item.time_ms for item in per), num_launches=len(per), per_launch=per)
+
+
+class _ChildScheduleBackend(_CountingBackend):
+    """Prefer one exact schedule for a directly tuned post-cut child."""
+
+    def benchmark(self, graph, num_iters="auto") -> BenchmarkResult:  # noqa: ARG002
+        self.calls += 1
+        (cuda,) = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
+        fast = cuda.knobs.get("WORK") == "t16x8" and cuda.knobs.get("STAGE") == "d1/smem-async"
+        us = 0.25 if fast else 10.0
+        return BenchmarkResult(
+            time_ms=us / 1000.0,
+            num_launches=1,
+            per_launch=(LaunchTime(idx=0, kernel_name=cuda.kernel_name, time_ms=us / 1000.0, samples=(us / 1000.0,)),),
+        )
 
 
 def _matmul(g: Graph, prefix: str, M: int, K: int, N: int) -> str:
@@ -200,14 +219,89 @@ def test_run_drives_outer_scores_separably_and_assembles() -> None:
     assert any(isinstance(n.op, CudaOp) for n in result.assembled.nodes.values())
 
 
-def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt(monkeypatch, tmp_path) -> None:
-    """A measured route stays search evidence until its exact child tree can replay."""
-    monkeypatch.setenv("EMMY_REDUCE", "")
+def _placement_route_graph() -> Graph:
     graph = _graph(("x", 64, 128, 48))
     graph.add_node(InputOp(), [], Tensor("residual", (64, 48)), node_id="residual")
     graph.add_node(ElementwiseOp("add"), ["xc", "residual"], Tensor("out", (64, 48)), node_id="out")
     graph.inputs.append("residual")
     graph.outputs = ["out"]
+    return graph
+
+
+def _persisted_placement_child() -> Graph:
+    """Return one unscheduled child as a Tile dump round-trip would load it."""
+    fused = Pipeline.build(LOOP_PASSES).run(_placement_route_graph(), ctx=Context.from_target((8, 0)), db=SearchDB())
+    with pinned_knobs({"PLACE": "cut"}):
+        pieces = Pipeline.build(["lowering/tile"], select={"lift", "cut"}).run(fused, ctx=Context.from_target((8, 0)), db=SearchDB())
+    producer = next(node.id for node in pieces.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.op.name)
+    child = single_node_graph(pieces, producer)
+    return Graph.from_dict(json.loads(json.dumps(child.to_dict(), default=str)))
+
+
+def test_persisted_unscheduled_tile_child_tunes_and_replays_in_parent_cut(tmp_path) -> None:
+    """A direct post-cut Tile target records ordinary child evidence, which the same child
+    consumes when its parent route is compiled later."""
+    ctx = Context.from_target((8, 0))
+    db = SearchDB(tmp_path / "child.db")
+    child = _persisted_placement_child()
+    backend = _ChildScheduleBackend()
+
+    with pinned_knobs({"REDUCE": ""}):
+        direct = run_two_level(
+            child,
+            ctx=ctx,
+            db=db,
+            backend=backend,
+            patience=24,
+            max_candidates=32,
+            prior=None,
+            manage_prior=False,
+        )
+    with pinned_knobs({"PLACE": "cut", "REDUCE": ""}):
+        parent = Pipeline.build(CUDA_PASSES).run(_placement_route_graph(), ctx=ctx, db=db)
+
+    assert direct.best_reward is not None and direct.best_reward.ok
+    assert len(direct.best_reward.per_op) == 1
+    direct_cuda = [node.op for node in direct.assembled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(direct_cuda) == 1
+    assert direct_cuda[0].knobs["WORK"] == "t16x8"
+    assert direct_cuda[0].knobs["STAGE"] == "d1/smem-async"
+    parent_cuda = [node.op for node in parent.nodes.values() if isinstance(node.op, CudaOp)]
+    producer = next(op for op in parent_cuda if "__place_" in op.kernel_name)
+    assert producer.knobs["WORK"] == "t16x8"
+    assert producer.knobs["STAGE"] == "d1/smem-async"
+    db.close()
+
+
+def test_scheduled_tile_child_is_not_reenrolled_or_rescheduled() -> None:
+    """A Tile root whose worker inventory is sealed is already decided."""
+    child = _persisted_placement_child()
+    with pinned_knobs({"WORK": "t16x8", "STAGE": "d1/smem-async", "REDUCE": ""}):
+        scheduled = Pipeline.build(["lowering/tile"]).run(child, ctx=Context.from_target((8, 0)), db=SearchDB())
+    tile = next(node.op for node in scheduled.nodes.values() if isinstance(node.op, TileOp))
+    assert tile.work is not None
+    assert _kernel_nodes(scheduled) == []
+
+    backend = _ChildScheduleBackend()
+    result = run_two_level(
+        scheduled,
+        ctx=Context.from_target((8, 0)),
+        db=SearchDB(),
+        backend=backend,
+        patience=_PATIENCE,
+        prior=None,
+        manage_prior=False,
+    )
+    assert backend.calls == 0
+    (cuda,) = [node.op for node in result.assembled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert cuda.knobs["WORK"] == "t16x8"
+    assert cuda.knobs["STAGE"] == "d1/smem-async"
+
+
+def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt(monkeypatch, tmp_path) -> None:
+    """A measured route stays search evidence until its exact child tree can replay."""
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    graph = _placement_route_graph()
     ctx = Context.from_target((8, 0))
     path = tmp_path / "route.db"
     db = SearchDB(path)
@@ -227,6 +321,30 @@ def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt
     route_rows = [row for row in db.iter_perf(ctx.structural_key(), backend="cuda") if row.knobs.get("PLACE") == "cut"]
     assert route_rows == []
     db.close()
+
+
+def test_pinned_placement_route_tunes_and_assembles_child_schedules(monkeypatch, caplog) -> None:
+    """A pinned cut freezes the kernel set; every minted child is then tuned independently and
+    the assembled route reads each child's own schedule evidence."""
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    backend = _RouteBackend()
+    with caplog.at_level(logging.INFO, logger="emmy.compiler.pipeline.search.strategy.two_level"):
+        with pinned_knobs({"PLACE": "cut"}):
+            result = run_two_level(
+                _placement_route_graph(),
+                ctx=Context.from_target((8, 0)),
+                db=SearchDB(),
+                backend=backend,
+                patience=_PATIENCE,
+                prior=None,
+                manage_prior=False,
+            )
+
+    assembled = [node.op for node in result.assembled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(assembled) == 2
+    assert sum("enrolled minted kernel" in record.message for record in caplog.records) >= 2
+    assert assembled[0].knobs["WORK"] == "t16x8" and assembled[0].knobs["STAGE"] == "d1/smem-async"
+    assert assembled[1].knobs["WORK"] == assembled[1].knobs["STAGE"] == ""
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:

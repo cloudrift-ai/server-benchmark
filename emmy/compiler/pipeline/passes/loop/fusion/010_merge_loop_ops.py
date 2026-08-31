@@ -10,6 +10,8 @@ boundary is semantic, not a profitability judgement.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt, splice_graph
@@ -160,7 +162,7 @@ def _wrap_multi_output_fragment(
     merged = merged.rename_buffers(rename)
     # Root insertion may reorder sibling loop nests. Kernel ABI order follows
     # graph liveness, not incidental body order.
-    merged.outputs = dict(zip(new_buffers, tensors, strict=True))
+    merged = replace(merged, outputs=dict(zip(new_buffers, tensors, strict=True)))
     frag = Graph()
     for inp_id in merged.inputs:
         ext_t = graph.buffer(inp_id)

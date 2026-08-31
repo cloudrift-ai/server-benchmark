@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -914,11 +915,14 @@ def retarget_constants_to_model(graph, wrapper, model) -> None:
     for path, tensor in wrapper.named_parameters(remove_duplicate=False):
         if (full := id_to_key.get(id(tensor))) is not None:
             key_map[path] = full
-    for _node_id, op in graph.loadable_constants():
-        if op.source_path in key_map:
-            op.source_path = key_map[op.source_path]
-        if op.source_parts:
-            op.source_parts = tuple((key_map.get(path, path), shape) for path, shape in op.source_parts)
+    for nid, op in graph.loadable_constants():
+        retargeted = replace(
+            op,
+            source_path=key_map.get(op.source_path, op.source_path),
+            source_parts=tuple((key_map.get(path, path), shape) for path, shape in op.source_parts) if op.source_parts else op.source_parts,
+        )
+        if retargeted != op:
+            graph.nodes[nid].op = retargeted
 
 
 def hyper_connection_seam(block):
@@ -1331,12 +1335,11 @@ def stamp_sliding_windows(
             f"DeepSeek V4 selected-layer sliding-window stamping expected at most one attention SDPA node, found {len(sdpa_nodes)}"
         )
     for node, lt in zip(sdpa_nodes, types, strict=True):
-        if lt == "sliding_attention" or (deepseek_v4 and lt in deepseek_banded):
-            node.op.sliding_window = window
+        banded = lt == "sliding_attention" or (deepseek_v4 and lt in deepseek_banded)
         # Sliding AND full layers: the wrapper's mask is causal — asserting it structurally lets
         # the lowering derive the stream END (and, banded, the stream START) through the opaque
         # bias operand a whole-model trace carries.
-        node.op.is_causal = True
+        node.op = replace(node.op, is_causal=True, sliding_window=window if banded else node.op.sliding_window)
 
 
 def build_causal_mask(seq_len: int, dtype) -> torch.Tensor:  # noqa: F821

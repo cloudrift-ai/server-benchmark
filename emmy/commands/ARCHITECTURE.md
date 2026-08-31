@@ -215,9 +215,16 @@ process unless `--target` narrows the file to one exact or unambiguous substring
 `--json DIR` writes one readable JSON record per target; there is no repeat or child-process orchestration layer.
 Invoke `emmy run` again when independent process observations are required. Inventory and proposal rows select the
 graph but are not trusted as automatic A/B pins; only verified rows with paired measurements auto-pin, while a
-proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded Loop IR stores stable algebra rather than
-derived structural stamps. Registered Boolean values in an explicit `--ab` row remain input pins, so false values are
-not dropped with kernel pass markers and the JSON record identifies the inputs that were compiled. A failed row with
+proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. One explicit working target whose matching
+realizations share an identical input-pin regime containing `PLACE` also applies the placement pins from that regime
+to the ordinary compile: the structural target is part of the requested working slice, while its other input pins and
+unverified schedule knobs remain free for the normal deploy evidence hierarchy. Different input-pin regimes under the
+same name leave the ordinary target unpinned rather than choosing one. Canonical selection never gets this
+working-file behavior. Embedded Loop IR stores stable algebra rather than derived structural stamps. Registered
+Boolean values in an explicit `--ab` row remain input pins, so false values are not dropped with kernel pass markers
+and the JSON record identifies the inputs that were compiled. A scoped schedule-key OFF beside a non-OFF bare family
+pin also remains explicit: it is the site-specific exception to that bare pin, not a redundant declined-site stamp
+(`replay_pin_spelling` in `compiler/pipeline/knob.py` owns the rule). A failed row with
 no realized graph reports the precision lane requested by those parsed input pins, including explicit false
 overrides, rather than defaulting every failure to the standard lane. `run --golden` replays it through the full
 compiler pipeline. When that replay has

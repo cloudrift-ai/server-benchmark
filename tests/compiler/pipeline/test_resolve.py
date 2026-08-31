@@ -145,14 +145,12 @@ def test_try_rewrite_refreshes_swapped_op_io() -> None:
     from emmy.compiler.pipeline.pipeline import Cursor, Pattern, Rule, RuleSkipped
     from emmy.compiler.pipeline.search.candidate import Candidate
 
-    class SpyMatmulOp(MatmulOp):
-        def __init__(self):
-            super().__init__()
-            self.pop_calls = 0
+    pop_calls = []
 
-        def populate_io(self, graph, node):
-            self.pop_calls += 1
-            super().populate_io(graph, node)
+    class SpyMatmulOp(MatmulOp):
+        def with_io(self, graph, node):
+            pop_calls.append(node.id)
+            return super().with_io(graph, node)
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (4, 4)), node_id="a")
@@ -175,10 +173,10 @@ def test_try_rewrite_refreshes_swapped_op_io() -> None:
     # I/O was never matcher-refreshed — exactly what an earlier apply's splice leaves behind.
     fresh = SpyMatmulOp()
     g.nodes["o"].op = fresh
-    assert fresh.pop_calls == 0
+    pop_calls.clear()  # the earlier pl.match already refreshed once
 
     run = Run(pipeline=pl, ctx=Context.from_target((8, 0)))
     Candidate(run=run, graph=g, cursor=Cursor(run=run)).try_rewrite(matches[0])
-    assert fresh.pop_calls == 1, "try_rewrite must refresh the consumed node's op I/O at apply time"
-    assert seen["op"] is fresh, "the rule must see the swapped-in op"
+    assert pop_calls == ["o"], "try_rewrite must refresh the consumed node's op I/O at apply time"
+    assert seen["op"].source is fresh, "the rule must see the swapped-in op (io-refreshed rebind chains to it)"
     assert seen["inputs"].get("a") is g.nodes["a"].output, "the rule must see graph-true operand tensors, not placeholders"

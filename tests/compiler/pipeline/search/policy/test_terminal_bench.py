@@ -75,7 +75,7 @@ class _RaisingBackend:
 
 
 def _perf_row(db: SearchDB, cand):
-    return db.lookup_perf(cand.ctx.structural_key(), cand.graph.nodes["out"].op.cache_key(), backend="cuda")
+    return db.lookup_perf(cand.ctx.structural_key(), cand.graph.nodes["out"].op.identity_key(with_io=True, with_knobs=True), backend="cuda")
 
 
 async def test_compile_budget_overrun_records_nothing() -> None:

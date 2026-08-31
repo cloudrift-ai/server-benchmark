@@ -997,22 +997,14 @@ def canonicalize_buffer_names(stmts: Body) -> Body:
 
     rename: dict[str, str] = {}
     for s in stmts.iter():
-        if isinstance(s, Load) and s.input not in rename:
-            rename[s.input] = f"b{len(rename)}"
-        elif isinstance(s, Write) and s.output not in rename:
-            rename[s.output] = f"b{len(rename)}"
+        for name in (*s.external_reads(), *s.external_writes()):
+            if name not in rename:
+                rename[name] = f"b{len(rename)}"
 
     if all(o == n for o, n in rename.items()):
         return stmts
 
-    def fn(s: Stmt) -> Stmt:
-        if isinstance(s, Load) and s.input in rename:
-            return replace(s, input=rename[s.input])
-        if isinstance(s, Write) and s.output in rename:
-            return replace(s, output=rename[s.output])
-        return s
-
-    return stmts.map(fn)
+    return stmts.rename_buffers(rename)
 
 
 # ---------------------------------------------------------------------------

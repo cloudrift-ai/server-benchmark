@@ -82,7 +82,7 @@ class _StubRecord:
     """The slice of a ``GoldenRecord`` the group builder reads, with the candidate pool handed in directly
     instead of traced. ``knobs`` / the pool rows are single-token dicts the stub signature below reads.
 
-    The builder groups on ``GoldenRecord.pool_key``, so a stub that hands its pool in must answer that
+    The builder groups on ``GoldenRecord.pool_group``, so a stub that hands its pool in must answer that
     question consistently with the pool it hands in, or it is describing a world that cannot happen.
     ``program`` therefore defaults to the pool's own content, and is passed explicitly only to build the two
     shapes that matter: the FAST_MATH one (one program, two pin sets, two enumerations) and the re-recorded
@@ -91,7 +91,7 @@ class _StubRecord:
     def __init__(self, name, knobs, rows, *, pins=(), program=None):
         self.name, self.knobs, self.target_program = name, knobs, rows
         self.gpu_name, self.compute_cap = "gpuA", (12, 0)
-        self.pool_key = (repr(rows if program is None else program), tuple(pins))
+        self.pool_group = (repr(rows if program is None else program), tuple(pins))
         self.pin_key, self.pin_map = tuple(pins), dict(pins)
         self.structural_features, self.dynamic = {}, False
         self.shape_key = SimpleNamespace(kind="", is_warp=True)

@@ -71,7 +71,7 @@ class Fork(ABC):
     is_leaf: bool = False
     structural: bool = False
     #: The enumeration's minted pool identity, carried by every node of a schedule tree
-    #: (``_schedule._State.pool_id`` — the session memo's own cache digest: ``pool_key`` + pins +
+    #: (``_schedule._State.pool_id`` — the enumeration's minted stamp: the variant key + hints + pins +
     #: split receipt + spelled key vocabulary). ``None`` for forks outside a schedule enumeration.
     #: Consumers key memoized decisions on THIS, never on a re-derived identity.
     pool_id: str | None = None

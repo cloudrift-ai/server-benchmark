@@ -47,7 +47,7 @@ configs:
     - out
     - qn
   realizations:
-  - name: k_sdpa_rms_norm_reduce_dd476e.6741552db729
+  - name: k_sdpa_rms_norm_reduce_dd476e.ce158ebf780e
     bindings: {}
     pins:
       FAST_MATH: false
@@ -60,4 +60,4 @@ configs:
       REDUCE: coop
       STAGE: ''
       RASTER: ''
-    identity: 83e4f2a6fa484a4b2a50babe833fc9cf35021c1f551fcfabaf496658c24d055f
+    identity: f1ad5cd0046f299018abb0a3b43bb2d3e005f6b036f1d11c8d1522f2486ff4f0

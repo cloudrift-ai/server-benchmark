@@ -27,9 +27,9 @@ def test_cubin_cache_key_partitions_by_flags(monkeypatch) -> None:
     cubins — otherwise an -O1 sweep would serve its cubin to an -O3 run."""
     monkeypatch.setattr(nvcc, "_toolkit_tag", lambda: "tag")  # avoid the nvcc --version subprocess
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
-    k_o3 = nvcc._cache_key("src", "k", "sm_80")
+    k_o3 = nvcc._cubin_key("src", "k", "sm_80")
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "-Xcicc -O1")
-    k_o1 = nvcc._cache_key("src", "k", "sm_80")
+    k_o1 = nvcc._cubin_key("src", "k", "sm_80")
     assert k_o3 != k_o1
 
 

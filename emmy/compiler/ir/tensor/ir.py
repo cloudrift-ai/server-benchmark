@@ -42,7 +42,7 @@ from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class RangeOp(Op):
     """Construct the static one-dimensional sequence ``[start, stop)`` by ``step``.
 
@@ -56,6 +56,7 @@ class RangeOp(Op):
     dtype: str = "i64"
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.step == 0:
             raise ValueError("RangeOp step must be non-zero")
         get_dtype(self.dtype)
@@ -67,13 +68,14 @@ class RangeOp(Op):
         return np.arange(self.start, self.stop, self.step, dtype=get_dtype(self.dtype).np)
 
 
-@dataclass
+@dataclass(frozen=True)
 class CastOp(Op):
     """Numerically convert every input element to ``dtype``."""
 
     dtype: str = "f32"
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         get_dtype(self.dtype)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
@@ -83,13 +85,14 @@ class CastOp(Op):
         return np.asarray(inputs[0]).astype(get_dtype(self.dtype).np)
 
 
-@dataclass
+@dataclass(frozen=True)
 class BitcastOp(Op):
     """Reinterpret every input element as a same-width ``dtype`` without changing bits."""
 
     dtype: str = "u16"
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         get_dtype(self.dtype)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
@@ -108,7 +111,7 @@ class BitcastOp(Op):
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class _ElementwiseImplOp(Op):
     """Shared base for ops carrying an ``ElementwiseImpl`` combine in ``op``.
 
@@ -120,6 +123,7 @@ class _ElementwiseImplOp(Op):
     op: ElementwiseImpl = field(default_factory=lambda: ElementwiseImpl("copy"))
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if isinstance(self.op, str):
             object.__setattr__(self, "op", ElementwiseImpl(self.op))
 
@@ -134,7 +138,7 @@ class _ElementwiseImplOp(Op):
         return self.op.name
 
 
-@dataclass
+@dataclass(frozen=True)
 class ElementwiseOp(_ElementwiseImplOp):
     """Apply a scalar function independently to each element.
 
@@ -175,7 +179,7 @@ class ElementwiseOp(_ElementwiseImplOp):
         return self.op(*inputs)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReduceLikeOp(_ElementwiseImplOp):
     """Shared base for the axis-folding ops (``ReduceOp`` / ``ScanOp``): a ``sum``-default
     ``ElementwiseImpl`` combine over one ``axis``, resolved to its numpy spelling."""
@@ -191,7 +195,7 @@ class ReduceLikeOp(_ElementwiseImplOp):
         return spelling
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReduceOp(ReduceLikeOp):
     """Collapse one or more dimensions via an associative binary op.
 
@@ -210,7 +214,7 @@ class ReduceOp(ReduceLikeOp):
         return self._spelling().np_reduce(inputs[0], axis=self.axis, keepdims=True)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ScanOp(ReduceLikeOp):
     """Cumulative application of an associative binary op along an axis."""
 
@@ -229,7 +233,7 @@ class ScanOp(ReduceLikeOp):
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class GatherOp(Op):
     """Read elements from arbitrary positions along an axis."""
 
@@ -256,7 +260,7 @@ class GatherOp(Op):
         return np.take(data, indices, axis=axis)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ScatterOp(Op):
     """Write (or reduce) values into arbitrary positions along an axis."""
 
@@ -300,7 +304,7 @@ class IndexSource:
     select: object | None = None  # Expr | None
 
 
-@dataclass
+@dataclass(frozen=True)
 class IndexMapOp(Op):
     """Compute output by reindexing inputs via affine coord arithmetic.
 
@@ -314,8 +318,9 @@ class IndexMapOp(Op):
     sources: tuple[IndexSource, ...] = ()
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if any(not isinstance(d, Dim) for d in self.out_shape):
-            self.out_shape = tuple(to_dim(d) for d in self.out_shape)
+            object.__setattr__(self, "out_shape", tuple(to_dim(d) for d in self.out_shape))
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         return tuple(self.out_shape)

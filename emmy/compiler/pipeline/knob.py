@@ -689,6 +689,23 @@ def drop_uninformative_scopes(knobs: dict) -> dict[str, str]:
     return dict(sorted(out.items(), key=lambda kv: knob_sort_key(kv[0])))
 
 
+def replay_pin_spelling(knobs: dict) -> dict[str, str]:
+    """A stored row as replay pins: the no-information spellings dropped
+    (:func:`drop_uninformative_scopes`), except that a scoped OFF beside a NON-OFF bare family pin
+    survives — it is the site-specific exception to that bare pin (a bare pin fans out across every
+    eligible site), not a redundant declined-site stamp. The exception is replay-only and stays out
+    of :func:`schedule_row_key`: the realized kernel stamps nothing at the declined site, so row
+    identity must keep normalizing the scoped OFF away on both sides or every such recording would
+    read as drift."""
+    out = drop_uninformative_scopes(knobs)
+    for name, value in knobs.items():
+        family = family_of(name)
+        bare = knobs.get(family)
+        if "@" in name and is_off_value(family, value) and bare is not None and not is_off_value(family, bare):
+            out[name] = value
+    return out
+
+
 def stamp_schedule_families(knobs: dict) -> dict[str, str]:
     """The ready-to-record knob map for one realized kernel: its tuning knobs
     (:func:`tuning_knob_items`) plus an explicit OFF value for every :data:`SCHEDULE_FAMILIES`

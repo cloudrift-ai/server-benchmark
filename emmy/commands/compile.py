@@ -157,9 +157,11 @@ def resolve_golden_arg(args) -> None:
     Canonical selection retains every measured sibling on ``args.golden_configs``
     for pinned A/B reporting. ``--golden-file`` instead resolves only inside that
     working document and retains its verified siblings, or its one valid direct tune winner, as automatic pins;
-    inventory/proposal siblings still select the target graph. No Python snippet
-    is generated and dynamic shapes need no CLI reconstruction: they are already
-    in the decoded program.
+    inventory/proposal siblings still select the target graph. When every matching
+    realization in an explicit working file shares one input-pin regime containing
+    ``PLACE``, that regime selects the ordinary compile's structural target without
+    promoting any unverified schedule knobs. No Python snippet is generated and
+    dynamic shapes need no CLI reconstruction: they are already in the decoded program.
 
     ``NAME`` matches the same way ``emmy eval --kernel`` filters goldens: an exact
     golden name first, else a name **substring** — so the identifier used to inspect
@@ -171,6 +173,7 @@ def resolve_golden_arg(args) -> None:
     name = getattr(args, "golden", None)
     golden_file = getattr(args, "golden_file", None)
     args.golden_configs = []
+    args.golden_target_pins = {}
     if golden_file and not name:
         logger.error("--golden-file requires --golden NAME")
         sys.exit(2)
@@ -193,6 +196,7 @@ def resolve_golden_arg(args) -> None:
         goldens_for_live_gpu,
         load_golden_file,
         load_golden_records,
+        shared_placement_pins,
     )
 
     # Canonical replay scopes to the live card as before. An explicit working file is
@@ -236,6 +240,8 @@ def resolve_golden_arg(args) -> None:
     if len(targets) != 1:
         logger.error("golden %r resolves to %d different embedded program targets", name, len(targets))
         sys.exit(2)
+    if document is not None:
+        args.golden_target_pins = shared_placement_pins(matches)
     args._golden_graph = matches[0].target_program.copy()
     from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
 
@@ -266,6 +272,8 @@ def resolve_golden_arg(args) -> None:
         len(pinned),
         "" if len(pinned) == 1 else "s",
     )
+    if args.golden_target_pins:
+        logger.info("[golden] applying shared structural target pins: %s", args.golden_target_pins)
 
 
 def add_quantize_arg(parser) -> None:
@@ -467,7 +475,10 @@ def handle_compile(args):
     else:
         logger.debug("No tuning DB at %s — using rule defaults", tune_db_path)
 
-    result = Pipeline.build(passes).run(graph, db=db, dump=dump)
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    with pinned_knobs(args.golden_target_pins):
+        result = Pipeline.build(passes).run(graph, db=db, dump=dump)
 
     n_compute = sum(1 for n in result.nodes.values() if not _is_boundary(n.op))
     logger.info("Lowered: %d graph nodes -> %d kernels", initial_count, n_compute)

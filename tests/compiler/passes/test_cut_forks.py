@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 
@@ -10,19 +11,20 @@ import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import F16
+from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
-from emmy.compiler.ir.pure.fold import Channel, Fold
+from emmy.compiler.ir.pure.carrier import exp_combine_states
+from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.identity import deploy_identity
-from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
+from emmy.compiler.loop_wire import loop_graph_to_wire
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
-from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _workspace_axes, cuttable_seams
+from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _producer_order, _workspace_axes, cuttable_seams
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
@@ -126,6 +128,54 @@ def _softmax_graph() -> Graph:
     return graph
 
 
+def _computed_value_expectation_tile() -> TileOp:
+    """A twisted expectation whose value is a stored contraction until placement cuts it."""
+    query, column, key, inner = Axis("q", 4), Axis("n", 16), Axis("j", 8), Axis("k", 16)
+    value = Fold.contraction(
+        k_axis=inner,
+        a=Load(name="xv", input="x", index=(Var("j"), Var("k"))),
+        channels=(Channel(b=Load(name="wv", input="w", index=(Var("n"), Var("k"))), acc="vacc"),),
+    )
+    states = ("maximum", "denominator", "expectation")
+    other = tuple(f"{name}__o" for name in states)
+    carrier = Fold(
+        axis=key,
+        operands=(value,),
+        lift=Lambda(
+            params=("j", "vacc"),
+            body=Body((Load(name="score", input="scores", index=(Var("q"), Var("j"))),)),
+            results=("score", 1.0, "vacc"),
+        ),
+        init=(float("-inf"), 0.0, 0.0),
+        combine=Lambda(params=states + other, body=Body(exp_combine_states(states, other)), results=states),
+    )
+    root = Fold.projection(
+        operands=(carrier,),
+        body=Body(
+            (
+                Assign(name="inverse", op="reciprocal", args=("denominator",)),
+                Assign(name="out", op="multiply", args=("expectation", "inverse")),
+            )
+        ),
+        results=("out",),
+    )
+    tile = TileOp(
+        op=root,
+        name="out",
+        place=Placement(free=(query, column)),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("q"), Var("n")), value="out")),),
+    )
+    return replace(
+        tile,
+        inputs={
+            "x": Tensor("x", (8, 16), F16),
+            "w": Tensor("w", (16, 16), F16),
+            "scores": Tensor("scores", (4, 8), F16),
+        },
+        outputs={"out": Tensor("out", (4, 16), F16)},
+    )
+
+
 def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
     offered: list[dict] = []
     passes = TILE_PASSES if frontend else ["lowering/tile"]
@@ -187,6 +237,19 @@ def test_cut_workspace_retains_static_unit_axes() -> None:
     )
 
     assert _workspace_axes(seam, produced) == (unit, column)
+
+
+def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> None:
+    """Counting direct workspace reads cannot order A->C->B when A and C each read one."""
+
+    def piece(name: str, source: str | None):
+        body = Body((Load(name=f"{name}_value", input=source or "input", index=()),))
+        produced = Fold.projection(body=body, results=(f"{name}_value",))
+        return (None, produced, (), (), name, (f"{name}_value",), (name,))
+
+    pieces = [piece("a", "c"), piece("c", "b"), piece("b", None)]
+
+    assert [buffers[0] for *_, buffers in _producer_order(pieces)] == ["b", "c", "a"]
 
 
 def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:
@@ -253,6 +316,14 @@ def test_softmax_state_cut_is_offered_and_pinned_cut_lowers() -> None:
     shifted = values.astype(np.float32) - values.max(axis=-1, keepdims=True).astype(np.float32)
     expected = np.exp(shifted) / np.exp(shifted).sum(axis=-1, keepdims=True)
     np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
+
+
+def test_twisted_expectation_value_cut_uses_the_public_store_dtype() -> None:
+    """Cutting a computed expectation value turns it into the derived contraction's B slab."""
+    seams = {tuple(seam.node.defines()): seam for seam in cuttable_seams(_computed_value_expectation_tile())}
+
+    assert seams[("vacc",)].dtypes == (F16,)
+    assert seams[("maximum", "denominator", "expectation")].dtypes == (F32, F32, F32)
 
 
 def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:
@@ -349,16 +420,15 @@ _STAT_PINS = {
 
 
 def test_statistics_seams_close_via_providers_and_declare_requirements() -> None:
-    """The softmax-statistics folds capture host-provided scalars and each other's accumulator;
-    provider closure offers them anyway, with the chain recorded as a requirement."""
+    """Provider closure records every fold-produced capture as a requirement."""
     match, graph = _composed_case_match()
     tile = next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp))
     seams = {seam.spelling: seam for seam in cuttable_seams(tile)}
+    norm = seams["PLACE@map.fold.a21"]
     first = seams["PLACE@map.fold.a.map.fold.a31"]
     second = seams["PLACE@map.fold.a.map.fold.a32"]
-    assert first.providers and not first.requires
-    assert second.providers and len(second.requires) == 1
-    assert second.requires[0][1] is first.node
+    assert first.providers and [producer for _, producer in first.requires] == [norm.node]
+    assert second.providers and [producer for _, producer in second.requires] == [norm.node, first.node]
 
 
 def test_dependent_seam_pins_pull_their_producer_into_the_composed_cut() -> None:
@@ -368,7 +438,11 @@ def test_dependent_seam_pins_pull_their_producer_into_the_composed_cut() -> None
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
     with pinned_knobs({"PLACE@map.fold.a.map.fold.a32": "cut", **_OFF}):
         fork = _CUT.rewrite(match, node)
-    assert set(fork.knobs) == {"PLACE@map.fold.a.map.fold.a32", "PLACE@map.fold.a.map.fold.a31"}
+    assert set(fork.knobs) == {
+        "PLACE@map.fold.a.map.fold.a32",
+        "PLACE@map.fold.a.map.fold.a31",
+        "PLACE@map.fold.a21",
+    }
 
 
 def test_statistics_route_shares_the_row_reduction_across_output_keys() -> None:
@@ -432,7 +506,7 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     it, and the verified-tier join reads the stored identity instead of the pre-cut lift."""
     fields = _receipt_fields()
     parent = GoldenRecord(knobs={}, **fields)
-    lift_identity = deploy_identity(_lifted_target(parent))
+    lift_identity = _lifted_target(parent).identity_key(with_io=True)
     children = {i: rows for i, rows in _candidate_rows(parent).items() if i is not None and i != lift_identity}
     assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
     (id_a, rows_a), (id_b, rows_b) = sorted(children.items())
@@ -450,6 +524,30 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     stale = GoldenRecord(knobs=dict(row_a), identity="0" * 64, **fields)
     reason = decode_record(stale)
     assert reason is not None and "equals none" in reason
+
+
+def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target() -> None:
+    """A stored child identity is the selector when a regenerated target now lowers to several
+    kernels; strict decoding must consult that identity's rows before requiring a one-kernel lift."""
+    graph = _sdpa_graph(False)
+    _input(graph, "x", (4, 32))
+    graph.add_node(SoftmaxOp(axis=-1), ["x"], Tensor("softmax", (4, 32), "f16"), node_id="softmax")
+    graph.inputs.append("x")
+    graph.outputs.append("softmax")
+    loop = Pipeline.build(LOOP_PASSES).run(graph.copy(), ctx=_CTX)
+    fields = {
+        **_receipt_fields(),
+        "program_wire": graph_to_wire(graph),
+        "origins": (),
+        "loop_index": 0,
+        "loop_wire": loop_graph_to_wire(loop),
+    }
+    parent = GoldenRecord(knobs={}, **fields)
+    with pytest.raises(ValueError, match="target lowers to 2 kernels"):
+        _lifted_target(parent)
+    identity, rows = next((identity, rows) for identity, rows in _candidate_rows(parent).items() if identity is not None)
+    receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=identity, **fields)
+    assert decode_record(receipt) is None
 
 
 def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:
@@ -472,3 +570,25 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -
     document["configs"][0]["realizations"][0]["identity"] = "0" * 64
     validate_golden_file(document)
     assert _pins_live({"PLACE@a3": "cut"}), "a receipt's routing pins are replay context, never a dead env regime"
+
+
+def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
+    """``pool_group`` composes the target kernels' identity keys, so two recordings of ONE
+    program whose node ids differ (separate recording sessions) fuse into one enumeration
+    group — the wire digest this replaced split them — while a different pin regime still
+    keys apart."""
+    fields = _receipt_fields()
+    respelled = _sdpa_graph(False)
+    for nid in [n for n in respelled.nodes if n not in respelled.inputs]:
+        respelled.rename_node(nid, f"session2_{nid}")
+    twin_fields = {
+        **fields,
+        "program_wire": graph_to_wire(respelled),
+        "origins": tuple(f"session2_{o}" for o in fields["origins"]),
+    }
+    a = GoldenRecord(knobs={}, **fields)
+    b = GoldenRecord(knobs={}, **twin_fields)
+    assert a.pool_group == b.pool_group, "node-id spelling must not split an enumeration group"
+
+    unpinned = GoldenRecord(knobs={}, **{**fields, "pins": ()})
+    assert unpinned.pool_group != a.pool_group, "the pin regime is a group-key term"

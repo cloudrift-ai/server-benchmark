@@ -26,11 +26,12 @@ walk reaches DERIVED sites (flash's synthesized PV contraction). The cross-CTA `
 NOT a row here: it changes the kernel SET, so it is the structural ``035_split_reduce`` fork's —
 the walk only CONSUMES a pin's ``g<n>[a|k]`` half on a kernel that already realized its split.
 
-The prescan is memoized in ``ctx.session_cache`` (:class:`_Pool`): the per-node option lists are a
-pure function of the term and the live pins, so N same-shape kernels — and every tune trajectory
-after the first — pay one option enumeration, and the walk replays it. Under ``ctx.pool_sample``
-(``emmy fit``'s offline dataset build) the walk's leaf stream is reservoir-sampled instead of
-returned lazy, and the drawn rows ride the memo beside the exact leaf count (:class:`_Draw`).
+Every :func:`schedule` call enumerates its own prescan — the per-node option lists are a pure
+function of the term and the live pins, and nothing is memoized across kernels or trajectories
+(the retired session pool memo cached them keyed by hints, pins, samples, split receipts and
+the spelled vocabulary — a growing side-channel of every fact identity rightly excludes, retired
+as a bug surface rather than re-guarded). Under ``ctx.pool_sample`` (``emmy fit``'s offline
+dataset build) the walk's leaf stream is reservoir-sampled instead of returned lazy.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from types import MappingProxyType
 
-from emmy.compiler.dim import Dim
+from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
@@ -62,7 +63,6 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.identity import hint_extent, pool_key
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, cone_seam, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import SLICE_FAMILIES, sites
 from emmy.compiler.pipeline.fork import Fork, iter_leaves
@@ -114,9 +114,8 @@ class _Option:
     nothing and composes with any), the placed tile the rest of the kernel must agree with, and the
     fragment-seam entries it stakes (``(role, edge key, value)`` triples — see :class:`Ctx`).
 
-    Fully immutable — the knob dict is sealed at construction — because option lists are what the
-    pool memo shares across kernels and tune trajectories (:class:`_Pool`): a walk reads options,
-    it never writes one."""
+    Fully immutable — the knob dict is sealed at construction — because option lists are shared
+    by every branch of one kernel's walk: a walk reads options, it never writes one."""
 
     knobs: Mapping
     work: Workers | None = None
@@ -769,7 +768,9 @@ def _reduce_catalog(state: _State, extent: int) -> list[ReducePlan]:
 
 def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     """The reduce partitions this fold offers: the serial fold plus every :func:`coop_reduce_moves`
-    band the node admits, or — under a ``REDUCE`` pin — the ONE partition that pin names, read
+    band the node admits — an observed fold (a scan), and a fold whose cone reads a boundary
+    store's sweep axis, offer exactly the serial fold — or, under a ``REDUCE`` pin, the ONE
+    partition that pin names, read
     against the kernel's pinned inventory (the ``coop`` token's width lives in ``WORK``). A pin is
     authoritative over the value; it cannot make a band this node has no geometry for legal, and
     one that names no legal partition raises the refusal instead of silently emptying the
@@ -783,7 +784,7 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     - The catalog's width filter (a band wider than the axis has work for) does not bind a pin: a
       pinned over-wide band idles its extra lanes and still realizes — the split's finalize takes
       the kernel's pinned inventory over a fold as narrow as the split width."""
-    extent = hint_extent(node.axis)
+    extent = node.axis.hint_extent
     pin = _pin(REDUCE, key)
     if node.observed:
         # An observer makes the stream order-visible: every partitioned combine — cooperative
@@ -794,6 +795,21 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
         # fails loudly at the offered oracle, whose membership check sees the pin unsatisfied.
         if pin is not None and ReducePlan.parse(pin, state.work_pin).stages and logger.isEnabledFor(logging.DEBUG):
             logger.debug("REDUCE pin %r names a partition; an observed fold (a scan) realizes the serial fold only", pin)
+        return [ReducePlan()]
+    swept = tuple(spec.sweep.name for spec in state.tile.output_specs if spec.sweep is not None and edge_refs_axis(node, spec.sweep.name))
+    if swept:
+        # The boundary store's output sweep must ENCLOSE this fold — its cone reads the sweep
+        # coordinate, so the whole reduce re-runs per swept cell (the materializer binds the
+        # projection unpeeled). A partitioned combine cannot ride inside the per-lane sweep, so
+        # only the serial fold realizes; deciding it here keeps the greedy off the kernel binder's
+        # decline, which costs a full re-resolve per declined row. A pin naming a partition is a
+        # recorded refusal, never a silent drop.
+        if pin is not None and ReducePlan.parse(pin, state.work_pin).stages:
+            raise PinRefused(
+                f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a partition, but this fold reads output "
+                f"sweep axis {swept[0]!r} — the sweep loop must enclose the whole reduce, so only the "
+                f"serial fold realizes"
+            )
         return [ReducePlan()]
     if pin is None:
         return _reduce_catalog(state, extent)
@@ -979,7 +995,7 @@ def _strip_variant(state: _State, plan: TilePlan, row: dict) -> TileOp:
     unrolled ``r`` times — copy ``i`` reads/writes ``inner·r + i`` with its SSA names suffixed —
     then regrouped as ``r`` loads · ``r`` computes · ``r`` writes so the unit-stride runs feed
     ``050_vectorize_loads`` / ``080_vectorize_stores``. A different term, hence a different
-    ``structural_key`` and ``Op.cache_key`` — which is why it is applied HERE and not at
+    ``structural_key`` and ``identity_key(with_io=True, with_knobs=True)`` — which is why it is applied HERE and not at
     recognition."""
     tile = state.tile
     inner = tile.place.free[-1]
@@ -1412,15 +1428,13 @@ class _State:
     work_pinned: bool = False
     #: id(node) -> its option tuple, computed ONCE by :func:`schedule`'s prescan. Options are a
     #: pure function of the node and the live pins, so this is a per-kernel FACT the walk reads —
-    #: a branch expansion re-asks per node, and re-resolving every stage there is pure waste — and
-    #: the same purity is what lets the prescan ride the session memo (:class:`_Pool`) across
-    #: same-pool kernels and tune trajectories.
+    #: a branch expansion re-asks per node, and re-resolving every stage there is pure waste.
     options: dict = field(default_factory=dict)
-    #: The pool's minted identity — the SAME digest the session memo caches under (``pool_key`` +
-    #: pins + the split receipt + the spelled key vocabulary + the sample identity). Minted once
-    #: here, at the one place that knows every enumeration input, and carried by every Fork of the
-    #: tree (:attr:`Fork.pool_id`) so consumers (the greedy decision memo) key on the stamped
-    #: identity instead of re-deriving a weaker one.
+    #: The pool's minted STAMP — the variant key + hints + pins + the sample identity, carried by
+    #: every Fork of the tree (:attr:`Fork.pool_id`). Not a cache key (nothing stores pools any
+    #: more): the greedy decision memo keys picks on it and the budgeted descent seeds its
+    #: deterministic draw from it, and both fail safe on any drift the stamp cannot see (a row
+    #: that no longer decodes re-decides).
     pool_id: str = ""
 
     @property
@@ -1636,50 +1650,28 @@ def _materialize(state: _State, row: dict) -> TileOp:
     )
 
 
-# ---- the pool memo: what one enumeration leaves for the next ------------------------------------- #
+def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
+    """Map a newly lifted, unmapped ``tile`` onto the grid and offer its scheduling fork.
 
+    Returns the siblings at the walk's first real choice — each one lazy, holding a work list and a
+    context rather than any row — a single leaf when the whole walk is forced (still a FORK: the
+    engine records a one-option fork as a decision, which is what keys a fully pinned kernel's row
+    into the trace and the evidence), or ``[]`` when nothing schedules, which is the guardrail
+    contract that leaves the term unmapped. A live SITE pin that names nothing raises out of the
+    prescan instead.
 
-@dataclass(frozen=True)
-class _Pool:
-    """One term's memoized prescan — everything :func:`schedule` derives that is OP-INDEPENDENT:
-    the per-node option tuples, in the stored walk's preorder. Shared through ``ctx.session_cache``
-    across ops with equal pool key and across tune trajectories, so it sits BELOW the search
-    policies: greedy and MCTS hit it alike, and it holds NO ranking and consults NO evidence —
-    only what evidence cannot change belongs here. Everything inside is immutable (frozen
-    :class:`_Option`\\ s over read-only mappings): the walk replays options, and every row a leaf
-    serves is a fresh dict, so no later walk can corrupt a served pool.
+    Every call enumerates its own prescan — options are a pure function of the node and the
+    live pins, and nothing is cached across kernels (see the module docstring for why the
+    session pool memo was retired).
 
-    Two enumeration inputs the walk consumes directly are KEY TERMS in their own right, never
-    left to ride on how the term digest happens to serialize them: the split receipt
-    (``carries_partition`` — it strips a ``REDUCE`` pin's ``g`` half where a receipt-free twin
-    must raise, and it lives on ``Axis.window``, a ``compare=False`` field whose presence in the
-    digest is an artifact of ``form``'s field walk, not a stated contract), and the spelled key
-    vocabulary (the decided-empty OFF map the rows decode under — spelled off axis names, which
-    are recognition-canonical identity today; the rows would mis-decode the day that changes).
-    Both are entailed by ``pool_key`` under the current serialization, and both are pinned by
-    tests that hold whichever layer separates the twins."""
-
-    options: tuple[tuple[_Option, ...], ...]  # per node, in ``_nodes`` preorder
-
-
-@dataclass(frozen=True)
-class _Draw:
-    """A sampled term's memo: the drawn complete rows (read-only mappings) beside the EXACT leaf
-    count they were drawn from — memoized together because both are the same pure function of the
-    term, and because a rank is only interpretable next to what it was ranked among. Keyed apart
-    from :class:`_Pool` (the sample's identity rides the cache key), so a sampled Context and the
-    live one sharing a session cache can never serve each other."""
-
-    rows: tuple[Mapping, ...]
-    total: int
-
-
-def _state(tile: TileOp, name: str, knobs: dict, ctx) -> _State:
-    """The per-kernel constants and FACTS one term's walk reads, computed once: the projection tail
-    and what it permits (the fragment epilogue, the transposed band's sweep + per-cell conditions),
-    the per-contraction facts (atom families, reduction domain, seam, producer, fragment edges,
-    packed readings), and the parsed WORK pin — the ONE read of that env var."""
+    Under ``ctx.pool_sample`` (``emmy fit``, never a deploy) the lazy fork is NOT returned:
+    the walk's leaf stream is reservoir-sampled (:meth:`~…search.pool.PoolSample.take`), the pool's
+    exact size is reported through ``sample.totals``, and the drawn rows come back as leaf forks."""
     sched = Sched(tile.op, {}, place=tile.place.on_grid())
+    # The per-kernel FACTS, computed once: the projection tail and what it permits (the fragment
+    # epilogue, the transposed band's sweep + per-cell conditions), the per-contraction facts
+    # (atom families, reduction domain, seam, producer, fragment edges), and the parsed WORK pin —
+    # the ONE read of that env var.
     tail = projection_tail(tile)
     frag_ok = _fragment_epilogue_ok(tail, _fold_states(tile.op))
     transposed_ok = _inner_free(tile) is not None and not any(isinstance(s, Loop) for s in tail) and not has_contraction_tail(tail)
@@ -1687,21 +1679,21 @@ def _state(tile: TileOp, name: str, knobs: dict, ctx) -> _State:
     raw = WORK.raw()
     off = _off(sched, tile.op)
     # The IR receipt (the sliced axis's partition Window), or the flag receipt a piece with no
-    # sliced axis carries (a realized split's independent projection sibling —
-    # ``split_consumed``): both mean the kernel-set decision was consumed, so a ``REDUCE``
-    # pin's ``g`` half strips.
+    # sliced axis carries (a realized split's independent projection sibling — ``split_consumed``):
+    # both mean the kernel-set decision was consumed, so a ``REDUCE`` pin's ``g`` half strips.
     partition = carries_partition(tile.op) or tile.split_consumed
-    # The pool identity, minted unconditionally: it keys the session memo AND stamps every Fork of
-    # this tree (``_State.pool_id``), so the two cannot key differently. The sample is part of the
-    # key rather than of the Context, because ``dataclasses.replace`` SHARES the session cache — a
-    # sampled Context and the live one it came from sit on one memo, and a Context-only flag would
-    # serve a sampled pool to a live compile. The split receipt and the spelled key vocabulary are
-    # explicit key terms beside ``pool_key``: a receipt-free twin must miss where the partial
-    # memoized its stripped ``g``-pin options, and an alpha-renamed twin must enumerate its own
-    # spellings.
     sample = getattr(ctx, "pool_sample", None)
-    key = digest(pool_key(tile, pins=schedule_pin_fingerprint()), sample.key if sample is not None else "", partition, tuple(off))
-    return _State(
+    # The pool STAMP (``_State.pool_id`` — see its comment): the variant key plus the situational
+    # facts a replayed PICK must not cross (hints size the space; pins prune it; a sampled draw
+    # must never seed a live one). Not a cache key — nothing stores pools.
+    io = (*tile.inputs.values(), *tile.outputs.values())
+    key = digest(
+        tile.identity_key(with_io=True, with_knobs=True),
+        tuple(d.hint or DEFAULT_SEQ_HINT for t in io for d in t.shape if not d.is_static),
+        schedule_pin_fingerprint(),
+        sample.key if sample is not None else "",
+    )
+    state = _State(
         tile,
         sched,
         ctx,
@@ -1716,53 +1708,16 @@ def _state(tile: TileOp, name: str, knobs: dict, ctx) -> _State:
         work_pinned=raw is not None,
         pool_id=key,
     )
-
-
-def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
-    """Map a newly lifted, unmapped ``tile`` onto the grid and offer its scheduling fork.
-
-    Returns the siblings at the walk's first real choice — each one lazy, holding a work list and a
-    context rather than any row — a single leaf when the whole walk is forced (still a FORK: the
-    engine records a one-option fork as a decision, which is what keys a fully pinned kernel's row
-    into the trace and the evidence), or ``[]`` when nothing schedules, which is the guardrail
-    contract that leaves the term unmapped. A live SITE pin that names nothing raises out of the
-    prescan instead.
-
-    The prescan is memoized in ``ctx.session_cache``, keyed by ``pool_key`` (the term + knobs, the
-    operand/output dtypes, per-axis extents, buffer shapes, stores and symbolic hints — every
-    enumeration input the term omits) folded with the live pin fingerprint, the split receipt and
-    the spelled key vocabulary (explicit key terms — :class:`_Pool` states why) and, when
-    sampling, the sample's identity; target facts need no key part because the cache lives ON
-    the Context and one instance never spans two fact sets. Options are a pure function of the node and the live pins,
-    so a hit replays the walk over the memoized option lists and yields byte-identical rows.
-
-    Under ``ctx.pool_sample`` (``emmy fit``, never a deploy) the lazy fork is NOT returned:
-    the walk's leaf stream is reservoir-sampled (:meth:`~…search.pool.PoolSample.take`), the pool's
-    exact size is reported through ``sample.totals``, and the drawn rows come back as leaf forks."""
-    state = _state(tile, name, knobs, ctx)
-    facts, key = state.facts, state.pool_id
-    cache = getattr(ctx, "session_cache", None)
-    sample = getattr(ctx, "pool_sample", None)
     nodes = tuple(_nodes(tile.op))
-    pool = cache.get(key) if cache is not None else None
-    if isinstance(pool, _Draw):
-        sample.totals[key] = pool.total  # the drawn rows cannot carry it; the caller reads it here
-        return [_Leaf(state, dict(row)) for row in pool.rows]
-    if isinstance(pool, _Pool):
-        state.options.update(zip((id(node) for node in nodes), pool.options, strict=True))
-    else:
-        # A node that offers nothing offers it under EVERY context — options are a function of the
-        # node and the pins alone — so one pass over the tree says whether the term has any
-        # schedule at all, and that same pass IS the option memo the walk reads (a site pin that
-        # names nothing raises here, out of the prescan — which is also why a raising pool is
-        # never memoized). It is also what keeps a lazy branch honest: past this check every node
-        # still has an option that composes with anything (the per-cell tile, the serial fold), so
-        # no branch can expand to nothing and promise leaves it does not have. The exceptions are
-        # kernel-global: a ``WORK`` pin is answered at the leaf, and a fragment seam can empty a
-        # sibling's offer mid-walk.
-        state.options.update((id(node), tuple(_options(state, node))) for node in nodes)
-        if cache is not None and sample is None:
-            cache.put(key, _Pool(tuple(state.options[id(node)] for node in nodes)))
+    # A node that offers nothing offers it under EVERY context — options are a function of the
+    # node and the pins alone — so one pass over the tree says whether the term has any
+    # schedule at all, and that same pass IS the option table the walk reads (a site pin that
+    # names nothing raises here, out of the prescan). It is also what keeps a lazy branch
+    # honest: past this check every node still has an option that composes with anything (the
+    # per-cell tile, the serial fold), so no branch can expand to nothing and promise leaves it
+    # does not have. The exceptions are kernel-global: a ``WORK`` pin is answered at the leaf,
+    # and a fragment seam can empty a sibling's offer mid-walk.
+    state.options.update((id(node), tuple(_options(state, node))) for node in nodes)
     if any(not opts for opts in state.options.values()):
         return []
     # ``S_``-prefixed — not a schedule family, so tile identity and prefix-consistency are
@@ -1792,11 +1747,8 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     if sample is None:
         return forks
     drawn = sample.take(dict(leaf.knobs) for leaf in iter_leaves(forks))
-    rows = tuple(MappingProxyType(dict(row)) for row in drawn.rows)
-    if cache is not None:
-        cache.put(key, _Draw(rows, drawn.total))
     sample.totals[key] = drawn.total
-    return [_Leaf(state, dict(row)) for row in rows]
+    return [_Leaf(state, dict(row)) for row in drawn.rows]
 
 
 __all__ = ["Ctx", "schedule"]

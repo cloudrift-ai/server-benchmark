@@ -20,8 +20,8 @@ everything the term deliberately does not carry:
 
 That split is the layer's invariant, not a convenience. The stored term is pure algebra, IMMUTABLE
 across the whole schedule search — a fork is a different slice map, never a rebuilt tree — which is
-what makes kernel identity (``TileOp.structural_key``) the algebra alone, with placement, slices,
-workers and output specifications all excluded. Tile IR stores only pure terms; statements appear when the term is
+what keeps kernel identity (``Op.body_identity`` over the derived ``loop_body``) schedule-free, with
+placement, slices and workers all excluded. Tile IR stores only pure terms; statements appear when the term is
 lowered, never inside it (``ir/ARCHITECTURE.md``, "Pure terms vs statements").
 
 There is no per-kind kernel/schedule type: dispatch reads the role structurally off the node (a
@@ -33,6 +33,9 @@ structure the tile IR already holds.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import cached_property
+
+from frozendict import frozendict
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
@@ -48,7 +51,6 @@ from emmy.compiler.ir.stmt.base import _axis_identity
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.path import sites
-from emmy.compiler.structural import digest
 
 
 @dataclass(frozen=True)
@@ -398,7 +400,7 @@ def _construction_normalized(stmts) -> list[Stmt]:
     return out
 
 
-@dataclass
+@dataclass(frozen=True)
 class TileOp(Op):
     """One scheduled map/reduce kernel (see module docstring).
 
@@ -407,7 +409,7 @@ class TileOp(Op):
     body is generated at materialize time by ``op.lower()``, and a bare reduction / contraction's
     output ``Write`` is glue generated there too (from ``place.grid`` + the graph node's output
     buffer; see ``lowering/kernel/010_materialize``). ``inputs`` / ``outputs`` come from the base
-    :meth:`Op.populate_io` (graph edges) — no body walk.
+    :meth:`Op.with_io` (graph edges) — no body walk.
 
     Schedule fields (all defaulted, so a fresh / placeholder node is well-formed):
 
@@ -424,13 +426,13 @@ class TileOp(Op):
     kind, so key and value agree by construction). The ``op`` term is pure algebra, IMMUTABLE
     across the whole schedule search — a fork is a different map, never a rebuilt tree. Read /
     write through :class:`~emmy.compiler.ir.tile.ops.Sched` (``ops.reduce_plan`` is the plan
-    accessor); ``lower`` never sees the slices, so kernel identity (``Op.cache_key``) is untouched."""
+    accessor); ``lower`` never sees the slices, so kernel identity (``identity_key(with_io=True, with_knobs=True)``) is untouched."""
 
     op: object = None
     name: str = ""
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
-    schedule: dict = field(default_factory=dict)
+    schedule: frozendict = field(default_factory=frozendict)
     # The kernel's output specifications: every explicit ``Write`` (and the legacy rms/softmax
     # output-sweep spelling) as a kernel-boundary fact beside ``place``. Empty for a
     # bare reduction / contraction — its grid-cell store
@@ -457,6 +459,9 @@ class TileOp(Op):
     split_consumed: bool = False
 
     def __post_init__(self) -> None:
+        Op.__post_init__(self)
+        if not isinstance(self.schedule, frozendict):
+            object.__setattr__(self, "schedule", frozendict(self.schedule))
         scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
         axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
         free_names = {axis.name for axis in self.place.free}
@@ -471,10 +476,10 @@ class TileOp(Op):
             candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,), sweep_axes=candidate_sweeps)
             if any(is_contraction(site.node) for site in sites(candidate)):
                 normalized = candidate
-                self.place = replace(self.place, free=candidate_free)
+                object.__setattr__(self, "place", replace(self.place, free=candidate_free))
         if self.schedule and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
-        self.op = normalized
+        object.__setattr__(self, "op", normalized)
 
         contractions = tuple(site.node for site in sites(normalized) if is_contraction(site.node))
         promoted = {
@@ -497,11 +502,16 @@ class TileOp(Op):
             free = (*self.place.free, *extra)
             if self.place.is_mapped:
                 grid = self.place.grid or self.place.free
-                self.place = replace(self.place, free=free, grid=(*grid, *extra), mapped=True)
+                object.__setattr__(self, "place", replace(self.place, free=free, grid=(*grid, *extra), mapped=True))
             else:
-                self.place = replace(self.place, free=free)
-        self.output_specs = tuple(
-            replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store for store in self.output_specs
+                object.__setattr__(self, "place", replace(self.place, free=free))
+        object.__setattr__(
+            self,
+            "output_specs",
+            tuple(
+                replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store
+                for store in self.output_specs
+            ),
         )
         # Promotion changes the enclosing-axis context that closes computed contraction operands.
         # Normalize once under the final scope so reconstructing this TileOp cannot expose a
@@ -512,7 +522,7 @@ class TileOp(Op):
         renormalized = normalize_fold_tree(self.op, final_axes, sweep_axes=final_sweeps)
         if self.schedule and renormalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
-        self.op = renormalized
+        object.__setattr__(self, "op", renormalized)
 
     def pretty_body(self) -> str:
         """The structural dump — delegated to :mod:`~emmy.compiler.ir.tile._dump`, which owns
@@ -521,15 +531,33 @@ class TileOp(Op):
 
         return tile_body(self)
 
-    def structural_key(self) -> str:
-        """Kernel identity — the stored term's α-invariant digest (``""`` for a placeholder).
-        Placement, schedule slices, workers and output specifications are deliberately EXCLUDED: identity is
-        the algebra alone (the NO-schedule-fields rule above), so every fork sibling of one term
-        shares the key and no emission path can leak a schedule into it."""
-        return self.op.structural_key() if self.op is not None else ""
+    @cached_property
+    def loop_body(self) -> Body | None:
+        """The complete schedule-free Loop-IR body this kernel executes, derived from the term
+        — what the identity lattice digests. The free grid axes wrap back
+        as plain loops around the ONE lowering spelling (:func:`lower_with_output_specs` —
+        ``Fold.lower()`` with every output specification attached at its owning scope), so the
+        extents, the store program (index spelling, ``atomicAdd``, width, output sweeps) and a
+        cut child's typed seam ``Load`` are all in the body. Schedule-free by construction:
+        ``lower`` never reads the schedule slices, and ``place``'s grid BINDING stays out (an
+        axis's launch coordinate is execution choice, not identity). A bare reduction carries no
+        ``Write`` — its grid-cell store is materializer glue derived from ``place.grid``, so the
+        empty store stream is itself derivable. Cached: the term and the kernel-boundary fields
+        are immutable across the schedule search. ``None`` for a placeholder."""
+        if self.op is None:
+            return None
+        stmts: list = lower_with_output_specs(self.op, self.output_specs)
+        for axis in reversed(self.place.free):
+            stmts = [Loop(axis=axis, body=Body(stmts))]
+        return Body.coerce(stmts)
 
-    def cache_key(self) -> str | None:
-        return digest(type(self).__name__, self.structural_key(), self._knob_key())
+    def _body_identity(self, *, structural: bool = True) -> str | None:
+        """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s
+        canonical digest, so a golden record derives the SAME key from its persisted program
+        (both sides lower through the one spelling) and term re-spellings that lower alike
+        share it."""
+        body = self.loop_body
+        return None if body is None else body.structural_key(structural=structural)
 
 
 __all__ = [

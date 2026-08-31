@@ -397,6 +397,7 @@ def _stmt_eval_scope() -> dict:
     # back. Auto-populate every public class from these modules (``setdefault`` so the
     # explicit stmt/expr entries above win on any name clash) — a new node/knob field
     # needs no edit here.
+    import emmy.compiler.ir.atom as _atom_mod  # noqa: PLC0415
     import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
@@ -404,7 +405,7 @@ def _stmt_eval_scope() -> dict:
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_axis_mod, _sched_mod, _fold_mod, _tile_mod, _kernel_mod, _cuda_mod):
+    for _mod in (_atom_mod, _axis_mod, _sched_mod, _fold_mod, _tile_mod, _kernel_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):
@@ -1114,13 +1115,13 @@ class Graph:
                 from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
                 def _field_key(o: object, name: str) -> str:
-                    # A ``TileOp``'s term digests α-invariantly (``TileOp.structural_key`` —
-                    # the bottom-up term key); a nested ``Graph`` field
+                    # A ``TileOp``'s term digests α-invariantly (``Fold.structural_key`` — the
+                    # exact-flavor digest of its lowered body); a nested ``Graph`` field
                     # (``ConstantOp.source_graph``) digests by its own structural key
                     # (its default repr carries the object address); every other field
                     # keeps its repr.
                     if name == "op" and isinstance(o, TileOp):
-                        return o.structural_key()
+                        return o.op.structural_key() if o.op is not None else ""
                     val = getattr(o, name)
                     if isinstance(val, Graph):
                         return val.structural_key()
@@ -1346,7 +1347,10 @@ def _rename_buf_in_op(op, old: str, new: str):
         }
 
     if isinstance(op, LoopOp):
-        renamed = op.rename_buffers({old: new})
+        # ``LoopOp.rename_buffers`` is the spelling-preserving clone: fields carried whole
+        # (name / knobs / source identity preserved), io renamed, and NO ``__post_init__`` — a
+        # rename must never renormalize (``sort_commutative_args`` orders by buffer name).
+        return op.rename_buffers({old: new})
     else:
 
         def rename_body(body):
@@ -1376,12 +1380,7 @@ def _rename_buf_in_op(op, old: str, new: str):
             op=rename_term(op.op),
             output_specs=tuple(replace(store, write=fn(store.write)) for store in op.output_specs),
         )
-    renamed.inputs = renamed_io(op.inputs)
-    renamed.outputs = renamed_io(op.outputs)
-    renamed.name = op.name
-    renamed.knobs = dict(op.knobs)
-    renamed.source = op.source
-    return renamed
+    return replace(renamed, inputs=renamed_io(op.inputs), outputs=renamed_io(op.outputs))
 
 
 # ---------------------------------------------------------------------------

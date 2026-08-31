@@ -25,6 +25,18 @@ def _sum_loop() -> Loop:
     return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR)
 
 
+def _with_slice(tile, family, node, value):
+    """Attach one schedule slice by rebuilding — ops are frozen; a slice map is assembled
+    before construction, never written after."""
+    from dataclasses import replace
+
+    from emmy.compiler.ir.tile.ops import Sched
+
+    schedule = dict(tile.schedule)
+    Sched(tile.op, schedule, place=tile.place).put(family, node, value)
+    return replace(tile, schedule=schedule)
+
+
 def test_from_loop_reconstructs_the_loop_exactly() -> None:
     loop = _sum_loop()
     red = fold_from_loop(loop)
@@ -64,17 +76,16 @@ def _tile(op) -> TileOp:
 
 
 def test_reduce_plan_reads_the_partition_off_the_schedule_dict() -> None:
-    from emmy.compiler.ir.tile.ops import sched_of
 
     plan = ReducePlan.of(coop=128)
     red = fold_from_loop(_sum_loop())
     assert red is not None
     # A bare reduce root and a zero-axis projection both surface the partition keyed on the fold.
     bare = _tile(red)
-    sched_of(bare).put("REDUCE", red, plan)
+    bare = _with_slice(bare, "REDUCE", red, plan)
     assert reduce_plan(bare) is plan
     wrapped = _tile(Fold.projection(body=Body((Assign(name="rms", op="sqrt", args=("acc",)),)), operands=(red,)))
-    sched_of(wrapped).put("REDUCE", red, plan)
+    wrapped = _with_slice(wrapped, "REDUCE", red, plan)
     assert reduce_plan(wrapped) is plan
 
 
@@ -180,7 +191,6 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
         a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
         channels=(replace(c.channels[0], b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index))),),
     )
-    from emmy.compiler.ir.tile.ops import sched_of
 
     accs = inner.defines()
     init, combine = M(*(["add"] * len(accs)), names=accs)
@@ -198,7 +208,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     assert red.role is AxisRole.PLANAR
     assert red.composed is inner
     t = _tile(red)
-    sched_of(t).put("REDUCE", red, ReducePlan.of(cta=2, finalize="atomic"))
+    t = _with_slice(t, "REDUCE", red, ReducePlan.of(cta=2, finalize="atomic"))
     assert reduce_plan(t).cta == 2
     lo = red.lower()
     assert len(lo) == 1 and isinstance(lo[0], Loop) and lo[0].axis.name == "k_ks"
@@ -399,6 +409,115 @@ def test_computed_b_factorizes_at_the_scalar_tier() -> None:
     assert exps, "the computed B operand (exp of the weight) must survive into the scalar kernel body"
 
 
+def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b(monkeypatch) -> None:
+    """Selecting an output-tiled contraction from a projection must retain a sibling Fold whose
+    result its computed B edge reads. The sibling varies over the contraction's output column, so
+    it belongs inside the per-cell compute fill; treating it as a post-contraction projection
+    leaves the fill reading an undefined scalar."""
+    from emmy.compiler.dtype import F16
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.kernel.ir import RegStore
+    from emmy.compiler.ir.schedule import Placement, Stage, Workers
+    from emmy.compiler.pipeline.passes.lowering.kernel import _factor
+
+    m, n, k, r = Axis("m", 16), Axis("n", 32), Axis("k", 16), Axis("r", 16)
+    statistic = Fold(
+        axis=r,
+        lift=Lambda(
+            params=("r",),
+            body=Body(
+                (
+                    Load(name="stat_in", input="W", index=(Var("n"), Var("r"))),
+                    Assign(name="square", op="multiply", args=("stat_in", "stat_in")),
+                )
+            ),
+            results=("square",),
+        ),
+        init=(0.0,),
+        combine=Lambda(
+            params=("stat", "stat__o"),
+            body=Body((Assign(name="stat", op="add", args=("stat", "stat__o")),)),
+            results=("stat",),
+        ),
+    )
+    provider = Fold.projection(
+        operands=(statistic,),
+        body=Body(
+            (
+                Assign(name="norm", op="rsqrt", args=("stat",)),
+                Load(name="row_bias", input="Bias", index=(Var("m"),)),
+            )
+        ),
+        results=("norm", "row_bias"),
+    )
+    computed_b = Fold.projection(
+        body=Body(
+            (
+                Load(name="weight", input="W", index=(Var("n"), Var("k"))),
+                Assign(name="scaled", op="multiply", args=("weight", "norm")),
+            )
+        ),
+        results=("scaled",),
+    )
+    contraction = Fold.contraction(
+        k_axis=k,
+        a=Load(name="activation", input="A", index=(Var("m"), Var("k"))),
+        channels=(Channel(b=computed_b, acc="out"),),
+    )
+    root = Fold.projection(
+        operands=(provider, contraction),
+        body=Body((Assign(name="biased", op="add", args=("out", "row_bias")),)),
+        results=("biased",),
+    )
+    workers = Workers.parse("w1x1")
+    plan = TilePlan.parse("mma_m16n8k16_f16_f32/f1x4/k1", workers).at(m, n)
+    tile = TileOp(
+        op=root,
+        name="out",
+        place=Placement(free=(m, n), grid=(m, n), mapped=True),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="biased")),),
+    )
+    from emmy.compiler.ir.tile.ops import Sched
+
+    schedule: dict = {}
+    sched = Sched(tile.op, schedule, place=tile.place)
+    sched.put("TILE", contraction, plan)
+    sched.put("STAGE", contraction, Stage(depth=1, transport="smem", smem=("scaled",), bk_elems=16))
+    tile = replace(
+        tile,
+        schedule=schedule,
+        inputs={
+            "A": Tensor("A", (16, 16), F16),
+            "Bias": Tensor("Bias", (16,), F16),
+            "W": Tensor("W", (32, 16), F16),
+        },
+        outputs={"out": Tensor("out", (16, 32), F16)},
+    )
+
+    sliced_results = []
+    provider_slice = _factor._provider_slice
+
+    def track_slice(edge, required):
+        sliced_results.append(frozenset(required))
+        return provider_slice(edge, required)
+
+    monkeypatch.setattr(_factor, "_provider_slice", track_slice)
+    lowered = _factor.factorize(tile, root=None)
+    stmts = tuple(lowered.body.iter())
+    first_def = {name: index for index, stmt in reversed(tuple(enumerate(stmts))) for name in stmt.defines()}
+    norm_reads = [(index, name) for index, stmt in enumerate(stmts) for name in stmt.deps() if name.startswith("norm")]
+    assert norm_reads
+    assert all(first_def.get(name, len(stmts)) < index for index, name in norm_reads)
+    assert all("m" not in expr.free_vars() for stmt in stmts for expr in stmt.exprs())
+    stat_loads = [stmt for stmt in stmts if isinstance(stmt, Load) and stmt.name.startswith("stat_in")]
+    assert len(stat_loads) == 8, "the statistic belongs only to the eight-column computed-B fill"
+    definitions = [name for stmt in stmts for name in stmt.defines()]
+    assert sum(name.startswith("norm") for name in definitions) == 8
+    bias_loads = [load for stmt in stmts if isinstance(stmt, RegStore) for load in stmt.epilogue.loads if load.name == "row_bias"]
+    assert len(bias_loads) == 4, "the unrelated provider result belongs only to the four output fragments"
+    assert sliced_results == [frozenset(("norm",)), frozenset(("row_bias",))]
+
+
 def test_both_edges_may_be_computed_at_once() -> None:
     """Nothing privileges one side: a contraction of two computed operands lowers too."""
     c = _computed_b_contraction(a_load=False)
@@ -434,12 +553,103 @@ def test_workers_derive_from_tile_slices_and_disagreement_is_loud() -> None:
         derive_workers([warp, TilePlan.parse("mma_m16n8k16_f16_f32/f1x2/k8", Workers.parse("w2x1"))])
 
 
-def test_seal_workers_fills_the_slot_off_the_schedule_dict() -> None:
+def test_sealed_inventory_derives_off_the_schedule_dict() -> None:
     from emmy.compiler.ir.schedule import Workers
-    from emmy.compiler.ir.tile.ops import sched_of, seal_workers
+    from emmy.compiler.ir.tile.ops import Sched, sealed_inventory
 
     c = _contraction()
     t = _tile(c)
-    sched_of(t).put("TILE", c, TilePlan.parse("f2", Workers.parse("t2")))
-    seal_workers(t)
-    assert t.work == Workers(kind="thread", units=(2, 1))
+    schedule: dict = {}
+    Sched(t.op, schedule, place=t.place).put("TILE", c, TilePlan.parse("f2", Workers.parse("t2")))
+    assert sealed_inventory(schedule, t.workers) == Workers(kind="thread", units=(2, 1))
+
+
+# --- an output sweep the bound reduce's cone reads ----------------------------------------------- #
+
+
+def _sweep_reading_reduce_tile(plan=None, chain: bool = False) -> TileOp:
+    """The DeepSeek ``k_div_36_reduce`` shape: a zero-axis projection whose OPERAND reduce streams a
+    load indexed by the boundary store's sweep axis (``acc = Σ_k x[m, k, j]`` under ``sweep(j)
+    o[m, j] = v``) — the reduce must re-run per swept cell, so the sweep loop has to enclose it.
+
+    ``chain`` puts a second zero-axis projection between the root and the reduce, so the peeled
+    operand carries no ``REDUCE`` site of its own."""
+    from emmy.compiler.ir.schedule import Placement
+
+    body = Body(
+        (
+            Load(name="x_e", input="x", index=(Var("m"), Var("k"), Var("j"))),
+            Accum(name="acc", value="x_e", op="add", axes=("k",)),
+        )
+    )
+    red = fold_from_loop(Loop(axis=Axis("k", 4), body=body, role=AxisRole.PLANAR))
+    assert red is not None
+    if chain:
+        inner = Fold.projection(body=Body((Assign(name="mid", op="copy", args=("acc",)),)), operands=(red,), results=("mid",))
+        node = Fold.projection(body=Body((Assign(name="v", op="sqrt", args=("mid",)),)), operands=(inner,))
+    else:
+        node = Fold.projection(body=Body((Assign(name="v", op="sqrt", args=("acc",)),)), operands=(red,))
+    tile = TileOp(
+        op=node,
+        place=Placement(free=(Axis("m", 8),)),
+        output_specs=(OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4)),),
+    )
+    if plan is not None:
+        scheduled = tile.op.operands[0]
+        while scheduled.axis is None and scheduled.operands:
+            scheduled = scheduled.operands[0]
+        tile = _with_slice(tile, "REDUCE", scheduled, plan)
+    return tile
+
+
+def _reads_axis_outside_its_loop(stmts, name: str) -> bool:
+    """A deep read of axis ``name`` not enclosed by a loop binding it — the undefined-identifier
+    shape nvcc rejects."""
+    for s in stmts:
+        if name in s.binds_axes():
+            continue
+        if any(name in e.free_vars() for e in s.exprs()):
+            return True
+        if any(_reads_axis_outside_its_loop(list(b), name) for b in s.nested()):
+            return True
+    return False
+
+
+def test_serial_reduce_reading_the_output_sweep_emits_inside_the_sweep_loop() -> None:
+    """The serial fold realizes the shape whole: the projection is not peeled off its operand, so
+    the output sweep ``Loop`` wraps the reduce and the sweep axis is bound everywhere it is read."""
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
+
+    tile = factorize(_sweep_reading_reduce_tile(), root=None)
+    assert not _reads_axis_outside_its_loop(list(tile.body), "j")
+
+
+def test_partitioned_reduce_reading_the_output_sweep_refuses_the_row() -> None:
+    """A cooperative / ILP partition cannot re-run per swept cell — the materializer distributes the
+    output sweep across the cooperating lanes, and a cross-lane combine inside a lane-local sweep
+    folds different swept cells. The row is declined (``RuleSkipped(reject=True)`` at the pass
+    boundary), and the greedy blocklist retry resolves onto the serial fold."""
+    import pytest
+
+    from emmy.compiler.ir.tile.ops import UnbindableProjection
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
+
+    with pytest.raises(UnbindableProjection):
+        factorize(_sweep_reading_reduce_tile(ReducePlan.of(coop=4)), root=None)
+
+
+def test_a_projection_chain_does_not_hide_the_partition_from_the_refusal() -> None:
+    """The schedule at stake is the ITERATING node's, and a chain of zero-axis projections may sit
+    between it and the peeled operand. Reading the plan off the wrapper found none and bound the
+    row as the serial fold: the emission was correct but silently dropped the partition the row
+    was priced on, which is the phantom stamp the offer-side narrowing exists to prevent."""
+    import pytest
+
+    from emmy.compiler.ir.tile.ops import UnbindableProjection
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
+
+    # The serial chain still emits with every axis bound.
+    tile = factorize(_sweep_reading_reduce_tile(chain=True), root=None)
+    assert not _reads_axis_outside_its_loop(list(tile.body), "j")
+    with pytest.raises(UnbindableProjection):
+        factorize(_sweep_reading_reduce_tile(ReducePlan.of(coop=4), chain=True), root=None)

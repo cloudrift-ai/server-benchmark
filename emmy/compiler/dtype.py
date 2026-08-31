@@ -49,7 +49,7 @@ class DataType:
         tidiness. ``structural.form`` renders a dataclass by walking its fields, so a field here
         joins the identity of every kernel that mentions any dtype — while carrying no information
         the name did not already carry, since the name is the first thing ``form`` renders. As a
-        field it moved every contraction's ``Op.cache_key`` and orphaned the kernel names recorded
+        field it moved every contraction's kernel identity (``Op.identity_key``) and orphaned the names recorded
         in the checked-in goldens; as a property it is invisible to the walk.
         """
         return 2 if self.name in _PACKED_PAIR_NAMES else 1

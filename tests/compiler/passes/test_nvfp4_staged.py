@@ -271,7 +271,15 @@ def _rows(node, inputs, axes, pins=None):
     ctx = Context.from_target((8, 9))
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     with pinned_knobs(pins or {}):
-        state = _schedule._state(op, "y", {}, ctx)
+        # The prescan the enumerator runs, spelled here because `schedule()` builds it inline: the
+        # per-kernel facts one term's walk reads, and nothing else this helper needs.
+        sched = _schedule.Sched(op.op, {}, place=op.place.on_grid())
+        tail = _schedule.projection_tail(op)
+        frag_ok = _schedule._fragment_epilogue_ok(tail, _schedule._fold_states(op.op))
+        facts = _schedule._site_facts(op, ctx, sched, tail, frag_ok)
+        state = _schedule._State(
+            op, sched, ctx, "y", {}, _schedule._off(sched, op.op), facts, frozenset(), False, carries_partition=False
+        )
         key = state.sched.key("STAGE", node)
         pin = _schedule._pin(STAGE, key)
         # The enumeration's own reading of both: which plan the slabs are sized against, and

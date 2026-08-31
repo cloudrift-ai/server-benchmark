@@ -56,7 +56,11 @@ boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a 
 pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
 Structural identity therefore reads the stored order directly. Contraction canonicalization first orders product
 arguments by geometry, then places the one argument shared by every product in the Fold's shared operand slot.
-Physical M/N orientation remains a placement fact rather than part of the Fold algebra.
+For a broadcast-batched product whose batch axis occurs in only one operand, the placement's trailing output pair
+still supplies that geometry. If its geometric first operand reads the reduction axis non-contiguously and the other
+materialized operand reads it contiguously, the commutative product puts the contiguous operand in the shared A slot;
+placement then derives the corresponding physical M/N orientation from the operand axes. Physical M/N orientation
+remains a placement fact rather than part of the Fold algebra.
 
 `normalize.py` owns only the idempotent, bottom-up rules that need Tile context: scoped lambda alpha-equivalence and
 clustering, semiring contraction canonicalization, and closed child-Fold extraction from a root projection. The
@@ -72,17 +76,31 @@ exclusive consumption (every moved definition dies into the closed edges), so th
 duplicated. Both rules measure an edge's captures with `Fold.deps` — scope-aware, so a name a sibling operand binds
 inside the edge is not a capture and an already-closed edge never re-fires the rewrite. A cone closed at its axes is
 what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
-vector) becomes materializable once per key instead of recomputed per query row. A body-member fold these rules
-leave capturing host names is not lost to placement: the fork closes it at offer time through provider closure
-(`lowering/tile/_cut.py`), without moving anything in the stored tree.
+vector) becomes materializable once per key instead of recomputed per query row.
+
+An iteration never crosses into a new evaluation domain. Attaching an iteration-bearing provider to a contraction
+operand would evaluate it once per step of every intervening binder; normalization therefore leaves that provider at
+its defining scope. Straight-line chains still close normally, and a reducing root's own axis counts as its existing
+domain. A stored fold left capturing by this rule remains placeable: the placement fork resolves its captures outward
+through the occurrence's lexical environment at offer time, without moving the stored tree.
+
+Three walks compute a capture's provider cone, at three stages, and each is allowed to move something different.
+Normalization's closing rules (`normalize.py`, above) are the only walk that REWRITES the stored tree, and only for
+straight-line providers within one evaluation domain. The placement fork's provider closure
+(`lowering/tile/_cut.py`) moves nothing: it proves every occurrence resolves to equal sources and offers the closed
+value as a seam, recording fold producers as the seam's requirements. Kernel lowering's per-cell closure
+(`lowering/kernel/_factor.py`) moves sibling providers into a computed operand's compute fill of the one kernel being
+emitted — a codegen fact that exists only inside that realization. A new capture-resolution need belongs in one of
+these three, not a fourth walk.
 
 An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
 projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
 computation compare unequal, and the placement fork's value clustering (`lowering/tile/_cut.py`) relies on
 alpha-equivalent cones converging to one canonical shape.
 
-Normalization ends by restoring OBJECT SHARING: structurally equal cones with the same captures collapse onto one
-Fold object (`_share_common_cones`), so a value fusion inlined into several consumption sites — attention's softmax
+Normalization ends by restoring OBJECT SHARING: same-value cones — alpha-equal with identical captures and exposed
+result names, so a copy differing only in internal binder spelling still qualifies — collapse onto one Fold object
+(`_share_common_cones`), so a value fusion inlined into several consumption sites — attention's softmax
 statistics, read by the weight cone and by the epilogue — is one node again. This is an invariant, not an
 optimization: seam grouping and cut realization key on object identity, so severed sharing silently turns one value
 into per-site recompute that no schedule can undo (the class PR #679 measured at three orders of magnitude). A
@@ -174,22 +192,33 @@ operand; the generic twisted Fold derivation then exposes the corresponding cont
 
 ## Kernel identity
 
-`identity.py` is the home for every "are these two kernels the same?" question, and the index over
-the ones answered elsewhere. The term digest (`_key.py`) canonicalizes α-renaming, buffer spelling
-**and sizes** away — right for the algebra, wrong for everything downstream — so each coarser
-identity folds the excluded facts back in through a named fingerprint rather than deriving them at
-the call site. `deploy_identity` is the verified-tier join key; `pool_key` is the schedule-space
-key and takes the live pin fingerprint as a required argument, which is what keeps the module a
-pure function of a `TileOp` and below the pipeline layer.
+Every "are these two kernels the same?" question is answered by ONE function — `Op.identity_key`
+(`ir/base.py`), a lattice over the canonical Loop-IR body with one flag per additional fact
+(`structural` cluster-collapse, `with_io`, `with_knobs`). `TileOp`'s contribution is `loop_body` —
+the complete schedule-free Loop-IR body the kernel executes, derived from the term (the free grid
+axes wrapped back as plain loops around `lower_with_output_specs`, so the extents, the store
+program and a cut child's typed seam `Load` are all in the body) — and the private
+`_body_identity` override that digests it. There is no separate term hasher: `Fold.structural_key`
+is the exact-flavor digest of the term's own lowered body (the term is pure algebra; its body is
+its normal form). The named lattice points are spelled at call sites: the deploy identity
+(`with_io=True` — the durable join key) and the variant key (`with_io=True, with_knobs=True` —
+the search tree and measurement stores). There is no schedule-space key on
+the interface: the enumeration's `pool_id` stamp is minted at its one site in
+`lowering/tile/_schedule` (the variant key + hints + pins + sample identity) — a stamp for the
+greedy decision memo and the budgeted descent seed, not a cache key: nothing stores pools.
 
-A fact that changes what a reader produces, and that the term does not carry, belongs in a
-fingerprint here. Omitting one is silent, and both known omissions cost the same way. `pool_key`
-shipped without per-axis extents, so two matmuls with transposed M/N — equal terms, equal
-`S_ext_*` summaries — shared one pool entry over spaces of 57442 and 8280 candidates. Buffer
-shapes and the output specifications were missing from both identities, so a `(128, 128)` output and a
-`(4, 32, 128)` one over the same iteration space collided: the split form spells its coordinate as
-a dim pair the fragment store can address only under a divisibility rule, and a golden measured on
-the flat kernel joined a kernel that could not realize its row.
+Identity has two flavors: the default `structural=True` is schedule-equivalent (compute-unit op
+clusters collapse — `relu` and `tanh` epilogues share a key because their schedule evidence
+transfers, which is what golden records join on), while `structural=False` names the exact kernel.
+
+The design lesson the interface encodes: a fact a schedule reads must be in the body or the io
+fingerprint, never re-derived beside a caller. The pool digest once shipped without per-axis extents,
+so two matmuls with transposed M/N — equal terms, equal `S_ext_*` summaries — shared one pool
+entry over spaces of 57442 and 8280 candidates; buffer shapes and the output specifications were
+once missing too, so a `(128, 128)` output and a `(4, 32, 128)` one over the same iteration space
+collided — the split form spells its coordinate as a dim pair the fragment store can address only
+under a divisibility rule, and a golden measured on the flat kernel joined a kernel that could not
+realize its row. Both facts now live in the completed loop body and the io fingerprint.
 
 Static extent products used as structural features saturate at the largest finite float. Feature extraction therefore
 stays bounded even for a deeply nested symbolic-model fixture whose exact integer product is too large to convert,
@@ -207,6 +236,10 @@ ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. 
 placement before scheduling; a scoped cut carries the consumed placement decision on both pieces and proceeds
 directly to scheduling. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation
 families nor filters legal cuts by profitability.
+
+A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
+when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's
+f32 reduction-carrier dtype; otherwise the materialized B slab would make every f16 tensor-core atom ineligible.
 
 Scheduling sees only the rewritten stored Fold tree. Every Fold is an addressable schedule site; the scheduler does
 not derive alternate classified views or suppress a child because its parent may realize it. A derived unit-axis

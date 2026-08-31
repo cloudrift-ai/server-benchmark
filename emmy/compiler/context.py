@@ -16,7 +16,6 @@ the signature alone.
 from __future__ import annotations
 
 import re
-from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -99,41 +98,6 @@ def _live_sm_count() -> int:
     return int(live_device_features().get("sm_count") or DEFAULT_SM_COUNT)
 
 
-class SessionCache:
-    """Session-scoped LRU memo (key digest → payload), carried on :class:`Context` as AMBIENT
-    state — like the device-physical fields it is EXCLUDED from :meth:`Context.structural_key`:
-    caching must never change identity. One instance per compilation session;
-    ``dataclasses.replace`` on a Context carries the same instance forward, so a tune run's
-    trajectories share it, while a fresh Context starts cold.
-
-    Sits BELOW the search policies (the one consumer today is the schedule pool cache in
-    ``lowering/tile/_schedule``), so greedy and MCTS share hits without knowing the cache
-    exists. Only evidence-independent payloads belong here — a policy's CONCLUSIONS (a deploy
-    pick, a ranking) must never be stored, since evidence moves under a tune. Payloads must be
-    immutable; the owner asserts that at ``put`` time."""
-
-    def __init__(self, cap: int = 8) -> None:
-        self.cap = cap
-        self._store: OrderedDict[str, object] = OrderedDict()
-        self.hits = 0
-        self.misses = 0
-
-    def get(self, key: str) -> object | None:
-        found = self._store.get(key)
-        if found is None:
-            self.misses += 1
-            return None
-        self._store.move_to_end(key)
-        self.hits += 1
-        return found
-
-    def put(self, key: str, value: object) -> None:
-        self._store[key] = value
-        self._store.move_to_end(key)
-        while len(self._store) > self.cap:
-            self._store.popitem(last=False)
-
-
 @dataclass(frozen=True)
 class Context:
     """Per-compilation state visible to rules.
@@ -214,15 +178,16 @@ class Context:
     # The candidate-pool sample this compile enumerates under, or ``None`` for a LIVE compile,
     # which always sees the whole pool. Set by the offline dataset builders (``emmy fit``), never
     # by a deploy. It is part of the Context's VALUE and rides the schedule pool's cache key,
-    # because ``dataclasses.replace`` shares the session cache below: a sampled Context and the
+    # because ``dataclasses.replace`` shares ambient state: a sampled Context and the
     # live one it was derived from sit on one memo, so a flag that did not key the cache would
     # serve a sampled pool to a live compile. NOT in ``structural_key`` — it decides which rows are
     # OFFERED, never what a chosen row compiles to.
     pool_sample: PoolSample | None = None
-    # The session memo (:class:`SessionCache`) — ambient, mutable-inside, shared across
-    # ``dataclasses.replace`` copies. NOT in ``structural_key`` and ``compare=False``:
-    # caching must never change identity or context equality.
-    session_cache: SessionCache = field(default_factory=SessionCache, compare=False, repr=False)
+    # The session kernel cache (``pipeline.kernel_cache.KernelCache``) — ambient, CALLER-owned,
+    # greedy-only (the tune search strips it; pricing probes strip it). Typed ``object`` because
+    # ``context`` sits below ``pipeline``. NOT in ``structural_key`` and ``compare=False``:
+    # caching must never change identity.
+    kernel_cache: object | None = field(default=None, compare=False, repr=False)
 
     @classmethod
     def from_target(cls, cap: tuple[int, int], *, gpu_name: str | None = None) -> Context:

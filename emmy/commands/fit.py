@@ -148,7 +148,7 @@ def _pool_identity(g, tier: str, packed: tuple[tuple[str, ...], np.ndarray, bool
     Two enumerations belong in one group when this matches — the featurized pool is then byte-identical, so
     one enumeration's row index addresses the same row the other's does, and the goldens behind them are
     several verified answers to one question. Deciding it from the packed pool rather than from a key is what
-    catches the same program recorded twice, which :attr:`~..compiler.pipeline.search.golden.GoldenRecord.pool_key`
+    catches the same program recorded twice, which :attr:`~..compiler.pipeline.search.golden.GoldenRecord.pool_group`
     cannot see.
 
     The identity fields ride along with the matrix digest because they decide things the matrix does not: the
@@ -196,7 +196,7 @@ def build_golden_groups(
 
     **A group is a candidate pool, not a golden.** Several goldens can land on one pool — the same shape
     recorded under two names, or a name recorded twice — and they then share ONE group, each contributing a
-    row to its golden set. Which goldens share a pool is read off the records (``GoldenRecord.pool_key``)
+    row to its golden set. Which goldens share a pool is read off the records (``GoldenRecord.pool_group``)
     BEFORE anything is enumerated, so each pool is enumerated, featurized and packed once, then folded by
     :func:`_pool_identity`; every group is built knowing all of its goldens. This logs how many goldens merged, and the caller records
     groups against positives in the metrics header.
@@ -238,22 +238,22 @@ def build_golden_groups(
     key_counts: dict[str, int] = {}
     matched = 0
     pools: dict[tuple, _Pool] = {}  # packed-pool identity -> the pool and every golden found in it
-    # ONE Context per card: the per-card facts are identical across its goldens, and sharing the
-    # instance shares its schedule pool cache — the std / parity / fm siblings of one shape
-    # re-enumerate byte-identical pools (490 matmul goldens collapse to ~313 distinct), so the
-    # dataset build pays each pool once. The fm-pinned enumeration keys apart on its own: the
-    # precision gate rides the pool key's pin fingerprint.
+    # ONE Context per card: the per-card facts are identical across its goldens. Cross-record
+    # enumeration dedup is the GROUPING's job — ``pool_group`` composes the target kernels'
+    # identity keys, so the std / parity siblings of one shape (and cross-session re-recordings)
+    # land in one group and the dataset build pays each pool once; the fm-pinned enumeration
+    # keys apart on its own, since the record's pin regime is a group-key term.
     ctxs: dict[tuple, Context] = {}
     # The keep-sets are precomputed BEFORE the loop because a bucket's obligation spans the whole
     # corpus: the pool a golden opens may also carry a later golden's recorded row.
     keeps = _keep_sets(GOLDEN_RECORDS) if sample > 0 else {}
-    # Group the records by the pool each will enumerate (:attr:`GoldenRecord.pool_key`) before touching
+    # Group the records by the pool each will enumerate (:attr:`GoldenRecord.pool_group`) before touching
     # the scheduler, so each enumeration is paid once. Insertion order is corpus order, so the groups
     # come out in the order they always did.
     by_pool: dict[tuple, list] = defaultdict(list)
     for g in GOLDEN_RECORDS:
         if kernel is None or kernel in g.name:
-            by_pool[g.pool_key].append(g)
+            by_pool[g.pool_group].append(g)
 
     for members in by_pool.values():
         g = members[0]  # the pool is a property of the KEY; every member spells it identically
@@ -264,8 +264,8 @@ def build_golden_groups(
         base = {**ctx.features(), **g.structural_features}
         from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
-        # The sample rides a REPLACED Context, which shares the session cache with the card's own:
-        # the pool memo keys on the sample too, so the two can share one cache and a sampled pool
+        # The sample rides a REPLACED Context; the pool stamp keys on the sample too, so a sampled
+        # enumeration can never be mistaken for a live one
         # can never be served to a live compile.
         keep_set = keeps.get(_pool_bucket(g), frozenset())
         enum_ctx = ctx if sample <= 0 else replace(ctx, pool_sample=PoolSample(sample, seed, keep_set))

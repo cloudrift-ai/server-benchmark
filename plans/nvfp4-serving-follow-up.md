@@ -127,8 +127,9 @@ at M=1 and 38.9 s at M=32; the other fused linears 1.5-5.8 s. At 36 layers that 
 warp-tier gap is not a speed story but a serveability precondition for W4A4.
 
 Boot 9 (2 h of startup forwards) died at the LAST boot step, outside emmy: vLLM's flashinfer sampler JIT
-(ninja build under `~/.cache/flashinfer`) fails to link on NixOS (`collect2: ld returned 1 exit status`).
-Workstation boots need `VLLM_USE_FLASHINFER_SAMPLER=0` (torch-native sampling). The forwards themselves
+(ninja build under `~/.cache/flashinfer`) failed to link on NixOS — `cannot find -lcuda`, the driver stub
+off the linker path. Fixed in place: `LIBRARY_PATH=/run/opengl-driver/lib` links it (verified by re-running
+the failed build.ninja; the .so now caches). Workstation serve boots carry that env var. The forwards
 completing confirms the untuned W4A4 programs run to completion — slow, not wrong.
 
 ## Step 3 — hybrid serving (Qwen3.6-27B-NVFP4) — stacked on step 2

@@ -277,9 +277,7 @@ def _rows(node, inputs, axes, pins=None):
         tail = _schedule.projection_tail(op)
         frag_ok = _schedule._fragment_epilogue_ok(tail, _schedule._fold_states(op.op))
         facts = _schedule._site_facts(op, ctx, sched, tail, frag_ok)
-        state = _schedule._State(
-            op, sched, ctx, "y", {}, _schedule._off(sched, op.op), facts, frozenset(), False, carries_partition=False
-        )
+        state = _schedule._State(op, sched, ctx, "y", {}, _schedule._off(sched, op.op), facts, frozenset(), False, carries_partition=False)
         key = state.sched.key("STAGE", node)
         pin = _schedule._pin(STAGE, key)
         # The enumeration's own reading of both: which plan the slabs are sized against, and

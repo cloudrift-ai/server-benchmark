@@ -1895,11 +1895,14 @@ def test_reshaped_a_declines_tma_and_falls_back(monkeypatch):
     assert "cp.async.bulk.tensor" in plain_src, "the canonical (sliced) A still stages via TMA — the pin is not dead"
 
 
-def test_transposed_a_warp_pin_raises(monkeypatch) -> None:
-    """A WARP pin on a transposed A RAISES the layout reason instead of lowering a kernel that
-    reads columns at the wrong stride — the other half of the contract: an unschedulable form is
-    refused loudly under a pin, and dropped silently (onto the scalar tier) without one."""
+def test_transposed_a_warp_pin_restricts_the_schedule_to_empty(monkeypatch) -> None:
+    """A warp-only c excludes every schedule for a transposed A instead of admitting a kernel
+    that reads columns at the wrong stride."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
     pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16_f32/f1x1"})
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    with pytest.raises(ValueError, match="columns CONTIGUOUSLY"):
-        _run_tile_pass(_imap_graph("transpose_a")[0])
+    out = _run_tile_pass(_imap_graph("transpose_a")[0])
+    tile = next(node.op for node in out.nodes.values() if isinstance(node.op, TileOp))
+
+    assert not tile.place.is_mapped and tile.classic is None

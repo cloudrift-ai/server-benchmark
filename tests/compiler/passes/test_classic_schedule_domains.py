@@ -1,8 +1,10 @@
 """Production classic scheduling obeys the independent-domain contract."""
 
+from dataclasses import replace as dc_replace
+
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.classic_schedule import (
     ClassicProblem,
     ClassicScheduleCodec,
@@ -315,6 +317,36 @@ def test_schedule_restriction_snapshots_parameter_values() -> None:
 
     assert expected
     assert tuple(enumerate_reference(c, problem.root, problem.target, domains=domains)) == expected
+
+
+def test_schedule_restriction_drops_the_structural_split_stage_from_c() -> None:
+    root = fold_from_loop(
+        Loop(
+            axis=Axis("k", 2048),
+            body=Body(
+                (
+                    Load(name="xv", input="x", index=(Var("k"),)),
+                    Accum(name="acc", value="xv", op="add", axes=("k",)),
+                )
+            ),
+            role=AxisRole.PLANAR,
+        )
+    )
+    assert root is not None and root.axis is not None
+    parent = root.axis
+    root = dc_replace(root, axis=dc_replace(parent, extent=1024, window=Window(parent=parent, partition=True)))
+    tile = TileOp(op=root, place=Placement(free=(Axis("n", 512),)))
+    target = Context.from_target((12, 0))
+    problem = ClassicProblem(root, target)
+    domains = project_domains(tile, target)
+    pins = {family: () for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
+    pins["REDUCE"] = (("REDUCE@n0", "g2k"),)
+    c = schedule_restriction(problem.root, problem.target, domains, pins=pins)
+    assignments = tuple(enumerate_reference(c, problem.root, problem.target, domains=domains))
+    site = ClassicScheduleContext(problem, domains).index.nodes[0]
+
+    assert assignments
+    assert all(assignment.nodes[site].reduce == Reduce() for assignment in assignments)
 
 
 def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:

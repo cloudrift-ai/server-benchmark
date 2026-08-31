@@ -136,6 +136,10 @@ factor unchanged, then compares production with Algorithm 1(c, p, t) under the s
 visitor carries that context intact and evaluates it only on complete assignments. The test deliberately bounds the
 factor catalogs so the literal oracle remains fast. Composed GPU cases cover nested and sibling fragment agreements;
 no composed-only enumerator or post-product membership rule exists.
+The structural-split boundary proves that the outer pass consumes a pinned GRID stage before constructing `c` for a
+fresh piece. The piece's schedule restriction therefore compares only the remaining schedule stages. Sampled walks
+and composed cross-CTA split pieces remain exact `ClassicScheduleUnavailable` obligations and fail before entering an
+unsupported long enumeration; the duration baseline records their bounded test cost.
 The producer-band boundary projects uniform, `+p1`, and `+p2` kernel choices before reading parameters, proves an exact
 `WORK` parameter leaves that domain unchanged, and checks that only compatible TMA edge assignments survive.
 The shared-constant cone fixture also pins a multi-channel contraction to the scalar tier: every channel remains in one

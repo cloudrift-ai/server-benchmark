@@ -55,7 +55,7 @@ from emmy.compiler.ir.schedule import (
 from emmy.compiler.ir.stmt import Accum, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import Sched, cone_seam, edge_dtypes, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, carries_partition, cone_seam, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.knob import family_pins, schedule_pin_fingerprint
@@ -813,6 +813,17 @@ def schedule_restriction(p: Fold, t, domains: ClassicDomains, *, pins=None) -> S
     codec = ClassicScheduleCodec(problem, domains)
     context = codec.context
     requested = {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")} if pins is None else pins
+    # The split pass is the outer structural enumeration. Its pieces retain a partition Window as
+    # the receipt that the GRID stage was consumed, so c restricts only the schedule stages that
+    # remain. This is parameter normalization at c's construction boundary, never an inspection
+    # of c by Algorithm 1's traversal.
+    if carries_partition(p):
+        requested = {
+            **requested,
+            "REDUCE": tuple(
+                (key, "/".join(part for part in value.split("/") if not part.startswith("g"))) for key, value in requested["REDUCE"]
+            ),
+        }
     scoped = tuple((key, value) for values in requested.values() for key, value in values if "@" in key)
     addressed = not scoped or any(key in codec.keys() for key, _value in scoped)
     values = {family: tuple(entries) for family, entries in requested.items()} if addressed else {family: () for family in requested}
@@ -832,16 +843,16 @@ def schedule_restriction(p: Fold, t, domains: ClassicDomains, *, pins=None) -> S
 def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     """Run Algorithm 1(c, p, t) over fixed independent domains."""
     p, t = tile.op, ctx
-    problem = ClassicProblem(p, t)
-    context = ClassicScheduleContext(problem)
-    observed = any(context.index.node(site).observed for site in context.index.nodes)
-    if observed and getattr(ctx, "pool_sample", None) is not None:
+    if getattr(t, "pool_sample", None) is not None:
         raise ClassicScheduleUnavailable("sampled lazy enumeration has not been reconstructed")
+    problem = ClassicProblem(p, t)
     try:
         domains = project_domains(tile, ctx)
     except _EmptyDomain:
         return []
     codec = ClassicScheduleCodec(problem, domains)
+    if carries_partition(p) and len(tile_sites(codec.context)) > 1:
+        raise ClassicScheduleUnavailable("scheduling a composed cross-CTA split piece has not been reconstructed")
     c = schedule_restriction(p, t, domains)
     pool_id = digest(
         tile.identity_key(with_io=True) or "",

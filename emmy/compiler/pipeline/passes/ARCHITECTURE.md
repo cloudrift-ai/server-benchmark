@@ -105,7 +105,10 @@ realizes is an addressing error. Unpinned cuts and bare
 deleted rather than adapted. `_classic.py` now realizes direct projection, plain-reduction, scalar-contraction,
 precision-gated tensor-core, materialized-operand copy staging, computed-operand and multi-channel smem compute-fill
 staging, fragment-compatible composed contractions, and kernel-global raster domains; sampled lazy enumeration raises
-`ClassicScheduleUnavailable` until its coherent recovery phase lands. A plain reduction projects serial,
+`ClassicScheduleUnavailable` until its coherent recovery phase lands. A composed cross-CTA split piece with several
+contraction schedule sites has the same explicit boundary. A split piece's partition receipt consumes the GRID stage
+before `c` is built, so its immutable schedule restriction contains only the remaining `REDUCE` stages; neither the
+domain projection nor the Algorithm 1 traversal reads that structural choice. A plain reduction projects serial,
 cooperative and ILP choices independently from its node, while the kernel domain projects the union of their worker
 inventories; the compatibility relation is the only join between them. A scalar contraction projects its complete
 output-tile catalog as one node factor, materializes placed geometry only after selection, and uses physical-axis

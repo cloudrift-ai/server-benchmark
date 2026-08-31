@@ -222,13 +222,18 @@ def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkey
     ctx = Context.from_target(_CC)
     captured: list[TileOp] = []
 
+    class _Captured(Exception):
+        pass
+
     def keep(fp):
         op = fp.root_op
         if isinstance(op, TileOp) and op.op is not None and not op.place.is_mapped and not captured:
             captured.append(op)
+            raise _Captured
         return next(iter_leaves(fp.options))
 
-    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_sdpa_graph(), keep)
+    with pytest.raises(_Captured):
+        Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_sdpa_graph(), keep)
     assert captured, "the flash cell must reach the tile passes as one fused kernel"
     offers = split_forks(None, SimpleNamespace(op=captured[0]))
     assert offers is not None
@@ -239,7 +244,20 @@ def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkey
     )
 
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    _pin_sdpa(monkeypatch)
+    _pin(
+        monkeypatch,
+        **{
+            "TILE@n2": "mma_m16n8k16_f16_f32/f1x2",
+            "TILE@n3": "mma_m16n8k16_f16_f32/f1x1",
+            "REDUCE@n0": "",
+            "REDUCE@n2": "",
+            "REDUCE@n3": "",
+            "STAGE@n2.e0": "",
+            "STAGE@n2.e1": "",
+            "STAGE@n3.e0": "",
+            "STAGE@n3.e1": "",
+        },
+    )
     monkeypatch.setenv("EMMY_RASTER", "")
     monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
     union_ctx = dc_replace(Context.from_target(_CC), validate_pins=False)

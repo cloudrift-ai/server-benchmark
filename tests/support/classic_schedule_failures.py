@@ -43,7 +43,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gm_pin_groups_the_launch_order",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_raster_gn_pin_groups_the_transpose",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_tile_block_over_thread_limit_rejected",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_transposed_a_warp_pin_raises",
             )
         ),
     ),
@@ -124,9 +123,7 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[5-2-1-coop]",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_streams_computed_b_through_tensor_cores",
                 "tests/compiler/passes/test_placement_routing.py::test_pinned_transposed_coop_band_still_refuses_without_a_free_axis",
-                "tests/compiler/passes/test_split_fresh_kernels.py::test_a_pin_hands_its_remaining_row_to_the_pieces",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_decides_its_own_row",
-                "tests/compiler/passes/test_split_fresh_kernels.py::test_no_piece_inherits_the_kernel_it_replaces",
             )
         ),
     ),
@@ -238,7 +235,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 129
+REMAINING_FAILURE_COUNT = 126
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

@@ -78,16 +78,20 @@ def nvcc_path() -> str | None:
     return None
 
 
-def device_arch(uses_tma: bool) -> str:
-    """The active compiler target, plus the ``a`` suffix for a TMA kernel."""
+def device_arch(arch_specific: bool) -> str:
+    """The active compiler target, plus the ``a`` suffix when the kernel needs the ARCH-SPECIFIC ISA.
+
+    Two instruction families need it, for unrelated reasons: TMA, and the block-scaled fp4 mma
+    (ptxas assembles that one only for an arch-suffixed sm_120a). So the flag names the need, not
+    either instruction."""
     from emmy.compiler.target import compute_capability  # noqa: PLC0415
 
     major, minor = compute_capability()
     cap = f"{major}{minor}"
-    return f"sm_{cap}" + ("a" if uses_tma else "")
+    return f"sm_{cap}" + ("a" if arch_specific else "")
 
 
-def _launchable_arch(uses_tma: bool) -> str:
+def _launchable_arch(arch_specific: bool) -> str:
     """The arch for a cubin THIS process is about to launch — the LIVE device's, not the target's.
 
     ``--target`` means "make every lowering decision as if on that GPU" (TMA / cp.async gating,
@@ -102,8 +106,8 @@ def _launchable_arch(uses_tma: bool) -> str:
     try:
         cap = str(cp.cuda.Device().compute_capability)
     except Exception:  # noqa: BLE001 — no device to probe; the target is the only answer left
-        return device_arch(uses_tma)
-    return f"sm_{cap}" + ("a" if uses_tma else "")
+        return device_arch(arch_specific)
+    return f"sm_{cap}" + ("a" if arch_specific else "")
 
 
 @functools.cache
@@ -165,7 +169,7 @@ def compile_to_cubin(source: str, name: str, *, arch: str) -> Path:
     return out
 
 
-def load_function(source: str, name: str, options, *, uses_tma: bool):  # noqa: ARG001 — options kept for call-site compat
+def load_function(source: str, name: str, options, *, arch_specific: bool):  # noqa: ARG001 — options kept for call-site compat
     """Compile (via nvcc, cached) + ``RawModule``-load ``name``, returning a
     cupy ``Function`` usable exactly like a ``RawKernel`` at launch (callable,
     and ``max_dynamic_shared_size_bytes`` is settable for the >48KB smem path).
@@ -181,7 +185,7 @@ def load_function(source: str, name: str, options, *, uses_tma: bool):  # noqa: 
             "dropped for faster, GPU-free, cubin-cacheable compiles)"
         )
     try:
-        cubin = compile_to_cubin(source, name, arch=_launchable_arch(uses_tma))
+        cubin = compile_to_cubin(source, name, arch=_launchable_arch(arch_specific))
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.decode(errors="replace") if exc.stderr else "(no stderr)"
         logger.error("nvcc compile failed for kernel %r:\n%s", name, detail)

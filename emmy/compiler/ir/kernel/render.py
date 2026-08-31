@@ -8,10 +8,12 @@ method does the per-line emission.
 
 from __future__ import annotations
 
+import numpy as np
+
 from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
-from emmy.compiler.dtype import F32
+from emmy.compiler.dtype import F4_VALUES, F32
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCopy,
     KernelOp,
@@ -34,6 +36,24 @@ from emmy.compiler.tensor import Tensor
 # total Smem footprint exceeds this, ``render_kernelop`` switches to a
 # single dynamic pool with per-buffer offsets.
 STATIC_SMEM_CAP = 48 * 1024
+
+# e2m1 encode. The fp8 encodes construct a <cuda_fp8.h> type and inherit its rounding; there is no
+# fp4 type to construct, and the result here is an ordinary integer carrier, so leaving the cast to
+# the target would TRUNCATE the value (1.5 storing 1) instead of encoding it. Hence an explicit
+# helper. The seven constants are the midpoints of e2m1's representable set (0, .5, 1, 1.5, 2, 3,
+# 4, 6), and the comparisons alternate strict and non-strict so a value landing exactly on a
+# midpoint rounds to the EVEN code — round-to-nearest-even, matching ``dtype.encode_f4``, which the
+# CUDA path is checked against. Saturates at 7 because the largest comparison simply stops
+# contributing; e2m1 has no inf code to reach.
+_F4_ENCODE_PRELUDE = """\
+static __device__ __forceinline__ unsigned char emmy_to_f4e2m1(float value) {
+    float a = fabsf(value);
+    unsigned char code = (a > 0.25f) + (a >= 0.75f) + (a > 1.25f) + (a >= 1.75f)
+                       + (a > 2.5f) + (a >= 3.5f) + (a > 5.0f);
+    return code | (unsigned char)(signbit(value) << 3);
+}
+
+"""
 
 _BITCAST_PRELUDE = """\
 template <typename To, typename From>
@@ -772,6 +792,69 @@ static __device__ __forceinline__ void emmy_mma_m16n8k32_e5m2_f32(float* d, cons
 
 """
 
+# Block-scaled fp4 mma (``m16n8k64``) — appended ONLY when the kernel carries one, so no other
+# kernel's source moves. Both multiplicands are packed e2m1 pairs and each 16-element K block
+# carries its own ue4m3 scale, which the instruction applies itself: the accumulator gets
+# ``SFA[m][kb] * SFB[n][kb] * sum(A·B over block kb)``. Everything below was measured on an
+# RTX 5080 Laptop (sm_120a) against a numpy reference built on ``dtype.decode_f4x2`` — random
+# operands AND random scales, agreeing bit-for-bit.
+#
+# ARCH: ptxas assembles this on sm_120a and REFUSES it on sm_100a, so the kernel needs the
+# arch-suffixed target (see ``backend/cuda/nvcc.py``).
+#
+# THREAD-ID RANGE: the PTX ISA documents the scale operands' thread-id selector as [0..3]. At
+# ``scale_vec::4X`` ptxas accepts only [0..1] — "Argument 5 of instruction 'mma': value '3' out of
+# range, expected to be in range [0..1]". A reader expecting the documented range will otherwise
+# widen these constants and hit an assembler error rather than a wrong answer.
+#
+# SCALE FRAGMENTS: one supplying lane holds a b32 covering its four K blocks, one per byte, and
+# byte-id is 0 because 4X consumes all four. Which lane supplies which row/column:
+#   SFA: lane L feeds m = (L>>2) + 8*((L&3) - 2*TID_A), when that difference is 0 or 1
+#   SFB: lane L feeds n = L>>2, when (L&3) == TID_B
+# Non-supplying lanes are ignored, so their register value does not matter. Both selector values
+# are legal and pick disjoint lane sets; SFA and SFB are separate operands, so overlap is fine.
+#
+# DATA FRAGMENTS: the k64 4-bit map is byte-for-byte the k32 8-bit one, so the ``_b8`` loaders
+# above serve unchanged — a packed row is K/2 bytes, which is exactly what they take as ``ldm``.
+# Those gather bytes per lane rather than issuing ``ldmatrix``, which is b16-only below sm_100a;
+# reusing them means this atom inherits that choice instead of needing a drain of its own.
+_MMA_F4_BLOCK_PRELUDE = """\
+#define EMMY_F4_SF_TID_A 0
+#define EMMY_F4_SF_TID_B 1
+
+static __device__ __forceinline__ unsigned emmy_mma_load_sfa_f4(const unsigned char* s, int ldm) {
+    int lane = threadIdx.x & 31, q = lane >> 2, r = (lane & 3) - 2 * EMMY_F4_SF_TID_A;
+    if (r < 0 || r > 1) return 0u;              // this lane supplies no row; the mma ignores it
+    int m = q + 8 * r;
+    unsigned packed;
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = s[m * ldm + j];
+    return packed;
+}
+
+static __device__ __forceinline__ unsigned emmy_mma_load_sfb_f4(const unsigned char* s, int ldm) {
+    int lane = threadIdx.x & 31, q = lane >> 2;
+    if ((lane & 3) != EMMY_F4_SF_TID_B) return 0u;
+    unsigned packed;
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = s[q * ldm + j];
+    return packed;
+}
+
+static __device__ __forceinline__ void emmy_mma_m16n8k64_e2m1_f32(
+        float* d, const unsigned* a, const unsigned* b, unsigned sfa, unsigned sfb) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4X"
+        ".f32.e2m1.e2m1.f32.ue4m3 "
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3}, "
+        "{%10}, {%12, %13}, {%11}, {%12, %14};\\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+          "r"(sfa), "r"(sfb), "n"(0), "n"(EMMY_F4_SF_TID_A), "n"(EMMY_F4_SF_TID_B));
+}
+
+"""
+
 # Staged fp8 slab drains — appended ONLY when the kernel carries a byte-slab ``LdmatrixLoad``
 # (a staged 1-byte operand), so every other kernel's source stays byte-identical. ldmatrix is
 # b16-only below sm_100a, so a staged fp8 slab drains through a cooperative per-lane gather with
@@ -826,6 +909,71 @@ static __device__ __forceinline__ void emmy_mma_load_b_smem_trans_b8v(unsigned* 
 }
 
 """
+
+# The staged PACKED-PAIR (NVFP4) B drain — appended only for the fragment dtypes a kernel's
+# scale-bearing byte-slab ``LdmatrixLoad``s actually use, so every other kernel's source stays
+# byte-identical and an f16 kernel never carries the bf16 form. One stored byte holds two adjacent
+# K values as 4-bit e2m1 codes (low nibble first), and every 16 of them share one scale, which the
+# fill already decoded into the fragment's own dtype in a companion slab. So a lane's fragment
+# element pair is: one byte read, two table lookups, one multiply each.
+#
+# ``EMMY_F4_LUT_*`` is ``dtype.F4_VALUES`` emitted as that dtype's bit patterns. Every e2m1 value
+# is exact in f16 AND in bf16 — the format's largest magnitude is 6 and its finest step is 0.5, so
+# one mantissa bit carries it — which is why the table IS the decode in both, and why the two forms
+# differ only in the constants and the two-value pack. Generating them here keeps the kernels and
+# the numpy decode on one table of values.
+#
+# The lane→element map is the k16 B fragment's, the same one the fp8 transposed drain walks: an
+# N-major slab (N rows × K columns), each lane owning K positions ``2·(lane & 3)`` and that + 8 of
+# its group's row. ``k >> 1`` turns a K position into its byte column, ``k >> 4`` into its scale
+# column — the block is 16, which the staged offer requires.
+_F4_LOADER = """\
+__constant__ unsigned short EMMY_F4_LUT_{SFX}[16] = {{
+{ROWS}
+}};
+
+static __device__ __forceinline__ void emmy_mma_load_b_smem_trans_f4s_{sfx}(
+    unsigned* r, const unsigned char* g, int ldm, const {T}* s, int sldm) {{
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {{
+        int k = (tig << 1) + (i ? 8 : 0);            // K: 2*threadID_in_group, +8 for the k16 half
+        unsigned char byte = g[grp * ldm + (k >> 1)];
+        {T} lo = {AS}(EMMY_F4_LUT_{SFX}[byte & 0xF]);
+        {T} hi = {AS}(EMMY_F4_LUT_{SFX}[byte >> 4]);
+        {T} sc = s[grp * sldm + (k >> 4)];
+        {T2} v = {PACK}(__hmul(lo, sc), __hmul(hi, sc));
+        r[i] = *reinterpret_cast<unsigned*>(&v);
+    }}
+}}
+
+"""
+
+#: Per-fragment-dtype spellings of the packed drain: the C type, its two-value vector and pack, and
+#: the intrinsic that reads a value back out of its 16 bits.
+_F4_SPELLINGS: dict[str, dict[str, str]] = {
+    "f16": {"T": "__half", "T2": "__half2", "AS": "__ushort_as_half", "PACK": "__halves2half2"},
+    "bf16": {"T": "__nv_bfloat16", "T2": "__nv_bfloat162", "AS": "__ushort_as_bfloat16", "PACK": "__halves2bfloat162"},
+}
+
+
+def _f4_lut_bits(dtype: str) -> list[int]:
+    """``dtype.F4_VALUES`` as that dtype's 16-bit patterns. bf16 has no numpy dtype, so its bits are
+    the top half of the f32 ones — exact here because every e2m1 value fits bf16's mantissa, so the
+    truncated half is all zeros and no rounding rule is involved."""
+    if dtype == "bf16":
+        return [int(b) >> 16 for b in np.array(F4_VALUES, dtype=np.float32).view(np.uint32)]
+    return [int(b) for b in np.array(F4_VALUES, dtype=np.float16).view(np.uint16)]
+
+
+def _f4_staged_prelude(dtypes: tuple[str, ...]) -> str:
+    """The packed drain(s) this kernel needs — one per fragment dtype, in the order given."""
+    out = []
+    for dt in dtypes:
+        bits = _f4_lut_bits(dt)
+        rows = "\n".join("    " + ", ".join(f"0x{b:04X}" for b in bits[i : i + 8]) + "," for i in (0, 8))
+        out.append(_F4_LOADER.format(SFX=dt.upper(), sfx=dt, ROWS=rows, **_F4_SPELLINGS[dt]))
+    return "".join(out)
 
 
 def _swizzle_prelude(kernel_op: KernelOp) -> str:
@@ -1038,12 +1186,25 @@ def render_kernelop(
     # staged byte-slab drain helpers likewise join only when a byte-slab drain is present.
     if any(isinstance(s, MmaSyncPtx) and s.ab_dtype in ("e4m3", "e5m2") for s in kernel_op.body.iter()):
         mma_sync_prelude += _MMA_F8_PRELUDE
-    if any(isinstance(s, LdmatrixLoad) and s.byte_slab for s in kernel_op.body.iter()):
+    if any(isinstance(s, MmaSyncPtx) and s.block_scaled for s in mma_stmts):
+        # The block-scaled fp4 wrapper reuses the ``_b8`` data loaders, so it needs the fp8
+        # prelude beside it even when no fp8 mma is present.
+        if _MMA_F8_PRELUDE not in mma_sync_prelude:
+            mma_sync_prelude += _MMA_F8_PRELUDE
+        mma_sync_prelude += _MMA_F4_BLOCK_PRELUDE
+    byte_drains = [s for s in kernel_op.body.iter() if isinstance(s, LdmatrixLoad) and s.byte_slab]
+    if any(s.scale_buffer is None for s in byte_drains):
         mma_sync_prelude += _F8_STAGED_PRELUDE
+    # A packed drain's fragment dtype IS its scale slab's — the fill writes that slab at the atom's
+    # own operand width — and the body render above already recorded every slab's dtype on ``ctx``.
+    packed = tuple(dict.fromkeys(ctx.buffer_dtypes.get(s.scale_buffer, "f16") for s in byte_drains if s.scale_buffer is not None))
+    if packed:
+        mma_sync_prelude += _f4_staged_prelude(packed)
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
     bitcast_prelude = _BITCAST_PRELUDE if any(isinstance(s, Assign) and s.op.name == "bitcast" for s in kernel_op.body.iter()) else ""
-    preludes = f"{includes}{bitcast_prelude}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
+    f4_encode = _F4_ENCODE_PRELUDE if any(isinstance(s, Assign) and s.op.name == "to_f4e2m1" for s in kernel_op.body.iter()) else ""
+    preludes = f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
     return f"{header} {{\n{body_text}\n}}\n"
 

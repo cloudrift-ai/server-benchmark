@@ -3,12 +3,20 @@
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.kernel.ir import swizzle_fn, swizzle_xor
+from emmy.compiler.ir.kernel.ir import Smem, pack_smem, swizzle_fn, swizzle_xor
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
-from emmy.compiler.pipeline.passes.lowering.kernel._stage import CtaTile, SyncOperand, SyncTransport, software_swizzle
+from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
+    _SWIZZLE_SLAB_ALIGN,
+    CtaTile,
+    SyncOperand,
+    SyncTransport,
+    _fill_align,
+    slab_smem,
+    software_swizzle,
+)
 
 
 def _sum_fold(axis: str, acc: str) -> Fold:
@@ -110,3 +118,37 @@ def test_software_swizzle_shifts_by_the_slab_row_not_the_atom() -> None:
     # unchanged slab's kernel source is unchanged.
     assert swizzle_fn("B128") == "emmy_swizzle_b128"
     assert swizzle_fn("B128@7") == "emmy_swizzle_b128_s7"
+
+
+def test_a_staged_slab_aligns_to_its_fill_chunk_not_its_element() -> None:
+    """A vector-filled slab's base must clear its FILL CHUNK, whatever its element width.
+
+    Both fill kinds vectorize: the peer copies through ``cp.async``, and the COMPUTE fill through
+    the ``v``-element runs :meth:`SyncTransport.fill` emits off the same width. So the rule covers
+    every staged slab, not only the copied ones.
+
+    :func:`_cp_async_width` picks the widest legal chunk that divides the inner span — 16 B for any
+    16 B-divisible row, an f16 operand as much as an fp8 one — and both ``cp.async`` and the
+    blocking vector store fault on a shared address that is not chunk-aligned. Aligning to the
+    ELEMENT would leave an f16 slab 2 B-aligned, free to land at 8 mod 16 behind an odd-sized
+    neighbour. That is a real fault, observed on an 8B serving compile, not a theoretical one.
+    """
+    assert _fill_align(64, 2, "NONE") == 16  # f16, 128 B rows — the case that used to align to 2
+    assert _fill_align(32, 1, "NONE") == 16  # the packed-pair byte slab
+    assert _fill_align(4, 2, "NONE") == 8  # 8 B rows admit only an 8 B chunk
+    assert _fill_align(2, 2, "NONE") == 4
+    # A swizzled slab still pins its atom when that is stricter.
+    assert _fill_align(64, 2, "B128") == _SWIZZLE_SLAB_ALIGN["B128"]
+
+
+def test_no_copied_slab_lands_misaligned_behind_an_odd_neighbour() -> None:
+    """The layout property the alignment exists for, checked through the real packer.
+
+    A packed weight stages three slabs, and the block-scale companion's size need not be a multiple
+    of the next slab's chunk. Placing an f16 operand after such a neighbour is exactly what put a
+    16 B ``cp.async`` write on an 8 mod 16 address; :func:`pack_smem` must now round it up.
+    """
+    odd = Smem(name="_bs_smem", extents=(3, 4), dtype="half")  # 24 B — leaves the cursor at 8 mod 16
+    copied = slab_smem("_a_smem", 8, 64, "half", align=_fill_align(64, 2, "NONE"))
+    offsets, _total = pack_smem([odd, copied])
+    assert offsets["_a_smem"] % 16 == 0, f"copied slab at {offsets['_a_smem']}, not 16 B-aligned"

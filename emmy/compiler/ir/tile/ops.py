@@ -68,6 +68,32 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     return (pro, cell, stats) if stats else ((), cell, ())
 
 
+def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, object]:
+    """The dtype each value bridged across the cone's K seam carries (:func:`cone_seam`).
+
+    The prologue runs once per tile row and publishes its results through smem rows the cell reads
+    back, so those rows are the only place a bridged value's dtype is declared. Declaring them all
+    float would decide the CELL's arithmetic too: a value that crosses as an integer — a shift
+    amount, a nibble mask — comes back f32, and the bit operations reading it have no f32 spelling.
+
+    Typed the same way :func:`edge_dtypes` types an edge's results, over the prologue's flat stmt
+    list. A name whose stmt kind carries no dtype is absent from the result; its row keeps the
+    float default."""
+    env: dict[str, object] = {}
+    for stmt in pro:
+        if isinstance(stmt, Load):
+            tensor = inputs.get(stmt.input) if inputs else None
+            env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
+        elif isinstance(stmt, Assign):
+            args = [env.get(name) for name in stmt.args]
+            env[stmt.name] = stmt.dtype or (get_dtype(dtype_promote(stmt.op.name, [d.name for d in args])) if all(args) else None)
+        elif isinstance(stmt, Init):
+            env[stmt.name] = stmt.dtype
+        else:
+            env.update((name, None) for name in stmt.defines())
+    return {nm: dt for nm in stats if (dt := env.get(nm)) is not None}
+
+
 def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict | None = None) -> tuple:
     """Infer an edge's result dtypes in the lexical scope where the edge occurs.
 
@@ -543,6 +569,7 @@ __all__ = [
     "axis_names",
     "carries_partition",
     "cone_seam",
+    "cone_stat_dtypes",
     "edge_dtypes",
     "head",
     "make_cone",

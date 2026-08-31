@@ -17,6 +17,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   and 16 values per row. The meaning of each dimension depends on the operation.
 - **Dtype (data type)** — The format used to store each tensor value, such as 32-bit floating point (`float32`) or
   16-bit floating point (`float16`). Smaller formats use less memory and can be faster but may lose precision.
+- **NVFP4** — NVIDIA's 4-bit float weight format: e2m1 values (1 sign / 2 exponent / 1 mantissa bit, no inf/nan
+  codes) packed two per byte, each block of 16 values sharing an fp8 e4m3 scale, plus one f32 per-tensor scale.
+  Checkpoints are published with TensorRT Model Optimizer ("modelopt") or llm-compressor. Blackwell tensor cores
+  multiply e2m1 natively; older cards decode to 16-bit first.
 - **Inference** — Using an already-trained model to produce an answer. It is different from training, which changes
   the weights.
 - **Token** — A small piece of text represented by an integer. A tokenizer converts text into tokens before an LLM

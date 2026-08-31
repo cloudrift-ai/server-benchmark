@@ -78,6 +78,12 @@ def is_dynamic_row(feats: dict) -> bool:
     return any(feats.get(name, 0.0) > 0 for name in ROUTING_FEATURES)
 
 
+#: Bits per element a packed-pair (NVFP4) weight occupies where it is staged in its stored form —
+#: two 4-bit e2m1 codes per byte. Named here because it is what ``MMA_b_store_bits`` reports, not a
+#: property of any codec on the row.
+PACKED_PAIR_STORE_BITS = 4
+
+
 def _row_values(knobs: dict) -> tuple:
     """This row's ``(WORK, TILE, STAGE, REDUCE)`` values, family keys read axis-aware so flash's
     ``TILE@dd`` reads like a bare one — the pooled read; a per-node featurizer loops the keys
@@ -341,6 +347,20 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
         # siblings — see ``_reduce_features``.
         feats.update(_reduce_features(node_knobs))
     feats.update(_stage_features(node_knobs))  # operand-staging pipeline (STAGE codec); {} when gmem-direct
+    # The B multiplicand's STORED width, on the rows where it differs from the width the mma
+    # fragment consumes (``MMA_a_bits``). A packed-pair (NVFP4) weight staged as raw bytes puts 4
+    # bits per element through the copy and the slab — a quarter of the traffic at the SAME atom,
+    # tile and transport spelling — so without this the priors price it exactly like a 16-bit
+    # weight stream. It is deliberately a PRODUCT of two facts, because neither alone identifies
+    # the row: the packed dtype (``S_dtype_f4e2m1x2``) is a whole-kernel fact that the compute-fill
+    # sibling rows share, and ``D_stage_async`` is a transport flag every 16-bit matmul sets too.
+    # Only their conjunction is the packed byte slab, and the packed arm of ``resolve_warp_stage``
+    # is its only producer. Emitted ONLY there, the way the ``D_tma_*`` terms are emitted only on a
+    # TMA-staged row, so every other row is untouched. Additive: a fit made before this key has no
+    # weight for it and scores it 0.0, so no ``FEATURIZER_VERSION`` bump is owed, and both fitted
+    # views name their ``MMA_*`` keys explicitly, so neither picks it up until asked to.
+    if feats.get("D_stage_async") and float(node_knobs.get("S_dtype_f4e2m1x2", 0.0) or 0.0) > 0 and "MMA_a_bits" in feats:
+        feats["MMA_b_store_bits"] = float(PACKED_PAIR_STORE_BITS)
     # TMA-conditioned tile pricing: TMA staging only enumerates where the hardware offers it
     # (Hopper/Blackwell), so a geometry term gated on ``D_stage_tma`` is where one weight set
     # prices those cards' tiles separately — no per-arch split needed. The 2026-07-09 5090

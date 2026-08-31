@@ -824,7 +824,7 @@ def test_fused_tensorcore_flash_reference_matches_torch(S):
 
     from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
 
-    fn = nvcc.load_function(_KERNEL, "fa2", "", uses_tma=False)
+    fn = nvcc.load_function(_KERNEL, "fa2", "", arch_specific=False)
     torch.manual_seed(S)
     D = 16
     q, k, v = (torch.randn(S, D, dtype=torch.float16) for _ in range(3))

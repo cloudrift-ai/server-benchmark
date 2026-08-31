@@ -181,10 +181,21 @@ materialized A the atom cannot bind (only the fill's typed slab store converts �
 has no gmem-direct sibling and a `STAGE` pin can only choose its depth. A NESTED-reduce B edge (the streamed
 computed-B decode cone) rides the same mandatory multi-channel fill — the fill evaluates every non-materialized B
 channel into its slab, nested reduce included — while a nested A, or a nested B on a single-channel node, keeps the
-refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. The fp8 (k32) gmem-direct tier rides the same
-two-layer policy as the f16-accumulate family: precision-gated for the catalog (`FP8_MMA` / the `FAST_MATH` umbrella),
-bindable by a pin regardless; its sm_89 hardware floor lives in the atom registry's target filter, which no pin
-overrides.
+refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. ONE computed operand
+has byte-transport siblings beside the fill: a packed-pair (NVFP4) weight cone, whose packed 4-bit values copy
+verbatim as a raw byte slab while only its block scales are compute-filled, so `resolve_warp_stage` answers for it
+and the cp.async and TMA rows sit beside the fill's depths as fork siblings. Which reading applies is a fact about
+the NODE, not about the transport a pin names — a multi-channel product carrying a cp.async or TMA pin still RAISES,
+since the single-sided byte-transport emitters carry one channel — and a shape the byte slab declines keeps the
+generic reading, which computes the same values through the fill. Where BOTH operands are packed over one block
+extent the native fp4 mma cell multiplies those values as stored and applies their raw block scales itself: that
+node's atom is read off the pair rather than off the A edge's leaf dtype, and its stored slabs copy verbatim — only
+an activation whose values this kernel computes takes a fill underneath them. That reading takes ANY channel arity:
+the shared A stages once and each product channel adds its own codes and block-scale slab (`2 + 2N` in all), so a
+fused gate⊗up MLP edge is the two-channel case of the same cell rather than a shape it declines. The fp8 (k32)
+gmem-direct tier rides the same two-layer policy as the f16-accumulate family: precision-gated for the catalog
+(`FP8_MMA` / the `FAST_MATH` umbrella), bindable by a pin regardless; its sm_89 hardware floor lives in the atom
+registry's target filter, which no pin overrides.
 
 **The fragment seam is a `Ctx` decision.** A fragment edge joins a consumer contraction to the one contraction
 producing its computed fragment operand — nested in its A cone, or a sibling in the enclosing fold's derived step
@@ -201,6 +212,15 @@ reduction domain, a prescan fact, never a rewritten tree.
 offers band variants (the band arms the box-copy mbarrier ring; cp.async's wait-group is issuing-thread-scoped and a
 compute fill has no async load half), budgeted against the CTA thread limit. A `+p` pin that no option can drive
 composes with nothing and the term stays unmapped — the band is part of the inventory, not a row key.
+
+The band splits the CTA into warps that only fetch and warps that only compute, which is why the NVFP4 byte slab
+above refuses it even under TMA, and refuses it as a LEGALITY: that slab's own TMA lowering returns the plain staged
+K-loop rather than the band-splitting one, so it takes no warp inventory and the two halves are never separated —
+while the CTA still widens to hold a band, because the thread budget is set from the inventory alone. The extra warps
+then reach the compute body, where the box copy elects its arming thread on a wrapping linear thread id: thread 0 and
+the band's first thread both match, so one mbarrier takes two arrivals against an arrival count of one and its phase
+parity desynchronizes. That is a hang, not a slow kernel. The native fp4 mma cell needs no rule of its own — its
+stage resolver takes cp.async only, so it never reaches a TMA stage for the question to be asked about.
 
 **The per-cell contraction tier partitions its K like a plain fold.** A contraction is a monoid with a ⊗ lift, so the
 untiled tile candidate composes with the same `coop_reduce_moves` catalog the plain folds offer — the cooperative
@@ -312,8 +332,43 @@ downstream failure to recognize or schedule a maximally fused body is a lowering
 repaired by retaining an early graph boundary.
 
 Only semantic splice boundaries remain: internal nodes must be owned, every escape must be an explicit live output,
-and the splicer must preserve semantics. Fusion does not estimate arithmetic work and has no lowering-dependent
-exception.
+the splicer must preserve semantics, and a region stops at a PACKED buffer it computes. Fusion does not estimate
+arithmetic work and has no lowering-dependent exception.
+
+Packed here means the storage sense — `logical_elems > 1`, two e2m1 codes to the byte — not a concatenated
+projection. Such a dtype states that a tensor's stored last-axis extent is half its logical one, and only a tensor
+carries that relation. The splice deletes the tensor. The codes then survive as an `Assign` at the packed dtype, a
+value with no extent, and a consumer's index names half a byte rather than one whole element. The merged body answers
+that by carrying the graph's own pack arithmetic into the consumer, deriving the whole byte at every logical index and
+reading one half of it.
+
+The splice also goes ONE WAY, and that is what makes this a refusal rather than a maximal merge evidence may cut
+back. Fusion may go maximal because `030_cut` offers each closed operand seam back. **Kernel boundaries after maximal
+fusion** below says what such a seam materializes: the dtype the consuming contraction stores, which is the decoded
+element rather than the codes. The storage-frontier refinement described there would hold the raw storage bits
+instead, but it recognizes a decode through the `ElementwiseImpl.decodes` trait, and only the fp8 casts carry that
+trait — an e2m1 code decodes through a value-table gather. Nothing offers the codes back. The merged form is not the
+widest of several siblings; it is the only one left.
+
+Consumer count decides nothing. One consumer or three reach the same shape: the quantize is a kernel of its own and
+the codes sit in memory. The buffer's readers leave the region together with everything downstream of them, so the
+remainder keeps no holes — a hole would make the merged node depend on a node that depends on it.
+
+Whatever is left feeding only what departed leaves with it. A cut materializes every buffer crossing it, so a survivor
+whose entire readership is on the far side buys nothing: its value is stored once and read once, and it is stored at
+whatever shape it happens to have. The quantized activation's scale is the case that shows why this matters. Its
+per-consumer reconstruction multiplies the block scale by the per-tensor one, rounds the product to f16 and broadcasts
+it across the block; left on the producer's side, that broadcast is what the boundary stores — one value per logical
+element where its source held one per block. Released, the reconstruction sits beside its matmul and the boundary falls
+on the raw block scales instead, which is the narrower buffer and the one a consumer can index block-wise. Two nodes
+never leave this way: one writing the packed buffer itself, since that buffer is the boundary the refusal exists to
+place, and one read from outside the region, whose value has to be stored for those readers regardless.
+
+That is a boundary-placement rule, not a lowering-driven exception. It asks only which side a value's readers are on,
+and it is what lets a contraction see a packed operand's two scale levels — the raw per-block byte and the k-invariant
+per-tensor factor — as separate loads, the shape `lowering/_packed.py` reads and the block-scaled tensor-core cell
+requires. Materializing the fused product instead does not merely cost bytes; it erases the block structure from the
+consumer's index, and a reading that cannot prove k-block invariance declines.
 
 There is one fusion pass and one fixpoint. One rewrite takes the maximal downstream Loop region: non-reconvergent
 consumers become output ports of one multi-output `LoopOp`, and all terminal Writes seed one splicer worklist. The

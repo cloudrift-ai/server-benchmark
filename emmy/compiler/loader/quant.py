@@ -52,7 +52,15 @@ from pathlib import Path
 
 import numpy as np
 
-from emmy.compiler.dtype import decode_f8  # noqa: F401 — re-exported; the LUT's home is the dtype layer
+from emmy.compiler.dtype import (  # noqa: F401 — re-exported; the LUTs' home is the dtype layer
+    F4_VALUES,
+    F8E4M3,
+    F4E2M1x2,
+    decode_f4x2,
+    decode_f8,
+    encode_f4x2,
+    encode_f8,
+)
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import ConstantOp
 from emmy.compiler.loader.exl3 import HAD_BLOCK, decode_trellis, fold_hadamard
@@ -111,28 +119,154 @@ def dequantize(weight: np.ndarray, scale: np.ndarray, *, inverse: bool = False) 
     return out.reshape(w.shape)
 
 
-def _fp8_quant_config(model_dir: Path) -> dict | None:
-    """The checkpoint's ``quantization_config`` when it declares an FP8 weight scheme.
+def fuse_nvfp4_scales(scale_bits: np.ndarray, scale_2: np.ndarray) -> np.ndarray:
+    """The NVFP4 two-level scale collapsed to ONE f16 tensor ("fused scale"):
+    ``e4m3-decode(scale_bits) * scale_2``.
 
-    Two formats in the wild (see the FP8 plan): ``quant_method: "fp8"`` (official
-    releases) and ``quant_method: "compressed-tensors"`` whose ``config_groups``
-    quantize weights as 8-bit float (FP8 / FP8_DYNAMIC / FP8_BLOCK schemes). Any
-    other scheme (int quants, no config) → ``None``, and stamping is a no-op.
+    e4m3 values are exact in f16 (3 mantissa bits, range ±448), so the only rounding
+    anywhere is the single f32→f16 round of the product. Kernels and the numpy oracle
+    both consume this one tensor, sharing one rounding story.
     """
-    cfg_path = model_dir / "config.json"
+    assert scale_bits.dtype == np.uint8, f"fuse_nvfp4_scales expects the uint8 e4m3 bits carrier, got {scale_bits.dtype}"
+    assert scale_2.dtype == np.float32 and scale_2.size == 1, (
+        f"weight_scale_2 is one f32 per tensor, got {scale_2.dtype} shape {scale_2.shape}"
+    )
+    return (decode_f8(scale_bits, F8E4M3.name) * scale_2.reshape(())).astype(np.float16)
+
+
+def dequantize_nvfp4(packed: np.ndarray, scale_bits: np.ndarray, scale_2: np.ndarray) -> np.ndarray:
+    """f32 values of an NVFP4 weight: decode the packed e2m1 pairs (last axis doubles to K)
+    and apply the fused f16 block scale, one per 16 elements along K.
+
+    These are EXACTLY the numbers the kernel path computes, not an approximation: an
+    e2m1 value carries ≤3 significand bits and the fused f16 scale ≤11, so every product
+    fits f32's 24 — the oracle admits bitwise comparison, no tolerance windows.
+    """
+    assert packed.dtype == np.uint8, f"dequantize_nvfp4 expects the uint8 packed carrier, got {packed.dtype}"
+    return dequantize(decode_f4x2(packed), fuse_nvfp4_scales(scale_bits, scale_2).astype(np.float32))
+
+
+#: Elements per block scale along the last axis, and the two formats' largest finite values.
+#: An NVFP4 checkpoint always uses 16, and the hardware's block-scaled mma reads 16 as well.
+NVFP4_BLOCK = 16
+_F4_MAX, _E4M3_MAX = 6.0, 448.0
+
+
+def quantize_nvfp4(values: np.ndarray, *, block: int = NVFP4_BLOCK) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Quantize f32 values TO the NVFP4 trio — the inverse of :func:`dequantize_nvfp4`, returning
+    ``(packed, scale_bits, scale_2)`` in exactly the carriers a checkpoint stores: packed e2m1
+    pairs, e4m3 block-scale BITS one per ``block`` elements along the last axis, and one f32 for
+    the tensor.
+
+    Two levels, because one is not enough: a block's scale must itself be stored in e4m3, whose
+    range would clip on a tensor with a wide dynamic range. So ``scale_2`` carries the tensor's
+    magnitude and each block's e4m3 scale is relative to it. Choosing ``scale_2 = amax /
+    (6 * 448)`` puts the largest block scale near the top of e4m3 without exceeding it.
+
+    The divisor applied per block is the FUSED scale, so quantize and dequantize meet on the one
+    tensor :func:`fuse_nvfp4_scales` defines and share its single rounding story. A zero block
+    keeps a zero scale, which dequantizes back to zero.
+
+    The block scales come out non-negative, and an e4m3 bit pattern with a clear sign bit is
+    also its unsigned ue4m3 reading — the form the hardware's block-scaled mma wants."""
+    x = np.asarray(values, dtype=np.float32)
+    assert x.shape[-1] % block == 0, f"quantize_nvfp4 needs the last axis divisible by {block}, got {x.shape[-1]}"
+    blocks = x.reshape(*x.shape[:-1], x.shape[-1] // block, block)
+    # Floored the same way the dynamic FP8 activation scale is, so an all-zero or vanishingly
+    # small tensor cannot drive scale_2 to zero and make the block-scale division blow up.
+    amax = max(float(np.abs(x).max()), 1e-12)
+    # The fused scale is an f16 tensor, so the largest block scale has to fit one. That bounds the
+    # tensor, and overshooting it would otherwise surface as a silent inf rather than an error.
+    assert amax / _F4_MAX <= 65504.0, f"quantize_nvfp4 needs |values| <= {_F4_MAX * 65504.0:g} for an f16 fused scale, got {amax:g}"
+    scale_2 = np.float32(amax / (_F4_MAX * _E4M3_MAX))
+    block_scale = np.abs(blocks).max(axis=-1) / _F4_MAX
+    scale_bits = encode_f8(block_scale / scale_2, F8E4M3.name)
+    fused = fuse_nvfp4_scales(scale_bits, np.asarray(scale_2, dtype=np.float32).reshape(1)).astype(np.float32)
+    packed = encode_f4x2(np.divide(blocks, fused[..., None], out=np.zeros_like(blocks), where=fused[..., None] != 0))
+    return packed.reshape(*x.shape[:-1], x.shape[-1] // 2), scale_bits, np.asarray(scale_2, dtype=np.float32).reshape(1)
+
+
+def _quantization_config(model_dir: str | Path) -> dict | None:
+    """The checkpoint's declared ``quantization_config``, or ``None`` when it declares none.
+
+    Takes the directory either way round — every recognizer reads the config through here, and a
+    caller holding a plain string is the ordinary case."""
+    cfg_path = Path(model_dir) / "config.json"
     if not cfg_path.exists():
         return None
     qc = json.loads(cfg_path.read_text()).get("quantization_config")
-    if not isinstance(qc, dict):
+    return qc if isinstance(qc, dict) else None
+
+
+def _quantizes_weights_at(qc: dict, num_bits: int, group_size: int | None = None) -> bool:
+    """Whether ANY ``config_groups`` entry quantizes weights as float at this width.
+
+    A checkpoint's groups are per-scheme, not per-scheme-per-checkpoint: one may hold the
+    8-bit leaves and another the 4-bit ones. So this asks "is this scheme present", never
+    "is this scheme the only one" — which leaf gets which is a per-tensor question that the
+    stored sibling signatures answer, not a config one.
+    """
+    for group in (qc.get("config_groups") or {}).values():
+        weights = group.get("weights") if isinstance(group, dict) else None
+        if not isinstance(weights, dict) or weights.get("type") != "float":
+            continue
+        if int(weights.get("num_bits") or 0) != num_bits:
+            continue
+        if group_size is not None and int(weights.get("group_size") or 0) != group_size:
+            continue
+        return True
+    return False
+
+
+def _fp8_quant_config(model_dir: Path) -> dict | None:
+    """The checkpoint's ``quantization_config`` when it quantizes ANY weights to FP8.
+
+    Three conventions in the wild: ``quant_method: "fp8"`` (official releases);
+    ``quant_method: "compressed-tensors"`` (llm-compressor) with an 8-bit float weight group;
+    and ``quant_method: "modelopt"`` at ``quant_algo: "MIXED_PRECISION"`` with one — the
+    TensorRT Model Optimizer form for a checkpoint whose schemes differ by leaf. Any other
+    scheme (int quants, no config) → ``None``, and stamping is a no-op.
+    """
+    qc = _quantization_config(model_dir)
+    if qc is None:
         return None
     method = qc.get("quant_method")
     if method == "fp8":
         return qc
+    if method == "modelopt" and qc.get("quant_algo") != "MIXED_PRECISION":
+        return None  # a pure modelopt scheme names itself in quant_algo; only the mixed one groups
+    if method in ("compressed-tensors", "modelopt") and _quantizes_weights_at(qc, 8):
+        return qc
+    return None
+
+
+def _fp4_quant_config(model_dir: Path) -> dict | None:
+    """The checkpoint's ``quantization_config`` when it quantizes ANY weights to NVFP4.
+
+    Three conventions in the wild: ``quant_method: "modelopt"`` with ``quant_algo: "NVFP4"``
+    (TensorRT Model Optimizer — the nvidia/* checkpoints); the same method at
+    ``quant_algo: "MIXED_PRECISION"`` carrying a 4-bit float weight group; and
+    ``quant_method: "compressed-tensors"`` (llm-compressor) whose ``config_groups`` quantize
+    weights as 4-bit float over 16-element groups (the ``nvfp4-pack-quantized`` format). The
+    group-size condition keeps 32-element-block 4-bit families (MXFP4) out — same e2m1
+    values, different scale dtype and block. Anything else → ``None``.
+
+    A MIXED_PRECISION checkpoint answers BOTH this and :func:`_fp8_quant_config`, by design:
+    nvidia/Qwen3.6-27B-NVFP4 puts its attention and delta-net projections in fp8 and its MLP and
+    lm_head in NVFP4, so both spellers must run over it and each takes the leaves whose stored
+    siblings are its own. The two recognizers still decline each other's PURE checkpoints.
+    """
+    qc = _quantization_config(model_dir)
+    if qc is None:
+        return None
+    method = qc.get("quant_method")
+    if method == "modelopt":
+        algo = qc.get("quant_algo")
+        if algo == "NVFP4":
+            return qc
+        return qc if algo == "MIXED_PRECISION" and _quantizes_weights_at(qc, 4, 16) else None
     if method == "compressed-tensors":
-        for group in (qc.get("config_groups") or {}).values():
-            weights = group.get("weights") if isinstance(group, dict) else None
-            if isinstance(weights, dict) and weights.get("type") == "float" and int(weights.get("num_bits") or 0) == 8:
-                return qc
+        return qc if _quantizes_weights_at(qc, 4, 16) else None
     return None
 
 
@@ -214,8 +348,8 @@ def decode_mxfp4(blocks: np.ndarray, scales: np.ndarray) -> np.ndarray:
     if blocks.ndim < 3 or blocks.shape[-1] != 16 or scales.shape != blocks.shape[:-1]:
         raise ValueError(f"MXFP4 storage geometry mismatch: blocks={blocks.shape}, scales={scales.shape}")
     nibbles = np.stack((blocks & np.uint8(0xF), blocks >> np.uint8(4)), axis=-1).reshape(*blocks.shape[:-1], 32)
-    values = np.asarray((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0))
-    decoded = np.ldexp(values[nibbles], scales.astype(np.int32)[..., None] - 127)
+    # MXFP4 shares e2m1's value table with NVFP4; only the block size and the scale format differ.
+    decoded = np.ldexp(np.asarray(F4_VALUES)[nibbles], scales.astype(np.int32)[..., None] - 127)
     dense = decoded.reshape(*blocks.shape[:-2], blocks.shape[-2] * 32)
     return np.swapaxes(dense, -2, -1).astype(np.float32)
 
@@ -254,6 +388,14 @@ def dequantize_awq4(qweight: np.ndarray, qzeros: np.ndarray, scales: np.ndarray,
     zeros = np.repeat(unpack_awq4(qzeros), effective_group, axis=0).astype(np.float32)
     scale_values = np.repeat(scales.astype(np.float32), effective_group, axis=0)
     return (integers - zeros) * scale_values
+
+
+def is_nvfp4_checkpoint(model_dir) -> bool:
+    """Whether the checkpoint declares the supported NVFP4 packed-trio scheme.
+
+    Same narrow purpose as :func:`is_awq_checkpoint` and :func:`is_exl3_checkpoint`: serving asks
+    only whether the dense trunk may stay coded."""
+    return _fp4_quant_config(Path(model_dir)) is not None
 
 
 def is_exl3_checkpoint(model_dir) -> bool:
@@ -308,8 +450,15 @@ def checkpoint_quant_summary(model_dir) -> str:
     model_dir = Path(model_dir)
     if (qc := _exl3_quant_config(model_dir)) is not None:
         return f"exl3 {qc.get('bits')} bpw (head {qc.get('head_bits')})"
-    if (qc := _fp8_quant_config(model_dir)) is not None:
-        return f"fp8 {qc.get('fmt') or qc.get('quant_method')}"
+    fp4, fp8 = _fp4_quant_config(model_dir), _fp8_quant_config(model_dir)
+    if fp4 is not None and fp8 is not None:
+        # Both recognizers answering is the MIXED form, not a contradiction: the checkpoint holds
+        # leaves of each scheme, and a boot log that named only one would misreport half the model.
+        return f"mixed fp8+nvfp4 {fp4.get('quant_method')}"
+    if fp4 is not None:
+        return f"nvfp4 {fp4.get('quant_method')}"
+    if fp8 is not None:
+        return f"fp8 {fp8.get('fmt') or fp8.get('quant_method')}"
     if (qc := _awq_quant_config(model_dir)) is not None:
         return f"awq int{qc.get('bits')} g{qc.get('group_size', qc.get('q_group_size'))} {qc.get('version', 'gemm')}"
     if _mxfp4_quant_config(model_dir) is not None:
@@ -434,6 +583,12 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     ``…experts.gate_up_proj`` + ``…experts.gate_up_proj_scale``). An
     unquantized checkpoint passes through unchanged.
 
+    NVFP4 checkpoints: each packed ``<key>`` with the ``<key>_scale`` (e4m3 block
+    scales, read as raw bits) + ``<key>_scale_2`` (f32) sibling pair dequantizes via
+    :func:`dequantize_nvfp4`; both consumed scales are dropped. Activation-quant
+    metadata (``input_scale``, kv-cache scales) passes through unconsumed — it
+    belongs to the serving path, not the twin.
+
     Native MXFP4 checkpoints: each routed expert's ``<projection>_blocks`` /
     ``<projection>_scales`` pair decodes to the logical ``<projection>`` tensor in the
     architecture twin's ``(experts, in, out)`` orientation. The consumed storage tensors
@@ -454,10 +609,19 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     model_dir = Path(model_dir)
     index = _build_index(model_dir)
     qc = _fp8_quant_config(model_dir)
+    qc4 = _fp4_quant_config(model_dir)
     mxfp4 = _mxfp4_quant_config(model_dir) is not None
     exl3 = _exl3_quant_config(model_dir) is not None
     awq = _awq_quant_config(model_dir)
     patterns = _skip_patterns(qc) if qc else []
+    patterns4 = list(qc4.get("ignore") or []) if qc4 else []
+    # NVFP4 trio signature: packed <key> + <key>_scale (e4m3) + <key>_scale_2 (f32).
+    # The e4m3 block scales must arrive as raw bits — dequantize_nvfp4 owns the decode.
+    fp4_scale_keys = (
+        frozenset(k for k in index if k.endswith("_scale") and k + "_2" in index and k[: -len("_scale")] in index)
+        if qc4 is not None
+        else frozenset()
+    )
 
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
@@ -465,7 +629,7 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     sources: dict[str, np.ndarray] = {}
     fp8_keys: dict[str, str] = {}
     for shard_path, keys in by_shard.items():
-        fp8_keys.update(_read_shard(shard_path, keys, sources))
+        fp8_keys.update(_read_shard(shard_path, keys, sources, bits_keys=fp4_scale_keys))
 
     out: dict[str, np.ndarray] = {}
     consumed: set[str] = set()
@@ -503,6 +667,11 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
             continue
         if key in consumed:
             continue
+        if qc4 is not None and key + "_scale" in fp4_scale_keys and not _is_skipped(key, patterns4):
+            if sources[key].dtype == np.uint8:
+                out[key] = dequantize_nvfp4(sources[key], sources[key + "_scale"], sources[key + "_scale_2"])
+                consumed |= {key + "_scale", key + "_scale_2"}
+                continue
         if awq is not None and key.endswith((".qzeros", ".scales")):
             base = key.rsplit(".", 1)[0]
             if base + ".qweight" in index:
@@ -651,6 +820,157 @@ def _spell_one(graph: Graph, nid: str, *, fmt: str, scale_key: str, scale_shape:
         block=block,
         degenerate=degenerate,
     )
+    frag.outputs = [final]
+    graph.splice(frag, consumed=[nid], output=nid)
+    return True
+
+
+def _f4_pair_table(graph: Graph, *, name: str, out_name: str, dtype) -> str:
+    """Add the 256x2 e2m1 pair-value table to ``graph`` as a source-free COMPUTED constant
+    (the trellis-codebook mechanism — ``ConstantOp.value`` carries scalars only) and return its
+    node id: row ``b`` holds byte ``b``'s low and high e2m1 values, concatenated along a trailing
+    axis of 2. Shared by the weight speller and the static activation speller, so both decode
+    chains read one table shape."""
+    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, RangeOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    tg = Graph()
+    codes = tg.add_node(op=RangeOp(stop=256, dtype="i32"), inputs=[], output=Tensor("codes", (256,), "i32"), node_id="codes")
+    mask = tg.add_node(op=ConstantOp(name="mask", value=15), inputs=[], output=Tensor("mask", (1,), "i32"))
+    shift = tg.add_node(op=ConstantOp(name="shift", value=4), inputs=[], output=Tensor("shift", (1,), "i32"))
+    low = tg.add_node(
+        op=ElementwiseOp(op="bitwise_and"),
+        inputs=[codes, broadcast_to(tg, mask, (256,))],
+        output=Tensor("low", (256,), "i32"),
+    )
+    high = tg.add_node(
+        op=ElementwiseOp(op="right_shift"),
+        inputs=[codes, broadcast_to(tg, shift, (256,))],
+        output=Tensor("high", (256,), "i32"),
+    )
+    vlow = tg.add_node(op=ElementwiseOp(op="from_f4e2m1"), inputs=[low], output=Tensor("vlow", (256,), "f32"))
+    vhigh = tg.add_node(op=ElementwiseOp(op="from_f4e2m1"), inputs=[high], output=Tensor("vhigh", (256,), "f32"))
+    pairs_t = tg.add_node(
+        op=IndexMapOp(
+            out_shape=(256, 2),
+            sources=(
+                IndexSource(input_idx=0, coord_map=(placeholder(0),), select=placeholder(1).lt(Literal(1, "int"))),
+                IndexSource(input_idx=1, coord_map=(placeholder(0),)),
+            ),
+        ),
+        inputs=[vlow, vhigh],
+        output=Tensor("pairs", (256, 2), "f32"),
+    )
+    if dtype.name != "f32":
+        pairs_t = tg.add_node(op=ElementwiseOp(op="copy"), inputs=[pairs_t], output=Tensor("pairs_cast", (256, 2), dtype))
+    tg.outputs = [pairs_t]
+    return graph.add_node(
+        op=ConstantOp(name=name, source_graph=tg, source_shape=(256, 2), source_dtype=dtype),
+        inputs=[],
+        output=Tensor(out_name, (256, 2), dtype),
+    )
+
+
+def _spell_fp4_one(
+    graph: Graph,
+    nid: str,
+    *,
+    scale_key: str,
+    packed_shape: tuple[int, ...],
+    scale_shape: tuple[int, ...],
+    s2_shape: tuple[int, ...],
+) -> bool:
+    """Rewrite the NVFP4 weight constant ``nid`` into packed-bits + fused-scale decode algebra.
+
+    The unpack is spelled as a pair-table gather — an embedding lookup: bits ``[…, K/2]``
+    (``f4e2m1x2``) → i32 → gather into a 256×2 value-carried table (row ``b`` holds both
+    e2m1 values of byte ``b``) → reshape to the promised ``[…, K]``. Chosen over in-graph
+    bit ops (mask/shift on each byte plus an interleave of the two halves), which would
+    say the same thing in ~3× the nodes; the graph term never dictates the emitted kernel
+    code — the lowering recognizes the term — so the smaller term wins. The scale side
+    decodes the e4m3 block scales, multiplies by ``scale_2``, and rounds ONCE to f16 (the
+    same single rounding as :func:`fuse_nvfp4_scales`), then a per-16 block multiply
+    applies it along the last axis. The cone's output keeps exactly the dtype/shape the
+    trace promised, so every later pass is unaffected. Checkpoint shapes that do not
+    match the packing leave the constant alone (``False``) — never a compile error.
+    """
+    from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    node = graph.nodes[nid]
+    op, out = node.op, node.output
+    if op.load_ops or op.source_parts or op.value is not None:
+        return False  # only a pristine single-source trace constant is spelled (birth time — nothing has run yet)
+    if any(not d.is_static for d in out.shape):
+        return False
+    shape = tuple(d.as_static() for d in out.shape)
+    k = shape[-1]
+    expected = (shape[:-1] + (k // 2,), shape[:-1] + (k // 16,))
+    if k % 16 or (packed_shape, scale_shape) != expected or int(np.prod(s2_shape) if s2_shape else 1) != 1:
+        logger.warning(
+            "NVFP4 weight %s: stored shapes packed=%s scale=%s scale_2=%s do not match logical %s; constant left alone",
+            nid,
+            packed_shape,
+            scale_shape,
+            s2_shape,
+            shape,
+        )
+        return False
+
+    frag = Graph()
+    bits = frag.add_node(
+        op=ConstantOp(name=op.name, source_path=op.source_path, source_shape=packed_shape, source_dtype=F4E2M1x2.name),
+        inputs=[],
+        output=Tensor(f"{out.name}_bits", packed_shape, F4E2M1x2.name),
+    )
+    idx = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[bits], output=Tensor(f"{out.name}_idx", packed_shape, "i32"))
+    table = _f4_pair_table(frag, name=f"{op.name}_f4_pairs", out_name=f"{out.name}_f4_pairs", dtype=out.dtype)
+    pairs = frag.add_node(op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{out.name}_pairs", packed_shape + (2,), out.dtype))
+    vals = frag.add_node(op=ReshapeOp(shape=shape), inputs=[pairs], output=Tensor(f"{out.name}_vals", shape, out.dtype))
+
+    s2_decl = (1,) * len(scale_shape)
+    s_bits = frag.add_node(
+        op=ConstantOp(name=f"{op.name}_scale", source_path=scale_key, source_shape=scale_shape, source_dtype=F8E4M3.name),
+        inputs=[],
+        output=Tensor(f"{out.name}_scale_bits", scale_shape, F8E4M3.name),
+    )
+    s_vals = frag.add_node(
+        op=ElementwiseOp(op=f"from_{F8E4M3.name}"), inputs=[s_bits], output=Tensor(f"{out.name}_scale_vals", scale_shape, "f32")
+    )
+    s2 = frag.add_node(
+        op=ConstantOp(
+            name=f"{op.name}_scale_2",
+            source_path=scale_key + "_2",
+            source_shape=s2_shape,
+            source_dtype="f32",
+            load_ops=() if tuple(s2_shape) == s2_decl else (ReshapeOp(shape=s2_decl),),
+        ),
+        inputs=[],
+        output=Tensor(f"{out.name}_scale_2", s2_decl, "f32"),
+    )
+    s2_bc = broadcast_to(frag, s2, scale_shape)
+    fused32 = frag.add_node(
+        op=ElementwiseOp(op="multiply"), inputs=[s_vals, s2_bc], output=Tensor(f"{out.name}_fused32", scale_shape, "f32")
+    )
+    # The format's single rounding point: the f32 product rounds once to f16 (fuse_nvfp4_scales parity).
+    fused = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[fused32], output=Tensor(f"{out.name}_fused", scale_shape, "f16"))
+    if out.dtype.name != "f16":
+        fused = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{out.name}_fused_cast", scale_shape, out.dtype))
+
+    interleaved = shape[:-1] + (k // 16, 16)
+    blk = frag.add_node(op=ReshapeOp(shape=interleaved), inputs=[vals], output=Tensor(f"{out.name}_blk", interleaved, out.dtype))
+    fused_r = frag.add_node(
+        op=ReshapeOp(shape=scale_shape + (1,)),
+        inputs=[fused],
+        output=Tensor(f"{out.name}_fused_r", scale_shape + (1,), out.dtype),
+    )
+    f_bc = broadcast_to(frag, fused_r, interleaved)
+    scaled = frag.add_node(op=ElementwiseOp(op="multiply"), inputs=[blk, f_bc], output=Tensor(f"{out.name}_sblk", interleaved, out.dtype))
+    final = frag.add_node(op=ReshapeOp(shape=shape), inputs=[scaled], output=Tensor(out.name, shape, out.dtype))
     frag.outputs = [final]
     graph.splice(frag, consumed=[nid], output=nid)
     return True
@@ -918,9 +1238,11 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
     qc = _fp8_quant_config(model_dir)
     if (awq := _awq_quant_config(model_dir)) is not None:
         return _spell_awq4_constants(graph, model_dir, awq)
-    if qc is None:
+    qc4 = _fp4_quant_config(model_dir)
+    if qc is None and qc4 is None:
         return 0
-    patterns = _skip_patterns(qc)
+    patterns = _skip_patterns(qc) if qc else []
+    patterns4 = list(qc4.get("ignore") or []) if qc4 else []
     index = _build_index(model_dir)
 
     spelled = 0
@@ -935,10 +1257,25 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
             return handle.get_slice(key)
 
         for nid, op in list(graph.loadable_constants()):
-            if op.source_path is None or op.source_dtype in F8_SAFETENSORS_DTYPES.values():
+            if op.source_path is None or op.source_dtype in F8_SAFETENSORS_DTYPES.values() or op.source_dtype == F4E2M1x2.name:
                 continue  # source-less, or an already-spelled bits constant (idempotency)
             key = next((c for c in _candidate_keys(op.source_path) if c in index), None)
-            if key is None or _is_skipped(key, patterns):
+            if key is None:
+                continue
+            # NVFP4 trio signature (packed U8 weight + e4m3 block scales + f32 tensor scale) —
+            # checked before the fp8 pairing, whose <key>_scale rule it would otherwise shadow.
+            if qc4 is not None and key + "_scale" in index and key + "_scale_2" in index and not _is_skipped(key, patterns4):
+                if _slice(key).get_dtype() == "U8" and _spell_fp4_one(
+                    graph,
+                    nid,
+                    scale_key=key + "_scale",
+                    packed_shape=tuple(int(d) for d in _slice(key).get_shape()),
+                    scale_shape=tuple(int(d) for d in _slice(key + "_scale").get_shape()),
+                    s2_shape=tuple(int(d) for d in _slice(key + "_scale_2").get_shape()),
+                ):
+                    spelled += 1
+                continue
+            if qc is None or _is_skipped(key, patterns):
                 continue
             stored = _slice(key).get_dtype()
             if stored not in F8_SAFETENSORS_DTYPES:
@@ -988,41 +1325,35 @@ def _dynamic_activation_declaration(qc: dict | None) -> tuple[bool, str | None]:
     return False, None
 
 
-def _cone_storage_formats(graph: Graph, start: str) -> set[str]:
-    """Return FP8 storage dtypes reachable upstream from one graph buffer."""
-    pending = [start]
-    seen: set[str] = set()
-    formats: set[str] = set()
+def _cone_nodes(graph: Graph, start: str):
+    """Every node upstream of buffer ``start``, each yielded once.
+
+    The one walk the cone readings below share; each applies its own predicate per node, and the
+    ones answering a yes/no question stop the walk early by breaking out of the generator."""
+    pending, seen = [start], set()
     while pending:
-        buf = pending.pop()
-        node = graph.producer(buf)
+        node = graph.producer(pending.pop())
         if node is None or node.id in seen:
             continue
         seen.add(node.id)
-        if isinstance(node.op, ConstantOp):
-            dtype = node.output.dtype.name
-            if dtype in F8_SAFETENSORS_DTYPES.values():
-                formats.add(dtype)
+        yield node
         pending.extend(node.inputs)
-    return formats
+
+
+def _cone_storage_formats(graph: Graph, start: str) -> set[str]:
+    """Return FP8 storage dtypes reachable upstream from one graph buffer."""
+    return {
+        name
+        for node in _cone_nodes(graph, start)
+        if isinstance(node.op, ConstantOp) and (name := node.output.dtype.name) in F8_SAFETENSORS_DTYPES.values()
+    }
 
 
 def _cone_has_fp8_encode(graph: Graph, start: str) -> bool:
     """Whether an activation buffer is already downstream of an FP8 encode."""
     from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
 
-    pending = [start]
-    seen: set[str] = set()
-    while pending:
-        buf = pending.pop()
-        node = graph.producer(buf)
-        if node is None or node.id in seen:
-            continue
-        seen.add(node.id)
-        if isinstance(node.op, ElementwiseOp) and node.op.op.name.startswith("to_f8"):
-            return True
-        pending.extend(node.inputs)
-    return False
+    return any(isinstance(n.op, ElementwiseOp) and n.op.op.name.startswith("to_f8") for n in _cone_nodes(graph, start))
 
 
 def _fresh_buffer_name(graph: Graph, base: str) -> str:
@@ -1141,6 +1472,267 @@ def spell_dynamic_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
         formats = ", ".join(sorted({fmt for _linear, _activation, fmt in eligible}))
         logger.info("spelled dynamic %s activation algebra for %d linear(s) from %s", formats, len(eligible), model_dir)
     return len(eligible)
+
+
+def _static_fp4_activation_declared(qc: dict) -> bool:
+    """Whether an NVFP4 checkpoint declares STATIC 4-bit float input activations.
+
+    modelopt 0.35+ and llm-compressor write a ``config_groups`` entry whose ``input_activations``
+    is 4-bit static float over 16-element groups; older modelopt configs carry no
+    ``config_groups`` at all, and there the per-linear ``input_scale`` tensors are the marker
+    (checked per linear, not here). A dynamic declaration declines — the static per-tensor
+    level is what this path's checkpoints calibrate."""
+    groups = qc.get("config_groups")
+    if not groups:
+        return qc.get("quant_method") == "modelopt"
+    for group in groups.values():
+        acts = group.get("input_activations") if isinstance(group, dict) else None
+        if (
+            isinstance(acts, dict)
+            and acts.get("type") == "float"
+            and int(acts.get("num_bits") or 0) == 4
+            and not acts.get("dynamic")
+            and int(acts.get("group_size") or NVFP4_BLOCK) == NVFP4_BLOCK
+        ):
+            return True
+    return False
+
+
+def _cone_fp4_weight_base(graph: Graph, start: str) -> str | None:
+    """The checkpoint module base (the ``.weight`` key minus its suffix) of the ONE packed NVFP4
+    weight constant upstream of buffer ``start``, or ``None`` — no packed weight, several, or a
+    source path outside the ``<module>.weight`` pairing that ``input_scale`` siblings follow."""
+    paths = {
+        node.op.source_path
+        for node in _cone_nodes(graph, start)
+        if isinstance(node.op, ConstantOp) and node.output.dtype.name == F4E2M1x2.name and node.op.source_path
+    }
+    if len(paths) != 1:
+        return None
+    path = next(iter(paths))
+    return path.removesuffix(".weight") if path.endswith(".weight") else None
+
+
+def _cone_has_fp4_encode(graph: Graph, start: str) -> bool:
+    """Whether an activation buffer is already downstream of an e2m1 encode (idempotency)."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
+
+    return any(isinstance(n.op, ElementwiseOp) and n.op.op.name == "to_f4e2m1" for n in _cone_nodes(graph, start))
+
+
+def _spell_static_fp4_quantize(
+    graph: Graph, activation: str, scale_key: str, s2_shape: tuple[int, ...]
+) -> tuple[str, str, str, str] | None:
+    """Spell the QUANTIZE half of one static 4-bit activation round trip — the half every
+    consumer of that activation shares. Returns ``(stem, packed codes, e4m3 block scales,
+    ``input_scale``)``, or ``None`` when the activation's shape cannot carry it (symbolic or
+    non-16-multiple K, a non-scalar ``input_scale``).
+
+    The algebra is :func:`quantize_nvfp4` with the checkpoint's static per-linear ``input_scale``
+    standing in for the tensor-derived ``scale_2``: per 16-element K block, the e4m3 block-scale
+    round trip (``to_f8e4m3(amax / (6·s2))``), ONE f32→f16 rounding of the fused scale
+    (:func:`fuse_nvfp4_scales` parity), the e2m1 encode of the block over the rounded fused
+    scale, and the pair pack into an ``f4e2m1x2`` buffer. The quantize's divisor is floored at
+    1e-12 so an all-zero block divides by the floor instead of by zero; its codes are zeros
+    either way, and the decode multiplies by the unfloored scale.
+
+    What the consumers share is the CODES and their raw block scales, never a reconstructed
+    value: the reconstruction is spelled per consumer (:func:`_spell_static_fp4_decode`). Loop
+    fusion materializes an activation's fan-out point, so this split is what decides that a
+    shared activation reaches its matmuls as the packed pair beside e4m3 scales — the two leaves
+    a packed weight constant already offers — instead of as a 16-bit dense buffer with the codes
+    dissolved into the producer."""
+    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    source = graph.buffer(activation)
+    if source is None or not source.shape or source.dtype.name not in {"f16", "bf16", "f32"}:
+        return None
+    kd = source.shape[-1]
+    if not kd.is_static or kd.as_static() % NVFP4_BLOCK or int(np.prod(s2_shape) if s2_shape else 1) != 1:
+        return None
+    k = kd.as_static()
+    lead = tuple(d.as_static() if d.is_static else str(d) for d in source.shape[:-1])
+    blocked = (*lead, k // NVFP4_BLOCK, NVFP4_BLOCK)
+    bshape = (*lead, k // NVFP4_BLOCK, 1)
+    flat, half = (*lead, k), (*lead, k // 2)
+    # Freshness must be probed on a DERIVED name: the stem itself never becomes a node, and
+    # ``add_node`` silently falls back to an ``n<i>`` node id on a taken name while keeping the
+    # duplicate TENSOR name — two buffers sharing one name then cross-read at the kernel level,
+    # where references are by name. ``_bits`` exists in every quantize half, so it is the probe.
+    stem, suffix = f"{activation}_static_fp4", 2
+    while f"{stem}_bits" in graph.nodes or graph.buffer(f"{stem}_bits") is not None:
+        stem = f"{activation}_static_fp4_{suffix}"
+        suffix += 1
+    dt = source.dtype
+
+    blk = graph.add_node(op=ReshapeOp(shape=blocked), inputs=[activation], output=Tensor(f"{stem}_blk", blocked, dt))
+    absolute = graph.add_node(op=ElementwiseOp(op="abs"), inputs=[blk], output=Tensor(f"{stem}_abs", blocked, "f32"))
+    amax = graph.add_node(op=ReduceOp(op="maximum", axis=-1), inputs=[absolute], output=Tensor(f"{stem}_amax", bshape, "f32"))
+    s2 = graph.add_node(
+        op=ConstantOp(
+            name=f"{stem}_scale_2",
+            source_path=scale_key,
+            source_shape=tuple(s2_shape),
+            source_dtype="f32",
+            load_ops=() if tuple(s2_shape) == (1,) * len(bshape) else (ReshapeOp(shape=(1,) * len(bshape)),),
+        ),
+        inputs=[],
+        output=Tensor(f"{stem}_scale_2", (1,) * len(bshape), "f32"),
+    )
+    s2_bc = broadcast_to(graph, s2, bshape)
+    fmax = const_bc(graph, name=f"{stem}_f4_max", value=_F4_MAX, target_shape=bshape, dtype="f32")
+    denom = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[fmax, s2_bc], output=Tensor(f"{stem}_denom", bshape, "f32"))
+    ratio = graph.add_node(op=ElementwiseOp(op="divide"), inputs=[amax, denom], output=Tensor(f"{stem}_ratio", bshape, "f32"))
+    sbits = graph.add_node(op=ElementwiseOp(op="to_f8e4m3"), inputs=[ratio], output=Tensor(f"{stem}_scale_bits", bshape, F8E4M3.name))
+    sdec = graph.add_node(op=ElementwiseOp(op=f"from_{F8E4M3.name}"), inputs=[sbits], output=Tensor(f"{stem}_scale_vals", bshape, "f32"))
+    fused32 = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[sdec, s2_bc], output=Tensor(f"{stem}_fused32", bshape, "f32"))
+    fused = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused32], output=Tensor(f"{stem}_fused", bshape, "f16"))
+    div32 = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{stem}_div32", bshape, "f32"))
+    floor = const_bc(graph, name=f"{stem}_floor", value=1.0e-12, target_shape=bshape, dtype="f32")
+    safe = graph.add_node(op=ElementwiseOp(op="maximum"), inputs=[div32, floor], output=Tensor(f"{stem}_safe", bshape, "f32"))
+    safe_bc = broadcast_to(graph, safe, blocked)
+    quot = graph.add_node(op=ElementwiseOp(op="divide"), inputs=[blk, safe_bc], output=Tensor(f"{stem}_norm", blocked, "f32"))
+    codes = graph.add_node(op=ElementwiseOp(op="to_f4e2m1"), inputs=[quot], output=Tensor(f"{stem}_codes", blocked, "i32"))
+    codes_f = graph.add_node(op=ReshapeOp(shape=flat), inputs=[codes], output=Tensor(f"{stem}_codes_flat", flat, "i32"))
+    d = len(flat) - 1
+    lead_ph = tuple(placeholder(i) for i in range(d))
+    even = graph.add_node(
+        op=IndexMapOp(out_shape=half, sources=(IndexSource(input_idx=0, coord_map=(*lead_ph, placeholder(d) * Literal(2, "int"))),)),
+        inputs=[codes_f],
+        output=Tensor(f"{stem}_even", half, "i32"),
+    )
+    odd = graph.add_node(
+        op=IndexMapOp(
+            out_shape=half,
+            sources=(IndexSource(input_idx=0, coord_map=(*lead_ph, placeholder(d) * Literal(2, "int") + Literal(1, "int"))),),
+        ),
+        inputs=[codes_f],
+        output=Tensor(f"{stem}_odd", half, "i32"),
+    )
+    four_bc = const_bc(graph, name=f"{stem}_shift", value=4, target_shape=half, dtype="i32")
+    hi = graph.add_node(op=ElementwiseOp(op="left_shift"), inputs=[odd, four_bc], output=Tensor(f"{stem}_hi", half, "i32"))
+    byte = graph.add_node(op=ElementwiseOp(op="bitwise_or"), inputs=[even, hi], output=Tensor(f"{stem}_byte", half, "i32"))
+    bits = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[byte], output=Tensor(f"{stem}_bits", half, F4E2M1x2.name))
+    return stem, bits, sbits, s2
+
+
+def _spell_static_fp4_decode(graph: Graph, quant: tuple[str, str, str, str], dtype) -> str:
+    """Spell ONE consumer's reconstruction over a shared quantized activation and return its
+    restored buffer.
+
+    The shape is the packed weight constant's own decode chain (:func:`_spell_fp4_one`): a
+    pair-table gather over the packed codes, times the block scale, with the two scale levels
+    multiplied in f32 and rounded once to f16 (:func:`fuse_nvfp4_scales` parity). Spelled per
+    consumer rather than shared, so each marked matmul carries both operands in that one
+    decode-chain reading — the packed pair and the raw e4m3 scale each reached through a load of
+    their own."""
+    from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    quant_stem, bits, sbits, s2 = quant
+    half = tuple(d.as_static() for d in graph.buffer(bits).shape)
+    bshape = tuple(d.as_static() for d in graph.buffer(sbits).shape)
+    flat, blocked = (*half[:-1], half[-1] * 2), (*bshape[:-1], NVFP4_BLOCK)
+    # A reconstruction's own stem, never the quantize half's: the two spell some of the same
+    # derived names (``_scale_vals``, ``_fused``), and ``add_node`` answers a taken name by
+    # keeping the duplicate TENSOR name while renaming only the node — buffers that share a name
+    # then cross-read at the kernel level, where references are by name.
+    suffix = 1
+    while f"{quant_stem}_r{suffix}_value" in graph.nodes or graph.buffer(f"{quant_stem}_r{suffix}_value") is not None:
+        suffix += 1
+    stem = f"{quant_stem}_r{suffix}"
+
+    idx = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[bits], output=Tensor(f"{stem}_idx", half, "i32"))
+    table = _f4_pair_table(graph, name=f"{stem}_f4_pairs", out_name=f"{stem}_f4_pairs", dtype=dtype)
+    pairs = graph.add_node(op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{stem}_pairs", (*half, 2), dtype))
+    vblk = graph.add_node(op=ReshapeOp(shape=blocked), inputs=[pairs], output=Tensor(f"{stem}_vals", blocked, dtype))
+    sdec = graph.add_node(op=ElementwiseOp(op=f"from_{F8E4M3.name}"), inputs=[sbits], output=Tensor(f"{stem}_scale_vals", bshape, "f32"))
+    s2_bc = broadcast_to(graph, s2, bshape)
+    fused32 = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[sdec, s2_bc], output=Tensor(f"{stem}_fused32", bshape, "f32"))
+    # The format's single rounding point: the f32 product rounds once to f16 (fuse_nvfp4_scales parity).
+    fused = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused32], output=Tensor(f"{stem}_fused", bshape, "f16"))
+    if dtype.name != "f16":
+        fused = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{stem}_fused_cast", bshape, dtype))
+    f_bc = broadcast_to(graph, fused, blocked)
+    scaled = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[vblk, f_bc], output=Tensor(f"{stem}_sblk", blocked, dtype))
+    return graph.add_node(op=ReshapeOp(shape=flat), inputs=[scaled], output=Tensor(f"{stem}_value", flat, dtype))
+
+
+def spell_static_fp4_activations(graph: Graph, model_id_or_path: str) -> int:
+    """Spell checkpoint-declared STATIC 4-bit activation quantization in front of NVFP4-marked
+    linears — the activation half of the declared W4A4 program.
+
+    A linear is marked when its already-spelled weight cone holds a packed NVFP4 constant AND the
+    checkpoint stores that module's ``input_scale`` — modelopt's calibrated per-linear activation
+    ``scale_2`` (one f32, ``calibration amax / (6 · 448)``). The graph's own meaning then becomes
+    Σ x̂·ŵ program-wide, and the numpy backend stays the parity oracle. Unmarked linears keep
+    their 16-bit activations untouched. The round trip is spelled in two halves: consumers
+    reading one activation through equal-valued ``input_scale`` tensors share ONE quantize (the
+    checkpoint calibrates a fused projection group — q/k/v, gate/up — to one scale, stored once
+    per member; unequal values quantize per scale path), and each consumer then gets its own
+    reconstruction over the shared codes. Returns the number of rewired linears; weight-only or
+    non-NVFP4 checkpoints are a no-op. Runs after :func:`spell_quantized_constants`, whose
+    spelled weight cones are the marker it reads."""
+    from safetensors import safe_open  # noqa: PLC0415
+
+    from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import _build_index, _resolve_model_dir  # noqa: PLC0415
+
+    model_dir = _resolve_model_dir(model_id_or_path)
+    qc4 = _fp4_quant_config(model_dir)
+    if qc4 is None or not _static_fp4_activation_declared(qc4):
+        return 0
+    index = _build_index(model_dir)
+
+    eligible: list[tuple[str, str, str]] = []
+    for node in list(graph.nodes.values()):
+        if not isinstance(node.op, LinearOp) or len(node.inputs) < 2:
+            continue
+        activation, weight = node.inputs[:2]
+        base = _cone_fp4_weight_base(graph, weight)
+        if base is None or _cone_has_fp4_encode(graph, activation):
+            continue
+        scale_key = base + ".input_scale"
+        if scale_key in index:
+            eligible.append((node.id, activation, scale_key))
+    if not eligible:
+        return 0
+
+    spelled = 0
+    with ExitStack() as stack:
+        handles: dict[str, object] = {}
+
+        def _open(key: str):
+            path = str(index[key])
+            handle = handles.get(path)
+            if handle is None:
+                handle = handles[path] = stack.enter_context(safe_open(path, framework="numpy"))
+            return handle
+
+        quantized: dict[tuple[str, float], tuple[str, str, str, str] | None] = {}
+        for linear_id, activation, scale_key in eligible:
+            value = float(np.asarray(_open(scale_key).get_tensor(scale_key), dtype=np.float32).reshape(-1)[0])
+            key = (activation, value)
+            if key not in quantized:
+                s2_shape = tuple(int(x) for x in _open(scale_key).get_slice(scale_key).get_shape())
+                quantized[key] = _spell_static_fp4_quantize(graph, activation, scale_key, s2_shape)
+                if quantized[key] is None:
+                    logger.warning("static fp4 activation %s: shape cannot carry the block quantize; linear stays 16-bit", scale_key)
+            quant = quantized[key]
+            if quant is None:
+                continue
+            graph.replace_input(linear_id, activation, _spell_static_fp4_decode(graph, quant, graph.buffer(activation).dtype))
+            spelled += 1
+    if spelled:
+        logger.info("spelled static 4-bit activation algebra for %d linear(s) from %s", spelled, model_dir)
+    return spelled
 
 
 def _trellis_dims(graph: Graph, nid: str, shapes: dict[str, tuple[int, ...]]) -> tuple[int, int, int, int] | None:

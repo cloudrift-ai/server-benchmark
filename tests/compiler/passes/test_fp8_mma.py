@@ -209,13 +209,19 @@ def _f8_term(cap=(12, 0), *, a_dtype=F8E4M3, b_dtype=F8E4M3, k=512):
 
 def _offered_atoms(tile, ctx, node):
     """The tensor-core atoms the catalog OFFERS at this node under the live precision pins — the
-    prescan's choice layer (``_node_refusal``) plus the policy half of the atom families."""
+    prescan's choice layer (``_node_refusal``) plus the policy half of the atom families.
+
+    ``packed`` is the pair of packed readings the prescan computes once per node and hands to both
+    layers; spelled here the way ``_site_facts`` spells it, so this helper asks the two functions
+    the same question the enumerator asks them."""
     from emmy.compiler.ir.tile.ops import projection_tail
+    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_b_node, match_packed_pair_node
 
     tail = projection_tail(tile)
-    if sched._node_refusal(tile, ctx, node, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op))) is not None:
+    packed = (match_packed_b_node(node, tile.inputs), match_packed_pair_node(node, tile.inputs))
+    if sched._node_refusal(tile, ctx, node, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op)), packed) is not None:
         return ()
-    return sched._atom_families(tile, ctx, node, tail)[0]
+    return sched._atom_families(tile, ctx, node, tail, packed)[0]
 
 
 def test_k32_enumeration_requires_the_precision_gate(monkeypatch):

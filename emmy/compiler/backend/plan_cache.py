@@ -85,8 +85,23 @@ def _binding_neutral_graph(graph: Graph) -> _Bindings:
     visit_graph(wire)
     # The full canonical payload is the dict key: profile counts are small, and avoiding a
     # digest means a collision can never hand one graph another graph's executable plan.
-    payload = json.dumps(wire, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(wire, sort_keys=True, separators=(",", ":"), default=_key_atom)
     return _Bindings(payload=payload, actual_by_slot=actual_by_slot, slot_by_actual=slot_by_actual)
+
+
+def _key_atom(o):
+    """Spell a non-JSON value for the cache key, or refuse.
+
+    A coded constant carries its storage ``DataType`` in the wire — a packed NVFP4 weight reaches
+    here as ``f4e2m1x2``. A dtype's NAME identifies it exactly, so it is a faithful key atom.
+    Anything else raises rather than stringifying: the key is the whole payload precisely so a
+    collision cannot hand one graph another's plan, and a blanket ``str`` would let two unlike
+    objects share a spelling."""
+    from emmy.compiler.dtype import DataType  # noqa: PLC0415
+
+    if isinstance(o, DataType):
+        return o.name
+    raise TypeError(f"plan-cache key: no spelling for {type(o).__name__} in the graph wire")
 
 
 def _weight_to_template(nid: str, weight: WeightSpec, slot_by_actual: dict[str, str]) -> WeightSpec:

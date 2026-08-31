@@ -68,6 +68,7 @@ from emmy.compiler.ir.tile.path import SLICE_FAMILIES, sites
 from emmy.compiler.pipeline.fork import Fork, iter_leaves
 from emmy.compiler.pipeline.knob import axis_of, schedule_pin_fingerprint
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_axis_step, split_addressable
+from emmy.compiler.pipeline.passes.lowering._packed import match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.passes.lowering.tile import _staging as staging
 from emmy.compiler.pipeline.passes.lowering.tile._tree import children, walk
 from emmy.compiler.pipeline.search.space import (
@@ -266,7 +267,7 @@ def _contraction_options(state: _State, node) -> list[_Option]:
                 opts.append(_Option(red_knobs, work, tile, seam))
                 opts.extend(
                     _Option(red_knobs, replace(work, producer=band), tile, seam)
-                    for band in _producer_bands(work, stage, plan.block_threads)
+                    for band in _producer_bands(work, stage, plan.block_threads, facts.packed[0] is not None)
                 )
     if not opts:
         if tile_pin is not None and tile_refused:
@@ -285,16 +286,22 @@ def _resolve_stage(state: _State, node, plan: TilePlan, placed: TilePlan, want: 
     """The ONE resolve dispatch — enumeration and the leaf's re-resolution (:func:`_stage_of`) both
     take it, chosen by the same predicate (:func:`_needs_fill`), so the materialized slice always
     reproduces the one the row identity was built from. The fill branch reads only ``want.depth``
-    (the fill's transport is fixed); the warp / scalar branches resolve the full spelling."""
+    (the fill's transport is fixed); the warp / scalar branches resolve the full spelling.
+
+    A fill-needing node can still name a BYTE transport when its B is a packed-pair decode cone:
+    the bits copy verbatim and only the block scales are compute-filled, so the byte slab is a
+    sibling of the fill rather than an alternative to it. Reading that fork here, off the stage
+    spelling and the node's packed fact, is what keeps enumeration and re-resolution agreeing
+    about which resolver a copy spelling on a packed node meant."""
     budget = state.ctx.max_dynamic_smem
-    if plan.is_warp and _needs_fill(state, node, plan):
-        facts = state.facts[id(node)]
+    facts = state.facts[id(node)]
+    if plan.is_warp and _needs_fill(state, node, plan) and not _packed_byte_slab_row(facts, want.spell()):
         seam, k_axis, producer = facts.seam, facts.k_axis, facts.producer
         return staging.resolve_fill_stage(
             node, placed, budget, want.depth, inputs=state.tile.inputs, why=why, seam=seam, k_axis=k_axis, producer=producer
         )
     if plan.is_warp:
-        return staging.resolve_warp_stage(node, placed, want, budget, state.tile.inputs)
+        return staging.resolve_warp_stage(node, placed, want, budget, state.tile.inputs, readings=facts.packed)
     return staging.resolve_scalar_stage(node, placed, want, state.tile.inputs, budget)
 
 
@@ -355,14 +362,34 @@ def _fill_options(
     a BARE byte-transport pin DROPS (the choice layer: it fans out to every STAGE site, and this
     one has no byte-transport tier for it to mean). A pinned depth the budget refuses on THIS
     plan's slabs is recorded like the family's other per-plan refusals; the caller raises when no
-    plan honors the pin."""
+    plan honors the pin.
+
+    ONE computed operand has byte-transport siblings beside the fill: a PACKED-PAIR B, the NVFP4
+    weight's decode cone, whose bits copy verbatim as raw packed bytes while only its block scales
+    are compute-filled (:func:`_staging.resolve_warp_stage`'s packed arm). Those rows sit beside
+    the fill's, so a shape the byte slab declines simply keeps the generic reading. Which reading
+    applies is a fact about the NODE, not about the transport the pin names: a multi-channel
+    product carrying a byte-transport pin still has no such sibling, since the byte-transport
+    emitters carry one channel."""
+    facts = state.facts[id(node)]
+    packed = facts.packed[0] is not None
     depths = [1, 2]
     if pin:
         # A pinned spelling names a kernel, so its TRANSPORT cannot be quietly dropped and read as
-        # depth alone: the fill's own asynchronous B-slab prefetch ring is the depth-2 ``smem``
-        # row, not ``smem-async``.
+        # depth alone: an ordinary cone's own asynchronous B-slab prefetch ring is the depth-2
+        # ``smem`` row, not ``smem-async``. A packed cone is the exception — it really does have
+        # those siblings — so a copy spelling there names the byte slab and nothing else.
         want = Stage.parse(pin)
         if want.transport != "smem":
+            if _packed_byte_slab_row(facts, pin):
+                # The packed cone really does have those siblings, so a copy spelling here names
+                # the byte slab and nothing else. Its refusal is per-PLAN like the depths below:
+                # the slab is sized by this tile's geometry, so a sibling plan may still resolve it.
+                slab = _resolve_stage(state, node, plan, placed, want)
+                if slab is None:
+                    refused.append(f"the packed byte slab does not resolve at {pin!r} for this contraction")
+                    return []
+                return [slab]
             reason = (
                 f"the smem compute fill has no {want.transport} sibling: a computed operand cannot ride a byte "
                 f"transport (nothing but the fill can evaluate a producer cone). Its own asynchronous B-slab "
@@ -399,7 +426,23 @@ def _fill_options(
         if r.spell() not in spelled:
             spelled.add(r.spell())
             out.append(r)
+    if not packed or pin:
+        return out
+    for move in stage_moves(warp=True, ctx=state.ctx):
+        if move.transport not in ("smem-async", "smem-tma"):
+            continue
+        slab = _resolve_stage(state, node, plan, placed, move)
+        if slab is not None and slab.spell() not in spelled:
+            spelled.add(slab.spell())
+            out.append(slab)
     return out
+
+
+def _packed_byte_slab_row(facts: _SiteFacts, spec: str) -> bool:
+    """Whether a row's ``STAGE`` spelling names the packed byte slab rather than a compute-fill
+    depth — the ONE reading that decides which resolver reproduces the row, so the enumeration and
+    the re-resolve cannot disagree about what a copy spelling on a packed node meant."""
+    return bool(spec) and facts.packed[0] is not None and Stage.parse(spec).transport in ("smem-async", "smem-tma")
 
 
 # ---- the producer band: the +p inventory a resolved stage can drive ------------------------------ #
@@ -414,6 +457,28 @@ def _band_transport_refusal(stage: Stage | None) -> str | None:
     return None
 
 
+def _band_packed_slab_refusal(stage: Stage | None, packed: bool) -> str | None:
+    """Why a resolved TMA stage over a PACKED BYTE SLAB drives no producer band — a real deadlock,
+    not a slowdown, so it is a LEGALITY like :func:`_band_transport_refusal` beside it and never a
+    bound a pin may raise past.
+
+    The packed byte-slab operand takes its own TMA lowering, which returns the plain staged K-loop
+    rather than the band-splitting one — it never receives the warp inventory, so no band is
+    emitted. The block still WIDENS to hold one, because the thread budget is set from the
+    inventory alone. The extra warps then fall into the compute body, where the TMA transport
+    elects its single arming thread on a linear thread id that wraps: thread 0 and the band's first
+    thread both match, so the box-copy barrier takes two arrivals against an arrival count of one,
+    its phase parity desynchronizes, and the kernel spins (measured 60 s against 0.22 s once
+    refused). The block-scaled cell needs no rule of its own: its stage resolver takes
+    ``smem-async`` only, so it never reaches a TMA stage for this question to be asked about.
+
+    ``packed`` is the node's single-sided packed reading; the condition is on the OPTION, since the
+    same node's compute-fill rows drive no band either way."""
+    if packed and stage is not None and stage.transport == "smem-tma":
+        return "a packed byte-slab operand under TMA has no band-splitting lowering"
+    return None
+
+
 def _band_budget_refusal(band: int, block_threads: int) -> str | None:
     """A dedicated producer band adds ``32·p`` threads ON TOP of the compute warps. Two budgets:
     the total fits the CTA limit, and the band does not outnumber the compute half."""
@@ -425,7 +490,7 @@ def _band_budget_refusal(band: int, block_threads: int) -> str | None:
     return None
 
 
-def _producer_bands(work: Workers | None, stage: Stage | None, block_threads: int) -> tuple[int, ...]:
+def _producer_bands(work: Workers | None, stage: Stage | None, block_threads: int, packed: bool = False) -> tuple[int, ...]:
     """The producer-band widths an option ALSO claims as inventory variants. The band is
     kernel-global, but every condition on it is a fact about the OPTION: it drives a resolved TMA
     stage and needs a warp inventory wide enough to spare it. Claiming it here is what makes the
@@ -435,7 +500,7 @@ def _producer_bands(work: Workers | None, stage: Stage | None, block_threads: in
     like the family's other choice-layer drops."""
     if work is None or work.kind != "warp":
         return ()
-    why = _band_transport_refusal(stage)
+    why = _band_transport_refusal(stage) or _band_packed_slab_refusal(stage, packed)
     if why is not None:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("producer band not offered: %s", why)
@@ -978,7 +1043,7 @@ def _channel_dtype(tile: TileOp, node, ctx):
     return next(iter(eligible)) if len(eligible) == 1 else None
 
 
-def _atom_families(tile: TileOp, ctx, node, tail: list) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _atom_families(tile: TileOp, ctx, node, tail: list, packed: tuple) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """The tensor-core atoms ``node``'s fragments can BIND, split ``(offered, pin-only)``: the
     catalog enumerates ``offered``; ``pin-only`` holds the precision-POLICY-gated remainder a pin
     may still name (pins bypass policy, never legality). Two policies, each off by default and
@@ -996,6 +1061,19 @@ def _atom_families(tile: TileOp, ctx, node, tail: list) -> tuple[tuple[str, ...]
     def bindable(names: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(n for n in names if _atom_refusal(ATOM_REGISTRY[n], dtype, a_step, a_is_load, tail, tile.place.free, shapes) is None)
 
+    if (pair := packed[1]) is not None:
+        # The BLOCK-SCALED cell multiplies the packed CODES themselves, so it is the one atom whose
+        # operands are read off the pair of decode chains rather than off the ``a`` edge's leaf
+        # dtype — which would answer with whichever of a chain's two loads, the codes or their
+        # e4m3 block scales, the body happens to name first. The weight side's codes are always
+        # STORED, so its dtype is the pair's; the activation's may be computed in this very kernel,
+        # leaving no gmem tensor to ask. No precision policy: the cell has no decoded sibling to
+        # trade accuracy against. Every channel's weight is read at one width — a mismatch would
+        # move raw bits at the wrong size — so channel 0 answers for all and the rest must agree.
+        weights = {tile.inputs[op.bits.input].dtype for op in pair.b}
+        if len(weights) != 1:
+            return (), ()
+        return atoms_for(next(iter(weights)), ctx=ctx), ()
     if dtype is not None and dtype.nbytes == 1:
         atoms = bindable(atoms_for(dtype, ctx=ctx))
         return (atoms, ()) if precision_pin(FP8_MMA) else ((), atoms)
@@ -1005,7 +1083,7 @@ def _atom_families(tile: TileOp, ctx, node, tail: list) -> tuple[tuple[str, ...]
     return ((*base, *f16acc), ()) if precision_pin(F16_MMA_F32_ACC) else (base, f16acc)
 
 
-def _node_refusal(tile: TileOp, ctx, node, frag_ok: bool) -> str | None:
+def _node_refusal(tile: TileOp, ctx, node, frag_ok: bool, packed: tuple) -> str | None:
     """Why the node's algebra and operand dtypes select NO warp tier, atom-independent (``None``
     when a tier is selected) — the CHOICE layer, which is also the layer a pin drops on."""
     ring = node.semiring
@@ -1031,6 +1109,19 @@ def _node_refusal(tile: TileOp, ctx, node, frag_ok: bool) -> str | None:
     if any(isinstance(ch.b, Fold) and ch.b.axis is not None for ch in node.channels) and len(node.channels) == 1:
         return "a nested scheduling site inhabits the B edge and no multi-channel fill is mandated to evaluate it"
     dtype = edge_dtypes(node.a, tile.inputs)[0]
+    if packed[1] is not None:
+        # The BLOCK-SCALED cell: both operands are packed codes, and the cell multiplies them
+        # as stored. Its A edge is a decode cone at a PACKED byte dtype, so both dtype rules
+        # below would read it as an fp8 byte and refuse. :func:`_atom_families` reads this node's
+        # atom off the pair instead.
+        return None
+    if dtype is not None and dtype.logical_elems != 1:
+        # A packed storage dtype has no scalar byte semantics — one stored element is two logical
+        # K elements — so every atom that multiplies DECODED operands is out, and the fp8 byte
+        # readings below would halve K. A packed A with no packed peer therefore stays off the
+        # warp tier; a packed B with a 16-bit A is untouched (the dtype read here is A's) and keeps
+        # the single-sided byte-slab reading, which computes the same values.
+        return f"a packed {dtype} A pairs with no packed peer; no atom multiplies packed codes against decoded ones"
     if dtype is not None and dtype.nbytes == 1:
         # The native fp8 (k32) family's STRUCTURAL requirements, which hold under any pin: the
         # byte-gather loaders move raw bits, so A must be a MATERIALIZED f8 load and every channel
@@ -1162,6 +1253,13 @@ class _SiteFacts:
     seam: tuple | None  # the computed-A stat-row seam, or a derived marker's carried-state seam
     producer: Fold | None  # the single contraction nested in the computed A edge (the paired budget)
     need: str | None  # the TILE key of this consumer's fragment producer (the cross-site seam)
+    #: The node's ``(single-sided, pair)`` packed readings — is B an NVFP4 decode cone, and are
+    #: BOTH operands packed over one block extent. Read here rather than at each candidate because
+    #: each walks an operand body, builds a backward cone per side and proves k-block invariance
+    #: over every index expr; the stage resolver needs them per CANDIDATE, of which a warp site has
+    #: hundreds, so asking there recomputed one answer thousands of times (measured at 391k matcher
+    #: calls and 57 s for a single toy linear).
+    packed: tuple
     #: whether the needed fragment is a SIBLING step's value rather than a nested cone's: a nested
     #: cone the compute fill can re-evaluate elementwise, but a sibling's per-step result exists
     #: only in the enclosing carrier's stream, so its fragments must come from a warp-scheduled
@@ -1197,7 +1295,8 @@ def _site_facts(tile: TileOp, ctx, sched: Sched, tail: list, frag_ok: bool) -> d
         # again for every plan. The derived marker is the one override: its states are the
         # ENCLOSING carrier's, which no cone read can see.
         k_axis, seam = node.axis, None
-        refusal = _node_refusal(tile, ctx, node, frag_ok)
+        packed = (match_packed_b_node(node, tile.inputs), match_packed_pair_node(node, tile.inputs))
+        refusal = _node_refusal(tile, ctx, node, frag_ok, packed)
         if (
             id(node) in derived_ids
             and node.axis.extent.is_static
@@ -1217,8 +1316,8 @@ def _site_facts(tile: TileOp, ctx, sched: Sched, tail: list, frag_ok: bool) -> d
         step = need is not None
         if need is None and producer is not None:
             need = sched.key("TILE", producer)
-        offered, pin_only = _atom_families(tile, ctx, node, tail) if refusal is None else ((), ())
-        out[id(node)] = _SiteFacts(refusal, offered, pin_only, k_axis, seam, producer, need, step)
+        offered, pin_only = _atom_families(tile, ctx, node, tail, packed) if refusal is None else ((), ())
+        out[id(node)] = _SiteFacts(refusal, offered, pin_only, k_axis, seam, producer, need, packed, step)
     return out
 
 

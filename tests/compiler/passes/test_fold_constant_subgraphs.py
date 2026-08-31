@@ -108,6 +108,32 @@ def test_storage_decode_cone_stays_expanded():
     assert set(_apply(graph).nodes) == before
 
 
+def test_packed_fp4_cone_stays_expanded():
+    # The NVFP4 decode gathers a source_graph pair table, so no elementwise decode
+    # appears in the main-graph cone; the packed constant's STORED dtype is what
+    # marks the cone as a storage decode. The real decode always byte-expands, so
+    # the compact-storage size policy would also decline it; to isolate the MARKER,
+    # this cone casts to bool — equal byte count, size policy silent — and the
+    # stored-dtype rule alone must hold the fold off.
+    from emmy.compiler.dtype import F4E2M1x2
+
+    graph = Graph()
+    bits = graph.add_node(
+        op=ConstantOp(name="w", source_path="m.w", source_shape=(4, 8), source_dtype=F4E2M1x2.name),
+        inputs=[],
+        output=Tensor("w_bits", (4, 8), F4E2M1x2.name),
+    )
+    graph.add_node(
+        op=ElementwiseOp(op="copy"),
+        inputs=[bits],
+        output=Tensor("out", (4, 8), "bool"),
+        node_id="out",
+    )
+    graph.outputs = ["out"]
+    before = set(graph.nodes)
+    assert set(_apply(graph).nodes) == before
+
+
 def test_storage_expanding_generic_cast_stays_expanded():
     graph = Graph()
     source = graph.add_node(

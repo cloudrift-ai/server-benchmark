@@ -389,9 +389,13 @@ def _contraction_domain(
     """Project one contraction's locally realizable scalar and tensor-core choices."""
     per_cell_reductions = _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
     allowed_atoms = _warp_atoms(tile, target, node)
+    wide_warp_tiles = tuple(
+        plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
+    )
     catalog = (
         *(scalar_tile_moves() if _supports_scalar(node) else ()),
         *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),
+        *wide_warp_tiles,
     )
     return tuple(
         ReductionSchedule(plan, reduction) for plan in catalog for reduction in (per_cell_reductions if not plan.is_tiled else (Reduce(),))
@@ -1079,15 +1083,23 @@ class _ScheduleParameters:
     supported: frozendict
     ignore_unsupported_global: bool
 
+    def _supports_global(self, family: str, value: str) -> bool:
+        return any(key.partition("@")[0] == family and value in choices for key, choices in self.supported.items())
+
     def _allows_value(self, family: str, key: str, value: str) -> bool:
         exact = tuple(pin_value for pin_key, pin_value in self.pins[family] if pin_key == key and key != family)
         inherited = tuple(pin_value for pin_key, pin_value in self.pins[family] if pin_key == family)
-        if self.ignore_unsupported_global:
-            inherited = tuple(pin_value for pin_value in inherited if pin_value in self.supported[key])
+        inherited = tuple(pin_value for pin_value in inherited if pin_value in self.supported[key])
         applicable = exact or inherited
         return all(pin_value == value for pin_value in applicable)
 
     def __call__(self, assignment: ClassicSchedule) -> bool:
+        if not self.ignore_unsupported_global and any(
+            pin_key == family and pin_value and not self._supports_global(family, pin_value)
+            for family, pins in self.pins.items()
+            for pin_key, pin_value in pins
+        ):
+            return False
         kernel = assignment.kernel
         if not (
             self._allows_value("WORK", "WORK", kernel.work.spell())
@@ -1125,8 +1137,7 @@ class _ScheduleParameters:
             family = key.partition("@")[0]
             exact = tuple(value for pin_key, value in self.pins[family] if pin_key == key and key != family)
             inherited = tuple(value for pin_key, value in self.pins[family] if pin_key == family)
-            if self.ignore_unsupported_global:
-                inherited = tuple(value for value in inherited if value in self.supported[key])
+            inherited = tuple(value for value in inherited if value in self.supported[key])
             pinned = tuple(dict.fromkeys(exact or inherited))
             if len(pinned) > 1:
                 return ()
@@ -1204,6 +1215,9 @@ def schedule(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     )
     prefix = {"S_warp_eligible": 1.0} if any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices) else {}
     restricted = c.restricted(codec)
+    stage_pins = family_pins("STAGE")
+    if restricted == () and t.validate_pins and stage_edges(codec.context) and any(value for _, value in stage_pins):
+        raise ValueError("classic schedule restriction does not resolve for this term")
     assignments = (
         ((assignment, codec._encode_accepted(assignment)) for assignment in restricted)
         if restricted is not None

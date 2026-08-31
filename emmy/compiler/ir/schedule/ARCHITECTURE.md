@@ -36,3 +36,8 @@ The cut pass explores structural cuts before this schedule enumeration begins. T
 consults it only for a complete assignment. It never unpacks `c` or lets it alter an independent domain. Prefix
 pruning may use only incompatibility facts derived from `p` and `t`, and every traversal order must retain the same
 compatible subset of the Cartesian product.
+
+A global schedule pin restricts every site whose independent domain contains its value. Non-supporting sibling sites
+remain unrestricted, while a strict kernel rejects a non-empty global value supported nowhere. A scoped pin restricts
+only its exact site. This keeps global pins stable across structural pieces without assigning a value to the wrong
+node or edge.

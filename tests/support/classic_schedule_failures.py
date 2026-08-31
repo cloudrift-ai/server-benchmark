@@ -37,41 +37,11 @@ class ReconstructionFailure:
 
 RECOVERY_CLUSTERS = (
     RecoveryCluster(
-        name="tensor-core-transport",
-        phase=4,
-        reason="restore tensor-core atoms, staging, and edge transport",
-        nodeids=frozenset(
-            (
-                "tests/compiler/e2e/test_matmul_coverage.py::test_reshaped_a_declines_tma_and_falls_back",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_staged_splitk_matches_gmem_direct_bit_for_bit[smem-async]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_staged_splitk_matches_gmem_direct_bit_for_bit[smem-tma]",
-                "tests/compiler/passes/test_fp8_mma.py::test_w8a8_dynamic_per_token_amax_cuda",
-                "tests/compiler/passes/test_fp8_staged.py::test_canonical_byte_b_and_splitk_compose_cuda",
-            )
-        ),
-    ),
-    RecoveryCluster(
         name="composed-kernels",
         phase=5,
         reason="restore compatible schedules for fused and multi-node kernels",
         nodeids=frozenset(
             (
-                "tests/compiler/e2e/test_attention_coverage.py::test_decode_sdpa_matches_torch[gqa_batch]",
-                "tests/compiler/e2e/test_attention_coverage.py::test_full_self_attn_tinyllama",
-                "tests/compiler/e2e/test_attention_coverage.py::test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates",
-                "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_split_partition_merges_monoid_states",
-                "tests/compiler/e2e/test_attention_coverage.py::test_fused_single_kernel_sdpa_matches_torch[cfg0]",
-                "tests/compiler/e2e/test_attention_coverage.py::test_fused_single_kernel_sdpa_matches_torch[cfg1]",
-                "tests/compiler/e2e/test_attention_coverage.py::test_sdpa_explicit_additive_mask[1-32]",
-                "tests/compiler/e2e/test_attention_coverage.py::test_sdpa_explicit_additive_mask[16-32]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_cone_splitk_matches_reference[d1/smem]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_cone_splitk_matches_reference[d2/smem]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_splitk_matches_reference",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_swiglu_symbolic_m[130]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_swiglu_symbolic_m[31]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_symbolic_m[130]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_symbolic_m[31]",
-                "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_norm_from_linear_and_matches_reference[8-PLACE]",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_rider_split_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_runner_gpu.py::test_adopted_raw_embed_table_matches_folded_gather",
@@ -92,29 +62,6 @@ RECOVERY_CLUSTERS = (
                 "tests/serving/test_attention_split_gpu.py::test_gemma_post_wrapper_compiles_and_runs_dynamic",
                 "tests/serving/test_attention_split_gpu.py::test_post_wrapper_compiles_with_shared_dim",
                 "tests/serving/test_attention_split_gpu.py::test_pre_wrapper_compiles_and_runs_dynamic",
-            )
-        ),
-    ),
-    RecoveryCluster(
-        name="structural-rewrites",
-        phase=6,
-        reason="restore schedules after structural cuts and fresh-kernel rewrites",
-        nodeids=frozenset(
-            (
-                "tests/compiler/loader/test_exl3.py::test_computed_b_split_k_matches_decoded_linear",
-                "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[2-0-16-mma]",
-                "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[5-2-1-coop]",
-            )
-        ),
-    ),
-    RecoveryCluster(
-        name="independent-enumeration",
-        phase=7,
-        reason="restore lazy enumeration of compatible independent node and edge domains",
-        nodeids=frozenset(
-            (
-                "tests/compiler/e2e/test_knob_pinning.py::test_scalar_cpasync_pin_refuses_odd_stride",
-                "tests/compiler/e2e/test_knob_pinning.py::test_unstaged_atom_lowers_gmem_direct",
             )
         ),
     ),
@@ -181,7 +128,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 78
+REMAINING_FAILURE_COUNT = 52
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

@@ -96,17 +96,18 @@ authored or golden-decoded pins.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (attention's statistics cone contains the score dots whose operand cones are
-cut beside it) — and all pieces set `placement_decided` and proceed to scheduling. A scoped pin whose site path does
+cut beside it) — and all pieces set `placement_decided` and proceed to scheduling. A bare pinned cut consumes its one
+root-most cut the same way. A scoped pin whose site path does
 not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
-realizes is an addressing error. Unpinned cuts and bare
-`PLACE=cut` deliberately leave the pieces undecided, so each fresh kernel can recurse over its own smaller seams.
-`040_schedule` is the clean-slate reconstruction boundary for classic assignments. The former `_schedule.py` was
-deleted rather than adapted. `_classic.py` now realizes direct projection, plain-reduction, scalar-contraction,
+realizes is an addressing error. Only unpinned cuts leave the pieces undecided, so search can explore their smaller
+seams before scheduling.
+`040_schedule` is the classic assignment boundary. `_classic.py` realizes direct projection, plain-reduction,
+scalar-contraction,
 precision-gated tensor-core, materialized-operand copy staging, computed-operand and multi-channel smem compute-fill
-staging, fragment-compatible composed contractions, and kernel-global raster domains; sampled lazy enumeration raises
-`ClassicScheduleUnavailable` until its coherent recovery phase lands. A composed cross-CTA split piece with several
-contraction schedule sites has the same explicit boundary. A split piece's partition receipt consumes the GRID stage
+staging, fragment-compatible composed contractions, and kernel-global raster domains. A composed cross-CTA split
+piece with several contraction schedule sites uses the same boundary. A split piece's partition receipt consumes the
+GRID stage
 before `c` is built, so its immutable schedule restriction contains only the remaining `REDUCE` stages; neither the
 domain projection nor the Algorithm 1 traversal reads that structural choice. A plain reduction projects serial,
 cooperative and ILP choices independently from its node, while the kernel domain projects the union of their worker
@@ -186,18 +187,19 @@ from its algebra, its operand dtypes and the gmem addressing its fragment loader
 the fragment seam's refusals (the paired register bound included) sit beside the option builder in `_classic`.
 `tile/_staging.py` is not a legality layer: it holds the three stage RESOLVERS (whose legal answer is a size) plus the
 compute fill's own node refusals, which live there because the fill is the move they filter. Nothing may narrow for
-SPEED — a slow candidate is a fork the evidence decides, never a row withheld. One acknowledged exception, labeled as
-a bound and not a legality: the reduce catalog drops a band wider than the axis has work for (idle lanes realize
-fine — a pin still gets such a band; the drop only keeps a short axis from enumerating the whole band catalog to no
-effect).
+SPEED — a slow candidate is a fork the evidence decides, never a row withheld. A cooperative band wider than its axis
+remains in the independent domain because idle lanes are legal; a restriction may select it without constructing a
+new value.
 
 **A schedule pin is a restriction, never a domain constructor.** `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` pins
 compare their exact canonical values with the applicable factors in Algorithm 1. They do not replace a factor or add a
 value the static catalog did not project. Precision gates are restrictions of the same enumeration: their atom choices
 remain in the fixed node domain, and the immutable `c` excludes them when it evaluates a complete assignment. A
 malformed or unavailable exact value therefore names no member of `D(p, t)` and is refused; pinning cannot manufacture
-a worker inventory, tile, transport, or raster value. With only bare schedule pins, they restrict every applicable
-kernel. Once the parameter set contains scoped schedule pins, its bare kernel values travel with that partial row:
+a worker inventory, tile, transport, or raster value. A bare pin must be supported by at least one factor in a strict
+kernel and restricts every factor that supports its value; non-supporting sibling sites are not silently given another
+meaning. Under union probing, a kernel that supports the value nowhere ignores the bare pin so a sibling kernel may
+carry it. Once the parameter set contains scoped schedule pins, its bare kernel values travel with that partial row:
 they restrict a kernel where at least one scoped key resolves and are inert on kernels where every scoped key is
 foreign.
 
@@ -491,18 +493,15 @@ that canonical input:
   seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
   disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
   them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
-  unmapped TileOps, so further legal cuts and schedules use the same ordinary passes; a pinned cut therefore recurses
-  exactly until a piece schedules (a scheduled piece is placed and never re-cut). A piece minted by a structural
+  unmapped TileOps, so further legal cuts and schedules use the same ordinary passes. An unpinned cut may expose more
+  cut choices; a pinned cut consumes its restriction on every piece. A piece minted by a structural
   apply joins the sweep after `030_cut`'s batch, so it reaches `040_schedule` first. If its placement is undecided and
   a cuttable seam remains, the schedule pass skips it without probing schedule parameters; the next sweep's cut pass
   explores its placement first.
 
-- **The cross-CTA reduce split is not currently realized.** Splitting the reduce axis across CTAs into a partial +
-  finalize is a *structural* alternative — it changes which kernels exist — but it used to be decided as a `REDUCE`
-  spelling inside the schedule and realized by a pass downstream of that decision. Carrying a structural decision at
-  a schedule position is what made it need a consumed-partition check, its own pin-refusal plumbing, and a separate
-  realizer. When it returns it belongs beside `030_cut`, offered before any schedule knob is spelled — unless the
-  partial genuinely needs the pre-split tile, which is the one thing to establish first.
+- **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
+  changes which kernels exist, so `035_split_reduce` offers it beside `030_cut` before any schedule is enumerated.
+  Each fresh piece then enters the ordinary schedule pass with the partition receipt described below.
 
 **Every split piece is a new kernel.** The rewrite consumes the scheduled kernel and returns fresh unmapped Tile IR
 for the partial and, when required, the finalize. The partial keeps the same `Fold(init, combine)` over an axis
@@ -576,8 +575,9 @@ the partial — and the deferred finalize folds every component before applying 
 Multi-channel products still have no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge
 is the anticipated
 `RoleKind` extension. `TILE` parameters match each site's own catalog through the exact codec spelling: an explicit
-`TILE@n<ordinal>` restricts one site when the family is ambiguous, while the canonical bare spelling addresses its
-only applicable site. A value absent from an applicable factor leaves no assignment rather than changing that factor. Staging additionally
+`TILE@n<ordinal>` restricts one site when supporting sites need different values, while the canonical bare spelling
+restricts every site that supports its value. A value absent from every applicable factor leaves no assignment rather
+than changing a factor. Staging additionally
 requires the staged BUFFER dtypes to match the atom's operand dtypes — a slab fill byte-copies and cannot
 convert; gmem-direct fragment loads convert
 per element and keep the warp tier either way. To keep that gate from silently disabling staging on real models,

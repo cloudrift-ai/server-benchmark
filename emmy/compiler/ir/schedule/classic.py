@@ -211,7 +211,7 @@ class ScheduleRestriction:
             raise ValueError("classic schedule restriction singleton proof returned more than one schedule")
         return schedules
 
-    def restricted(self, codec: ClassicScheduleCodec, *, limit: int = 256) -> tuple[ClassicSchedule, ...] | None:
+    def restricted(self, codec: ClassicScheduleCodec, *, limit: int = 512) -> tuple[ClassicSchedule, ...] | None:
         """Return the exact restricted set when the predicate can prove it within ``limit``.
 
         ``None`` leaves Algorithm 1 to traverse the unchanged product. The proof belongs to c;

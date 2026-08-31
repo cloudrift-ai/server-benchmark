@@ -15,14 +15,14 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, out
 PATTERN = [Pattern("root", TileOp)]
 
 
-def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | None:
+def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     """The cut parameter restriction spelled by live PLACE pins, or ``None``.
 
     This restriction is consumed entirely by the cut pass before classic schedule enumeration.
-    Returns ``(seams, value, scoped)``: every scoped ``PLACE@site=cut`` pin that resolves on this
-    kernel joins ONE composed decision — the seams all live on this kernel's tree, so one
-    realization cuts them together and the pieces stay decided, which is what lets a pinned
-    compile spell a multi-workspace route without recursive re-placement. A scoped pin whose site
+    Every scoped ``PLACE@site=cut`` pin that resolves on this kernel joins ONE composed decision —
+    the seams all live on this kernel's tree, so one realization cuts them together and the pieces
+    stay decided, which is what lets a pinned compile spell a multi-workspace route without
+    recursive re-placement. A scoped pin whose site
     path does not exist on this kernel addresses another kernel of the graph; a kernel none of
     the pins address decides FUSE, so the unpinned fork never returns under a pin-driven compile.
     A pin that resolves to a site no cut realizes is an addressing error and raises. A scoped
@@ -69,14 +69,14 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | Non
                 cut.append(required)
                 queue.append(required)
     if cut:
-        return tuple(cut), "cut", True
+        return tuple(cut), "cut"
     if fused:
-        return (fused[0],), "fuse", True
+        return (fused[0],), "fuse"
     for name, value in pins:
         if name != "PLACE":
             continue
         if value == "fuse":
-            return (name,), value, False
+            return (name,), value
         # A bare ``PLACE=cut`` names the placement DECISION, not a site: the codec's primary
         # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (an unclosed
         # cone, a seam whose workspace dtypes stay undetermined), so a bare pin resolves among
@@ -85,14 +85,14 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | Non
         # because pieces run OUT of seams, and provider closure keeps every piece supplied.
         plain = [seam for seam in seams if not (seam.providers or seam.requires)]
         if not plain:
-            return ("PLACE",), "fuse", False
+            return ("PLACE",), "fuse"
         depth = {id(site.node): site.depth for site in all_sites}
         seam = min(plain, key=lambda s: depth[id(s.node)])
-        return (seam,), value, False
+        return (seam,), value
     if missing:
         # A pin-driven compile whose scoped pins all address other kernels decides FUSE here —
         # deterministic, and the unpinned placement fork never returns under a pin.
-        return ("PLACE",), "fuse", False
+        return ("PLACE",), "fuse"
     return None
 
 
@@ -109,12 +109,12 @@ def rewrite(match: Match, root: Node, ctx=None):
     match.output = renamed
     pinned = _placement_restriction(tile, seams)
     if pinned is not None:
-        chosen, value, scoped = pinned
+        chosen, value = pinned
         if value == "fuse":
             (spelling,) = chosen
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
         return DeferredFork(
-            lambda: realize(match, root, chosen, renamed, placement_decided=scoped),
+            lambda: realize(match, root, chosen, renamed, placement_decided=True),
             {seam.spelling: "cut" for seam in chosen},
             structural=True,
         )

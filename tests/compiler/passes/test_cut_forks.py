@@ -349,15 +349,14 @@ def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
         _CUT.rewrite(match, node)
 
 
-def test_bare_place_cut_keeps_recursing_on_fresh_pieces() -> None:
+def test_bare_place_cut_is_consumed_once_by_both_pieces() -> None:
     fragment = _nested_attention_cut({"PLACE": "cut"})
     node = _piece_with_seam(fragment)
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
 
-    assert not node.op.placement_decided
-    with pinned_knobs({"PLACE": "cut"}):
-        fork = _CUT.rewrite(match, node)
-    assert "cut" in fork.knobs.values()
+    assert node.op.placement_decided
+    with pinned_knobs({"PLACE": "cut"}), pytest.raises(RuleSkipped, match="already placed"):
+        _CUT.rewrite(match, node)
 
 
 def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:

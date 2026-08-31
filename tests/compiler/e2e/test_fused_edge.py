@@ -142,8 +142,7 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
     # to a (legal) 2-kernel split row (seen on sm_89). The split form has its own test
     # (test_fused_cone_splitk_matches_reference); the free pick, test_fused_rmsnorm_linear_unpinned.
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE@N0", "")
-    monkeypatch.setenv("EMMY_REDUCE@N3", "")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     S, H, inter = 32, 1024, 3072
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, S, H), F16), node_id="x")
@@ -220,7 +219,6 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     fix): the ``_rsub`` grouped decode must be emitted, not silently degraded to flat."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     pin_classic(monkeypatch, {"TILE": tile, "WORK": work, "REDUCE": ""})
-    monkeypatch.setenv("EMMY_REDUCE@N3", "")  # serial fold — the swizzle inspection needs the ONE fused kernel
     if tile.endswith("k4"):
         monkeypatch.setenv("EMMY_RASTER", "gn8")
     S, H, inter = 64, 1024, 3072
@@ -252,8 +250,7 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
 def test_place_cone_cut_splits_norm_from_linear_and_matches_reference(rows, place, monkeypatch):
     """The restored placement cut covers both decode M=1 and a regular norm→linear tile."""
     monkeypatch.setenv(f"EMMY_{place.upper()}", "cut")
-    monkeypatch.setenv("EMMY_REDUCE@N0", "")
-    monkeypatch.setenv("EMMY_REDUCE@N3", "")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     hidden, intermediate = 64, 64
     graph = _rmsnorm_linear_graph(rows, hidden, intermediate)
     _rmsnorm_linear_check(graph, rows, hidden, intermediate, want_mma=False, kernels=(2,))
@@ -272,7 +269,6 @@ def test_fused_rmsnorm_linear_symbolic_m(runtime_s, monkeypatch):
         monkeypatch,
         {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "REDUCE": ""},
     )  # tile 64×32 — every runtime S is masked
-    monkeypatch.setenv("EMMY_REDUCE@N3", "")  # serial fold — the ONE-masked-kernel contract is what's under test
     H, inter = 256, 512
     g = _rmsnorm_linear_graph(Dim("seq_len", hint=64), H, inter)
     _rmsnorm_linear_check(g, runtime_s, H, inter, want_mma=True)
@@ -303,7 +299,6 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
     pin_classic(
         monkeypatch,
         {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "REDUCE": ""},
-        node=1,
     )  # serial fold — ONE masked kernel is the contract; the split form has its own test
     S, H, inter = runtime_s, 256, 512
     Sd = Dim("seq_len", hint=64)
@@ -461,7 +456,6 @@ def test_fused_gate_up_splitk_matches_reference(monkeypatch):
     pin_classic(
         monkeypatch,
         {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x4", "REDUCE": "g4k"},
-        node=1,
     )
     S, H, inter = 32, 256, 512
     g = Graph()

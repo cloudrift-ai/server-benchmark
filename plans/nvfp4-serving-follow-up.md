@@ -126,6 +126,11 @@ Measured reality of the fused shapes on the scalar tier (2026-09-01, 5080): `gat
 at M=1 and 38.9 s at M=32; the other fused linears 1.5-5.8 s. At 36 layers that is minutes per token — the
 warp-tier gap is not a speed story but a serveability precondition for W4A4.
 
+Boot 9 (2 h of startup forwards) died at the LAST boot step, outside emmy: vLLM's flashinfer sampler JIT
+(ninja build under `~/.cache/flashinfer`) fails to link on NixOS (`collect2: ld returned 1 exit status`).
+Workstation boots need `VLLM_USE_FLASHINFER_SAMPLER=0` (torch-native sampling). The forwards themselves
+completing confirms the untuned W4A4 programs run to completion — slow, not wrong.
+
 ## Step 3 — hybrid serving (Qwen3.6-27B-NVFP4) — stacked on step 2
 
 Scope: the serving-contract work. Revert `b3056eea0`, fix the 3-vs-4 unpack, give the runner per-layer kinds,

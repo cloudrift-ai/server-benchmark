@@ -53,9 +53,6 @@ RECOVERY_CLUSTERS = (
         reason="restore tensor-core atoms, staging, and edge transport",
         nodeids=frozenset(
             (
-                "tests/compiler/e2e/test_matmul_coverage.py::test_mma_static_k_tail_zero_fills[128-False]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_mma_static_k_tail_zero_fills[132-True]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_mma_static_k_tail_zero_fills[136-True]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_reshaped_a_declines_tma_and_falls_back",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_staged_splitk_matches_gmem_direct_bit_for_bit[smem-async]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_staged_splitk_matches_gmem_direct_bit_for_bit[smem-tma]",
@@ -290,7 +287,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 181
+REMAINING_FAILURE_COUNT = 178
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

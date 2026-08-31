@@ -197,10 +197,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/cli/test_run.py::test_run_ab_bench_shows_pinned_row",
                 "tests/compiler/cli/test_run.py::test_run_ab_bench_unmatched_pin_fails_loudly",
                 "tests/compiler/cli/test_run.py::test_run_code_fp16_matmul_accuracy",
-                "tests/compiler/cli/test_run.py::test_run_code_sdpa_k_chunked",
-                "tests/compiler/cli/test_run.py::test_run_code_sdpa_seq1024_dynamic_smem",
-                "tests/compiler/cli/test_run.py::test_run_code_sdpa_tinyllama_full",
-                "tests/compiler/cli/test_run.py::test_run_code_sdpa_tinyllama_per_head",
             )
         ),
     ),
@@ -271,7 +267,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 162
+REMAINING_FAILURE_COUNT = 158
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

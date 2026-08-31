@@ -668,3 +668,25 @@ def test_a_required_producer_keeps_its_own_seam() -> None:
 
     assert any(seam.node is producer.node for seam in kept), "the required producer must survive as its own seam"
     assert not any(sibling is producer.node for seam in kept for sibling, _ in seam.siblings)
+
+
+def test_a_dependent_seam_is_an_unpinned_composed_arm() -> None:
+    """The unpinned fork offers a dependent seam WITH its transitive producer closure — one arm,
+    composed exactly as the pin path composes it. The plain-only ballot could never elect the one
+    placement measured to work on DeepSeek-V4 post4096 (a dependent seam's closure), however the
+    evidence ranked: the arm was not offered."""
+    match, graph = _composed_case_match()
+    node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    with pinned_knobs(_OFF):
+        options = _CUT.rewrite(match, node)
+    arms = [dict(option.knobs) for option in options if "cut" in option.knobs.values()]
+    dependent = {
+        "PLACE@map.fold.a.map.fold.a32": "cut",
+        "PLACE@map.fold.a.map.fold.a31": "cut",
+        "PLACE@map.fold.a21": "cut",
+    }
+    assert dependent in arms, f"the dependent seam's closure must be one composed arm, got {arms}"
+    seams = cuttable_seams(node.op)
+    offered = {spelling for arm in arms for spelling in arm}
+    missing = {seam.spelling for seam in seams} - offered
+    assert not missing, f"every seam must appear on the ballot through some closure: {missing}"

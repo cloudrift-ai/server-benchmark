@@ -68,8 +68,6 @@ RECOVERY_CLUSTERS = (
         nodeids=frozenset(
             (
                 "tests/compiler/e2e/test_attention_coverage.py::test_decode_sdpa_matches_torch[gqa_batch]",
-                "tests/compiler/e2e/test_attention_coverage.py::test_flash_causal_and_gqa_match_torch",
-                "tests/compiler/e2e/test_attention_coverage.py::test_flash_transposed_output_matches_torch",
                 "tests/compiler/e2e/test_attention_coverage.py::test_full_self_attn_tinyllama",
                 "tests/compiler/e2e/test_attention_coverage.py::test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates",
                 "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_split_partition_merges_monoid_states",
@@ -258,7 +256,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 149
+REMAINING_FAILURE_COUNT = 147
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

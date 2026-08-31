@@ -87,7 +87,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_swiglu_symbolic_m[31]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_symbolic_m[130]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_symbolic_m[31]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_unpinned",
                 "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_norm_from_linear_and_matches_reference[8-PLACE]",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_rider_split_inside_outer_capture_replays_live",
@@ -123,9 +122,7 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/loader/test_exl3.py::test_computed_b_split_partial_reindexes_the_cone",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[2-0-16-mma]",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[5-2-1-coop]",
-                "tests/compiler/loader/test_exl3.py::test_input_spelling_reaches_cuda_source_without_format_ir",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_streams_computed_b_through_tensor_cores",
-                "tests/compiler/loader/test_exl3.py::test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds",
                 "tests/compiler/passes/test_placement_routing.py::test_pinned_transposed_coop_band_still_refuses_without_a_free_axis",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_a_pin_hands_its_remaining_row_to_the_pieces",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_decides_its_own_row",
@@ -171,7 +168,6 @@ RECOVERY_CLUSTERS = (
             (
                 "tests/compiler/backend/test_source_determinism.py::test_kernel_source_identical_across_processes",
                 "tests/compiler/cli/test_eval.py::test_offer_audit_flags_unrealized_entries_and_fall_through",
-                "tests/compiler/cli/test_run.py::test_run_code_fp16_matmul_accuracy",
             )
         ),
     ),
@@ -242,7 +238,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 133
+REMAINING_FAILURE_COUNT = 129
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

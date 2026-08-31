@@ -121,7 +121,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/loader/test_exl3.py::test_computed_b_lane_offers_the_cross_cta_split",
                 "tests/compiler/loader/test_exl3.py::test_computed_b_split_k_matches_decoded_linear",
                 "tests/compiler/loader/test_exl3.py::test_computed_b_split_partial_reindexes_the_cone",
-                "tests/compiler/loader/test_exl3.py::test_factored_linear_runs_from_a_plan_on_checkpoint_leaves_alone",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[2-0-16-mma]",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_computed_b_matches_decoded_linear[5-2-1-coop]",
                 "tests/compiler/loader/test_exl3.py::test_input_spelling_reaches_cuda_source_without_format_ir",
@@ -246,7 +245,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 137
+REMAINING_FAILURE_COUNT = 136
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

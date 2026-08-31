@@ -93,10 +93,24 @@ fusion stop-gaps — fuse everything, and where a boundary helps performance, CU
 lane), never refuse the fusion up front; and the resulting coverage is pinned as
 `tests/compiler/realization` cases (the 2.7 deliverable), not new custom Python tests.
 
-Findings logged along the way, each needing its own fix: the coded-trunk weight load takes 23 minutes for the
-6 GB 8B (host-side, independent of kernel picks); `--dump-dir`'s frontend-reproducer capture crashes on a
-spelled W4A4 graph (`Input buffer 'attn_out_static_fp4_bits' does not exist` — slice taken over the pre-spell
-input graph); an expected `bench_fail` watchdog verdict prints a full child traceback and reads like a crash.
+Findings logged along the way, each needing its own fix: the coded-trunk weight load takes 24 minutes cold /
+12.6 warm for the 6 GB 8B (host-side; vLLM's own reader accounts for 0.25 s of it; every `f4_pairs` constant
+logs "rides a bind record with unresolved leaves; will not rebind from a pack"); `--dump-dir`'s
+frontend-reproducer capture crashes on a spelled W4A4 graph (`Input buffer 'attn_out_static_fp4_bits' does
+not exist`); an expected `bench_fail` watchdog verdict prints a full child traceback; nvcc's actual error
+lines are truncated out of the captured tail on a compile failure; the sweep has THREE stacked caps
+(accumulated GPU time — hardcoded until 3164dacab; per-launch `EMMY_KERNEL_TIMEOUT_MS`; the worker wall
+derived as compile+run+60 s) and each silently converts a slow-but-finite kernel into an unmeasured target,
+with failures cached as sticky rows that later runs replay; micro-kernel benches at m1/sym are unstable
+(75-91% silly-sample rates, one target measured 1.2 us then 2.5 s across runs, negative Spearman calibration
+on several targets); a measured evidence row can select a schedule whose lowering strands a TileOp and
+crashes engine init (`plan_from_graph: node 'reshape_1' has non-CudaOp 'TileOp'`) — deploy needs a
+discard-and-fall-back, not a crash; serving boots must pin `--max-num-batched-tokens` to the prefill bucket
+or the profiling forward runs symbolic/rider programs (and layer-0 compile takes 31 s greedy-resolve spikes).
+
+Measured reality of the fused shapes on the scalar tier (2026-09-01, 5080): `gate+up` best 19.7 s per launch
+at M=1 and 38.9 s at M=32; the other fused linears 1.5-5.8 s. At 36 layers that is minutes per token — the
+warp-tier gap is not a speed story but a serveability precondition for W4A4.
 
 ## Step 3 — hybrid serving (Qwen3.6-27B-NVFP4) — stacked on step 2
 

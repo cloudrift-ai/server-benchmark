@@ -1313,8 +1313,10 @@ def test_warp_static_k_indivisible_is_masked(monkeypatch) -> None:
     partial step zero-fills the fragment halves past K, the same masking a symbolic K gets. The
     K-step used to be a hard divisibility gate, which put every such shape out of a golden's reach
     (the emitted zero-fill is asserted by ``test_mma_static_k_tail_zero_fills``)."""
-    pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16_f32/f1x1"})  # K-step 16
-    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    pin_classic(
+        monkeypatch,
+        {"WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "", "STAGE": "", "RASTER": ""},
+    )  # K-step 16
     _run_tile_pass(_guard_mm_graph(128, 128, 100))  # 100 % 16 == 4 — masked, no raise
     _run_tile_pass(_guard_mm_graph(128, 128, 128))  # 128 % 16 == 0 — exact, no mask
 

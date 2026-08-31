@@ -18,6 +18,7 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.kernel_cache import POISON, KernelCache
 from emmy.compiler.pipeline.search.db import SearchDB
+from tests.compiler.helpers import pin_classic
 
 
 def _matmul(x: str, w: str, o: str) -> Graph:
@@ -37,7 +38,13 @@ def _compile(graph: Graph, ctx: Context) -> list[CudaOp]:
     return _cuda_ops(Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=SearchDB()))
 
 
-def test_twin_replay_renders_byte_identical_source() -> None:
+def _pin_direct_matmul(monkeypatch) -> None:
+    """Keep cache tests on one complete schedule; their subject is replay, not enumeration."""
+    pin_classic(monkeypatch, {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""})
+
+
+def test_twin_replay_renders_byte_identical_source(monkeypatch) -> None:
+    _pin_direct_matmul(monkeypatch)
     cache = KernelCache()
     ctx = replace(Context.from_target((12, 0)), kernel_cache=cache)
 
@@ -54,7 +61,8 @@ def test_twin_replay_renders_byte_identical_source() -> None:
     assert first.kernel_source != fresh.kernel_source, "the premise: the twins spell different buffer names"
 
 
-def test_without_a_cache_nothing_changes() -> None:
+def test_without_a_cache_nothing_changes(monkeypatch) -> None:
+    _pin_direct_matmul(monkeypatch)
     ctx = Context.from_target((12, 0))
     assert ctx.kernel_cache is None
     (op,) = _compile(_matmul("x0", "w0", "o0"), ctx)

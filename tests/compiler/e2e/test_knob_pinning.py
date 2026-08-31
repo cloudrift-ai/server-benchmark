@@ -44,7 +44,13 @@ def _run_with_knobs(graph, inputs: dict[str, np.ndarray], out_name: str, knobs: 
 # warp stage resolver gates the box extent, and a pinned stage the resolver declines REFUSES —
 # the pin names a kernel, so silently deploying its gmem-direct sibling would deploy something the
 # user did not ask for (the same contract ``test_scalar_cpasync_pin_refuses_odd_stride`` states).
-_OVERSIZED_BOX_KNOBS = {"TILE": "mma_m16n8k16_f16_f32/f8x2/k2", "WORK": "w4x2", "STAGE": "d2/smem-tma"}
+_OVERSIZED_BOX_KNOBS = {
+    "TILE": "mma_m16n8k16_f16_f32/f8x2/k2",
+    "WORK": "w4x2",
+    "REDUCE": "",
+    "STAGE": "d2/smem-tma",
+    "RASTER": "",
+}
 
 
 def test_warp_tma_pin_refuses_oversized_box(monkeypatch):

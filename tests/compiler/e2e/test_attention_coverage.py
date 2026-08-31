@@ -331,7 +331,7 @@ def test_scalar_flash_matches_torch(monkeypatch, variant):
     afford to score (module docstring's burner evidence) — this cell protects mask accuracy,
     not the cold policy."""
     if variant == "mask":
-        _pin_scalar_fused(monkeypatch)
+        _pin_mask_direct(monkeypatch)
     torch.manual_seed(0)
     for cfg in _FLASH_VARIANTS[variant][2]:
         module, args, feed, ref = _flash_feed(variant, *cfg)
@@ -564,7 +564,7 @@ def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
     (for GQA) the causal guard at once. Accurate vs torch at seq ∈ {8, 16, 37}. The ``mask``
     variant pins the fused scalar row, exactly as in ``test_scalar_flash_matches_torch``."""
     if variant == "mask":
-        _pin_scalar_fused(monkeypatch)
+        _pin_mask_direct(monkeypatch)
     torch.manual_seed(0)
     seq = torch.export.Dim("seq_len", min=4, max=4096)
     module_cls, kwargs, _ = _FLASH_VARIANTS[variant]
@@ -881,8 +881,23 @@ def _chain_tile_pins(monkeypatch):
 
 
 def _pin_scalar_fused(monkeypatch):
-    """Pin fused placement; the test selects the direct typed schedule from the fork tree."""
+    """Pin fused placement; model-chain tests select their schedule from the fork tree."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
+
+
+def _pin_mask_direct(monkeypatch):
+    """Pin fused placement and independently restrict mask c to the complete direct schedule."""
+    _pin_scalar_fused(monkeypatch)
+    monkeypatch.setenv("EMMY_WORK", "")
+    monkeypatch.setenv("EMMY_RASTER", "")
+    _pin_classic(
+        monkeypatch,
+        {
+            **{f"TILE@n{node}": "" for node in (0, 4, 6, 7)},
+            **{f"REDUCE@n{node}": "" for node in (0, 3, 4, 5, 6, 7)},
+            **{f"STAGE@n{node}.e{edge}": "" for node in (0, 4, 6, 7) for edge in (0, 1)},
+        },
+    )
 
 
 def _run_module_with_eager(

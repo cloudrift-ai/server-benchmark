@@ -21,10 +21,18 @@ from emmy.compiler.loader.exl3 import (
     pack_trellis,
     trellis_windows,
 )
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import classic_row, requires_cuda
 from tests.support.checkpoints import exl3_linear_tensors
 
 rng = np.random.default_rng(7)
+
+
+def _direct_trellis_schedule() -> dict[str, str]:
+    """The complete direct schedule for the three trellis lowering sites."""
+    row = {}
+    for node in (1, 2, 6):
+        row.update(classic_row({"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, node=node))
+    return row
 
 
 def _random_trellis(kt, nt, K):
@@ -546,6 +554,7 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     from emmy.compiler.ir.frontend.ir import LinearOp
     from emmy.compiler.loader.quant import spell_trellis_inputs
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (1, 128), "f16"), node_id="x")
@@ -554,7 +563,9 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     graph.inputs, graph.outputs = ["x", "w"], ["y"]
     spell_trellis_inputs(graph, {"w": (0, (8, 8, 32))})
 
-    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
+    # Placement is the cut parameter; c independently names one complete schedule.
+    with pinned_knobs({"PLACE": "fuse", **_direct_trellis_schedule()}):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
     cuda = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert cuda
     assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
@@ -1095,6 +1106,7 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
     from emmy.compiler.ir.frontend.ir import LinearOp
     from emmy.compiler.loader.quant import spell_trellis_constants
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources
 
     tensors, _ref = exl3_linear_tensors("layer", 128, 128, K=2, cb=2)
@@ -1105,7 +1117,9 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
     graph.inputs, graph.outputs = ["x"], ["y"]
     assert spell_trellis_constants(graph, str(tmp_path)) == 1
 
-    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
+    # Placement is the cut parameter; c independently names one complete schedule.
+    with pinned_knobs({"PLACE": "fuse", **_direct_trellis_schedule()}):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
     assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
     plan = plan_from_graph(lowered)
     paths = {weight.source_path for weight in plan.weights.values() if weight.source_path is not None}

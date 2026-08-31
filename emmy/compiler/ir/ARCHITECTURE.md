@@ -67,8 +67,9 @@ schedule, materialization, output specifications, and knobs belong to `TileOp`, 
 
 ## Classic schedule model
 
-`classic_schedule.py` owns the semantic model for the ordinary grid/CTA/warp/thread/register schedule. A
-`ClassicProblem` contains only an unscheduled `Fold` tree and target. Its immutable `SiteIndex` assigns one stable
+The [schedule package](schedule/ARCHITECTURE.md) separates schedule-wide interfaces and reusable choices from concrete
+implementations. `schedule/classic.py` owns the semantic model for the ordinary grid/CTA/warp/thread/register schedule.
+A `ClassicProblem` contains only an unscheduled `Fold` tree and target. Its immutable `SiteIndex` assigns one stable
 `NodeSite` to each Fold identity and one `EdgeSite` to every consumer operand position, so a shared producer is
 scheduled once while each use receives an independent transport choice. Site classification reads only the Fold at a
 node site; target facts cannot affect whether that site is a projection, reduction, or contraction-capable reduction.

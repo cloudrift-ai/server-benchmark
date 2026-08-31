@@ -10,11 +10,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from itertools import product
-from types import MappingProxyType
+
+from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold, is_contraction
-from emmy.compiler.ir.schedule import (
+
+from .base import Schedule, ScheduleCodec, ScheduleContext
+from .choices import (
     PlacedTile,
     Raster,
     Reduce,
@@ -175,7 +179,7 @@ class EdgeSchedule:
 
 
 @dataclass(frozen=True)
-class ClassicSchedule:
+class ClassicSchedule(Schedule):
     """One complete classic schedule assignment."""
 
     kernel: KernelSchedule
@@ -195,12 +199,28 @@ class ClassicSchedule:
             raise TypeError("classic edge assignments must be keyed by EdgeSite")
         if any(not isinstance(assignment, EdgeSchedule) for assignment in self.edges.values()):
             raise TypeError("classic edge assignments must contain edge schedules")
-        object.__setattr__(self, "nodes", MappingProxyType(dict(self.nodes)))
-        object.__setattr__(self, "edges", MappingProxyType(dict(self.edges)))
+        object.__setattr__(self, "nodes", frozendict(self.nodes))
+        object.__setattr__(self, "edges", frozendict(self.edges))
 
-    def __reduce__(self):
-        """Rebuild read-only mappings after process transport."""
-        return type(self), (self.kernel, dict(self.nodes), dict(self.edges))
+    def replace(self, **changes: object) -> ClassicSchedule:
+        """Return a new classic schedule with ``changes`` applied."""
+        return dc_replace(self, **changes)
+
+    def with_kernel(self, kernel: KernelSchedule) -> ClassicSchedule:
+        """Return a schedule with a replacement kernel assignment."""
+        return self.replace(kernel=kernel)
+
+    def with_node(self, site: NodeSite, assignment: NodeSchedule) -> ClassicSchedule:
+        """Return a schedule with one replacement node assignment."""
+        nodes = dict(self.nodes)
+        nodes[site] = assignment
+        return self.replace(nodes=nodes)
+
+    def with_edge(self, site: EdgeSite, assignment: EdgeSchedule) -> ClassicSchedule:
+        """Return a schedule with one replacement edge assignment."""
+        edges = dict(self.edges)
+        edges[site] = assignment
+        return self.replace(edges=edges)
 
 
 def _allow_schedule(_schedule: ClassicSchedule) -> bool:
@@ -293,7 +313,7 @@ class LocalSupport:
             raise TypeError("classic local support edges must map EdgeSite to EdgeSchedule")
         if self.work is not None and not isinstance(self.work, Work):
             raise TypeError("classic local support work must be Work or None")
-        object.__setattr__(self, "edges", MappingProxyType(dict(self.edges)))
+        object.__setattr__(self, "edges", frozendict(self.edges))
 
 
 @dataclass(frozen=True)
@@ -322,9 +342,9 @@ class ClassicDomains:
                 raise TypeError(f"classic {name} domains have invalid site keys")
             if any(not choices or any(not isinstance(choice, choice_type) for choice in choices) for choices in values.values()):
                 raise TypeError(f"classic {name} domains have invalid choices")
-        object.__setattr__(self, "nodes", MappingProxyType({site: tuple(choices) for site, choices in self.nodes.items()}))
-        object.__setattr__(self, "edges", MappingProxyType({edge: tuple(choices) for edge, choices in self.edges.items()}))
-        object.__setattr__(self, "supports", MappingProxyType({site: tuple(choices) for site, choices in self.supports.items()}))
+        object.__setattr__(self, "nodes", frozendict({site: tuple(choices) for site, choices in self.nodes.items()}))
+        object.__setattr__(self, "edges", frozendict({edge: tuple(choices) for edge, choices in self.edges.items()}))
+        object.__setattr__(self, "supports", frozendict({site: tuple(choices) for site, choices in self.supports.items()}))
 
     @property
     def product_size(self) -> int:
@@ -349,12 +369,8 @@ class ClassicMaterialization:
             raise TypeError("classic materialization tiles must map NodeSite to PlacedTile")
         if any(not isinstance(edge, EdgeSite) or not isinstance(stage, ResolvedStage) for edge, stage in self.stages.items()):
             raise TypeError("classic materialization stages must map EdgeSite to ResolvedStage")
-        object.__setattr__(self, "tiles", MappingProxyType(dict(self.tiles)))
-        object.__setattr__(self, "stages", MappingProxyType(dict(self.stages)))
-
-    def __reduce__(self):
-        """Rebuild read-only mappings after process transport."""
-        return type(self), (dict(self.tiles), dict(self.stages))
+        object.__setattr__(self, "tiles", frozendict(self.tiles))
+        object.__setattr__(self, "stages", frozendict(self.stages))
 
 
 @dataclass(frozen=True)
@@ -457,13 +473,13 @@ class Acceptance:
         return self.refusal is None
 
 
-class ClassicScheduleContext:
+class ClassicScheduleContext(ScheduleContext[ClassicSchedule, Acceptance]):
     """Derived facts and complete-assignment invariants for one classic problem."""
 
     def __init__(self, problem: ClassicProblem, domains: ClassicDomains | None = None) -> None:
         self.problem = problem
         self.index = SiteIndex(problem.root)
-        self.views = MappingProxyType({site: classify(self.index, site) for site in self.index.nodes})
+        self.views = frozendict({site: classify(self.index, site) for site in self.index.nodes})
         self._node_sites = frozenset(self.index.nodes)
         self._edge_sites = frozenset(self.index.edges)
         self._tile_sites = frozenset(tile_sites(self))
@@ -679,7 +695,7 @@ def _fragment_seam_ok(need: tuple, offer: tuple) -> bool:
     return shape == offer_shape and layout == offer_layout and offer_units_n == 1 and offer_tile_n == bk
 
 
-class ClassicScheduleCodec:
+class ClassicScheduleCodec(ScheduleCodec[ClassicSchedule]):
     """Strict wire boundary for complete classic schedules.
 
     Kernel families are bare. Every node and edge family carries the one canonical site suffix: a

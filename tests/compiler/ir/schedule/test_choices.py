@@ -1,4 +1,4 @@
-"""The value grammar's codec core — the ``WORK`` worker-inventory family and the SITE-LOCAL
+"""The reusable value grammar — the ``WORK`` worker-inventory family and the SITE-LOCAL
 ``TILE`` / ``REDUCE`` value forms.
 
 The grammar stores each kernel-global fact ONCE: the worker inventory spells exactly once

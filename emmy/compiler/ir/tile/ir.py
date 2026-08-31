@@ -36,12 +36,12 @@ from functools import cached_property
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
-from emmy.compiler.ir.classic_schedule import ClassicMaterialization, ClassicSchedule
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
+from emmy.compiler.ir.schedule.classic import ClassicMaterialization, ClassicSchedule
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
 from emmy.compiler.ir.stmt.base import _axis_identity
@@ -522,7 +522,7 @@ class TileOp(Op):
             return
         if self.classic is None or self.materialization is None:
             raise ValueError("a scheduled TileOp requires both ClassicSchedule and ClassicMaterialization")
-        from emmy.compiler.ir.classic_schedule import ClassicProblem, ClassicScheduleContext, Reduction  # noqa: PLC0415
+        from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleContext, Reduction  # noqa: PLC0415
         from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
 
         context = ClassicScheduleContext(ClassicProblem(self.op, target=None))

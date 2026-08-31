@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis, AxisRole
-from emmy.compiler.ir.classic_schedule import (
+from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure import Lambda
+from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
+from emmy.compiler.ir.schedule import Raster, ResolvedStage, Stage, Tile, Work
+from emmy.compiler.ir.schedule.classic import (
     ClassicMaterialization,
     ClassicProblem,
     ClassicSchedule,
@@ -16,10 +20,6 @@ from emmy.compiler.ir.classic_schedule import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
-from emmy.compiler.ir.schedule import Raster, ResolvedStage, Stage, Tile, Work
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, Reduce, TileOp, apply_output_specs
 from emmy.compiler.ir.tile.ops import reduce_plan
@@ -575,7 +575,8 @@ def test_workers_derive_from_tile_slices_and_disagreement_is_loud() -> None:
 
 
 def test_scheduled_uses_only_the_accepted_kernel_choice() -> None:
-    from emmy.compiler.ir.classic_schedule import (
+    from emmy.compiler.ir.schedule import Raster, Reduce, Stage, Work
+    from emmy.compiler.ir.schedule.classic import (
         ClassicProblem,
         ClassicSchedule,
         ClassicScheduleContext,
@@ -583,7 +584,6 @@ def test_scheduled_uses_only_the_accepted_kernel_choice() -> None:
         KernelSchedule,
         ReductionSchedule,
     )
-    from emmy.compiler.ir.schedule import Raster, Reduce, Stage, Work
     from emmy.compiler.ir.tile.ops import scheduled
 
     c = _contraction()

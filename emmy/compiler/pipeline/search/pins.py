@@ -6,8 +6,8 @@ import contextlib
 import os
 
 from emmy import config
-from emmy.compiler.ir.classic_schedule import CLASSIC_FAMILIES
 from emmy.compiler.ir.schedule import Level, Reduce, Work
+from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 from emmy.compiler.pipeline.knob import axis_of, family_of, get, is_off_value, pin_key_matches, values_equal
 
 #: A synthetic thread inventory so ``Reduce.parse`` accepts a ``coop`` token here. The width

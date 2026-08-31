@@ -18,7 +18,7 @@ from itertools import combinations
 from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.structural import instance_memo
 
-#: The only family a tree path may address. Schedule identities belong to ``classic_schedule``.
+#: The only family a tree path may address. Schedule identities belong to ``schedule.classic``.
 PATH_FAMILIES = ("PLACE",)
 
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.

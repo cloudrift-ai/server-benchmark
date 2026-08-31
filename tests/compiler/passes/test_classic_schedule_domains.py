@@ -5,7 +5,10 @@ from dataclasses import replace as dc_replace
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, AxisRole, Window
-from emmy.compiler.ir.classic_schedule import (
+from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure import Channel, Fold
+from emmy.compiler.ir.schedule import Reduce, Stage, Tile, Work
+from emmy.compiler.ir.schedule.classic import (
     ClassicProblem,
     ClassicScheduleCodec,
     ClassicScheduleContext,
@@ -13,9 +16,6 @@ from emmy.compiler.ir.classic_schedule import (
     ScheduleRestriction,
     enumerate_reference,
 )
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Channel, Fold
-from emmy.compiler.ir.schedule import Reduce, Stage, Tile, Work
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline.passes.lowering.tile import _classic as classic

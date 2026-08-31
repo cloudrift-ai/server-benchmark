@@ -2,6 +2,7 @@
 
 import json
 import pickle
+from dataclasses import FrozenInstanceError
 from itertools import permutations
 
 import pytest
@@ -10,7 +11,12 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.classic_schedule import (
+from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure import Channel, Fold, Lambda, M
+from emmy.compiler.ir.schedule import PlacedTile, Placement, Raster, Reduce, ResolvedStage, Stage, Tile, Work
+from emmy.compiler.ir.schedule.base import Schedule, ScheduleCodec, ScheduleContext
+from emmy.compiler.ir.schedule.classic import (
     ClassicDomains,
     ClassicMaterialization,
     ClassicProblem,
@@ -38,10 +44,6 @@ from emmy.compiler.ir.classic_schedule import (
     kernel_domain,
     node_domain,
 )
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Channel, Fold, Lambda, M
-from emmy.compiler.ir.schedule import PlacedTile, Placement, Raster, Reduce, ResolvedStage, Stage, Tile, Work
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import TileOp
 
@@ -408,6 +410,38 @@ def test_schedule_and_materialization_are_pickle_safe() -> None:
     assert materialization.tiles[site] == placed
     assert materialization.stages[edge] == resolved
     assert isinstance(materialization.tiles[site], PlacedTile)
+
+
+def test_classic_types_implement_the_schedule_interfaces() -> None:
+    assert issubclass(ClassicSchedule, Schedule)
+    assert issubclass(ClassicScheduleContext, ScheduleContext)
+    assert issubclass(ClassicScheduleCodec, ScheduleCodec)
+
+
+def test_classic_schedule_updates_return_immutable_replacements() -> None:
+    context = ClassicScheduleContext(ClassicProblem(_sum(), target=None))
+    original = _direct(context)
+    site = context.index.nodes[0]
+    edge = context.index.edges[0]
+    kernel = KernelSchedule(Work.parse("t2"), Raster())
+    node = ReductionSchedule(Tile(units=(1, 2)), Reduce())
+    edge_assignment = EdgeSchedule(Stage())
+
+    with pytest.raises(FrozenInstanceError):
+        original.kernel = kernel  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        original.nodes[site] = node  # type: ignore[index]
+    with pytest.raises(TypeError):
+        original.edges[edge] = edge_assignment  # type: ignore[index]
+
+    replaced_kernel = original.with_kernel(kernel)
+    replaced_node = original.with_node(site, node)
+    replaced_edge = original.with_edge(edge, edge_assignment)
+
+    assert replaced_kernel is not original and replaced_kernel.kernel == kernel
+    assert replaced_node is not original and replaced_node.nodes[site] == node
+    assert replaced_edge is not original and replaced_edge.edges[edge] == edge_assignment
+    assert original == _direct(context)
 
 
 def test_schedule_and_materialization_reject_untyped_entries() -> None:

@@ -19,7 +19,19 @@ from types import MappingProxyType
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.classic_schedule import (
+from emmy.compiler.ir.pure.fold import Fold, deep_reads, edge_refs_axis, is_contraction
+from emmy.compiler.ir.schedule import (
+    PlacedTile,
+    Raster,
+    Reduce,
+    ResolvedStage,
+    Stage,
+    Tile,
+    WarpSpec,
+    Work,
+    derive_inventory,
+)
+from emmy.compiler.ir.schedule.classic import (
     AxisAgreement,
     ClassicDomains,
     ClassicMaterialization,
@@ -39,18 +51,6 @@ from emmy.compiler.ir.classic_schedule import (
     reduction_sites,
     stage_edges,
     tile_sites,
-)
-from emmy.compiler.ir.pure.fold import Fold, deep_reads, edge_refs_axis, is_contraction
-from emmy.compiler.ir.schedule import (
-    PlacedTile,
-    Raster,
-    Reduce,
-    ResolvedStage,
-    Stage,
-    Tile,
-    WarpSpec,
-    Work,
-    derive_inventory,
 )
 from emmy.compiler.ir.stmt import Accum, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail

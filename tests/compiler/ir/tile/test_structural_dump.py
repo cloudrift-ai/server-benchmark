@@ -18,7 +18,11 @@ them — never from the term; (e) a λ that is not closed says what it captures.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, AxisRole
-from emmy.compiler.ir.classic_schedule import (
+from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.pure import Lambda
+from emmy.compiler.ir.pure.fold import Channel, Fold
+from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Stage, Tile, Work
+from emmy.compiler.ir.schedule.classic import (
     ClassicMaterialization,
     ClassicProblem,
     ClassicSchedule,
@@ -29,10 +33,6 @@ from emmy.compiler.ir.classic_schedule import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Channel, Fold
-from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Stage, Tile, Work
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.ir.tile._dump import pretty

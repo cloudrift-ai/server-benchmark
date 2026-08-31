@@ -434,7 +434,7 @@ def _serialize_op_fields(op: Op) -> dict:
 
     if not isinstance(op, TileOp) or op.classic is None:
         return fields
-    from emmy.compiler.ir.classic_schedule import ClassicProblem, ClassicScheduleCodec  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCodec  # noqa: PLC0415
 
     codec = ClassicScheduleCodec(ClassicProblem(op.op, target=None))
     fields["classic"] = codec.encode(op.classic)
@@ -466,7 +466,8 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
         if materialization_row is not None:
             raise ValueError("classic materialization requires a classic schedule")
         return op_cls(**fields) if fields else op_cls()
-    from emmy.compiler.ir.classic_schedule import (  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import PlacedTile, ResolvedStage  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.classic import (  # noqa: PLC0415
         ClassicMaterialization,
         ClassicProblem,
         ClassicScheduleCodec,
@@ -474,7 +475,6 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
         NodeId,
         NodeSite,
     )
-    from emmy.compiler.ir.schedule import PlacedTile, ResolvedStage  # noqa: PLC0415
 
     codec = ClassicScheduleCodec(ClassicProblem(fields["op"], target=None))
     schedule = codec.decode(_wire_mapping(classic_row, "classic schedule"))

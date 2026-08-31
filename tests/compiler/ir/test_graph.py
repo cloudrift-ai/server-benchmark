@@ -222,7 +222,10 @@ def test_tile_op_scalar_atom_schedule_roundtrip():
     import json
 
     from emmy.compiler.ir.atom import ScalarAtom
-    from emmy.compiler.ir.classic_schedule import (
+    from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.schedule import Raster, Work
+    from emmy.compiler.ir.schedule import Tile as ScheduleTile
+    from emmy.compiler.ir.schedule.classic import (
         ClassicMaterialization,
         ClassicProblem,
         ClassicSchedule,
@@ -230,9 +233,6 @@ def test_tile_op_scalar_atom_schedule_roundtrip():
         KernelSchedule,
         ProjectionSchedule,
     )
-    from emmy.compiler.ir.pure import Fold
-    from emmy.compiler.ir.schedule import Raster, Work
-    from emmy.compiler.ir.schedule import Tile as ScheduleTile
     from emmy.compiler.ir.tile import TileOp
 
     fold = Fold.projection(results=(0.0,))

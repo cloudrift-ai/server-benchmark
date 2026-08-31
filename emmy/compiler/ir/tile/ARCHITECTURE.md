@@ -237,7 +237,7 @@ accepted tiles require placed geometry and exactly the edges whose accepted tran
 must equal the geometry derived from the structural placement and its axis-free choice; every resolved stage must retain
 its edge's choice. Construction rejects missing, extra, mismatched, or partly attached facts.
 
-`ir/classic_schedule.py` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
+`ir/schedule/classic.py` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
 
 - `ClassicProblem` contains the unscheduled Fold root and target. `SiteIndex` assigns one stable `NodeSite` per Fold
   identity and one distinct `EdgeSite` per consumer operand position, including multiple uses of one producer.

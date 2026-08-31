@@ -18,16 +18,6 @@ from __future__ import annotations
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
-from emmy.compiler.ir.classic_schedule import (
-    ClassicProblem,
-    ClassicScheduleContext,
-    ReductionSchedule,
-    edge_key,
-    node_key,
-    reduction_sites,
-    stage_edges,
-    tile_sites,
-)
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -41,6 +31,16 @@ from emmy.compiler.ir.pure.fold import (
     stmt_axis_names,
 )
 from emmy.compiler.ir.schedule import PlacedTile, Reduce
+from emmy.compiler.ir.schedule.classic import (
+    ClassicProblem,
+    ClassicScheduleContext,
+    ReductionSchedule,
+    edge_key,
+    node_key,
+    reduction_sites,
+    stage_edges,
+    tile_sites,
+)
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs

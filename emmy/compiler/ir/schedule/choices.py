@@ -1,14 +1,12 @@
-"""Tile schedule type system — how a kernel's axes bind to the hardware, and the codecs that ser/des
-the schedule knobs.
+"""Reusable schedule choices — how a kernel's axes bind to hardware.
 
-This root ``ir`` module is the merge of the former ``ir/tile/{codec,role,schedule}.py``. The schedule
-value types are used by both the tile IR and the kernel materializer, so they live at the ir root
-beside :mod:`~emmy.compiler.ir.atom`, not under ``ir/tile``.
+The value types are used by both the tile IR and the kernel materializer, so they live outside any
+one concrete schedule implementation.
 
 **The schedule is separate from the combine.** The combine (the ⊕) lives in the op tree
 (:mod:`emmy.compiler.ir.pure.algebra` + :mod:`~emmy.compiler.ir.tile.ir`). This module owns the
 leaf choice types (:class:`Reduce` / :class:`Tile` / :class:`Stage` / :class:`WarpSpec` plus
-:class:`Placement`); :mod:`emmy.compiler.ir.classic_schedule` composes them into the accepted
+:class:`Placement`); :mod:`emmy.compiler.ir.schedule.classic` composes them into the accepted
 kernel, node, and edge assignment stored on ``TileOp.classic``. The Fold term itself carries no
 schedule field.
 

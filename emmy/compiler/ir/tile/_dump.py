@@ -6,8 +6,8 @@ reads made ``ops`` half presentation."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.classic_schedule import CLASSIC_FAMILIES
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
+from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 from emmy.compiler.ir.stmt import Body, Load
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.tile.ir import ProjectionRegion

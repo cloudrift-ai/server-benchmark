@@ -33,7 +33,7 @@ from functools import lru_cache
 from typing import Any
 
 from emmy import config
-from emmy.compiler.ir.classic_schedule import CLASSIC_FAMILIES
+from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 
 # Reserved prefix for the structural-feature knobs stamped by
 # the ``IdentityStrategy`` (``passes/identity.py``) — distinct from any tuning Knob
@@ -643,7 +643,7 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
         bare = sorted(key for key in out if key in {"TILE", "REDUCE", "STAGE"})
         if bare:
             raise ValueError(f"classic node and edge families require exact sites: {', '.join(bare)}")
-        from emmy.compiler.ir.classic_schedule import EdgeSite, NodeId  # noqa: PLC0415
+        from emmy.compiler.ir.schedule.classic import EdgeSite, NodeId  # noqa: PLC0415
 
         node_keys = []
         for key in out:

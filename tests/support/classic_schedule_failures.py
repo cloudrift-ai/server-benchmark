@@ -92,8 +92,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_symbolic_m[130]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_symbolic_m[31]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_unpinned",
-                "tests/compiler/e2e/test_fused_edge.py::test_mixed_dtype_matmul_demotes_a_to_mma[scalar]",
-                "tests/compiler/e2e/test_fused_edge.py::test_mixed_dtype_matmul_demotes_a_to_mma[warp]",
                 "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_norm_from_linear_and_matches_reference[8-PLACE]",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_rider_split_inside_outer_capture_replays_live",
@@ -256,7 +254,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 147
+REMAINING_FAILURE_COUNT = 145
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

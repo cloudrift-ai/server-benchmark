@@ -1701,7 +1701,7 @@ _RASTER_TILE = ("mma_m16n8k16_f16_f32/f2x4/k2", "w2x2")  # M-tile 64, N-tile 64 
 
 def _raster_kop(monkeypatch, M: int, raster: str | None = None):
     _pin_tile(monkeypatch, _RASTER_TILE)
-    pin_classic(monkeypatch, {"STAGE": "d2/smem-async"})
+    pin_classic(monkeypatch, {"REDUCE": "", "STAGE": "d2/smem-async"})
     if raster is not None:
         monkeypatch.setenv("EMMY_RASTER", raster)
     g = _mma_matmul_graph("static", M, 2048, 1024, "f16", False)

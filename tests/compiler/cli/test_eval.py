@@ -800,7 +800,9 @@ def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, capl
     from emmy.commands.trace import trace_inline_code
     from emmy.compiler.context import Context
     from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.schedule import Tile, Work
     from emmy.compiler.pipeline.knob import complete_kernel_row
+    from emmy.compiler.pipeline.passes.lowering.tile import _classic as classic
     from emmy.compiler.pipeline.search.golden import load_golden_records
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
     from emmy.compiler.torch_wire import graph_to_wire
@@ -808,6 +810,15 @@ def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, capl
     gpu, cap = "NVIDIA GeForce RTX 5090", (12, 0)
     with config.nvcc_flags_override(""):  # the deployable -O3 regime the tier is gated on
         ctx = Context.from_target(cap, gpu_name=gpu)
+
+    # This test owns the audit verdicts, not catalog breadth. Keep Algorithm 1 intact over a
+    # bounded independent product so every audit compile remains a fast unit test.
+    warp = Tile.parse("mma_m16n8k16_f16_f32/f2x2/k2", Work.parse("w2x1"))
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
+    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [])
+    monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
+    monkeypatch.setattr(classic, "raster_moves", lambda: [""])
 
     def enumerated_row(graph):
         rows = enumerate_graph(graph.copy(), ctx).rows
@@ -853,9 +864,10 @@ def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, capl
     # Two DIFFERENT extents, so the two targets carry different structural identities and the
     # floored target's offered row cannot decide the orphan's fork.
     small, big = matmul(64), matmul(256)
-    drifted = drifted_tile(enumerated_row(small))  # a fragment nothing offers
-    floored = records(small, "audit.floored", [(drifted, 10.0), (enumerated_row(small), 20.0)])
-    orphan = records(big, "audit.orphan", [(drifted_tile(enumerated_row(big)), 10.0)])
+    small_row, big_row = enumerated_row(small), enumerated_row(big)
+    drifted = drifted_tile(small_row)  # a fragment nothing offers
+    floored = records(small, "audit.floored", [(drifted, 10.0), (small_row, 20.0)])
+    orphan = records(big, "audit.orphan", [(drifted_tile(big_row), 10.0)])
 
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
         fell = eval_cmd._emit_offer_audit(floored + orphan)

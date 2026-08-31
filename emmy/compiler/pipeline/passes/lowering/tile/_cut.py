@@ -206,15 +206,30 @@ def _environments(root: Fold) -> dict[int, list[tuple[Fold, ...]]]:
     Operand edges and body members have the same lexical scoping. The walk follows every tree
     occurrence, including shared nodes, because provider closure must prove that all occurrences
     resolve to the same sources before one placement seam may represent them.
+
+    A stored Fold is not always a DIRECT member — the same rule ``_tree`` states for the scope walk:
+    a plain statement's nested body can host one, and a maximally fused kernel puts every output's
+    own free axis in such a statement (:class:`~emmy.compiler.ir.tile.ir.ProjectionRegion`, the
+    sibling output loop a multi-output kernel needs when its outputs disagree on their extents).
+    Descending only through Folds skipped those occurrences, so a capturing seam inside a
+    projection region had no environment to close in and was never offered — which is every
+    contraction in a fused requantizing linear, whose packed codes and block scales are two
+    outputs at two extents. The enclosing FOLD chain is what a capture resolves against, so a
+    plain statement contributes its body but not a scope level.
     """
     environments: dict[int, list[tuple[Fold, ...]]] = {}
 
-    def visit(node: Fold, outer: tuple[Fold, ...]) -> None:
-        inner = (node, *outer)
-        for child in (*node.operands, *node.lift.body):
+    def members(stmts, inner: tuple[Fold, ...]) -> None:
+        for child in stmts:
             if isinstance(child, Fold):
                 environments.setdefault(id(child), []).append(inner)
                 visit(child, inner)
+            else:
+                for body in child.nested():
+                    members(body, inner)
+
+    def visit(node: Fold, outer: tuple[Fold, ...]) -> None:
+        members((*node.operands, *node.lift.body), (node, *outer))
 
     visit(root, ())
     return environments

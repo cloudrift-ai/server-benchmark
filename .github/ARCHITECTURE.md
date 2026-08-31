@@ -26,7 +26,8 @@ compiler-heavy job uses `ubuntu-runners` for `make test`, including `tests/githu
 `.github/scripts/` and `.github/workflows/scripts/`. Hugging Face downloads used by tests are cached because anonymous
 shared-runner traffic is rate-limited. A separate GitHub-hosted bare-Python job runs `make pypi-dist`, the exact
 non-publishing build path used by the release workflow, and requires one wheel and one source distribution. This
-workflow has no write permission and does not use deployment credentials.
+workflow has no write permission and does not use deployment credentials. The test step has a ten-minute execution
+cap; the outer twenty-minute job allowance also covers dependency installation and cache setup.
 
 ## Package publication
 

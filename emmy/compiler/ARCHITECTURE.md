@@ -184,7 +184,9 @@ f16 tensor, the format's single rounding point. At graph birth, `spell_quantized
 weight constant into its decode cone. The packed-bits constant feeds a pair-table gather; the e4m3 block-scale
 constant and the f32 per-tensor scale (`weight_scale_2`) fuse into one f16 scale that multiplies the gathered
 values, one scale per 16 along the last axis. The 256×2 byte-to-value-pair table is a `ConstantOp` whose
-`source_graph` computes it at bind time; `from_f4e2m1` decodes the code halves inside that subgraph.
+`source_graph` computes it at bind time; `from_f4e2m1` decodes the code halves inside that subgraph. Like every
+other constant it declares its dtype by NAME, which is what lets a spelled graph round-trip through
+`Graph.to_dict()` — the form the serving-twin capture writes and `emmy tune` reads back.
 
 A contraction (the matmul-shaped node) consuming that cone reads two ways, both fork siblings on the tensor-core
 tier. The general one is the computed-B reading every producer cone gets: loop fusion merges the decode into the

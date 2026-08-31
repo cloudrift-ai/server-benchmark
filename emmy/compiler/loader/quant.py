@@ -402,6 +402,32 @@ def is_nvfp4_checkpoint(model_dir) -> bool:
     return _fp4_quant_config(Path(model_dir)) is not None
 
 
+def nvfp4_checkpoint_dir(model_id_or_path: str, hf_config=None, *, revision: str | None = None) -> Path | None:
+    """The local directory of a checkpoint declaring NVFP4 weights, or ``None`` for any other
+    scheme — :func:`is_nvfp4_checkpoint`'s answer plus the directory the answer is about.
+
+    The NVFP4 counterpart of :func:`~emmy.compiler.loader.exl3.coded_tensor_storage`, and it hands
+    back a directory rather than a weight-free allocation listing because this format has no such
+    description: the packed shapes live in the safetensors headers, and the activation half's
+    calibrated ``input_scale`` values live in the shards. A twin that wants the deployed program
+    therefore reads the same checkpoint the deployed program reads.
+
+    ``hf_config`` is an already-loaded transformers config, consulted to confirm the scheme before
+    any fetch, so a caller holding a config never touches the hub for an ordinary model. Omit it
+    and the checkpoint's own ``config.json`` decides (local paths only).
+    """
+    from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
+
+    if hf_config is None:
+        return Path(model_id_or_path) if is_nvfp4_checkpoint(model_id_or_path) else None
+    qc = getattr(hf_config, "quantization_config", None)
+    if qc is None:
+        return None
+    if not isinstance(qc, dict):
+        qc = {key: getattr(qc, key, None) for key in ("quant_method", "quant_algo", "config_groups")}
+    return _resolve_model_dir(model_id_or_path, revision) if _declares_nvfp4_weights(qc) else None
+
+
 def is_exl3_checkpoint(model_dir) -> bool:
     """Whether the checkpoint declares the EXL3 scheme.
 
@@ -875,7 +901,7 @@ def _f4_pair_table(graph: Graph, *, name: str, out_name: str, dtype) -> str:
         pairs_t = tg.add_node(op=ElementwiseOp(op="copy"), inputs=[pairs_t], output=Tensor("pairs_cast", (256, 2), dtype))
     tg.outputs = [pairs_t]
     return graph.add_node(
-        op=ConstantOp(name=name, source_graph=tg, source_shape=(256, 2), source_dtype=dtype),
+        op=ConstantOp(name=name, source_graph=tg, source_shape=(256, 2), source_dtype=dtype.name),
         inputs=[],
         output=Tensor(out_name, (256, 2), dtype),
     )

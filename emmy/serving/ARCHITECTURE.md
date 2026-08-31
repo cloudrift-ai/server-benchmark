@@ -112,8 +112,18 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   `config.json` alone (no checkpoint download — a trace never reads a weight value; `layer_types` collapses to one
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs the file-scoped `emmy eval golden
-  GOLDEN_YAML --serving-config PATH` release audit and serving-image gate;
-  `scripts/capture_gen_twins.py` remains the full-checkpoint diagnostic capture.
+  GOLDEN_YAML --serving-config PATH` release audit and serving-image gate; `scripts/capture_gen_twins.py` is its
+  JSON writer, one graph per file, because `emmy tune` reads a graph per file.
+  A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
+  the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
+  checkpoint keys by dotted suffix, then `spell_quantized_constants` and — for a checkpoint declaring static 4-bit
+  input activations — `spell_static_fp4_activations` run over the checkpoint directory itself, yielding `…@nvfp4`.
+  Tuning evidence transfers to serving only while the twin's kernels have serving's identities, and one trace path
+  plus one spell sequence is what makes them equal. NVFP4 is the one format with no weight-free description: its
+  packed shapes live in the safetensors headers and its calibrated `input_scale` values in the shards, so
+  `loader.quant.nvfp4_checkpoint_dir` resolves the directory (consulting the loaded config first, so no other model
+  touches the hub for it). No rate multiplies these twins — one rate, one block size, and the representative layer is
+  the profile's lowest member.
   Coded routed experts are spelled weight-free so the golden records the program serving deploys, not the f16 GEMM
   the trace promised: EXL3 from the allocation sidecar (`…@b4`, one twin per rate profile), fp8 from the config's
   `quantization_config` alone (`loader.quant.fp8_weight_profile` — format token, `weight_block_size`, skip patterns;

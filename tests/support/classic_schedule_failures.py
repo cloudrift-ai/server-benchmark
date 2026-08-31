@@ -130,7 +130,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_a_pin_hands_its_remaining_row_to_the_pieces",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_decides_its_own_row",
                 "tests/compiler/passes/test_split_fresh_kernels.py::test_no_piece_inherits_the_kernel_it_replaces",
-                "tests/serving/generation/test_exl3_head.py::test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers",
             )
         ),
     ),
@@ -245,7 +244,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 136
+REMAINING_FAILURE_COUNT = 135
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

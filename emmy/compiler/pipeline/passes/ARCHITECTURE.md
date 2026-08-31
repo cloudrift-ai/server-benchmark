@@ -89,10 +89,14 @@ pure `Load`/`Assign` chain joins the produced piece verbatim, while a Fold produ
 reads the name through that producer's workspace, so cutting it composes the producer's cut in. Dtypes for capturing
 seams come from inference rooted at the Tile tree, where the enclosing bindings are visible. This is what lets row
 statistics materialize once per query row instead of being copied into a contraction's evaluation domain.
-Provider-closed and dependent seams are SCOPED-PIN-ONLY: the unpinned fork and bare `PLACE=cut` never select them,
-because nearly every kernel — and every fresh cut piece, which copies its providers — hosts some, so offering them
-would make recursive placement inexhaustible and the candidate walk explode. A route through them is spelled by
-authored or golden-decoded pins.
+Provider-closed and dependent seams join the UNPINNED fork as principal closures: each seam is offered with its
+transitively required producers as ONE composed structural arm, built by the same composition walk the pin path
+uses, so the evidence-driven route through a dependent seam is on the ballot (DeepSeek-V4 post4096's only working
+placement was a dependent seam's closure — the previous plain-only ballot could never elect it, however the
+evidence ranked). Two seams whose closures coincide are one arm. Bare `PLACE=cut` still resolves among the PLAIN
+seams only — it names one deterministic decision, and its recursion terminates because pieces run out of plain
+seams. Recursive placement over composed arms converges in practice — pieces collapse onto shared identities as
+the tree shrinks — rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (attention's statistics cone contains the score dots whose operand cones are
@@ -477,8 +481,8 @@ Maximal Loop fusion remains canonical. Tile lowering may expose two kinds of gra
 that canonical input:
 
 - **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam — body-member folds
-  closed at offer time by provider closure and dependent seams stay scoped-pin-only (see the placement discussion
-  above). A cut writes one workspace
+  closed at offer time by provider closure, and dependent seams offered as principal closures (see the placement
+  discussion above). A cut writes one workspace
   per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
   are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:

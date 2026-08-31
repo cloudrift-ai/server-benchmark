@@ -282,8 +282,44 @@ def test_a_sweep_reading_fold_offers_only_the_serial_reduce(unpinned) -> None:
     sweep_spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
 
     def state(specs):
-        return SimpleNamespace(tile=SimpleNamespace(output_specs=specs), work_pin=None, transposed_ok=False)
+        return SimpleNamespace(tile=SimpleNamespace(output_specs=specs, op=red), work_pin=None, transposed_ok=False)
 
     assert _schedule._reduce_moves(state((sweep_spec,)), red, None) == [ReducePlan()]
     # Without the sweep read the catalog stays whole.
     assert len(_schedule._reduce_moves(state(()), red, None)) > 1
+
+
+def test_a_fold_under_a_chain_form_root_offers_only_the_serial_reduce(unpinned) -> None:
+    """A chain-form root — a zero-axis projection with NO operand edges (a body-FED or
+    sweep-reading member the normalize hoist keeps in place) — binds without a peel: the
+    materializer emits the whole body in order through the schedule-blind body recursion, so a
+    partitioned REDUCE row stamped under it would be a partition the kernel never emits. The
+    serial fold is the whole catalog (DeepSeek-V4 post4096's two-cut consumer piece)."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+    from emmy.compiler.ir.tile import ReducePlan
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+
+    body = Body(
+        (
+            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
+            Assign(name="scaled", op="multiply", args=("x_e", "v25")),
+            Accum(name="acc", value="scaled", op="add", axes=("k",)),
+        )
+    )
+    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
+    assert red is not None
+    chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
+    root = Fold.projection(body=Body((*chain, red)), results=("acc",))
+    assert not root.operands, "the fed member must remain in the body for this shape to be under test"
+
+    def state(op):
+        return SimpleNamespace(tile=SimpleNamespace(output_specs=(), op=op), work_pin=None, transposed_ok=False)
+
+    assert _schedule._reduce_moves(state(root), red, None) == [ReducePlan()]
+    # The same fold bound as the kernel root keeps the whole catalog.
+    assert len(_schedule._reduce_moves(state(red), red, None)) > 1

@@ -1,5 +1,6 @@
 """Focused tests for greedy schedule-space traversal."""
 
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -30,7 +31,71 @@ def test_db_measured_index_excludes_placement_route_totals(route) -> None:
     db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
     ctx = SimpleNamespace(structural_key=lambda: "ctx")
 
-    assert _db_measured_index_build(db, ctx) == {signature: [({"WORK": "t64"}, 7.0)]}
+    assert _db_measured_index_build(db, ctx).ok == {signature: [({"WORK": "t64"}, 7.0)]}
+
+
+def test_db_measured_index_collects_shapes_whose_every_measured_variant_failed() -> None:
+    """A ``bench_fail`` row is evidence too — the watchdog measured that variant not finishing.
+    When EVERY measured variant of one structural shape failed, the shape itself is disqualified;
+    one surviving ``ok`` variant means only some rows are bad and the shape stays rankable.
+
+    Failures are collected before the placement-route filter the ``ok`` tier applies: a route's
+    LATENCY is unattributable without a child-schedule receipt, but a kernel that hung is
+    attributable to the kernel whatever route produced it."""
+    doomed = frozenset({("S_shape", "4096")})
+    mixed = frozenset({("S_shape", "128")})
+    rows = [
+        SimpleNamespace(status="bench_fail", stats=SimpleNamespace(median=2_000_000.0), knobs={"S_shape": 4096, "WORK": "t32"}),
+        SimpleNamespace(status="bench_fail", stats=SimpleNamespace(median=2_000_000.0), knobs={"S_shape": 4096, "PLACE": "fuse"}),
+        SimpleNamespace(status="bench_fail", stats=SimpleNamespace(median=2_000_000.0), knobs={"S_shape": 128, "WORK": "t32"}),
+        SimpleNamespace(status="ok", stats=SimpleNamespace(median=7.0), knobs={"S_shape": 128, "WORK": "t64"}),
+    ]
+    db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
+    ctx = SimpleNamespace(structural_key=lambda: "ctx")
+
+    measured = _db_measured_index_build(db, ctx)
+    assert doomed in measured.failed, "every measured variant of this shape hit the watchdog"
+    assert mixed not in measured.failed, "a shape with one ok variant is not disqualified"
+    assert measured.ok == {mixed: [({"WORK": "t64"}, 7.0)]}
+
+
+def test_a_shape_whose_every_variant_failed_prices_as_infeasible() -> None:
+    """The disqualification's teeth: a slice containing a known-failed kernel prices ``inf``, so
+    any structural arm holding it loses the ``_priced_pick`` argmin to an arm that does not.
+
+    Without this the failures are invisible at deploy — the measured index carries ``ok`` rows
+    only, so a kernel every one of whose variants hung simply has no evidence and falls through to
+    the prior, which is exactly how DeepSeek-V4's post block kept its hanging fused arm across a
+    30-minute tune that recorded 40 failures for it."""
+    doomed = frozenset({("S_shape", "4096")})
+    op = SimpleNamespace(knobs={"S_shape": 4096}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=op)})
+    trace = [SimpleNamespace(node_id="n", score=5.0)]
+    ctx = SimpleNamespace(features=lambda: {})
+
+    assert greedy._resolved_price(terminal, trace, ctx, None) == 5.0
+    assert greedy._resolved_price(terminal, trace, ctx, None, failed={doomed: [2_000_000.0]}) == math.inf
+
+
+def test_a_disqualification_condemns_only_the_shape_that_was_measured() -> None:
+    """Elimination matches the signature EXACTLY, unlike the ranking tier's drift-tolerant
+    :func:`_sig_groups`. There a loose match only widens the candidate pool and a second filter
+    still has to agree on the tunable knobs; here nothing follows the match, so condemning every
+    shape that merely does not contradict a recorded failure disqualifies the whole program.
+    Measured: on DeepSeek-V4's post block the tolerant form priced all 17 leaves of one fork
+    ``inf``, which decides nothing at all."""
+    recorded = frozenset({("S_shape", "4096"), ("S_dtype_f16", "1.0")})
+    # Agrees on every SHARED key, so the drift-tolerant matcher would call it a hit; it is a
+    # different shape and must still be priced.
+    other = SimpleNamespace(knobs={"S_shape": 4096, "S_n_loop": 9}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=other)})
+    trace = [SimpleNamespace(node_id="n", score=5.0)]
+    ctx = SimpleNamespace(features=lambda: {})
+
+    assert greedy._sig_groups({recorded: [1.0]}, frozenset({("S_shape", "4096"), ("S_n_loop", "9")})), (
+        "the tolerant matcher does hit here — which is exactly why elimination must not use it"
+    )
+    assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}) == 5.0
 
 
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:

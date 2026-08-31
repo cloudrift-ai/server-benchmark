@@ -768,8 +768,9 @@ def _reduce_catalog(state: _State, extent: int) -> list[ReducePlan]:
 
 def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     """The reduce partitions this fold offers: the serial fold plus every :func:`coop_reduce_moves`
-    band the node admits — an observed fold (a scan), and a fold whose cone reads a boundary
-    store's sweep axis, offer exactly the serial fold — or, under a ``REDUCE`` pin, the ONE
+    band the node admits — an observed fold (a scan), a fold whose cone reads a boundary
+    store's sweep axis, and any fold under a chain-form root (a zero-axis projection with no
+    operand edges) offer exactly the serial fold — or, under a ``REDUCE`` pin, the ONE
     partition that pin names, read
     against the kernel's pinned inventory (the ``coop`` token's width lives in ``WORK``). A pin is
     authoritative over the value; it cannot make a band this node has no geometry for legal, and
@@ -810,6 +811,25 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
                 f"sweep axis {swept[0]!r} — the sweep loop must enclose the whole reduce, so only the "
                 f"serial fold realizes"
             )
+        return [ReducePlan()]
+    root = state.tile.op
+    if isinstance(root, Fold) and root.axis is None and not root.operands:
+        # The chain form — a zero-axis root with no operand edges (a sweep-reading or body-FED
+        # member the normalize hoist must keep in place) — binds without a peel: the materializer
+        # emits the whole body in order through the schedule-blind body recursion, so no fold
+        # under it can realize a cooperative/ILP partition. Same contract as the swept branch:
+        # only the serial fold is offered, and a pin naming one is a recorded refusal, never a
+        # silent drop. The cross-CTA ``g`` half stays the split fork's decision — a split piece IS
+        # a chain-form root carrying its captured prologue, so the pin resolves through the
+        # ordinary receipt consumption first and only a SURVIVING partition refuses.
+        if pin is not None:
+            plan = _parsed_reduce_pin(state, pin, key)
+            if plan.stages:
+                raise PinRefused(
+                    f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a partition, but this kernel's root binds "
+                    f"its projection body whole — a chain-form member realizes only the serial fold"
+                )
+            return [plan]
         return [ReducePlan()]
     if pin is None:
         return _reduce_catalog(state, extent)

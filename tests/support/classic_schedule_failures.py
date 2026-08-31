@@ -77,9 +77,7 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_attention_coverage.py::test_fused_sdpa_sweeps_the_score_once[cfg1]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_fused_single_kernel_sdpa_matches_torch[cfg0]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_fused_single_kernel_sdpa_matches_torch[cfg1]",
-                "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_dynamic_matches_torch[gqa]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_dynamic_matches_torch[mask]",
-                "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_dynamic_matches_torch[plain]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_matches_torch[mask]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_matches_torch[scaled]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_sdpa_explicit_additive_mask[1-32]",
@@ -103,9 +101,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_fused_edge.py::test_mixed_dtype_matmul_demotes_a_to_mma[scalar]",
                 "tests/compiler/e2e/test_fused_edge.py::test_mixed_dtype_matmul_demotes_a_to_mma[warp]",
                 "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_norm_from_linear_and_matches_reference[8-PLACE]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa_causal]",
-                "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa_gqa]",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_rider_split_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_run_device_aliased_input_backing_replays_live",
@@ -267,7 +262,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 158
+REMAINING_FAILURE_COUNT = 153
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

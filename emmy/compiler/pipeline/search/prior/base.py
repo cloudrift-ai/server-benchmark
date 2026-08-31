@@ -444,7 +444,11 @@ class Prior(ABC):
         # visible rather than silently demoted.
         self.calibration = self._reservoir_calibration()
         if self.calibration is not None:
-            verdict = "owns deploys" if self.trustworthy else f"QUARANTINED (< {CALIBRATION_MIN}) — deploys stay offline"
+            verdict = (
+                "owns deploys"
+                if self.trustworthy
+                else f"QUARANTINED (< {CALIBRATION_MIN}) — deploys stay offline and keep every kernel set fused"
+            )
             logger.info("[prior] reservoir calibration %+.2f → online model %s", self.calibration, verdict)
         return True
 

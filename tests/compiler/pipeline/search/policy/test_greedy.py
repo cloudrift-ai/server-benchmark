@@ -9,6 +9,7 @@ from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key, schedule_row_key
+from emmy.compiler.pipeline.pipeline import ForkPoint
 from emmy.compiler.pipeline.search.policy import greedy
 from emmy.compiler.pipeline.search.policy.greedy import (
     _db_measured_index_build,
@@ -297,6 +298,53 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# greedy_decide — an untrustworthy prior may not settle a kernel-set change.
+# ---------------------------------------------------------------------------
+
+
+class _ProxyPrior(_BarePrior):
+    """A prior that answers ``trustworthy`` — the surface the competence check reads."""
+
+    def __init__(self, *, trustworthy: bool):
+        self.trustworthy = trustworthy
+
+
+def _kernel_set_fork():
+    """One ``030_cut``-shaped fork: a splice against a keep-fused schedule pool.
+
+    Priced the way the RTX 5080 nvfp4 deploy prices its m32 post-attention block — the fused
+    kernel at its MEASURED 49.73 µs, the cut's fragments at what the offline prior's ordinal
+    proxy makes of them. The proxy is not µs, so its number is five orders of magnitude below a
+    real kernel and the cut wins every such fork on arithmetic alone.
+    """
+    splice = DeferredFork(materialize=lambda: object(), knobs={"PLACE": "cut"}, structural=True)
+    fused = [DeferredFork(materialize=lambda: object(), knobs={"TILE": str(t), "STAGE": "0"}, structural=False) for t in range(3)]
+    return ForkPoint(
+        match=SimpleNamespace(root_node_id="add_2", rule=SimpleNamespace(name="030_cut", pass_=None)),
+        options=[splice, *fused],
+        root_op=SimpleNamespace(knobs={"S_shape": 128}),
+        ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
+    ), splice
+
+
+@pytest.mark.parametrize(("trustworthy", "takes_the_cut"), [(False, False), (True, True)])
+def test_kernel_set_change_needs_a_trustworthy_prior(monkeypatch, trustworthy, takes_the_cut) -> None:
+    """A Σ-of-µs comparison across two kernel sets is only a latency comparison when the ranker
+    answers in µs. While the prior is untrustworthy the deploy half is the offline one, whose
+    score is an ordinal proxy, so the splices are withdrawn and the measured fused side survives;
+    a trustworthy prior still gets to change the kernel set."""
+    monkeypatch.setattr(greedy, "_price_graph", lambda *_a, **_kw: 0.00039)  # the proxy's fantasy
+    monkeypatch.setattr(greedy, "_price_op_leaf", lambda *_a, **_kw: 49.7336)  # the measured kernel
+    point, splice = _kernel_set_fork()
+
+    pick = greedy.greedy_decide(prior=_ProxyPrior(trustworthy=trustworthy))(point)
+
+    assert (pick is splice) is takes_the_cut
+    if not takes_the_cut:
+        assert leaf_knobs(pick).get("PLACE") is None, "the withdrawn class must not reach the ranking either"
+
+
+# ---------------------------------------------------------------------------
 # _price_kernel — the price memo must share across identically computing kernels.
 # ---------------------------------------------------------------------------
 
@@ -313,7 +361,12 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
     from emmy.compiler.ir.frontend.ir import MatmulOp
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline
     from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.prior.fallback import FallbackPrior
 
+    # The per-test prior file is empty, so the loaded prior is untrustworthy and greedy withdraws
+    # the splices — no probe would fire. This test is about the price memo's KEY, so it hands
+    # greedy a prior allowed to price a kernel-set change.
+    monkeypatch.setattr(FallbackPrior, "trustworthy", property(lambda _self: True))
     identity_keys, memo_keys, calls = set(), set(), []
     orig = greedy._price_kernel
 

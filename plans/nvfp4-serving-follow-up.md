@@ -159,6 +159,14 @@ with its cache, raise the twin-memory ceiling for the 27B.
 
 ## Backlog (named, not scheduled)
 
+From the pricing investigation (2026-09-01): price provenance on `Decision` so a trustworthy prior can still
+be refused when an all-predicted splice competes with measured evidence (the finer rule; today's
+trustworthy-check is the coarse one, and it costs cold machines their structural picks even where
+proxy-vs-proxy ranking is unit-consistent); a µs scale for the offline prior's deploy score (the root unit
+error — `latency_proxy` is ordinal); tune-lane fragment coverage so cut fragments get measured rows at all
+(zero `enrolled minted kernel` events across run1's five sweeps — nothing can ever promote the prior to
+trustworthy on these shapes until fragments bench).
+
 q/k contraction binding; two-channel `gate`+`up` pair reading; per-kernel `PLACE`/`WORK` pins + the
 evidence-path direct test; the 2.0x cell gap to cuBLAS; `graph.to_dict()` round-trip on packed constants;
 #499's parity-gated consolidations. Pulled in only when a step's numbers demand it.

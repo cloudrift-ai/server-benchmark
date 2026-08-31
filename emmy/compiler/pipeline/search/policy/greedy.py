@@ -31,6 +31,21 @@ degenerates to the enumeration's first leaf, which carries no meaning and can
 be arbitrarily slow. That is the accepted cost of the rule, not a defect to
 patch: a bad unmeasured pick is fixed by measuring (a tune, a recorded golden)
 or by fitting the prior better, never by teaching this module a preference.
+
+**One competence check, and it is not a preference.** A structural
+(``Graph``-splicing) leaf changes the kernel SET, so ranking it compares two
+Σ-of-µs estimates across different kernels rather than two spellings of one.
+That comparison needs a ranker whose numbers ARE microseconds. While the
+prior is not :attr:`~emmy.compiler.pipeline.search.prior.base.Prior.trustworthy`
+— cold, or quarantined by the reservoir calibration — the deploy half is the
+offline prior, whose score is an ordinal proxy with arbitrary magnitude
+(``exp(-scale·quality)``, only its ORDER meaningful). Summed against a measured
+µs it is not a latency comparison at all: an unmeasured fragment prices below a
+measured kernel by five orders of magnitude, and measuring the fused side only
+widens the gap. So while that holds the splices are withdrawn wholesale
+(the ``price_structural=False`` retirement), and every op-variant leaf still
+ranks by evidence alone. This withholds a whole class because nothing present
+can price it — never one leaf because another is safer.
 """
 
 from __future__ import annotations
@@ -975,13 +990,19 @@ def greedy_decide(
     Structural (``Graph``-splicing) options are priced against the fused side
     with the same evidence — :func:`_priced_pick` — because a ``Graph`` leaf
     carries no knob row the ordinary ranking could score; when a leaf cannot
-    be priced, all of them go on to that ranking anyway. Nothing withholds a
-    structural leaf to keep a kernel set unchanged.
-    ``price_structural=False`` withdraws the splices for reasons that are not
-    about speed — ``Pipeline.run``'s retry after a structural pick failed to
-    LOWER, and the nested pricing probes, which must not re-split the slice
-    they are pricing. The price memo is per-factory-call (one compile
-    attempt), keyed by ``identity_key(with_io=True, with_knobs=True)``."""
+    be priced, all of them go on to that ranking anyway. Nothing ranks a
+    structural leaf below another to keep a kernel set unchanged.
+
+    They are offered at all only while the prior is ``trustworthy``. An
+    untrustworthy one prices through the offline half, whose score is an
+    ordinal proxy rather than µs, and a Σ of those against a measured µs is not
+    a latency comparison (module docstring, "One competence check"). So the
+    splices are withdrawn, which is also what ``price_structural=False`` does
+    for the two reasons that are not about speed — ``Pipeline.run``'s retry
+    after a structural pick failed to LOWER, and the nested pricing probes,
+    which must not re-split the slice they are pricing. The price memo is
+    per-factory-call (one compile attempt), keyed by
+    ``identity_key(with_io=True, with_knobs=True)``."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     memo: dict[str, float | None] = {}  # exact variant key → predicted µs (None = unpriceable)
@@ -1069,8 +1090,12 @@ def greedy_decide(
         # price stays the nested Σ over its fragment kernels (:func:`_price_graph`); an op-vs-op
         # score tie keeps the content tie rule, an op-vs-splice tie keeps the fused side.
         node_blocked = blocked.get(fp.node_id) if blocked else None
+        # A prior that may not own decisions may not own the kernel SET either (module docstring,
+        # "One competence check"). A prior with no ``trustworthy`` surface at all — a bare
+        # ``mean_scores`` double — is taken at its word.
+        allow_structural = price_structural and getattr(the_prior, "trustworthy", True)
         splices, plain = fp.splices, fp.variants
-        if splices and not price_structural:
+        if splices and not allow_structural:
             # Structural RETIREMENT, not a ranking rule: a fragment kernel that failed to lower
             # cannot be blocklisted at the fork site (the splice minted fresh node ids), so
             # ``Pipeline.run`` re-resolves with the splices withdrawn — the same role ``blocked``
@@ -1109,7 +1134,7 @@ def greedy_decide(
         # Reached on: an unpriceable splice, an all-splice fork, a degenerate op side beside
         # splices, or a structural leaf that surfaced mid-stream (outside the top-level
         # construction) — all small-pool corners; the flatten path handles them as before.
-        leaves = flatten_leaves(fp.options if price_structural else (plain or fp.options))
+        leaves = flatten_leaves(fp.options if allow_structural else (plain or fp.options))
         base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
         # Structural options (Graph splices that change the kernel set): the
         # per-op prior prices ONE kernel's knob row, so its score for a
@@ -1122,13 +1147,14 @@ def greedy_decide(
         # pin makes the Graph the rule's only option, which applies inline and
         # never reaches a decide.
         if any(_is_structural_option(o) for o in leaves):
-            if not price_structural:
+            if not allow_structural:
                 # Structural RETIREMENT, not a ranking rule: a fragment kernel
                 # that failed to lower cannot be blocklisted at the fork site
                 # (the splice minted fresh node ids), so ``Pipeline.run``
                 # re-resolves with the splices withdrawn — the same role
                 # ``blocked`` plays for a tile. It is also what stops a nested
-                # price probe from re-splitting the slice it is pricing.
+                # price probe from re-splitting the slice it is pricing, and
+                # what an untrustworthy prior costs the structural class.
                 leaves = [o for o in leaves if not _is_structural_option(o)] or leaves
             else:
                 pick = _priced_pick(fp, leaves, the_prior, memo, db, decisions)

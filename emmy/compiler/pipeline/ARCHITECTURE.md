@@ -646,9 +646,15 @@ of the Spearman correlation between its predictions and its own reservoir labels
 grouped by their `S_*` signature, groups of fewer than 8 rows skipped, the verdict stored in the checkpoint). Below
 `CALIBRATION_MIN` (0.5 — a genuinely trained model scores ~+0.85, while the collapse where the model and its rows no
 longer share feature names scores ~0) the model is **quarantined**: it keeps training and checkpointing, but the
-deploy ranking calls, PUCT, and the structural cost estimate (`greedy._priced_pick`) all fall back to the offline
-half, and the verdict is logged. The reservoir evidence tier stays live under quarantine, because measured evidence
-needs no trusted model.
+deploy ranking calls and PUCT fall back to the offline half, and the verdict is logged. The reservoir evidence tier
+stays live under quarantine, because measured evidence needs no trusted model.
+
+The structural cost estimate (`greedy._priced_pick`) does NOT fall back — it stops. The offline half ranks by an
+ordinal proxy whose magnitude is arbitrary, and a kernel-SET comparison is a sum of absolute µs across different
+kernels, so the fallback would price an unmeasured fragment orders of magnitude under a measured kernel and take
+every cut. So while the prior is untrustworthy the splices are withdrawn instead, and the kernel set stays as
+lowered. Measuring more only widens that gap, which is why the failure survived a tune: the fused side's price is
+the only one measurement can move, and it moves up.
 
 A calibration that could not be measured at all (`None` — e.g. scipy is missing, or no op group is big enough) passes.
 The gate is an alarm for measured failure, not a demand for proof of quality. It is known to be lenient in one case: a
@@ -776,10 +782,12 @@ sum-of-predictions comparison would be exposed to the model's absolute-µs error
 different kernel families, and that is a fitting requirement on the prior. When a splice cannot be priced at all,
 the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking
 (`_priced_pick`, the flat-list form kept for exactly these corners). **No leaf is
-withheld to keep a kernel set unchanged.** The one thing that does withdraw the splices is `price_structural=False`,
-which is not about speed: it is how `GreedyStrategy` retires a structural pick whose fragment kernel failed to LOWER
-(the splice minted fresh node ids, so it cannot be blocklisted at the fork site), and how a nested price probe
-avoids re-splitting the slice it is pricing.
+withheld to keep a kernel set unchanged.** Two things withdraw the splices, and neither ranks one leaf above
+another. `price_structural=False` is how `GreedyStrategy` retires a structural pick whose fragment kernel failed to
+LOWER (the splice minted fresh node ids, so it cannot be blocklisted at the fork site), and how a nested price probe
+avoids re-splitting the slice it is pricing. An untrustworthy prior withdraws them too — a competence check on the
+ranker, not a preference among leaves: nothing present can price a kernel set, so the whole class is offered to
+nothing rather than settled by a proxy.
 
 **Evidence joins are drift-tolerant.** `Prior.sig_groups` is one contract for both the reservoir -O3 tier and the DB
 tier: a candidate's fork-time `S_*` base may carry scheduler stamps the persisted perf rows predate (#311's

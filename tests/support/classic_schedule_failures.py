@@ -198,8 +198,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/cli/test_run.py::test_run_ab_bench_unmatched_pin_fails_loudly",
                 "tests/compiler/cli/test_run.py::test_run_code_fp16_matmul_accuracy",
                 "tests/compiler/cli/test_run.py::test_run_code_linear_blockify",
-                "tests/compiler/cli/test_run.py::test_run_code_matmul_accuracy[f16]",
-                "tests/compiler/cli/test_run.py::test_run_code_matmul_accuracy[f32]",
                 "tests/compiler/cli/test_run.py::test_run_code_matmul_blockify[f16]",
                 "tests/compiler/cli/test_run.py::test_run_code_matmul_blockify[f32]",
                 "tests/compiler/cli/test_run.py::test_run_code_matmul_k_chunked",
@@ -278,7 +276,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 169
+REMAINING_FAILURE_COUNT = 167
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

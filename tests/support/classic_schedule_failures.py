@@ -53,22 +53,7 @@ RECOVERY_CLUSTERS = (
         reason="restore tensor-core atoms, staging, and edge transport",
         nodeids=frozenset(
             (
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[demoted_n-130]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[demoted_n-31]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[demoted_n-700]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[pv_materialized_warp-130]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[pv_materialized_warp-16]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[pv_materialized_warp-31]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[pv_materialized_warp-700]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[residual_cp-100]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_k_gmem-130]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_k_gmem-16]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_k_gmem-31]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_k_gmem-700]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_k_trans-130]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_k_trans-16]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_k_trans-31]",
-                "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_k_trans-700]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_m_cp-1]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_m_cp-31]",
                 "tests/compiler/e2e/test_matmul_coverage.py::test_masked_symbolic_accuracy[symbolic_m_cp-700]",
@@ -332,7 +317,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 223
+REMAINING_FAILURE_COUNT = 208
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

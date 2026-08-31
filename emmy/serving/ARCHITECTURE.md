@@ -381,6 +381,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   invokes the same factorized spelling directly and stays compressed without a separate native path. Any unmatched
   coded trunk weight aborts compilation.
 
+  **NVFP4 trunk (W4A4).** A modelopt/NVFP4 checkpoint takes the same coded-trunk lane, and its stamp additionally
+  runs `spell_static_fp4_activations` (between the coded-weight and trellis spellers, `emmy compile`'s order): each
+  linear the checkpoint marks with a stored `input_scale` gets the declared activation quantize→dequantize written
+  into the pre/post graphs, so serving compiles the W4A4 program rather than 16-bit activations over packed
+  weights. vLLM never sees the scheme — `engine_config_overrides` nulls the quant config for NVFP4 declarations
+  (including modelopt MIXED_PRECISION with a 4-bit weight group) exactly as for EXL3/AWQ/MXFP4.
+
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes
   `sinks=` into each `Attention`, which makes vLLM's backend selection sinks-aware (sm_120 lands on TRITON_ATTN;

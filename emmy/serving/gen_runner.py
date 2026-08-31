@@ -465,9 +465,11 @@ def _compile_split(
     would otherwise report no floor at all.
     ``ckpt`` — ``(checkpoint_dir, id_to_key)`` — switches the TRUNK to the checkpoint-sourced
     lane: every traced constant is re-addressed to its checkpoint key
-    (:func:`_retarget_constants`), the checkpoint's AWQ/EXL3 constant speller then fires on a
-    serving wrapper for the first time (the compressed lane forced, not env-gated), and the
-    constant feed comes from the shards rather than the live module (:func:`_plan_sources`).
+    (:func:`_retarget_constants`), the checkpoint's spellers then fire on a serving wrapper for
+    the first time (the compressed lane forced, not env-gated) — coded weights (fp8/AWQ/NVFP4),
+    then the static 4-bit input encode a W4A4 checkpoint declares, then EXL3 trellis, the order
+    ``emmy compile`` stamps them in — and the constant feed comes from the shards rather than
+    the live module (:func:`_plan_sources`).
     This is what puts a coded trunk on the card at its stored size; without it a trunk linear
     binds decoded values.
     ``plan_cache`` is a session-scoped, binding-neutral plan-template cache. It runs only on the
@@ -493,7 +495,7 @@ def _compile_split(
 
             promote_expert_output_float32(graph)
         if ckpt is not None:
-            from emmy.compiler.loader.quant import spell_quantized_constants, spell_trellis_constants
+            from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations, spell_trellis_constants
             from emmy.compiler.trace.huggingface import promote_laguna_exl3_post_float32, promote_shared_expert_float32
 
             _retarget_constants(graph, wrapper, ckpt[1])
@@ -502,6 +504,7 @@ def _compile_split(
             if getattr(wrapper, "_emmy_shared_expert_float32", False):
                 promote_shared_expert_float32(graph)
             spell_quantized_constants(graph, ckpt[0])
+            spell_static_fp4_activations(graph, ckpt[0])
             spell_trellis_constants(graph, ckpt[0])
         if quant_specs:
             from emmy.compiler.loader.quant import spell_quantized_inputs

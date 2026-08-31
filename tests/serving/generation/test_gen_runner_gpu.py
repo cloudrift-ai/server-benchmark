@@ -906,6 +906,101 @@ def test_expert_program_fp8_indirect_compose(monkeypatch):
         torch.testing.assert_close(got.cpu().reshape(ref.shape), ref, rtol=2e-2, atol=2e-2)
 
 
+def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch):
+    """A serving split whose weights come from a checkpoint declaring static 4-bit activations must
+    COMPUTE the declared W4A4 program on the card, not merely be spelled as one.
+
+    ``_compile_split``'s checkpoint lane stamps the weight speller and then the static activation
+    speller, so the split's meaning becomes Σ x̂·ŵ — 4-bit codes on both sides. The numpy backend
+    evaluating that same stamped graph is the repo-wide parity oracle for it, so the graph is
+    captured at the CUDA backend seam and both backends run it: any gap is a lowering defect, not a
+    quantization effect (the checkpoint's own error cancels — both sides read the same codes).
+
+    Two marked linears read the graph input DIRECTLY, the shape a decoder block's q/k projections
+    have. Fed directly, both backends reach the e2m1 encode with bit-identical values; behind a
+    computed producer (a norm) an epsilon disagreement flips codes at block boundaries and parity
+    becomes distributional — that case belongs to ``tests/compiler/passes/test_nvfp4_w4a4.py``.
+
+    Tolerance is that file's block-scaled bound, since ``m=16, n=128, k=512`` is a shape the
+    block-scaled tensor-core cell is offered on: the instruction takes the RAW e4m3 block scale
+    where the declared program applies the two scale levels fused, one f16 rounding of a per-block
+    constant apart. Both lowerings pass it — the generic reading reproduces the declared value to
+    kernel noise."""
+    pytest.importorskip("cupy")
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from emmy.compiler.loader.synthesize import write_quantized_checkpoint
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class _Pre(torch.nn.Module):
+        """Two marked linears over one activation — a decoder block's q/k projections at toy size."""
+
+        def __init__(self, hidden, inner):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(hidden, inner, bias=False)
+            self.k_proj = torch.nn.Linear(hidden, inner, bias=False)
+
+        def forward(self, x):
+            return self.q_proj(x), self.k_proj(x)
+
+    m, hidden, inner = 16, 512, 128
+    torch.manual_seed(0)
+    wrapper = _Pre(hidden, inner).to(torch.float16).eval()  # serving forces fp16
+    x = (torch.randn(m, hidden) * 0.5).to(torch.float16)
+
+    traced = trace_split(wrapper, (x,), None)
+    param_path = {nid: op.source_path for nid, op in traced.loadable_constants()}
+    ckpt = write_quantized_checkpoint(traced, (wrapper, (x,), {}), tmp_path / "ckpt")
+    # What the runner threads as ``ckpt``: parameter identity → checkpoint key. The writer renames
+    # each weight to its own ``l<i>``, so the keys are read off the repointed graph rather than
+    # assumed — nothing here depends on which projection the trace visited first.
+    params = dict(wrapper.named_parameters())
+    id_to_key = {id(params[param_path[nid]]): op.source_path for nid, op in traced.loadable_constants()}
+    assert len(id_to_key) == 2, "both projections must have been quantized into the checkpoint"
+
+    stamped, lowered = [], []
+    real_compile = CudaBackend.compile
+
+    def capture(self, graph):
+        stamped.append(graph.copy())  # the loader's spellings are all in; the passes have not run
+        lowered.append(real_compile(self, graph))
+        return lowered[-1]
+
+    monkeypatch.setattr(CudaBackend, "compile", capture)
+    prog, _plan = _compile_split(wrapper, [x], None, np.dtype("float16"), ckpt=(str(ckpt), id_to_key))
+    (graph,) = stamped
+
+    # The program must carry the ACTIVATION encode: a W4A16 split would pass every numeric check
+    # below against its own oracle and still be the wrong program.
+    weights = {n.id for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and type(n.op).__name__ == "ConstantOp"}
+    assert len(weights) == 2, "the weight speller did not pack both projections"
+    encodes = [n for n in graph.nodes.values() if type(n.op).__name__ == "ElementwiseOp" and n.op.name == "to_f4e2m1"]
+    assert len(encodes) == 1, f"one shared activation quantize expected, got {len(encodes)}"
+    assert [n for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and n.id not in weights], (
+        "no packed f4e2m1x2 activation buffer: only the weight side is spelled"
+    )
+    sources = [s for node in lowered[0].nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    assert any("emmy_to_f4e2m1" in s for s in sources), "the activation encode never reached a kernel"
+
+    feed = {prog.input_names[0]: x.numpy()}
+    ref, _ = NumpyBackend().run(graph, input_data={**load_constants_from_safetensors(graph, str(ckpt)), **feed})
+    got = prog.run([x.numpy()])
+
+    for name, c in zip(prog.output_names, got, strict=True):
+        r = ref.outputs[name].astype(np.float32).reshape(-1)
+        c = np.asarray(c).astype(np.float32).reshape(-1)
+        assert float(np.abs(r).max()) > 1e-3, f"{name}: reference suspiciously small; the bound would be trivial"
+        rel = np.abs(c - r) / float(np.abs(r).max())
+        assert float(np.median(rel)) < 1e-4, f"{name}: a systematic shift, not the fused-scale rounding"
+        assert float(rel.max()) < 2e-3, f"{name}: past one fused-scale rounding per side"
+
+
 def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypatch):
     """``EMMY_GEN_EMBED_HOST`` moves the vocab table out of VRAM without changing a single
     gathered row.

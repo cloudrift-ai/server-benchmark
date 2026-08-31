@@ -240,8 +240,8 @@ def _fp8_quant_config(model_dir: Path) -> dict | None:
     return None
 
 
-def _fp4_quant_config(model_dir: Path) -> dict | None:
-    """The checkpoint's ``quantization_config`` when it quantizes ANY weights to NVFP4.
+def _declares_nvfp4_weights(qc: dict) -> bool:
+    """Whether a ``quantization_config`` MAPPING quantizes ANY weights to NVFP4.
 
     Three conventions in the wild: ``quant_method: "modelopt"`` with ``quant_algo: "NVFP4"``
     (TensorRT Model Optimizer — the nvidia/* checkpoints); the same method at
@@ -249,7 +249,21 @@ def _fp4_quant_config(model_dir: Path) -> dict | None:
     ``quant_method: "compressed-tensors"`` (llm-compressor) whose ``config_groups`` quantize
     weights as 4-bit float over 16-element groups (the ``nvfp4-pack-quantized`` format). The
     group-size condition keeps 32-element-block 4-bit families (MXFP4) out — same e2m1
-    values, different scale dtype and block. Anything else → ``None``.
+    values, different scale dtype and block.
+
+    Split from :func:`_fp4_quant_config` for the callers holding the declaration already —
+    a serving engine's HF config carries it, and never a checkpoint directory to read.
+    """
+    method = qc.get("quant_method")
+    if method == "modelopt":
+        algo = qc.get("quant_algo")
+        return algo == "NVFP4" or (algo == "MIXED_PRECISION" and _quantizes_weights_at(qc, 4, 16))
+    return method == "compressed-tensors" and _quantizes_weights_at(qc, 4, 16)
+
+
+def _fp4_quant_config(model_dir: Path) -> dict | None:
+    """The checkpoint's ``quantization_config`` when it quantizes ANY weights to NVFP4
+    (:func:`_declares_nvfp4_weights` names the declarations that count), else ``None``.
 
     A MIXED_PRECISION checkpoint answers BOTH this and :func:`_fp8_quant_config`, by design:
     nvidia/Qwen3.6-27B-NVFP4 puts its attention and delta-net projections in fp8 and its MLP and
@@ -257,17 +271,7 @@ def _fp4_quant_config(model_dir: Path) -> dict | None:
     siblings are its own. The two recognizers still decline each other's PURE checkpoints.
     """
     qc = _quantization_config(model_dir)
-    if qc is None:
-        return None
-    method = qc.get("quant_method")
-    if method == "modelopt":
-        algo = qc.get("quant_algo")
-        if algo == "NVFP4":
-            return qc
-        return qc if algo == "MIXED_PRECISION" and _quantizes_weights_at(qc, 4, 16) else None
-    if method == "compressed-tensors":
-        return qc if _quantizes_weights_at(qc, 4, 16) else None
-    return None
+    return qc if qc is not None and _declares_nvfp4_weights(qc) else None
 
 
 def _mxfp4_quant_config(model_dir: Path) -> dict | None:
@@ -471,13 +475,17 @@ def engine_config_overrides(hf_config) -> dict:
     loader already owns. ``{}`` for an ordinary checkpoint (and for ``None``, the caller's
     "config unreadable").
 
-    EXL3, AWQ and MXFP4 are owned by Emmy's loader and compiler. Presenting their shape-only
-    architecture twin as unquantized prevents the engine from rejecting an otherwise supported
-    device or trying to allocate a second decoded expert table. This lives in the loader band
-    because naming a checkpoint scheme is frontend-band knowledge."""
+    EXL3, AWQ, MXFP4 and NVFP4 are owned by Emmy's loader and compiler. Presenting their
+    shape-only architecture twin as unquantized prevents the engine from rejecting an otherwise
+    supported device, standing up a second quantizer over weights the loader already reads, or
+    trying to allocate a second decoded expert table. NVFP4 is recognized by the declaration
+    itself (:func:`_declares_nvfp4_weights`), not by ``quant_method`` alone: modelopt spells
+    fp8 checkpoints the same way, and those stay the engine's to own. This lives in the loader
+    band because naming a checkpoint scheme is frontend-band knowledge."""
     scheme = getattr(hf_config, "quantization_config", None)
     method = scheme.get("quant_method") if isinstance(scheme, dict) else getattr(scheme, "quant_method", None)
-    return {"quantization_config": None} if method in {"exl3", "awq", "mxfp4"} else {}
+    owned = method in {"exl3", "awq", "mxfp4"} or (isinstance(scheme, dict) and _declares_nvfp4_weights(scheme))
+    return {"quantization_config": None} if owned else {}
 
 
 def strip_engine_quant_config(hf_config) -> None:

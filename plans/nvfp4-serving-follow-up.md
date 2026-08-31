@@ -23,10 +23,12 @@ Evidence discipline: every number or state inherited from PR #499's description 
    `vllm_model_gen.py` unpacks 3 tensors where a gated layer's `pre` returns 4. Per-layer-kind routing and
    DeltaNet cache wiring in serving were never written.
 4. **No recipe, no qualification** for any NVFP4 Qwen; Inferact repack calibration unvouched.
-5. **Compile-lane efficiency gaps** (*claimed*, backlog): 3 of layer 0's 6 matmul kernels reach the
-   block-scaled cell (`q_proj`/`k_proj` never bind as contractions; fused `gate`+`up` is two-channel and the
-   pair reading declines); the cell is 2.0x slower than cuBLAS's same instruction; `PLACE`/`WORK` pins are
-   whole-program.
+5. **Compile-lane efficiency gaps** (backlog): re-measured 2026-08-31 on this head (workstation, layer 0,
+   seq-len 512, tile IR): the block-scaled cell lands on **1 of 6** marked linears (`down_proj` only) — the
+   readiness table's 3-of-6 (v/o/down, 2026-08-26) did not reproduce; the PR description's final "lands on one
+   kernel" matches. `q_proj`/`k_proj` ride as planar decodes fused into mean-reduce kernels. The activation
+   encode itself is present (8 `to_f4e2m1` sites), so the declared W4A4 program compiles. *Claimed, un-rerun:*
+   the cell is 2.0x slower than cuBLAS's same instruction; `PLACE`/`WORK` pins are whole-program.
 
 ## Environment
 
@@ -53,7 +55,7 @@ cell coverage, serving's current W4A16 state) on the workstation.
 | 1.2 | vLLM no longer receives the modelopt quant config when emmy owns the weights | extend `engine_config_overrides` coverage with a modelopt case, written first |
 | 1.3 | one 8B layer through the runner matches eager torch within the declared program's envelope (#499 recorded median 1.5e-3 / max 1.9e-2; bar: max <= 5e-2) | parity run on the workstation — pre-commit |
 | 1.4 | `emmy serve nvidia/Qwen3-8B-NVFP4 --generate` boots, picks the coded trunk, chat probe returns coherent text | manual run, workstation |
-| 1.5 | prefill-tier layer-0 program carries the block-scaled cell on >= 3 marked linears (current compile-lane coverage — serving must not land below it) | kernel dump inspection via `EMMY_DUMP_DIR`, workstation |
+| 1.5 | prefill-tier layer-0 program carries the block-scaled cell on >= 1 marked linear — parity with the compile lane's re-measured coverage (1 of 6, `down_proj`, this head); widening coverage is backlog, not step 1 | kernel dump inspection via `EMMY_DUMP_DIR`, workstation |
 | 1.6 | full `tests/serving` green | pytest (GPU box or CI where local Cling breakage applies) |
 
 Deliberately excluded: any speed claim. Parity is this step's only number.
@@ -71,6 +73,12 @@ Scope: NVFP4 twins arm (`serving/twins.py` + `scripts/capture_gen_twins.py`), tu
 | 2.4 | the coded-trunk decode step completes and has a number (today: two timed-out profile runs, none) | `scripts/profile_gen_decode.py --bucket 16` on 5090 |
 | 2.5 | coded W4A4 TPOT <= the decoded-trunk baseline (160.03 ms/step per #499) and no kernel > 10x over its roofline floor | same profile + runner roofline report |
 | 2.6 | `--generate --bench` vs stock vLLM, same 5090: comparison recorded (target, not promise: within 1.5x of stock TPOT) | bench table in PR |
+
+| 2.7 | regression tracking for the marked-linear kernels: realization corpus cases per projection shape at prefill width, pinned to the block-scaled cell — `q_proj`/`k_proj` as `_xfail_offered` (the ratchet records the binding gap and forces acknowledging its closure); `down_proj` green | new cases under `tests/compiler/realization/cases/`, per its ARCHITECTURE; `offered`/`realized` run on any machine |
+
+Search-selection drift (the `v_proj` class — schedule realizes, search stops picking it) is deliberately NOT a
+corpus case (its ARCHITECTURE excludes search shortfalls); the recorded model golden (2.3) is the tracker for
+that, plus `make bench-kernels` drift findings.
 
 If 2.5 fails on tuning alone, backlog items (q/k binding, per-kernel `PLACE`) get pulled into a step 2b —
 decided then, with numbers in hand.

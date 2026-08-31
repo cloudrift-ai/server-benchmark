@@ -102,7 +102,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_rmsnorm_linear_unpinned",
                 "tests/compiler/e2e/test_fused_edge.py::test_mixed_dtype_matmul_demotes_a_to_mma[scalar]",
                 "tests/compiler/e2e/test_fused_edge.py::test_mixed_dtype_matmul_demotes_a_to_mma[warp]",
-                "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_norm_from_linear_and_matches_reference[1-PLACE@a0]",
                 "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_norm_from_linear_and_matches_reference[8-PLACE]",
                 "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa]",
                 "tests/compiler/e2e/test_ops_vs_torch.py::test_op[cuda-sdpa_causal]",
@@ -279,7 +278,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 170
+REMAINING_FAILURE_COUNT = 169
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

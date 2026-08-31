@@ -328,7 +328,7 @@
   "tests/compiler/e2e/test_ops_vs_torch.py::test_op[loop-sdpa_causal]": 0.06,
   "tests/compiler/e2e/test_ops_vs_torch.py::test_op[loop-sdpa_gqa]": 0.05,
   "tests/compiler/e2e/test_pipeline.py::test_matmul_gpu@cuda": 0.09,
-  "tests/compiler/e2e/test_warp_specialize_deadlock.py::test_mlp_slice_completes_and_matches@cuda": 2.74,
+  "tests/compiler/e2e/test_warp_specialize_deadlock.py::test_mlp_slice_completes_and_matches@cuda": 25.79,
   "tests/compiler/ir/loop/test_builder.py::test_insert_descends_by_axis_and_prepends_at_the_leaf": 0.05,
   "tests/compiler/ir/loop/test_splicer.py::test_deep_affine_recurrence_is_declined_by_the_binding_cap": 0.2,
   "tests/compiler/ir/loop/test_splicer.py::test_shallow_affine_recurrence_still_fuses": 0.1,

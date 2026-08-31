@@ -732,6 +732,7 @@ def test_matmul_mma_f16acc_coverage(stage, monkeypatch):
     The static-M column of each transport is a corpus case."""
     if stage == "smem-tma" and not _supports_tma():
         pytest.skip("TMA needs sm_90+")
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
     M = N = K = 128
     pin_classic(monkeypatch, {"STAGE": _F16ACC_STAGES[stage]})
     run_m = M + 2
@@ -764,6 +765,7 @@ def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
     it at the symbol's 512 hint, which is a whole number of promote periods; K=70 is off both the
     16-step grid and the promote period, and there is no way to store "compile at the hint, run
     at 70"."""
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
     pin_classic(monkeypatch, {"TILE": "mma_m16n8k16_f16_f16/f1x1"})
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.delenv("EMMY_STAGE", raising=False)

@@ -1528,6 +1528,20 @@ def _cone_has_fp4_encode(graph: Graph, start: str) -> bool:
     return any(isinstance(n.op, ElementwiseOp) and n.op.op.name == "to_f4e2m1" for n in _cone_nodes(graph, start))
 
 
+def _shape_extents(shape) -> tuple[int | str, ...]:
+    """A buffer's shape as the ``int | str`` extents an op's shape field takes — static dims as
+    ints, symbolic ones by name.
+
+    NVFP4 packs along the LAST axis only: two codes per byte over K, one block scale per 16
+    elements of K. Both halves of the round trip below therefore do real int arithmetic on the
+    last extent — the pair pack's ``k // 2``, the block split's ``k // 16``. That extent is always
+    an int: K comes from the packed weight. Every LEADING axis just rides along through the
+    elementwise / gather / reshape chain, so it may be the serving trace's symbolic ``num_tokens``
+    and has to survive as such: resolving those too raises on the any-width program serving
+    compiles beside its static token buckets."""
+    return tuple(d.as_static() if d.is_static else str(d) for d in shape)
+
+
 def _spell_static_fp4_quantize(
     graph: Graph, activation: str, scale_key: str, s2_shape: tuple[int, ...]
 ) -> tuple[str, str, str, str] | None:
@@ -1564,7 +1578,7 @@ def _spell_static_fp4_quantize(
     if not kd.is_static or kd.as_static() % NVFP4_BLOCK or int(np.prod(s2_shape) if s2_shape else 1) != 1:
         return None
     k = kd.as_static()
-    lead = tuple(d.as_static() if d.is_static else str(d) for d in source.shape[:-1])
+    lead = _shape_extents(source.shape[:-1])
     blocked = (*lead, k // NVFP4_BLOCK, NVFP4_BLOCK)
     bshape = (*lead, k // NVFP4_BLOCK, 1)
     flat, half = (*lead, k), (*lead, k // 2)
@@ -1645,8 +1659,8 @@ def _spell_static_fp4_decode(graph: Graph, quant: tuple[str, str, str, str], dty
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
     quant_stem, bits, sbits, s2 = quant
-    half = tuple(d.as_static() for d in graph.buffer(bits).shape)
-    bshape = tuple(d.as_static() for d in graph.buffer(sbits).shape)
+    half = _shape_extents(graph.buffer(bits).shape)
+    bshape = _shape_extents(graph.buffer(sbits).shape)
     flat, blocked = (*half[:-1], half[-1] * 2), (*bshape[:-1], NVFP4_BLOCK)
     # A reconstruction's own stem, never the quantize half's: the two spell some of the same
     # derived names (``_scale_vals``, ``_fused``), and ``add_node`` answers a taken name by

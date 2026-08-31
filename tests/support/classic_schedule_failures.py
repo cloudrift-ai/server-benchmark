@@ -87,10 +87,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_splitk_matches_reference",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_swiglu_symbolic_m[130]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_gate_up_swiglu_symbolic_m[31]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[scalar-broadcast]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[scalar-multiply]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[scalar-relu]",
-                "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[scalar-sigmoid]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[warp-broadcast]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[warp-multiply]",
                 "tests/compiler/e2e/test_fused_edge.py::test_fused_map_matmul[warp-relu]",
@@ -262,7 +258,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 153
+REMAINING_FAILURE_COUNT = 149
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

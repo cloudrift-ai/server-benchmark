@@ -274,7 +274,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/cli/test_run.py::test_run_code_sdpa_tinyllama_full",
                 "tests/compiler/cli/test_run.py::test_run_code_sdpa_tinyllama_per_head",
                 "tests/compiler/cli/test_run.py::test_run_code_target_override",
-                "tests/compiler/pipeline/test_kernel_cache.py::test_twin_replay_renders_byte_identical_source",
             )
         ),
     ),
@@ -346,7 +345,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 237
+REMAINING_FAILURE_COUNT = 236
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

@@ -283,7 +283,6 @@ RECOVERY_CLUSTERS = (
         reason="restore CUDA worker, program-pack, capture, and serving integration",
         nodeids=frozenset(
             (
-                "tests/compiler/backend/test_async_bench_worker.py::test_async_worker_real_roundtrip_single_gpu",
                 "tests/serving/generation/test_gen_pack_gpu.py::test_gen_pack_key_separates_quantized_rungs",
                 "tests/serving/generation/test_gen_pack_gpu.py::test_gen_pack_second_boot_hits_and_matches",
             )
@@ -345,7 +344,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 236
+REMAINING_FAILURE_COUNT = 235
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

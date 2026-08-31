@@ -26,7 +26,7 @@
   "tests/commands/test_recipe.py::test_recipe_query_filters_sorts_and_limits_catalog_rows": 0.41,
   "tests/commands/test_recipe.py::test_recipe_query_hydrates_external_candidate": 0.25,
   "tests/commands/test_recipe.py::test_recipe_query_rejects_non_positive_limit": 0.22,
-  "tests/compiler/backend/test_async_bench_worker.py::test_async_worker_real_roundtrip_single_gpu@cuda": 7.33,
+  "tests/compiler/backend/test_async_bench_worker.py::test_async_worker_real_roundtrip_single_gpu@cuda": 10.65,
   "tests/compiler/backend/test_bench_worker_compare.py::test_compare_in_worker_returns_torch_and_emmy@cuda": 0.97,
   "tests/compiler/backend/test_bench_worker_compare.py::test_preserved_reference_retires_worker_before_next_job": 0.27,
   "tests/compiler/backend/test_bench_worker_compare.py::test_run_job_send_times_out_on_unresponsive_worker": 2.0,

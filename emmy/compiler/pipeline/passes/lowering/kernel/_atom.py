@@ -262,14 +262,20 @@ def _warp_epilogue(
     # select, or an earlier op) — an unbound name means the variant's projection tail reads a
     # value this node does not compute (a mis-sliced multi-channel combine: the gemma GeGLU
     # tail on a single-fold row referenced the sibling channel's ``acc2`` and died with a
-    # ``KeyError`` in the RegStore render). Decline the variant cleanly instead.
+    # ``KeyError`` in the RegStore render). Decline the variant cleanly instead — as a REJECTING
+    # skip, like the materializer's ``UnbindableProjection`` decline: this is the node's lowering
+    # refusing the offered row, and a decline the greedy retry cannot see leaves the node a
+    # ``TileOp`` in a compile that reports success, surfacing as ``plan_from_graph``'s
+    # "non-CudaOp 'TileOp'" at deploy.
     from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
     bound = {acc, *(a for a, _ in extra_accs), *(ld.name for ld in loads), *(nm for nm, _ in selects)}
     for name, _op, args, _dtype in ops:
         unbound = [a for a in args if a not in bound]
         if unbound:
-            raise RuleSkipped(f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)")
+            raise RuleSkipped(
+                f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)", reject=True
+            )
         bound.add(name)
     return RegEpilogue(acc=acc, loads=tuple(loads), ops=tuple(ops), result=write.value, selects=tuple(selects), extra_accs=extra_accs)
 

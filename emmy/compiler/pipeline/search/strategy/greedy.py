@@ -76,6 +76,14 @@ class GreedyStrategy(SearchStrategy):
             if not failed:
                 break
             if allow_structural and any(d.chosen_kind == "graph" for d in trace):
+                # Say so: the keep-fused re-resolve is correct but slower, and a silent retirement
+                # leaves a deploy on a kernel set with nothing in the log to explain it.
+                logger.warning(
+                    "compile: the priced kernel-set change left %s un-lowered (%s) — retiring structural picks and "
+                    "re-resolving down the keep-fused branch",
+                    ", ".join(repr(nid) for nid in failed),
+                    "; ".join(reason for _nid, _label, reason in rejections),
+                )
                 allow_structural = False
                 continue
             new = {nid: ident for nid, ident in failed.items() if ident not in blocked.get(nid, set())}

@@ -358,3 +358,63 @@ def test_tuning_contains_raising_lowering_pass(caplog):
     # ends cleanly with zero terminals instead of crashing.
     assert terminals == []
     assert any("dropped un-lowerable candidate" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# The materializer's OTHER decline: a projection tail whose chain reads a name
+# the sliced node does not compute (``_atom._warp_epilogue``). It is the same
+# kind of answer as the ``UnbindableProjection`` decline — this row's binding is
+# refused — so it must reach the rejection sink. While it did not, a compile that
+# took a structural cut whose remainder is mis-sliced returned a terminal still
+# holding the ``TileOp``, reported success, and died downstream in
+# ``plan_from_graph`` ("non-CudaOp 'TileOp'") — an engine-init crash on a serve
+# boot whose measured evidence priced that cut cheapest.
+# ---------------------------------------------------------------------------
+
+
+def _mis_sliced_tail():
+    """A projection tail whose chain op reads ``acc2`` — a sibling channel's
+    accumulator, which a node sliced to one channel never computes."""
+    from emmy.compiler.ir.elementwise import ElementwiseImpl
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Assign, Write
+
+    return [
+        Assign(name="result", op=ElementwiseImpl("copy"), args=("acc2",)),
+        Write(output="out", index=(Var("m"), Var("n")), value="result"),
+    ]
+
+
+def test_mis_sliced_projection_tail_declines_as_a_rejection():
+    from emmy.compiler.ir.sigma import Sigma
+    from emmy.compiler.pipeline import RuleSkipped
+    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_epilogue
+
+    with pytest.raises(RuleSkipped) as exc:
+        _warp_epilogue(_mis_sliced_tail(), "acc", "m", "n", Sigma.IDENTITY)
+    assert "acc2" in exc.value.reason
+    assert exc.value.reject, "the decline must record as a rejection or the greedy retry never sees it"
+
+
+def test_greedy_run_raises_when_the_projection_tail_is_mis_sliced():
+    # End to end through the engine: the only lowering declines this row, so the
+    # node stays a TileOp — the compile must say so, not hand a half-lowered
+    # graph to the backend.
+    from emmy.compiler.ir.sigma import Sigma
+    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_epilogue
+
+    def rewrite(root):  # noqa: ARG001 — the decline is fixed
+        return _warp_epilogue(_mis_sliced_tail(), "acc", "m", "n", Sigma.IDENTITY)
+
+    rule = Rule(
+        name="010_materialize",
+        pattern=[Pattern(name="root", op_type=TileOp)],
+        rewrite=rewrite,
+        param_names=tuple(inspect.signature(rewrite).parameters.keys()),
+    )
+    pass_ = Pass(name="lowering/kernel", rules=[rule], index=0)
+    rule.pass_ = pass_
+    with pytest.raises(LoweringError) as exc:
+        Pipeline(passes=[pass_]).run(_graph_with_tile(), ctx=_small_smem_ctx())
+    assert "'y'" in str(exc.value)
+    assert "acc2" in str(exc.value)

@@ -208,7 +208,11 @@ def rewrite(ctx: Context, graph: Graph, match: Match) -> Graph | Op | list[Graph
   Pattern names from `PATTERN` bind to their matched `Node` objects. Anything else binds positionally to
   `root.inputs[i]`. Take only what you need — `ctx` is optional.
 - Files starting with `_` (e.g. `_broadcast.py`) are **not** loaded as rules — they're shared helpers.
-- Raise `RuleSkipped(reason)` to decline a match; the engine logs the reason at DEBUG and moves on.
+- Raise `RuleSkipped(reason)` to decline a match; the engine logs the reason at DEBUG and moves on. Add
+  `reject=True` when the decline is a **lowering** refusing the offered row rather than a pass legitimately passing
+  the node on: that records into the `rejections` sink below, which is what lets the greedy retry move to another row.
+  Without it the node keeps its pre-final op in a compile that reports success, and the leak surfaces as
+  `plan_from_graph`'s `non-CudaOp` `TypeError` at deploy.
 
 ### Strategies — engine events for cross-cutting concerns
 

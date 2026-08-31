@@ -59,7 +59,21 @@ cell coverage, serving's current W4A16 state) on the workstation.
 | 1.5 | prefill-tier layer-0 program carries the block-scaled cell on >= 1 marked linear — parity with the compile lane's re-measured coverage (1 of 6, `down_proj`, this head); widening coverage is backlog, not step 1 | kernel dump inspection via `EMMY_DUMP_DIR`, workstation |
 | 1.6 | full `tests/serving` green | pytest (GPU box or CI where local Cling breakage applies) |
 
-Deliberately excluded: any speed claim. Parity is this step's only number.
+Deliberately excluded: any tuned-speed claim (step 2's). But NOT excluded (added 2026-09-01, Ivan): the
+generated code for the fused W4A4 linears must become serveable in this PR — testing the serving path is
+impractical while a fused kernel launch costs seconds. One kernel at a time, ordered by decode-step cost;
+a sub-task's scope is its kernel, and a generic fix helping the others is a free check-off, not an
+obligation:
+
+| # | kernel (fused shape) | today, measured | command | expected behavior |
+| --- | --- | --- | --- | --- |
+| g1 | `k_linear_reduce` (gate+up+SiLU+requant) | 19.7 s @ m1, 38.9 s @ m32 | `emmy compile _tune/twins/post32@nvfp4.json --target sm_120 --ir tile`; then `emmy run <same> --bench` | the contraction's pin carries `TILE=mma_…`; parity green; kernel <= 100 ms @ m32 |
+| g2 | pre `k_linear_mean_reduce` (q+q_norm, k+k_norm) | 2.3-5.8 s | same commands on `pre32@nvfp4.json` | pre program total <= 10 ms @ m32 |
+| g3 | post `k_linear_mean_reduce` (o+residual+norm+requant) | 47.7-87.6 ms | same commands on `post32@nvfp4.json` | kernel <= 5 ms @ m32 |
+| g4 | the `*-sym` twins (symbolic width) | 0.5-70.9 s per program | same commands on `pre-sym@nvfp4.json` / `post-sym@nvfp4.json` | each program <= 100 ms per launch |
+
+Exit bar for this scope: `emmy serve nvidia/Qwen3-8B-NVFP4 --generate` reaches healthy in <= 20 min on
+the workstation and a probe token costs <= 1 min — testable, with tuned speed still step 2's claim.
 
 ## Step 2 — tuned and measured (dense 8B) — stacked on step 1
 

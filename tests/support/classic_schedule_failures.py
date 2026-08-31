@@ -80,10 +80,7 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_dynamic_matches_torch[gqa]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_dynamic_matches_torch[mask]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_dynamic_matches_torch[plain]",
-                "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_matches_torch[causal]",
-                "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_matches_torch[gqa]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_matches_torch[mask]",
-                "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_matches_torch[plain]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_scalar_flash_matches_torch[scaled]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_sdpa_explicit_additive_mask[1-32]",
                 "tests/compiler/e2e/test_attention_coverage.py::test_sdpa_explicit_additive_mask[16-32]",
@@ -282,7 +279,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 173
+REMAINING_FAILURE_COUNT = 170
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

@@ -91,10 +91,6 @@ RECOVERY_CLUSTERS = (
                 "tests/compiler/e2e/test_fused_edge.py::test_place_cone_cut_splits_norm_from_linear_and_matches_reference[8-PLACE]",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_capture_gpu.py::test_rider_split_inside_outer_capture_replays_live",
-                "tests/serving/generation/test_gen_capture_gpu.py::test_run_device_aliased_input_backing_replays_live",
-                "tests/serving/generation/test_gen_capture_gpu.py::test_run_device_inside_outer_capture_replays_live",
-                "tests/serving/generation/test_gen_capture_gpu.py::test_run_device_sym_aliased_input_backing_replays_live",
-                "tests/serving/generation/test_gen_capture_gpu.py::test_run_device_sym_inside_outer_capture_replays_live",
                 "tests/serving/generation/test_gen_runner_gpu.py::test_adopted_raw_embed_table_matches_folded_gather",
                 "tests/serving/generation/test_gen_runner_gpu.py::test_decode_twin_shares_weight_buffers",
                 "tests/serving/generation/test_gen_runner_gpu.py::test_device_residents_allocated_eagerly",
@@ -250,7 +246,7 @@ RECOVERY_CLUSTERS = (
 
 
 _INITIAL_FAILURE_COUNT = 1304
-REMAINING_FAILURE_COUNT = 141
+REMAINING_FAILURE_COUNT = 137
 
 
 def _failures() -> Mapping[str, ReconstructionFailure]:

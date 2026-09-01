@@ -1,201 +1,31 @@
-# NVFP4 serving follow-up: native, tuned serving for Qwen 3.6 / 3.8
+# NVFP4 serving follow-up — current stage (PR #695)
 
-Branch-lifetime working note for the follow-up to PR #499. May be discarded before the PR is finalized.
+Branch-lifetime working note. The full multi-stage plan lives outside git (the project memory the working
+sessions load); this file tracks only the stage in flight. Delete at merge.
 
-**Goal.** `emmy serve Inferact/Qwen3.8-27B-NVFP4 --generate` on an RTX 5090 doing what the vLLM recipe command
-(`--tool-call-parser qwen3_coder --reasoning-parser qwen3 --enable-auto-tool-choice`) does, plus
-`nvidia/Qwen3.6-27B-NVFP4` as the architecture-identical official stand-in — emmy kernels, native W4A4, tuned.
-The vLLM parser flags need no work: `emmy serve` forwards unknown flags verbatim (`_split_own_flags`).
+## This PR: serving declares W4A4, dense 8B, workstation golden
 
-Evidence discipline: every number or state inherited from PR #499's description or notes is a HYPOTHESIS
-(marked *claimed*) until re-run on our heads. The docs there were written across many heads by many agents.
+Shipped state: `emmy serve nvidia/Qwen3-8B-NVFP4 --generate` boots healthy and answers coherently on the
+RTX 5080 Laptop with the recorded cut kernels deployed. The PR description is the authoritative record of
+deliverables (command → observed), fixes, the tuning process, and non-deliverables.
 
-## The gaps
+Residual work in this PR's scope, post-merge with main's #691/#692:
 
-1. **Serving never declares 4-bit activations.** `gen_runner._compile_split` stamps quantized weights
-   (`spell_quantized_constants`) but never calls `spell_static_fp4_activations` — the one call the compile
-   lane makes and serving doesn't. Serving therefore runs the W4A16 scaffolding. Verified by reading.
-2. **Nothing is tuned.** `serving/twins.py`'s format dispatch has EXL3/fp8/mxfp4 arms, no NVFP4 arm; no NVFP4
-   model golden exists in `recipes/`. *Claimed:* untuned coded-trunk decode sits 58431x over its roofline
-   floor and profiling never completes.
-3. **No hybrid dispatch.** Qwen3.6/3.8-27B run gated-DeltaNet linear attention on 3 of 4 layers. The trace-side
-   carve was removed in `b3056eea0` (re-applies cleanly — tested 2026-08-31). Known consumer bug:
-   `vllm_model_gen.py` unpacks 3 tensors where a gated layer's `pre` returns 4. Per-layer-kind routing and
-   DeltaNet cache wiring in serving were never written.
-4. **No recipe, no qualification** for any NVFP4 Qwen; Inferact repack calibration unvouched.
-5. **Compile-lane efficiency gaps** (backlog): re-measured 2026-08-31 on this head (workstation, layer 0,
-   seq-len 512, tile IR): the block-scaled cell lands on **1 of 6** marked linears (`down_proj` only) — the
-   readiness table's 3-of-6 (v/o/down, 2026-08-26) did not reproduce; the PR description's final "lands on one
-   kernel" matches. `q_proj`/`k_proj` ride as planar decodes fused into mean-reduce kernels. The activation
-   encode itself is present (8 `to_f4e2m1` sites), so the declared W4A4 program compiles. *Claimed, un-rerun:*
-   the cell is 2.0x slower than cuBLAS's same instruction; `PLACE`/`WORK` pins are whole-program.
+- [x] Semantic merge (main's scheduling rebuild taken whole; our pricing/verified-tier/cut features
+      re-homed; guard refined to withdraw mixed measured-vs-predicted comparisons only)
+- [x] Golden re-recorded on the merged head (24 configs, all clear-card measurements; 8 targets dropped to
+      named upstream gaps — the recording codec's missing node assignment for composed-cut children being
+      the big one)
+- [ ] Boot 13 + probe on the merged head — the serving-works-after-sync proof
+- [ ] Push the synced branch; refresh the PR description's numbers (24/69 rows; the 1.8x M=1 projection
+      move; the dropped-target gaps into Not delivered)
 
-## Environment
+## Upcoming stages (headings only — details live in the out-of-git plan)
 
-Workstation: RTX 5080 Laptop, 16 GB VRAM, cc 12.0 (sm_120 — the block-scaled instruction runs), 30 GB host RAM.
-Good for: 8B serving, sm_120 correctness, kernel dumps. Not for: recorded perf numbers, goldens, 27B. Those go
-to a rented 5090. Setup on the workstation: `nix develop` + venv in the worktree. NixOS gotcha: CPU LoopOp
-execution (cppyy/Cling) segfaults locally — keep local tests on graph-structure checks and numpy forwards;
-LoopOp-executing suites run on CI/GPU boxes.
+### Stage 2: sweep-and-record on the rented RTX 5090; repo serving goldens; perf claims
 
-PR stacking: step 1's PR is based on `feature/nvfp4`; each later step stacks on the previous. GitHub retargets
-to `main` when #499 merges; then one `git rebase --onto origin/main <499-head>` per open branch.
+### Stage 2b: the four-of-eight cut children that decline the warp execution tier; the eight-fold recompute
 
-## Step 1 — serving declares W4A4 (dense 8B) — PR based on `feature/nvfp4`
+### Stage 3: hybrid per-layer dispatch (Qwen3.6-27B); DeltaNet routing; twin-memory ceiling
 
-Scope: `emmy serve nvidia/Qwen3-8B-NVFP4 --generate` runs the declared W4A4 program instead of the W4A16
-scaffolding. Touches `_compile_split` (activation speller joins its stamp), `engine_config_overrides` (null the
-modelopt quant config toward vLLM as already done for exl3/awq/mxfp4), plus whatever plan plumbing spelled
-activations need. No compiler-pass changes. Also: re-verify the 499 claims this step stands on (compile-lane
-cell coverage, serving's current W4A16 state) on the workstation.
-
-| # | deliverable | verified by |
-| --- | --- | --- |
-| 1.1 | `_compile_split` on a synthetic NVFP4 checkpoint produces pre/post graphs carrying the activation quantize algebra: `to_f4e2m1` encode ahead of each marked linear, packed `f4e2m1x2` activation buffer | new CPU test, written first, failing now — `tests/serving/generation/test_gen_runner.py`, fixture style of `test_create_keeps_storage_coded_trunks_packed` |
-| 1.2 | vLLM no longer receives the modelopt quant config when emmy owns the weights | extend `engine_config_overrides` coverage with a modelopt case, written first |
-| 1.3 | one 8B layer through the runner matches eager torch within the declared program's envelope (#499 recorded median 1.5e-3 / max 1.9e-2; bar: max <= 5e-2) | parity run on the workstation — pre-commit |
-| 1.4a | pulled forward from 2.1/2.2 after the first boot attempts (2026-08-31): untuned W4A4 makes even booting impractical (vLLM's startup forwards run 36 layers of untuned programs; #499 measured one such window at 69+ s). So: the NVFP4 twins arm in `scripts/capture_gen_twins.py`'s lane, then a budgeted local tune of the decode-width twins on the workstation. The local tune DB is machine-local evidence, not step 2's recorded 5090 goldens | twins-arm test (written first) + a completed local tune run |
-| 1.4 | `emmy serve nvidia/Qwen3-8B-NVFP4 --generate` boots, picks the coded trunk, chat probe returns coherent text | manual run, workstation, after 1.4a; `--enforce-eager` + `--num-gpu-blocks-override` is the accepted graphless smoke fallback |
-| 1.5 | prefill-tier layer-0 program carries the block-scaled cell on >= 1 marked linear — parity with the compile lane's re-measured coverage (1 of 6, `down_proj`, this head); widening coverage is backlog, not step 1 | kernel dump inspection via `EMMY_DUMP_DIR`, workstation |
-| 1.6 | full `tests/serving` green | pytest (GPU box or CI where local Cling breakage applies) |
-
-Deliberately excluded: any tuned-speed claim (step 2's). But NOT excluded (added 2026-09-01, Ivan): the
-generated code for the fused W4A4 linears must become serveable in this PR — testing the serving path is
-impractical while a fused kernel launch costs seconds. One kernel at a time, ordered by decode-step cost;
-a sub-task's scope is its kernel, and a generic fix helping the others is a free check-off, not an
-obligation:
-
-| # | kernel (fused shape) | today, measured | command | expected behavior |
-| --- | --- | --- | --- | --- |
-| g1 | `k_linear_reduce` (gate+up+SiLU+requant) | 19.7 s @ m1, 38.9 s @ m32 | `emmy compile _tune/twins/post32@nvfp4.json --target sm_120 --ir tile`; then `emmy run <same> --bench` | the contraction's pin carries `TILE=mma_…`; parity green; kernel <= 100 ms @ m32 |
-| g2 | pre `k_linear_mean_reduce` (q+q_norm, k+k_norm) | 2.3-5.8 s | same commands on `pre32@nvfp4.json` | pre program total <= 10 ms @ m32 |
-| g3 | post `k_linear_mean_reduce` (o+residual+norm+requant) | 47.7-87.6 ms | same commands on `post32@nvfp4.json` | kernel <= 5 ms @ m32 |
-| g4 | the `*-sym` twins (symbolic width) | 0.5-70.9 s per program | same commands on `pre-sym@nvfp4.json` / `post-sym@nvfp4.json` | each program <= 100 ms per launch |
-
-Exit bar for this scope: `emmy serve nvidia/Qwen3-8B-NVFP4 --generate` reaches healthy in <= 20 min on
-the workstation and a probe token costs <= 1 min — testable, with tuned speed still step 2's claim.
-
-g1 measured at serving size (2026-09-01, deployable O3, whole target): gate+up m1 19.7 s -> 9.1 ms (2152x),
-m32 38.9 s -> 119.5 ms (326x) — the 100 ms bar missed by the NEXT gap, one notch narrower: four of the eight
-contraction pieces take the block-scaled cell at 21 us each; the other four structurally decline the warp
-tier (no offered tile binds) and cost 110 of the 119.5 ms. Bound like their siblings, the kernel sits ~9 ms.
-After the cut the decode step's dominator flips to fused q/k (97.5% of m1 time); their seam sets are
-enumerated and the same recipe applies. Deploy route decided (Ivan): record canonical goldens for the 5080
-(goldens carry cut pins, bypass prior and guard); blocked on a binder crash — the pair-decode table's
-source-graph select is an int literal where a bool mask belongs (`np.copyto(where=int64)` refuses;
-ir/tensor/ir.py moved in #689) — parity-checked fix in flight, golden recording resumes after.
-
-## Step 2 — tuned and measured (dense 8B) — stacked on step 1
-
-Scope: NVFP4 twins arm (`serving/twins.py` + `scripts/capture_gen_twins.py`), tune, record goldens. Rented
-5090 for every recorded number.
-
-| # | deliverable | verified by |
-| --- | --- | --- |
-| 2.1 | twin capture on a synthetic NVFP4 checkpoint yields coded W4A4 twins | new CPU test, written first, beside `test_twins_coded.py`'s exl3/fp8/mxfp4 patterns |
-| 2.2 | `emmy tune` over captured 8B twins completes; `emmy eval knobs` shows the packed rows | tune run on 5090, output in PR |
-| 2.3 | `recipes/Qwen3-8B-NVFP4/golden/rtx5090_sm120.yaml` exists and passes golden validation | file in PR |
-| 2.4 | the coded-trunk decode step completes and has a number (today: two timed-out profile runs, none) | `scripts/profile_gen_decode.py --bucket 16` on 5090 |
-| 2.5 | coded W4A4 TPOT <= the decoded-trunk baseline (160.03 ms/step per #499) and no kernel > 10x over its roofline floor | same profile + runner roofline report |
-| 2.6 | `--generate --bench` vs stock vLLM, same 5090: comparison recorded (target, not promise: within 1.5x of stock TPOT) | bench table in PR |
-
-| 2.7 | regression tracking for the marked-linear kernels: realization corpus cases per projection shape at prefill width, pinned to the block-scaled cell — `q_proj`/`k_proj` as `_xfail_offered` (the ratchet records the binding gap and forces acknowledging its closure); `down_proj` green | new cases under `tests/compiler/realization/cases/`, per its ARCHITECTURE; `offered`/`realized` run on any machine |
-
-Search-selection drift (the `v_proj` class — schedule realizes, search stops picking it) is deliberately NOT a
-corpus case (its ARCHITECTURE excludes search shortfalls); the recorded model golden (2.3) is the tracker for
-that, plus `make bench-kernels` drift findings.
-
-**Step 2b is no longer conditional — the trigger fired structurally on 2026-08-31**, from the workstation
-manual sweep (`_tune/run1/`, 112 offerability-verified proposals over all 32 serving twin kernels): the
-block-scaled cell is offered on only 2 of 8 serving matmul shapes (unfused `v_proj`/`down_proj`, static widths
-only), and every FUSED linear (q+norm, k+norm, o+residual+norm+requant, gate+up+SiLU+requant — the shapes
-serving compiles) refuses the warp tier outright, at every width, as does every symbolic twin. Tuned bests
-show the consequence: pre graphs land at 11-35 us across tiers, post graphs at 48-330 ms — a scalar-tier
-floor no schedule search can cross. Giving the fused shapes a tensor-core tier is the critical path to any
-honest speed number; q/k binding is a sub-case of it. Two team invariants bound HOW (Ivan, 2026-08-31): no
-fusion stop-gaps — fuse everything, and where a boundary helps performance, CUT the graph (the `PLACE`
-lane), never refuse the fusion up front; and the resulting coverage is pinned as
-`tests/compiler/realization` cases (the 2.7 deliverable), not new custom Python tests.
-
-Findings logged along the way, each needing its own fix: the coded-trunk weight load takes 24 minutes cold /
-12.6 warm for the 6 GB 8B (host-side; vLLM's own reader accounts for 0.25 s of it; every `f4_pairs` constant
-logs "rides a bind record with unresolved leaves; will not rebind from a pack"); `--dump-dir`'s
-frontend-reproducer capture crashes on a spelled W4A4 graph (`Input buffer 'attn_out_static_fp4_bits' does
-not exist`); an expected `bench_fail` watchdog verdict prints a full child traceback; nvcc's actual error
-lines are truncated out of the captured tail on a compile failure; the sweep has THREE stacked caps
-(accumulated GPU time — hardcoded until 3164dacab; per-launch `EMMY_KERNEL_TIMEOUT_MS`; the worker wall
-derived as compile+run+60 s) and each silently converts a slow-but-finite kernel into an unmeasured target,
-with failures cached as sticky rows that later runs replay; micro-kernel benches at m1/sym are unstable
-(75-91% silly-sample rates, one target measured 1.2 us then 2.5 s across runs, negative Spearman calibration
-on several targets); a measured evidence row can select a schedule whose lowering strands a TileOp and
-crashes engine init (`plan_from_graph: node 'reshape_1' has non-CudaOp 'TileOp'`) — deploy needs a
-discard-and-fall-back, not a crash; serving boots must pin `--max-num-batched-tokens` to the prefill bucket
-or the profiling forward runs symbolic/rider programs (and layer-0 compile takes 31 s greedy-resolve spikes).
-
-Measured reality of the fused shapes on the scalar tier (2026-09-01, 5080): `gate+up` best 19.7 s per launch
-at M=1 and 38.9 s at M=32; the other fused linears 1.5-5.8 s. At 36 layers that is minutes per token — the
-warp-tier gap is not a speed story but a serveability precondition for W4A4.
-
-Boot 9 (2 h of startup forwards) died at the LAST boot step, outside emmy: vLLM's flashinfer sampler JIT
-(ninja build under `~/.cache/flashinfer`) failed to link on NixOS — `cannot find -lcuda`, the driver stub
-off the linker path. Fixed in place: `LIBRARY_PATH=/run/opengl-driver/lib` links it (verified by re-running
-the failed build.ninja; the .so now caches). Workstation serve boots carry that env var. The forwards
-completing confirms the untuned W4A4 programs run to completion — slow, not wrong.
-
-## Step 3 — hybrid serving (Qwen3.6-27B-NVFP4) — stacked on step 2
-
-Scope: the serving-contract work. Revert `b3056eea0`, fix the 3-vs-4 unpack, give the runner per-layer kinds,
-route full-attention layers through emmy programs and linear-attention layers through vLLM's DeltaNet module
-with its cache, raise the twin-memory ceiling for the 27B.
-
-| # | deliverable | verified by |
-| --- | --- | --- |
-| 3.1 | stock vLLM 0.23 serves `nvidia/Qwen3.6-27B-NVFP4` — or the recorded fact it doesn't, which re-plans the step | first task, before any code — run on rented 5090 |
-| 3.2 | carve restored: `tests/serving/test_linear_attention_split.py` green again | pytest |
-| 3.3 | a gated layer's 4-tensor `pre` is consumed correctly | new CPU test, written first, failing on the unpack bug |
-| 3.4 | runner exposes per-layer kind; `EmmyGenModel.forward` routes by it | new CPU tests, hybrid config, mock weights |
-| 3.5 | both layer kinds hold parity on real 27B weights (#499 claims carve max_abs 0.0 — re-verify) | `emmy run --layer <N>` for one layer of each kind, 5090 |
-| 3.6 | 27B twin capture fits in <= 30 GB host RSS | measured capture run |
-| 3.7 | `emmy serve nvidia/Qwen3.6-27B-NVFP4 --generate` generates coherent text with full-attention layers on emmy kernels | manual run + kernel dump inspection, 5090 |
-
-## Step 4 — Qwen3.8, qualification, recipes — stacked on step 3
-
-| # | deliverable | verified by |
-| --- | --- | --- |
-| 4.1 | `emmy serve Inferact/Qwen3.8-27B-NVFP4 --generate` + the three parser flags: a chat completion with a parsed tool call round-trips | probe on 5090 |
-| 4.2 | 27B twins tuned; `recipes/Qwen3.8-27B-NVFP4/golden/rtx5090_sm120.yaml` recorded | files + tune runs |
-| 4.3 | calibration vouched: lm-eval score within an agreed delta of the fp16/AWQ sibling recipe's score | `scripts/run_lmeval_gate.py` on 5090 |
-| 4.4 | TPOT/throughput vs stock vLLM recorded in the recipe's RESULTS | bench table |
-
-## Backlog (named, not scheduled)
-
-From the pricing investigation (2026-09-01): price provenance on `Decision` so a trustworthy prior can still
-be refused when an all-predicted splice competes with measured evidence (the finer rule; today's
-trustworthy-check is the coarse one, and it costs cold machines their structural picks even where
-proxy-vs-proxy ranking is unit-consistent); a µs scale for the offline prior's deploy score (the root unit
-error — `latency_proxy` is ordinal); tune-lane fragment coverage so cut fragments get measured rows at all
-(zero `enrolled minted kernel` events across run1's five sweeps — nothing can ever promote the prior to
-trustworthy on these shapes until fragments bench).
-
-q/k contraction binding; two-channel `gate`+`up` pair reading; per-kernel `PLACE`/`WORK` pins + the
-evidence-path direct test; the 2.0x cell gap to cuBLAS; `graph.to_dict()` round-trip on packed constants;
-#499's parity-gated consolidations. Pulled in only when a step's numbers demand it.
-
-## Risks
-
-- vLLM 0.23 may not serve `qwen3_5` — checked at 3.1; fallbacks: newer vLLM pin in the recipe, or another
-  DeltaNet route. Re-planning trigger, not a silent assumption.
-- #689 (kernel identity off the canonical lowered body) landed after #499's measurements — recorded goldens
-  may already be orphaned; step 2 re-records rather than trusts.
-- Inferact calibration unvouched until 4.3; alternates (`RadixArk/…`, `gittensor-model-hub/…`) queue behind it.
-
-## Step 1 serving milestone (2026-09-01 20:45)
-
-Boot 12: `emmy serve nvidia/Qwen3-8B-NVFP4 --generate` healthy in ~9 min; chat probe returned coherent
-text ("Hello, how can I help?", finish_reason stop) over the declared W4A4 program with the recorded cut
-kernels deployed (288 fragment-kernel builds in the log; routing lane + receipts + join all live).
-Deliverable 1.4 CLOSED on the workstation. Boot env kit: EMMY_TUNE_DB/EMMY_ONLINE_FILE at the run stores,
-EMMY_GEN_DECODE_BUCKET=32, EMMY_GEN_PREFILL_CAPACITY=256, LIBRARY_PATH=/run/opengl-driver/lib,
-TRITON_LIBCUDA_PATH=/run/opengl-driver/lib, --gpu-memory-utilization 0.82 --enforce-eager
---num-gpu-blocks-override 256 --max-num-batched-tokens 256. Remaining for step 1: the 1.5 dump check
-(fragments+cell visible in builds — formalize), 1.6 full tests/serving on a CUDA box, checklist + PR.
+### Stage 4: Inferact/Qwen3.8-27B qualification, recipes, tool-call round trip

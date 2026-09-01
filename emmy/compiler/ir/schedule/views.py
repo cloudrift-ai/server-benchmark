@@ -86,10 +86,10 @@ def schedule_nodes(root: Fold) -> tuple[Fold, ...]:
         return memo["nodes"]
     nodes = []
     seen = set()
-    for node, _axes in walk(root):
-        if isinstance(node, Fold) and id(node) not in seen:
-            seen.add(id(node))
-            nodes.append(node)
+    for visit in walk(root):
+        if isinstance(visit.node, Fold) and id(visit.node) not in seen:
+            seen.add(id(visit.node))
+            nodes.append(visit.node)
     memo["nodes"] = tuple(nodes)
     return memo["nodes"]
 
@@ -145,14 +145,13 @@ def _contraction_facts(owner) -> dict[NodeId, ContractionFacts]:
     read through ``op`` / ``nodes`` / ``node_sites`` / ``views`` / ``node_at`` / ``node_id`` so this
     layer states the reading without importing the tile layer that owns the term.
     """
-    from emmy.compiler.ir.tile.path import sites  # noqa: PLC0415 — the tile layer reads these views
-
-    root = owner.op
     parents: dict[int, Fold] = {}
-    for node in owner.nodes:
-        for child, _child_axes in children(node):
-            parents.setdefault(id(child), node)
-    derived = {id(site.node) for site in sites(root) if site.derived}
+    derived: set[int] = set()
+    for visit in walk(owner.op):
+        if visit.derived:
+            derived.add(id(visit.node))
+        for child, _axes, _segment, _child_derived in children(visit.node):
+            parents.setdefault(id(child), visit.node)
     sibling = _sibling_fragment_edges(owner)
     facts = {}
     for site in owner.node_sites:
@@ -178,7 +177,7 @@ def _contraction_facts(owner) -> dict[NodeId, ContractionFacts]:
             k_axis = node.axis
         producer = None
         if isinstance(node.a, Fold):
-            nested = tuple(site.node for site in sites(node.a) if is_contraction(site.node) and k_axis.name in edge_free_axes(site.node))
+            nested = tuple(visit.node for visit in walk(node.a) if is_contraction(visit.node) and k_axis.name in edge_free_axes(visit.node))
             producer = nested[0] if len(nested) == 1 else None
         need = sibling.get(id(node))
         facts[site] = ContractionFacts(

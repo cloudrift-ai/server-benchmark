@@ -39,11 +39,15 @@ supplies the vocabulary (`node_view`, `Projection`, `Reduction`, `Contraction`, 
 the tile layer reads through; a contraction view belongs to a node site and expresses its operand roles as edge
 positions, and is not another Fold node. A concrete codec alone translates integer and tuple sites to wire spellings.
 
-The node list is the one walk in `ir/pure/tree.py`, deduplicated by object identity — the schedule layer does not carry
-its own copy of the three rules that walk exists to write once. **Every derivation memoizes on the ROOT, not on the
-wrapper**: several `TileOp`s exist over one term across a lowering, and a cache on the wrapper silently re-derives per
-wrapper. `schedule_nodes`, `schedule_views` and `contraction_facts` all key their memo on the Fold root, and the
-`TileOp` properties are accessors over it.
+The node list is the one walk in `ir/pure/tree.py`, deduplicated by object identity. That walk yields a `Visit` per
+node — the term, the axes in scope, the segment path, and whether it is derived evaluation — so the schedule's integer
+ids, the tree-path codec's segments, and the cut pass's scopes are all readings of one traversal and cannot drift. A
+contraction's edges are visited by ROLE (`a`, then each channel's `b`), not in the stored order that puts the channels
+first: the segment vocabulary spells the roles, so role order is the one order both identities can share.
+
+**Every derivation memoizes on the ROOT, not on the wrapper**: several `TileOp`s exist over one term across a
+lowering, and a cache on the wrapper silently re-derives per wrapper. `schedule_nodes`, `schedule_views` and
+`contraction_facts` all key their memo on the Fold root, and the `TileOp` properties are accessors over it.
 
 ## Classic schedule
 

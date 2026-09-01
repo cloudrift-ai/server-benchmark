@@ -58,11 +58,13 @@ Why each part, and why nothing else:
 
 - `programs` / `target` / `compute_cap` — the reproducer. Stable Torch IR rather than a code snippet, so a frontend
   change cannot silently alter what the corpus tests.
-- `name` — already carries the variant key (`identity_key(with_io=True, with_knobs=True)`)`[:12]`, so it detects cache-key drift for free.
+- `name` — already carries the variant key (`identity_key(with_io=True, with_knobs=True)`)`[:12]`, so it detects
+  cache-key drift for free.
 - `pins` / `knobs` — the authored schedule. Regeneration structurally cannot produce these, which is what makes the
   staleness mechanism safe.
-- `identity` — the record's the deploy identity — `identity_key(with_io=True)`, structural flavor —: the digest of the complete schedule-free
-  Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. the variant key (in `name`) is the
+- `identity` — the record's deploy identity — `identity_key(with_io=True)`, structural flavor — is the digest of the
+  complete schedule-free Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. The variant key
+  (in `name`) is the
   variant key — the same body + io folded with the knob row — so a knob-only change moves `name` while leaving
   `identity` untouched.
 - `identity` and the optional per-card `latency` block are the only additions the corpus makes to the golden schema,
@@ -190,10 +192,10 @@ Five rules make it load-bearing:
 1. **Regenerate through the library, not a CLI.** `emmy trace --target sm_89` still stamps `gpu_name` from the live
    card; the library path with an explicit context emits none. That is what makes the check machine-independent, so it
    fires and its fix works on any box.
-2. **Canonicalize the authored knobs strictly.** `canon_family_value` normally swallows a `ValueError` and returns the
-   raw string, which is exactly how a retired spelling survives. Under `strict=True` regeneration fails loudly on
-   `STAGE=d2/ring`, `WORK=zzz9x9`, `TILE=mma_m64n64k64_…` or `REDUCE=g2z`, while a valid-but-unreachable pin
-   (`WORK=w7x13`, `TILE=…/f99x99/k8`) parses cleanly and falls through to `offered`, where a genuine lockout belongs.
+2. **Validate authored knobs strictly.** `validate_family_value` requires every classic value to use its sole wire
+   spelling. Regeneration fails loudly on `STAGE=d2/ring`, `WORK=zzz9x9`, `TILE=mma_m64n64k64_…` or `REDUCE=g2z`,
+   while a canonical but unreachable pin (`WORK=w7x13`, `TILE=…/f99x99/k8`) parses cleanly and falls through to
+   `offered`, where a genuine lockout belongs.
 3. **Refuse to write when a verdict changed.** If one commit moves an identity and breaks realization, regeneration
    fixes the first and must not let the second ride along. It names the affected cases and exits non-zero; resolving
    them is a review conversation, not a mechanical step.

@@ -273,11 +273,11 @@ def impossible_kernel_reason(row: NodeRow) -> str | None:
     stage_spec = next((str(v) for k, v in f.items() if k.startswith("STAGE") and v), "")
     if not tile_spec or not stage_spec.startswith("d"):
         return None
-    from emmy.compiler.ir.schedule import Stage, TilePlan, Workers  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import Stage, Tile, Work  # noqa: PLC0415
 
     try:
-        work = Workers.parse(str(f.get("WORK") or ""))  # the row's unit widths live here, not in TILE
-        tp, st = TilePlan.parse(tile_spec, work), Stage.parse(stage_spec)
+        work = Work.parse(str(f.get("WORK") or ""))  # the row's unit widths live here, not in TILE
+        tp, st = Tile.parse(tile_spec, work), Stage.parse(stage_spec)
     except ValueError:
         return None
     if not tp.is_warp:

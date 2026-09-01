@@ -774,17 +774,13 @@ def test_render_table_ansi_aware_width():
     assert plain[2] == "22  y"  # coloured "22" fills the column; "y" still aligns under "x"
 
 
-def test_bare_families_canonicalizes_axis_suffixed_knobs():
-    """The golden-reproduction table compares the greedy pick against golden YAML rows,
-    whose knobs are spelled bare — but resolved ops carry axis-suffixed codec keys
-    (``TILE@a2``). ``_bare_families`` bridges the two; compared raw, every found summary
-    rendered ``-`` over perfectly good picks (the post-rebuild 0/29 table)."""
+def test_bare_families_aggregates_exact_sites_for_summary():
+    """The golden-reproduction table summarizes one resolved value per schedule family."""
     from emmy.commands.eval import _bare_families
 
-    got = _bare_families({"TILE@a2": "f2x4", "WORK": "t16x8", "STAGE@a2": "d3/smem-tma", "REDUCE@a2": "g2a"})
+    got = _bare_families({"TILE@n0": "f2x4", "WORK": "t16x8", "STAGE@n0.e0": "d3/smem-tma", "REDUCE@n0": "g2a"})
     assert got == {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d3/smem-tma", "REDUCE": "g2a"}
-    # bare keys pass through; first key wins a family collision (single-node picks in practice)
-    assert _bare_families({"TILE": "a", "TILE@x": "b"}) == {"TILE": "a"}
+    assert _bare_families({"TILE@n0": "a", "TILE@n1": "b"}) == {"TILE": "a"}
 
 
 def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, caplog):
@@ -804,7 +800,9 @@ def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, capl
     from emmy.commands.trace import trace_inline_code
     from emmy.compiler.context import Context
     from emmy.compiler.ir.base import InputOp
-    from emmy.compiler.pipeline.knob import stamp_schedule_families
+    from emmy.compiler.ir.schedule import Tile, Work
+    from emmy.compiler.ir.schedule import classic_projection as classic
+    from emmy.compiler.pipeline.knob import complete_kernel_row
     from emmy.compiler.pipeline.search.golden import load_golden_records
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
     from emmy.compiler.torch_wire import graph_to_wire
@@ -813,9 +811,24 @@ def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, capl
     with config.nvcc_flags_override(""):  # the deployable -O3 regime the tier is gated on
         ctx = Context.from_target(cap, gpu_name=gpu)
 
+    # This test owns the audit verdicts, not catalog breadth. Keep Algorithm 1 intact over a
+    # bounded independent product so every audit compile remains a fast unit test.
+    warp = Tile.parse("mma_m16n8k16_f16_f32/f2x2/k2", Work.parse("w2x1"))
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
+    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [])
+    monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
+    monkeypatch.setattr(classic, "raster_moves", lambda: [""])
+
     def enumerated_row(graph):
         rows = enumerate_graph(graph.copy(), ctx).rows
-        return stamp_schedule_families(next(r for r in rows if str(r.get("WORK", "")).startswith("w")))
+        return complete_kernel_row(next(r for r in rows if str(r.get("WORK", "")).startswith("w")))
+
+    def drifted_tile(row):
+        row = dict(row)
+        tile_key = next(key for key in row if key.split("@", 1)[0] == "TILE")
+        row[tile_key] = "mma_m16n8k16_f16_f32/f9x9"
+        return row
 
     def records(graph, name, entries):
         origins = [nid for nid, node in graph.nodes.items() if not isinstance(node.op, InputOp)]
@@ -851,9 +864,10 @@ def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, capl
     # Two DIFFERENT extents, so the two targets carry different structural identities and the
     # floored target's offered row cannot decide the orphan's fork.
     small, big = matmul(64), matmul(256)
-    drifted = {**enumerated_row(small), "TILE": "mma_m16n8k16_f16_f32/f9x9"}  # a fragment nothing offers
-    floored = records(small, "audit.floored", [(drifted, 10.0), (enumerated_row(small), 20.0)])
-    orphan = records(big, "audit.orphan", [({**enumerated_row(big), "TILE": "mma_m16n8k16_f16_f32/f9x9"}, 10.0)])
+    small_row, big_row = enumerated_row(small), enumerated_row(big)
+    drifted = drifted_tile(small_row)  # a fragment nothing offers
+    floored = records(small, "audit.floored", [(drifted, 10.0), (small_row, 20.0)])
+    orphan = records(big, "audit.orphan", [(drifted_tile(big_row), 10.0)])
 
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
         fell = eval_cmd._emit_offer_audit(floored + orphan)

@@ -211,7 +211,7 @@ def _serialize_field(v):
     if isinstance(v, Op):
         return {
             "__op__": type(v).__name__,
-            "fields": {k: _serialize_field(x) for k, x in v.__dict__.items() if not k.startswith("_")},
+            "fields": _serialize_op_fields(v),
         }
     if isinstance(v, (list, tuple)) and v and all(isinstance(x, Op) for x in v):
         return [_serialize_field(x) for x in v]
@@ -239,7 +239,7 @@ def _deserialize_field(k, v):
         # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
         return _eval_stmt(v) if "(" in v else ElementwiseImpl(v)
     # ``TileOp``'s schedule descriptors serialize as constructor-repr strings
-    # (``Placement(...)`` / ``TilePlan(...)`` / ``ReducePlan(...)`` / ``Stage(...)`` /
+    # (``Placement(...)`` / ``Tile(...)`` / ``Reduce(...)`` / ``Stage(...)`` /
     # ``WarpSpec(...)``); ``None`` fields round-trip as JSON null. Eval a string only when it
     # opens with a constructor whose name is a known IR class — so a plain string field
     # (a name / path / C source) that merely looks like ``Name(...)`` is never eval'd.
@@ -255,8 +255,7 @@ def _deserialize_field(k, v):
         op_cls = _lookup_op_class(v["__op__"])
         if op_cls is None:
             raise ValueError(f"Unknown nested op class: {v['__op__']}")
-        fields = {fk: _deserialize_field(fk, fv) for fk, fv in v.get("fields", {}).items()}
-        return op_cls(**fields) if fields else op_cls()
+        return _deserialize_op(op_cls, v.get("fields", {}))
     if isinstance(v, list) and v and all(isinstance(e, dict) and "__op__" in e for e in v):
         return tuple(_deserialize_field(k, e) for e in v)
     if isinstance(v, list) and v and any(isinstance(e, dict) and "__dim__" in e for e in v):
@@ -267,8 +266,6 @@ def _deserialize_field(k, v):
         # dump's ``json.dumps(default=str)``), which a plain ``tuple(v)`` left as strings.
         return tuple(_maybe_eval_ctor(e) if isinstance(e, str) else e for e in v)
     if isinstance(v, dict):
-        # Dict-valued op fields (``TileOp.schedule`` — codec key → resolved slice) round-trip
-        # their VALUES as constructor reprs under the same known-class guard.
         return {dk: (_maybe_eval_ctor(dv) if isinstance(dv, str) else dv) for dk, dv in v.items()}
     return v
 
@@ -285,13 +282,16 @@ def _maybe_eval_ctor(s: str):
 
 def _eval_stmt(s: str):
     scope = _stmt_eval_scope()
-    # ``repr(enum_value)`` produces ``<SwizzleMode.NONE: 'NONE'>`` which
-    # isn't eval-able. Rewrite to the dotted form before eval.
-    if "<" in s and ":" in s:
-        import re as _re
+    return eval(_evalable_enum_reprs(s), scope)
 
-        s = _re.sub(r"<([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*): [^>]+>", r"\1.\2", s)
-    return eval(s, scope)
+
+def _evalable_enum_reprs(s: str) -> str:
+    """Rewrite dataclass enum reprs to the dotted form accepted by the IR eval scopes."""
+    if "<" not in s or ":" not in s:
+        return s
+    import re as _re
+
+    return _re.sub(r"<([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*): [^>]+>", r"\1.\2", s)
 
 
 _STMT_EVAL_SCOPE: dict | None = None
@@ -388,15 +388,11 @@ def _stmt_eval_scope() -> dict:
         "Lambda": _pure_lambda,
         "__builtins__": {},
     }
-    # The stored term (the ``Fold`` node, in ``ir/pure/fold``) and the
-    # schedule descriptors (``Placement`` / ``TilePlan`` / ``ReducePlan`` / ``Stage`` /
-    # ``WarpSpec`` + their component dataclasses / enums) round-trip through ``TileOp``'s
-    # repr-string fields (``op`` / ``place`` / ``reduce`` / ``tier`` / ``stage`` /
-    # ``workers``), and the cuda stage's ``CudaOp.tma_descriptors`` round-trips its
-    # ``TmaDescMeta`` reprs the same way, so ``emmy run --ir <stage.json>`` can eval them
-    # back. Auto-populate every public class from these modules (``setdefault`` so the
-    # explicit stmt/expr entries above win on any name clash) — a new node/knob field
-    # needs no edit here.
+    # The stored Fold term and ordinary IR descriptors round-trip through repr-string fields. The
+    # classic assignment is deliberately excluded: ``_serialize_op_fields`` and
+    # ``_deserialize_op`` route it through the strict site codec instead. Auto-populate every
+    # public class from these modules (``setdefault`` so explicit stmt/expr entries win on a name
+    # clash); a new ordinary IR field needs no edit here.
     import emmy.compiler.ir.atom as _atom_mod  # noqa: PLC0415
     import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
@@ -405,7 +401,10 @@ def _stmt_eval_scope() -> dict:
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
-    for _mod in (_atom_mod, _axis_mod, _sched_mod, _fold_mod, _tile_mod, _kernel_mod, _cuda_mod):
+    # Kernel IR owns the bare ``Tile(...)`` repr used in body fields. The classic ``Tile`` choice
+    # never enters this eval path (it uses ``ClassicScheduleCodec``), so kernel must precede the
+    # schedule module when their class names collide.
+    for _mod in (_atom_mod, _axis_mod, _kernel_mod, _sched_mod, _fold_mod, _tile_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):
@@ -423,7 +422,117 @@ _STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta"})
 # pure runtime state (``source`` / ``knobs`` chain metadata, ``inputs`` /
 # ``outputs`` snapped by the matcher) — none of it belongs in the persisted
 # IR.
-_SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs", "meta"})
+_SERIALIZE_SKIP_FIELDS = frozenset({"source", "knobs", "inputs", "outputs", "meta", "schedule", "materialization"})
+
+
+def _serialize_op_fields(op: Op) -> dict:
+    """Serialize one op, with its schedule using the implementation's codec boundary."""
+    from dataclasses import fields as dc_fields
+
+    fields = {f.name: _serialize_field(getattr(op, f.name)) for f in dc_fields(op) if f.name not in _SERIALIZE_SKIP_FIELDS}
+    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+
+    if not isinstance(op, TileOp) or op.schedule is None:
+        return fields
+    from emmy.compiler.ir.schedule.classic import (  # noqa: PLC0415
+        ClassicProblem,
+        ClassicScheduleCodec,
+        ClassicScheduleContext,
+        edge_site_spelling,
+        node_id_spelling,
+    )
+
+    codec = ClassicScheduleCodec(ClassicScheduleContext(ClassicProblem.from_tile(op, target=None)))
+    fields["schedule"] = codec._encode(op.schedule)
+    if op.materialization is not None:
+        fields["materialization"] = {
+            "tiles": {node_id_spelling(site): [repr(axis) for axis in placed.axes] for site, placed in op.materialization.tiles.items()},
+            "stages": {
+                edge_site_spelling(edge): {
+                    "smem": list(stage.smem),
+                    "bk_elems": stage.bk_elems,
+                }
+                for edge, stage in op.materialization.stages.items()
+            },
+        }
+    return fields
+
+
+def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
+    """Deserialize one op and reconstruct typed schedule values before construction."""
+    raw = dict(raw_fields)
+    schedule_row = raw.pop("schedule", None)
+    materialization_row = raw.pop("materialization", None)
+    fields = {key: _deserialize_field(key, value) for key, value in raw.items()}
+    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+
+    if not issubclass(op_cls, TileOp):
+        return op_cls(**fields) if fields else op_cls()
+    if schedule_row is None:
+        if materialization_row is not None:
+            raise ValueError("schedule materialization requires a schedule")
+        return op_cls(**fields) if fields else op_cls()
+    from emmy.compiler.ir.schedule import PlacedTile, ResolvedStage  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.classic import (  # noqa: PLC0415
+        ClassicMaterialization,
+        ClassicProblem,
+        ClassicScheduleCodec,
+        ClassicScheduleContext,
+        parse_edge_site,
+        parse_node_id,
+    )
+
+    source = op_cls(**fields)
+    codec = ClassicScheduleCodec(ClassicScheduleContext(ClassicProblem.from_tile(source, target=None)))
+    schedule_wire = _wire_mapping(schedule_row, "classic schedule")
+    schedule = codec._parse(schedule_wire)
+    if codec._encode(schedule) != dict(schedule_wire):
+        raise ValueError("classic schedule row is not its typed schedule's canonical encoding")
+    fields["schedule"] = schedule
+    materialization = _exact_wire_mapping(materialization_row, {"tiles", "stages"}, "classic materialization")
+    tile_rows = _wire_mapping(materialization["tiles"], "classic materialization tiles")
+    stage_rows = _wire_mapping(materialization["stages"], "classic materialization stages")
+    tiles = {}
+    for spelling, axes in tile_rows.items():
+        if not isinstance(spelling, str) or not isinstance(axes, list) or len(axes) != 2 or not all(isinstance(axis, str) for axis in axes):
+            raise ValueError("classic materialization tiles must map node-id spellings to two serialized axes")
+        site = parse_node_id(spelling)
+        if site not in schedule.nodes:
+            raise ValueError(f"classic materialization names unknown node site {spelling}")
+        tiles[site] = PlacedTile(schedule.nodes[site].tile, tuple(_maybe_eval_ctor(axis) for axis in axes))
+    stages = {}
+    for spelling, raw_facts in stage_rows.items():
+        if not isinstance(spelling, str):
+            raise ValueError("classic materialization stage keys must be edge-site spellings")
+        facts = _exact_wire_mapping(raw_facts, {"smem", "bk_elems"}, f"classic materialization stage {spelling}")
+        if not isinstance(facts["smem"], list) or not all(isinstance(name, str) for name in facts["smem"]):
+            raise ValueError(f"classic materialization stage {spelling} smem must be a list of strings")
+        edge = parse_edge_site(spelling)
+        if edge not in schedule.edges:
+            raise ValueError(f"classic materialization names unknown edge site {spelling}")
+        stages[edge] = ResolvedStage(schedule.edges[edge].stage, tuple(facts["smem"]), facts["bk_elems"])
+    fields["materialization"] = ClassicMaterialization(tiles, stages)
+    return op_cls(**fields)
+
+
+def _wire_mapping(value, where: str) -> dict:
+    """Require a plain string-keyed wire mapping."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} must be a mapping")
+    if any(not isinstance(key, str) for key in value):
+        raise ValueError(f"{where} keys must be strings")
+    return value
+
+
+def _exact_wire_mapping(value, expected: set[str], where: str) -> dict:
+    """Require exactly the named wire fields; classic serialization has no permissive path."""
+    mapping = _wire_mapping(value, where)
+    actual = set(mapping)
+    if missing := expected - actual:
+        raise ValueError(f"{where} is missing {', '.join(sorted(missing))}")
+    if extra := actual - expected:
+        raise ValueError(f"{where} has unknown fields {', '.join(sorted(extra))}")
+    return mapping
 
 
 @dataclass(frozen=True)
@@ -1215,8 +1324,7 @@ class Graph:
             if op_cls is None:
                 raise ValueError(f"Unknown op class: {op_cls_name}")
 
-            fields = {k: _deserialize_field(k, v) for k, v in ndata.get("op_fields", {}).items()}
-            op = op_cls(**fields) if fields else op_cls()
+            op = _deserialize_op(op_cls, ndata.get("op_fields", {}))
             # Dual-read: the historic single-``output`` dict and the plural
             # ``outputs`` list (slot order). Old dumps stay loadable.
             outs_data = ndata["outputs"] if "outputs" in ndata else [ndata["output"]]
@@ -1254,14 +1362,10 @@ class Graph:
         }
         if self.hints:
             result["hints"] = self.hints.to_dict()
-        from dataclasses import fields as dc_fields  # noqa: PLC0415
-
         for nid, node in self.nodes.items():
             entry: dict = {
                 "op": type(node.op).__name__,
-                "op_fields": {
-                    f.name: _serialize_field(getattr(node.op, f.name)) for f in dc_fields(node.op) if f.name not in _SERIALIZE_SKIP_FIELDS
-                },
+                "op_fields": _serialize_op_fields(node.op),
                 "inputs": node.inputs,
                 # Serialized in the plural ``outputs`` form (slot order);
                 # ``from_dict`` dual-reads this and the historic single-

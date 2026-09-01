@@ -8,16 +8,13 @@ facts off a synthesized nest is the inversion this module exists to prevent; :me
 is for callers that consume a body.
 
 This module holds the structural reads over a node tree — the cone seam (:func:`cone_seam`), the
-iteration-space names (:func:`axis_names`) — plus the tree-path schedule accessor (:class:`Sched`),
-kernel identity (:func:`structural_key`) and the worker sealing (:func:`seal_workers`). Lowering itself
+iteration-space names (:func:`axis_names`) — plus the typed schedule accessor (:class:`Sched`). Lowering itself
 has ONE spelling and it lives on the node: :meth:`Fold.lower` (a fold flattens through
 :attr:`Fold.loop`, a wrapping projection appends its operand nests). Stored trees are already
 resolved — a computed operand is an inline node on its edge, so there is no name-resolution step
 ahead of a lowering walk."""
 
 from __future__ import annotations
-
-from dataclasses import replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
@@ -33,11 +30,16 @@ from emmy.compiler.ir.pure.fold import (
     splice_operands,
     stmt_axis_names,
 )
-from emmy.compiler.ir.schedule import ReducePlan, derive_inventory
+from emmy.compiler.ir.schedule import ClassicSites, PlacedTile, Reduce
+from emmy.compiler.ir.schedule.classic import (
+    ReductionSchedule,
+    classic_node_key,
+    classic_stage_key,
+)
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
-from emmy.compiler.ir.tile.path import UnknownSiteError, resolve, sites, spell
+from emmy.compiler.ir.tile.path import UnknownSiteError, sites
 
 
 def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
@@ -233,16 +235,18 @@ def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tup
 
 
 class Sched:
-    """Read/write view of one kernel's schedule slices — the ``TileOp.schedule`` dict (1r:
-    ``{codec key → resolved TilePlan / ReducePlan / Stage}``) bound to the op tree the keys spell
-    against. The ONE accessor pair every reader (the materializer) and stamper
-    (the ``_schedule`` option builders) goes through, so a slice has exactly one home and the key
-    spelling is always the tree-path codec's canonical one (:mod:`~emmy.compiler.ir.tile.path`).
-    A node that is not a site of the family reads ``None`` and refuses writes loudly."""
+    """Read-only view of one kernel's schedule choices and materialization facts.
 
-    def __init__(self, root, table: dict | None, place=None) -> None:
+    Node families use stable integer identities; transport is keyed by consumer and operand.
+    ``PLACE`` is structural and remains outside this view. A node outside the problem, or a family
+    outside that node's classified schedule sum, fails loudly.
+    """
+
+    def __init__(self, root, place=None, schedule=None, materialization=None) -> None:
         self.root = root
-        self.table = table if table is not None else {}
+        self.schedule = schedule
+        self.materialization = materialization
+        self.sites = ClassicSites(root)
         #: The kernel's free→grid :class:`~emmy.compiler.ir.schedule.Placement`. A ``TILE`` slice
         #: is geometry over an ``(m, n)`` output pair, and WHICH pair is a function of the site's
         #: position in the tree — so the binding belongs here, on the scheduling structure, and
@@ -277,43 +281,64 @@ class Sched:
         return site
 
     def key(self, family: str, node) -> str | None:
-        """The canonical codec key addressing ``node`` under ``family`` — ``None`` when the node
-        is not a site of that family on this tree (nothing to key)."""
+        """The canonical node-family key, or ``None`` when the family does not apply."""
         try:
-            return spell(self.root, family, node, all_sites=self._all_sites())
-        except ValueError:
+            site = self.sites.site(node)
+        except KeyError as error:
+            raise UnknownSiteError(str(error)) from None
+        if family == "TILE":
+            family_sites = self.sites.tile_sites
+        elif family == "REDUCE":
+            family_sites = self.sites.reduction_sites
+        elif family == "STAGE":
+            edges = self.sites.stage_edges
+            family_sites = tuple(dict.fromkeys(edge[0] for edge in edges))
+        else:
+            raise ValueError(f"unknown classic schedule family {family!r}")
+        if site not in family_sites:
             return None
+        if family == "STAGE":
+            return classic_stage_key(self.sites, next(edge for edge in self.sites.stage_edges if edge[0] == site))
+        return classic_node_key(self.sites, family, site)
 
     def get(self, family: str, node):
-        k = self.key(family, node)
-        return self.table.get(k) if k is not None else None
-
-    def put(self, family: str, node, value) -> None:
-        """Store a resolved slice for ``node`` (drop a ``None`` / empty value — an absent key IS
-        the decided-empty)."""
-        if value is None:
-            return
-        k = self.key(family, node)
-        if k is None:
-            raise ValueError(f"{family} does not apply to this {type(node).__name__} — no site to key the slice on")
-        self.table[k] = value
+        if self.schedule is None:
+            return None
+        site = self.sites.site(node)
+        assignment = self.schedule.nodes[site]
+        if family == "TILE":
+            return assignment.tile if assignment.tile.is_tiled else None
+        if family == "REDUCE":
+            if not isinstance(assignment, ReductionSchedule) or not assignment.reduce.stages:
+                return None
+            return assignment.reduce
+        if family == "STAGE":
+            if self.materialization is None:
+                return None
+            stages = {stage for edge, stage in self.materialization.stages.items() if edge[0] == site}
+            if len(stages) > 1:
+                raise ValueError("current kernel lowering requires one resolved transport across a node's operand edges")
+            return next(iter(stages), None)
+        raise ValueError(f"unknown classic schedule family {family!r}")
 
     def tile_of(self, node):
         """The node's ``TILE`` slice, ALREADY PLACED — its ``(m, n)`` output axes bound
-        (:attr:`TilePlan.axes`), so a reader gets the geometry off the slice and never re-derives
+        (:attr:`Tile.axes`), so a reader gets the geometry off the slice and never re-derives
         placement of its own. ``axes`` stays ``compare=False`` / ``repr=False``, so binding it here
         cannot reach ``spell()``, a stamped row, a golden or a prior key.
 
         The pair is a function of the SITE (:meth:`_mn_for`), which is what makes one rule
         possible where there used to be three hand-written ``.at(...)`` calls."""
-        return self.placed(node, self.get("TILE", node))
+        if self.schedule is None or self.materialization is None:
+            return None
+        return self.materialization.tiles.get(self.sites.site(node))
 
     def placed(self, node, plan):
         """``plan`` bound to the ``(m, n)`` output axes a ``TILE`` slice at ``node``'s site tiles —
         the same one rule :meth:`tile_of` reads through, offered to a caller holding a CANDIDATE
         plan the table does not carry yet (the enumeration, whose legality predicates read the
         placed geometry). Already-placed and unplaceable plans pass through."""
-        if plan is None or self.place is None or plan.axes is not None:
+        if plan is None or self.place is None or isinstance(plan, PlacedTile):
             return plan
         mn = self._mn_for(node)
         return plan.at(*mn) if mn is not None else plan
@@ -362,7 +387,7 @@ class Sched:
             return orient(self.place.root_mn)
         if len(free) < 2:
             return None
-        if site.derived and node.axis.extent.is_static and node.axis.extent.as_static() == 1:
+        if site.derived and node.axis is not None and node.axis.extent.is_static and node.axis.extent.as_static() == 1:
             return orient((free[-2], free[-1]))
         parent = next((s for s in self._all_sites() if s.segments == site.segments[:-1]), None)
         ax = getattr(parent.node, "axis", None) if parent is not None else None
@@ -372,8 +397,13 @@ class Sched:
 
 
 def sched_of(tile) -> Sched:
-    """The :class:`Sched` view of a ``TileOp`` (binds its ``schedule`` dict to its op tree)."""
-    return Sched(tile.op, tile.schedule, place=tile.place)
+    """Return the typed schedule view of a ``TileOp``."""
+    return Sched(
+        tile.op,
+        place=tile.place,
+        schedule=tile.schedule,
+        materialization=tile.materialization,
+    )
 
 
 def scheduled(
@@ -383,38 +413,32 @@ def scheduled(
     place,
     knobs: dict,
     output_specs: tuple = (),
-    slices=(),
+    schedule=None,
+    materialization=None,
     workers=None,
 ):
-    """Build a SCHEDULED ``TileOp``: the term + placement, its schedule slices written through
-    :class:`Sched` (the canonical key spelling), and the ``WORK`` inventory sealed.
+    """Build a scheduled ``TileOp`` from one accepted semantic assignment.
 
-    The one constructor every row materializer shares (a split PIECE is not built here — it leaves
-    ``035_split_reduce`` unscheduled and reaches this through its own row). Sealing is what makes a
-    ``TileOp`` scheduled — an unsealed one carries no ``work`` and stamps no ``WORK`` knob — so
-    pairing it with construction here is what stops a new builder forgetting it.
-
-    ``slices`` are ``(family, node, value)`` triples keyed on the way in. ``None`` slice values
-    are skipped, so a resolver that declined needs no guard."""
-    source = Sched(op, {}, place=place)
-    # The op term normalizes at construction, so key spelling and slice writes go through a
-    # PLACEHOLDER TileOp's normalized term; the final op is then built in one shot — schedule,
-    # work inventory and the ``WORK`` knob included — and never mutated after.
-    shell = TileOp(op=op, name=name, place=place, workers=workers, output_specs=tuple(output_specs))
-    schedule: dict = {}
-    sched = Sched(shell.op, schedule, place=shell.place)
-    for family, node, value in slices:
-        if value is not None:
-            key = source.key(family, node)
-            if key is None:
-                raise ValueError(f"{family} does not apply to this {type(node).__name__} — no site to key the slice on")
-            sched.put(family, resolve(shell.op, key).node, value)
-    work = sealed_inventory(schedule, workers)
-    return replace(
-        shell,
+    The one constructor every row materializer shares (a split piece is not built here — it leaves
+    ``030_cut`` unscheduled and reaches this through its own row). The accepted assignment
+    is the sole worker-inventory source; the encoded row must agree with it."""
+    if schedule is None:
+        raise ValueError("cannot construct a scheduled TileOp without a Schedule")
+    work = schedule.kernel.work
+    producer = workers.producer_warps if workers is not None else 0
+    if work.producer != producer:
+        raise ValueError(f"WORK producer band {work.producer} disagrees with WarpSpec producer band {producer}")
+    if knobs.get("WORK") != work.spell():
+        raise ValueError("encoded WORK does not agree with the accepted classic assignment")
+    return TileOp(
+        op=op,
+        name=name,
+        place=place,
+        workers=workers,
+        knobs=knobs,
+        output_specs=tuple(output_specs),
         schedule=schedule,
-        work=work,
-        knobs={**knobs, "WORK": work.spell() if work is not None else ""},
+        materialization=materialization,
     )
 
 
@@ -444,7 +468,7 @@ def projection_tail(tile) -> list[Stmt]:
     """The kernel's EFFECTFUL projection stmt stream — the root zero-axis fold's (pure) body with the
     kernel-boundary ``TileOp.output_specs`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.apply_output_specs`).
     The ONE read every scheduler gate that inspects "the tail" goes through, so the
-    ``b<n>t`` band's no-sweep-``Loop`` condition keeps excluding rms/softmax rows after their
+    ``coop-t`` band's no-sweep-``Loop`` condition keeps excluding rms/softmax rows after their
     sweep moved to an ``OutputSpec`` decoration."""
     op = tile.op
     body = list(op.body) if isinstance(op, Fold) and op.axis is None else []
@@ -486,27 +510,6 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body,
     if any(members[id(left)] & members[id(right)] for i, left in enumerate(roots) for right in roots[i + 1 :]):
         raise UnbindableProjection("output-tiled root projections may not share tail statements")
     return tuple((root, Body(stmt for stmt in op.body if stmt in members[id(root)]), tuple(grouped[id(root)])) for root in roots)
-
-
-def sealed_inventory(schedule: dict, workers) -> object | None:
-    """Derive the kernel's ONE worker inventory (``TileOp.work`` + the ``WORK`` knob — the
-    step-7 value-grammar family): the per-site ``w``/``n`` worker tokens factored out of the
-    resolved ``TILE`` slices, the cooperative width off the ``REDUCE`` slices (``b512`` →
-    ``t512``), and the producer band off the resolved :class:`WarpSpec` (the ``WSPEC`` absorb —
-    ``+p<n>``). FAILING LOUDLY on cross-site disagreement (one kernel, one inventory). A 1-thread
-    inventory (a bare register strip) keeps ``None`` — the per-cell forms' launch geometry stays
-    derived. A PURE derivation over the assembled schedule dict, consumed by the one scheduled
-    builder BEFORE it constructs the ``TileOp`` — sealing rides construction, and a built op is
-    never edited."""
-    coop = max(
-        (v.coop for k, v in schedule.items() if k.split("@", 1)[0] == "REDUCE"),
-        default=1,
-    )
-    return derive_inventory(
-        (v for k, v in schedule.items() if k.split("@", 1)[0] == "TILE"),
-        coop=coop,
-        producer=workers.producer_warps if workers is not None else 0,
-    )
 
 
 def head(op):
@@ -560,16 +563,16 @@ def carries_partition(op) -> bool:
 
 
 def reduce_plan(tile):
-    """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.ReducePlan`), read from
-    ``TileOp.schedule`` for the PRIMARY :class:`~emmy.compiler.ir.pure.fold.Fold` — when ``tile.op``
+    """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.Reduce`), read from
+    ``TileOp.schedule`` for the primary :class:`~emmy.compiler.ir.pure.fold.Fold` — when ``tile.op``
     is a ``Fold`` (bare, or wrapped via ``operands``), else ``None`` (a pure pointwise / scalar
-    per-cell zero-axis ``Fold`` has no partition). An unstamped fold reads the empty plan (the scalar serial
-    fold), matching the node field's default. The materializer's single accessor."""
+    per-cell zero-axis ``Fold`` has no partition). An unscheduled fold reads the direct plan. The
+    materializer's single accessor."""
     node = head(tile.op)
     if node is None:
         return None
     plan = sched_of(tile).get("REDUCE", node)
-    return plan if plan is not None else ReducePlan()
+    return plan if plan is not None else Reduce()
 
 
 # Kernel identity lives in its own module (``tile/_key.py``) — it is not a compute read — and its
@@ -590,6 +593,5 @@ __all__ = [
     "projection_tail",
     "reduce_plan",
     "sched_of",
-    "sealed_inventory",
     "split_invariant_factors",
 ]

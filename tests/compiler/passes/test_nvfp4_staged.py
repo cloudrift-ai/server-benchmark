@@ -20,14 +20,14 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F8E4M3, F16, F32, F4E2M1x2
 from emmy.compiler.graph import Tensor
+from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var
-from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
+from emmy.compiler.ir.schedule import Stage, Tile, Work
+from emmy.compiler.ir.schedule.packing import match_packed_b_node
+from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import Channel, Fold
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
-from emmy.compiler.pipeline.passes.lowering._packed import match_packed_b_node
-from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 from tests.compiler.helpers import requires_cuda
 
 K16 = "mma_m16n8k16_f16_f32"
@@ -83,7 +83,7 @@ def _node(*, m=512, n=4096, k=4096, block=16, a_dtype=F16, k_last=True):
 
 
 def _tile(atom: str, spec: str, work: str, axes):
-    return TilePlan.parse(f"{atom}/{spec}", Workers.parse(work)).at(*axes)
+    return Tile.parse(f"{atom}/{spec}", Work.parse(work)).at(*axes)
 
 
 # ===================================================================
@@ -241,7 +241,7 @@ def test_packed_b_declines_a_byte_row_under_sixteen():
     """A byte row of ``bk_elems / 2`` must stay 16-divisible: the fill copies 16 B chunks and a
     chunk never straddles a row. ``k1`` leaves 8 bytes."""
     node, inputs, axes = _node()
-    assert resolve_warp_stage(node, _tile(K16, "f2x2/k1", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, _tile(K16, "f2x2", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
 
 
 # ===================================================================
@@ -252,13 +252,10 @@ def test_packed_b_declines_a_byte_row_under_sixteen():
 def _rows(node, inputs, axes, pins=None):
     """The ``STAGE`` rows the schedule offers this node at a warp tile, as resolved spellings."""
     from emmy.compiler.context import Context
+    from emmy.compiler.ir.schedule.classic import ClassicScheduleContext
     from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import Placement, TileOp
     from emmy.compiler.ir.tile.ir import OutputSpec
-    from emmy.compiler.pipeline.knob import axis_of
-    from emmy.compiler.pipeline.passes.lowering.tile import _schedule
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
-    from emmy.compiler.pipeline.search.space import STAGE
 
     write = Write(output="y", index=(Var("m"), Var("n")), value="acc")
     op = TileOp(
@@ -270,21 +267,16 @@ def _rows(node, inputs, axes, pins=None):
     )
     ctx = Context.from_target((8, 9))
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    with pinned_knobs(pins or {}):
-        # The prescan the enumerator runs, spelled here because `schedule()` builds it inline: the
-        # per-kernel facts one term's walk reads, and nothing else this helper needs.
-        sched = _schedule.Sched(op.op, {}, place=op.place.on_grid())
-        tail = _schedule.projection_tail(op)
-        frag_ok = _schedule._fragment_epilogue_ok(tail, _schedule._fold_states(op.op))
-        facts = _schedule._site_facts(op, ctx, sched, tail, frag_ok)
-        state = _schedule._State(op, sched, ctx, "y", {}, _schedule._off(sched, op.op), facts, frozenset(), False, carries_partition=False)
-        key = state.sched.key("STAGE", node)
-        pin = _schedule._pin(STAGE, key)
-        # The enumeration's own reading of both: which plan the slabs are sized against, and
-        # whether the pin ADDRESSES this site (a scoped pin raises where a bare one drops).
-        scoped = pin is not None and (element := axis_of(key)) is not None and STAGE.pin_at(element) is not None
-        placed = state.sched.placed(node, tile)
-        return [st.spell() for st in _schedule._fill_options(state, node, tile, placed, pin, scoped, [])]
+    from emmy.compiler.ir.schedule.classic_projection import project_classic
+
+    problem, domains = project_classic(op, ctx)
+    context = ClassicScheduleContext(problem, domains)
+    site = context.site(node)
+    choices = tuple(choice for choice in domains.nodes[site] if choice.tile == tile.choice)
+    edge_domains = tuple((edge, domains.edges[edge]) for edge in context.incident_edges(site))
+    rows = [next(iter(support.edges.values())).stage.spell() for support in context._local_frontier(site, choices, edge_domains)]
+    pin = (pins or {}).get("STAGE")
+    return [row for row in rows if pin is None or row == pin]
 
 
 def _transport(row: str) -> str:
@@ -296,13 +288,11 @@ def _transport(row: str) -> str:
 
 
 def test_the_offer_puts_the_byte_slab_beside_the_compute_fill():
-    """Both readings are fork siblings: the compute-fill depths first (the conservative option,
-    which every computed cone has), then the byte-slab transports."""
+    """The compute-fill and byte-slab readings are independent edge-domain siblings."""
     node, inputs, axes = _node()
     rows = _rows(node, inputs, axes)
     assert any(_transport(r) == "smem" for r in rows), rows
     assert any(_transport(r).startswith("smem-") for r in rows), rows
-    assert _transport(rows[0]) == "smem", rows
 
 
 def test_the_offer_adds_no_compute_fill_depth_the_fill_did_not_ask_for():
@@ -554,7 +544,15 @@ def test_the_packed_drain_stages_a_batched_activation_over_tma(tmp_path):
 
     x = (np.random.default_rng(3).standard_normal((1, m, k)) * 0.05).astype(np.float16)
     backend = CudaBackend()
-    with pinned_knobs({"TILE": "mma_m16n8k16_f16_f32/f2x4/k8", "WORK": "w1x1", "REDUCE": "g8k", "STAGE": "d1/smem-tma"}):
+    with pinned_knobs(
+        {
+            "TILE": "mma_m16n8k16_f16_f32/f2x4/k8",
+            "WORK": "w1x1",
+            "REDUCE": "g8k",
+            "STAGE": "d1/smem-tma",
+            "PLACE": "fuse",
+        }
+    ):
         compiled = backend.compile(g)
     src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
     assert "emmy_mma_load_b_smem_trans_f4s_f16" in src, "the packed pins did not reach the byte-slab drain"
@@ -683,7 +681,7 @@ def test_the_pair_reading_splits_each_side_into_codes_scale_and_residue():
     """What the cell takes: the packed codes, the RAW block-scale load, and the k-invariant factor
     the epilogue applies. The per-tensor scale is that residue — it is the one part of the
     operand's chain the instruction has no operand for."""
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_pair_node
+    from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 
     node, inputs, _axes = _pair_node()
     pair = match_packed_pair_node(node, inputs)
@@ -726,7 +724,7 @@ def _fused_pair_node(*, m=512, n=4096, k=4096, block=16):
 def test_the_pair_reading_takes_a_fused_two_channel_node():
     """Sharing is arity: a fused gate\u2297up edge is the two-channel case of the same reading, not a
     shape the cell declines. Refusing it kept that node off the packed path entirely."""
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_pair_node
+    from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 
     node, inputs, _axes = _fused_pair_node()
     pair = match_packed_pair_node(node, inputs)
@@ -742,7 +740,7 @@ def test_the_pair_reading_takes_a_fused_two_channel_node():
 def test_the_pair_reading_declines_a_fused_node_whose_channels_disagree_on_block():
     """One block extent per node: the cell applies one scale per block per side and has a single
     block size, so channels spelled at different extents keep the decode-based readings."""
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_pair_node
+    from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 
     node, inputs, _axes = _fused_pair_node()
     mixed = Fold.contraction(
@@ -761,7 +759,7 @@ def test_the_pair_reading_declines_a_fused_node_whose_channels_disagree_on_block
 def test_a_packed_weight_beside_a_materialized_a_is_not_a_pair():
     """The single-sided shape answers ``None`` here and keeps its own reading — the k16 drain,
     which decodes the weight into 16-bit fragments against a 16-bit activation."""
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_pair_node
+    from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 
     node, inputs, _axes = _node()
     assert match_packed_pair_node(node, inputs) is None
@@ -797,19 +795,31 @@ def test_the_block_scaled_stage_declines_tma_and_a_scale_row_under_the_chunk():
 
 
 def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
-    from emmy.compiler.ir.schedule import Workers
-    from emmy.compiler.pipeline.passes.lowering.tile import _schedule
-    from emmy.compiler.pipeline.search.space import Stage
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.schedule.classic import ClassicScheduleContext
+    from emmy.compiler.ir.stmt import Write
+    from emmy.compiler.ir.tile import Placement, TileOp
+    from emmy.compiler.ir.tile.ir import OutputSpec
 
-    tma = Stage(depth=1, transport="smem-tma", bk_elems=64)
-    assert _schedule._band_packed_slab_refusal(tma, True) is not None, "the combination hangs; it must decline"
-    assert _schedule._band_packed_slab_refusal(tma, False) is None, "a band over an unpacked TMA operand stays legal"
-    # The refusal reaches the OFFER, so a row over a packed slab claims no band at all. It is a
-    # legality, not a bound: the walk yields no leaf when the pinned inventory is never claimed, so
-    # an ``EMMY_WORK=...+p1`` pin here is refused rather than exempted.
-    work = Workers(kind="warp", units=(1, 4))
-    assert _schedule._producer_bands(work, tma, 128, True) == ()
-    assert _schedule._producer_bands(work, tma, 128, False) == (1, 2)
-    # Only the BAND is refused, never the staging: the caller asks this at all only for a row whose
-    # worker inventory declares producer warps, so the packed byte slab's own TMA transport — which
-    # carries the weight's 4-bit traffic — keeps every stage it resolved.
+    node, inputs, axes = _node()
+    op = TileOp(
+        op=Fold.projection(body=Body(()), operands=(node,)),
+        name="y",
+        place=Placement(free=axes),
+        inputs=inputs,
+        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="acc")),),
+    )
+    target = Context.from_target((9, 0))
+    from emmy.compiler.ir.schedule.classic_projection import project_classic
+
+    problem, domains = project_classic(op, target)
+    context = ClassicScheduleContext(problem, domains)
+    site = context.site(node)
+    tile = _tile(K16, "f2x2/k2", "w1x4", axes)
+    choices = tuple(choice for choice in domains.nodes[site] if choice.tile == tile.choice)
+    edge_domains = tuple(
+        (edge, tuple(choice for choice in domains.edges[edge] if choice.stage.spell() == "d1/smem-tma"))
+        for edge in context.incident_edges(site)
+    )
+    supports = context._local_frontier(site, choices, edge_domains)
+    assert supports and all(not support.producer_eligible for support in supports)

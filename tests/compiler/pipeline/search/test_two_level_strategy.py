@@ -41,6 +41,17 @@ from tests.compiler.helpers import run_inner_reward, run_two_level
 # backend gives a stable but arbitrary per-variant signal).
 _PATIENCE = 8
 
+_CHILD_WINNER = {
+    "WORK": "t32",
+    "TILE": "f1",
+    "STAGE": "",
+}
+
+
+def _is_child_winner(knobs) -> bool:
+    """Whether a row is the early non-default child schedule priced by the fake backends."""
+    return all(knobs.get(key) == value for key, value in _CHILD_WINNER.items())
+
 
 @pytest.fixture(autouse=True)
 def _force_target(monkeypatch, tmp_path):
@@ -92,14 +103,14 @@ class _RouteBackend(_CountingBackend):
         if len(cuda) > 1:
             route = tuple(node.op.identity_key(with_io=True, with_knobs=True) for node in cuda)
             first = cuda[0].op.knobs
-            fast_route = first.get("WORK") == "t16x8" and first.get("STAGE") == "d1/smem-async"
+            fast_route = _is_child_winner(first)
             if fast_route:
                 self.measured_route = route
             us = 1.0 if fast_route else 20.0
         else:
             knobs = cuda[0].op.knobs
             fused = knobs.get("S_n_accum") == 1.0 and knobs.get("S_pw_add") == 1.0
-            us = 100.0 if fused else (0.25 if knobs.get("WORK") == "" and knobs.get("STAGE") == "" else 10.0)
+            us = 100.0 if fused else (0.25 if _is_child_winner(knobs) else 10.0)
         per = [
             LaunchTime(idx=i, kernel_name=getattr(node.op, "kernel_name", "k"), time_ms=us / 1000.0, samples=(us / 1000.0,))
             for i, node in enumerate(cuda)
@@ -113,7 +124,7 @@ class _ChildScheduleBackend(_CountingBackend):
     def benchmark(self, graph, num_iters="auto") -> BenchmarkResult:  # noqa: ARG002
         self.calls += 1
         (cuda,) = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
-        fast = cuda.knobs.get("WORK") == "t16x8" and cuda.knobs.get("STAGE") == "d1/smem-async"
+        fast = _is_child_winner(cuda.knobs)
         us = 0.25 if fast else 10.0
         return BenchmarkResult(
             time_ms=us / 1000.0,
@@ -143,12 +154,12 @@ def _fuse(graph: Graph) -> Graph:
 
 
 def test_searched_winner_requires_one_post_fusion_kernel_and_an_exact_replay_row() -> None:
-    one = OpResult(name="k", op_key="key", best_us=4.0, searched_knobs={"TILE": "f2x2"}, searched_us=5.0, searched_cuda_ops=1)
-    assert InnerReward(total_us=4.0, ok=True, per_op=[one]).searched_winner() == ({"TILE": "f2x2"}, 5.0)
+    one = OpResult(name="k", op_key="key", best_us=4.0, searched_knobs={"TILE@n0": "f2x2"}, searched_us=5.0, searched_cuda_ops=1)
+    assert InnerReward(total_us=4.0, ok=True, per_op=[one]).searched_winner() == ({"TILE@n0": "f2x2"}, 5.0)
     multi_cuda = OpResult(**{**one.__dict__, "searched_cuda_ops": 2})
     assert InnerReward(total_us=4.0, ok=True, per_op=[multi_cuda]).searched_winner() is None
-    split = OpResult(**{**multi_cuda.__dict__, "searched_knobs": {"REDUCE": "g8k"}, "searched_structural": True})
-    assert InnerReward(total_us=4.0, ok=True, per_op=[split]).searched_winner() == ({"REDUCE": "g8k"}, 5.0)
+    split = OpResult(**{**multi_cuda.__dict__, "searched_knobs": {"REDUCE@n0": "g8k"}, "searched_structural": True})
+    assert InnerReward(total_us=4.0, ok=True, per_op=[split]).searched_winner() == ({"REDUCE@n0": "g8k"}, 5.0)
     assert InnerReward(total_us=8.0, ok=True, per_op=[one, one]).searched_winner() is None
 
 
@@ -231,7 +242,7 @@ def _placement_route_graph() -> Graph:
 def _persisted_placement_child() -> Graph:
     """Return one unscheduled child as a Tile dump round-trip would load it."""
     fused = Pipeline.build(LOOP_PASSES).run(_placement_route_graph(), ctx=Context.from_target((8, 0)), db=SearchDB())
-    with pinned_knobs({"PLACE": "cut"}):
+    with pinned_knobs({"PLACE": "cut", "REDUCE": ""}):
         pieces = Pipeline.build(["lowering/tile"], select={"lift", "cut"}).run(fused, ctx=Context.from_target((8, 0)), db=SearchDB())
     producer = next(node.id for node in pieces.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.op.name)
     child = single_node_graph(pieces, producer)
@@ -264,12 +275,10 @@ def test_persisted_unscheduled_tile_child_tunes_and_replays_in_parent_cut(tmp_pa
     assert len(direct.best_reward.per_op) == 1
     direct_cuda = [node.op for node in direct.assembled.nodes.values() if isinstance(node.op, CudaOp)]
     assert len(direct_cuda) == 1
-    assert direct_cuda[0].knobs["WORK"] == "t16x8"
-    assert direct_cuda[0].knobs["STAGE"] == "d1/smem-async"
+    assert _is_child_winner(direct_cuda[0].knobs)
     parent_cuda = [node.op for node in parent.nodes.values() if isinstance(node.op, CudaOp)]
     producer = next(op for op in parent_cuda if "__place_" in op.kernel_name)
-    assert producer.knobs["WORK"] == "t16x8"
-    assert producer.knobs["STAGE"] == "d1/smem-async"
+    assert _is_child_winner(producer.knobs)
     db.close()
 
 
@@ -279,7 +288,7 @@ def test_scheduled_tile_child_is_not_reenrolled_or_rescheduled() -> None:
     with pinned_knobs({"WORK": "t16x8", "STAGE": "d1/smem-async", "REDUCE": ""}):
         scheduled = Pipeline.build(["lowering/tile"]).run(child, ctx=Context.from_target((8, 0)), db=SearchDB())
     tile = next(node.op for node in scheduled.nodes.values() if isinstance(node.op, TileOp))
-    assert tile.work is not None
+    assert tile.schedule is not None
     assert _kernel_nodes(scheduled) == []
 
     backend = _ChildScheduleBackend()
@@ -343,15 +352,15 @@ def test_pinned_placement_route_tunes_and_assembles_child_schedules(monkeypatch,
     assembled = [node.op for node in result.assembled.nodes.values() if isinstance(node.op, CudaOp)]
     assert len(assembled) == 2
     assert sum("enrolled minted kernel" in record.message for record in caplog.records) >= 2
-    assert assembled[0].knobs["WORK"] == "t16x8" and assembled[0].knobs["STAGE"] == "d1/smem-async"
-    assert assembled[1].knobs["WORK"] == assembled[1].knobs["STAGE"] == ""
+    assert _is_child_winner(assembled[0].knobs)
+    assert assembled[1].knobs["WORK"] == "" and assembled[1].knobs.get("STAGE", "") == ""
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:
     """A pinned cross-CTA split mints pieces inside the inner loops; the splice watcher reports
     them and the strategy enrolls each — tuned in its own slice, logged as enrolled — while the
     terminal reward keeps only the OUTER kernel (pieces are evidence, not reward terms)."""
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
     fused = _fuse(_graph(("x", 64, 512, 48)))
     backend = _CountingBackend()
     with caplog.at_level(logging.INFO, logger="emmy.compiler.pipeline.search.strategy.two_level"):

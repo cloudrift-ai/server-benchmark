@@ -53,7 +53,7 @@ class OnlinePrior(Prior):
         present on this row" off from a knob that is present *and* legitimately
         zero (a BOOL ``False`` → ``0.0``, ``STAGE="00"`` → ``popcount 0.0``).
         Since every *realized leaf* now stamps every declared knob (the schedule
-        codecs get their explicit OFF value ``""`` from ``_schedule``'s option-0
+        codecs get their explicit OFF value ``""`` from the classic schedule's option-0
         stamping; bare-stamped knobs via ``knob.apply_off_defaults`` — see the
         knob-stamp invariant), an absent feature means **only** "not-yet-decided"
         — a partial fork-prefix row scored / collected mid-descent (``_node_knobs``).

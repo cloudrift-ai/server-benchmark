@@ -32,7 +32,7 @@ it seals through the one `grid_tile` finalizer (the article's "schedule separate
   (mma / scalar). A contraction without an applicable output tile takes the ordinary Fold path. The schedule only
   places the algebra and declines with `LoweringError` when there is no `(m, n)` grid pair to place onto.
 - **REDUCE-tiled** (`_tile_reduce_axis`, a `PLANAR` / `TWISTED` reduce — or a non-output-tiled `CONTRACTION` — whose
-  `ReducePlan` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
+  `Reduce` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
   (its unit level) and `reg` ILP chains across per-thread accumulators (its register level), then a REG-tree fold, the
   cross-thread combine (`emit_combine`), and the projection. It reads the reduce straight off the `Fold` node (no
   `lower`-then-refind) and builds its per-cell body via the recursion (`_emit`, below); the output stays one cell per
@@ -62,17 +62,17 @@ NODE. This is the
 tile-IR-rebuild mandate's *one hierarchical emitter, no divergent codegen path*: `_emit(node).body` is byte-identical to
 `node.lower()` for a scalar-nested (block=1) node today. `Handle` carries `name` + `residence` (a scalar
 register value); the **tensor-core seam** is the view arm in `_bind` — an output-warp-tiled contraction (an mma
-`TilePlan`) emits through the register-tile pipeline + the accumulator→operand fragment recast there, where the rebuild
+`Tile`) emits through the register-tile pipeline + the accumulator→operand fragment recast there, where the rebuild
 extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
 the inbound `wires`.
 
 A materialized Fold-edge cut reaches this walk as an ordinary `Load` operand. `_emit` preserves that load and returns
 its bound value as the wire, so cut and fused trees use the same parent emission path.
 
-The output-tiled arm travels as **`(node, tile)`** — the stored `Fold` (bilinear reading) and its PLACED `TilePlan`
+The output-tiled arm travels as **`(node, tile)`** — the stored `Fold` (bilinear reading) and its PLACED `Tile`
 slice. There is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "`is_contraction(op)` with a
 TILE slice over a grid with an `(m, n)` pair" and threads the two on; the slice arrives ALREADY PLACED from
-`Sched.tile_of`, which binds the caller's `(m, n)` through `TilePlan.at`. It is
+`Sched.tile_of`, which binds the caller's `(m, n)` through `Tile.at`. It is
 binding-driven for both atoms, with **no per-atom subclass**, and cleanly
 splits the **placement/schedule the slice owns** (its `axes` and the `Side`
 geometry derived from them — the tiled CELL and nothing outside it, so the kernel's leading batch axes stay the
@@ -82,11 +82,11 @@ contract: the reduce `axis`, the shared `a` operand edge plus the product `chann
 field, its one home is the wrapping zero-axis `Fold.lift`. The edges share ONE type. Canonicalization places the
 argument shared across channels in `a`; `Sched.tile_of` then orients algebraic M toward the physical output axis that
 edge references and N toward the other axis. Either side may be computed and use the synchronous compute fill)
-from the **schedule** (the `TilePlan` slice carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
+from the **schedule** (the `Tile` slice carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
 `ScalarAtom`, `ir/atom.py` — plus the unit/register widths + K-chunk). The per-CTA geometry (the `(m, n)` `Side` pair —
 tile width / mask / block+unit var names — plus `launch_threads`) is **derived on the slice**, from its widths × its
 own `axes` (`@property`). Keeping the schedule a single swappable
-slice is what lets the same operand/`acc` params be tiled by a *different* `TilePlan`.
+slice is what lets the same operand/`acc` params be tiled by a *different* `Tile`.
 
 A symbolic / non-divisible tail is **clamp-to-identity** (the masked overhang folds a no-op or guards its store); the
 dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `int seq_len` arg.
@@ -204,11 +204,12 @@ supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner 
 axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
 CTA-shared across the sibling, so a sibling var can only survive as a value-dead flat-index reshape residue (a
 merged / reshaped weight row), and left unbound it would emit the unsplit axis name the kernel no longer defines. The staging **decision** does not live here at all: the
-`Stage` on the `TileOp` arrives **already resolved** by the scheduler (transport eligibility, the slab K-chunk
-`bk_elems`, the depth clamps — or `None`, gmem-direct), and `state` (which slots the operand fragments) and the
-shared `reduce` (which emits the loop) apply it verbatim. The `Stage` names the intermediate storage and its fill mechanism — `smem` (the synchronous
-thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all (gmem→register on
-a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
+`ResolvedStage` in `ClassicMaterialization` arrives **already resolved** by the scheduler (transport eligibility, the
+slab names, K-chunk `bk_elems`, and depth clamps). A direct edge has an explicit direct `Stage` choice and no resolved
+materialization. The `state` builder (which slots the operand fragments) and shared `reduce` (which emits the loop)
+apply the resolved facts verbatim. The `Stage` choice names the intermediate storage and its fill mechanism — `smem`
+(the synchronous thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all
+(gmem→register on a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
 `d<depth>` is the gmem→smem ring (blocking synchronous slot fill / cp.async commit group / TMA mbarrier-phased
 prefetch over the K-slab loop),
 `p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps). Staging is a
@@ -223,7 +224,8 @@ additionally requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves
 are never offered and a `smem-tma` pin refuses — Ada/Ampere have no
 `cp.async.bulk.tensor` and nvcc has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the
-schedule fork enumerates the resolver-gated stage grid (`search/space.stage_moves`) alongside the tile / reduce moves;
+schedule fork enumerates the resolver-gated stage grid (`ir/schedule/catalog.stage_moves`) alongside the tile / reduce
+moves;
 an `EMMY_STAGE` pin stays authoritative.
 
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
@@ -296,8 +298,9 @@ the multi-channel sync compute-fill and the scalar resolver still decline 1-byte
 **Staged packed-pair (NVFP4) weights — the byte slab plus a block-scale slab.** A packed weight is a COMPUTED B, so
 the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading
 moves 16-bit values through global memory, which is the whole point of a 4-bit format thrown away. The specialized
-reading keeps it. `_packed.match_packed_b_node` recognizes the node (the ONE question the offer, the resolver and
-the materializer all ask, so they cannot drift apart), and `_atom._packed_operands` stages THREE slabs where the
+reading keeps it. `ir.schedule.packing.match_packed_b_node` recognizes the node (the ONE question the offer, the
+resolver and the materializer all ask, so they cannot drift apart), and `_atom._packed_operands` stages THREE slabs
+where the
 ordinary matmul stages two: A and the weight's raw bits as `cp.async` peers, plus the weight's block scales as the
 `SyncTransport`'s compute-filled operand. The bits slab is half the K width of a 16-bit one (one byte is two K
 elements) and is addressed canonically — row `n`, byte column `k / 2` over the checkpoint's `[N, K/2]` buffer —
@@ -376,7 +379,7 @@ assuming that all components share the contraction accumulator's residence.
 The Fold move is never re-decided during materialization. `ReduceStage.combine` is the placement-keyed selector:
 within-warp uses `SHFL`, within-block uses a `SHFL` plus shared-memory tree, and cross-CTA uses `ATOMIC` or `KERNEL`
 (a multi-component carrier is kernel-finalize only). Scalar materialization consumes it through `emit_combine`, while
-the structural `tile/035_split_reduce` fork realizes the graph-level partition.
+the structural `tile/030_cut` fork realizes the graph-level partition.
 
 **Shared-row staging (`_tile_reduce_axis`) — the reduce tier's `sync` transport.** The fused norm→linear prologue is a
 cooperative reduce: an input row folded by the cooperative reduce AND re-read per output column of a contraction tail (a

@@ -17,7 +17,9 @@ from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.kernel_cache import POISON, KernelCache
+from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.db import SearchDB
+from tests.compiler.helpers import direct_classic_leaf
 
 
 def _matmul(x: str, w: str, o: str) -> Graph:
@@ -34,7 +36,8 @@ def _cuda_ops(graph: Graph) -> list[CudaOp]:
 
 
 def _compile(graph: Graph, ctx: Context) -> list[CudaOp]:
-    return _cuda_ops(Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=SearchDB()))
+    lowered, _ = Run(Pipeline.build(CUDA_PASSES), ctx, db=SearchDB()).resolve(graph, direct_classic_leaf)
+    return _cuda_ops(lowered)
 
 
 def test_twin_replay_renders_byte_identical_source() -> None:

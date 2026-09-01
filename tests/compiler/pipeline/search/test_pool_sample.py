@@ -75,10 +75,9 @@ def test_a_pool_no_larger_than_the_draw_is_taken_whole() -> None:
     assert PoolSample(rows=0).take(space) == Candidates(space, 10), "0 is 'enumerate everything', the live and unsampled default"
 
 
-def test_the_cache_identity_ignores_the_size_sink_and_the_keep_set_order() -> None:
-    """The pool memo keys on this, so it must be stable across processes: a ``frozenset``'s
-    iteration order follows randomized string hashing, and its ``repr`` would key one sample two
-    ways on two runs."""
+def test_the_sample_identity_ignores_the_size_sink_and_the_keep_set_order() -> None:
+    """The sample identity must be stable across processes: a ``frozenset``'s iteration order
+    follows randomized string hashing, and its ``repr`` would spell one sample two ways."""
     a = PoolSample(rows=10, seed=1, keep=frozenset({("x",), ("y",)}))
     b = PoolSample(rows=10, seed=1, keep=frozenset({("y",), ("x",)}))
     b.totals["some-pool"] = 999

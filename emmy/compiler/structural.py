@@ -16,10 +16,10 @@ Implementers today:
 - :class:`emmy.compiler.ir.stmt.body.Body` — canonicalized body
   rendering with SSA / axis / commutative-arg / external-buffer names
   normalized away.
-- :class:`emmy.compiler.ir.pure.fold.Fold` — the tile term's α-invariant
-  identity: the exact-flavor canonical digest of the Loop-IR body the term
-  lowers to (the term is pure algebra; its body is its normal form);
-  excludes placement, schedule slices and workers.
+ - :class:`emmy.compiler.ir.pure.fold.Fold` — the tile term's α-invariant
+   identity: the exact-flavor canonical digest of the Loop-IR body the term
+   lowers to (the term is pure algebra; its body is its normal form);
+   excludes placement, classic schedule, materialization and workers.
 - :class:`emmy.compiler.context.Context` — codegen-affecting
   compilation knobs (compute capability today; tuning overrides as they
   land). Excludes ambient I/O fields (dump dirs, verbosity, the session

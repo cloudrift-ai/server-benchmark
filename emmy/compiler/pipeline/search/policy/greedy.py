@@ -683,14 +683,14 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
 
     A SCHEDULE fork (the recognized ``TileOp`` root): the fork's the deploy identity (``identity_key(with_io=True)``) selects the
     records; the fastest record whose spelled row is EXACTLY one enumerated leaf
-    (``canonical_row_key`` equality — no prefix, no any-of) decides. A record that matches the
+    (``schedule_row_key`` equality — no prefix, no any-of) decides. A record that matches the
     identity but equals no leaf is DRIFT: warn loudly and decide nothing (fail-closed — the fuzzy
     acceptance this tier replaced is what deployed wrong kernels).
 
     Under an active :func:`golden_audit` sink every SCHEDULE consultation also appends its verdict
     (MATCH / DRIFT / GAP) — the drift audit's only reading of this tier."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import drop_uninformative_scopes, schedule_row_key, values_equal  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import schedule_row_key, values_equal  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     root = fp.root_op
@@ -709,8 +709,8 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
             if _is_structural_option(option):
                 return None
             if isinstance(option, Fork) and not option.is_leaf:
-                branch = drop_uninformative_scopes(option.knobs)
-                if all(key in record and values_equal(key, record[key], value) for key, value in branch.items()):
+                prefix = dict(schedule_row_key(option.knobs))
+                if all(key in record and values_equal(key, record[key], value) for key, value in prefix.items()):
                     found = find_recorded(option.expand(), target)
                     if found is not None:
                         return found
@@ -796,7 +796,8 @@ def _direct_measured_pick(fp: ForkPoint, blocked, db_index: dict) -> tuple[objec
     def find(options, record):
         for option in options:
             if isinstance(option, Fork) and not option.is_leaf:
-                if all(key in record and values_equal(key, record[key], value) for key, value in option.knobs.items()):
+                decisions = {key: value for key, value in option.knobs.items() if not key.startswith(("S_", "H_"))}
+                if all(key in record and values_equal(key, record[key], value) for key, value in decisions.items()):
                     found = find(children(option), record)
                     if found is not None:
                         return found
@@ -912,7 +913,7 @@ def _stream_tiers(
     leaf set. ``(leaf, None, None)`` is the degenerate plain return (≤1 leaf, or every leaf
     blocklisted — no score, no decision memo); ``(leaf, knobs, price)`` is the ranked pick."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import NO_OPTION, _is_structural_option  # noqa: PLC0415
 
     base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
     picker = getattr(the_prior, "pick", None)
@@ -960,7 +961,8 @@ def _stream_tiers(
     # The cold-pool budget: a pool whose minted bound exceeds _POOL_BUDGET is sampled by seeded
     # descents instead of walked — the tiers below then rank the drawn complete rows exactly as
     # they would the full pool. An empty draw fails explicitly: walking the full oversized pool
-    # would silently discard the bound, while returning a partial branch would violate the prior's
+    # would silently discard the bound. Report the empty subtree to the resolver so it can keep
+    # walking the current rule batch; returning a partial branch would violate the prior's
     # complete-row contract.
     bound = next((b for o in opts if (b := getattr(o, "pool_bound", None)) is not None), None)
     drawn = None
@@ -968,7 +970,7 @@ def _stream_tiers(
         pid = next((p for o in opts if (p := getattr(o, "pool_id", None)) is not None), "")
         drawn = _descent_sample(opts, pid, node_blocked)
         if not drawn:
-            raise RuntimeError(f"budgeted schedule pool {pid!r} produced no live complete row")
+            return NO_OPTION, None, None
     n_leaves = n_live = 0
     first: object = None
     sample_row: dict | None = None  # one live row — carries the fork's shared ``S_*`` signature
@@ -990,8 +992,10 @@ def _stream_tiers(
         if len(chunk) >= _CHUNK:
             scan(chunk)
             chunk = []
-    if n_leaves <= 1 or n_live == 0:
-        return (first if first is not None else next(iter_leaves(opts))), None, None
+    if n_leaves == 0:
+        return NO_OPTION, None, None
+    if n_leaves == 1 or n_live == 0:
+        return first, None, None
     if chunk:
         scan(chunk)
     if best_ev is not None:
@@ -1194,7 +1198,11 @@ def greedy_decide(
                 if pick is not None:
                     return pick
         if len(leaves) <= 1:
-            return leaves[0] if leaves else next(iter_leaves(fp.options))
+            if leaves:
+                return leaves[0]
+            from emmy.compiler.pipeline.pipeline import NO_OPTION  # noqa: PLC0415
+
+            return NO_OPTION
         # The constant base under this fork's deltas: the offer op's knobs
         # (its ``S_*`` structural identity) plus the ``H_*`` host/hardware
         # regime — the feature base tune trained on (``two_level.inner_reward``).

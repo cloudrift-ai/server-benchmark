@@ -1,8 +1,8 @@
 r"""Operand-stage RESOLUTION — the sizing arithmetic behind the schedule's ``STAGE`` family.
 
 Exactly three resolvers live here — :func:`resolve_warp_stage`, :func:`resolve_scalar_stage`,
-:func:`resolve_fill_stage` — plus the compute fill's own node refusals. The walk's option builder
-(``_schedule``) offers a staged transport only when it RESOLVES here, and the row carries the
+:func:`resolve_fill_stage` — plus the compute fill's own node refusals. The classic scheduler
+offers a staged transport only when it RESOLVES here, and the row carries the
 resolved spelling, so the fork, the stamped knobs and the kernel agree. A resolver is not a
 predicate and this is not a legality layer: for the shared-memory budget the legal answer is a
 SIZE — the resolved ``bk_elems`` slab chunk and the deepest ring the budget affords — so each
@@ -16,21 +16,20 @@ are the NODE-dependent geometry of the move :func:`resolve_fill_stage` realizes 
 because the fill is the move they filter, one statement each so the unpinned enumeration's drop
 and a pin's raise share it. What deliberately does NOT live here: the transport/target rule
 (MOVE×target — ``Stage.available_on``, filtered in the ``stage_moves`` catalog; the scheduler's
-pin path reads its message through :func:`stage_target`) and the fragment-seam legality (the
-paired register bound), which lives beside the other refusal functions in ``_schedule``. Nothing
-here ranks or narrows for speed."""
+pin path reads its message through :func:`stage_target`) and the fragment-seam relation (including
+the paired register bound), which lives in :class:`ClassicScheduleContext`. Nothing here ranks or
+narrows for speed."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 
+from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.pure.fold import Fold, operand_name
-from emmy.compiler.ir.schedule import Stage, TilePlan
+from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
+from emmy.compiler.ir.schedule.packing import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.ir.stmt import Load
-from emmy.compiler.ir.tile.ops import cone_seam
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
-from emmy.compiler.pipeline.passes.lowering._packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
 # at 4 so it stays within the 5-dim limit.
@@ -106,7 +105,7 @@ _PACKED_BLOCK = 16
 _PACKED_FRAGMENT_DTYPES = ("f16", "bf16")
 
 
-def _packed_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, packed, inputs) -> Stage | None:
+def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, inputs) -> ResolvedStage | None:
     """Resolve the PACKED byte-slab stage for a packed-pair k-block B — the NVFP4 weight cone.
 
     The scoped shape, which is what the fragment drain is written for: a copy transport (cp.async or
@@ -165,7 +164,8 @@ def _packed_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, packe
     if scale_bytes + slot_bytes > budget:
         return None
     depth = _clamp_depth(stage.depth, slot_bytes, budget - scale_bytes)
-    return replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
+    choice = replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk))
+    return ResolvedStage(choice, bk_elems=bk_elems)
 
 
 def _row_major_k_inner(tensor, load, k_name: str) -> bool:
@@ -188,7 +188,7 @@ def _row_major_k_inner(tensor, load, k_name: str) -> bool:
     return len(dims) == 2 and all(d.is_static for d in dims) and k_name in idx[-1].free_vars()
 
 
-def _block_scaled_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, pair, inputs) -> Stage | None:
+def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pair, inputs) -> ResolvedStage | None:
     """Resolve the FOUR-SLAB stage of a block-scaled packed pair — the native fp4 cell.
 
     The simplest staging in the tier, because no SCALE is computed: the packed byte-slab stage next
@@ -243,10 +243,19 @@ def _block_scaled_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int,
     slot_bytes = sum(r * (bk_elems // 2 + BYTE_SLAB_PAD) + r * (bk_elems // block + BYTE_SLAB_PAD) for r in rows)
     if slot_bytes > budget:
         return None
-    return replace(stage, depth=_clamp_depth(stage.depth, slot_bytes, budget), reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
+    choice = replace(stage, depth=_clamp_depth(stage.depth, slot_bytes, budget), reg_depth=min(stage.reg_depth, tile.bk))
+    return ResolvedStage(choice, bk_elems=bk_elems)
 
 
-def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, inputs=None, *, readings: tuple | None = None) -> Stage | None:
+def resolve_warp_stage(
+    c: Fold,
+    tile: Tile,
+    stage: Stage,
+    budget: int,
+    inputs=None,
+    *,
+    readings: tuple | None = None,
+) -> ResolvedStage | None:
     """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — synchronous copy,
     cp.async, TMA, or gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth``
     clamped so the ring's slots fit ``budget``, and ``reg_depth`` clamped to ``bk``. A tile whose
@@ -261,7 +270,7 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     (W8A16), and the fp8 (k32) atoms stage both operands as byte slabs drained by the byte repack.
     Any other mismatch DECLINES and keeps the warp tier gmem-direct, whose fragment load converts
     per element. A byte slab's fill runs 16 B chunks and its cp.async row pad is 16 B
-    (``_addr.BYTE_SLAB_PAD``), so its inner span — and, canonical-B, the gmem row stride N — must
+    (``ir.address.BYTE_SLAB_PAD``), so its inner span — and, canonical-B, the gmem row stride N — must
     be 16-divisible.
 
     A PACKED-PAIR B (an NVFP4 weight's decode cone) is the one COMPUTED edge that resolves here,
@@ -333,10 +342,11 @@ def resolve_warp_stage(c: Fold, tile: TilePlan, stage: Stage, budget: int, input
     if slot_bytes > budget:
         return None
     depth = _clamp_depth(stage.depth, slot_bytes, budget)
-    return replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk), bk_elems=bk_elems)
+    choice = replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk))
+    return ResolvedStage(choice, bk_elems=bk_elems)
 
 
-def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: int) -> Stage | None:
+def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int) -> ResolvedStage | None:
     """Resolve an operand ``Stage`` against the scalar register-tile contraction ``c``, or ``None``
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
@@ -381,7 +391,7 @@ def resolve_scalar_stage(c: Fold, tile: TilePlan, stage: Stage, inputs, budget: 
         depth -= 1
     if bk_elems < 4:
         return None
-    return replace(stage, depth=depth, reg_depth=1, bk_elems=bk_elems)
+    return ResolvedStage(replace(stage, depth=depth, reg_depth=1), bk_elems=bk_elems)
 
 
 # ---- the smem compute fill --------------------------------------------------------------------- #
@@ -402,7 +412,7 @@ def converting_a(node: Fold, atom, inputs) -> bool:
     return t is not None and t.dtype.nbytes >= 2 and t.dtype != atom.operand_dtype("a")
 
 
-def computed_operand_cover(c: Fold, tile: TilePlan, *, converting: bool = False, k_axis: Axis | None = None) -> str | None:
+def computed_operand_cover(c: Fold, tile: Tile, *, converting: bool = False, k_axis: Axis | None = None) -> str | None:
     """Geometry required by a smem compute-filled contraction operand.
 
     A computed A leaves B on the async-copy path, whose contiguous N-vector copy cannot clamp a
@@ -444,7 +454,7 @@ def computed_operand_cover(c: Fold, tile: TilePlan, *, converting: bool = False,
     return None
 
 
-def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs, *, converting: bool = False) -> str | None:
+def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool = False) -> str | None:
     """Every BYTE-COPIED edge of a compute-filled contraction must already have the atom dtype.
 
     The ``smem`` stage evaluates computed (and converting) operands into their typed shared-memory
@@ -474,7 +484,7 @@ def computed_operand_copy_dtype(c: Fold, tile: TilePlan, inputs, *, converting: 
 
 def resolve_fill_stage(
     c: Fold,
-    tile: TilePlan,
+    tile: Tile,
     budget: int,
     want_depth: int = 1,
     inputs=None,
@@ -482,7 +492,7 @@ def resolve_fill_stage(
     seam: tuple | None = None,
     k_axis: Axis | None = None,
     producer: Fold | None = None,
-) -> Stage | None:
+) -> ResolvedStage | None:
     """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under
     ``tile`` — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the
     byte-copy / cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it
@@ -499,6 +509,8 @@ def resolve_fill_stage(
     ``k_axis`` overrides the stored contraction axis when the contraction is a derived singleton
     marker whose enclosing Fold owns the actual K sweep. ``why`` collects the decline reason when
     the tier refuses, so a PINNED caller reports the gate it actually hit."""
+    from emmy.compiler.ir.tile.ops import cone_seam  # noqa: PLC0415
+
     atom = tile.atom
     k_axis = k_axis or c.axis
     if atom.operand_dtype("a").nbytes < 2:
@@ -547,7 +559,7 @@ def resolve_fill_stage(
     depth = _clamp_depth(want_depth, async_bytes, budget - fixed) if async_bytes else 1
     computed = [operand_name(c.a)] if a_converts or not isinstance(c.a, Load) else []
     computed.extend(operand_name(ch.b) for ch in c.channels if not isinstance(ch.b, Load))
-    return Stage(depth=depth, transport="smem", smem=tuple(computed), bk_elems=bk_elems)
+    return ResolvedStage(Stage(depth=depth, transport="smem"), smem=tuple(computed), bk_elems=bk_elems)
 
 
 __all__ = [

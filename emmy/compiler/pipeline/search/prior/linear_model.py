@@ -196,7 +196,7 @@ class LinearModel:
         for k, w in w_set.items():
             if feats.get(k, 0.0):
                 yield k, w * feats[k]
-        finalize, splitk = gate_values(feats)  # splitk is the split-K count (REDUCE@<k>.cta)
+        finalize, splitk = gate_values(feats)  # splitk is the structural split-K count
         if finalize:
             yield (
                 "gate:atomic_free",

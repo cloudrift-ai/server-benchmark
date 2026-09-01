@@ -50,7 +50,7 @@ configs:
       FAST_MATH: false
       PLACE: cut
     knobs:
-      TILE: ''
+      TILE: f1
       WORK: t256
       REDUCE: ''
       STAGE: ''

@@ -13,7 +13,7 @@ from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
@@ -22,7 +22,7 @@ from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.loop_wire import loop_graph_to_wire
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     CutSite,
@@ -30,6 +30,8 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     _producer_order,
     _workspace_axes,
     cuttable_seams,
+    output_map,
+    realize,
 )
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
@@ -44,15 +46,41 @@ from emmy.compiler.pipeline.search.golden import (
 )
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import direct_classic_leaf, requires_cuda
 
 _CTX = Context.from_target((12, 0))
-_OFF = {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}
 _CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
 
 
 def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
     graph.add_node(InputOp(), [], Tensor(name, shape, dtype), node_id=name)
+
+
+def test_cut_and_assignment_passes_share_the_generic_schedule_driver() -> None:
+    from emmy.compiler.ir.schedule import schedule
+
+    assert _CUT.schedule is schedule
+    assert import_module("emmy.compiler.pipeline.fork").schedule is schedule
+
+
+def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
+    """A split piece can re-enter placement; cutting it must not make REDUCE pending again."""
+    from emmy.compiler.pipeline.passes.lowering.tile._split import split_pending
+
+    graph = _computed_operand_graph("a")
+    tile = graph.nodes["out"].op
+    partitioned = replace(tile.op, axis=replace(tile.op.axis, window=Window(parent=tile.op.axis, partition=True)))
+    graph.nodes["out"].op = replace(tile, op=partitioned)
+    pipeline = Pipeline.build(["lowering/tile"], select={"cut"})
+    match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
+    seams = cuttable_seams(match.root.op)
+    renamed = output_map(match.root)
+
+    fragment = realize(match, match.root, (seams[0],), renamed)
+
+    pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    assert pieces and all(piece.split_consumed for piece in pieces)
+    assert not any(split_pending(piece) for piece in pieces)
 
 
 def _computed_operand_graph(side: str) -> Graph:
@@ -201,11 +229,15 @@ def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
     return offered
 
 
-def _lower_cut(graph: Graph, spelling: str) -> Graph:
-    with pinned_knobs({spelling: "cut", **_OFF}):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=_CTX)
+def _lower(graph: Graph, placement: dict[str, str]) -> Graph:
+    with pinned_knobs(placement):
+        lowered, _ = Run(Pipeline.build(CUDA_PASSES), _CTX).resolve(graph, direct_classic_leaf)
     lowered.validate()
     return lowered
+
+
+def _lower_cut(graph: Graph, spelling: str) -> Graph:
+    return _lower(graph, {spelling: "cut"})
 
 
 def _nested_attention_cut(pins: dict[str, str]) -> Graph:
@@ -259,8 +291,7 @@ def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> Non
 
 
 def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:
-    with pinned_knobs({"PLACE": "fuse", **_OFF}):
-        lowered = Pipeline.build(CUDA_PASSES).run(_computed_operand_graph("a"), ctx=_CTX)
+    lowered = _lower(_computed_operand_graph("a"), {"PLACE": "fuse"})
     assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 1
 
 
@@ -348,19 +379,22 @@ def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
     assert pieces and all(node.op.placement_decided for node in pieces)
     node = _piece_with_seam(fragment)
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
-    with pinned_knobs({"PLACE@map.fold.a.fold.b1": "cut"}), pytest.raises(RuleSkipped, match="already placed"):
-        _CUT.rewrite(match, node)
+    with pinned_knobs({"PLACE@map.fold.a.fold.b1": "cut"}):
+        result = _CUT.rewrite(match, node)
+    options = result if isinstance(result, list) else [result]
+    assert options and all(not any(name.startswith("PLACE") for name in option.knobs) for option in options)
 
 
-def test_bare_place_cut_keeps_recursing_on_fresh_pieces() -> None:
+def test_bare_place_cut_is_consumed_once_by_both_pieces() -> None:
     fragment = _nested_attention_cut({"PLACE": "cut"})
     node = _piece_with_seam(fragment)
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
 
-    assert not node.op.placement_decided
+    assert node.op.placement_decided
     with pinned_knobs({"PLACE": "cut"}):
-        fork = _CUT.rewrite(match, node)
-    assert "cut" in fork.knobs.values()
+        result = _CUT.rewrite(match, node)
+    options = result if isinstance(result, list) else [result]
+    assert options and all(not any(name.startswith("PLACE") for name in option.knobs) for option in options)
 
 
 def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
@@ -404,6 +438,19 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     assert any(set(node.inputs) & workspaces for node in producers), "the nested value's producer must read a sibling workspace"
 
 
+def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
+    match, graph = _composed_case_match()
+    pins = {"PLACE": "cut", "PLACE@map.fold.a.map.fold.fold.b1": "cut"}
+
+    with pinned_knobs(pins):
+        fork = _CUT.rewrite(match, graph.nodes[match.root_node_id])
+
+    assert len(fork.knobs) == 2 and set(fork.knobs.values()) == {"cut"}
+    (fragment,) = fork.expand()
+    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    assert len(pieces) == 3 and all(node.op.placement_decided for node in pieces)
+
+
 def _composed_case_match() -> tuple[Match, Graph]:
     case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
     (record,) = load_golden_records(load_golden_file(case))
@@ -442,7 +489,7 @@ def test_dependent_seam_pins_pull_their_producer_into_the_composed_cut() -> None
     structural, so the pin cannot decline it."""
     match, graph = _composed_case_match()
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
-    with pinned_knobs({"PLACE@map.fold.a.map.fold.a32": "cut", **_OFF}):
+    with pinned_knobs({"PLACE@map.fold.a.map.fold.a32": "cut"}):
         fork = _CUT.rewrite(match, node)
     assert set(fork.knobs) == {
         "PLACE@map.fold.a.map.fold.a32",
@@ -471,7 +518,7 @@ def test_statistics_route_shares_the_row_reduction_across_output_keys() -> None:
                 stack.extend(current.lift.body)
         return out
 
-    with pinned_knobs({**_STAT_PINS, **_OFF}):
+    with pinned_knobs(_STAT_PINS):
         fragment = _CUT.rewrite(match, node).expand()[0]
     pieces = [piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp)]
     assert len(pieces) == 7  # six workspaces plus the consumer
@@ -677,8 +724,7 @@ def test_a_dependent_seam_is_an_unpinned_composed_arm() -> None:
     evidence ranked: the arm was not offered."""
     match, graph = _composed_case_match()
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
-    with pinned_knobs(_OFF):
-        options = _CUT.rewrite(match, node)
+    options = _CUT.rewrite(match, node)
     arms = [dict(option.knobs) for option in options if "cut" in option.knobs.values()]
     dependent = {
         "PLACE@map.fold.a.map.fold.a32": "cut",

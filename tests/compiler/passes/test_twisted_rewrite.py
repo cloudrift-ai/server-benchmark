@@ -90,8 +90,10 @@ def test_sdpa_fold_tree_reaches_both_mma_sites(monkeypatch, causal: bool) -> Non
         f"torch.randn(1, 1, 32, 16, dtype=torch.float16){suffix})"
     )
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x2")
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    for node in (3, 4):
+        monkeypatch.setenv(f"EMMY_TILE@N{node}", "mma_m16n8k16_f16_f32/f1x2")
+    for node in (1, 3, 4):
+        monkeypatch.setenv(f"EMMY_REDUCE@N{node}", "")
     monkeypatch.setenv("EMMY_PLACE", "fuse")
 
     lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))

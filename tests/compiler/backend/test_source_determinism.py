@@ -5,12 +5,12 @@ Rendered kernel source must be byte-identical across interpreter launches: an
 address- or seed-derived token in the text re-keys the kernel on every boot, which
 silently defeats the on-disk cubin cache (each server start recompiles) and makes a
 prebuilt-cache image impossible. Found on a real RTX 5090 release run: ~270 of ~580
-serving kernels re-keyed per boot — the vectorized-store temp name embedded
-``id(self)``. The compile here runs in two SUBPROCESSES (fresh address space and hash
-seed — an in-process double compile cannot see this class of bug), off-GPU (CUDA
-hidden; sources render without a device), and the traced pointwise add is pinned
-to the production ``f2`` register-strip schedule so it must emit a vectorized store.
-The explicit pin keeps coverage independent of deploy-policy and tune-database picks.
+serving kernels re-keyed per boot — a rendered temp name embedded ``id(self)``. The
+compile here runs in two SUBPROCESSES (fresh address space and hash seed — an
+in-process double compile cannot see this class of bug), off-GPU (CUDA hidden;
+sources render without a device), and the traced pointwise add is pinned to an
+explicit ``f2`` register-strip schedule. The pin keeps coverage independent of
+deploy-policy and tune-database picks.
 """
 
 import subprocess

@@ -1,10 +1,10 @@
-"""The schedule walk's enumeration contracts — what outlived the deleted addressable product.
+"""The schedule walk's enumeration contracts.
 
-The walk has no product space and no ``space[i]``: one recursive traversal IS the enumeration, the
-prescan is the one place a catalog question is asked, and sampling is a reservoir over the leaf
-stream (``search/pool.py``). What survives of the old space's contract is pinned here: one prescan
-per term, computed and derived fold sites keyed as schedule sites, the paired mma row on the flash
-pair, and the structural split fork standing beside the walk with both finalize arms on offer.
+One recursive traversal enumerates the compatible subset of the classic schedule product. The
+prescan asks each domain catalog once, and sampling is a reservoir over the leaf stream
+(``search/pool.py``). These tests pin the traversal contract: every node and operand-use edge has a
+stable schedule-site identity, the flash pair can select its paired mma choices, and structural
+split choices remain separate from classic schedule choices.
 """
 
 from __future__ import annotations
@@ -16,10 +16,18 @@ import pytest
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
+from emmy.compiler.ir.pure import Fold
+from emmy.compiler.ir.pure.fold import Channel
+from emmy.compiler.ir.schedule import classic_projection as _classic
+from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.tile import OutputSpec, Reduce
 from emmy.compiler.pipeline.knob import family_of
-from emmy.compiler.pipeline.passes.lowering.tile import _schedule
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, scan_from_loop
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pool import PoolSample
 
@@ -79,6 +87,25 @@ def _rows(graph) -> list[dict]:
     return enumerate_graph(graph, ctx).rows
 
 
+def _pin(monkeypatch, **pins: str) -> None:
+    """Pin canonical classic schedule keys without a family-wide fallback."""
+    for key, value in pins.items():
+        monkeypatch.setenv(f"EMMY_{key.upper()}", value)
+
+
+def _pin_sdpa(monkeypatch) -> None:
+    _pin(
+        monkeypatch,
+        **{
+            "TILE@n3": "mma_m16n8k16_f16_f32/f1x2",
+            "TILE@n4": "mma_m16n8k16_f16_f32/f1x1",
+            "REDUCE": "",
+            "STAGE@n3": "",
+            "STAGE@n4": "d1/smem",
+        },
+    )
+
+
 @pytest.fixture
 def unpinned(monkeypatch):
     for var in _PIN_VARS:
@@ -95,13 +122,13 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
     leaf, so a reintroduced per-branch re-ask shows up here as a repeated question, not as a slow
     test somebody eventually notices."""
     asked: list[tuple] = []
-    original = _schedule._options
+    original = _classic._options
 
     def spy(state, node):
         asked.append((state.tile, node))  # strong refs, so ids below cannot alias freed objects
         return original(state, node)
 
-    monkeypatch.setattr(_schedule, "_options", spy)
+    monkeypatch.setattr(_classic, "_options", spy)
     assert _rows(FIXTURES[case]())
     assert asked, "the fixture built no catalog at all"
     keys = [(id(tile), id(node)) for tile, node in asked]
@@ -111,18 +138,18 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
 
 def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> None:
     """A computed-A cone is lowered once for its stat-row seam, not once per tile plan."""
-    from emmy.compiler.pipeline.passes.lowering.tile import _staging  # noqa: PLC0415
+    from emmy.compiler.ir.tile import ops as tile_ops  # noqa: PLC0415
 
     calls: list[tuple] = []
-    original = _schedule.cone_seam
+    original = _classic.cone_seam
 
     def spy(cone, k_name):
         calls.append((cone, k_name))
         return original(cone, k_name)
 
-    monkeypatch.setattr(_schedule, "cone_seam", spy)
+    monkeypatch.setattr(_classic, "cone_seam", spy)
     monkeypatch.setattr(
-        _staging,
+        tile_ops,
         "cone_seam",
         lambda *_: (_ for _ in ()).throw(AssertionError("the fill must reuse the prescan's seam")),
     )
@@ -135,7 +162,7 @@ def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> N
 @pytest.mark.parametrize("case, tile_sites, reduce_sites", (("fused_norm_linear", 1, 2), ("flash_pair", 2, 3)))
 def test_computed_fold_sites_are_keyed_schedule_sites(case, tile_sites, reduce_sites, unpinned) -> None:
     """A computed cone's fold and a derived site (flash's synthesized PV) are real schedule sites:
-    every row spells them, keyed by the tree-path codec, so nothing nested is silently undecided."""
+    every row spells them with stable node identities, so nothing nested is silently undecided."""
     row = _rows(FIXTURES[case]())[0]
     assert sum(key == "TILE" or key.startswith("TILE@") for key in row) == tile_sites
     assert sum(key == "REDUCE" or key.startswith("REDUCE@") for key in row) == reduce_sites
@@ -145,19 +172,24 @@ def test_sdpa_fold_tree_offers_a_paired_mma_row(unpinned, monkeypatch) -> None:
     """The walk reaches a row where BOTH flash contractions ride the tensor core — the score's N
     tile feeding the value contraction's streamed K block through the fragment seam."""
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    # The score's N tile is the value contraction's streamed K block.
-    monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f1x2")
-    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f1x1")
-    monkeypatch.setenv("EMMY_STAGE", "")
+    _pin_sdpa(monkeypatch)
     monkeypatch.setenv("EMMY_RASTER", "")
-    monkeypatch.setenv("EMMY_REDUCE", "")
     rows = _rows(_sdpa_graph())
     assert any(sum(key.startswith("TILE@") and "mma_" in str(value) for key, value in row.items()) == 2 for row in rows)
 
 
+def test_global_classic_pins_restrict_every_applicable_site(unpinned, monkeypatch) -> None:
+    """Bare families form one immutable restriction without manufacturing domain choices."""
+    _pin(monkeypatch, WORK="", TILE="", REDUCE="", STAGE="", RASTER="")
+    rows = _rows(_matmul_graph(64, 64, 64, "f16"))
+    assert rows
+    for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER"):
+        assert all(all(value == "" for key, value in row.items() if family_of(key) == family) for row in rows)
+
+
 def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
     """The old product kept the cross-CTA partitions as combined rows; they are now STRUCTURAL
-    siblings of the unsplit tree (``035_split_reduce``), and a fold that admits both finalizes
+    siblings of the unsplit tree (``030_cut``), and a fold that admits both finalizes
     still sees the atomic and the deferred arm offered together, beside the unsplit one."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import iter_leaves  # noqa: PLC0415
@@ -175,12 +207,9 @@ def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
 
 
 def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkeypatch) -> None:
-    """The cross-CTA split composes with the paired-mma flash cell. Asserted at the offer
-    function: after a cut fork decides on the same kernel, the engine's structural replay resolves
-    a later structural fork inline (the count evidence is per-op, not per-rule — see
-    ``_replay_structural_decision``), so the split's siblings never reach a decide on this graph —
-    the offer itself is the observable. The atomic
-    arm is refused on the carrier's ARITY (``atomicAdd`` folds one additive state; the twisted
+    """The cross-CTA split composes with the paired-mma flash cell. The offer is inspected directly
+    to isolate its algebraic legality from the rest of resolution. The atomic arm is refused on the
+    carrier's ARITY (``atomicAdd`` folds one additive state; the twisted
     carrier streams three), while the deferred workspace arm slices the multi-component carrier.
     And the pieces re-schedule their paired sites: under the pinned deferred split the partial's
     row still spells BOTH mma contractions."""
@@ -195,13 +224,18 @@ def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkey
     ctx = Context.from_target(_CC)
     captured: list[TileOp] = []
 
+    class _Captured(Exception):
+        pass
+
     def keep(fp):
         op = fp.root_op
         if isinstance(op, TileOp) and op.op is not None and not op.place.is_mapped and not captured:
             captured.append(op)
+            raise _Captured
         return next(iter_leaves(fp.options))
 
-    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_sdpa_graph(), keep)
+    with pytest.raises(_Captured):
+        Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_sdpa_graph(), keep)
     assert captured, "the flash cell must reach the tile passes as one fused kernel"
     offers = split_forks(None, SimpleNamespace(op=captured[0]))
     assert offers is not None
@@ -212,14 +246,22 @@ def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkey
     )
 
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f1x2")
-    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f1x1")
-    monkeypatch.setenv("EMMY_STAGE", "")
-    monkeypatch.setenv("EMMY_RASTER", "")
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
-    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target(_CC)).resolve(
-        _sdpa_graph(), lambda fp: next(iter_leaves(fp.options))
+    _pin(
+        monkeypatch,
+        **{
+            "TILE@n2": "mma_m16n8k16_f16_f32/f1x2",
+            "TILE@n3": "mma_m16n8k16_f16_f32/f1x1",
+            "REDUCE@n0": "",
+            "REDUCE@n2": "",
+            "REDUCE@n3": "",
+            "STAGE@n2": "",
+            "STAGE@n3": "d1/smem",
+        },
     )
+    monkeypatch.setenv("EMMY_RASTER", "")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
+    union_ctx = dc_replace(Context.from_target(_CC), validate_pins=False)
+    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=union_ctx).resolve(_sdpa_graph(), lambda fp: next(iter_leaves(fp.options)))
     partial = next(n.op for nid, n in out.nodes.items() if nid.endswith("__partial") and isinstance(n.op, TileOp))
     assert partial.place.is_mapped, "the partial piece must decide its own row"
     assert sum(key.startswith("TILE@") and "mma_" in str(value) for key, value in partial.knobs.items()) == 2, (
@@ -237,14 +279,19 @@ def test_an_observed_fold_offers_only_the_serial_reduce(unpinned) -> None:
         assert not offending, f"a partitioned REDUCE row reached an observed fold: {offending}"
 
 
-def test_computed_b_statistic_is_a_keyed_schedule_site(unpinned, monkeypatch) -> None:
+def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> None:
     """A score contraction's computed B operand cone closes over its per-key statistic
     (``normalize_fold_tree``'s reduce-body closing), and the walk keys that relocated fold as an
-    ordinary schedule site — nothing nested inside a B edge is silently undecided."""
-    monkeypatch.setenv("EMMY_TILE", "")
-    monkeypatch.setenv("EMMY_STAGE", "")
+    ordinary schedule site. Its identity is independent of its changing structural path."""
+    _pin(
+        monkeypatch,
+        **{
+            "TILE": "",
+            "REDUCE": "",
+            "STAGE": "",
+        },
+    )
     monkeypatch.setenv("EMMY_RASTER", "")
-    monkeypatch.setenv("EMMY_REDUCE", "")
     graph = _code_graph(
         "torch.nn.functional.scaled_dot_product_attention("
         f"{_NORM}(torch.randn(1, 2, 8, 16, dtype=torch.float16)), "
@@ -253,106 +300,72 @@ def test_computed_b_statistic_is_a_keyed_schedule_site(unpinned, monkeypatch) ->
     )
     rows = _rows(graph)
     assert rows, "the fused attention kernel must still enumerate"
-    keyed_under_b = [key for row in rows for key in row if key.split("@", 1)[0] == "REDUCE" and "b" in key.split("@", 1)[-1].split(".")]
-    assert keyed_under_b, "no REDUCE site was keyed inside a computed B operand cone"
+    reduce_keys = {key for row in rows for key in row if key.startswith("REDUCE@")}
+    assert reduce_keys == {f"REDUCE@n{i}" for i in (1, 2, 5, 6, 10, 13, 14)}
 
 
-def test_a_sweep_reading_fold_offers_only_the_serial_reduce(unpinned) -> None:
-    """A fold whose cone reads a boundary store's sweep axis must be ENCLOSED by the output sweep
-    loop (the materializer binds the projection unpeeled), and a partitioned combine cannot ride
-    inside the per-lane sweep — so the serial fold is the whole catalog, decided at the offer.
-    Offering a band and declining it at the kernel binder instead costs one full greedy
-    re-resolve per declined row (DeepSeek-V4's fused ``k_div_36_reduce`` on the live V100)."""
-    from types import SimpleNamespace
+# --- the chain-form root's reduce domain -------------------------------------------------------- #
+#
+# A chain-form root is a zero-axis Fold with no operand edge. Its DIRECT body members bind through
+# the kernel factorizer's chain arm and carry a partition; everything else under it stays serial.
+# These project the domain directly — the projection is a pure function of the tree and the output
+# specs, so a hand-built root states the contract without a graph to route it through.
 
-    from emmy.compiler.ir.axis import Axis, AxisRole
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Accum, Body, Load, Loop, Write
-    from emmy.compiler.ir.tile import OutputSpec, ReducePlan
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
+def _chain_member(acc: str, axis: str, extent: int, src: str, factor: str):
+    """One reduce fold that captures ``factor`` from the provider chain emitted ahead of it."""
     body = Body(
         (
-            Load(name="x_e", input="x", index=(Var("m"), Var("k"), Var("j"))),
-            Accum(name="acc", value="x_e", op="add", axes=("k",)),
+            Load(name=f"{src}_e", input=src, index=(Var("m"), Var(axis))),
+            Assign(name=f"{src}_scaled", op="multiply", args=(f"{src}_e", factor)),
+            Accum(name=acc, value=f"{src}_scaled", op="add", axes=(axis,)),
         )
     )
-    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
+    red = fold_from_loop(Loop(axis=Axis(axis, extent), body=body, role=AxisRole.PLANAR))
     assert red is not None
-    sweep_spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
-
-    def state(specs):
-        return SimpleNamespace(tile=SimpleNamespace(output_specs=specs, op=red), work_pin=None, transposed_ok=False)
-
-    assert _schedule._reduce_moves(state((sweep_spec,)), red, None) == [ReducePlan()]
-    # Without the sweep read the catalog stays whole.
-    assert len(_schedule._reduce_moves(state(()), red, None)) > 1
+    return red
 
 
-def test_a_direct_member_of_a_chain_form_root_offers_the_catalog(unpinned) -> None:
-    """A direct body member of a chain-form root binds through the chain arm — its provider chain
-    emits ahead of the strided loop — so it offers the full catalog, minus the transposed band
-    (whose close assumes the kernel-root fold shape). A live ``REDUCE`` pin is honored the same
-    way: a legal non-transposed partition binds exactly, and a transposed one is a recorded
-    refusal."""
-    from types import SimpleNamespace
+def _provider_chain():
+    return (Load(name="ws", input="cutbuf", index=(Var("m"),)), Assign(name="v25", op="rsqrt", args=("ws",)))
 
-    from emmy.compiler.ir.axis import Axis, AxisRole
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.pure import Fold
-    from emmy.compiler.ir.schedule import Workers
-    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-    from emmy.compiler.ir.tile import ReducePlan
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    body = Body(
-        (
-            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
-            Assign(name="scaled", op="multiply", args=("x_e", "v25")),
-            Accum(name="acc", value="scaled", op="add", axes=("k",)),
-        )
-    )
-    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
-    assert red is not None
-    chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
-    root = Fold.projection(body=Body((*chain, red)), results=("acc",))
-    assert not root.operands, "the fed member must remain in the body for this shape to be under test"
+def _chain_root(*members, results=("acc",)):
+    root = Fold.projection(body=Body((*_provider_chain(), *members)), results=results)
+    assert root.axis is None and not root.operands, "the fed members must stay in the body for this shape"
+    return root
 
-    def state(op, transposed_ok=False):
-        return SimpleNamespace(
-            tile=SimpleNamespace(output_specs=(), op=op), work_pin=Workers(kind="thread", units=(1, 32)), transposed_ok=transposed_ok
-        )
 
-    moves = _schedule._reduce_moves(state(root), red, None)
-    assert moves == [p for p in _schedule._reduce_catalog(state(root), 128) if not p.coop_transposed]
+def _tile_stub(root, output_specs=()):
+    from types import SimpleNamespace  # noqa: PLC0415
 
-    # A legal non-transposed pin is honored exactly, against the kernel's WORK inventory.
-    with pinned_knobs({"REDUCE": "coop"}):
-        assert _schedule._reduce_moves(state(root), red, "REDUCE") == [ReducePlan.of(coop=32)]
-    # A transposed pin still refuses on a chain member — its close assumes the kernel-root fold
-    # shape — even with ``transposed_ok=True``, proving the refusal is the chain arm's own, not
-    # the general transposed-geometry gate `_transposed_refusal` would raise at `transposed_ok=False`.
-    with pinned_knobs({"REDUCE": "coop-t"}), pytest.raises(_schedule.PinRefused, match="a chain-form member cannot realize it"):
-        _schedule._reduce_moves(state(root, transposed_ok=True), red, "REDUCE")
+    return SimpleNamespace(output_specs=output_specs, op=root)
+
+
+def _member_catalog() -> tuple:
+    return (Reduce(), *(choice for choice in coop_reduce_moves() if not choice.coop_transposed))
+
+
+def test_a_direct_chain_member_offers_the_non_transposed_catalog(unpinned) -> None:
+    """A DIRECT body member of a chain-form root binds through the factorizer's chain arm — its
+    sibling providers emit ahead of one shared strided loop — so it offers the whole cooperative /
+    ILP catalog, priced at the offer rather than dropped at the binder."""
+    red = _chain_member("acc", "k", 128, "x", "v25")
+    assert _classic._reduction_domain(_tile_stub(_chain_root(red)), red) == _member_catalog()
+
+
+def test_a_transposed_band_is_not_in_a_direct_chain_members_domain(unpinned) -> None:
+    """The ``coop-t`` band's σ-substitution and guarded close assume the fold is the kernel ROOT,
+    so no chain member may carry one — offering it would mint one kernel from two knob spellings."""
+    red = _chain_member("acc", "k", 128, "x", "v25")
+    domain = _classic._reduction_domain(_tile_stub(_chain_root(red)), red)
+    assert domain, "the member still offers the serial fold and the plain bands"
+    assert not any(choice.coop_transposed for choice in domain)
 
 
 def test_a_fold_nested_under_a_chain_member_offers_only_the_serial_reduce(unpinned) -> None:
-    """A fold nested UNDER a chain-form root's direct member — not itself a member of the root's
-    own body — binds through that member's own body recursion, so no cooperative / ILP partition
-    can ride under it either: the serial fold is the whole catalog, and a live pin naming a
-    partition is a recorded refusal, never a silent drop."""
-    from types import SimpleNamespace
-
-    from emmy.compiler.ir.axis import Axis, AxisRole
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.pure import Fold
-    from emmy.compiler.ir.schedule import Workers
-    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-    from emmy.compiler.ir.tile import ReducePlan
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
-
+    """A fold nested UNDER a direct member — not itself a member of the root's own body — binds
+    through that member's schedule-blind body recursion, so no partition can ride under it."""
     inner_body = Body(
         (
             Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
@@ -364,78 +377,25 @@ def test_a_fold_nested_under_a_chain_member_offers_only_the_serial_reduce(unpinn
     outer = fold_from_loop(Loop(axis=Axis("m", 4), body=outer_body, role=AxisRole.PLANAR))
     inner = next(member for member in outer.lift.body if isinstance(member, Fold))
 
-    chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
-    root = Fold.projection(body=Body((*chain, outer)), results=("acc_outer",))
-    assert not root.operands, "the fed member must remain in the body for this shape to be under test"
-
-    def state():
-        return SimpleNamespace(
-            tile=SimpleNamespace(output_specs=(), op=root), work_pin=Workers(kind="thread", units=(1, 32)), transposed_ok=False
-        )
-
-    assert _schedule._reduce_moves(state(), inner, None) == [ReducePlan()]
-    with pinned_knobs({"REDUCE": "coop"}), pytest.raises(_schedule.PinRefused, match="nested under a chain-form root's member"):
-        _schedule._reduce_moves(state(), inner, "REDUCE")
+    root = _chain_root(outer, results=("acc_outer",))
+    assert _classic._reduction_domain(_tile_stub(root), outer) == _member_catalog()
+    assert _classic._reduction_domain(_tile_stub(root), inner) == (Reduce(),)
 
 
 def test_a_sweep_carrying_store_keeps_chain_members_serial(unpinned) -> None:
-    """A chain-form root's boundary store carrying an output sweep keeps every direct member
-    serial too — even one the sweep axis never enters — because the sweep loop must enclose the
-    whole kernel tail and a partitioned member's lane-distributed close cannot re-run per swept
-    cell. A live pin naming a partition is a recorded refusal naming the sweep, not a silent
-    drop."""
-    from types import SimpleNamespace
-
-    from emmy.compiler.ir.axis import Axis, AxisRole
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.pure import Fold
-    from emmy.compiler.ir.schedule import Workers
-    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-    from emmy.compiler.ir.tile import OutputSpec, ReducePlan
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
-
-    body = Body(
-        (
-            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
-            Assign(name="scaled", op="multiply", args=("x_e", "v25")),
-            Accum(name="acc", value="scaled", op="add", axes=("k",)),
-        )
-    )
-    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
-    assert red is not None
-    chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
-    root = Fold.projection(body=Body((*chain, red)), results=("acc",))
-    sweep_spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
-
-    def state():
-        return SimpleNamespace(
-            tile=SimpleNamespace(output_specs=(sweep_spec,), op=root), work_pin=Workers(kind="thread", units=(1, 32)), transposed_ok=False
-        )
-
-    assert _schedule._reduce_moves(state(), red, None) == [ReducePlan()]
-    with pinned_knobs({"REDUCE": "coop"}), pytest.raises(_schedule.PinRefused, match="boundary store carries an output sweep"):
-        _schedule._reduce_moves(state(), red, "REDUCE")
+    """A boundary store carrying an output sweep keeps every direct member serial — even one the
+    sweep axis never enters — because the sweep loop encloses the whole kernel tail and a
+    partitioned member's lane-distributed close cannot re-run per swept cell. A KERNEL-level fact,
+    unlike the per-node sweep-reading gate above it."""
+    red = _chain_member("acc", "k", 128, "x", "v25")
+    spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
+    assert _classic._reduction_domain(_tile_stub(_chain_root(red), (spec,)), red) == (Reduce(),)
 
 
 def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
-    """A chain-form root's boundary store that streams into a SIBLING observed member's reduce
-    loop keeps every OTHER direct member serial too: the trailing append that splices a streamed
-    store cannot reach a loop that already sits in an earlier segment, so the whole kernel binds
-    without a peel — same contract as the swept store, decided at the offer so the binder never
-    drops a stamped partition. A live pin naming a partition is a recorded refusal naming the
-    streamed store, not a silent drop."""
-    from types import SimpleNamespace
-
-    from emmy.compiler.ir.axis import Axis, AxisRole
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.pure import Fold
-    from emmy.compiler.ir.schedule import Workers
-    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-    from emmy.compiler.ir.tile import OutputSpec, ReducePlan
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, scan_from_loop
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
-
+    """A boundary store that streams into a SIBLING observed member's reduce loop keeps every
+    OTHER direct member serial too: the trailing splice cannot reach a loop that already sits in an
+    earlier segment. Also kernel-level, and the exact gate the factorizer's chain arm applies."""
     scan_body = Body(
         (
             Load(name="y_e", input="y", index=(Var("m"), Var("j"))),
@@ -445,30 +405,38 @@ def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
     )
     scan, _trailing = scan_from_loop(Loop(axis=Axis("j", 4), body=scan_body, role=AxisRole.PLANAR))
     assert scan.observe is not None
+    red = _chain_member("acc", "k", 128, "x", "v25")
+    spec = OutputSpec(write=Write(output="running", index=(Var("m"), Var("j")), value=scan.observe.results[0]), sweep=None)
+    assert _classic._reduction_domain(_tile_stub(_chain_root(scan, red), (spec,)), red) == (Reduce(),)
 
-    body = Body(
-        (
-            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
-            Assign(name="scaled", op="multiply", args=("x_e", "v25")),
-            Accum(name="acc", value="scaled", op="add", axes=("k",)),
+
+def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None:
+    """The contraction per-cell tier reads the SAME projection (``_contraction_domain`` delegates
+    to ``_reduction_domain``), so a contraction that is a direct chain member inherits the member
+    catalog, the transposed exclusion, and the swept / streamed serial-only gates with no
+    carve-out of its own. A contraction is a monoid with a ⊗ lift; nothing about the chain arm
+    reads its algebra.
+
+    Note the shape is projected directly here. ``normalize_fold_tree``'s hoist currently moves any
+    contraction off a projection body onto an operand edge — absorbing whatever body value fed it —
+    and a root with an operand edge is no longer chain-form, so no lowered tree reaches this arm
+    with a contraction today. The delegation is still stated once, here, so a normalizer that later
+    keeps one in place does not silently acquire a different reduce domain."""
+    cone = Fold.projection(
+        body=Body(
+            (
+                Load(name="a_e", input="A", index=(Var("m"), Var("k"))),
+                Assign(name="a_scaled", op="multiply", args=("a_e", "v25")),
+            )
         )
     )
-    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
-    assert red is not None
-    chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
-    root = Fold.projection(body=Body((*chain, scan, red)), results=("acc",))
-    streamed_spec = OutputSpec(write=Write(output="running", index=(Var("m"), Var("j")), value=scan.observe.results[0]), sweep=None)
+    con = Fold.contraction(
+        k_axis=Axis("k", 128),
+        a=cone,
+        channels=(Channel(b=Load(name="b_e", input="B", index=(Var("k"),)), acc="acc"),),
+    )
+    root = _chain_root(con)
+    assert _classic._reduction_domain(_tile_stub(root), con) == _member_catalog()
 
-    def state():
-        return SimpleNamespace(
-            tile=SimpleNamespace(output_specs=(streamed_spec,), op=root),
-            work_pin=Workers(kind="thread", units=(1, 32)),
-            transposed_ok=False,
-        )
-
-    assert _schedule._reduce_moves(state(), red, None) == [ReducePlan()]
-    with (
-        pinned_knobs({"REDUCE": "coop"}),
-        pytest.raises(_schedule.PinRefused, match="streams into a sibling observed member's reduce loop"),
-    ):
-        _schedule._reduce_moves(state(), red, "REDUCE")
+    swept = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
+    assert _classic._reduction_domain(_tile_stub(root, (swept,)), con) == (Reduce(),)

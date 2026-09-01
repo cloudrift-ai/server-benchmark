@@ -57,7 +57,7 @@ from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, _unique_edge
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
+from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs, observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, cone_seam, projection_regions, sched_of
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
@@ -120,9 +120,8 @@ class Ctx:
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
     raster: object = None  # the parsed RASTER codec (ir.schedule.Raster; None = flat launch order)
-    # The kernel's schedule slices (``TileOp.schedule`` bound to its op tree — ``ops.Sched``): the
-    # per-node ``tile`` / ``reduce`` / ``stage`` reads all go through here (1r — the term stores
-    # no slices).
+    # The accepted classic assignment bound to its Fold sites (read through ``ops.Sched``): all
+    # per-node tile/reduce and per-edge stage reads go through here; the term stores no choices.
     sched: object = None
     # The placement's FREE axes — the un-shrunk originals. A split partial may prefix ``_ksplit``;
     # contraction views derive their output axes from the trailing pair.
@@ -440,7 +439,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
       :func:`reduce_codegen`, and ``store`` the per-cell sink (default :func:`store_sink`). Its projection
       arrives as ``tail`` — peeled off the wrapping zero-axis fold, the ONE home for a projection; the bare
       grid-``Write`` glue is synthesized here (it needs ``ctx.output``, so it can't ride the node).
-    - a :class:`Fold` whose :class:`ReducePlan` cooperates tiles its REDUCE axis instead
+    - a :class:`Fold` whose :class:`Reduce` cooperates tiles its REDUCE axis instead
       (:func:`_tile_reduce_axis` — ``coop`` lanes at the unit level, ``reg`` ILP chains at the
       register level, the carrier merge closing the fold). The output stays one cell per thread:
       the 1×1 ``atomize`` with the whole grid riding ``lead_axes`` untiled.
@@ -510,7 +509,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduction is a
         # ``Fold`` node (a projecting zero-axis
         # ``Fold`` was already peeled off by :func:`_factorize`).
-        plan = (ctx.sched.get("REDUCE", op) or ReducePlan()) if isinstance(op, Fold) else None
+        plan = (ctx.sched.get("REDUCE", op) or Reduce()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
         # A CHAIN-FORM root (a zero-axis ``Fold`` with no operand edge) carries its reduces as
         # direct body members, so the partition rides THEM and the root's own plan is always
@@ -527,9 +526,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             and all(spec.sweep is None and not set(spec.write.values) <= observed for spec in output_specs)
         ):
             # A transposed (``coop-t``) band's σ-substitution and guarded close assume the fold is
-            # the kernel ROOT, so the chain arm cannot realize one; ``_contraction_reduces`` can
-            # still stamp it on a contraction member, and realizing it as a PLAIN coop band would
-            # mint one kernel from two knob spellings. Excluded here, it falls to the serial arm.
+            # the kernel ROOT, so the chain arm cannot realize one, and realizing it as a PLAIN
+            # coop band would mint one kernel from two knob spellings. The reduce domain excludes
+            # it under a chain root; excluded here too, a stamped one falls to the serial arm.
             parts = tuple(
                 (member, p)
                 for member in op.body
@@ -552,7 +551,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
                 body = apply_output_specs(body, root_specs, observed=observed_result_names(op))
             state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
         elif plan.coop_transposed:
-            # The ``b<n>t`` k-major matvec partition: the innermost output axis splits into a
+            # The ``coop-t`` k-major matvec partition: the innermost output axis splits into a
             # shrunk ``<out>_blk`` grid axis (×32) + the 32-wide ``n_lane`` thread axis (with
             # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
             # output-var references were σ-substituted to ``blk·32 + n_lane`` inside (clamped,
@@ -732,7 +731,7 @@ def emit_combine(
     smem_c = cuda_name(dtype)
     bufs = tuple(f"{st}_smem" for st in state)
     if inner is not None:
-        # The transposed (``b<n>t``) combine: threads sharing an output lane sit ``scale``
+        # The transposed (``coop-t``) combine: threads sharing an output lane sit ``scale``
         # apart in tid, so a shuffle would fold DIFFERENT outputs — always the segment-indexed
         # smem tree: ``n_threads`` k-slices × ``scale`` lanes per slab, each lane's tree
         # halving its own segment (``TreeHalve.inner``).
@@ -795,7 +794,7 @@ def combine_tail(red, *, reg: int, coop: int, lane) -> list[Stmt]:
 def _tile_reduce_axis_transposed(
     op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str
 ) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...]]:
-    """The ``b<n>t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
+    """The ``coop-t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
     ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
     every k step, and ``coop/32`` ``k_co`` slices ride the upper thread bits. The emitted body
     keeps referencing the original output axis var — one σ substitutes it with
@@ -945,7 +944,7 @@ def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_va
 
 
 def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
-    """Tile the REDUCE axis per the node's cooperating :class:`ReducePlan` — the reduce counterpart
+    """Tile the REDUCE axis per the node's cooperating :class:`Reduce` — the reduce counterpart
     of the output ``unit_tile`` / ``register_tile`` levels: ``coop`` lanes across threads (the
     ``_co`` lane axis, the axis's UNIT level) and ``reg`` ILP chains across per-thread accumulators
     (its REGISTER level — cyclic, copy ``r`` offset by ``r·coop``, the loop striding ``coop·reg``).

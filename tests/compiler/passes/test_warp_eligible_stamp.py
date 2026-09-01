@@ -2,7 +2,7 @@
 
 The scheduler stamps it into every fork option row (branch identity, deploy candidates), but the
 materialized op is what ``realized_knobs`` — and therefore every leaf / -O3 evidence row — reads.
-When ``_schedule``'s ``_materialize`` dropped it, one op's rows fractured into two ``S_*``
+When the classic scheduler's materialization dropped it, one op's rows fractured into two ``S_*``
 signatures (fork rows stamped, leaf rows not), ``Prior.evidence_pick`` never joined the measured
 -O3 rows at deploy time, and greedy shipped the online model's unbenched per-cell extrapolation
 (the 2026-07-07 RTX 5090 gate: 1157 µs per-cell b256 vs the 3.5 µs mma golden, ~330x).

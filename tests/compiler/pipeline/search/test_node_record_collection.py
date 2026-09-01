@@ -16,9 +16,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from emmy.compiler.pipeline.knob import stamp_schedule_families
+from emmy.compiler.pipeline.knob import complete_kernel_row
 from emmy.compiler.pipeline.search.db import PerfStats
 from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, TuningSearch
+
+
+def _classic(*, work: str, tile: str, reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
+    return {
+        "WORK": work,
+        "RASTER": raster,
+        "TILE": tile,
+        "REDUCE": reduce,
+        "STAGE": stage,
+    }
 
 
 def _bench_fail_leaf(*, realized_knobs: dict | None) -> SearchNode:
@@ -91,13 +101,7 @@ def test_best_realized_does_not_fall_back_from_a_faster_unrepresentable_terminal
 
 
 def test_validated_structural_input_records_the_original_parent_linked_edge() -> None:
-    route = {
-        "WORK": "w2x1",
-        "TILE": "mma_m16n8k16_f16_f32/f4x8/k8",
-        "REDUCE": "g4k",
-        "STAGE": "d1/smem-async",
-        "RASTER": "",
-    }
+    route = _classic(work="w2x1", tile="mma_m16n8k16_f16_f32/f4x8/k8", reduce="g4k", stage="d1/smem-async")
     tree = SearchTree()
     leaf = _ok_leaf(
         59.61,
@@ -105,7 +109,7 @@ def test_validated_structural_input_records_the_original_parent_linked_edge() ->
         cuda_ops=2,
         cuda_knobs=[
             {**route, "REDUCE": ""},
-            {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""},
+            _classic(work="", tile=""),
         ],
     )
     leaf.visits = 1
@@ -119,7 +123,7 @@ def test_validated_structural_input_records_the_original_parent_linked_edge() ->
     search._base_knobs = {"H_opt": 3.0, "S_loop": 1.0}
 
     assert search.best_realized() is None
-    assert search.best_realized(validated_input_route=route) == (stamp_schedule_families(route), 59.61, 2, True)
+    assert search.best_realized(validated_input_route=route) == (complete_kernel_row(route), 59.61, 2, True)
     rows = search._collect_node_records(
         context_key="cc89/o3",
         op_sig="original-loop",
@@ -133,14 +137,14 @@ def test_validated_structural_input_records_the_original_parent_linked_edge() ->
     branch = next(row for row in rows if row.parent_key is not None)
     assert parent.features == {"H_opt": 3.0, "S_loop": 1.0}
     assert branch.parent_key == parent.node_key
-    assert branch.features == {"H_opt": 3.0, "S_loop": 1.0, **stamp_schedule_families(route)}
+    assert branch.features == {"H_opt": 3.0, "S_loop": 1.0, **complete_kernel_row(route)}
     assert branch.value_us == pytest.approx(59.61)
     assert branch.is_leaf
 
 
 def test_best_realized_returns_the_fastest_terminal_with_its_structural_replay_row() -> None:
     tree = SearchTree()
-    row = {"WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x4/k8", "REDUCE": "g8k", "STAGE": "d1/smem"}
+    row = _classic(work="w1x1", tile="mma_m16n8k16_f16_f32/f1x4/k8", reduce="g8k", stage="d1/smem")
     route = SearchNode(candidate=SimpleNamespace(resolved_knobs=row), parent=tree.root)
     fast = _ok_leaf(
         6.0,
@@ -148,7 +152,7 @@ def test_best_realized_returns_the_fastest_terminal_with_its_structural_replay_r
         cuda_ops=2,
         cuda_knobs=[
             {**row, "REDUCE": ""},
-            {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""},
+            _classic(work="", tile=""),
         ],
     )
     fast.parent = route
@@ -158,12 +162,12 @@ def test_best_realized_returns_the_fastest_terminal_with_its_structural_replay_r
     search = TuningSearch.__new__(TuningSearch)
     search.tree = tree
 
-    assert search.best_realized() == (stamp_schedule_families(row), 6.0, 2, True)
+    assert search.best_realized() == (complete_kernel_row(row), 6.0, 2, True)
 
 
 def test_best_realized_rejects_a_structural_parent_that_names_a_different_child_schedule() -> None:
     tree = SearchTree()
-    row = {"WORK": "w4x2", "TILE": "mma_m16n8k16_f16_f32/f1x2/k8", "REDUCE": "g8k", "STAGE": "d1/smem"}
+    row = _classic(work="w4x2", tile="mma_m16n8k16_f16_f32/f1x2/k8", reduce="g8k", stage="d1/smem")
     route = SearchNode(candidate=SimpleNamespace(resolved_knobs=row), parent=tree.root)
     fast = _ok_leaf(
         6.0,
@@ -171,7 +175,7 @@ def test_best_realized_rejects_a_structural_parent_that_names_a_different_child_
         cuda_ops=2,
         cuda_knobs=[
             {**row, "WORK": "w1x2", "REDUCE": ""},
-            {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""},
+            _classic(work="", tile=""),
         ],
     )
     fast.parent = route
@@ -217,7 +221,7 @@ def test_best_realized_keeps_only_the_routing_row_for_a_placement_cut() -> None:
 
 def test_best_realized_keeps_the_schedule_row_for_fused_placement() -> None:
     tree = SearchTree()
-    row = stamp_schedule_families({"WORK": "w1x4", "TILE": "mma_m16n8k16_f16_f32/f4x2/k8", "STAGE": "d1/smem"})
+    row = complete_kernel_row(_classic(work="w1x4", tile="mma_m16n8k16_f16_f32/f4x2/k8", stage="d1/smem"))
     route = SearchNode(candidate=SimpleNamespace(resolved_knobs={"PLACE": "fuse"}), parent=tree.root)
     fast = _ok_leaf(6.0, realized_knobs=row, cuda_ops=1, cuda_knobs=[row])
     fast.parent = route

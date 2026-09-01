@@ -25,7 +25,5 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: ''
       REDUCE: ''
-      STAGE: ''
     identity: cab7c1f55b8a61d899647f19566c637792aaecca3a6aceb525040e1e30192ee4

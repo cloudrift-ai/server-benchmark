@@ -13,14 +13,14 @@ copy the inner's graph once, replay ``pending`` through
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph, Tensor, _fmt_op
 from emmy.compiler.ir.base import ConstantOp, InputOp, Op
 from emmy.compiler.pipeline.dump import _inline_scalar_loads, _scalar_constant_inputs
 from emmy.compiler.pipeline.fork import Fork, OptionFork
-from emmy.compiler.pipeline.pipeline import Cursor, RuleSkipped
+from emmy.compiler.pipeline.pipeline import _REWRITE_APPLIED, Cursor, RuleSkipped, _remember_structural_decision
 from emmy.compiler.pipeline.rule_diff import display_name, emit, format_skipped, render_rule_diff
 from emmy.compiler.pipeline.strategy import SplicedEvent, SpliceEvent
 
@@ -52,6 +52,9 @@ class Candidate:
     run: Run
     graph: Graph
     cursor: Cursor
+    # Exact structural decisions already made on this trajectory. The domain is part of each key,
+    # so two kernel-set rewrites over the same op never substitute for one another.
+    structural_decisions: list[tuple[object, tuple[str, ...], dict]] = field(default_factory=list)
 
     @property
     def ctx(self) -> Context:
@@ -64,22 +67,20 @@ class Candidate:
         the rollout's current cand back to ``Search.push``)."""
         return LazyCandidate(inner=self, cursor=self.cursor, pending=None)
 
-    def try_rewrite(self, match: Match) -> list[Op | Graph] | None:
+    def try_rewrite(self, match: Match) -> list[Op | Graph] | object | None:
         """Eager mode (called by the search loop): invoke
         ``match.rule.rewrite`` against this candidate's graph,
         validate the result, and either apply the single chosen
         option or — for a multi-option fork — return the option list
         for the caller to spawn ``LazyCandidate`` siblings from.
-        Returns ``None`` when no rewrite was applied (``RuleSkipped``,
-        empty options after validation, or single option applied
-        successfully).
+        Returns ``None`` when no rewrite was applied (``RuleSkipped`` or empty options after
+        validation). A single concrete rewrite returns the private applied sentinel so a fixpoint
+        rule can restart immediately.
 
-        Cursor advance is unconditional on ``match.is_last`` — even
-        when the rewrite skipped or produced no valid option — so the
-        search loop terminates on quiescent batches where every match
-        is skipped by the rule's own idempotence guard. The
-        multi-option return path is the one exception: the cursor
-        advance is left to the eventual fork's apply on resolve."""
+        A skip or invalid option advances unconditionally on ``match.is_last``, so quiescent
+        batches terminate. A successful fixpoint rewrite keeps the cursor on the same rule; other
+        successful rewrites advance normally. A multi-option return leaves advancement to the
+        eventual fork's apply on resolve."""
         if not match.is_alive():
             # Earlier applies in this batch invalidated the match's
             # consumed nodes. Skip the rewrite, but still advance the
@@ -162,7 +163,7 @@ class Candidate:
             # eventual leaf's apply on resolve.
             return options
         self.apply(match, options[0])
-        return None
+        return _REWRITE_APPLIED
 
     def apply(self, match: Match, option: Op | Graph, *, knobs: dict | None = None) -> None:
         """Lazy mode (called by ``LazyCandidate.resolve`` and
@@ -222,7 +223,7 @@ class Candidate:
             for strat in strategies:
                 strat.on_spliced(spliced)
             self.cursor.n_applied += 1
-        self._advance_if_last(match)
+        self._advance_if_last(match, applied=True)
 
     def _log_apply(self, match: Match, option: Op | Graph) -> None:
         """Render a per-rule diff at DEBUG and route a structured
@@ -243,8 +244,8 @@ class Candidate:
             record = _record_rule_application(self.graph, match, fragment)
             dump.on_rule(pass_, rule, record, text)
 
-    def _advance_if_last(self, match: Match) -> None:
-        if match.is_last:
+    def _advance_if_last(self, match: Match, *, applied: bool = False) -> None:
+        if match.is_last and not (applied and match.rule.fixpoint):
             self.cursor.advance(self.graph)
 
 
@@ -280,9 +281,18 @@ class LazyCandidate:
     # unresolved keep-fused sibling keeps full knobs — an asymmetric, noisy
     # PUCT comparison.
     resolved_knobs: dict | None = None
+    structural_domain: tuple[str, ...] | None = None
 
     @classmethod
-    def from_option(cls, *, inner: Candidate, cursor: Cursor, match: Match, option: Op | Graph | Fork) -> LazyCandidate:
+    def from_option(
+        cls,
+        *,
+        inner: Candidate,
+        cursor: Cursor,
+        match: Match,
+        option: Op | Graph | Fork,
+        structural_domain: tuple[str, ...] | None = None,
+    ) -> LazyCandidate:
         """The single fork-spawn constructor (used by ``Pipeline.search``
         and :meth:`expand`): a rule-emitted ``Fork`` passes through; a
         concrete ``Op`` / ``Graph`` (already validated upstream in
@@ -293,7 +303,7 @@ class LazyCandidate:
             # graph itself carries no knobs, so it scores as a knob-less generic row.
             knobs = dict(getattr(option, "knobs", None) or {}) if isinstance(option, Op) else {}
             option = OptionFork(option=option, knobs=knobs)
-        return cls(inner=inner, cursor=cursor, pending=(match, option))
+        return cls(inner=inner, cursor=cursor, pending=(match, option), structural_domain=structural_domain)
 
     def is_expandable(self) -> bool:
         """``True`` iff ``pending`` carries a *branch* :class:`Fork` —
@@ -319,7 +329,14 @@ class LazyCandidate:
         match, fork = self.pending
         children_options = fork.expand()
         return [
-            LazyCandidate.from_option(inner=self.inner, cursor=replace(self.cursor), match=match, option=opt) for opt in children_options
+            LazyCandidate.from_option(
+                inner=self.inner,
+                cursor=replace(self.cursor),
+                match=match,
+                option=opt,
+                structural_domain=self.structural_domain,
+            )
+            for opt in children_options
         ]
 
     def resolve(self) -> Candidate:
@@ -342,8 +359,16 @@ class LazyCandidate:
         leaves = fork.expand()
         assert len(leaves) == 1, f"leaf Fork must expand to a single option, got {len(leaves)}"
         option = leaves[0]
-        resolved = Candidate(run=self.inner.run, graph=self.inner.graph.copy(), cursor=self.cursor)
+        root_op = match.root.op
+        resolved = Candidate(
+            run=self.inner.run,
+            graph=self.inner.graph.copy(),
+            cursor=self.cursor,
+            structural_decisions=list(self.inner.structural_decisions),
+        )
         resolved.apply(match.remap(resolved.graph), option, knobs=fork.knobs)
+        if self.structural_domain is not None:
+            _remember_structural_decision(resolved.structural_decisions, root_op, self.structural_domain, dict(fork.knobs))
         self.resolved_knobs = dict(fork.knobs)
         self.pending = None
         self.inner = resolved

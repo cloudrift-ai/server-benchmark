@@ -23,7 +23,7 @@ def _stampable_reduce(want: str) -> str | None:
     walk's pin path consumes the ``g`` half with — so the rule has one statement; a value the
     codec does not parse answers ``None`` and is probed as-is.
 
-    A cross-CTA split is realized by REPLACING the kernel: the structural ``035_split_reduce``
+    A cross-CTA split is realized by REPLACING the kernel: the structural ``030_cut``
     fork mints brand-new
     pieces and ``knob.consume_kernel_row`` strips their schedule row, so no piece may carry the
     ``g<n>`` it came from (``test_split_fresh_kernels`` asserts that outright). The receipt is

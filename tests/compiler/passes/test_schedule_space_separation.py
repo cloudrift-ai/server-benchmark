@@ -9,6 +9,7 @@ twin enumerates rows under ITS OWN spelled vocabulary."""
 from __future__ import annotations
 
 from dataclasses import replace
+from importlib import import_module
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
@@ -18,6 +19,8 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
+
+classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
 
 
 def _unmapped_tile(m: int, n: int, k: int = 64, dtype: str = "f16"):
@@ -61,8 +64,6 @@ def test_transposed_free_extents_stamp_different_spaces() -> None:
     differ by 7x — the enumeration sizes the coop band against ``_inner_free`` and the fragment
     store against the free axes. Their space stamps must preserve that distinction.
     """
-    from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
-
     ctx = Context.from_target((12, 0))
     wide, tall = _unmapped_tile(8, 512), _unmapped_tile(512, 8)
 
@@ -88,7 +89,6 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     on the flat kernel is never handed to a kernel that cannot realize its row.
     """
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 
     matmul = "(torch.randn(128,64,dtype=torch.float16) @ torch.randn(64,128,dtype=torch.float16))"
@@ -126,7 +126,6 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.sigma import Sigma
     from emmy.compiler.ir.tile.ir import TileOp
-    from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 
     norm = "(lambda t: t*torch.rsqrt((t.float()*t.float()).mean(-1,keepdim=True)+1e-6).to(t.dtype))"

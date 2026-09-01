@@ -158,9 +158,9 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 |--------|------------------|
 | `pipeline.py` | Engine core: `Pattern` / `Match` / `Rule` / `Pass` / `Pipeline` (the frozen pass layout) plus `Run` — the per-run state and engine loop. |
 | `fork.py` | The `Fork` interface (`OptionFork`) and the reusable `Level` + `build_fork_tree`, which builds a tree of knob-value combinations lazily. |
+| `schedule.py` | The generic adapter from a semantic `ScheduleContext` and codec to lazy schedule Forks, including pool sampling. |
 | `knob.py` | The `Knob` descriptor system and the `EMMY_<KNOB>` env namespace (borrowing `config.knob_var` / `config.knob_raw`; `format_tuning_knobs` renders the real tuning knobs for `tune` output). Holds NO concrete knob declarations. |
-| `search/space.py` | **The single home of the search space.** Every `Knob` instance is declared here and nowhere else — the schedule codecs (`WORK` / `TILE` / `REDUCE` / `STAGE` / `RASTER`), the kernel-lowering policy knobs (`VECTORIZE_LOADS` / `INTERLEAVE_LOADS`), and the enumeration value grids (`scalar_tile_moves` & co). A rule that decides a knob imports it from here; registration is construction (`Knob.__post_init__`), and `knob.registry()` imports `space.py` before answering, so the registry is complete in any process. |
-| `search/domain.py` | The candidate domain as a **constrained integer set** — `Dimension` (a name + its finite integer values), `Bound` (`coeff · ∏ dims` `<=` / `==` / `divides` a limit) and `Space` (enumerate the legal points, or ask whether a recorded one is still a member). The constraints that bound a schedule family are products of the unknowns, so the feasible set is not convex and no coordinate change makes both the products and the budgets affine at once; the answer is to keep integer coordinates and enumerate, pruning each prefix the moment a running product overruns its bound. Generation machinery only — it holds no schedule family today (`space.py`'s grids are still curated), and categorical legality stays with the scheduler. |
+| `search/space.py` | **The single home of concrete `Knob` declarations.** It declares schedule codec knobs and kernel-lowering policy knobs; the classic typed move catalogs live with the classic model under `ir/schedule`. Registration is construction (`Knob.__post_init__`), and `knob.registry()` imports `space.py` before answering. |
 | `search/features.py` | The featurizers (`knob_features`, `tile_signature`, the `D_*` / `MMA_*` encodings) — kept beside `space.py` so the whole space (dimensions × values × encoding) is analyzable in one package. |
 | `search/db.py` | `SearchDB`, the persistent SQLite store (Part 6). |
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
@@ -209,6 +209,8 @@ def rewrite(ctx: Context, graph: Graph, match: Match) -> Graph | Op | list[Graph
   `root.inputs[i]`. Take only what you need — `ctx` is optional.
 - Files starting with `_` (e.g. `_broadcast.py`) are **not** loaded as rules — they're shared helpers.
 - Raise `RuleSkipped(reason)` to decline a match; the engine logs the reason at DEBUG and moves on.
+- A rule module may declare `FIXPOINT = True`. After every successful rewrite the cursor stays on that rule; only a
+  quiescent match batch advances. `030_cut` uses this so every fresh kernel finishes structural cuts before scheduling.
 
 ### Strategies — engine events for cross-cutting concerns
 
@@ -849,9 +851,10 @@ kernels; its **reward** is `1 / Σ best-per-op time` from the strategy's separab
 reused `TuningSearch`. The Tile-dialect cross-CTA split stays INNER — it is part of a kernel's independent
 measurement, and a slice whose kernel set changed benches as the Σ over the pieces it minted.
 
-Within one trajectory, structurally identical fork points all take the same side: `Run.drive` replays the first
-decision, read off the trajectory's own graph (`_replay_structural_decision`), so the outer tree grows with the number
-of *unique* kernels rather than as `2^n` in the number of such points. Fusion itself is still deterministic (no rule
+Within one trajectory, structurally identical fork points in the same cut domain take the same exact choice:
+`Run.drive` replays the first domain-and-knob receipt (`_replay_structural_decision`), so the outer tree grows with the
+number of *unique* kernels rather than as `2^n` in the number of such points. Placement and cross-CTA cuts never replay
+one another merely because they produce the same number of kernels. Fusion itself is still deterministic (no rule
 offers a multi-option fusion fork), so a graph with no structural forks yields exactly one terminal and the whole
 thing reduces to "tune each op once, sum, assemble". The global prior drives the outer PUCT too: each terminal emits
 one combined Σ row per structural decision it took (features `{ctx, op knobs before the decision, the decision's knob
@@ -978,9 +981,10 @@ and the final tune winner is annotated or appended as another proposal only when
 provides both its knob row and cost. When that row matches an existing proposal, the same entry is promoted from
 proposal feedback to a direct tune winner so strict replay can use it as an automatic exact pin. When the fastest
 searched terminal changes the kernel set, the winner is its
-first exact structural replay row: a `PLACE`-only routing row for a placement cut, or the complete pre-split schedule
-row for a cross-CTA reduction. `PLACE=fuse` does not change the kernel set, so it retains the terminal's complete
-schedule row instead of truncating the winner to a routing receipt. The pieces remain independent tuning targets;
+first exact structural replay row: a `PLACE`-only routing row for a placement cut, or the composed `PLACE=fuse` plus
+cross-CTA `REDUCE` cut row for a reduction split. An unsplit `PLACE=fuse` arm does not change the kernel set, so it
+retains the terminal's complete schedule row instead of truncating the winner to a routing receipt. The pieces remain
+independent tuning targets;
 promotion never fabricates their heterogeneous schedules into one row or falls back to a slower monolithic sibling. A
 cross-CTA parent becomes a tune
 winner only when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a
@@ -1500,11 +1504,11 @@ complete tree, including maximal pure operand-cone factoring for semiring contra
 orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. Pure projection regions remain
 in the term, while their writes live as `OutputSpec`s at the `TileOp` boundary.
 
-`020_twisted` rewrites the exp-family composition over that canonical tree. The one cut phase has two ordered slices:
-`030_cut` offers the maximal tree and every semantically closed stored child-Fold seam through `PLACE`, then
-`035_split_reduce` offers the unsplit tree beside every cross-CTA reduce split the head fold admits. A selected cut
-writes the complete child state to workspaces; a selected split slices the same Fold and folds partial state tuples
-with its stored combine. Both return fresh unmapped TileOps. `040_schedule` then enumerates
+`020_twisted` rewrites the exp-family composition over that canonical tree. The single `030_cut` pass reaches a
+fixpoint over two ordered domains: it offers the maximal tree and every semantically closed stored child-Fold seam
+through `PLACE`, then the unsplit tree beside every cross-CTA reduce split the head Fold admits. A selected cut writes
+the complete child state to workspaces; a selected split slices the same Fold and folds partial state tuples with its
+stored combine. Both return fresh unmapped TileOps. `040_schedule` then enumerates
 schedules over each stored Fold tree only. Independent roots stay fused and combine only schedules with matching
 physical output-axis tile widths and unit counts.
 
@@ -1561,8 +1565,8 @@ siblings — closure counting the offer-time provider closure and dependent-seam
 describes. A cut is
 consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
 the structural decision trace. A scoped cut consumes its authoritative placement decision on both fresh pieces, which
-proceed to scheduling. Bare `PLACE=cut` selects the primary seam but, like an unpinned cut, leaves both pieces able to
-re-enter placement and expose smaller seams.
+proceed to scheduling. Bare `PLACE=cut` selects the primary seam and consumes placement on both pieces. Only unpinned
+cuts leave their pieces able to re-enter placement and expose smaller seams.
 
 **`WORK`** (STR codec) — the kernel-global **worker inventory**, spelled exactly once per row (step 7):
 `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer band the retired per-row `WSPEC` key
@@ -1593,7 +1597,7 @@ low-precision output, a multi-component twisted carrier, and a multi-channel ⊗
 destination would round once per partition and can cross the strict correctness boundary; the deferred arm combines
 carrier state in f32 and rounds once. Pin
 via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is realized by
-`lowering/tile/035_split_reduce` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
+`lowering/tile/030_cut` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
 re-stamped, each scheduled at its own fork; a split node is priced as the Σ of its pieces' bests, and the split is
 CONSUMED by the kernel that realizes it (the sliced axis is a `Window` of its parent, so nothing partitions it
 twice). See [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the invariant. The
@@ -1704,7 +1708,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/fusion/`            | `merge_loop_ops` maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address, and a sub-byte-packed operand address separates its row axis out of the pair-packing division via `_div_mod_decompose`), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect, after maximal fusion. |
-| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` offers stored-edge cuts; `035_split_reduce` offers cross-CTA reduce splits; `040_schedule` schedules each stored tree. |
+| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` reaches a fixpoint over stored-edge then cross-CTA cuts; `040_schedule` schedules each stored tree. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 

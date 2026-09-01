@@ -1,6 +1,6 @@
-"""Structural-coverage test for the permitted-move catalog (``search/space.py``).
+"""Structural coverage for the classic schedule move catalog.
 
-The tile schedule (``040_schedule`` → ``_classic``) enumerates the catalog into the tile fork; this
+The tile schedule enumerates the catalog into the tile fork; this
 file pins the catalog's **legal set** three ways:
 
 - the catalog function ``scalar_tile_moves()`` equals the hand-computed pure-register,
@@ -24,14 +24,14 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Reduce, Tile, Work, derive_workers, resolve_site_tile
+from emmy.compiler.ir.schedule.catalog import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
+from emmy.compiler.ir.schedule.catalog import scalar_tile_moves
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_value
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.space import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
-from emmy.compiler.pipeline.search.space import scalar_tile_moves
 
 # The hand-computed legal products as explicit literals — the per-cell tile, one-dimensional thread
 # ladder, pure-register box, and (par × reg) box
@@ -82,7 +82,7 @@ def test_scalar_tile_moves_equals_hand_product():
 
 def test_coop_reduce_moves_equals_hand_product():
     """The normal cooperative and ILP stages form one fixed product; parameters do not add rows."""
-    from emmy.compiler.pipeline.search.space import coop_reduce_moves
+    from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
 
     expected = {
         *(Reduce.of(coop=coop, reg=reg) for coop in (1, 4, 8, 16, 32, 64, 128, 256, 512) for reg in (1, 2, 4) if coop > 1 or reg > 1),
@@ -180,7 +180,7 @@ def test_bare_reduce_forks_the_coop_catalog():
     pinned ``b16``/``b32`` reduce goldens (eighth golden sweep, finding 3). The offer is a function
     of legality alone now: the reduce extent has to be able to feed the band, and nothing else
     narrows it."""
-    from emmy.compiler.pipeline.search.space import coop_reduce_moves
+    from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
 
     rows: list[dict] = []
 
@@ -269,8 +269,9 @@ def _computed_a_term() -> TileOp:
 def _rows_of(tile, ctx=None) -> list[dict]:
     """Every row ``tile`` enumerates — the leaves of the walk's own fork (a fully forced walk is
     still a one-leaf fork, so the engine records its row as a decision)."""
-    from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
+    from importlib import import_module
 
+    classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
     out = classic_forks(tile, "k", {}, ctx or Context.from_target((12, 0)))
     return [dict(leaf.knobs) for leaf in iter_leaves(out)]
 

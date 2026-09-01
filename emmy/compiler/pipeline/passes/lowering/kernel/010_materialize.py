@@ -41,11 +41,11 @@ PATTERN = [Pattern("root", TileOp)]
 def rewrite(match: Match, root: Node) -> KernelOp | None:
     tile: TileOp = root.op
     # By the kernel pass no schedule slice can carry a cross-CTA ``GRID`` stage: the split is the
-    # structural ``tile/035_split_reduce`` fork's, decided BEFORE scheduling (the walk's catalog
+    # structural ``tile/030_cut`` fork's, decided BEFORE scheduling (the walk's catalog
     # offers no ``g`` row, and its pin path strips the consumed ``g`` half). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
     rplan = reduce_plan(tile) if tile.op is not None else None
-    assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 035_split_reduce"
+    assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
         materialized = _pointwise_strip(tile, factorize(tile, root))
         return KernelOp(body=_drop_repeated_declarations(Body((materialized,))), name=tile.name)

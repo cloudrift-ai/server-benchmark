@@ -19,9 +19,9 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import Fork
-from emmy.compiler.pipeline.pipeline import Run
+from emmy.compiler.pipeline.pipeline import Run, _remember_structural_decision, _replay_structural_decision
 
 
 @pytest.fixture(autouse=True)
@@ -87,6 +87,60 @@ def test_option0_decide_matches_no_prior_greedy() -> None:
     greedy, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_f32_matmul_graph(), greedy_decide(prior=None))
     plain, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_f32_matmul_graph(), _option0)
     assert _graph_signature(plain) == _graph_signature(greedy)
+
+
+def test_fixpoint_rule_repeats_until_quiescent() -> None:
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.pipeline.pipeline import Pass, Pattern, Rule, RuleSkipped
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (4,)), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (4,)), node_id="b")
+    graph.add_node(ElementwiseOp("add"), ["a", "b"], Tensor("o", (4,)), node_id="o")
+    graph.inputs, graph.outputs = ["a", "b"], ["o"]
+
+    def rewrite(root):
+        if root.op.fn == "add":
+            return ElementwiseOp("subtract")
+        if root.op.fn == "subtract":
+            return ElementwiseOp("multiply")
+        raise RuleSkipped("fixpoint reached")
+
+    rule = Rule(
+        name="repeat",
+        pattern=[Pattern("root", ElementwiseOp)],
+        rewrite=rewrite,
+        param_names=("root",),
+        fixpoint=True,
+    )
+    pipeline = Pipeline([Pass("repeat", [rule])])
+
+    terminal, _ = Run(pipeline=pipeline, ctx=Context.from_target((8, 0))).resolve(graph, _option0)
+
+    assert terminal.nodes["o"].op.fn == "multiply"
+
+
+def test_structural_replay_is_scoped_to_the_cut_domain() -> None:
+    """Equal output counts never let a placement choice suppress a reduction choice."""
+    from emmy.compiler.pipeline.fork import DeferredFork
+
+    graph, _ = Run(pipeline=Pipeline.build(LOOP_PASSES), ctx=Context.from_target((8, 0))).resolve(_f32_matmul_graph(), _option0)
+    root = graph.nodes["o"].op
+    placement_cut = Graph()
+    reduction_split = Graph()
+    placement = [
+        DeferredFork(lambda: root, {"PLACE": "fuse"}),
+        DeferredFork(lambda: placement_cut, {"PLACE": "cut"}, structural=True),
+    ]
+    reduction = [
+        DeferredFork(lambda: root, {"REDUCE": ""}),
+        DeferredFork(lambda: reduction_split, {"REDUCE": "g2k"}, structural=True),
+    ]
+    decisions = []
+    _remember_structural_decision(decisions, root, ("PLACE",), {"PLACE": "cut"})
+
+    assert _replay_structural_decision(decisions, root, placement) is placement_cut
+    assert _replay_structural_decision(decisions, root, reduction) is None
 
 
 # ---------------------------------------------------------------------------

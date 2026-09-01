@@ -212,7 +212,7 @@ its normal form). The named lattice points are spelled at call sites: the deploy
 (`with_io=True` — the durable join key) and the variant key (`with_io=True, with_knobs=True` —
 the search tree and measurement stores). There is no schedule-space key on
 the interface: the enumeration's `pool_id` stamp is minted at its one site in
-`lowering/tile/_classic` (the variant key + hints + pins + sample identity) — a stamp for the
+`lowering/tile/040_schedule` (the variant key + hints + pins + sample identity) — a stamp for the
 greedy decision memo and the budgeted descent seed, not a cache key: nothing stores pools.
 
 Identity has two flavors: the default `structural=True` is schedule-equivalent (compute-unit op
@@ -272,14 +272,14 @@ Structural choices are deliberately outside this algebra. A cut or split changes
 kernel then constructs a fresh problem and fresh sites. Search ranks encoded accepted leaves and materialization
 consumes the typed assignment, so neither layer defines schedule membership.
 
-`lowering/tile/030_cut` offers kernel placement and `035_split_reduce` offers cross-CTA reduction splits before
-scheduling. `PLACE` uses the same tree-path codec to address a
+The single `lowering/tile/030_cut` pass reaches a fixpoint over kernel-set alternatives before scheduling: placement
+first, then cross-CTA reduction splitting. `PLACE` uses the same tree-path codec to address a
 stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
 writes the child Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with
-ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned and bare cuts re-enter
-placement before scheduling; a scoped cut carries the consumed placement decision on both pieces and proceeds
-directly to scheduling. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation
-families nor filters legal cuts by profitability.
+ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned cuts re-enter placement
+before scheduling; any pinned cut carries the consumed placement decision on both pieces and proceeds to reduction
+splitting. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation families nor
+filters legal cuts by profitability.
 
 A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
 when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's

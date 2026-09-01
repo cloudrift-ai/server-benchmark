@@ -876,11 +876,9 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
     """The computed-B warp lane admits the cross-CTA split — no GPU, the OFFER only.
 
     RE-EXPRESSED against the structural split fork: the cross-CTA ``g`` half is a kernel-set
-    decision (``035_split_reduce``), never a schedule row — ``golden_eval``'s rows spell no ``g``
-    by design — and a resolve's decide cannot observe the offer either: the count replay
-    (``_replay_structural_decision``) applies the unsplit arm inline once the cut fork decided
-    fuse on the same kernel. So the offer is asked of ``split_forks`` itself, on the kernel the
-    cut fork surfaced. The pinned realization is covered by
+    decision (``030_cut``), never a schedule row — ``golden_eval``'s rows spell no ``g`` by
+    design. The offer is asked of ``split_forks`` itself to isolate computed-B legality from the
+    placement domain and later scheduling. The pinned realization is covered by
     ``test_computed_b_split_k_matches_decoded_linear`` and
     ``test_computed_b_split_partial_reindexes_the_cone``."""
     from emmy.compiler.context import Context

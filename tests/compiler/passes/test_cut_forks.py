@@ -13,7 +13,7 @@ from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
@@ -22,7 +22,7 @@ from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.loop_wire import loop_graph_to_wire
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     CutSite,
@@ -30,6 +30,8 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     _producer_order,
     _workspace_axes,
     cuttable_seams,
+    output_map,
+    realize,
 )
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
@@ -48,7 +50,6 @@ from tests.compiler.helpers import direct_classic_leaf, requires_cuda
 
 _CTX = Context.from_target((12, 0))
 _CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
-_SPLIT = import_module("emmy.compiler.pipeline.passes.lowering.tile.035_split_reduce")
 _SCHEDULE = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule")
 
 
@@ -56,18 +57,31 @@ def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
     graph.add_node(InputOp(), [], Tensor(name, shape, dtype), node_id=name)
 
 
-def test_cut_passes_share_the_generic_schedule_driver() -> None:
+def test_cut_and_assignment_passes_share_the_generic_schedule_driver() -> None:
     from emmy.compiler.ir.schedule import schedule
 
     assert _CUT.schedule is schedule
-    assert _SPLIT.schedule is schedule
+    assert import_module("emmy.compiler.pipeline.fork").schedule is schedule
 
 
-def test_cut_passes_precede_assignment_enumeration() -> None:
-    rules = Pipeline.build(["lowering/tile"]).passes[0].rules
-    order = {rule.name: position for position, rule in enumerate(rules)}
+def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
+    """A split piece can re-enter placement; cutting it must not make REDUCE pending again."""
+    from emmy.compiler.pipeline.passes.lowering.tile._split import split_pending
 
-    assert order["030_cut"] < order["035_split_reduce"] < order["040_schedule"]
+    graph = _computed_operand_graph("a")
+    tile = graph.nodes["out"].op
+    partitioned = replace(tile.op, axis=replace(tile.op.axis, window=Window(parent=tile.op.axis, partition=True)))
+    graph.nodes["out"].op = replace(tile, op=partitioned)
+    pipeline = Pipeline.build(["lowering/tile"], select={"cut"})
+    match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
+    seams = cuttable_seams(match.root.op)
+    renamed = output_map(match.root)
+
+    fragment = realize(match, match.root, (seams[0],), renamed)
+
+    pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    assert pieces and all(piece.split_consumed for piece in pieces)
+    assert not any(split_pending(piece) for piece in pieces)
 
 
 def _computed_operand_graph(side: str) -> Graph:
@@ -366,19 +380,22 @@ def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
     assert pieces and all(node.op.placement_decided for node in pieces)
     node = _piece_with_seam(fragment)
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
-    with pinned_knobs({"PLACE@map.fold.a.fold.b1": "cut"}), pytest.raises(RuleSkipped, match="already placed"):
-        _CUT.rewrite(match, node)
+    with pinned_knobs({"PLACE@map.fold.a.fold.b1": "cut"}):
+        result = _CUT.rewrite(match, node)
+    options = result if isinstance(result, list) else [result]
+    assert options and all(not any(name.startswith("PLACE") for name in option.knobs) for option in options)
 
 
-def test_bare_place_cut_keeps_recursing_on_fresh_pieces() -> None:
+def test_bare_place_cut_is_consumed_once_by_both_pieces() -> None:
     fragment = _nested_attention_cut({"PLACE": "cut"})
     node = _piece_with_seam(fragment)
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
 
-    assert not node.op.placement_decided
+    assert node.op.placement_decided
     with pinned_knobs({"PLACE": "cut"}):
-        fork = _CUT.rewrite(match, node)
-    assert "cut" in fork.knobs.values()
+        result = _CUT.rewrite(match, node)
+    options = result if isinstance(result, list) else [result]
+    assert options and all(not any(name.startswith("PLACE") for name in option.knobs) for option in options)
 
 
 def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:

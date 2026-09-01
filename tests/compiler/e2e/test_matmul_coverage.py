@@ -1246,7 +1246,7 @@ def _splitk_mma_graph(m: int, k: int, n: int, *, out_dtype=F16) -> Graph:
 @pytest.mark.parametrize("transport", ["smem-async", "smem-tma"])
 def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     """Operand staging composes with split-K: the ``STAGE`` resolved against the SLICED inner node
-    reaches the split partial (a fresh kernel scheduling itself past ``035_split_reduce``), whose K-loop stages its slice through the smem
+    reaches the split partial (a fresh kernel scheduling itself past ``030_cut``), whose K-loop stages its slice through the smem
     pipeline. A pure perf transform — the staged split is **bit-identical** to the gmem-direct
     split (same partials, same finalize), and the partial kernel actually stages."""
     if transport == "smem-tma" and not _supports_tma():

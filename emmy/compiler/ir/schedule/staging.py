@@ -26,9 +26,9 @@ from dataclasses import replace
 
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
+from emmy.compiler.ir.schedule.packing import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.ir.stmt import Load
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -270,7 +270,7 @@ def resolve_warp_stage(
     (W8A16), and the fp8 (k32) atoms stage both operands as byte slabs drained by the byte repack.
     Any other mismatch DECLINES and keeps the warp tier gmem-direct, whose fragment load converts
     per element. A byte slab's fill runs 16 B chunks and its cp.async row pad is 16 B
-    (``address.BYTE_SLAB_PAD``), so its inner span — and, canonical-B, the gmem row stride N — must
+    (``ir.address.BYTE_SLAB_PAD``), so its inner span — and, canonical-B, the gmem row stride N — must
     be 16-divisible.
 
     A PACKED-PAIR B (an NVFP4 weight's decode cone) is the one COMPUTED edge that resolves here,

@@ -215,7 +215,8 @@ additionally requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves
 are never offered and a `smem-tma` pin refuses — Ada/Ampere have no
 `cp.async.bulk.tensor` and nvcc has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the
-schedule fork enumerates the resolver-gated stage grid (`search/space.stage_moves`) alongside the tile / reduce moves;
+schedule fork enumerates the resolver-gated stage grid (`ir/schedule/catalog.stage_moves`) alongside the tile / reduce
+moves;
 an `EMMY_STAGE` pin stays authoritative.
 
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
@@ -288,8 +289,9 @@ the multi-channel sync compute-fill and the scalar resolver still decline 1-byte
 **Staged packed-pair (NVFP4) weights — the byte slab plus a block-scale slab.** A packed weight is a COMPUTED B, so
 the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading
 moves 16-bit values through global memory, which is the whole point of a 4-bit format thrown away. The specialized
-reading keeps it. `_packed.match_packed_b_node` recognizes the node (the ONE question the offer, the resolver and
-the materializer all ask, so they cannot drift apart), and `_atom._packed_operands` stages THREE slabs where the
+reading keeps it. `ir.schedule.packing.match_packed_b_node` recognizes the node (the ONE question the offer, the
+resolver and the materializer all ask, so they cannot drift apart), and `_atom._packed_operands` stages THREE slabs
+where the
 ordinary matmul stages two: A and the weight's raw bits as `cp.async` peers, plus the weight's block scales as the
 `SyncTransport`'s compute-filled operand. The bits slab is half the K width of a 16-bit one (one byte is two K
 elements) and is addressed canonically — row `n`, byte column `k / 2` over the checkpoint's `[N, K/2]` buffer —
@@ -368,7 +370,7 @@ assuming that all components share the contraction accumulator's residence.
 The Fold move is never re-decided during materialization. `ReduceStage.combine` is the placement-keyed selector:
 within-warp uses `SHFL`, within-block uses a `SHFL` plus shared-memory tree, and cross-CTA uses `ATOMIC` or `KERNEL`
 (a multi-component carrier is kernel-finalize only). Scalar materialization consumes it through `emit_combine`, while
-the structural `tile/035_split_reduce` fork realizes the graph-level partition.
+the structural `tile/030_cut` fork realizes the graph-level partition.
 
 **Shared-row staging (`_tile_reduce_axis`) — the reduce tier's `sync` transport.** The fused norm→linear prologue is a
 cooperative reduce: an input row folded by the cooperative reduce AND re-read per output column of a contraction tail (a

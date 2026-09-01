@@ -1,19 +1,26 @@
-"""Enumerate stored-Fold-edge cuts before schedule assignments."""
+"""Enumerate every kernel-set cut before schedule assignments.
+
+Stored-Fold-edge placement is the first domain and cross-CTA reduction splitting is the second.
+The rule runs to a fixpoint, so each successful choice and every fresh piece re-enters these ordered
+domains before scheduling.
+"""
 
 from __future__ import annotations
 
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule import CutScheduleContext, schedule
+from emmy.compiler.ir.schedule import ScheduleContext, schedule
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import MissingSiteError, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import family_of, family_pins
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, output_map, realize
+from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
 
 PATTERN = [Pattern("root", TileOp)]
+FIXPOINT = True
 
 
 def _seam_index(seams) -> dict[int, object]:
@@ -36,7 +43,7 @@ def _with_required(chosen, by_node: dict[int, object], refuse: frozenset = froze
     return tuple(out)
 
 
-def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | None:
+def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     """The authoritative placement spelled by live PLACE pins, or ``None``.
 
     This restriction is consumed entirely by the cut pass before classic schedule enumeration.
@@ -77,30 +84,30 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | Non
     cut = [seam for seam in cut if seam.spelling not in fused]
     cut = list(_with_required(cut, by_node, refuse=frozenset(fused)))
     if cut:
-        return tuple(cut), "cut", True
+        return tuple(cut), "cut"
     if fused:
-        return (fused[0],), "fuse", True
+        return (fused[0],), "fuse"
     for name, value in pins:
         if name != "PLACE":
             continue
         if value == "fuse":
-            return (name,), value, False
+            return (name,), value
         # A bare ``PLACE=cut`` names the placement DECISION, not a site: the codec's primary
         # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (an unclosed
         # cone, a seam whose workspace dtypes stay undetermined), so a bare pin resolves among
         # the CUTTABLE seams instead: the root-most one.
-        # Provider-closed and dependent seams are scoped-pin-only: bare-cut recursion terminates
-        # because pieces run OUT of seams, and provider closure keeps every piece supplied.
+        # Provider-closed and dependent seams are scoped-pin-only. A bare pin selects this one
+        # root-most plain seam and is consumed on the fresh pieces.
         plain = [seam for seam in seams if not (seam.providers or seam.requires)]
         if not plain:
-            return ("PLACE",), "fuse", False
+            return ("PLACE",), "fuse"
         depth = {id(site.node): site.depth for site in all_sites}
         seam = min(plain, key=lambda candidate: depth[id(candidate.node)])
-        return (seam,), value, False
+        return (seam,), value
     if missing:
         # A pin-driven compile whose scoped pins all address other kernels decides FUSE here —
         # deterministic, and the unpinned placement fork never returns under a pin.
-        return ("PLACE",), "fuse", False
+        return ("PLACE",), "fuse"
     return None
 
 
@@ -114,12 +121,12 @@ def _placement_forks(match: Match, root: Node, tile: TileOp):
     match.output = renamed
     pinned = _placement_restriction(tile, seams)
     if pinned is not None:
-        chosen, value, scoped = pinned
+        chosen, value = pinned
         if value == "fuse":
             (spelling,) = chosen
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
         return DeferredFork(
-            lambda: realize(match, root, chosen, renamed, placement_decided=scoped),
+            lambda: realize(match, root, chosen, renamed, placement_decided=True),
             {seam.spelling: "cut" for seam in chosen},
             structural=True,
         )
@@ -144,11 +151,13 @@ def _placement_forks(match: Match, root: Node, tile: TileOp):
 def rewrite(match: Match, root: Node, ctx=None):
     del ctx
     tile: TileOp = root.op
-    if tile.op is None or tile.place.is_mapped or tile.schedule is not None or tile.placement_decided:
-        raise RuleSkipped("TileOp already placed / scheduled")
-    choices = _placement_forks(match, root, tile)
+    if tile.op is None or tile.place.is_mapped or tile.schedule is not None:
+        raise RuleSkipped("TileOp already scheduled")
+    choices = None if tile.placement_decided else _placement_forks(match, root, tile)
     if choices is None:
-        raise RuleSkipped("no closed stored Fold edge")
+        choices = split_forks(match, root)
+    if choices is None:
+        raise RuleSkipped("no pending kernel-set cut")
     choices = choices if isinstance(choices, list) else [choices]
-    options = tuple(assignment.kernel for assignment in schedule(CutScheduleContext(tuple(choices))))
+    options = tuple(schedule(ScheduleContext.only_cuts(choices)))
     return list(options) if len(options) > 1 else options[0]

@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.pipeline.fork import Fork
-from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, format_tuning_knobs
+from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, family_of, format_tuning_knobs
 from emmy.compiler.pipeline.strategy import PassEndEvent, RunStartEvent, discovered_strategies
 
 if TYPE_CHECKING:
@@ -50,6 +50,7 @@ logger = logging.getLogger("emmy.compiler.pipeline")
 
 _PASSES_DIR = Path(__file__).resolve().parent / "passes"
 _RULE_PREFIX_RE = re.compile(r"^\d+[a-z]?_")
+_REWRITE_APPLIED = object()
 
 
 def _strip_rule_prefix(name: str) -> str:
@@ -109,6 +110,9 @@ class Rule:
         slot ``i``, ``None`` past the input count or for deleted
         source nodes.
 
+    * ``fixpoint`` — repeat this rule after every successful rewrite and advance only when a
+      complete match batch is quiescent.
+
     * ``pass_`` — backref to the owning ``Pass``. Stamped by ``Pass``
       at construction time; ``None`` only on stray ``Rule`` instances
       built outside a pipeline (none exist in production paths).
@@ -118,6 +122,7 @@ class Rule:
     pattern: list[Pattern]
     rewrite: Callable[..., Graph | Op | None] | None = None
     param_names: tuple[str, ...] = field(default_factory=tuple)
+    fixpoint: bool = False
     pass_: Pass | None = field(default=None, repr=False, compare=False)
 
 
@@ -220,6 +225,7 @@ class Pass:
                     pattern=pattern,
                     rewrite=rewrite_fn,
                     param_names=param_names,
+                    fixpoint=bool(getattr(module, "FIXPOINT", False)),
                 )
             )
             # Collect the knobs this rule module declares OR imports (e.g. the
@@ -754,6 +760,10 @@ class Run:
             return None
         for match in matches:
             options = cand.try_rewrite(match)
+            if options is _REWRITE_APPLIED:
+                if match.rule.fixpoint:
+                    return None
+                continue
             if options is None:
                 continue
             # The fork is classified here, where the raw ``options`` list
@@ -762,15 +772,15 @@ class Run:
             # rebinds (and the partition planner's branch Forks) are
             # op-variant.
             structural = any(_is_structural_option(o) for o in options)
-            # A structurally identical offer site already decided on this
-            # trajectory takes the same side inline (no fork), so the
-            # search tree stays linear in *unique* kernels instead of
-            # ``2^sites`` (e.g. one decision for 28 identical per-layer
-            # splits). The earlier decision is read off the candidate's
-            # own graph — see :func:`_replay_structural_decision` — so no
-            # side-table state is threaded through resolves.
-            if structural and (chosen := _replay_structural_decision(cand.graph, match.root.op, options)) is not None:
+            # A structurally identical offer site already decided in the SAME cut domain on this
+            # trajectory takes the exact same knob receipt inline. Domain is part of the key:
+            # placement and cross-CTA cuts may both mint two kernels, but neither can replay the
+            # other's choice.
+            domain = _structural_domain(options) if structural else None
+            if structural and (chosen := _replay_structural_decision(cand.structural_decisions, match.root.op, options)) is not None:
                 cand.apply(match, chosen)
+                if match.rule.fixpoint:
+                    return None
                 continue
             if decide is not None:
                 root_op = match.root.op
@@ -784,6 +794,8 @@ class Run:
                     raise ValueError(f"decide returned a branch Fork at {match.rule.name!r} — return a concrete option or a leaf Fork")
                 knob_delta = _choice_knobs(choice, option, root_op)
                 cand.apply(match, option)
+                if domain is not None:
+                    _remember_structural_decision(cand.structural_decisions, root_op, domain, knob_delta)
                 assert trace is not None
                 trace.append(
                     Decision(
@@ -910,7 +922,17 @@ class Run:
                 search.push(cand.lazy(), parent=token)
                 continue
             match, options, structural = step
-            forks = [LazyCandidate.from_option(inner=cand, cursor=replace(cand.cursor), match=match, option=opt) for opt in options]
+            domain = _structural_domain(options) if structural else None
+            forks = [
+                LazyCandidate.from_option(
+                    inner=cand,
+                    cursor=replace(cand.cursor),
+                    match=match,
+                    option=opt,
+                    structural_domain=domain,
+                )
+                for opt in options
+            ]
             search.push(*forks, parent=token, structural=structural)
 
 
@@ -965,55 +987,43 @@ def _choice_knobs(choice: object, option: object, root_op) -> dict:
     return dict(getattr(option, "knobs", None) or {})
 
 
-def _replay_structural_decision(graph: Graph, root_op, options: list) -> object | None:
+def _option_receipt(option: object, root_knobs: dict) -> dict:
+    """The exact decided-knob receipt carried by one raw fork option, without materializing it."""
+    return decision_view(dict(option.knobs)) if isinstance(option, Fork) else _option_decision(option, root_knobs) or {}
+
+
+def _structural_domain(options: list) -> tuple[str, ...] | None:
+    """The knob families that identify one structural fork domain."""
+    families = {family_of(key) for option in options for key in _option_receipt(option, {}).keys()}
+    return tuple(sorted(families)) or None
+
+
+def _remember_structural_decision(decisions: list, root_op, domain: tuple[str, ...], receipt: dict) -> None:
+    """Record the first exact structural choice for an identical offer in one cut domain."""
+    key = root_op.identity_key(with_io=True, with_knobs=True)
+    receipt = decision_view(receipt)
+    if key is None or not receipt or any(prior_key == key and prior_domain == domain for prior_key, prior_domain, _ in decisions):
+        return
+    decisions.append((key, domain, dict(receipt)))
+
+
+def _replay_structural_decision(decisions: list, root_op, options: list) -> object | None:
     """The concrete option a structurally identical, already-decided offer site on this trajectory
     took — or ``None`` (undecided / unmatchable → fork normally).
 
-    Read off the candidate's own GRAPH, with no side table and no stamped marker: a structural
-    decision is CONSUMED by the rewrite that realizes it, so what it chose is not recorded anywhere
-    afterwards — the node set IS the record. A site that cut holds two kernels where it held one,
-    and that is the whole of the evidence.
-
-    So: find the kernels whose ``Op.source`` chain reaches an op structurally identical to this
-    offer (same ``identity_key(with_io=True, with_knobs=True)`` — the engine stamps ``source`` unconditionally on rebinds and
-    across loop-dialect splices, and ``_rename_buf_in_op`` preserves it), count them, and replay
-    the option that produces that many. This keeps the tune tree linear in UNIQUE kernels rather
-    than ``2^sites`` — one decision for 28 identical per-layer seams.
-
-    Counting is the only comparison available. The earlier site's pieces have since been recognized
-    into the tile dialect while a fresh option's are still loop-dialect, so their structural digests
-    are not comparable term-for-term. When two options would produce the SAME count — several legal
-    seams on one tree, each cutting into a producer and a consumer — the evidence does not
-    distinguish them, and this answers ``None`` so the fork is offered normally. The count evidence
-    is also per-OP, not per-rule: two structural rules offering on one op (a cut and a cross-CTA
-    split both mint two kernels) can replay each other's counts, so a rule's siblings may never
-    reach a decide on such a kernel and stay reachable by pin only — which also makes offer-side
-    TESTS for a second structural family unwritable through ``resolve``: ask the offer function
-    directly (the exl3 split-offer test does). Correctness never depended on
-    the replay; only the tree's width does."""
+    A candidate keeps the first decision as ``(root identity, cut domain, exact knob receipt)``.
+    Replay therefore preserves the old one-decision-per-identical-kernel bound without inferring a
+    semantic decision from its output count. If the earlier receipt is not an exact option here,
+    this site remains a real fork."""
     key = root_op.identity_key(with_io=True, with_knobs=True)
-    if key is None:
+    domain = _structural_domain(options)
+    if key is None or domain is None:
         return None
-    produced = 0
-    for node in graph.nodes.values():
-        if node.op.identity_key(with_io=True, with_knobs=True) is None:
-            continue  # not a kernel
-        chain = node.op.source_chain()
-        next(chain)  # the op itself — its key differs from the pre-decision key by later stamps
-        if any(anc.identity_key(with_io=True, with_knobs=True) == key for anc in chain):
-            produced += 1
-    if not produced:
-        return None  # this site is undecided on this trajectory
-    matches = []
-    for opt in options:
-        concrete = _concrete_option(opt)
-        if isinstance(concrete, Graph):
-            n = sum(1 for node in concrete.nodes.values() if node.op.identity_key(with_io=True, with_knobs=True) is not None)
-        else:
-            n = 1
-        if n == produced:
-            matches.append(concrete)
-    return matches[0] if len(matches) == 1 else None
+    receipt = next((prior for prior_key, prior_domain, prior in decisions if prior_key == key and prior_domain == domain), None)
+    if receipt is None:
+        return None
+    matches = [option for option in options if _option_receipt(option, root_op.knobs) == receipt]
+    return _concrete_option(matches[0]) if len(matches) == 1 else None
 
 
 def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:

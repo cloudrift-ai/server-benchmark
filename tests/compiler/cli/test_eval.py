@@ -801,8 +801,8 @@ def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, capl
     from emmy.compiler.context import Context
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.schedule import Tile, Work
+    from emmy.compiler.ir.schedule import classic_projection as classic
     from emmy.compiler.pipeline.knob import complete_kernel_row
-    from emmy.compiler.pipeline.passes.lowering.tile import _classic as classic
     from emmy.compiler.pipeline.search.golden import load_golden_records
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
     from emmy.compiler.torch_wire import graph_to_wire

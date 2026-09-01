@@ -18,8 +18,8 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
+from emmy.compiler.ir.schedule import classic_projection as _classic
 from emmy.compiler.pipeline.knob import family_of
-from emmy.compiler.pipeline.passes.lowering.tile import _classic
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pool import PoolSample
 
@@ -133,13 +133,18 @@ def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> N
     from emmy.compiler.ir.tile import ops as tile_ops  # noqa: PLC0415
 
     calls: list[tuple] = []
-    original = tile_ops.cone_seam
+    original = _classic.cone_seam
 
     def spy(cone, k_name):
         calls.append((cone, k_name))
         return original(cone, k_name)
 
-    monkeypatch.setattr(tile_ops, "cone_seam", spy)
+    monkeypatch.setattr(_classic, "cone_seam", spy)
+    monkeypatch.setattr(
+        tile_ops,
+        "cone_seam",
+        lambda *_: (_ for _ in ()).throw(AssertionError("the fill must reuse the prescan's seam")),
+    )
     assert _rows(FIXTURES["fused_norm_linear"]())
     assert calls
     keys = [(id(cone), k_name) for cone, k_name in calls]
@@ -176,7 +181,7 @@ def test_global_classic_pins_restrict_every_applicable_site(unpinned, monkeypatc
 
 def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
     """The old product kept the cross-CTA partitions as combined rows; they are now STRUCTURAL
-    siblings of the unsplit tree (``035_split_reduce``), and a fold that admits both finalizes
+    siblings of the unsplit tree (``030_cut``), and a fold that admits both finalizes
     still sees the atomic and the deferred arm offered together, beside the unsplit one."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import iter_leaves  # noqa: PLC0415
@@ -194,12 +199,9 @@ def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
 
 
 def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkeypatch) -> None:
-    """The cross-CTA split composes with the paired-mma flash cell. Asserted at the offer
-    function: after a cut fork decides on the same kernel, the engine's structural replay resolves
-    a later structural fork inline (the count evidence is per-op, not per-rule — see
-    ``_replay_structural_decision``), so the split's siblings never reach a decide on this graph —
-    the offer itself is the observable. The atomic
-    arm is refused on the carrier's ARITY (``atomicAdd`` folds one additive state; the twisted
+    """The cross-CTA split composes with the paired-mma flash cell. The offer is inspected directly
+    to isolate its algebraic legality from the rest of resolution. The atomic arm is refused on the
+    carrier's ARITY (``atomicAdd`` folds one additive state; the twisted
     carrier streams three), while the deferred workspace arm slices the multi-component carrier.
     And the pieces re-schedule their paired sites: under the pinned deferred split the partial's
     row still spells BOTH mma contractions."""

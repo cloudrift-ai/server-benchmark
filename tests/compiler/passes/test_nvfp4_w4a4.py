@@ -216,8 +216,8 @@ def _bound_contractions(tmp_path):
 def _edge_readings(tile, con):
     """``(activation, weight)`` — each operand edge's packed k-block reading, or ``None`` where the
     edge does not read as one."""
-    from emmy.compiler.ir.packed import match_packed_kblock_b
     from emmy.compiler.ir.pure.fold import operand_body
+    from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
     return tuple(match_packed_kblock_b(list(operand_body(e)), con.axis.name, tile.inputs) for e in (con.a, con.channels[0].b))
 

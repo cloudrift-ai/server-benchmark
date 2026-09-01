@@ -1696,7 +1696,7 @@ def test_write_ab_json_uses_whole_program_time_for_multi_launch_pinned_row(tmp_p
 def test_unreproducible_pin_flag_reads_a_cross_cta_split_structurally(monkeypatch):
     """A realized cross-CTA ``REDUCE`` split leaves no knob stamp, so the gate must not read one.
 
-    ``035_split_reduce`` mints brand-new pieces and ``knob.consume_kernel_row`` strips their
+    ``030_cut`` mints brand-new pieces and ``knob.consume_kernel_row`` strips their
     schedule row, so no piece may carry the ``g<n>`` it came from — ``test_split_fresh_kernels``
     asserts exactly that. The receipt is the piece's sliced reduce axis, which knob stamps cannot
     show, so a ``g2a`` pin that DID realize used to be reported ``realized (off)`` and its row went

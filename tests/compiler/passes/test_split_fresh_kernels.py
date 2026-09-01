@@ -1,6 +1,6 @@
-"""A cross-CTA split mints BRAND-NEW kernels — the invariant ``035_split_reduce`` realizes.
+"""A cross-CTA split mints BRAND-NEW kernels — the invariant ``030_cut`` realizes.
 
-The split is a STRUCTURAL fork in the cut phase after ``030_cut``, decided BEFORE scheduling (a ``REDUCE`` pin's
+The split is a STRUCTURAL fork inside ``030_cut``, decided BEFORE scheduling (a ``REDUCE`` pin's
 ``g<n>[a|k]`` half is authoritative over it); its rewrite returns a different set of nodes, and
 those nodes are new kernels:
 

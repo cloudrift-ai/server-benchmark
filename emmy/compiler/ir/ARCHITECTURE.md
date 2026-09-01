@@ -70,11 +70,11 @@ schedule, materialization, output specifications, and knobs belong to `TileOp`, 
 The [schedule package](schedule/ARCHITECTURE.md) separates schedule-wide interfaces and reusable choices from concrete
 implementations. `schedule/classic.py` owns the semantic model for the ordinary grid/CTA/warp/thread/register schedule.
 A `ClassicProblem` captures the unscheduled `Fold` tree, source TileOp facts, and target used by compatibility.
-`ClassicScheduleContext` assigns one stable integer node id to each Fold identity and one `(consumer, operand)` edge
-site to every consumer operand position, so a shared producer is scheduled once while each use receives an independent
-transport choice. The reusable views in
-`schedule/views.py` read only the Fold at a node id; target facts cannot affect whether that site is a projection,
-reduction, or contraction-capable reduction. `TileOp` caches the same nodes and edges in that stable enumeration order.
+`ClassicSites` assigns one stable integer node id to each Fold identity and one `(consumer, operand)` edge site to every
+consumer operand position, so a shared producer is scheduled once while each use receives an independent transport
+choice. It also derives each node site's projection or reduction view from the Fold; target facts cannot affect whether
+a site is a projection, reduction, or contraction-capable reduction. `ClassicScheduleContext` composes compatibility
+over those sites and the separately projected node and edge domains.
 
 `Schedule` is the immutable, generic assignment of kernel, node, and edge choices. Direct work, flat raster, untiled
 nodes, serial reductions, and direct edges are explicit values rather than missing fields. Choice values never carry
@@ -183,7 +183,7 @@ kernel it produced went on to read.
   (dynamic `seq_len`) is supported — the `StridedLoop`'s `< seq_len`
   bound is the runtime-extent mask (idle lanes fold the identity; no
   ceil-div / clamp) and the `Dim` name is threaded as a runtime `int`
-  arg. Cross-CTA reduction splits are structural choices in `035_split_reduce`. A symbolic FREE axis
+  arg. Cross-CTA reduction splits are structural choices in `030_cut`. A symbolic FREE axis
   (dynamic grid), strided rows, and the tensor-core `warp_tile` are reserved future tiers.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
   `CudaOp` carrying rendered source.
@@ -464,7 +464,7 @@ Construction never fails: unresolved names are data, and chaining scope levels m
 `backward_cone` with the previous one's `external_reads`. `Body.defs_die_at(members, roots=…, allowed=…)` is the
 matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
-`lowering/tile/035_split_reduce`) — eligibility judgments stay in the rules, per
+`lowering/tile/030_cut`) — eligibility judgments stay in the rules, per
 `pipeline/passes/ARCHITECTURE.md`. The
 `classify_fragment_epilogue` walk (`ir/pure/algebra.py`) deliberately does NOT use it: it is a single pass
 interleaving reduce-scope flags with its negative-form blocker reporting, a different operator than the cone's

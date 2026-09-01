@@ -52,10 +52,10 @@ from emmy.compiler.ir.kernel.ir import (
     RegStore,
     frag_layout,
 )
-from emmy.compiler.ir.packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_body, operand_name, subst_free
 from emmy.compiler.ir.schedule import Side, Stage, Tile
+from emmy.compiler.ir.schedule.packing import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.passes import rename_free

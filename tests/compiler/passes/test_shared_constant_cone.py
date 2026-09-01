@@ -88,8 +88,10 @@ def test_sibling_cones_share_one_declaration_of_a_broadcast_constant(_scalar_tie
 
     assert sources, "the graph must lower to at least one kernel"
     assert {name: _redeclared(src) for name, src in sources.items() if _redeclared(src)} == {}
-    # The two channels read the shared constant through ONE binding, not one per cone.
-    assert sum(src.count("= c[0]") for src in sources.values()) == 1
+    # Every reduction step reads the shared constant through ONE binding used by both sibling
+    # cones. Cooperative rerolling may spell several steps with distinct SSA suffixes.
+    bindings = [(source, name) for source in sources.values() for name in re.findall(r"__half (\w+) = c\[0\];", source)]
+    assert bindings and all(source.count(f" - {name};") == 2 for source, name in bindings)
 
 
 def test_a_name_rebound_to_a_different_address_survives_as_the_fault_it_is() -> None:

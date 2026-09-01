@@ -1,12 +1,12 @@
 """Loop IR → Tile IR.
 
 ``010_lift`` peels the outer parallel axes and mechanically converts every remaining reduction loop
-to a ``Fold``. ``020_twisted`` rewrites equivalent exp-family siblings into one twisted Fold,
-``030_cut`` offers the maximal fused tree beside every closed stored Fold-edge cut, then
-``035_split_reduce`` offers the unsplit tree beside every cross-CTA reduce split the head fold admits. Both are structural: a chosen cut or
-split replaces the kernel with fresh unmapped pieces that re-enter this pass. ``040_schedule``
-schedules the stored tree.
+to a ``Fold``. ``020_twisted`` rewrites equivalent exp-family siblings into one twisted Fold. The
+single ``030_cut`` pass runs to a fixpoint: it first offers the maximal fused tree beside every
+closed stored Fold-edge cut, then the unsplit tree beside every cross-CTA reduce split the head Fold
+admits. A structural choice replaces the kernel with fresh unmapped pieces that re-enter this pass.
+``040_schedule`` schedules the stored tree only after the cut rule is quiescent.
 
-``030_cut`` reads the structural tree through ``_tree``. The rebuilt ``040_schedule`` may reuse
-that traversal mechanically, but schedule membership must remain independent of traversal order.
+``030_cut`` reads the structural tree through ``ir.pure.tree``. ``040_schedule`` adapts the classic
+schedule model's accepted assignments to lazy pipeline forks; schedule membership remains independent of traversal order.
 """

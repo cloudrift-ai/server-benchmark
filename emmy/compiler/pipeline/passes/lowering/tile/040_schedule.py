@@ -4,7 +4,7 @@ scheduling fork — the second half of the Loop-IR → Tile-IR boundary.
 ``010_lift`` is purely structural: it reads the algebra off a ``LoopOp`` and emits an UNMAPPED
 :class:`~emmy.compiler.ir.tile.ir.TileOp` (its ``op`` set, ``place`` carrying just the free axes).
 THIS rule picks that up and decides the schedule — the free-axis → grid mapping plus the per-node
-``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families through ``_classic``.
+``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families through the classic model.
 
 The fixed candidate-space contract is Algorithm 1(c, p, t): the schedule restriction, problem, and target form one
 immutable context over independently projected kernel, node, and edge domains. The generic traversal never unpacks
@@ -24,7 +24,14 @@ Empty enumeration remains a skip rather than a guessed schedule.
 from __future__ import annotations
 
 from emmy.compiler.graph import Node
+from emmy.compiler.ir.schedule.classic import ClassicScheduleCodec, ClassicScheduleContext
+from emmy.compiler.ir.schedule.classic_projection import (
+    ClassicProjectionError,
+    materialize_classic,
+    project_classic,
+)
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
 
@@ -32,10 +39,60 @@ from emmy.compiler.pipeline.fork import Fork
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
 # pass. Pin reads / knob-key spelling ride the enumerator's helpers instead; the family NAMES below
 # are plain strings and a function, which that scan does not see.
-from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
+from emmy.compiler.pipeline.knob import STRUCT_PREFIX, family_pins, schedule_pin_fingerprint
+from emmy.compiler.pipeline.schedule import fork_schedule
+from emmy.compiler.structural import digest
 
 PATTERN = [Pattern("root", TileOp)]
+
+
+def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
+    """Adapt the classic semantic enumeration to the pipeline's lazy search tree."""
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
+
+    try:
+        problem, domains = project_classic(tile, ctx)
+    except ClassicProjectionError:
+        return []
+    context = ClassicScheduleContext(problem, domains).restrict(
+        {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")},
+        split_consumed=carries_partition(tile.op) or tile.split_consumed,
+        allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
+        allow_fp8=precision_pin(FP8_MMA) is True,
+        validate_pins=ctx.validate_pins,
+    )
+    codec = ClassicScheduleCodec(context)
+    pool_id = digest(
+        tile.identity_key(with_io=True) or "",
+        ctx.structural_key(),
+        tuple((axis.name, repr(axis.extent)) for axis in tile.place.free),
+        codec.keys(),
+        schedule_pin_fingerprint(),
+        tile.split_consumed,
+    )
+    prefix = {"S_warp_eligible": 1.0} if any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices) else {}
+    descent_bound = len(domains.kernel) + sum(
+        len(choices) * max((len(domains.edges[edge]) for edge in domains.edges if edge[0] == site), default=1)
+        for site, choices in domains.nodes.items()
+    )
+    return fork_schedule(
+        context,
+        codec=codec,
+        inherited_knobs=knobs,
+        row_prefix=prefix,
+        materialize=lambda assignment, row: materialize_classic(
+            tile,
+            name=name,
+            knobs=row,
+            target=ctx,
+            assignment=assignment,
+            problem=problem,
+        ),
+        pool_id=pool_id,
+        pool_bound=domains.product_size,
+        pool_descent_bound=descent_bound,
+        sample=getattr(ctx, "pool_sample", None),
+    )
 
 
 def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:

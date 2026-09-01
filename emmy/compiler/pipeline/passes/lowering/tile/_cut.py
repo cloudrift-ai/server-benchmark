@@ -2,8 +2,8 @@
 
 The cut is structural: the child Fold keeps its algebra, writes every state component to a
 workspace, and the parent reads those components through ordinary ``Load`` edges. Both pieces
-are fresh unmapped ``TileOp`` objects. Unpinned and bare cuts re-enter placement; a scoped cut
-consumes that placement decision on both pieces before they enter scheduling.
+are fresh unmapped ``TileOp`` objects. Pinned cuts consume placement on both pieces before the
+cut pass continues with cross-CTA reduction splitting; unpinned cuts may expose smaller seams.
 A contraction-operand seam whose cone passes through a storage waypoint cuts THERE instead
 (:func:`storage_frontier`): the workspace holds the raw storage bits and the consumer keeps the
 decode-plus-factors residue.
@@ -19,7 +19,6 @@ from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.fold_tree import walk
 from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -30,9 +29,10 @@ from emmy.compiler.ir.pure.fold import (
     is_contraction,
     loaded_buffers,
 )
+from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.ops import edge_dtypes
+from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
@@ -608,8 +608,11 @@ def realize(
     hoisted onto the accumulator epilogue).
 
     ``placement_decided`` consumes an authoritative pinned PLACE restriction on every piece.
-    Unpinned cuts leave it false so fresh pieces can expose and decide smaller seams."""
+    Unpinned cuts leave it false so fresh pieces can expose and decide smaller seams. A placement
+    cut never erases an earlier cross-CTA decision: every piece inherits the parent's explicit or
+    sliced-axis split receipt."""
     tile: TileOp = root.op
+    split_consumed = tile.split_consumed or carries_partition(tile.op)
     pieces = []
     workspace_loads: dict[int, tuple] = {}
     for seam in _requires_order(seams):
@@ -689,6 +692,7 @@ def realize(
                 OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)
             ),
             placement_decided=placement_decided,
+            split_consumed=split_consumed,
         )
         producer = replace(producer, knobs=consume_kernel_row(producer.knobs))
         shape = tuple(axis.extent for axis in axes)
@@ -711,6 +715,7 @@ def realize(
         place=tile.place,
         output_specs=parent_stores,
         placement_decided=placement_decided,
+        split_consumed=split_consumed,
     )
     consumer = replace(consumer, knobs=consume_kernel_row(consumer.knobs))
     output_tensors = (

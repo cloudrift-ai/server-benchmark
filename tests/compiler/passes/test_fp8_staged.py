@@ -24,9 +24,9 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
+from emmy.compiler.ir.schedule.catalog import stage_moves
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Load
-from emmy.compiler.pipeline.search.space import stage_moves
 from tests.compiler.helpers import requires_cuda
 
 K16 = "mma_m16n8k16_f16_f32"

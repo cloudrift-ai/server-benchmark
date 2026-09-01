@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Self
 
 from frozendict import frozendict
 
-from emmy.compiler.ir.fold_tree import walk
 from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.structural import instance_memo
 
@@ -49,100 +47,6 @@ class Reduction:
 type NodeView = Projection | Reduction
 
 
-@dataclass(frozen=True)
-class ScheduleInventory:
-    """Stable target-independent node, edge, and classification indexes for one Fold tree."""
-
-    nodes: tuple[Fold, ...]
-    edges: tuple[EdgeSite, ...]
-    site_by_identity: Mapping[int, NodeId]
-    views: Mapping[NodeId, NodeView]
-    incident: Mapping[NodeId, tuple[EdgeSite, ...]]
-
-    @classmethod
-    def from_root(
-        cls,
-        root: Fold,
-        *,
-        nodes: tuple[Fold, ...] | None = None,
-        edges: tuple[EdgeSite, ...] | None = None,
-    ) -> Self:
-        nodes = schedule_nodes(root) if nodes is None else nodes
-        edges = schedule_edges(nodes) if edges is None else edges
-        sites = tuple(range(len(nodes)))
-        return cls(
-            nodes,
-            edges,
-            frozendict({id(node): site for site, node in enumerate(nodes)}),
-            frozendict({site: node_view(nodes[site]) for site in sites}),
-            frozendict({site: tuple(edge for edge in edges if edge[0] == site) for site in sites}),
-        )
-
-    def __getstate__(self):
-        """Serialize structural indexes; object-identity keys are rebuilt on load."""
-        return {
-            "nodes": self.nodes,
-            "edges": self.edges,
-            "views": self.views,
-            "incident": self.incident,
-        }
-
-    def __setstate__(self, state) -> None:
-        for name, value in state.items():
-            object.__setattr__(self, name, value)
-        object.__setattr__(self, "site_by_identity", frozendict({id(node): site for site, node in enumerate(self.nodes)}))
-
-    @property
-    def node_sites(self) -> tuple[NodeId, ...]:
-        return tuple(range(len(self.nodes)))
-
-    @property
-    def tile_sites(self) -> tuple[NodeId, ...]:
-        return tuple(
-            site
-            for site, view in self.views.items()
-            if (isinstance(view, Reduction) and view.contraction is not None)
-            or (isinstance(view, Projection) and site == 0 and not self.nodes[site].operands)
-        )
-
-    @property
-    def reduction_sites(self) -> tuple[NodeId, ...]:
-        return tuple(site for site, view in self.views.items() if isinstance(view, Reduction))
-
-    @property
-    def stage_edges(self) -> tuple[EdgeSite, ...]:
-        return tuple(
-            edge for edge in self.edges if isinstance(self.views[edge[0]], Reduction) and self.views[edge[0]].contraction is not None
-        )
-
-    def node(self, site: NodeId) -> Fold:
-        if type(site) is not int or not 0 <= site < len(self.nodes):
-            raise KeyError(f"unknown node site {site!r}")
-        return self.nodes[site]
-
-    def site(self, node: Fold) -> NodeId:
-        try:
-            return self.site_by_identity[id(node)]
-        except KeyError:
-            raise KeyError("Fold is not a node of this schedule inventory") from None
-
-    def operand(self, edge: EdgeSite):
-        if not isinstance(edge, tuple) or len(edge) != 2:
-            raise KeyError(f"invalid edge site {edge!r}")
-        consumer, operand = edge
-        try:
-            return self.node(consumer).operands[operand]
-        except IndexError:
-            raise KeyError(f"unknown operand {operand} at node {consumer}") from None
-
-    def producer(self, edge: EdgeSite) -> NodeId | None:
-        value = self.operand(edge)
-        return self.site(value) if isinstance(value, Fold) else None
-
-    def incident_edges(self, site: NodeId) -> tuple[EdgeSite, ...]:
-        return self.incident[site]
-
-
 def node_view(node: Fold) -> NodeView:
     """Classify one Fold without target or schedule input."""
     if node.axis is None:
@@ -164,7 +68,7 @@ def schedule_nodes(root: Fold) -> tuple[Fold, ...]:
         return memo["nodes"]
     nodes = []
     seen = set()
-    for node, _axes in walk(root):
+    for node in _walk(root):
         if id(node) not in seen:
             seen.add(id(node))
             nodes.append(node)
@@ -177,6 +81,87 @@ def schedule_edges(nodes: tuple[Fold, ...]) -> tuple[EdgeSite, ...]:
     return tuple((consumer, operand) for consumer, node in enumerate(nodes) for operand in range(len(node.operands)))
 
 
+@dataclass(frozen=True)
+class ClassicSites:
+    """The node and edge sites, and their schedule views, derived from one Fold root."""
+
+    root: Fold
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, Fold):
+            raise TypeError("classic sites require a Fold root")
+
+    def _memo(self) -> dict:
+        return instance_memo(self.root, "_memo_classic_sites")
+
+    @property
+    def nodes(self) -> tuple[Fold, ...]:
+        return schedule_nodes(self.root)
+
+    @property
+    def node_sites(self) -> tuple[NodeId, ...]:
+        return tuple(range(len(self.nodes)))
+
+    @property
+    def edge_sites(self) -> tuple[EdgeSite, ...]:
+        return schedule_edges(self.nodes)
+
+    @property
+    def views(self) -> frozendict[NodeId, NodeView]:
+        memo = self._memo()
+        if "views" not in memo:
+            memo["views"] = frozendict({site: node_view(self.nodes[site]) for site in self.node_sites})
+        return memo["views"]
+
+    @property
+    def tile_sites(self) -> tuple[NodeId, ...]:
+        return tuple(
+            site
+            for site in self.node_sites
+            if (isinstance(self.views[site], Reduction) and self.views[site].contraction is not None)
+            or (isinstance(self.views[site], Projection) and site == self.node_sites[0] and not self.nodes[site].operands)
+        )
+
+    @property
+    def reduction_sites(self) -> tuple[NodeId, ...]:
+        return tuple(site for site in self.node_sites if isinstance(self.views[site], Reduction))
+
+    @property
+    def stage_edges(self) -> tuple[EdgeSite, ...]:
+        return tuple(
+            edge for edge in self.edge_sites if isinstance(self.views[edge[0]], Reduction) and self.views[edge[0]].contraction is not None
+        )
+
+    def node(self, site: NodeId) -> Fold:
+        if type(site) is not int or not 0 <= site < len(self.nodes):
+            raise KeyError(f"unknown node site {site!r}")
+        return self.nodes[site]
+
+    def site(self, node: Fold) -> NodeId:
+        memo = self._memo()
+        if "site_by_identity" not in memo:
+            memo["site_by_identity"] = {id(value): site for site, value in enumerate(self.nodes)}
+        try:
+            return memo["site_by_identity"][id(node)]
+        except KeyError:
+            raise KeyError("Fold is not a node of these classic sites") from None
+
+    def operand(self, edge: EdgeSite):
+        consumer, operand = edge
+        try:
+            return self.node(consumer).operands[operand]
+        except (TypeError, IndexError):
+            raise KeyError(f"unknown classic edge site {edge!r}") from None
+
+    def producer(self, edge: EdgeSite) -> NodeId | None:
+        value = self.operand(edge)
+        return self.site(value) if isinstance(value, Fold) else None
+
+    def incident_edges(self, site: NodeId) -> tuple[EdgeSite, ...]:
+        self.node(site)
+        return tuple(edge for edge in self.edge_sites if edge[0] == site)
+
+
 def _operand_position(node: Fold, wanted) -> int:
     for position, operand in enumerate(node.operands):
         if operand is wanted:
@@ -184,14 +169,47 @@ def _operand_position(node: Fold, wanted) -> int:
     raise ValueError("contraction role is not one of the node's operand edges")
 
 
+def _stmt_nodes(stmt) -> Iterator[Fold]:
+    for body in stmt.nested():
+        for member in body:
+            if isinstance(member, Fold):
+                yield member
+            else:
+                yield from _stmt_nodes(member)
+
+
+def _children(node: Fold) -> Iterator[Fold]:
+    yield from (operand for operand in node.operands if isinstance(operand, Fold))
+    for member in node.lift.body:
+        if isinstance(member, Fold):
+            yield member
+        else:
+            yield from _stmt_nodes(member)
+    stored = {id(value) for value in (*node.operands, *node.lift.body)}
+    if node.axis is not None and not is_contraction(node):
+        for member in node.step_stmts():
+            if id(member) in stored:
+                continue
+            if isinstance(member, Fold):
+                yield member
+            else:
+                yield from _stmt_nodes(member)
+
+
+def _walk(root: Fold) -> Iterator[Fold]:
+    yield root
+    for child in _children(root):
+        yield from _walk(child)
+
+
 __all__ = [
+    "ClassicSites",
     "Contraction",
     "EdgeSite",
     "NodeId",
     "NodeView",
     "Projection",
     "Reduction",
-    "ScheduleInventory",
     "node_view",
     "schedule_edges",
     "schedule_nodes",

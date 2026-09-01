@@ -16,7 +16,6 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Channel, Fold, Lambda, M
 from emmy.compiler.ir.schedule import (
-    CutScheduleContext,
     PlacedTile,
     Placement,
     Raster,
@@ -49,10 +48,10 @@ from emmy.compiler.ir.schedule.classic import (
     parse_node_id,
 )
 from emmy.compiler.ir.schedule.views import (
+    ClassicSites,
     Contraction,
     Projection,
     Reduction,
-    ScheduleInventory,
     node_view,
     schedule_edges,
     schedule_nodes,
@@ -106,17 +105,17 @@ def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
     left = Fold.projection(operands=(shared,), body=Body((Assign("left", "add", ("sum", "sum")),)), results=("left",))
     right = Fold.projection(operands=(shared,), body=Body((Assign("right", "add", ("sum", "sum")),)), results=("right",))
     root = Fold.projection(operands=(left, right), body=Body(), results=("left", "right"))
-    inventory = ScheduleInventory.from_root(root)
+    inventory = ClassicSites(root)
 
     assert len(inventory.node_sites) == 4
     shared_site = inventory.site(shared)
-    uses = tuple(edge for edge in inventory.edges if inventory.producer(edge) == shared_site)
+    uses = tuple(edge for edge in inventory.edge_sites if inventory.producer(edge) == shared_site)
     assert uses == ((inventory.site(left), 0), (inventory.site(right), 0))
 
 
 def test_classification_binds_contraction_roles_to_consumer_operands() -> None:
     contraction = _contraction()
-    inventory = ScheduleInventory.from_root(contraction)
+    inventory = ClassicSites(contraction)
 
     view = node_view(inventory.node(inventory.node_sites[0]))
     assert view == Reduction(Contraction(a=1, channels=(0,)))
@@ -517,8 +516,8 @@ def test_classic_types_implement_the_schedule_interfaces() -> None:
 
 
 def test_generic_driver_returns_one_independent_choice_domain() -> None:
-    assignments = advance_schedule(CutScheduleContext(("fuse", "cut")))
-    assert tuple(assignment.kernel for assignment in assignments) == ("fuse", "cut")
+    assignments = advance_schedule(ScheduleContext.only_cuts(("fuse", "cut")))
+    assert tuple(assignments) == ("fuse", "cut")
 
 
 def test_generic_fork_adapter_drives_a_schedule_context_lazily() -> None:

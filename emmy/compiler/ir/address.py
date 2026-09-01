@@ -1,8 +1,10 @@
-"""Flat-address `Expr` builders shared by schedule compatibility and lowering.
-
-The module owns fold-aware sums and products, re-fused split-axis addressability, global-memory
-axis and row steps, and the shared-memory row pad used by byte slabs. These are generic expression
-and address facts with no schedule-family or pipeline dependency.
+"""Flat-address `Expr` builders — fold-aware `sum` / `product` over int / `Expr` terms, plus
+`split_pair` / `split_addressable` — the re-fused
+split-store spelling of an axis across two buffer dims, and whether per-atom-origin addressing is
+exact for one — and `gmem_axis_step` / `gmem_row_stride` — how a gmem `Load`'s flat address moves
+along one axis, the row step (`ldm`) a fragment loader reads off the index and buffer shape and the
+contiguity its columns need, plus `BYTE_SLAB_PAD` — the smem row pad a cp.async-staged byte slab
+carries. This is generic IR addressing algebra with no schedule, search, or pass-layer dependency.
 """
 
 from __future__ import annotations

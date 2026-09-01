@@ -12,9 +12,10 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp
+from emmy.compiler.ir.schedule.catalog import MAX_FRAGMENT_REGISTERS, warp_tile_moves
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
-from emmy.compiler.pipeline.search.space import MAX_FRAGMENT_REGISTERS, warp_tile_moves
 from emmy.compiler.target import set_target
 
 VOLTA = "mma_m8n8k4_f16_f32"
@@ -228,10 +229,12 @@ def test_modern_mma_source_does_not_gain_the_volta_prelude(monkeypatch) -> None:
     assert "emmy_mma884" not in src and "mma.sync.aligned.m8n8k4" not in src
 
 
-def test_sm70_rejects_a_pinned_modern_atom(monkeypatch) -> None:
+def test_sm70_modern_atom_pin_restricts_the_schedule_to_empty(monkeypatch) -> None:
     _pin(monkeypatch, AMPERE)
-    with pytest.raises(ValueError, match="has_mma_m16n8k16.*unavailable on sm_70"):
-        Pipeline.build(TILE_PASSES).run(_graph(k=16), ctx=Context(compute_capability=(7, 0)))
+    out = Pipeline.build(TILE_PASSES).run(_graph(k=16), ctx=Context(compute_capability=(7, 0)))
+    tile = next(node.op for node in out.nodes.values() if isinstance(node.op, TileOp))
+
+    assert not tile.place.is_mapped and tile.schedule is None
 
 
 @pytest.mark.parametrize("stage", ["d1/smem-async", "d1/smem-tma"])

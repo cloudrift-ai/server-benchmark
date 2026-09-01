@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
 
 from frozendict import frozendict
@@ -87,8 +86,8 @@ def schedule_nodes(root: Fold) -> tuple[Fold, ...]:
         return memo["nodes"]
     nodes = []
     seen = set()
-    for node in _walk(root):
-        if id(node) not in seen:
+    for node, _axes in walk(root):
+        if isinstance(node, Fold) and id(node) not in seen:
             seen.add(id(node))
             nodes.append(node)
     memo["nodes"] = tuple(nodes)
@@ -192,8 +191,8 @@ class ClassicSites:
 def _sibling_fragment_edges(site_index: ClassicSites) -> dict[int, NodeId]:
     """Map each sibling-step consumer to the one contraction producing its computed edge."""
     out = {}
-    for node, _axes in walk(site_index.root):
-        if not (isinstance(node, Fold) and node.axis is not None) or is_contraction(node) or node.combine is None:
+    for node in site_index.nodes:
+        if node.axis is None or is_contraction(node) or node.combine is None:
             continue
         steps = node.step_stmts()
         states = set(node.combine.results)
@@ -217,18 +216,17 @@ def _contraction_facts(site_index: ClassicSites) -> dict[NodeId, ContractionFact
 
     root = site_index.root
     parents: dict[int, Fold] = {}
-    for node, _axes in walk(root):
+    for node in site_index.nodes:
         for child, _child_axes in children(node):
             parents.setdefault(id(child), node)
     derived = {id(site.node) for site in sites(root) if site.derived}
     sibling = _sibling_fragment_edges(site_index)
     facts = {}
-    for node, _axes in walk(root):
-        if not (isinstance(node, Fold) and node.axis is not None and is_contraction(node)):
+    for site in site_index.node_sites:
+        view = site_index.views[site]
+        if not isinstance(view, Reduction) or view.contraction is None:
             continue
-        site = site_index.site(node)
-        if site in facts:
-            continue
+        node = site_index.node(site)
         parent = parents.get(id(node))
         if (
             id(node) in derived
@@ -265,39 +263,6 @@ def _operand_position(node: Fold, wanted) -> int:
         if operand is wanted:
             return position
     raise ValueError("contraction role is not one of the node's operand edges")
-
-
-def _stmt_nodes(stmt) -> Iterator[Fold]:
-    for body in stmt.nested():
-        for member in body:
-            if isinstance(member, Fold):
-                yield member
-            else:
-                yield from _stmt_nodes(member)
-
-
-def _children(node: Fold) -> Iterator[Fold]:
-    yield from (operand for operand in node.operands if isinstance(operand, Fold))
-    for member in node.lift.body:
-        if isinstance(member, Fold):
-            yield member
-        else:
-            yield from _stmt_nodes(member)
-    stored = {id(value) for value in (*node.operands, *node.lift.body)}
-    if node.axis is not None and not is_contraction(node):
-        for member in node.step_stmts():
-            if id(member) in stored:
-                continue
-            if isinstance(member, Fold):
-                yield member
-            else:
-                yield from _stmt_nodes(member)
-
-
-def _walk(root: Fold) -> Iterator[Fold]:
-    yield root
-    for child in _children(root):
-        yield from _walk(child)
 
 
 __all__ = [

@@ -35,8 +35,10 @@ Reusable leaf choices such as `Work`, `Tile`, `Reduce`, `Stage`, and `Raster` co
 `ClassicSites` is the formal target-independent reading of one Fold root: it derives stable node ids, operand-edge
 sites, each site's projection or reduction view, and each contraction's schedule-independent `ContractionFacts` — its
 effective K axis, computed-A cone seam, nested producer, and fragment need — while storing only the root. A contraction
-view belongs to a node site and expresses its operand roles as edge positions; it is not another Fold node. A concrete codec alone translates
-integer and tuple sites to wire spellings.
+view belongs to a node site and expresses its operand roles as edge positions; it is not another Fold node. A concrete
+codec alone translates integer and tuple sites to wire spellings. The node list is the one walk in `ir/pure/tree.py`,
+deduplicated by object identity — the schedule layer does not carry its own copy of the three rules that walk exists
+to write once.
 
 ## Classic schedule
 

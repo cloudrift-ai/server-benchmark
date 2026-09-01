@@ -351,18 +351,19 @@ def test_run_replays_embedded_loop_golden_through_structural_stamps(tmp_path):
 
 
 def test_emmy_only_benchmark_returns_same_input_reference():
-    """Embedded Loop replay can return its greedy inputs/outputs without a Torch twin."""
+    """Embedded Loop replay returns runtime inputs without overriding self-contained constants."""
     import numpy as np
 
     from emmy.commands.run import bench_lowered_vs_torch
 
     graph = Graph()
-    graph.add_node(ConstantOp(name="y", value=2.0), [], Tensor("y", (1,)), node_id="y")
+    graph.add_node(ConstantOp(name="y", value=2.0), [], Tensor("y", (4,)), node_id="y")
     graph.outputs = ["y"]
-    outputs = {"y": np.array([2.0], dtype=np.float32)}
+    outputs = {"y": np.full(4, 2.0, dtype=np.float32)}
 
     class FakeBackend:
         def run(self, _graph, *, input_data):
+            assert input_data == {}
             return SimpleNamespace(outputs=outputs), None
 
         async def benchmark_async(self, *_args, **_kwargs):
@@ -383,7 +384,7 @@ def test_emmy_only_benchmark_returns_same_input_reference():
         )
     )
     assert len(refs) == 1
-    assert refs[0][0] == {"y": [2.0]}
+    assert refs[0][0] == {}
     assert refs[0][1] is outputs
 
 

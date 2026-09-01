@@ -229,7 +229,7 @@ overrides, rather than defaulting every failure to the standard lane. `run --gol
 compiler pipeline. When that replay has
 pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
 check; strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
-for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still
+for a non-frontend IR target whose worker returned the exact same inputs and outputs; runnable frontend targets still
 require direct eager correctness. A completed reference survives a later greedy
 timing watchdog: JSON records the exact failure and one-run timing, omits the isolated greedy row, and keeps the command
 nonzero while the pinned schedules receive their normal timed and reference-clean checks. Frontend replay can instead
@@ -237,7 +237,8 @@ request a direct eager correctness proof. Reference-free Loop replay does not al
 of each boundary input; full-program price probes therefore retain the execution path's device-memory contract.
 Repeated names that resolve to different embedded targets remain ambiguous;
 qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
-stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel
+stage-complete artifact and runs only the later passes, except that a persisted unmapped Tile child runs the schedule
+rule before that tail without repeating lift or cut. JSON records whole-program end-to-end timing for multi-kernel
 rows, so promotion compares aggregate execution rather than a sum of isolated launch windows.
 `--record` attributes that latency to the measured realization by exact name, pins, and knobs; a repeated name alone
 is never enough to choose a row. Newly appended tune winners start without copied latency because the seed row's

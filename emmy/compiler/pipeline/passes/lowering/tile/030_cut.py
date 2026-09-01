@@ -42,6 +42,15 @@ def _with_required(chosen, by_node: dict[int, object], refuse: frozenset = froze
     return tuple(out)
 
 
+def _rootmost_plain(seams, all_sites, refuse: frozenset[str] = frozenset()):
+    """Return the root-most plain seam not excluded by a scoped fuse pin."""
+    plain = [seam for seam in seams if not (seam.providers or seam.requires) and seam.spelling not in refuse]
+    if not plain:
+        return None
+    depth = {id(site.node): site.depth for site in all_sites}
+    return min(plain, key=lambda candidate: depth[id(candidate.node)])
+
+
 def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     """The authoritative placement spelled by live PLACE pins, or ``None``.
 
@@ -53,7 +62,8 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     the pins address decides FUSE, so the unpinned fork never returns under a pin-driven compile.
     A pin that resolves to a site no cut realizes is an addressing error and raises. A scoped
     ``PLACE@site=fuse`` excludes that seam from the composed cut (alone, it decides fuse under
-    that spelling). Bare ``PLACE`` pins apply only when no scoped pin addressed this kernel."""
+    that spelling). A bare cut supplies the primary root-most seam and composes with scoped cuts;
+    a bare fuse applies only when no scoped pin addressed this kernel."""
     pins = [(name, value) for name, value in family_pins("PLACE") if family_of(name) == "PLACE"]
     if not pins:
         return None
@@ -80,8 +90,14 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
             fused.append(seam.spelling)
         elif not any(chosen is seam for chosen in cut):
             cut.append(seam)
-    cut = [seam for seam in cut if seam.spelling not in fused]
-    cut = list(_with_required(cut, by_node, refuse=frozenset(fused)))
+    refused = frozenset(fused)
+    cut = [seam for seam in cut if seam.spelling not in refused]
+    bare = next(((name, value) for name, value in pins if name == "PLACE"), None)
+    if bare is not None and bare[1] == "cut":
+        seam = _rootmost_plain(seams, all_sites, refused)
+        if seam is not None and not any(chosen is seam for chosen in cut):
+            cut.append(seam)
+    cut = list(_with_required(cut, by_node, refuse=refused))
     if cut:
         return tuple(cut), "cut"
     if fused:
@@ -97,11 +113,9 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
         # the CUTTABLE seams instead: the root-most one.
         # Provider-closed and dependent seams are scoped-pin-only. A bare pin selects this one
         # root-most plain seam and is consumed on the fresh pieces.
-        plain = [seam for seam in seams if not (seam.providers or seam.requires)]
-        if not plain:
+        seam = _rootmost_plain(seams, all_sites)
+        if seam is None:
             return ("PLACE",), "fuse"
-        depth = {id(site.node): site.depth for site in all_sites}
-        seam = min(plain, key=lambda candidate: depth[id(candidate.node)])
         return (seam,), value
     if missing:
         # A pin-driven compile whose scoped pins all address other kernels decides FUSE here —

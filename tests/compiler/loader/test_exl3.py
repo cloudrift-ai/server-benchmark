@@ -715,7 +715,9 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.loader.quant import spell_trellis_inputs
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.fork import iter_leaves
     from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.compiler.helpers import device_compute_capability
 
     capability = device_compute_capability()
@@ -731,17 +733,14 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
     # Preserve the same computed-B lowering boundary as the GPU-less source test above.
     graph.outputs.extend(["y_left_flat", "y_core_reduce"])
 
-    selected = []
-
     def choose_lane(fp):
-        leaf = _prefer_mma_leaf(fp)
-        row = dict(getattr(leaf, "knobs", {}) or {})
-        if _computed_b_rows([row]):
-            selected.append(row)
-        return leaf
+        return next(iter_leaves(fp.options))
 
-    lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target(capability)).resolve(graph, choose_lane)
-    assert selected
+    pins = {"PLACE": "fuse", "WORK": "w1x1", "STAGE": "d1/smem", "REDUCE": "", "RASTER": ""}
+    if lane == "mma":
+        pins["TILE"] = "mma_m16n8k16_f16_f32/f1x2"
+    with pinned_knobs(pins):
+        lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target(capability)).resolve(graph, choose_lane)
     sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert any("emmy_bitcast" in source for source in sources)
     if lane == "mma":

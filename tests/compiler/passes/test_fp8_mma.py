@@ -370,7 +370,7 @@ def _w8a8_graph(m, n, k):
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 def test_w8a8_static_act_quant_e2e_cuda():
-    """The W8A8 e2e (M3 priority 4): under the bare recursive cut, the fused MIMO kernel (whose
+    """The W8A8 e2e (M3 priority 4): one composed cut splits the fused MIMO kernel (whose
     independent ``x_f8`` output refuses the fragment epilogue, so it has no warp tier at all)
     decomposes until the contraction stands alone — the A cone cuts at its STORAGE FRONTIER
     (``storage_frontier``: the encode prefix becomes its own kernel, the raw f8 bytes the
@@ -393,7 +393,17 @@ def test_w8a8_static_act_quant_e2e_cuda():
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": "", "PLACE": "cut"}):
+    with pinned_knobs(
+        {
+            "TILE": f"{K32}/f2x2/k2",
+            "WORK": "w1x8",
+            "REDUCE": "",
+            "STAGE": "",
+            "PLACE": "cut",
+            "PLACE@a": "cut",
+            "PLACE@map": "cut",
+        }
+    ):
         compiled = backend.compile(_w8a8_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     assert any("__nv_fp8_e4m3(" in s and "x_f8[" in s for s in srcs), "no encode kernel materializing x_f8"

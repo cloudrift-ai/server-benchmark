@@ -544,7 +544,15 @@ def test_the_packed_drain_stages_a_batched_activation_over_tma(tmp_path):
 
     x = (np.random.default_rng(3).standard_normal((1, m, k)) * 0.05).astype(np.float16)
     backend = CudaBackend()
-    with pinned_knobs({"TILE": "mma_m16n8k16_f16_f32/f2x4/k8", "WORK": "w1x1", "REDUCE": "g8k", "STAGE": "d1/smem-tma"}):
+    with pinned_knobs(
+        {
+            "TILE": "mma_m16n8k16_f16_f32/f2x4/k8",
+            "WORK": "w1x1",
+            "REDUCE": "g8k",
+            "STAGE": "d1/smem-tma",
+            "PLACE": "fuse",
+        }
+    ):
         compiled = backend.compile(g)
     src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
     assert "emmy_mma_load_b_smem_trans_f4s_f16" in src, "the packed pins did not reach the byte-slab drain"

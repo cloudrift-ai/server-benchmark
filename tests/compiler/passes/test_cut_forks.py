@@ -431,6 +431,19 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     assert any(set(node.inputs) & workspaces for node in producers), "the nested value's producer must read a sibling workspace"
 
 
+def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
+    match, graph = _composed_case_match()
+    pins = {"PLACE": "cut", "PLACE@map.fold.a.map.fold.fold.b1": "cut"}
+
+    with pinned_knobs(pins):
+        fork = _CUT.rewrite(match, graph.nodes[match.root_node_id])
+
+    assert len(fork.knobs) == 2 and set(fork.knobs.values()) == {"cut"}
+    (fragment,) = fork.expand()
+    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    assert len(pieces) == 3 and all(node.op.placement_decided for node in pieces)
+
+
 def _composed_case_match() -> tuple[Match, Graph]:
     case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
     (record,) = load_golden_records(load_golden_file(case))

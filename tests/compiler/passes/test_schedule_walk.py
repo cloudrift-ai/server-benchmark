@@ -289,19 +289,16 @@ def test_a_sweep_reading_fold_offers_only_the_serial_reduce(unpinned) -> None:
     assert len(_schedule._reduce_moves(state(()), red, None)) > 1
 
 
-def test_a_fold_under_a_chain_form_root_offers_only_the_serial_reduce(unpinned) -> None:
-    """A chain-form root — a zero-axis projection with NO operand edges (a body-FED or
-    sweep-reading member the normalize hoist keeps in place) — binds without a peel: the
-    materializer emits the whole body in order through the schedule-blind body recursion, so a
-    partitioned REDUCE row stamped under it would be a partition the kernel never emits. The
-    serial fold is the whole catalog (DeepSeek-V4 post4096's two-cut consumer piece)."""
+def test_a_direct_member_of_a_chain_form_root_offers_the_catalog(unpinned) -> None:
+    """A direct body member of a chain-form root binds through the chain arm — its provider chain
+    emits ahead of the strided loop — so it offers the full catalog, minus the transposed band
+    (whose close assumes the kernel-root fold shape)."""
     from types import SimpleNamespace
 
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.pure import Fold
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-    from emmy.compiler.ir.tile import ReducePlan
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
     body = Body(
@@ -320,6 +317,124 @@ def test_a_fold_under_a_chain_form_root_offers_only_the_serial_reduce(unpinned) 
     def state(op):
         return SimpleNamespace(tile=SimpleNamespace(output_specs=(), op=op), work_pin=None, transposed_ok=False)
 
-    assert _schedule._reduce_moves(state(root), red, None) == [ReducePlan()]
-    # The same fold bound as the kernel root keeps the whole catalog.
-    assert len(_schedule._reduce_moves(state(red), red, None)) > 1
+    moves = _schedule._reduce_moves(state(root), red, None)
+    assert len(moves) > 1, "the catalog must open for a direct chain member"
+    assert all(not p.coop_transposed for p in moves)
+
+
+def test_a_fold_nested_under_a_chain_member_offers_only_the_serial_reduce(unpinned) -> None:
+    """A fold nested UNDER a chain-form root's direct member — not itself a member of the root's
+    own body — binds through that member's own body recursion, so no cooperative / ILP partition
+    can ride under it either: the serial fold is the whole catalog, and a live pin naming a
+    partition is a recorded refusal, never a silent drop."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.schedule import Workers
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+    from emmy.compiler.ir.tile import ReducePlan
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    inner_body = Body(
+        (
+            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
+            Accum(name="acc_inner", value="x_e", op="add", axes=("k",)),
+        )
+    )
+    inner_loop = Loop(axis=Axis("k", 128), body=inner_body, role=AxisRole.PLANAR)
+    outer_body = Body((inner_loop, Accum(name="acc_outer", value="acc_inner", op="add", axes=("m",))))
+    outer = fold_from_loop(Loop(axis=Axis("m", 4), body=outer_body, role=AxisRole.PLANAR))
+    inner = next(member for member in outer.lift.body if isinstance(member, Fold))
+
+    chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
+    root = Fold.projection(body=Body((*chain, outer)), results=("acc_outer",))
+    assert not root.operands, "the fed member must remain in the body for this shape to be under test"
+
+    def state():
+        return SimpleNamespace(
+            tile=SimpleNamespace(output_specs=(), op=root), work_pin=Workers(kind="thread", units=(1, 32)), transposed_ok=False
+        )
+
+    assert _schedule._reduce_moves(state(), inner, None) == [ReducePlan()]
+    with pinned_knobs({"REDUCE": "coop"}), pytest.raises(_schedule.PinRefused):
+        _schedule._reduce_moves(state(), inner, "REDUCE")
+
+
+def test_a_sweep_carrying_store_keeps_chain_members_serial(unpinned) -> None:
+    """A chain-form root's boundary store carrying an output sweep keeps every direct member
+    serial too — even one the sweep axis never enters — because the sweep loop must enclose the
+    whole kernel tail and a partitioned member's lane-distributed close cannot re-run per swept
+    cell."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+    from emmy.compiler.ir.tile import OutputSpec, ReducePlan
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+
+    body = Body(
+        (
+            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
+            Assign(name="scaled", op="multiply", args=("x_e", "v25")),
+            Accum(name="acc", value="scaled", op="add", axes=("k",)),
+        )
+    )
+    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
+    assert red is not None
+    chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
+    root = Fold.projection(body=Body((*chain, red)), results=("acc",))
+    sweep_spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
+
+    def state():
+        return SimpleNamespace(tile=SimpleNamespace(output_specs=(sweep_spec,), op=root), work_pin=None, transposed_ok=False)
+
+    assert _schedule._reduce_moves(state(), red, None) == [ReducePlan()]
+
+
+def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
+    """A chain-form root's boundary store that streams into a SIBLING observed member's reduce
+    loop keeps every OTHER direct member serial too: the trailing append that splices a streamed
+    store cannot reach a loop that already sits in an earlier segment, so the whole kernel binds
+    without a peel — same contract as the swept store, decided at the offer so the binder never
+    drops a stamped partition."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+    from emmy.compiler.ir.tile import OutputSpec, ReducePlan
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, scan_from_loop
+
+    scan_body = Body(
+        (
+            Load(name="y_e", input="y", index=(Var("m"), Var("j"))),
+            Accum(name="scan_acc", value="y_e", op="add", axes=("j",)),
+            Write(output="running", index=(Var("m"), Var("j")), value="scan_acc"),
+        )
+    )
+    scan, _trailing = scan_from_loop(Loop(axis=Axis("j", 4), body=scan_body, role=AxisRole.PLANAR))
+    assert scan.observe is not None
+
+    body = Body(
+        (
+            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
+            Assign(name="scaled", op="multiply", args=("x_e", "v25")),
+            Accum(name="acc", value="scaled", op="add", axes=("k",)),
+        )
+    )
+    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
+    assert red is not None
+    chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
+    root = Fold.projection(body=Body((*chain, scan, red)), results=("acc",))
+    streamed_spec = OutputSpec(write=Write(output="running", index=(Var("m"), Var("j")), value=scan.observe.results[0]), sweep=None)
+
+    def state():
+        return SimpleNamespace(tile=SimpleNamespace(output_specs=(streamed_spec,), op=root), work_pin=None, transposed_ok=False)
+
+    assert _schedule._reduce_moves(state(), red, None) == [ReducePlan()]

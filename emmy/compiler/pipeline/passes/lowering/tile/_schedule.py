@@ -62,7 +62,7 @@ from emmy.compiler.ir.schedule import (
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, observed_result_names
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, cone_seam, edge_dtypes, projection_tail, scheduled
 from emmy.compiler.ir.tile.path import SLICE_FAMILIES, sites
 from emmy.compiler.pipeline.fork import Fork, iter_leaves
@@ -768,10 +768,11 @@ def _reduce_catalog(state: _State, extent: int) -> list[ReducePlan]:
 
 def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
     """The reduce partitions this fold offers: the serial fold plus every :func:`coop_reduce_moves`
-    band the node admits — an observed fold (a scan), a fold whose cone reads a boundary
-    store's sweep axis, and any fold under a chain-form root (a zero-axis projection with no
-    operand edges) offer exactly the serial fold — or, under a ``REDUCE`` pin, the ONE
-    partition that pin names, read
+    band the node admits — an observed fold (a scan) and a fold whose cone reads a boundary
+    store's sweep axis offer exactly the serial fold; a fold nested under a chain-form root's
+    direct members, and any fold of a sweep-carrying or streamed-store chain kernel, offer exactly
+    the serial fold; a DIRECT member offers the non-transposed catalog — or, under a ``REDUCE``
+    pin, the ONE partition that pin names, read
     against the kernel's pinned inventory (the ``coop`` token's width lives in ``WORK``). A pin is
     authoritative over the value; it cannot make a band this node has no geometry for legal, and
     one that names no legal partition raises the refusal instead of silently emptying the
@@ -814,21 +815,40 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
         return [ReducePlan()]
     root = state.tile.op
     if isinstance(root, Fold) and root.axis is None and not root.operands:
-        # The chain form — a zero-axis root with no operand edges (a sweep-reading or body-FED
-        # member the normalize hoist must keep in place) — binds without a peel: the materializer
-        # emits the whole body in order through the schedule-blind body recursion, so no fold
-        # under it can realize a cooperative/ILP partition. Same contract as the swept branch:
-        # only the serial fold is offered, and a pin naming one is a recorded refusal, never a
-        # silent drop. The cross-CTA ``g`` half stays the split fork's decision — a split piece IS
-        # a chain-form root carrying its captured prologue, so the pin resolves through the
-        # ordinary receipt consumption first and only a SURVIVING partition refuses.
+        # The chain form — a zero-axis root with no operand edges (a body-FED or sweep-reading
+        # member the normalize hoist keeps in place; every composed-cut and split piece). A DIRECT
+        # body member binds through the chain arm — its sibling providers emit ahead of the
+        # strided loop — so it offers the full catalog, minus the transposed band (whose close
+        # assumes the kernel-root fold shape). Two shapes keep the serial fold, decided HERE so no
+        # priced row is dropped at the binder: a fold nested DEEPER (the body recursion emits it
+        # serially per cell), and any member of a kernel whose boundary store carries an output
+        # sweep OR streams into a sibling observed member's reduce loop (the wrap would re-run a
+        # partitioned member per swept cell; the trailing splice cannot reach a loop that already
+        # sits in an earlier segment). The cross-CTA ``g`` half stays the split fork's decision —
+        # the shared pin arm consumes the receipt first.
+        direct = any(node is stmt for stmt in root.body)
+        swept_store = any(spec.sweep is not None for spec in state.tile.output_specs)
+        streamed_store = any(set(spec.write.values) <= observed_result_names(root) for spec in state.tile.output_specs)
+        if direct and not swept_store and not streamed_store:
+            if pin is None:
+                return [p for p in _reduce_catalog(state, extent) if not p.coop_transposed]
+            plan = _parsed_reduce_pin(state, pin, key)
+            if plan.coop_transposed:
+                raise PinRefused(
+                    f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a transposed band, whose close assumes the "
+                    f"kernel-root fold shape — a chain-form member cannot realize it"
+                )
+            return [plan]
         if pin is not None:
             plan = _parsed_reduce_pin(state, pin, key)
             if plan.stages:
-                raise PinRefused(
-                    f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a partition, but this kernel's root binds "
-                    f"its projection body whole — a chain-form member realizes only the serial fold"
-                )
+                if swept_store:
+                    why = "the kernel's boundary store carries an output sweep"
+                elif streamed_store:
+                    why = "the kernel's boundary store streams into a sibling observed member's reduce loop"
+                else:
+                    why = "this fold is nested under a chain-form root's member"
+                raise PinRefused(f"REDUCE pin {pin!r} at {key or 'REDUCE'} names a partition, but {why} — only the serial fold realizes")
             return [plan]
         return [ReducePlan()]
     if pin is None:

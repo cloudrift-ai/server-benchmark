@@ -845,11 +845,6 @@ class Fold:
     # the edges themselves, by each ``Load``'s index ``exprs`` (which already duplicated every name
     # the old ``deps`` reported — that duplication is what made this look load-bearing).
 
-    def exprs(self):
-        """No index / predicate ``Expr`` of its own — a term's coordinates live on the ``Load``
-        edges and the stmts inside its lift, which the walks reach as children."""
-        return ()
-
     def binds_axes(self) -> frozenset[str]:
         """The iteration var this term binds (empty at zero axes) — what scopes an axis-name read
         so a nested fold's ``k`` shadows an enclosing one of the same name."""

@@ -316,20 +316,6 @@ def _normalize_body(body: Body, axes: tuple[str, ...], implicit_axes: frozenset[
     return Body(out)
 
 
-def fed_by_body(fold: Fold, body) -> bool:
-    """Whether ``fold``'s subtree captures a name a plain (non-Fold) member of ``body`` defines.
-
-    A projection evaluates its operands before its scalar body, so such a fold can never move onto
-    an operand edge — the names it captures would not exist yet. ``Fold.deps()`` is the memoized
-    deep capture set (its own lift's free names plus every operand edge's, recursively), so the
-    check costs one set intersection. Read by the hoist below — its only caller. What the hoist
-    LEAVES in the body is what the classic reduce domain then reads as a chain-form root's direct
-    members, so the two answer the same question from opposite ends: this decides which folds stay,
-    membership decides which of them partition."""
-    del body  # a term reads no sibling definition: its values arrive through operand edges
-    return False
-
-
 def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
     """Move closed child Folds from a zero-axis body onto operand edges.
 
@@ -341,18 +327,15 @@ def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset
     ``k_div_36``). A CONTRACTION is exempt: ``TileOp.__post_init__`` promotes a sweep its operands
     read into a real free axis right after normalization, so the hoisted edge stays bound.
 
-    A fold FED by the body is never hoisted either — no matter what kind: the ``closed`` gate
-    reads only the fold's own lift, but hoisting moves the whole subtree, and a subtree capturing
-    a name the remaining body defines (:func:`fed_by_body`) would evaluate before its provider.
-    The composed placement cut builds exactly this shape — the consumer piece's workspace loads
-    and their rsqrt chain feed the retained reduce — and hoisting it emitted every capture as an
-    undefined identifier at nvcc (DeepSeek-V4 post4096's two-cut ``…mean_reduce`` piece)."""
+    The body-fed refusal that used to sit here is gone with the condition it guarded: a subtree
+    could capture a name the remaining body defines, and hoisting it emitted that capture as an
+    undefined identifier at nvcc (DeepSeek-V4 post4096's two-cut ``…mean_reduce`` piece). A term
+    takes its values through operand edges now, so there is no such capture to strand."""
     candidates = [
         stmt
         for stmt in root.body
         if isinstance(stmt, Fold)
         and set(stmt.environment) <= set(axes)  # captures nothing but axes in scope
-        and not fed_by_body(stmt, root.body)
         and (is_contraction(stmt) or edge_free_axes(stmt).isdisjoint(sweep_axes))
     ]
     if not candidates:

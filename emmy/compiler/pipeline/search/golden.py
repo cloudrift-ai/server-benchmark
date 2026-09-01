@@ -758,7 +758,11 @@ def _target_kernel_nodes(record: GoldenRecord):
         provenance.seed(graph)
     lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
     if record.loop_wire is not None:
-        nodes = [node for output in lowered.outputs if (node := lowered.producer(output)) is not None and isinstance(node.op, LoopOp)]
+        # One kernel per PRODUCER, not per output: a multi-output kernel (an NVFP4 re-encode emits
+        # packed codes beside their block scales) produces several of the graph's outputs, and
+        # counting it once per output made a single-kernel target read as "lowers to N kernels".
+        producers = (lowered.producer(output) for output in lowered.outputs)
+        nodes = list({node.id: node for node in producers if node is not None and isinstance(node.op, LoopOp)}.values())
     else:
         wanted = frozenset(record.origins)
         nodes = []

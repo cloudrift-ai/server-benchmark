@@ -16,6 +16,11 @@ Three rules that are easy to get wrong separately, which is why they are written
   derived step yields that is neither an operand edge nor a literal lift-body member. The cut pass
   is unaffected — it filters through ``path.family_sites("PLACE", …)``, which excludes derived
   sites, so a derived node contributes scopes but never a cuttable edge.
+- **A contraction's edges are visited by ROLE, not stored order.** ``Fold.contraction`` stores the
+  channels before the shared A edge, while the tree-path codec spells the roles (``fold.a`` /
+  ``fold.b``). Visiting by role is what lets the schedule's integer ids and the codec's segments
+  come off ONE walk; in stored order a contraction with two computed edges numbers the other way.
+
 - **Axes in scope accumulate down the walk.** A node's own reduce axis is in scope for everything
   below it, and so is any axis a nesting statement binds. The cut pass needs this to ask whether an
   edge is semantically closed where it sits; nothing else may recompute it.
@@ -48,7 +53,12 @@ def children(node, axes: tuple = ()) -> tuple[tuple[Fold, tuple], ...]:
     if not isinstance(node, Fold):
         return ()
     inner = axes if node.axis is None else (*axes, node.axis)
-    members = (*node.operands, *node.lift.body)
+    # A CONTRACTION's operand edges are visited by ROLE — the A edge, then each channel's B —
+    # not in stored order, which puts the channels first. The tree-path codec spells those roles
+    # (``fold.a`` / ``fold.b``), so role order is the one order both identities can share; a walk
+    # in stored order would number a contraction with two computed edges the other way round.
+    ordered = (node.a, *(channel.b for channel in node.channels)) if is_contraction(node) else node.operands
+    members = (*ordered, *node.lift.body)
     # A contraction's children are exactly its operand edges. Its derived step repeats those
     # nodes, so reading it here would create duplicate classic sites.
     if node.axis is not None and not is_contraction(node):

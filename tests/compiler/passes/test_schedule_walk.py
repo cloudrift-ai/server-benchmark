@@ -311,7 +311,11 @@ def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> N
     rows = _rows(graph)
     assert rows, "the fused attention kernel must still enumerate"
     reduce_keys = {key for row in rows for key in row if key.startswith("REDUCE@")}
-    assert reduce_keys == {f"REDUCE@n{i}" for i in (1, 2, 5, 6, 10, 13, 14)}
+    # n11, not n10: the score contraction's A and B are BOTH norm cones here, and the one walk
+    # visits a contraction's edges by ROLE (a, then each channel's b) rather than in stored order,
+    # which puts the channels first — so the two cone subtrees, and the reduce sites inside them,
+    # number the other way round.
+    assert reduce_keys == {f"REDUCE@n{i}" for i in (1, 2, 5, 6, 11, 13, 14)}
 
 
 # --- the chain-form root's reduce domain -------------------------------------------------------- #

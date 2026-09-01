@@ -685,11 +685,17 @@ def _audit_record(
 def _verified_index(ctx: Context) -> dict:
     """The card's recorded goldens keyed by STRICT structural identity — the schedule-free
     lowered-body digest + io fingerprint (``identity_key(with_io=True)``), derived record-side
-    from each record's own persisted program through the shared recognition core. Returns schedule
-    rows as ``{identity: [records fastest-first]}``, scoped to the live
-    ``(gpu_name, compute_cap)`` and the live pin regime. Best-effort per record (an underivable row
-    is skipped — the decode tripwire is where that is loud); classification-free: no shape key,
-    no matching heuristic, identity or nothing."""
+    from each record's own persisted program through the shared recognition core. Returns
+    ``{identity: [records fastest-first]}``, scoped to the live ``(gpu_name, compute_cap)`` and the
+    live pin regime. Best-effort per record (an underivable row is skipped — the decode tripwire is
+    where that is loud); classification-free: no shape key, no matching heuristic, identity or
+    nothing.
+
+    Both kinds of row are indexed under the one join key, and the CONSULTED FORK selects which of
+    them are eligible (:func:`_verified_pick`): a schedule row decides a schedule fork, a ROUTING
+    row (``GoldenRecord.is_routing`` — nothing but ``PLACE`` keys, a whole recorded placement) a
+    kernel-set fork. A row that mixes the two families is spelled by neither lane and decides
+    nothing."""
     from emmy.compiler.pipeline.search.golden import flush_identity_store, kernel_identity, records_for_card  # noqa: PLC0415
 
     gpu_name = getattr(ctx, "gpu_name", None)
@@ -701,7 +707,7 @@ def _verified_index(ctx: Context) -> dict:
         for g in records_for_card(gpu_name, cap):
             if not g.knobs or not _pins_live(g.pin_map):
                 continue
-            if any(str(key).split("@", 1)[0] == "PLACE" for key in g.knobs):
+            if not g.is_routing and any(str(key).split("@", 1)[0] == "PLACE" for key in g.knobs):
                 continue
             identity = kernel_identity(g)
             if identity is None:
@@ -715,8 +721,82 @@ def _verified_index(ctx: Context) -> dict:
     return sched
 
 
+def _is_placement_fork(fp: ForkPoint) -> bool:
+    """Whether this fork decides a kernel PLACEMENT — read off the OFFER, whose arms spell the
+    family they decide: ``030_cut`` spells ``PLACE`` (``PLACE=fuse`` and one ``PLACE@<site>=cut``
+    per offered seam), a cross-CTA split spells ``REDUCE``, a schedule fork the schedule families.
+    Not the same question as ``fp.structural``: a kernel whose every seam is provider-closed or
+    dependent offers only the FUSE arm — those seams are reachable by scoped pin alone — so the
+    fork carries no structural offer and is still a placement decision, and it is exactly the shape
+    the fused NVFP4 linears take."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    return any(family_of(str(key)) == "PLACE" for option in fp.options for key in leaf_knobs(option))
+
+
+def _routing_pick(fp: ForkPoint, recs: list) -> tuple[object, float, dict | None] | None:
+    """The verified tier's decision at a PLACEMENT fork — the card's recorded ROUTING rows.
+
+    A routing row records a whole placement: the scoped ``PLACE@<site>=cut`` pins that cut one
+    fused kernel into the fragment set its measurement was taken on. It names the PRE-cut kernel,
+    which is exactly the identity this fork's root carries, so the ordinary join selects it.
+
+    The row is APPLIED the way the ``--golden`` replay lane applies one (``compile``'s
+    ``golden_target_pins``): publish its pins and re-ask the fork's own rule, so the cut machinery
+    composes the multi-seam decision itself (``030_cut._pin`` joins every scoped pin that resolves
+    on this kernel into ONE realization). This tier never re-derives which offered arms add up to a
+    recorded route — the arms are per-seam and the route is a set, and matching them by hand is the
+    fuzzy acceptance the tier exists to avoid.
+
+    Fail-closed, and reviewed evidence only: the rows come from the repository goldens, never from
+    the reservoir or the tune DB, and the composed decision is checked back against the row before
+    it is taken — every recorded ``PLACE@<site>`` must come out of the composition on the side it
+    was recorded on. A stale seam spelling addresses no site on this kernel, which the cut machinery
+    reads as "that pin names another kernel" and quietly drops; here it means the recorded route is
+    not the route being deployed, so the row warns in the drift style and decides nothing, leaving
+    the fork to pricing. The composition may add seams the row does not name — a dependent seam
+    pulls in the producers it reads — which is structural, deterministic from the recorded pins, and
+    was equally true of the run that recorded them."""
+    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.candidate import _build_rewrite_kwargs  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    rule = getattr(fp.match, "rule", None)
+    if not recs or rule is None or rule.rewrite is None:
+        return None
+    declined = []
+    for rec in recs:
+        try:
+            with pinned_knobs(dict(rec.knobs)):
+                result = rule.rewrite(**_build_rewrite_kwargs(rule, fp.match, fp.ctx))
+        except Exception as exc:  # noqa: BLE001 — the reason is the warning's product
+            declined.append(f"{rec.name} ({type(exc).__name__}: {exc})")
+            continue
+        options = list(result) if isinstance(result, (list, tuple)) else [result]
+        if len(options) != 1 or not _is_structural_option(options[0]):
+            declined.append(f"{rec.name} (pins compose no cut: {len(options)} option(s))")
+            continue
+        route = {str(key): str(value) for key, value in leaf_knobs(options[0]).items()}
+        unmet = sorted(
+            str(key) for key, value in rec.knobs.items() if str(key) != "PLACE" and (route.get(str(key)) == "cut") != (str(value) == "cut")
+        )
+        if not unmet:
+            return options[0], float(rec.emmy_us or 0.0), dict(rec.knobs)
+        declined.append(f"{rec.name} (recorded seam(s) not in the composed route: {', '.join(unmet)})")
+    logger.warning(
+        "deploy: node %r matches %d recorded ROUTING golden(s) by structural identity, but none of "
+        "their placement pins composes this kernel's route (drift); falling through to pricing. Records: %s",
+        fp.node_id,
+        len(recs),
+        ", ".join(declined),
+    )
+    return None
+
+
 def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, float, dict | None] | None:
     """The strict verified-tier decision for one fork, or ``None``.
+
+    The fork's kind picks the lane, and the two never cross:
 
     A SCHEDULE fork — a recognized ``TileOp`` root AND no structural offer, the two halves of
     "this fork decides how one kernel is scheduled": the fork's the deploy identity (``identity_key(with_io=True)``) selects the
@@ -724,6 +804,13 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     (``canonical_row_key`` equality — no prefix, no any-of) decides. A record that matches the
     identity but equals no leaf is DRIFT: warn loudly and decide nothing (fail-closed — the fuzzy
     acceptance this tier replaced is what deployed wrong kernels).
+
+    A PLACEMENT fork (:func:`_is_placement_fork` — its arms spell ``PLACE``) decides which kernels
+    exist, not how one is scheduled, so it consults the recorded ROUTING rows instead
+    (:func:`_routing_pick`). Any other kernel-set fork — a cross-CTA split — is priced
+    (:func:`_priced_pick`) and this tier says nothing: its arms spell no schedule, so a recorded
+    schedule row could only be compared against them by accident, which is how an all-OFF recording
+    came to decide a placement it was never about while every other recording read as drift.
 
     Under an active :func:`golden_audit` sink every SCHEDULE consultation also appends its verdict
     (MATCH / DRIFT / GAP) — the drift audit's only reading of this tier."""
@@ -733,18 +820,13 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None:
         return None
-    # A fork carrying structural offers (``ForkPoint.structural`` — the engine's typed partition)
-    # is deciding the KERNEL SET: which pieces a placement cut leaves, or whether a reduction
-    # splits across CTAs. Its arms spell ``PLACE`` / split knobs, so every one of them
-    # canonicalizes to the same all-OFF schedule row and a recorded schedule row can only be
-    # compared against it by accident — an all-OFF recording equalled the fuse arm and decided the
-    # placement it was never about, and every other recording read as drift on a fork that is not
-    # this tier's question. Pricing (:func:`_priced_pick`) is what answers the kernel-set fork; the
-    # schedule fork below the chosen arm is where a record decides.
+    identity = root.identity_key(with_io=True)
+    entries = sched_idx.get(identity) or ()
+    if _is_placement_fork(fp):
+        return _routing_pick(fp, [g for g in entries if g.is_routing])
     if fp.structural:
         return None
-    identity = root.identity_key(with_io=True)
-    recs = sched_idx.get(identity)
+    recs = [g for g in entries if not g.is_routing] or None
     node_blocked = blocked.get(fp.node_id) if blocked else None
     if not recs and _AUDIT_SINK is None:
         return None

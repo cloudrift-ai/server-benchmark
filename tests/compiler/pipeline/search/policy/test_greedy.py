@@ -11,6 +11,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key, schedule_row_key
 from emmy.compiler.pipeline.pipeline import ForkPoint
+from emmy.compiler.pipeline.search.golden import GoldenRecord
 from emmy.compiler.pipeline.search.policy import greedy
 from emmy.compiler.pipeline.search.policy.greedy import (
     _db_measured_index_build,
@@ -20,6 +21,25 @@ from emmy.compiler.pipeline.search.policy.greedy import (
     golden_audit,
     tile_identity,
 )
+
+
+def _record(name: str, knobs: dict, *, emmy_us: float = 1.25) -> GoldenRecord:
+    """A minimal recorded row — the real ``GoldenRecord``, so ``is_routing`` (which lane may read
+    it) is its own derivation from the knobs rather than a stand-in's hand-set flag."""
+    return GoldenRecord(
+        name=name,
+        gpu_name="card",
+        compute_cap=(12, 0),
+        model=None,
+        program_index=0,
+        program_wire={},
+        origins=(),
+        bindings=(),
+        pins=(),
+        knobs=knobs,
+        measurements={"emmy_us": emmy_us, "reference_us": 2.0, "reference_backend": "torch"},
+        ranking=None,
+    )
 
 
 @pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@a": "cut"}, {"PLACE@a": "cut", "WORK": "t32"}))
@@ -85,7 +105,7 @@ def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) ->
         materialize=lambda _row: None,
     )
     point = _fork_point([tree], rule="040_schedule")
-    record = SimpleNamespace(name="recorded-golden", knobs={"RASTER": "", "TILE": "recorded"}, emmy_us=1.25)
+    record = _record("recorded-golden", {"RASTER": "", "TILE": "recorded"})
     monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
 
     leaf, price, knobs = _verified_pick(point, {"identity": [record]}, None)
@@ -117,8 +137,8 @@ def test_verified_pick_defers_a_structural_fork(monkeypatch, caplog, with_fuse_a
     point = _fork_point([fuse, cut] if with_fuse_arm else [cut], rule="030_cut")
     monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
 
-    all_off = SimpleNamespace(name="all-off-golden", knobs=dict.fromkeys(("WORK", "TILE", "REDUCE", "STAGE", "RASTER"), ""), emmy_us=1.25)
-    scheduled = SimpleNamespace(name="scheduled-golden", knobs={"WORK": "t512", "TILE": "recorded"}, emmy_us=1.25)
+    all_off = _record("all-off-golden", dict.fromkeys(("WORK", "TILE", "REDUCE", "STAGE", "RASTER"), ""))
+    scheduled = _record("scheduled-golden", {"WORK": "t512", "TILE": "recorded"})
     for record in (all_off, scheduled):
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger=greedy.logger.name):

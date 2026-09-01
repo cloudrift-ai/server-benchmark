@@ -511,12 +511,24 @@ enumeration's emission order, which carries no meaning. Such a pick can be far o
 and that is an accepted outcome of the design — the fix is a measurement, a recorded golden, or a better-fitted
 prior, never a preference written into a pass or into this policy.
 
-1. the **verified goldens** recorded for this GPU (`greedy._verified_index` / `_verified_pick`), consulted at a
-   SCHEDULE fork only — a recognized `TileOp` root AND no structural offer. A fork that also offers a kernel-set
-   change (a placement cut, a cross-CTA split) decides which kernels exist, not how one is scheduled: its arms spell
-   `PLACE` / split knobs, all of which canonicalize to the same all-OFF schedule row, so a recorded row there would
-   either match an arm by accident or read as drift on a question it never answered. Pricing decides those forks. At a
-   schedule fork the record whose
+1. the **verified goldens** recorded for this GPU (`greedy._verified_index` / `_verified_pick`). One index, one join
+   key, and the FORK's kind picks which rows are eligible — a recorded row is either a schedule row (no `PLACE` key)
+   or a **routing row** (nothing but `PLACE` keys: a whole recorded placement), and a row mixing the two families is
+   spelled by neither lane and decides nothing.
+
+   A PLACEMENT fork — `greedy._is_placement_fork`, read off the offer, whose arms spell `PLACE` — consults the
+   routing rows (`_routing_pick`). A routing row names the PRE-CUT kernel, which is the identity the fork's root
+   carries, and it is APPLIED the way `compile --golden` applies `golden_target_pins`: its pins are published and the
+   fork's own rule re-asked, so `030_cut._pin` composes the multi-seam route itself. The tier never re-derives which
+   offered arms add up to a recorded route — the arms are per-seam, the route is a set, and the fused NVFP4 linears
+   route through seams no unpinned arm even offers (a provider-closed seam is scoped-pin-only). Reviewed evidence
+   only: reservoir and tune-DB placement rows never deploy. Fail-closed: the composed decision is checked back
+   against the row and every recorded seam must come out of it on the side it was recorded on, so a stale spelling —
+   which the cut machinery would otherwise drop as naming another kernel — warns and leaves the fork to pricing.
+
+   Any other kernel-set fork (a cross-CTA split) is priced: its arms spell no schedule, so a recorded schedule row
+   could only match one by accident. At a SCHEDULE fork — a recognized `TileOp` root and no structural offer — the
+   record whose
    the deploy identity (`identity_key(with_io=True)`) — the canonical digest of the complete schedule-free Loop-IR body the lifted term lowers
    to (free grid loops + `Fold.lower()` + the reconstituted output writes, through `Body.structural_key`'s
    canonicalization, so term re-spellings and compute-unit cluster siblings that lower alike share it), folded
@@ -528,8 +540,7 @@ prior, never a preference written into a pass or into this policy.
    their block scales) keys the same way on both sides — equals the
    fork's, and whose spelled row (`knob.schedule_row_key`, the recording canonicalizer restricted to the schedule
    families) equals EXACTLY one enumerated leaf. Fastest matching record first; a record that matches the identity
-   but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). A row containing `PLACE` is an exact
-   replay input, not implicit deploy evidence, until a durable receipt can bind its ordered child schedule tree.
+   but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed).
    The tier needs no prior, applies only at deployable
    `-O3` flags, and scopes records to the live card and the exact live pin regime;
 2. measured **reservoir** evidence (`Prior.evidence_pick`): the candidate that agrees with the fastest reservoir row

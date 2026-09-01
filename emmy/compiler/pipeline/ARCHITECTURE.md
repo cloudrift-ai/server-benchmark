@@ -742,9 +742,8 @@ and selects the global argmin. This preserves the fitted model's semantics, at t
 until schedule composition and scoring are factorized end to end. With no online prior the `OfflinePrior` ranks
 (including a positive `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns
 nothing entirely every fork falls to the first leaf in emission order, which is meaningless and may be slow.
-Greedy benches nothing, so it can only *use* a prior, never train one. Direct DB descent has already joined the row by
-its `S_*` signature and context, so it ignores `S_*` / `H_*` values carried by intermediate fork levels and matches
-only their tuning knobs against the feature-free measured row.
+Greedy benches nothing, so it can only *use* a prior, never train one. After joining a DB row by `S_*` signature and
+context, direct descent ignores intermediate `S_*` / `H_*` values and matches only tuning knobs.
 
 **And it scores each decision once.** A decision is a conclusion over evidence, so it is memoized GREEDY-SIDE (one
 factory call — one compile attempt; never shared ambient state, which would hand MCTS cached picks): the memo

@@ -9,16 +9,16 @@ correctness for admissible rows, and fresh `torch.compile` measurements where th
 The A100 s512 attention all-four cut produced five kernels, but initially failed before launch with
 `KeyError: linear_1_wt`. Cut-piece graph inputs came from lowered root statements, which omit contraction operands
 retained structurally beneath a projection region even though kernel materialization later expands and reads them.
-Commit `a9672422` now collects buffer reads from the complete structural Fold tree and uses the same inventory for
-piece inputs and producer ordering. The former route now carries all 23 required inputs, exercises tuning on the A100,
-and has a focused regression test. The combined branch gate passed 3,993 tests with 1,012 skips and five expected
-failures on the qualification host; local focused replay passed 22 tests with one skip, and lint is clean.
+The historical cut-local fix was commit `a9672422`. Main's later generic schedule reconstruction superseded it:
+`loaded_buffers` inventories the complete stored Fold tree, and both piece inputs and producer ordering consume that
+shared reading. At the historical source, the route carried all 23 required inputs and exercised A100 tuning. Its gate
+passed 3,993 tests with 1,012 skips and five expected failures; focused replay passed 22 tests with one skip.
 
 A second bounded reduction found that legal placement sites beneath a projection region were absent from provider
 closure: the lexical-environment walk only visited direct Fold members while placement used the complete stored-child
-walk. Commit `8c2bb5cb` shares that traversal. The current s512 normalized-K projection plus rotary seam now lowers as
-two kernels, materializing the value once and reading its workspace in the consumer. This is a real new route, but a
-complete correct s512 assembly still has another child that exceeds the 15-second bound.
+walk. Historical commit `8c2bb5cb` fixed that locally; main now supersedes it with the generic `_stored_folds` traversal
+and its regression test. At that source, the normalized-K projection plus rotary seam lowered as two
+kernels, but a complete correct s512 assembly still had another child that exceeded the 15-second bound.
 
 Manually selected A100 child rows demonstrate that schedule quality is not the immediate blocker:
 
@@ -37,9 +37,11 @@ value materialization across independent projection regions, not a larger schedu
 The V100 manual screen found one correct and repeatable schedule improvement. The standalone model-sized Volta
 projection fell from 3,571.7 µs to 1,868.8 µs with `WORK=w4x2`, f16 MMA `f2x4/k4`, and `STAGE=d1/smem`, while
 `torch.compile` measured 756.736 µs. A fresh repeat measured 1,881.088 versus 757.760 µs with strict zero error. The
-exact-card CLI recorded the first pair in the realization case. This is a 1.9x Emmy improvement but remains about
-2.5x behind. Its CUDA uses two CTA barriers in a 192-iteration K loop, 123 registers per thread, and 25% occupancy, so
-the remaining gap needs a better SM70 blocking-copy software pipeline rather than another currently offered schedule.
+exact-card CLI recorded the first pair in the realization case. These measurements predate main's #691 generic
+schedule reconstruction and are historical rather than current-head latency evidence; the authored row still passes
+the current GPU-free realization checks but needs an exact V100 timing refresh. At the measured source it was a 1.9x
+Emmy improvement but remained about 2.5x behind; its CUDA used two CTA barriers in a 192-iteration K loop, 123
+registers per thread, and 25% occupancy.
 
 The V100 linear-cut diagnostic fell from 1,160.2 µs to 247.0-247.8 µs by selecting the unsplit child, versus
 65.7-66.0 µs for `torch.compile`, but it is not admissible: both strict repeats fail with 26,441 mismatches and maximum
@@ -64,8 +66,8 @@ promoted without repeated correct reference measurements.
 Manual scheduling therefore improved the measured ceilings and exposed one fixed compiler bug, but did not establish
 parity. Across Ampere and Ada the next shared problem is forming reusable value boundaries before child scheduling;
 on Volta the independent remaining problems are synchronous staging efficiency and the strict large-linear numerical
-contract. After integrating both placement fixes and the recorded Volta row, the combined local gate passed 3,994
-tests with 1,012 skips and five expected failures; lint remained clean. The A100 VM remains running.
+contract. At the historical source, the combined local gate passed 3,994 tests with 1,012 skips and five expected
+failures; lint remained clean. The A100 VM remained running.
 
 ## Post-#689 structural-identity qualification (2026-08-29)
 
@@ -130,10 +132,10 @@ linear-cut; strict linear-cut correctness still found 26,418 mismatches with max
 A fresh 10-candidate workspace tune exposed one deploy replay gap. Its fastest DB row was 76.012 µs, but direct
 descent compared the schedule tree's intermediate `S_warp_eligible` feature with a feature-free measured row after
 the `S_*` signature had already joined them. Every measured row therefore appeared disjoint and deploy fell back to
-the prior at about 85 µs. Commit `d2505362` ignores `S_*` / `H_*` fork keys during that tuning-knob descent. Exact
-A100 strict replay then selected the measured `WORK=t8` row at 76.0 µs with direct eager correctness, rather than the
-prior's `WORK=t4` fallback. This closes evidence replay but not the workspace performance gap: 76.0 µs remains about
-6.9x slower than the 11 µs `torch.compile` result.
+the prior at about 85 µs. Historical commit `d2505362` ignored `S_*` / `H_*` fork keys during tuning-knob descent.
+That implementation is now in main; this branch retains its focused measured-row regression coverage. At the measured
+source, exact A100 strict replay selected `WORK=t8` at 76.0 µs with direct eager correctness rather than the prior's
+`WORK=t4` fallback. This closed evidence replay but not the roughly 6.9x workspace performance gap.
 
 Stat-fill's remaining persistence gap is larger. A four-candidate fused probe stayed at 277,229 µs and produced no
 children. Replaying the previously correct six-cut route did enroll its resulting kernels: a four-candidate cap per
@@ -144,8 +146,8 @@ split-first persistence: record the route decision, realize the resulting kernel
 to its measured schedule before writing a replayable winner. This is not a safe small follow-up to the DB descent
 fix, and no unqualified stat-fill row was promoted.
 
-Draft PR #687 carries the replay fix. Local verification is 3,982 passed, 1,012 skipped, five expected failures, and
-clean lint; its GitHub test and lint jobs are also green. The retained A100 VM remains running.
+Draft PR #687 carried the original replay fix. Its local verification was 3,982 passed, 1,012 skipped, five expected
+failures, and clean lint; its GitHub test and lint jobs were green. The A100 VM remained running.
 
 ## Current-head corpus requalification (2026-08-29)
 

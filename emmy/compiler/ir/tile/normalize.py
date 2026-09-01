@@ -410,7 +410,7 @@ def _with_source(node: Fold, source) -> Fold:
     bound = tuple(name for edge in operands for name in _operand_result_names(edge))
     if node.axis is None:
         return Fold.projection(operands=operands, body=node.body, results=node.lift.results)
-    return replace(node, operands=operands, lift=replace(node.lift, params=(node.axis.name, *bound)))
+    return replace(node, operands=operands, lift=replace(node.lift.fn, params=(node.axis.name, *bound)))
 
 
 def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
@@ -587,7 +587,7 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
         outside.update(root.observe.free_names())
     if moved_defs & outside:
         return root  # the chain does not die into the closed edges — moving it would duplicate work
-    return replace(root, operands=rewritten_operands, lift=replace(root.lift, body=kept))
+    return replace(root, operands=rewritten_operands, lift=replace(root.lift.fn, body=kept))
 
 
 def _flat_members(edge) -> tuple | None:

@@ -515,7 +515,7 @@ def _replace_fold(node: Fold, targets: dict[int, tuple]) -> Fold:
     body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets))
     if _unchanged(operands, node.operands) and _unchanged(body, node.lift.body):
         return node
-    return replace(node, operands=operands, lift=replace(node.lift, body=Body(body)))
+    return replace(node, operands=operands, lift=replace(node.lift.fn, body=Body(body)))
 
 
 def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:

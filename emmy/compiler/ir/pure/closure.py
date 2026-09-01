@@ -138,6 +138,25 @@ class Closure:
                 f"operand edges bound positionally to lift params; only the axes {list(self.axes)} may be free."
             )
 
+    # ---- the wrapped lambda's own interface, forwarded. A Closure IS the scoped lambda, so a
+    # consumer that only needs the binder reads it here rather than reaching through ``fn``. ----
+    @property
+    def params(self) -> tuple[str, ...]:
+        return self.fn.params
+
+    @property
+    def body(self) -> Body:
+        return self.fn.body
+
+    @property
+    def results(self) -> tuple:
+        return self.fn.results
+
+    def free_names(self) -> frozenset[str]:
+        """Empty for every Closure — the formation gate refuses an open lambda. Kept so a
+        ``Lambda`` and a ``Closure`` answer the same question the same way."""
+        return self.fn.free_names()
+
     @classmethod
     def over_edge(cls, operand, axes: Iterable[str]) -> Closure:
         """Wrap one operand edge as a closure over the axes it references, kept in ``axes`` order.

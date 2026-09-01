@@ -24,6 +24,7 @@ from __future__ import annotations
 import heapq
 from dataclasses import dataclass, field, replace
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
@@ -34,6 +35,9 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
 from emmy.compiler.ir.stmt.base import _axis_identity
+
+if TYPE_CHECKING:  # ``closure`` imports this module, so the type is a forward reference only
+    from emmy.compiler.ir.pure.closure import Closure
 
 
 def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
@@ -348,7 +352,7 @@ class Fold:
     # TRUE monoid's flat ``(init, combine)`` pair whose combine carries the REAL accumulator
     # names (its results). The serial step, the ``Accum`` forms and the ``carrier`` annotation
     # are DERIVED (:func:`_fold_derived_step` / ``__post_init__``). ------------------------------ #
-    lift: Lambda = field(kw_only=True)
+    lift: Closure = field(kw_only=True)  # coerced from a bare ``Lambda`` at formation (:meth:`_bind_environment`)
     init: tuple = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
     combine: Lambda | None = field(kw_only=True, default=None)  # S × S → S — THE ⊕; None at zero axes
     # The per-step OBSERVER — the scan spelling: a pure λ(k, s₁…sₙ) over the carried state,
@@ -429,10 +433,17 @@ class Fold:
 
         Trailing, never interleaved: the operand correspondence is the param PREFIX, so appending
         leaves every positional read of it intact."""
-        residual = self.lift.free_names()
-        if not residual:
-            return
-        object.__setattr__(self, "lift", replace(self.lift, params=(*self.lift.params, *sorted(residual))))
+        from emmy.compiler.ir.pure.closure import Closure  # noqa: PLC0415 — closure imports fold
+
+        fn = self.lift.fn if isinstance(self.lift, Closure) else self.lift
+        residual = fn.free_names()
+        if residual:
+            fn = replace(fn, params=(*fn.params, *sorted(residual)))
+        # The FIELD is a Closure, whose formation gate refuses an open lambda — the invariant is
+        # carried by the type rather than restated at each construction site. The binding above is
+        # the migration seam: while captures remain it makes the gate satisfiable, and deleting it
+        # is what turns the invariant from established into ENFORCED.
+        object.__setattr__(self, "lift", Closure(fn, ()))
 
     @property
     def environment(self) -> tuple[str, ...]:

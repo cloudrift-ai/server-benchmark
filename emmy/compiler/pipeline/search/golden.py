@@ -14,7 +14,7 @@ import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property
 from numbers import Real
@@ -788,9 +788,11 @@ def _lifted_target(record: GoldenRecord):
     node = nodes[0]
     node.op = node.op.with_io(lowered, node)
     tile = lift_loop_op(node.op, name=node.id)
-    # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
-    # half of the identity (the deploy identity (``identity_key(with_io=True)``)) reads the same output fingerprint.
-    return replace(tile, outputs={node.output.name: node.output})
+    # A fork's root op is always matcher-refreshed (``_match_at`` runs ``with_io`` on every matched
+    # node before the rule that offers the fork), so the record side mirrors the io through that
+    # same call rather than a hand-rolled map: a multi-output kernel — an NVFP4 re-encode emits
+    # packed codes beside their block scales — is bound to every one of the node's output buffers.
+    return tile.with_io(lowered, node)
 
 
 def decode_record(record: GoldenRecord) -> str | None:

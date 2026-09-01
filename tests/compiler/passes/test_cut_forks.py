@@ -20,6 +20,7 @@ from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
@@ -30,6 +31,7 @@ from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
     _candidate_rows,
     _lifted_target,
+    _target_kernel_nodes,
     decode_record,
     kernel_identity,
     load_golden_file,
@@ -548,6 +550,37 @@ def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target
     identity, rows = next((identity, rows) for identity, rows in _candidate_rows(parent).items() if identity is not None)
     receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=identity, **fields)
     assert decode_record(receipt) is None
+
+
+def test_multi_output_kernel_record_joins_its_live_fork_by_derived_identity() -> None:
+    """A record whose one target kernel writes SEVERAL output buffers must derive the identity its
+    live fork carries. The derivation lifts the persisted kernel; the fork root op is whatever the
+    matcher's ``with_io`` produced, and that map holds every output slot — so a derivation that kept
+    only slot 0 keyed such a record off a fingerprint no fork can produce and the verified tier
+    joined nothing."""
+    graph = Graph()
+    _input(graph, "x", (8,))
+    graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("hot", (8,), "f16"), node_id="hot")
+    graph.add_node(ElementwiseOp("negative"), ["hot"], Tensor("cold", (8,), "f16"), node_id="cold")
+    graph.inputs, graph.outputs = ["x"], ["hot", "cold"]
+    loop = Pipeline.build(LOOP_PASSES).run(graph.copy(), ctx=_CTX)
+    record = GoldenRecord(
+        knobs={},
+        **{
+            **_receipt_fields(),
+            "name": "fused.multi_output",
+            "pins": (),
+            "program_wire": graph_to_wire(graph),
+            "origins": (),
+            "loop_index": 0,
+            "loop_wire": loop_graph_to_wire(loop),
+        },
+    )
+    _lowered, nodes = _target_kernel_nodes(record)
+    assert len(nodes) == 1 and len(nodes[0].outputs) == 2, "the fused target must be ONE kernel writing two buffers"
+
+    assert kernel_identity(record) in _candidate_rows(record), "the derived identity names no kernel the live resolve offers"
+    assert decode_record(record) is None
 
 
 def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:

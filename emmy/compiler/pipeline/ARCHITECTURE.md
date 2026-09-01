@@ -517,7 +517,10 @@ prior, never a preference written into a pass or into this policy.
    canonicalization, so term re-spellings and compute-unit cluster siblings that lower alike share it), folded
    with the io dtype/shape fingerprint (hint-free — a symbolic record is the symbolic kernel's identity at every
    hint),
-   derived record-side through the shared total lift (`_fromloop.lift_loop_op`) — equals the
+   derived record-side through the shared total lift (`_fromloop.lift_loop_op`) over the persisted kernel and the
+   same `Op.with_io` refresh the matcher applies before any rule runs — so the io half spans every output buffer the
+   kernel writes, not just the primary slot, and a multi-output kernel (an NVFP4 re-encode emits packed codes beside
+   their block scales) keys the same way on both sides — equals the
    fork's, and whose spelled row (`knob.schedule_row_key`, the recording canonicalizer restricted to the schedule
    families) equals EXACTLY one enumerated leaf. Fastest matching record first; a record that matches the identity
    but equals no leaf is DRIFT — a loud warning and nothing else (fail-closed). A row containing `PLACE` is an exact

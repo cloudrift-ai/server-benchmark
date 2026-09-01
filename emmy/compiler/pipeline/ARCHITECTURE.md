@@ -1500,11 +1500,11 @@ complete tree, including maximal pure operand-cone factoring for semiring contra
 orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. Pure projection regions remain
 in the term, while their writes live as `OutputSpec`s at the `TileOp` boundary.
 
-`020_twisted` rewrites the exp-family composition over that canonical tree. `030_cut` offers the maximal tree and
-every semantically closed stored child-Fold seam through `PLACE`; a selected cut writes the complete child state to
-workspaces and returns fresh unmapped producer and consumer TileOps. `035_split_reduce` offers the unsplit tree
-beside every cross-CTA reduce split the head fold admits; a selected split slices the same Fold and folds partial
-state tuples with its stored combine, its pieces fresh unmapped TileOps too. `040_schedule` then enumerates
+`020_twisted` rewrites the exp-family composition over that canonical tree. The one cut phase has two ordered slices:
+`030_cut` offers the maximal tree and every semantically closed stored child-Fold seam through `PLACE`, then
+`035_split_reduce` offers the unsplit tree beside every cross-CTA reduce split the head fold admits. A selected cut
+writes the complete child state to workspaces; a selected split slices the same Fold and folds partial state tuples
+with its stored combine. Both return fresh unmapped TileOps. `040_schedule` then enumerates
 schedules over each stored Fold tree only. Independent roots stay fused and combine only schedules with matching
 physical output-axis tile widths and unit counts.
 
@@ -1704,7 +1704,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/fusion/`            | `merge_loop_ops` maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect, after maximal fusion. |
-| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` offers fused and closed Fold-edge kernel placements; `035_split_reduce` offers and realizes cross-CTA reduce splits; `040_schedule` schedules each stored tree. |
+| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` offers stored-edge cuts; `035_split_reduce` offers cross-CTA reduce splits; `040_schedule` schedules each stored tree. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 

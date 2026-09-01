@@ -227,30 +227,32 @@ while retaining exact values throughout the ordinary extent range.
 ## TileOp and scheduling
 
 `TileOp` owns facts deliberately excluded from the Fold tree: placement, an accepted `Schedule`, its separate
-`ScheduleMaterialization`, knobs, and output specifications. The semantic assignment contains choices only;
+classic materialization, knobs, and output specifications. The semantic assignment contains choices only;
 site-indexed placed tile geometry and resolved transport sizes are lowering facts and cannot enter a row identity.
 `ops.Sched` is a read-only lowering view over those typed fields. There is no keyed slice map, per-node schedule
 field, compatibility adapter, alias codec, or dual reader.
 
-A scheduled `TileOp` must carry both base-interface fields, and the materialization validates itself against the
-schedule. A classic materialization contains exactly the contraction sites whose accepted tiles require placed
-geometry and exactly the edges whose accepted transport is non-direct. Every placed tile must equal the geometry
-derived from the structural placement and its axis-free choice; every resolved stage must retain its edge's choice.
-Construction rejects missing, extra, mismatched, or partly attached facts.
+A scheduled `TileOp` must carry both its schedule and materialization, and the materialization validates itself
+against the schedule. A classic materialization contains exactly the contraction sites whose accepted tiles require
+placed geometry and exactly the edges whose accepted transport is non-direct. Every placed tile must equal the
+geometry derived from the structural placement and its axis-free choice; every resolved stage must retain its edge's
+choice. Construction rejects missing, extra, mismatched, or partly attached facts.
 
 `ir/schedule/classic.py` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
 
-- `ClassicProblem` contains the unscheduled Fold root and target. `SiteIndex` assigns one stable integer id per Fold
-  identity and one distinct `(consumer id, operand position)` tuple per edge, including multiple uses of one producer.
+- `ClassicProblem` contains the unscheduled Fold root and target. `ClassicScheduleContext` assigns one stable integer
+  id per Fold identity and one distinct `(consumer id, operand position)` tuple per edge, including multiple uses of
+  one producer.
 - Reusable schedule views classify one Fold without target input. A contraction records consumer-relative operand
   positions; it does not mint alternate nodes or edge identities. `TileOp` caches both stable inventories.
 - `KernelSchedule`, `ProjectionSchedule` / `ReductionSchedule`, and `EdgeSchedule` contain choices only. They do not
   cache paths, classifications, shapes, placed geometry, resolved shared-memory sizes, or codec spellings.
-- `ClassicScheduleContext.accepts` checks complete coverage, classification arms, worker inventory, target thread
-  limits, producer-band/TMA agreement, raster eligibility, target availability, and node/edge transport agreement
-  without mutating the problem or assignment.
-- The production walk keeps its catalogs and partial-assignment pruning private. Every leaf is decoded into one typed
-  schedule and accepted by the context before search can observe it; an encoded dictionary is never a semantic leaf.
+- `ClassicScheduleContext` derives local support after selecting a node and its incident edges. `extend` composes it
+  through worker inventory, physical-axis and fragment agreements, then composes the kernel factor through target
+  limits, raster eligibility, and restriction. It returns a new immutable context or raises `ScheduleRefused`; a
+  terminal context contains the generic typed `Schedule`.
+- The production walk keeps its catalogs private. Every leaf is accepted by the context before search can observe it;
+  an encoded dictionary is never a semantic leaf.
 - Kernel, node, and edge domains are projected independently. Enumeration is the compatible subset of their Cartesian
   product, so changing traversal order may change work but can never change membership.
 - `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`. A node family is bare
@@ -258,15 +260,12 @@ Construction rejects missing, extra, mismatched, or partly attached facts.
   follows the same rule. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
   and semantically refused assignments.
 
-The lowering implementation is currently being rebuilt in `lowering/tile/_classic`. Until it satisfies these
-invariants, that boundary raises `ClassicScheduleUnavailable` and the exact strict test registry records every affected
-acceptance obligation.
-
 Structural choices are deliberately outside this algebra. A cut or split changes the kernel set first; every fresh
 kernel then constructs a fresh problem and fresh sites. Search ranks encoded accepted leaves and materialization
 consumes the typed assignment, so neither layer defines schedule membership.
 
-`lowering/tile/030_cut` offers kernel placement before scheduling. `PLACE` uses the same tree-path codec to address a
+`lowering/tile/030_cut` offers kernel placement and `035_split_reduce` offers cross-CTA reduction splits before
+scheduling. `PLACE` uses the same tree-path codec to address a
 stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
 writes the child Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with
 ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned and bare cuts re-enter

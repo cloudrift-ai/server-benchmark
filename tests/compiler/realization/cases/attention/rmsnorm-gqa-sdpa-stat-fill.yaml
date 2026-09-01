@@ -55,20 +55,6 @@ configs:
       WORK: w1x1
       RASTER: ''
       TILE: mma_m16n8k16_f16_f32/f1x1
-      TILE@a.fold.a4: mma_m16n8k16_f16_f32/f1x1
-      TILE@a8: ''
-      REDUCE@map.fold.a21: ''
-      REDUCE@a7: ''
-      REDUCE@a.fold.a3: ''
-      REDUCE@map.fold.a.map.fold.fold.a41: ''
-      REDUCE@a.b.fold.a4: ''
-      REDUCE@map.fold.a.fold.a81: ''
-      REDUCE@a.map.fold.a8: ''
-      STAGE@map.fold.a21: ''
-      STAGE@a7: d1/smem
-      STAGE@a.fold.a3: ''
-      STAGE@map.fold.a.map.fold.fold.a41: d1/smem
-      STAGE@a.b.fold.a4: ''
-      STAGE@map.fold.a.fold.a81: ''
-      STAGE@a.map.fold.a8: ''
+      REDUCE: ''
+      STAGE: d1/smem
     identity: 65bf7fb58c06bce21e81f9adf1841e495e47f0b6713b1e6b86d011e51e7f2483

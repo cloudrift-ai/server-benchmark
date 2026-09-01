@@ -436,15 +436,13 @@ def _serialize_op_fields(op: Op) -> dict:
         return fields
     from emmy.compiler.ir.schedule.classic import (  # noqa: PLC0415
         ClassicProblem,
-        ClassicSchedule,
         ClassicScheduleCodec,
+        ClassicScheduleContext,
         edge_site_spelling,
         node_id_spelling,
     )
 
-    if not isinstance(op.schedule, ClassicSchedule):
-        raise TypeError(f"no wire codec registered for {type(op.schedule).__name__}")
-    codec = ClassicScheduleCodec(ClassicProblem(op.op, target=None))
+    codec = ClassicScheduleCodec(ClassicScheduleContext(ClassicProblem(op.op, target=None)))
     fields["schedule"] = codec.encode(op.schedule)
     if op.materialization is not None:
         fields["materialization"] = {
@@ -479,11 +477,13 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
         ClassicMaterialization,
         ClassicProblem,
         ClassicScheduleCodec,
+        ClassicScheduleContext,
         parse_edge_site,
         parse_node_id,
     )
 
-    codec = ClassicScheduleCodec(ClassicProblem(fields["op"], target=None))
+    context = ClassicScheduleContext(ClassicProblem(fields["op"], target=None))
+    codec = ClassicScheduleCodec(context)
     schedule = codec.decode(_wire_mapping(schedule_row, "classic schedule"))
     fields["schedule"] = schedule
     materialization = _exact_wire_mapping(materialization_row, {"tiles", "stages"}, "classic materialization")

@@ -223,12 +223,11 @@ def test_tile_op_scalar_atom_schedule_roundtrip():
 
     from emmy.compiler.ir.atom import ScalarAtom
     from emmy.compiler.ir.pure import Fold
-    from emmy.compiler.ir.schedule import Raster, Work
+    from emmy.compiler.ir.schedule import Raster, Schedule, Work
     from emmy.compiler.ir.schedule import Tile as ScheduleTile
     from emmy.compiler.ir.schedule.classic import (
         ClassicMaterialization,
         ClassicProblem,
-        ClassicSchedule,
         ClassicScheduleContext,
         KernelSchedule,
         ProjectionSchedule,
@@ -237,9 +236,9 @@ def test_tile_op_scalar_atom_schedule_roundtrip():
 
     fold = Fold.projection(results=(0.0,))
     context = ClassicScheduleContext(ClassicProblem(fold, target=None))
-    classic = ClassicSchedule(
+    classic = Schedule(
         KernelSchedule(Work(), Raster()),
-        {context.index.nodes[0]: ProjectionSchedule(ScheduleTile())},
+        {context.node_sites[0]: ProjectionSchedule(ScheduleTile())},
         {},
     )
     g = Graph()
@@ -255,7 +254,7 @@ def test_tile_op_scalar_atom_schedule_roundtrip():
     loaded = Graph.from_dict(json.loads(json.dumps(g.to_dict(), default=str)))
     loaded_tile = loaded.nodes["out"].op
     loaded_context = ClassicScheduleContext(ClassicProblem(loaded_tile.op, target=None))
-    plan = loaded_tile.schedule.nodes[loaded_context.index.nodes[0]].tile
+    plan = loaded_tile.schedule.nodes[loaded_context.node_sites[0]].tile
     assert isinstance(plan, ScheduleTile)
     assert isinstance(plan.atom, ScalarAtom)
 

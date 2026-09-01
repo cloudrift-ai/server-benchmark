@@ -6,13 +6,10 @@ scheduling fork — the second half of the Loop-IR → Tile-IR boundary.
 THIS rule picks that up and decides the schedule — the free-axis → grid mapping plus the per-node
 ``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families through ``_classic``.
 
-Direct projection, plain-reduction, scalar-contraction, precision-gated tensor-core,
-materialized-operand copy staging, smem compute-fill staging, and kernel-global raster schedules are
-live while the remaining classic domains are being reconstructed behind an explicit unavailable
-boundary. The fixed candidate-space contract is Algorithm 1(c, p, t): the schedule restriction
-``c`` is one immutable context evaluated only on complete assignments from the independently
-projected kernel, node, and edge domains. A traversal may prune ``p``/``t`` incompatibility, but it
-never unpacks ``c`` and cannot make traversal order semantic.
+The fixed candidate-space contract is Algorithm 1(c, p, t): the schedule restriction, problem, and target form one
+immutable context over independently projected kernel, node, and edge domains. The generic traversal never unpacks
+that context. Its composition may reject a prefix only when the combined state proves there is no completion, and
+traversal order cannot change membership.
 
 Splitting the two halves is what makes the fork ONE thing: a kernel reaches scheduling by
 several routes — the ordinary lift and a cross-CTA split's partial and finalize — and all converge here. The engine restarts its
@@ -21,14 +18,13 @@ matched here on the next sweep, and so is every unmapped ``TileOp`` a structural
 That is exactly why none of them needs a special case: each arrives as a kernel with no schedule,
 like any other, and this rule cannot tell them apart.
 
-Once reconstruction reaches this rule, empty enumeration remains a skip rather than a guessed
-schedule. During reconstruction, ``ClassicScheduleUnavailable`` is intentionally loud and is the
-only failure accepted by the exact test registry.
+Empty enumeration remains a skip rather than a guessed schedule.
 """
 
 from __future__ import annotations
 
 from emmy.compiler.graph import Node
+from emmy.compiler.ir.schedule import schedule
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
@@ -38,8 +34,9 @@ from emmy.compiler.pipeline.fork import Fork
 # pass. Pin reads / knob-key spelling ride the enumerator's helpers instead; the family NAMES below
 # are plain strings and a function, which that scan does not see.
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-from emmy.compiler.pipeline.passes.lowering.tile._classic import schedule
+from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+from emmy.compiler.pipeline.passes.lowering.tile._split import split_pending
 
 PATTERN = [Pattern("root", TileOp)]
 
@@ -61,9 +58,9 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     # A structural apply can mint a fresh kernel after ``030_cut`` has run in the current sweep.
     # Do not probe the schedule space and defer only after a refusal: the cut domain is the outer
     # enumeration, so every remaining cut must be explored before this inner enumeration starts.
-    if not tile.placement_decided and cuttable_seams(tile):
-        raise RuleSkipped("cut enumeration precedes classic schedule enumeration")
-    options = schedule(tile, tile.name, tile.knobs, ctx)
+    if (not tile.placement_decided and cuttable_seams(tile)) or split_pending(tile):
+        raise RuleSkipped("cut enumeration precedes schedule enumeration")
+    options = classic_forks(tile, tile.name, tile.knobs, ctx, advance=schedule)
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

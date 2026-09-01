@@ -12,7 +12,7 @@ term (``ir/pure/fold.py``), which a ``TileOp`` holds whole in ``op``. What this 
 everything the term deliberately does not carry:
 
 - the free-axis → grid :class:`~.schedule.Placement` (``place``), an accepted site-indexed
-  :class:`Schedule`, and its separate :class:`ScheduleMaterialization`;
+  :class:`Schedule`, and its separate materialization;
 - the kernel's EFFECTS — the :class:`OutputSpec` decorations and the ``apply_output_specs`` /
   ``extract_output_specs`` pair that reconstitutes the effectful stmt stream from them.
 
@@ -41,7 +41,7 @@ from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
-from emmy.compiler.ir.schedule.base import Schedule, ScheduleMaterialization
+from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId, schedule_edges, schedule_nodes
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
@@ -49,7 +49,6 @@ from emmy.compiler.ir.stmt.base import _axis_identity
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.path import sites
-from emmy.compiler.structural import instance_memo
 
 
 @dataclass(frozen=True)
@@ -432,7 +431,7 @@ class TileOp(Op):
     # The accepted semantic assignment and its derived lowering facts. Unscheduled Tile IR carries
     # neither; scheduling installs both together.
     schedule: Schedule | None = field(default=None, compare=False, repr=False)
-    materialization: ScheduleMaterialization | None = field(default=None, compare=False, repr=False)
+    materialization: object | None = field(default=None, compare=False, repr=False)
     # The kernel's output specifications: every explicit ``Write`` (and the legacy rms/softmax
     # output-sweep spelling) as a kernel-boundary fact beside ``place``. Empty for a
     # bare reduction / contraction — its grid-cell store
@@ -523,31 +522,25 @@ class TileOp(Op):
         if self.schedule is None and self.materialization is None:
             return
         if self.schedule is None or self.materialization is None:
-            raise ValueError("a scheduled TileOp requires both a Schedule and ScheduleMaterialization")
-        self.materialization.validate(self.schedule, self.op, place=self.place, workers=self.workers)
+            raise ValueError("a scheduled TileOp requires both a schedule and materialization")
+        validate = getattr(self.materialization, "validate", None)
+        if not callable(validate):
+            raise TypeError("schedule materialization must provide validate(schedule, root, place=..., workers=...)")
+        validate(self.schedule, self.op, place=self.place, workers=self.workers)
 
-    @property
+    @cached_property
     def nodes(self) -> tuple[Fold, ...]:
         """The term's Fold nodes in stable schedule order."""
-        memo = instance_memo(self, "_memo_schedule")
-        if "nodes" not in memo:
-            memo["nodes"] = schedule_nodes(self.op) if isinstance(self.op, Fold) else ()
-        return memo["nodes"]
+        return schedule_nodes(self.op) if isinstance(self.op, Fold) else ()
 
-    @property
+    @cached_property
     def node_edges(self) -> tuple[EdgeSite, ...]:
         """Every consumer operand position in stable schedule order."""
-        memo = instance_memo(self, "_memo_schedule")
-        if "edges" not in memo:
-            memo["edges"] = schedule_edges(self.nodes)
-        return memo["edges"]
+        return schedule_edges(self.nodes)
 
-    @property
+    @cached_property
     def _node_ids(self) -> dict[int, NodeId]:
-        memo = instance_memo(self, "_memo_schedule")
-        if "node_ids" not in memo:
-            memo["node_ids"] = {id(node): node_id for node_id, node in enumerate(self.nodes)}
-        return memo["node_ids"]
+        return {id(node): node_id for node_id, node in enumerate(self.nodes)}
 
     def node_id(self, node: Fold) -> NodeId:
         """Return ``node``'s schedule identity by object identity."""

@@ -1,54 +1,102 @@
-"""Interfaces shared by schedule implementations."""
+"""Generic schedule assignments and compatible enumeration.
+
+The interface deliberately exposes no domain catalog, site order, restriction object, or schedule
+family. A context chooses the smallest useful frontier, and :func:`schedule` lazily composes that
+frontier. For example, the classic context groups one node with its incident edges so it can reject
+mixed transport and fragment-seam combinations before they create subtrees; the cut context uses
+the kernel field for one structural choice because it has no node or edge assignment.
+
+Three invariants make those different granularities one enumeration:
+
+* ``assignment`` is immutable; ``kernel is None`` means the prefix is incomplete.
+* ``extensions`` yields a lazy, context-aware frontier. It may omit picks already proved
+  incompatible, but must retain a route to every accepted complete assignment.
+* ``extend`` is the authority. It accepts a frontier pick or a complete assignment supplied by a
+  caller, returns a new context, and raises :class:`ScheduleRefused` without mutating the prefix.
+
+The generic driver knows only those operations. Repeatedly calling it on the returned contexts is
+the lazy enumeration; no schedule-family visitor or product materialization exists beside it.
+"""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from typing import Self
 
+from frozendict import frozendict
 
-class Schedule(ABC):
-    """An immutable hardware-execution plan.
+from .views import EdgeSite, NodeId
 
-    Implementations expose replacement rather than in-place mutation so a schedule can remain a
-    stable value while it is enumerated, validated, serialized, and measured.
+
+@dataclass(frozen=True)
+class Schedule[KernelT, NodeT, EdgeT]:
+    """One immutable kernel × node × edge assignment, possibly still incomplete."""
+
+    kernel: KernelT | None
+    nodes: Mapping[NodeId, NodeT]
+    edges: Mapping[EdgeSite, EdgeT]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.nodes, Mapping) or not isinstance(self.edges, Mapping):
+            raise TypeError("schedule node and edge assignments must be mappings")
+        if any(type(site) is not int or site < 0 for site in self.nodes):
+            raise TypeError("schedule node assignments must use non-negative integer sites")
+        if any(
+            not isinstance(edge, tuple)
+            or len(edge) != 2
+            or type(edge[0]) is not int
+            or edge[0] < 0
+            or type(edge[1]) is not int
+            or edge[1] < 0
+            for edge in self.edges
+        ):
+            raise TypeError("schedule edge assignments must use (consumer, operand) sites")
+        object.__setattr__(self, "nodes", frozendict(self.nodes))
+        object.__setattr__(self, "edges", frozendict(self.edges))
+
+
+class ScheduleRefused(ValueError):
+    """A pick cannot compose with the immutable schedule context."""
+
+
+class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
+    """One immutable prefix of a compatible enumeration.
+
+    Implementations own frontier granularity, compatibility, restrictions, and validation. They
+    may therefore emit one site at a time, a node together with related edges, or one complete
+    schedule when the restriction already identifies it.
     """
 
+    @property
     @abstractmethod
-    def replace(self, **changes: object) -> Self:
-        """Return a new schedule with ``changes`` applied."""
-
-
-class ScheduleMaterialization(ABC):
-    """Facts derived from an accepted schedule for lowering."""
+    def assignment(self) -> Schedule[KernelT, NodeT, EdgeT]:
+        """The kernel × node × edge assignment decided so far."""
 
     @abstractmethod
-    def validate(self, schedule: Schedule, root: object, *, place: object, workers: object) -> None:
-        """Raise when these facts do not derive from ``schedule`` for ``root``."""
-
-
-class ScheduleContext[ScheduleT: Schedule, AcceptanceT](ABC):
-    """Problem and target facts that decide schedule compatibility."""
+    def extensions(self) -> Iterator[Schedule[KernelT, NodeT, EdgeT]]:
+        """Yield the next lazy frontier without losing any accepted completion."""
 
     @abstractmethod
-    def accepts(self, schedule: ScheduleT) -> AcceptanceT:
-        """Return the compatibility verdict for one complete schedule."""
+    def extend(self, pick: Schedule[KernelT, NodeT, EdgeT]) -> Self:
+        """Compose a partial or complete pick, or raise when it is incompatible."""
 
 
-class ScheduleCodec[ScheduleT: Schedule](ABC):
-    """Strict canonical wire boundary for one schedule type."""
+def schedule[KernelT, NodeT, EdgeT](
+    context: ScheduleContext[KernelT, NodeT, EdgeT],
+) -> Iterator[ScheduleContext[KernelT, NodeT, EdgeT] | Schedule[KernelT, NodeT, EdgeT]]:
+    """Lazily yield the next compatible contexts or complete assignments.
 
-    @abstractmethod
-    def encode(self, schedule: ScheduleT) -> dict[str, str]:
-        """Encode one accepted schedule in canonical key order."""
-
-    @abstractmethod
-    def decode(self, row: Mapping[str, str]) -> ScheduleT:
-        """Decode and validate one complete canonical row."""
-
-    @abstractmethod
-    def keys(self) -> tuple[str, ...]:
-        """Return the accepted keys in canonical encoding order."""
+    Each yielded context is fed back to this same function by the consumer's lazy tree. A complete
+    assignment is yielded directly. The driver never inspects a pick or a concrete context.
+    """
+    for pick in context.extensions():
+        try:
+            child = context.extend(pick)
+        except ScheduleRefused:
+            continue
+        yield child.assignment if child.assignment.kernel is not None else child
 
 
-__all__ = ["Schedule", "ScheduleCodec", "ScheduleContext", "ScheduleMaterialization"]
+__all__ = ["Schedule", "ScheduleContext", "ScheduleRefused", "schedule"]

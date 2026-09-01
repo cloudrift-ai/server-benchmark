@@ -112,16 +112,15 @@ numpy backends in three places:
 
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
-sites through the CUDA pipeline. During the clean-slate classic-scheduler reconstruction, the exact strict registry
-holds the unreconstructed acceptance obligations at `ClassicScheduleUnavailable`. The direct projection boundary is
-live and exhaustively compares its production rows with the literal compatible subset of the independent Cartesian
-product before checking materialization. The plain-reduction boundary also compares the production set with that
-literal reference: its independent product contains mismatched node and kernel worker choices that only the
-compatibility relation may reject. `test_schedule_walk.py` pins the target enumeration contracts — independent node
-and edge domains, traversal-order-invariant compatible membership, computed and derived folds keyed as schedule sites,
-and exact pins — without flattening a live space into test memory. The scalar-contraction boundary likewise compares
-production with the literal reference, proves the independent product is larger than the accepted set, and checks that
-a selected output tile alone produces placed materialization geometry.
+sites through the CUDA pipeline. The direct projection boundary exhaustively compares its production rows with the
+literal compatible subset of the independent Cartesian product before checking materialization. The plain-reduction
+boundary also compares the production set with that literal reference: its independent product contains mismatched
+node and kernel worker choices that only the compatibility relation may reject. `test_schedule_walk.py` pins the
+target enumeration contracts — independent node and edge domains, traversal-order-invariant compatible membership,
+computed and derived folds keyed as schedule sites, and exact pins — without flattening a live space into test memory.
+The scalar-contraction boundary likewise compares production with the literal reference, proves the independent
+product is larger than the accepted set, and checks that a selected output tile alone produces placed materialization
+geometry.
 The gmem-direct tensor-core boundary repeats that proof over a typed f16 contraction and asserts that the independent
 kernel domain contains both warp inventories and raster choices. It also proves that compatibility rejects grouped
 rasterization beside every untiled node choice.
@@ -133,14 +132,15 @@ warp node that needs the fill accepts only equal smem edges, while scalar suppor
 independent public factor.
 The schedule-restriction boundary proves that exact `WORK` and addressed `TILE` parameters leave every independent
 factor unchanged, then compares production with Algorithm 1(c, p, t) under the same immutable `c`. The production
-visitor carries that context intact and evaluates it only on complete assignments. The test deliberately bounds the
-factor catalogs so the literal oracle remains fast. A complete `c` also proves its singleton without changing a
-factor, while an opaque predicate exposes no proof and is observed only at complete assignments. Composed GPU cases
-cover nested and sibling fragment agreements; no composed-only enumerator or post-product membership rule exists.
+driver carries that context intact. The context may prune a prefix when the restriction and compatibility state prove
+that it has no accepted completion; an opaque predicate exposes no such proof and is observed only at complete
+assignments. The test deliberately bounds the factor catalogs so the literal oracle remains fast. A complete `c` also
+proves its singleton without changing a factor. Composed GPU cases cover nested and sibling fragment agreements; no
+composed-only enumerator or post-product membership rule exists.
 The structural-split boundary proves that the outer pass consumes a pinned GRID stage before constructing `c` for a
 fresh piece. The piece's schedule restriction therefore compares only the remaining schedule stages. Sampled walks
-and composed cross-CTA split pieces remain exact `ClassicScheduleUnavailable` obligations and fail before entering an
-unsupported long enumeration; the duration baseline records their bounded test cost.
+and composed cross-CTA split pieces exercise the same enumeration, and the duration baseline records their bounded
+test cost.
 The producer-band boundary projects uniform, `+p1`, and `+p2` kernel choices before reading parameters, proves an exact
 `WORK` parameter leaves that domain unchanged, and checks that only compatible TMA edge assignments survive.
 The shared-constant cone fixture also pins a multi-channel contraction to the scalar tier: every channel remains in one

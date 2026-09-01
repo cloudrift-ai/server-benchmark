@@ -24,7 +24,6 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE: ''
       REDUCE: coop
       WORK: t64
     identity: d97cc7121a67069993cd1c13d310561508dccd564f1c9e85b01ef348870a54d0

@@ -31,7 +31,7 @@ from emmy.compiler.ir.tile.ops import axis_names, sched_of
 # a reader goes for a body.
 #
 # Schedule choices are not on the term at all. The owning ``TileOp`` supplies one complete
-# ``ClassicSchedule`` whose node choices annotate their canonical sites.
+# generic ``Schedule`` whose node choices annotate their canonical sites.
 # --------------------------------------------------------------------------- #
 
 _TEE, _ELBOW, _PIPE, _GAP = "├─ ", "└─ ", "│  ", "   "

@@ -42,11 +42,20 @@ from tests.compiler.helpers import direct_classic_leaf, requires_cuda
 
 _CTX = Context.from_target((12, 0))
 _CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
+_SPLIT = import_module("emmy.compiler.pipeline.passes.lowering.tile.035_split_reduce")
 _SCHEDULE = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule")
 
 
 def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
     graph.add_node(InputOp(), [], Tensor(name, shape, dtype), node_id=name)
+
+
+def test_cut_and_assignment_passes_share_the_generic_schedule_driver() -> None:
+    from emmy.compiler.ir.schedule import schedule
+
+    assert _CUT.schedule is schedule
+    assert _SPLIT.schedule is schedule
+    assert _SCHEDULE.schedule is schedule
 
 
 def _computed_operand_graph(side: str) -> Graph:
@@ -349,14 +358,11 @@ def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
         _CUT.rewrite(match, node)
 
 
-def test_bare_place_cut_is_consumed_once_by_both_pieces() -> None:
+def test_bare_place_cut_consumes_its_rootmost_decision() -> None:
     fragment = _nested_attention_cut({"PLACE": "cut"})
-    node = _piece_with_seam(fragment)
-    match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
 
-    assert node.op.placement_decided
-    with pinned_knobs({"PLACE": "cut"}), pytest.raises(RuleSkipped, match="already placed"):
-        _CUT.rewrite(match, node)
+    assert pieces and all(node.op.placement_decided for node in pieces)
 
 
 def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
@@ -390,7 +396,7 @@ def test_cut_enumeration_finishes_before_schedule_enumeration(monkeypatch) -> No
         _SCHEDULE.rewrite(match, node, _CTX)
     assert not called
 
-    decided = replace(tile, placement_decided=True)
+    decided = replace(tile, placement_decided=True, split_consumed=True)
     node.op = decided
     with pytest.raises(RuleSkipped, match="no enumerable schedule"):
         _SCHEDULE.rewrite(match, node, _CTX)

@@ -269,9 +269,10 @@ def _computed_a_term() -> TileOp:
 def _rows_of(tile, ctx=None) -> list[dict]:
     """Every row ``tile`` enumerates — the leaves of the walk's own fork (a fully forced walk is
     still a one-leaf fork, so the engine records its row as a decision)."""
-    from emmy.compiler.pipeline.passes.lowering.tile._classic import schedule
+    from emmy.compiler.ir.schedule import schedule
+    from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
 
-    out = schedule(tile, "k", {}, ctx or Context.from_target((12, 0)))
+    out = classic_forks(tile, "k", {}, ctx or Context.from_target((12, 0)), advance=schedule)
     return [dict(leaf.knobs) for leaf in iter_leaves(out)]
 
 

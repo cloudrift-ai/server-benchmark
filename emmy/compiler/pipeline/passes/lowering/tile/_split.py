@@ -2,7 +2,7 @@
 
 The split changes the kernel SET, exactly like a ``PLACE`` cut: a kernel that splits does not run,
 so its cost is the Σ over the pieces it produces (``policy/greedy._resolved_price``), which is why
-the split is a fork BESIDE ``030_cut`` and not a schedule row. It runs BEFORE scheduling — the
+the split is the ``035_split_reduce`` fork and not a schedule row. It runs BEFORE scheduling — the
 rewrite consumes only the stored :class:`Fold` algebra, never a schedule decision — and each piece
 is a fresh unmapped :class:`TileOp` that re-enters the pass scan and decides its own row at
 ``040_schedule`` like any newly lifted tree.
@@ -178,7 +178,20 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
 # ---- the offer: the unsplit tree beside every split the head fold admits ---------------------- #
 
 
-def split_forks(match: Match, root: Node) -> list[Fork] | None:
+def split_pending(tile: TileOp) -> bool:
+    """Whether this kernel still has a cross-CTA split decision for ``035_split_reduce`` to consume."""
+    node = head(tile.op)
+    return (
+        node is not None
+        and node.axis is not None
+        and node.combine is not None
+        and not node.observed
+        and not carries_partition(tile.op)
+        and not tile.split_consumed
+    )
+
+
+def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None) -> list[Fork] | None:
     """The split fork for ``root``'s kernel — the unsplit tree first, then one STRUCTURAL option
     per :func:`splitk_moves` member the head fold admits — or ``None`` when there is nothing to
     decide (no reduce fold, or the kernel is itself a piece of a realized split: the sliced axis's
@@ -195,15 +208,12 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
     raises the recorded refusal (``REDUCE`` has no choice of tier, so there is no drop layer);
     a pin with no ``g`` half decides UNSPLIT, exactly as a spelled row with no ``g`` half does."""
     tile: TileOp = root.op
-    node = head(tile.op)
-    if node is None or node.axis is None or node.combine is None:
+    if not split_pending(tile):
         return None
-    if node.observed:
-        return None  # a scan preserves its stream order — there is no split question to decide
-    if carries_partition(tile.op):
-        return None  # a piece of a realized split — the partition was consumed
+    node = head(tile.op)
+    assert node is not None and node.axis is not None
     key = Sched(tile.op).key("REDUCE", node) or "REDUCE"
-    unsplit = DeferredFork(lambda: replace(tile, split_consumed=True), {key: ""})
+    unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
     element = axis_of(key)
     pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
     tail = projection_tail(tile)

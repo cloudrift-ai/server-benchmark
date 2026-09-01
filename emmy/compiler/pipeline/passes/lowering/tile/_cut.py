@@ -542,8 +542,8 @@ def realize(
     operand cone (which normalization then binds as a raw storage-dtype load with the factors
     hoisted onto the accumulator epilogue).
 
-    ``placement_decided`` consumes an authoritative PLACE restriction on every piece. Unpinned
-    cuts leave it false so the fresh pieces can expose and decide smaller seams."""
+    ``placement_decided`` consumes an authoritative pinned PLACE restriction on every piece.
+    Unpinned cuts leave it false so fresh pieces can expose and decide smaller seams."""
     tile: TileOp = root.op
     pieces = []
     workspace_loads: dict[int, tuple] = {}

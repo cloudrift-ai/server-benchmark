@@ -35,10 +35,6 @@ from emmy.compiler.ir.schedule.classic import (
     ClassicProblem,
     ClassicScheduleContext,
     ReductionSchedule,
-    node_key,
-    reduction_sites,
-    stage_edges,
-    tile_sites,
 )
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
@@ -212,7 +208,6 @@ class Sched:
         self.schedule = schedule
         self.materialization = materialization
         self.context = ClassicScheduleContext(ClassicProblem(root, target=None))
-        self.index = self.context.index
         #: The kernel's free→grid :class:`~emmy.compiler.ir.schedule.Placement`. A ``TILE`` slice
         #: is geometry over an ``(m, n)`` output pair, and WHICH pair is a function of the site's
         #: position in the tree — so the binding belongs here, on the scheduling structure, and
@@ -249,24 +244,28 @@ class Sched:
     def key(self, family: str, node) -> str | None:
         """The canonical node-family key, or ``None`` when the family does not apply."""
         try:
-            site = self.index.site(node)
+            site = self.context.site(node)
         except KeyError as error:
             raise UnknownSiteError(str(error)) from None
         if family == "TILE":
-            family_sites = tile_sites(self.context)
+            family_sites = self.context.tile_sites
         elif family == "REDUCE":
-            family_sites = reduction_sites(self.context)
+            family_sites = self.context.reduction_sites
         elif family == "STAGE":
-            edges = stage_edges(self.context)
+            edges = self.context.stage_edges
             family_sites = tuple(dict.fromkeys(edge[0] for edge in edges))
         else:
             raise ValueError(f"unknown classic schedule family {family!r}")
-        return node_key(family, site, family_sites) if site in family_sites else None
+        if site not in family_sites:
+            return None
+        if family == "STAGE":
+            return self.context.stage_key(next(edge for edge in self.context.stage_edges if edge[0] == site))
+        return self.context.node_key(family, site)
 
     def get(self, family: str, node):
         if self.schedule is None:
             return None
-        site = self.index.site(node)
+        site = self.context.site(node)
         assignment = self.schedule.nodes[site]
         if family == "TILE":
             return assignment.tile if assignment.tile.is_tiled else None
@@ -293,7 +292,7 @@ class Sched:
         possible where there used to be three hand-written ``.at(...)`` calls."""
         if self.schedule is None or self.materialization is None:
             return None
-        return self.materialization.tiles.get(self.index.site(node))
+        return self.materialization.tiles.get(self.context.site(node))
 
     def placed(self, node, plan):
         """``plan`` bound to the ``(m, n)`` output axes a ``TILE`` slice at ``node``'s site tiles —
@@ -349,7 +348,7 @@ class Sched:
             return orient(self.place.root_mn)
         if len(free) < 2:
             return None
-        if site.derived and node.axis.extent.is_static and node.axis.extent.as_static() == 1:
+        if site.derived and node.axis is not None and node.axis.extent.is_static and node.axis.extent.as_static() == 1:
             return orient((free[-2], free[-1]))
         parent = next((s for s in self._all_sites() if s.segments == site.segments[:-1]), None)
         ax = getattr(parent.node, "axis", None) if parent is not None else None
@@ -385,10 +384,12 @@ def scheduled(
     ``035_split_reduce`` unscheduled and reaches this through its own row). The accepted assignment
     is the sole worker-inventory source; the encoded row must agree with it."""
     if schedule is None:
-        raise ValueError("cannot construct a scheduled TileOp without a ClassicSchedule")
-    verdict = ClassicScheduleContext(ClassicProblem(op, target=None)).accepts(schedule)
-    if not verdict:
-        raise ValueError(f"cannot construct a scheduled TileOp from a refused assignment: {verdict.refusal}")
+        raise ValueError("cannot construct a scheduled TileOp without a Schedule")
+    context = ClassicScheduleContext(ClassicProblem(op, target=None))
+    try:
+        context.extend(schedule)
+    except ValueError as error:
+        raise ValueError(f"cannot construct a scheduled TileOp from a refused assignment: {error}") from error
     work = schedule.kernel.work
     producer = workers.producer_warps if workers is not None else 0
     if work.producer != producer:

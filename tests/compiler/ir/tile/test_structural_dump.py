@@ -21,11 +21,10 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold
-from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Stage, Tile, Work
+from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Schedule, Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import (
     ClassicMaterialization,
     ClassicProblem,
-    ClassicSchedule,
     ClassicScheduleContext,
     EdgeSchedule,
     KernelSchedule,
@@ -257,10 +256,10 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
         site: ProjectionSchedule(Tile()) if isinstance(view, Projection) else ReductionSchedule(Tile(), Reduce.of(reg=4))
         for site, view in context.views.items()
     }
-    classic = ClassicSchedule(
+    classic = Schedule(
         KernelSchedule(Work(), Raster()),
         nodes,
-        {edge: EdgeSchedule(Stage.direct()) for edge in context.index.edges},
+        {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites},
     )
     scheduled = TileOp(
         op=fold,

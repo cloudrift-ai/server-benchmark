@@ -8,16 +8,16 @@ state, and materialization data do not belong here.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
-from dataclasses import replace as dc_replace
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from itertools import product
 
 from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.structural import instance_memo
 
-from .base import Schedule, ScheduleCodec, ScheduleContext, ScheduleMaterialization
+from .base import Schedule, ScheduleContext, ScheduleRefused
 from .choices import (
     PlacedTile,
     Raster,
@@ -124,110 +124,11 @@ class EdgeSchedule:
             raise TypeError("classic edge STAGE must be a Stage choice")
 
 
-@dataclass(frozen=True)
-class ClassicSchedule(Schedule):
-    """One complete classic schedule assignment."""
-
-    kernel: KernelSchedule
-    nodes: Mapping[NodeId, NodeSchedule]
-    edges: Mapping[EdgeSite, EdgeSchedule]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.kernel, KernelSchedule):
-            raise TypeError(f"classic kernel assignment must be KernelSchedule, got {type(self.kernel).__name__}")
-        if not isinstance(self.nodes, Mapping) or not isinstance(self.edges, Mapping):
-            raise TypeError("classic node and edge assignments must be mappings")
-        if any(not _is_node_id(site) for site in self.nodes):
-            raise TypeError("classic node assignments must be keyed by non-negative integer node ids")
-        if any(not isinstance(assignment, (ProjectionSchedule, ReductionSchedule)) for assignment in self.nodes.values()):
-            raise TypeError("classic node assignments must contain projection or reduction schedules")
-        if any(not _is_edge_site(edge) for edge in self.edges):
-            raise TypeError("classic edge assignments must be keyed by (consumer, operand) pairs")
-        if any(not isinstance(assignment, EdgeSchedule) for assignment in self.edges.values()):
-            raise TypeError("classic edge assignments must contain edge schedules")
-        object.__setattr__(self, "nodes", frozendict(self.nodes))
-        object.__setattr__(self, "edges", frozendict(self.edges))
-
-    def replace(self, **changes: object) -> ClassicSchedule:
-        """Return a new classic schedule with ``changes`` applied."""
-        return dc_replace(self, **changes)
-
-    def with_kernel(self, kernel: KernelSchedule) -> ClassicSchedule:
-        """Return a schedule with a replacement kernel assignment."""
-        return self.replace(kernel=kernel)
-
-    def with_node(self, site: NodeId, assignment: NodeSchedule) -> ClassicSchedule:
-        """Return a schedule with one replacement node assignment."""
-        nodes = dict(self.nodes)
-        nodes[site] = assignment
-        return self.replace(nodes=nodes)
-
-    def with_edge(self, site: EdgeSite, assignment: EdgeSchedule) -> ClassicSchedule:
-        """Return a schedule with one replacement edge assignment."""
-        edges = dict(self.edges)
-        edges[site] = assignment
-        return self.replace(edges=edges)
+type ClassicAssignment = Schedule[KernelSchedule, NodeSchedule, EdgeSchedule]
 
 
-def _allow_schedule(_schedule: ClassicSchedule) -> bool:
-    """The unrestricted Algorithm 1 context."""
+def _allow_schedule(_schedule: ClassicAssignment) -> bool:
     return True
-
-
-@dataclass(frozen=True, slots=True)
-class ScheduleRestriction:
-    """The immutable ``c`` input to Algorithm 1.
-
-    The predicate sees one complete assignment. Enumerators may carry this context intact, but
-    must not inspect it while traversing the independent domains.
-    """
-
-    _predicate: Callable[[ClassicSchedule], bool] = _allow_schedule
-
-    def __post_init__(self) -> None:
-        if not callable(self._predicate):
-            raise TypeError("classic schedule restriction requires a callable complete-assignment predicate")
-
-    def accepts(self, schedule: ClassicSchedule) -> bool:
-        """Whether this complete assignment satisfies ``c``."""
-        return bool(self._predicate(schedule))
-
-    def singleton(self, codec: ClassicScheduleCodec) -> tuple[ClassicSchedule, ...] | None:
-        """Return the complete restricted set when ``c`` can prove it has at most one member.
-
-        ``None`` means the proof is unavailable and Algorithm 1 must traverse the product. An
-        empty tuple means the restriction is provably empty. The predicate owns this optional
-        proof; callers never inspect its representation or alter an independent domain.
-        """
-        prove = getattr(self._predicate, "singleton", None)
-        if prove is None:
-            return None
-        schedules = prove(codec)
-        if schedules is None:
-            return None
-        if not isinstance(schedules, tuple) or any(not isinstance(schedule, ClassicSchedule) for schedule in schedules):
-            raise TypeError("classic schedule restriction singleton proof must return a tuple of schedules")
-        if len(schedules) > 1:
-            raise ValueError("classic schedule restriction singleton proof returned more than one schedule")
-        return schedules
-
-    def restricted(self, codec: ClassicScheduleCodec, *, limit: int = 512) -> tuple[ClassicSchedule, ...] | None:
-        """Return the exact restricted set when the predicate can prove it within ``limit``.
-
-        ``None`` leaves Algorithm 1 to traverse the unchanged product. The proof belongs to c;
-        callers neither inspect its representation nor narrow an independent domain.
-        """
-        prove = getattr(self._predicate, "restricted", None)
-        if prove is None:
-            return self.singleton(codec)
-        schedules = prove(codec, limit=limit)
-        if schedules is None:
-            return None
-        if not isinstance(schedules, tuple) or any(not isinstance(schedule, ClassicSchedule) for schedule in schedules):
-            raise TypeError("classic schedule restriction proof must return a tuple of schedules")
-        if len(schedules) > limit:
-            raise ValueError("classic schedule restriction proof exceeded its declared limit")
-        return schedules
 
 
 @dataclass(frozen=True)
@@ -258,7 +159,7 @@ class LocalSupport:
 
     The public domains are projections of these records.  A support record is not a schedule:
     placed geometry and fragment facts remain derived compatibility evidence and never enter a
-    :class:`ClassicSchedule` value.
+    :class:`Schedule` value.
     """
 
     node: NodeSchedule
@@ -282,17 +183,20 @@ class LocalSupport:
 
 @dataclass(frozen=True)
 class ClassicDomains:
-    """Independent finite domains plus their static compatibility support.
+    """Independent finite domains plus one lazy local-support projection.
 
-    ``kernel``, ``nodes`` and ``edges`` are the literal Cartesian factors.  ``supports`` records
-    why combinations of those independently projected choices can coexist; it is consumed only by
-    :meth:`ClassicScheduleContext.accepts` and by a private prefix propagator.
+    ``kernel``, ``nodes`` and ``edges`` are the literal Cartesian factors. ``_support`` derives
+    the static evidence for one already-selected node and its incident edges. It is deliberately
+    lazy: the context applies ``c`` before asking for expensive placed and staged facts.
     """
 
     kernel: tuple[KernelSchedule, ...]
     nodes: Mapping[NodeId, tuple[NodeSchedule, ...]]
     edges: Mapping[EdgeSite, tuple[EdgeSchedule, ...]]
-    supports: Mapping[NodeId, tuple[LocalSupport, ...]]
+    _support: Callable[[NodeId, NodeSchedule, Mapping[EdgeSite, EdgeSchedule]], LocalSupport | None] = field(
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not self.kernel or any(not isinstance(choice, KernelSchedule) for choice in self.kernel):
@@ -300,15 +204,94 @@ class ClassicDomains:
         for name, values, site_test, choice_type in (
             ("node", self.nodes, _is_node_id, (ProjectionSchedule, ReductionSchedule)),
             ("edge", self.edges, _is_edge_site, EdgeSchedule),
-            ("support", self.supports, _is_node_id, LocalSupport),
         ):
             if not isinstance(values, Mapping) or any(not site_test(site) for site in values):
                 raise TypeError(f"classic {name} domains have invalid site keys")
             if any(not choices or any(not isinstance(choice, choice_type) for choice in choices) for choices in values.values()):
                 raise TypeError(f"classic {name} domains have invalid choices")
+        if not callable(self._support):
+            raise TypeError("classic domains require a local-support projection")
         object.__setattr__(self, "nodes", frozendict({site: tuple(choices) for site, choices in self.nodes.items()}))
         object.__setattr__(self, "edges", frozendict({edge: tuple(choices) for edge, choices in self.edges.items()}))
-        object.__setattr__(self, "supports", frozendict({site: tuple(choices) for site, choices in self.supports.items()}))
+
+    def local_support(
+        self,
+        site: NodeId,
+        node: NodeSchedule,
+        edges: Mapping[EdgeSite, EdgeSchedule],
+    ) -> LocalSupport | None:
+        """Derive static compatibility evidence for one local product member."""
+        return self._support(site, node, edges)
+
+    def local_frontier(
+        self,
+        site: NodeId,
+        nodes: tuple[NodeSchedule, ...],
+        edge_domains: tuple[tuple[EdgeSite, tuple[EdgeSchedule, ...]], ...],
+    ) -> tuple[LocalSupport, ...]:
+        """Return the locally supported node-plus-incident-edge frontier.
+
+        The caller has already applied its immutable restriction to each factor. Classic transport
+        currently requires one edge value per consumer, so mixed incident-edge products have no
+        completion and are never materialized. The result is shared by every prefix carrying the
+        same restriction-local factors.
+        """
+        cache = instance_memo(self, "_memo_local_frontier")
+        key = (site, nodes, edge_domains)
+        if cached := cache.get(key):
+            return cached
+        if key in cache:
+            return ()
+        if edge_domains:
+            common = set(edge_domains[0][1])
+            for _edge, choices in edge_domains[1:]:
+                common.intersection_update(choices)
+            edge_picks = tuple(
+                frozendict({edge: choice for edge, _choices in edge_domains}) for choice in edge_domains[0][1] if choice in common
+            )
+        else:
+            edge_picks = (frozendict(),)
+        result = tuple(support for node in nodes for edges in edge_picks if (support := self.local_support(site, node, edges)) is not None)
+        cache[key] = result
+        return result
+
+    def compatible_frontier(
+        self,
+        site: NodeId,
+        nodes: tuple[NodeSchedule, ...],
+        edge_domains: tuple[tuple[EdgeSite, tuple[EdgeSchedule, ...]], ...],
+        work: Work | None,
+        previous_nodes: tuple[NodeSchedule, ...],
+        axes: tuple[tuple[str, tuple[int, int]], ...],
+        fragments: tuple[tuple[tuple[str, str], tuple], ...],
+        allowed_works: frozenset[tuple[str, tuple[int, ...]]] | None,
+    ) -> tuple[LocalSupport, ...]:
+        """Index the local frontier by the prefix facts that can reject it."""
+        cache = instance_memo(self, "_memo_compatible_frontier")
+        key = (site, nodes, edge_domains, work, previous_nodes, axes, fragments, allowed_works)
+        if cached := cache.get(key):
+            return cached
+        if key in cache:
+            return ()
+        result = tuple(
+            support
+            for support in self.local_frontier(site, nodes, edge_domains)
+            if ClassicScheduleContext._prefix_relation_refusal(
+                support,
+                work=work,
+                previous_nodes=previous_nodes,
+                axes=axes,
+                fragments=fragments,
+                allowed_works=allowed_works,
+            )
+            is None
+        )
+        cache[key] = result
+        return result
+
+    def __getstate__(self):
+        """Pickle stored domains only; derived frontiers recompute after transport."""
+        return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
 
     @property
     def product_size(self) -> int:
@@ -320,7 +303,7 @@ class ClassicDomains:
 
 
 @dataclass(frozen=True)
-class ClassicMaterialization(ScheduleMaterialization):
+class ClassicMaterialization:
     """Placed geometry and resolved transport facts derived from an accepted schedule."""
 
     tiles: Mapping[NodeId, PlacedTile]
@@ -336,18 +319,19 @@ class ClassicMaterialization(ScheduleMaterialization):
         object.__setattr__(self, "tiles", frozendict(self.tiles))
         object.__setattr__(self, "stages", frozendict(self.stages))
 
-    def validate(self, schedule: Schedule, root: object, *, place: object, workers: object) -> None:
+    def validate(self, schedule: ClassicAssignment, root: object, *, place: object, workers: object) -> None:
         """Validate classic lowering facts against their semantic assignment."""
-        if not isinstance(schedule, ClassicSchedule):
-            raise TypeError("classic materialization requires a ClassicSchedule")
+        if not isinstance(schedule, Schedule):
+            raise TypeError("classic materialization requires a Schedule")
         if not isinstance(root, Fold):
             raise TypeError("classic materialization requires a Fold root")
         from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
 
         context = ClassicScheduleContext(ClassicProblem(root, target=None))
-        verdict = context.accepts(schedule)
-        if not verdict:
-            raise ValueError(f"TileOp carries a refused classic schedule: {verdict.refusal}")
+        try:
+            context.extend(schedule)
+        except ScheduleRefused as error:
+            raise ValueError(f"TileOp carries a refused classic schedule: {error}") from error
         expected_tiles = {
             site
             for site, assignment in schedule.nodes.items()
@@ -361,7 +345,7 @@ class ClassicMaterialization(ScheduleMaterialization):
         placement = Sched(root, place=place)
         for site, placed in self.tiles.items():
             choice = schedule.nodes[site].tile
-            expected = placement.placed(context.index.node(site), choice)
+            expected = placement.placed(context.node(site), choice)
             if placed.choice != choice or placed != expected:
                 raise ValueError(f"materialized tile at {node_id_spelling(site)} does not derive from its classic choice")
         for edge, resolved in self.stages.items():
@@ -384,299 +368,869 @@ class ClassicProblem:
             raise TypeError("classic problem root must be a Fold")
 
 
-class SiteIndex:
-    """Immutable problem-local lookup for node and edge sites."""
+@dataclass(frozen=True)
+class _ClassicSpace:
+    """Immutable indexes shared by every prefix of one ``p``/``t`` product."""
 
-    def __init__(self, root: Fold) -> None:
-        self._nodes = schedule_nodes(root)
-        self._sites = tuple(range(len(self._nodes)))
-        self._site_by_identity = {id(node): site for site, node in enumerate(self._nodes)}
-        self._edges = schedule_edges(self._nodes)
+    folds: tuple[Fold, ...]
+    node_sites: tuple[NodeId, ...]
+    edge_sites: tuple[EdgeSite, ...]
+    site_by_identity: frozendict
+    views: frozendict
+    tile_sites: tuple[NodeId, ...]
+    reduction_sites: tuple[NodeId, ...]
+    stage_edges: tuple[EdgeSite, ...]
+    incident_edges: frozendict
+    kernel_set: frozenset
+    node_sets: frozendict
+    edge_sets: frozendict
+    values: frozendict
+
+
+@dataclass(frozen=True)
+class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeSchedule]):
+    """Immutable classic ``c + p + t`` compatibility-composition state."""
+
+    problem: ClassicProblem
+    domains: ClassicDomains | None = None
+    order: tuple[NodeId, ...] | None = None
+    position: int = 0
+    _assignment: ClassicAssignment = field(default_factory=lambda: Schedule(None, {}, {}), repr=False)
+    _work: Work | None = field(default=None, repr=False)
+    _axes: Mapping[str, tuple[int, int]] = field(default_factory=frozendict, repr=False)
+    _fragments: Mapping[tuple[str, str], tuple] = field(default_factory=frozendict, repr=False)
+    _raster_eligible: bool = field(default=False, repr=False)
+    _predicate: Callable[[ClassicAssignment], bool] = field(default=_allow_schedule, repr=False, compare=False)
+    _pins: Mapping[str, tuple[tuple[str, str], ...]] | None = field(default=None, repr=False, compare=False)
+    _allow_f16_accumulate: bool = field(default=True, repr=False, compare=False)
+    _allow_fp8: bool = field(default=True, repr=False, compare=False)
+    _ignore_unsupported_global: bool = field(default=False, repr=False, compare=False)
+    _allowed_works: frozenset[tuple[str, tuple[int, ...]]] | None = field(default=None, repr=False, compare=False)
+    _unsupported_global: bool | None = field(default=None, repr=False, compare=False)
+    _restricted_kernels: tuple[KernelSchedule, ...] | None = field(default=None, repr=False, compare=False)
+    _restricted_kernel_set: frozenset[KernelSchedule] | None = field(default=None, repr=False, compare=False)
+    _restricted_nodes: Mapping[NodeId, tuple[NodeSchedule, ...]] | None = field(default=None, repr=False, compare=False)
+    _restricted_edges: Mapping[EdgeSite, tuple[EdgeSchedule, ...]] | None = field(default=None, repr=False, compare=False)
+    _space: _ClassicSpace | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._space is None:
+            object.__setattr__(self, "_space", self._build_space())
+        assert self._space is not None
+        order = self._space.node_sites if self.order is None else tuple(self.order)
+        if len(order) != len(self._space.node_sites) or set(order) != set(self._space.node_sites):
+            raise ValueError("classic composition order must contain every node site exactly once")
+        if not 0 <= self.position <= len(order):
+            raise ValueError("classic composition position is outside its node order")
+        if not callable(self._predicate):
+            raise TypeError("classic schedule restriction must be callable")
+        object.__setattr__(self, "order", order)
+        if not isinstance(self._assignment, Schedule):
+            raise TypeError("classic context assignment must be a Schedule")
+        object.__setattr__(self, "_axes", frozendict(self._axes))
+        object.__setattr__(self, "_fragments", frozendict(self._fragments))
+        if self._pins is not None:
+            object.__setattr__(self, "_pins", frozendict({family: tuple(values) for family, values in self._pins.items()}))
+            if self._unsupported_global is None:
+                object.__setattr__(
+                    self,
+                    "_unsupported_global",
+                    not self._ignore_unsupported_global
+                    and any(
+                        key == family and value and not self._supports_global(family, value)
+                        for family, pins in self._pins.items()
+                        for key, value in pins
+                    ),
+                )
+            if self._restricted_kernels is None:
+                kernels = tuple(kernel for kernel in self.kernels if self._kernel_restriction_allows(kernel))
+                nodes = frozendict(
+                    {
+                        site: tuple(choice for choice in self.node_choices(site) if self._node_restriction_allows(site, choice))
+                        for site in self.node_sites
+                    }
+                )
+                edges = frozendict(
+                    {
+                        edge: tuple(choice for choice in self.edge_choices(edge) if self._edge_restriction_allows(edge, choice))
+                        for edge in self.edge_sites
+                    }
+                )
+                object.__setattr__(self, "_restricted_kernels", kernels)
+                object.__setattr__(self, "_restricted_kernel_set", frozenset(kernels))
+                object.__setattr__(self, "_restricted_nodes", nodes)
+                object.__setattr__(self, "_restricted_edges", edges)
+            if self._allowed_works is None:
+                assert self._restricted_kernels is not None
+                object.__setattr__(
+                    self,
+                    "_allowed_works",
+                    frozenset((kernel.work.kind, kernel.work.units) for kernel in self._restricted_kernels),
+                )
+            if self.position == 0 and not self.assignment.nodes:
+                self._validate_local_pin_support()
+
+    def _build_space(self) -> _ClassicSpace:
+        folds = schedule_nodes(self.problem.root)
+        node_sites = tuple(range(len(folds)))
+        edge_sites = schedule_edges(folds)
+        views = frozendict({site: node_view(folds[site]) for site in node_sites})
+        tile_sites = tuple(
+            site
+            for site in node_sites
+            if (isinstance(views[site], Reduction) and views[site].contraction is not None)
+            or (isinstance(views[site], Projection) and site == node_sites[0] and not folds[site].operands)
+        )
+        reduction_sites = tuple(site for site in node_sites if isinstance(views[site], Reduction))
+        stage_edges = tuple(edge for edge in edge_sites if isinstance(views[edge[0]], Reduction) and views[edge[0]].contraction is not None)
+        incident = frozendict({site: tuple(edge for edge in edge_sites if edge[0] == site) for site in node_sites})
+        kernel_set = frozenset()
+        node_sets = frozendict()
+        edge_sets = frozendict()
+        values = {}
+        if self.domains is not None:
+            expected_nodes = set(node_sites)
+            expected_edges = set(edge_sites)
+            if set(self.domains.nodes) != expected_nodes:
+                raise ValueError("classic domains must cover every node site exactly once")
+            if set(self.domains.edges) != expected_edges:
+                raise ValueError("classic domains must cover every edge site exactly once")
+            kernel_set = frozenset(self.domains.kernel)
+            node_sets = frozendict({site: frozenset(values) for site, values in self.domains.nodes.items()})
+            edge_sets = frozendict({edge: frozenset(values) for edge, values in self.domains.edges.items()})
+
+            def node_key(family, site, sites):
+                return family if len(sites) == 1 else f"{family}@{node_id_spelling(site)}"
+
+            values["WORK"] = tuple(dict.fromkeys(choice.work.spell() for choice in self.domains.kernel))
+            values["RASTER"] = tuple(dict.fromkeys(choice.raster.spell() for choice in self.domains.kernel))
+            values.update(
+                {
+                    node_key("TILE", site, tile_sites): tuple(dict.fromkeys(choice.tile.spell() for choice in self.domains.nodes[site]))
+                    for site in tile_sites
+                }
+            )
+            values.update(
+                {
+                    node_key("REDUCE", site, reduction_sites): tuple(
+                        dict.fromkeys(choice.reduce.spell() for choice in self.domains.nodes[site] if isinstance(choice, ReductionSchedule))
+                    )
+                    for site in reduction_sites
+                }
+            )
+            stage_consumers = tuple(dict.fromkeys(edge[0] for edge in stage_edges))
+            for site in stage_consumers:
+                edges = tuple(edge for edge in stage_edges if edge[0] == site)
+                common = set.intersection(*({choice.stage.spell() for choice in self.domains.edges[edge]} for edge in edges))
+                values[node_key("STAGE", site, stage_consumers)] = tuple(
+                    dict.fromkeys(choice.stage.spell() for choice in self.domains.edges[edges[0]] if choice.stage.spell() in common)
+                )
+        return _ClassicSpace(
+            folds,
+            node_sites,
+            edge_sites,
+            frozendict({id(node): site for site, node in enumerate(folds)}),
+            views,
+            tile_sites,
+            reduction_sites,
+            stage_edges,
+            incident,
+            kernel_set,
+            node_sets,
+            edge_sets,
+            frozendict(values),
+        )
 
     @property
-    def nodes(self) -> tuple[NodeId, ...]:
-        """Node sites in canonical order."""
-        return self._sites
+    def node_sites(self) -> tuple[NodeId, ...]:
+        assert self._space is not None
+        return self._space.node_sites
 
     @property
-    def edges(self) -> tuple[EdgeSite, ...]:
-        """Edge sites in canonical consumer/operand order."""
-        return self._edges
+    def edge_sites(self) -> tuple[EdgeSite, ...]:
+        assert self._space is not None
+        return self._space.edge_sites
+
+    @property
+    def views(self) -> Mapping[NodeId, NodeView]:
+        assert self._space is not None
+        return self._space.views
+
+    @property
+    def tile_sites(self) -> tuple[NodeId, ...]:
+        assert self._space is not None
+        return self._space.tile_sites
+
+    @property
+    def reduction_sites(self) -> tuple[NodeId, ...]:
+        assert self._space is not None
+        return self._space.reduction_sites
+
+    @property
+    def stage_edges(self) -> tuple[EdgeSite, ...]:
+        assert self._space is not None
+        return self._space.stage_edges
+
+    @property
+    def kernels(self) -> tuple[KernelSchedule, ...]:
+        return self.domains.kernel if self.domains is not None else (KernelSchedule(Work(), Raster()),)
+
+    def node_choices(self, site: NodeId) -> tuple[NodeSchedule, ...]:
+        view = self.views[site]
+        if self.domains is not None:
+            try:
+                return self.domains.nodes[site]
+            except KeyError:
+                raise ValueError(f"classic domains do not contain {node_id_spelling(site)}") from None
+        return (ProjectionSchedule(Tile()),) if isinstance(view, Projection) else (ReductionSchedule(Tile(), Reduce()),)
+
+    def edge_choices(self, edge: EdgeSite) -> tuple[EdgeSchedule, ...]:
+        self.operand(edge)
+        if self.domains is not None:
+            try:
+                return self.domains.edges[edge]
+            except KeyError:
+                raise ValueError(f"classic domains do not contain {edge_site_spelling(edge)}") from None
+        return (EdgeSchedule(Stage.direct()),)
 
     def node(self, site: NodeId) -> Fold:
-        """Resolve a node site."""
-        if type(site) is not int or site < 0 or site >= len(self._nodes):
-            raise KeyError(f"unknown node site {site!r}") from None
-        return self._nodes[site]
+        assert self._space is not None
+        if type(site) is not int or not 0 <= site < len(self._space.folds):
+            raise KeyError(f"unknown node site {site!r}")
+        return self._space.folds[site]
 
     def site(self, node: Fold) -> NodeId:
-        """Return the one site of ``node`` by object identity."""
+        assert self._space is not None
         try:
-            return self._site_by_identity[id(node)]
+            return self._space.site_by_identity[id(node)]
         except KeyError:
             raise KeyError("Fold is not a node of this classic problem") from None
 
     def operand(self, edge: EdgeSite):
-        """Resolve the producer value used at an edge site."""
         if not _is_edge_site(edge):
-            raise KeyError(f"invalid edge site {edge!r}") from None
+            raise KeyError(f"invalid edge site {edge!r}")
         consumer, operand = edge
-        node = self.node(consumer)
         try:
-            return node.operands[operand]
+            return self.node(consumer).operands[operand]
         except IndexError:
             raise KeyError(f"unknown operand {operand} at {node_id_spelling(consumer)}") from None
 
     def producer(self, edge: EdgeSite) -> NodeId | None:
-        """Return the producer node site when this edge reads an inline Fold."""
         value = self.operand(edge)
         return self.site(value) if isinstance(value, Fold) else None
 
+    def incident_edges(self, site: NodeId) -> tuple[EdgeSite, ...]:
+        assert self._space is not None
+        return self._space.incident_edges[site]
 
-@dataclass(frozen=True)
-class Refusal:
-    """A stable explanation of why a complete assignment is not a classic schedule."""
+    def node_key(self, family: str, site: NodeId) -> str:
+        sites = {"TILE": self.tile_sites, "REDUCE": self.reduction_sites}.get(family)
+        if sites is None:
+            raise ValueError(f"{family} is not a classic node family")
+        if site not in sites:
+            raise ValueError(f"{node_id_spelling(site)} is not a {family} site")
+        return family if len(sites) == 1 else f"{family}@{node_id_spelling(site)}"
 
-    reason: str
-    site: NodeId | EdgeSite | None = None
+    def stage_key(self, edge: EdgeSite) -> str:
+        if edge not in self.stage_edges:
+            raise ValueError(f"{edge_site_spelling(edge)} is not a STAGE edge")
+        consumers = tuple(dict.fromkeys(candidate[0] for candidate in self.stage_edges))
+        return "STAGE" if len(consumers) == 1 else f"STAGE@{node_id_spelling(edge[0])}"
 
+    def keys(self) -> tuple[str, ...]:
+        stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.stage_edges))
+        return (
+            "WORK",
+            "RASTER",
+            *(self.node_key("TILE", site) for site in self.tile_sites),
+            *(self.node_key("REDUCE", site) for site in self.reduction_sites),
+            *(self.stage_key(next(edge for edge in self.stage_edges if edge[0] == site)) for site in stage_consumers),
+        )
 
-@dataclass(frozen=True)
-class Acceptance:
-    """The result of checking one complete schedule."""
+    def values(self, key: str) -> tuple[str, ...]:
+        if self.domains is None or key not in self.keys():
+            raise ValueError(f"classic key {key!r} has no projected domain")
+        assert self._space is not None
+        return self._space.values[key]
 
-    refusal: Refusal | None = None
+    def restrict(
+        self,
+        pins: Mapping[str, Sequence[tuple[str, str]]],
+        *,
+        split_consumed: bool = False,
+        allow_f16_accumulate: bool = True,
+        allow_fp8: bool = True,
+        validate_pins: bool = True,
+    ) -> ClassicScheduleContext:
+        """Return ``c + p + t`` with raw schedule parameters normalized exactly once."""
+        values = {family: tuple(pins.get(family, ())) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
+        if split_consumed:
+            values["REDUCE"] = tuple(
+                (key, "/".join(part for part in value.split("/") if not part.startswith("g"))) for key, value in values["REDUCE"]
+            )
+        return replace(
+            self,
+            _pins=frozendict(values),
+            _allow_f16_accumulate=allow_f16_accumulate,
+            _allow_fp8=allow_fp8,
+            _ignore_unsupported_global=not validate_pins,
+            _allowed_works=None,
+            _unsupported_global=None,
+            _restricted_kernels=None,
+            _restricted_kernel_set=None,
+            _restricted_nodes=None,
+            _restricted_edges=None,
+        )
 
-    def __bool__(self) -> bool:
-        return self.refusal is None
+    def with_restriction(self, predicate: Callable[[ClassicAssignment], bool]) -> ClassicScheduleContext:
+        """Return a context with one opaque complete-assignment restriction ``c``."""
+        if not callable(predicate):
+            raise TypeError("classic schedule restriction must be callable")
+        return replace(self, _predicate=predicate)
 
+    @property
+    def nodes_complete(self) -> bool:
+        assert self.order is not None
+        return self.position == len(self.order)
 
-class ClassicScheduleContext(ScheduleContext[ClassicSchedule, Acceptance]):
-    """Derived facts and complete-assignment invariants for one classic problem."""
+    @property
+    def next_site(self) -> NodeId | None:
+        assert self.order is not None
+        return None if self.nodes_complete else self.order[self.position]
 
-    def __init__(self, problem: ClassicProblem, domains: ClassicDomains | None = None) -> None:
-        self.problem = problem
-        self.index = SiteIndex(problem.root)
-        self.views = frozendict({site: node_view(self.index.node(site)) for site in self.index.nodes})
-        self._node_sites = frozenset(self.index.nodes)
-        self._edge_sites = frozenset(self.index.edges)
-        self._tile_sites = frozenset(tile_sites(self))
-        self._stage_edges = frozenset(stage_edges(self))
-        self._incident_edges = {site: tuple(edge for edge in self.index.edges if edge[0] == site) for site in self.index.nodes}
-        self.domains = domains
-        self._kernel_domain = frozenset()
-        self._node_domains = {}
-        self._edge_domains = {}
-        self._support_index = {}
-        if domains is not None:
-            expected_nodes = self._node_sites
-            expected_edges = self._edge_sites
-            if set(domains.nodes) != expected_nodes or set(domains.supports) != expected_nodes:
-                raise ValueError("classic domains must cover every node site exactly once")
-            if set(domains.edges) != expected_edges:
-                raise ValueError("classic domains must cover every edge site exactly once")
-            self._kernel_domain = frozenset(domains.kernel)
-            self._node_domains = {site: frozenset(choices) for site, choices in domains.nodes.items()}
-            self._edge_domains = {edge: frozenset(choices) for edge, choices in domains.edges.items()}
-            for site in self.index.nodes:
-                incident = self._incident_edges[site]
-                indexed: dict[tuple, list[LocalSupport]] = {}
-                for support in domains.supports[site]:
-                    key = (support.node, *(support.edges[edge] for edge in incident))
-                    indexed.setdefault(key, []).append(support)
-                self._support_index[site] = {key: tuple(values) for key, values in indexed.items()}
+    @property
+    def assignment(self) -> ClassicAssignment:
+        return self._assignment
 
-    def accepts(self, schedule: ClassicSchedule) -> Acceptance:
-        """Accept a complete assignment or return the first semantic incompatibility."""
-        if not isinstance(schedule, ClassicSchedule):
-            return Acceptance(Refusal("assignment must be a ClassicSchedule"))
-        if not isinstance(schedule.kernel.work, Work) or not isinstance(schedule.kernel.raster, Raster):
-            return Acceptance(Refusal("kernel assignment must contain explicit Work and Raster choices"))
-        expected_nodes = self._node_sites
-        actual_nodes = schedule.nodes.keys()
-        if missing := expected_nodes - actual_nodes:
-            return Acceptance(Refusal("missing node assignment", min(missing)))
-        if extra := actual_nodes - expected_nodes:
-            return Acceptance(Refusal("node assignment is outside this problem", min(extra)))
+    def extensions(self) -> Iterator[ClassicAssignment]:
+        """Yield a lazy compatible frontier of one node and its incident edges."""
+        if self.assignment.kernel is not None:
+            return
+        if self.domains is None:
+            raise ValueError("classic compatibility composition requires projected domains")
+        if self.nodes_complete:
+            kernels = self._restricted_kernels if self._restricted_kernels is not None else self.kernels
+            for kernel in kernels:
+                if self._kernel_composes(kernel):
+                    yield Schedule(kernel, {}, {})
+            return
+        assert self.next_site is not None
+        site = self.next_site
+        incident = self.incident_edges(site)
+        nodes = self._restricted_nodes[site] if self._restricted_nodes is not None else self.node_choices(site)
+        edges = tuple(
+            (
+                edge,
+                self._restricted_edges[edge] if self._restricted_edges is not None else self.edge_choices(edge),
+            )
+            for edge in incident
+        )
+        previous_nodes = tuple(self.assignment.nodes.values()) if self._work is None else ()
+        frontier = self.domains.compatible_frontier(
+            site,
+            nodes,
+            edges,
+            self._work,
+            previous_nodes,
+            tuple(self._axes.items()),
+            tuple(self._fragments.items()),
+            self._allowed_works,
+        )
+        for support in frontier:
+            yield Schedule(None, {site: support.node}, support.edges)
 
-        expected_edges = self._edge_sites
-        actual_edges = schedule.edges.keys()
-        if missing := expected_edges - actual_edges:
-            return Acceptance(Refusal("missing edge assignment", min(missing)))
-        if extra := actual_edges - expected_edges:
-            return Acceptance(Refusal("edge assignment is outside this problem", min(extra)))
+    def _validate_local_pin_support(self) -> None:
+        """Reject a non-direct STAGE parameter that no local node/edge support can realize."""
+        assert self.domains is not None and self._restricted_nodes is not None and self._restricted_edges is not None
+        for site in self.node_sites:
+            stage_keys = tuple(dict.fromkeys(self.stage_key(edge) for edge in self.incident_edges(site) if edge in self.stage_edges))
+            if not any(pin for key in stage_keys for pin in self._applicable_pins("STAGE", key)):
+                continue
+            edge_domains = tuple((edge, self._restricted_edges[edge]) for edge in self.incident_edges(site))
+            if not self.domains.compatible_frontier(
+                site,
+                self._restricted_nodes[site],
+                edge_domains,
+                None,
+                (),
+                (),
+                (),
+                self._allowed_works,
+            ):
+                self._raise_empty_pinned_frontier(("STAGE",), site)
 
-        claimed_work: Work | None = None
-        for site in self.index.nodes:
+    def _raise_empty_pinned_frontier(self, families: tuple[str, ...], site: NodeId | None = None) -> None:
+        """Keep an authoritative parameter refusal loud when no compatible pick realizes it."""
+        if self._pins is None:
+            return
+        keys = {
+            "WORK": ("WORK",),
+            "RASTER": ("RASTER",),
+            "TILE": (self.node_key("TILE", site),) if site in self.tile_sites else (),
+            "REDUCE": (self.node_key("REDUCE", site),) if site in self.reduction_sites else (),
+            "STAGE": tuple(dict.fromkeys(self.stage_key(edge) for edge in self.incident_edges(site) if edge in self.stage_edges))
+            if site is not None
+            else (),
+        }
+        for family in families:
+            for key in keys[family]:
+                if pins := self._applicable_pins(family, key):
+                    raise ValueError(f"{family} pin {pins[-1]!r} at {key} does not resolve to a compatible schedule")
+
+    def extend(self, pick: ClassicAssignment) -> ClassicScheduleContext:
+        """Compose a frontier pick or validate and accept one complete assignment."""
+        if not isinstance(pick, Schedule) or self.assignment.kernel is not None:
+            self._refuse("classic extension requires an incomplete context and a Schedule pick")
+        if pick.kernel is not None and (pick.nodes or pick.edges):
+            return self._extend_complete(pick)
+        if self.nodes_complete:
+            return self._finish(pick)
+
+        return self._extend_local(pick)
+
+    def _extend_complete(self, pick: ClassicAssignment) -> ClassicScheduleContext:
+        if any(pick.nodes.get(site) != choice for site, choice in self.assignment.nodes.items()) or any(
+            pick.edges.get(edge) != choice for edge, choice in self.assignment.edges.items()
+        ):
+            self._refuse("complete assignment disagrees with the existing classic prefix")
+        self._require_complete(pick)
+        assert self.order is not None and pick.kernel is not None
+        work = Work(pick.kernel.work.kind, pick.kernel.work.units)
+        return replace(self, position=len(self.order), _assignment=pick, _work=work)
+
+    def _extend_local(self, pick: ClassicAssignment) -> ClassicScheduleContext:
+        site = self.next_site
+        assert self._space is not None
+        incident = self.incident_edges(site)
+        if (
+            site is None
+            or self.domains is None
+            or pick.kernel is not None
+            or set(pick.nodes) != {site}
+            or set(pick.edges) != set(incident)
+            or pick.nodes[site] not in self._space.node_sets[site]
+            or any(pick.edges[edge] not in self._space.edge_sets[edge] for edge in incident)
+        ):
+            self._refuse("pick is outside the next independent classic position", site)
+        node = pick.nodes[site]
+        if self._restricted_nodes is not None:
+            restricted = node not in self._restricted_nodes[site] or any(
+                choice not in self._restricted_edges[edge] for edge, choice in pick.edges.items()
+            )
+        else:
+            restricted = not self._node_restriction_allows(site, node) or any(
+                not self._edge_restriction_allows(edge, choice) for edge, choice in pick.edges.items()
+            )
+        if restricted:
+            self._refuse("pick is outside the schedule restriction", site)
+        support = self.domains.local_support(site, node, pick.edges)
+        if support is None:
+            self._refuse("pick has no local classic support", site)
+        if why := self._support_refusal(site, support):
+            self._refuse(why, site)
+        work = support.work or self._work
+        nodes = {**self.assignment.nodes, site: support.node}
+        axes = {**self._axes, **{claim.name: (claim.tile, claim.units) for claim in support.axes}}
+        fragments = {**self._fragments, **{(claim.role, claim.edge): claim.value for claim in support.fragments}}
+        return replace(
+            self,
+            position=self.position + 1,
+            _assignment=Schedule(None, nodes, {**self.assignment.edges, **support.edges}),
+            _work=work,
+            _axes=axes,
+            _fragments=fragments,
+            _raster_eligible=self._raster_eligible or support.raster_eligible,
+        )
+
+    def _support_refusal(self, site: NodeId, support: LocalSupport) -> str | None:
+        """Return why one locally supported pick cannot extend this prefix."""
+        if not self._local_restriction_allows(site, support):
+            return "pick is outside the schedule restriction"
+        why = self._prefix_relation_refusal(
+            support,
+            work=self._work,
+            previous_nodes=tuple(self.assignment.nodes.values()) if self._work is None else (),
+            axes=tuple(self._axes.items()),
+            fragments=tuple(self._fragments.items()),
+            allowed_works=self._allowed_works,
+        )
+        if why is not None:
+            return why
+        if self._allowed_works is None and not self._work_restriction_allows(support.work or self._work):
+            return "pick cannot reach a kernel allowed by the schedule restriction"
+        return None
+
+    @staticmethod
+    def _prefix_relation_refusal(
+        support: LocalSupport,
+        *,
+        work: Work | None,
+        previous_nodes: tuple[NodeSchedule, ...],
+        axes: tuple[tuple[str, tuple[int, int]], ...],
+        fragments: tuple[tuple[tuple[str, str], tuple], ...],
+        allowed_works: frozenset[tuple[str, tuple[int, ...]]] | None,
+    ) -> str | None:
+        """Return the one work/axis/fragment refusal shared by frontier indexing and extension."""
+        if work is not None and support.work is not None and support.work != work:
+            return "pick requires a different worker inventory"
+        resolved_work = support.work or work
+        if allowed_works is not None and resolved_work is not None and (resolved_work.kind, resolved_work.units) not in allowed_works:
+            return "pick cannot reach a kernel allowed by the schedule restriction"
+        if work is None and resolved_work is not None:
+            if not all(choice.tile.is_canonical_for(resolved_work) for choice in (*previous_nodes, support.node)):
+                return "pick is not canonical for the worker inventory"
+        elif not support.node.tile.is_canonical_for(resolved_work):
+            return "pick is not canonical for the worker inventory"
+        axis_values = dict(axes)
+        for claim in support.axes:
+            value = (claim.tile, claim.units)
+            if axis_values.get(claim.name, value) != value:
+                return "pick disagrees on physical-axis geometry"
+        fragment_values = dict(fragments)
+        for claim in support.fragments:
+            key = (claim.role, claim.edge)
+            if fragment_values.setdefault(key, claim.value) != claim.value:
+                return "pick repeats a fragment endpoint inconsistently"
+            other_role = "need" if claim.role == "offer" else "offer"
+            other = fragment_values.get((other_role, claim.edge))
+            if other is None:
+                continue
+            need, offer = (claim.value, other) if claim.role == "need" else (other, claim.value)
+            if offer[0] == "free":
+                compatible = need[0] != "step"
+            else:
+                compatible = (
+                    need[0] in ("warp", "step")
+                    and offer[0] == "warp"
+                    and need[1] == offer[1]
+                    and need[2] == offer[2]
+                    and offer[3] == 1
+                    and offer[4] == need[3]
+                )
+            if not compatible:
+                return "pick is incompatible at a fragment seam"
+        return None
+
+    def _finish(self, pick: ClassicAssignment) -> ClassicScheduleContext:
+        assert self._space is not None
+        if (
+            not self.nodes_complete
+            or self.assignment.kernel is not None
+            or not isinstance(pick.kernel, KernelSchedule)
+            or pick.nodes
+            or pick.edges
+            or pick.kernel not in self._space.kernel_set
+            or (self._restricted_kernel_set is not None and pick.kernel not in self._restricted_kernel_set)
+            or not self._kernel_composes(pick.kernel)
+        ):
+            self._refuse("pick is incompatible with the classic kernel position")
+        assignment = Schedule(pick.kernel, self.assignment.nodes, self.assignment.edges)
+        self._require_kernel_prefix(assignment)
+        if self._unsupported_global:
+            self._refuse("global schedule pin is unsupported by every applicable site")
+        if not self._predicate(assignment):
+            self._refuse("schedule restriction rejects assignment")
+        return replace(self, _assignment=assignment)
+
+    def _require_kernel_prefix(self, schedule: ClassicAssignment) -> None:
+        """Validate the kernel facts not already proved by local prefix composition."""
+        kernel_work = Work(schedule.kernel.work.kind, schedule.kernel.work.units)
+        warp_size = getattr(self.problem.target, "warp_size", 32)
+        compute_threads = kernel_work.count * (warp_size if kernel_work.kind == "warp" else 1)
+        producer_threads = schedule.kernel.work.producer * warp_size
+        if producer_threads > compute_threads:
+            self._refuse("producer band cannot outnumber the compute band")
+        if compute_threads + producer_threads > getattr(self.problem.target, "max_threads_per_cta", 1024):
+            self._refuse("worker inventory exceeds the target thread limit")
+        if not schedule.kernel.work.producer:
+            return
+        for site, assignment in schedule.nodes.items():
+            if not assignment.tile.is_tiled:
+                continue
+            if isinstance(assignment, ReductionSchedule) and assignment.reduce.needs_split:
+                self._refuse("a producer band cannot accompany a cross-CTA reduction", site)
+            edges = tuple(edge for edge in self.incident_edges(site) if edge in self.stage_edges)
+            if not edges or any(schedule.edges[edge].stage.transport != "smem-tma" for edge in edges):
+                self._refuse("a producer band requires TMA transport at every tiled consumer", site)
+
+    def _require_complete(self, schedule: ClassicAssignment) -> None:
+        """Raise :class:`ScheduleRefused` with the first complete-assignment refusal."""
+        self._require_intrinsic(schedule)
+        self._require_domain_membership(schedule)
+        if self.domains is not None and not self._support_relation_accepts(schedule):
+            raise ScheduleRefused("complete choices violate the classic compatibility relation")
+        self._require_restriction(schedule)
+
+    def _refuse(self, reason: str, site: NodeId | EdgeSite | None = None) -> None:
+        if site is None:
+            raise ScheduleRefused(reason)
+        where = node_id_spelling(site) if type(site) is int else edge_site_spelling(site)
+        raise ScheduleRefused(f"{where}: {reason}")
+
+    def _require_intrinsic(self, schedule: ClassicAssignment) -> None:
+        if not isinstance(schedule, Schedule) or not isinstance(schedule.kernel, KernelSchedule):
+            self._refuse("assignment must contain a classic kernel schedule")
+        if any(not isinstance(value, (ProjectionSchedule, ReductionSchedule)) for value in schedule.nodes.values()):
+            self._refuse("classic node assignments must contain projection or reduction schedules")
+        if any(not isinstance(value, EdgeSchedule) for value in schedule.edges.values()):
+            self._refuse("classic edge assignments must contain edge schedules")
+        expected_nodes = set(self.node_sites)
+        if missing := expected_nodes - schedule.nodes.keys():
+            self._refuse("missing node assignment", min(missing))
+        if extra := schedule.nodes.keys() - expected_nodes:
+            self._refuse("node assignment is outside this problem", min(extra))
+        expected_edges = set(self.edge_sites)
+        if missing := expected_edges - schedule.edges.keys():
+            self._refuse("missing edge assignment", min(missing))
+        if extra := schedule.edges.keys() - expected_edges:
+            self._refuse("edge assignment is outside this problem", min(extra))
+
+        claimed_work = None
+        for site in self.node_sites:
             view = self.views[site]
             assignment = schedule.nodes[site]
             if isinstance(view, Projection) and not isinstance(assignment, ProjectionSchedule):
-                return Acceptance(Refusal("projection site requires a projection schedule", site))
+                self._refuse("projection site requires a projection schedule", site)
             if isinstance(view, Reduction) and not isinstance(assignment, ReductionSchedule):
-                return Acceptance(Refusal("reduction site requires a reduction schedule", site))
+                self._refuse("reduction site requires a reduction schedule", site)
             if isinstance(assignment.tile, PlacedTile):
-                return Acceptance(Refusal("node choices cannot contain placed tile geometry", site))
-            if site not in self._tile_sites and assignment.tile != Tile():
-                return Acceptance(Refusal("this node has no tile choice", site))
+                self._refuse("node choices cannot contain placed tile geometry", site)
+            if site not in self.tile_sites and assignment.tile != Tile():
+                self._refuse("this node has no tile choice", site)
             if assignment.tile.is_warp and hasattr(self.problem.target, assignment.tile.atom.target_feature):
                 if not assignment.tile.atom.available_on(self.problem.target):
-                    return Acceptance(Refusal("tile atom is unavailable on the target", site))
+                    self._refuse("tile atom is unavailable on the target", site)
             coop = assignment.reduce.coop if isinstance(assignment, ReductionSchedule) else 1
             try:
                 work = derive_inventory((assignment.tile,), coop=coop)
             except ValueError as error:
-                return Acceptance(Refusal(str(error), site))
+                self._refuse(str(error), site)
             if work is not None:
                 if claimed_work is not None and claimed_work != work:
-                    return Acceptance(Refusal("node choices require different worker inventories", site))
+                    self._refuse("node choices require different worker inventories", site)
                 claimed_work = work
+            if not assignment.tile.is_canonical_for(schedule.kernel.work):
+                self._refuse("node TILE is not canonical under the kernel WORK", site)
         kernel_work = Work(schedule.kernel.work.kind, schedule.kernel.work.units)
         if (claimed_work or Work()) != kernel_work:
-            return Acceptance(Refusal("kernel WORK does not realize the node choices"))
-        for site, assignment in schedule.nodes.items():
-            if not assignment.tile.is_canonical_for(schedule.kernel.work):
-                return Acceptance(Refusal("node TILE is not canonical under the kernel WORK", site))
+            self._refuse("kernel WORK does not realize the node choices")
         warp_size = getattr(self.problem.target, "warp_size", 32)
-        max_threads = getattr(self.problem.target, "max_threads_per_cta", 1024)
         compute_threads = kernel_work.count * (warp_size if kernel_work.kind == "warp" else 1)
         producer_threads = schedule.kernel.work.producer * warp_size
         if producer_threads > compute_threads:
-            return Acceptance(Refusal("producer band cannot outnumber the compute band"))
-        if compute_threads + producer_threads > max_threads:
-            return Acceptance(Refusal("worker inventory exceeds the target thread limit"))
-        if schedule.kernel.raster != Raster() and not any(
+            self._refuse("producer band cannot outnumber the compute band")
+        if compute_threads + producer_threads > getattr(self.problem.target, "max_threads_per_cta", 1024):
+            self._refuse("worker inventory exceeds the target thread limit")
+        if not schedule.kernel.raster.is_direct and not any(
             isinstance(self.views[site], Reduction) and self.views[site].contraction is not None and schedule.nodes[site].tile.is_tiled
-            for site in self.index.nodes
+            for site in self.node_sites
         ):
-            return Acceptance(Refusal("RASTER requires a tiled contraction site"))
-        for edge in self.index.edges:
-            edge_assignment = schedule.edges[edge]
-            if not isinstance(edge_assignment, EdgeSchedule):
-                return Acceptance(Refusal("edge assignment must be an EdgeSchedule", edge))
-            stage = edge_assignment.stage
-            if not isinstance(stage, Stage):
-                return Acceptance(Refusal("edge assignment must contain an explicit Stage choice", edge))
-            if edge not in self._stage_edges and not stage.is_direct:
-                return Acceptance(Refusal("this edge has no staged transport choice", edge))
-            assignment = schedule.nodes[edge[0]]
-            if not stage.is_direct and not assignment.tile.is_tiled:
-                return Acceptance(Refusal("staged transport requires a tiled consumer", edge))
+            self._refuse("RASTER requires a tiled contraction site")
+        for edge in self.edge_sites:
+            stage = schedule.edges[edge].stage
+            if edge not in self.stage_edges and not stage.is_direct:
+                self._refuse("this edge has no staged transport choice", edge)
+            if not stage.is_direct and not schedule.nodes[edge[0]].tile.is_tiled:
+                self._refuse("staged transport requires a tiled consumer", edge)
             if not stage.is_direct and hasattr(self.problem.target, "has_cp_async") and not stage.available_on(self.problem.target):
-                return Acceptance(Refusal("transport is unavailable on the target", edge))
-        for site in self.index.nodes:
-            stages = {schedule.edges[edge].stage for edge in self._incident_edges[site]}
-            if len(stages) > 1:
-                return Acceptance(Refusal("one contraction currently requires one transport choice across its operands", site))
+                self._refuse("transport is unavailable on the target", edge)
+        for site in self.node_sites:
+            if len({schedule.edges[edge].stage for edge in self.incident_edges(site)}) > 1:
+                self._refuse("one contraction currently requires one transport choice across its operands", site)
         if schedule.kernel.work.producer:
-            for site in self.index.nodes:
+            for site in self.node_sites:
                 assignment = schedule.nodes[site]
                 if not assignment.tile.is_tiled:
                     continue
                 if isinstance(assignment, ReductionSchedule) and assignment.reduce.needs_split:
-                    return Acceptance(Refusal("a producer band cannot accompany a cross-CTA reduction", site))
-                edges = tuple(edge for edge in self._incident_edges[site] if edge in self._stage_edges)
+                    self._refuse("a producer band cannot accompany a cross-CTA reduction", site)
+                edges = tuple(edge for edge in self.incident_edges(site) if edge in self.stage_edges)
                 if not edges or any(schedule.edges[edge].stage.transport != "smem-tma" for edge in edges):
-                    return Acceptance(Refusal("a producer band requires TMA transport at every tiled consumer", site))
-        if self.domains is not None:
-            verdict = _accepts_domains(self, schedule)
-            if not verdict:
-                return verdict
-        return Acceptance()
+                    self._refuse("a producer band requires TMA transport at every tiled consumer", site)
 
+    def _require_domain_membership(self, schedule: ClassicAssignment) -> None:
+        if self.domains is None:
+            return
+        assert self._space is not None
+        if schedule.kernel not in self._space.kernel_set:
+            self._refuse("kernel choice is outside its independent domain")
+        for site in self.node_sites:
+            if schedule.nodes[site] not in self._space.node_sets[site]:
+                self._refuse("node choice is outside its independent domain", site)
+        for edge in self.edge_sites:
+            if schedule.edges[edge] not in self._space.edge_sets[edge]:
+                self._refuse("edge choice is outside its independent domain", edge)
 
-def _accepts_domains(context: ClassicScheduleContext, schedule: ClassicSchedule) -> Acceptance:
-    """Check one complete assignment against independent domains and their support relation."""
-    assert context.domains is not None
-    if schedule.kernel not in context._kernel_domain:
-        return Acceptance(Refusal("kernel choice is outside its independent domain"))
-    for site in context.index.nodes:
-        if schedule.nodes[site] not in context._node_domains[site]:
-            return Acceptance(Refusal("node choice is outside its independent domain", site))
-    for edge in context.index.edges:
-        if schedule.edges[edge] not in context._edge_domains[edge]:
-            return Acceptance(Refusal("edge choice is outside its independent domain", edge))
+    def _support_relation_accepts(self, schedule: ClassicAssignment) -> bool:
+        start = replace(
+            self,
+            position=0,
+            _assignment=Schedule(None, {}, {}),
+            _work=None,
+            _axes=frozendict(),
+            _fragments=frozendict(),
+            _raster_eligible=False,
+            _predicate=_allow_schedule,
+            _pins=None,
+            _allow_f16_accumulate=True,
+            _allow_fp8=True,
+            _allowed_works=None,
+            _unsupported_global=None,
+            _restricted_kernels=None,
+            _restricted_kernel_set=None,
+            _restricted_nodes=None,
+            _restricted_edges=None,
+        )
 
-    candidates: list[tuple[NodeId, tuple[LocalSupport, ...]]] = []
-    for site in context.index.nodes:
-        incident = context._incident_edges[site]
-        key = (schedule.nodes[site], *(schedule.edges[edge] for edge in incident))
-        matches = context._support_index[site].get(key, ())
-        if not matches:
-            return Acceptance(Refusal("node and incident edge choices have no static support", site))
-        candidates.append((site, matches))
+        context = start
+        try:
+            while not context.nodes_complete:
+                assert context.next_site is not None
+                site = context.next_site
+                edges = {edge: schedule.edges[edge] for edge in context.incident_edges(site)}
+                context = context.extend(Schedule(None, {site: schedule.nodes[site]}, edges))
+        except ScheduleRefused:
+            return False
+        return context._kernel_composes(schedule.kernel)
 
-    def visit(
-        position: int,
-        work: Work | None,
-        axes: dict[str, tuple[int, int]],
-        fragments: dict[tuple[str, str], tuple],
-        raster_eligible: bool,
-    ) -> bool:
-        if position == len(candidates):
-            kernel_work = Work(schedule.kernel.work.kind, schedule.kernel.work.units)
-            return (work or Work()) == kernel_work and (schedule.kernel.raster.is_direct or raster_eligible)
-        _site, supports = candidates[position]
-        for support in supports:
-            next_work = work
-            if support.work is not None:
-                if next_work is not None and next_work != support.work:
-                    continue
-                next_work = support.work
-            next_axes = axes
-            rejected = False
-            if support.axes:
-                next_axes = dict(axes)
-                for claim in support.axes:
-                    value = (claim.tile, claim.units)
-                    if next_axes.setdefault(claim.name, value) != value:
-                        rejected = True
-                        break
-            if rejected:
-                continue
-            next_fragments = fragments
-            if support.fragments:
-                next_fragments = dict(fragments)
-                for claim in support.fragments:
-                    key = (claim.role, claim.edge)
-                    if next_fragments.setdefault(key, claim.value) != claim.value:
-                        rejected = True
-                        break
-                    other_role = "need" if claim.role == "offer" else "offer"
-                    other = next_fragments.get((other_role, claim.edge))
-                    if other is not None:
-                        need, offer = (claim.value, other) if claim.role == "need" else (other, claim.value)
-                        if not _fragment_seam_ok(need, offer):
-                            rejected = True
-                            break
-            if rejected:
-                continue
-            if visit(
-                position + 1,
-                next_work,
-                next_axes,
-                next_fragments,
-                raster_eligible or support.raster_eligible,
+    def _kernel_composes(self, kernel: KernelSchedule) -> bool:
+        work = self._work or Work()
+        return kernel.work.kind == work.kind and kernel.work.units == work.units and (kernel.raster.is_direct or self._raster_eligible)
+
+    def _supports_global(self, family: str, value: str) -> bool:
+        return any(key.partition("@")[0] == family and value in self.values(key) for key in self.keys())
+
+    def _allows_value(self, family: str, key: str, value: str) -> bool:
+        return all(pin == value for pin in self._applicable_pins(family, key))
+
+    def _applicable_pins(self, family: str, key: str) -> tuple[str, ...]:
+        """Return exact pins, or global pins whose value belongs to this projected site."""
+        assert self._pins is not None
+        exact = tuple(pin for pin_key, pin in self._pins[family] if pin_key == key and key != family)
+        if exact:
+            return exact
+        return tuple(pin for pin_key, pin in self._pins[family] if pin_key == family and pin in self.values(key))
+
+    def _kernel_restriction_allows(self, kernel: KernelSchedule) -> bool:
+        """Whether the kernel support can still satisfy the immutable restriction ``c``."""
+        if self._pins is None:
+            return True
+        if not self._allows_value("WORK", "WORK", kernel.work.spell()):
+            return False
+        if not self._allows_value("RASTER", "RASTER", kernel.raster.spell()):
+            return False
+        allow_transposed = any(key == "RASTER" and value.startswith("gn") for key, value in self._pins["RASTER"])
+        return kernel.raster.orient != "n" or allow_transposed
+
+    def _work_restriction_allows(self, work: Work | None) -> bool:
+        """Whether a claimed prefix inventory can still reach a kernel allowed by ``c``."""
+        if work is None:
+            return True
+        if self._allowed_works is not None:
+            return (work.kind, work.units) in self._allowed_works
+        return any(
+            kernel.work.kind == work.kind and kernel.work.units == work.units and self._kernel_restriction_allows(kernel)
+            for kernel in self.kernels
+        )
+
+    def _local_restriction_allows(self, site: NodeId, support: LocalSupport) -> bool:
+        """Whether one local support can still satisfy the immutable restriction ``c``."""
+        return self._node_restriction_allows(site, support.node) and all(
+            self._edge_restriction_allows(edge, choice) for edge, choice in support.edges.items()
+        )
+
+    def _node_restriction_allows(self, site: NodeId, choice: NodeSchedule) -> bool:
+        """Whether one independent node value can still satisfy ``c``."""
+        if self._pins is not None:
+            if site in self.tile_sites and not self._allows_value("TILE", self.node_key("TILE", site), choice.tile.spell()):
+                return False
+            if isinstance(choice, ReductionSchedule) and not self._allows_value(
+                "REDUCE", self.node_key("REDUCE", site), choice.reduce.spell()
             ):
-                return True
-        return False
+                return False
+        if choice.tile.is_warp:
+            atom = choice.tile.atom
+            if atom.operand_dtype("a").nbytes == 1 and not self._allow_fp8:
+                return False
+            if atom.operand_dtype("c").nbytes == 2 and not self._allow_f16_accumulate:
+                return False
+        return True
 
-    if not visit(0, None, {}, {}, False):
-        return Acceptance(Refusal("complete choices violate the classic compatibility relation"))
-    return Acceptance()
+    def _edge_restriction_allows(self, edge: EdgeSite, choice: EdgeSchedule) -> bool:
+        """Whether one independent edge value can still satisfy ``c``."""
+        return self._pins is None or edge not in self.stage_edges or self._allows_value("STAGE", self.stage_key(edge), choice.stage.spell())
+
+    def _require_restriction(self, schedule: ClassicAssignment) -> None:
+        if not self._predicate(schedule):
+            self._refuse("schedule restriction rejects assignment")
+        if self._pins is None:
+            return
+        if self._unsupported_global:
+            self._refuse("global schedule pin is unsupported by every applicable site")
+        if not self._allows_value("WORK", "WORK", schedule.kernel.work.spell()):
+            self._refuse("WORK is outside the schedule restriction")
+        if not self._allows_value("RASTER", "RASTER", schedule.kernel.raster.spell()):
+            self._refuse("RASTER is outside the schedule restriction")
+        allow_transposed = any(key == "RASTER" and value.startswith("gn") for key, value in self._pins["RASTER"])
+        if schedule.kernel.raster.orient == "n" and not allow_transposed:
+            self._refuse("transposed RASTER is outside the schedule restriction")
+        for site, choice in schedule.nodes.items():
+            if site in self.tile_sites and not self._allows_value("TILE", self.node_key("TILE", site), choice.tile.spell()):
+                self._refuse("TILE is outside the schedule restriction", site)
+            if isinstance(choice, ReductionSchedule) and not self._allows_value(
+                "REDUCE", self.node_key("REDUCE", site), choice.reduce.spell()
+            ):
+                self._refuse("REDUCE is outside the schedule restriction", site)
+            if choice.tile.is_warp:
+                atom = choice.tile.atom
+                if atom.operand_dtype("a").nbytes == 1 and not self._allow_fp8:
+                    self._refuse("FP8 TILE is outside the precision restriction", site)
+                if atom.operand_dtype("c").nbytes == 2 and not self._allow_f16_accumulate:
+                    self._refuse("f16-accumulate TILE is outside the precision restriction", site)
+        for edge, choice in schedule.edges.items():
+            if edge in self.stage_edges and not self._allows_value("STAGE", self.stage_key(edge), choice.stage.spell()):
+                self._refuse("STAGE is outside the schedule restriction", edge)
+
+    def node_assignment(self, site: NodeId) -> NodeSchedule:
+        return self.assignment.nodes[site]
+
+    def edge_assignment(self, edge: EdgeSite) -> EdgeSchedule:
+        return self.assignment.edges[edge]
+
+    @property
+    def work(self) -> Work | None:
+        return self._work
 
 
-def _fragment_seam_ok(need: tuple, offer: tuple) -> bool:
-    """Whether one consumer fragment requirement composes with a producer offer."""
-    if offer[0] == "free":
-        return need[0] != "step"
-    if need[0] not in ("warp", "step") or offer[0] != "warp":
-        return False
-    _, shape, layout, bk = need
-    _, offer_shape, offer_layout, offer_units_n, offer_tile_n = offer
-    return shape == offer_shape and layout == offer_layout and offer_units_n == 1 and offer_tile_n == bk
+def classic_cartesian_assignments(
+    context: ClassicScheduleContext,
+) -> Iterator[tuple[ClassicAssignment, bool]]:
+    """Enumerate the literal classic kernel × node × edge product and its acceptance bit."""
+    node_domains = tuple(context.node_choices(site) for site in context.node_sites)
+    edge_domains = tuple(context.edge_choices(site) for site in context.edge_sites)
+    for kernel, node_values, edge_values in product(context.kernels, product(*node_domains), product(*edge_domains)):
+        assignment = Schedule(
+            kernel,
+            dict(zip(context.node_sites, node_values, strict=True)),
+            dict(zip(context.edge_sites, edge_values, strict=True)),
+        )
+        try:
+            context.extend(assignment)
+        except (ScheduleRefused, TypeError):
+            accepted = False
+        else:
+            accepted = True
+        yield assignment, accepted
 
 
-class ClassicScheduleCodec(ScheduleCodec[ClassicSchedule]):
+def enumerate_classic_reference(context: ClassicScheduleContext) -> Iterator[ClassicAssignment]:
+    """Literal Algorithm 1 oracle for a classic context's independent domains."""
+    for assignment, accepted in classic_cartesian_assignments(context):
+        if accepted:
+            yield assignment
+
+
+class ClassicScheduleCodec:
     """Strict wire boundary for complete classic schedules.
 
     Kernel families are bare. A node family is bare when it has one applicable site and carries a
@@ -685,89 +1239,79 @@ class ClassicScheduleCodec(ScheduleCodec[ClassicSchedule]):
     or unknown fields.
     """
 
-    def __init__(self, problem: ClassicProblem, domains: ClassicDomains | None = None) -> None:
-        self.context = ClassicScheduleContext(problem, domains)
-        self._tile_sites = tile_sites(self.context)
-        self._reduce_sites = reduction_sites(self.context)
-        self._stage_sites = stage_edges(self.context)
-        self._stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self._stage_sites))
-        self._key_order = (
-            "WORK",
-            "RASTER",
-            *(self._node_key("TILE", site, self._tile_sites) for site in self._tile_sites),
-            *(self._node_key("REDUCE", site, self._reduce_sites) for site in self._reduce_sites),
-            *(self._stage_key(site) for site in self._stage_consumers),
-        )
+    def __init__(self, context: ClassicScheduleContext) -> None:
+        if not isinstance(context, ClassicScheduleContext):
+            raise TypeError("classic codec requires a ClassicScheduleContext")
+        self.context = context
+        self._key_order = context.keys()
         self._keys = frozenset(self._key_order)
 
-    def encode(self, schedule: ClassicSchedule) -> dict[str, str]:
+    def encode(self, schedule: ClassicAssignment) -> dict[str, str]:
         """Encode one accepted typed schedule in canonical scope order."""
-        verdict = self.context.accepts(schedule)
-        if not verdict:
-            raise ValueError(_refusal_message(verdict.refusal))
-        return self._encode_accepted(schedule)
+        accepted = self.context.extend(schedule).assignment
+        return self._encode_accepted(accepted)
 
-    def _encode_accepted(self, schedule: ClassicSchedule) -> dict[str, str]:
+    def _encode_accepted(self, schedule: ClassicAssignment) -> dict[str, str]:
         """Encode a schedule whose compatibility was already checked at this boundary."""
         row = {
             "WORK": schedule.kernel.work.spell(),
             "RASTER": schedule.kernel.raster.spell(),
         }
-        for site in self._tile_sites:
-            row[self._node_key("TILE", site, self._tile_sites)] = schedule.nodes[site].tile.spell()
-        for site in self._reduce_sites:
+        for site in self.context.tile_sites:
+            row[self.context.node_key("TILE", site)] = schedule.nodes[site].tile.spell()
+        for site in self.context.reduction_sites:
             assignment = schedule.nodes[site]
             assert isinstance(assignment, ReductionSchedule)
-            row[self._node_key("REDUCE", site, self._reduce_sites)] = assignment.reduce.spell()
-        for site in self._stage_consumers:
-            stages = {schedule.edges[edge].stage for edge in self._stage_sites if edge[0] == site}
+            row[self.context.node_key("REDUCE", site)] = assignment.reduce.spell()
+        stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.context.stage_edges))
+        for site in stage_consumers:
+            edges = tuple(edge for edge in self.context.stage_edges if edge[0] == site)
+            stages = {schedule.edges[edge].stage for edge in edges}
             if len(stages) != 1:
                 raise ValueError(f"{node_id_spelling(site)}: one STAGE value must cover every operand edge")
-            row[self._stage_key(site)] = stages.pop().spell()
+            row[self.context.stage_key(edges[0])] = stages.pop().spell()
         return row
 
-    def decode(self, row: Mapping[str, str]) -> ClassicSchedule:
+    def decode(self, row: Mapping[str, str]) -> ClassicAssignment:
         """Decode one complete canonical row and reject every other key set or assignment."""
         self._check_keys(row)
 
         work = Work.parse(row["WORK"])
         nodes: dict[NodeId, NodeSchedule] = {}
-        for site in self.context.index.nodes:
+        for site in self.context.node_sites:
             view = self.context.views[site]
             reduce = None
             if isinstance(view, Reduction):
-                reduce = Reduce.parse(row[self._node_key("REDUCE", site, self._reduce_sites)], work)
+                reduce = Reduce.parse(row[self.context.node_key("REDUCE", site)], work)
             tile = (
                 resolve_site_tile(
-                    row[self._node_key("TILE", site, self._tile_sites)],
+                    row[self.context.node_key("TILE", site)],
                     work,
                     reduce.coop if reduce is not None else 1,
                 )
-                if site in self._tile_sites
+                if site in self.context.tile_sites
                 else Tile()
             )
             nodes[site] = ProjectionSchedule(tile) if reduce is None else ReductionSchedule(tile, reduce)
-        schedule = ClassicSchedule(
+        schedule = Schedule(
             KernelSchedule(work, Raster.parse(row["RASTER"])),
             nodes,
             {
-                edge: EdgeSchedule(Stage.parse(row[self._stage_key(edge[0])]))
-                if edge in self._stage_sites
+                edge: EdgeSchedule(Stage.parse(row[self.context.stage_key(edge)]))
+                if edge in self.context.stage_edges
                 else EdgeSchedule(Stage.direct())
-                for edge in self.context.index.edges
+                for edge in self.context.edge_sites
             },
         )
         return self._validate_row(schedule, row)
 
-    def _validate_row(self, schedule: ClassicSchedule, row: Mapping[str, str]) -> ClassicSchedule:
+    def _validate_row(self, schedule: ClassicAssignment, row: Mapping[str, str]) -> ClassicAssignment:
         """Validate a parsed assignment and its claimed canonical row exactly once."""
-        verdict = self.context.accepts(schedule)
-        if not verdict:
-            raise ValueError(_refusal_message(verdict.refusal))
-        canonical = self._encode_accepted(schedule)
+        accepted = self.context.extend(schedule).assignment
+        canonical = self._encode_accepted(accepted)
         if dict(row) != canonical:
             raise ValueError("classic schedule row is not its typed schedule's canonical encoding")
-        return schedule
+        return accepted
 
     def _check_keys(self, row: Mapping[str, str]) -> None:
         """Require the codec's exact key set before parsing or validating values."""
@@ -784,268 +1328,39 @@ class ClassicScheduleCodec(ScheduleCodec[ClassicSchedule]):
 
     def values(self, key: str) -> tuple[str, ...]:
         """Return one canonical key's values in independent-domain order."""
-        domains = self.context.domains
-        if domains is None or key not in self._keys:
-            raise ValueError(f"classic key {key!r} has no projected domain")
-        family = key.partition("@")[0]
-        if family == "WORK":
-            values = (choice.work.spell() for choice in domains.kernel)
-        elif family == "RASTER":
-            values = (choice.raster.spell() for choice in domains.kernel)
-        elif family == "TILE":
-            site = next(site for site in self._tile_sites if self.node_key("TILE", site) == key)
-            values = (choice.tile.spell() for choice in domains.nodes[site])
-        elif family == "REDUCE":
-            site = next(site for site in self._reduce_sites if self.node_key("REDUCE", site) == key)
-            values = (choice.reduce.spell() for choice in domains.nodes[site] if isinstance(choice, ReductionSchedule))
-        else:
-            edges = tuple(edge for edge in self._stage_sites if self.stage_key(edge) == key)
-            per_edge = [{choice.stage.spell() for choice in domains.edges[edge]} for edge in edges]
-            common = set.intersection(*per_edge)
-            values = (choice.stage.spell() for choice in domains.edges[edges[0]] if choice.stage.spell() in common)
-        return tuple(dict.fromkeys(values))
+        return self.context.values(key)
 
     def node_key(self, family: str, site: NodeId) -> str:
         """Return the canonical key for one TILE or REDUCE site."""
-        sites = {"TILE": self._tile_sites, "REDUCE": self._reduce_sites}.get(family)
-        if sites is None:
-            raise ValueError(f"{family} is not a classic node family")
-        return self._node_key(family, site, sites)
+        return self.context.node_key(family, site)
 
     def stage_key(self, edge: EdgeSite) -> str:
         """Return the canonical STAGE key for one transport edge."""
-        if edge not in self._stage_sites:
-            raise ValueError(f"{edge_site_spelling(edge)} is not a STAGE edge")
-        return self._stage_key(edge[0])
-
-    @staticmethod
-    def _node_key(family: str, site: NodeId, family_sites: Sequence[NodeId]) -> str:
-        return node_key(family, site, family_sites)
-
-    def _stage_key(self, site: NodeId) -> str:
-        return node_key("STAGE", site, self._stage_consumers)
-
-
-def _refusal_message(refusal: Refusal | None) -> str:
-    if refusal is None:
-        return "classic schedule refused"
-    if refusal.site is None:
-        return refusal.reason
-    if type(refusal.site) is int:
-        where = node_id_spelling(refusal.site)
-    else:
-        where = edge_site_spelling(refusal.site)
-    return f"{where}: {refusal.reason}"
-
-
-def tile_sites(context: ClassicScheduleContext) -> tuple[NodeId, ...]:
-    """Node sites whose tile domain contains more than the fixed direct choice."""
-    out = []
-    for site in context.index.nodes:
-        view = context.views[site]
-        node = context.index.node(site)
-        if (isinstance(view, Reduction) and view.contraction is not None) or (
-            isinstance(view, Projection) and site == context.index.nodes[0] and not node.operands
-        ):
-            out.append(site)
-    return tuple(out)
-
-
-def stage_edges(context: ClassicScheduleContext) -> tuple[EdgeSite, ...]:
-    """Operand edges whose transport domain belongs to a contraction."""
-    return tuple(
-        edge for edge in context.index.edges if isinstance((view := context.views[edge[0]]), Reduction) and view.contraction is not None
-    )
-
-
-def reduction_sites(context: ClassicScheduleContext) -> tuple[NodeId, ...]:
-    """Node sites whose schedule includes a reduction choice."""
-    return tuple(site for site in context.index.nodes if isinstance(context.views[site], Reduction))
-
-
-def node_key(family: str, site: NodeId, family_sites: Sequence[NodeId]) -> str:
-    """Return the sole canonical codec key for a node family site."""
-    if site not in family_sites:
-        raise ValueError(f"{node_id_spelling(site)} is not a {family} site")
-    return family if len(family_sites) == 1 else f"{family}@{node_id_spelling(site)}"
-
-
-def edge_key(edge: EdgeSite, family_edges: Sequence[EdgeSite]) -> str:
-    """Return the canonical STAGE key for an edge's consumer node."""
-    if edge not in family_edges:
-        raise ValueError(f"{edge_site_spelling(edge)} is not a STAGE site")
-    consumers = tuple(dict.fromkeys(candidate[0] for candidate in family_edges))
-    return node_key("STAGE", edge[0], consumers)
-
-
-def kernel_domain(problem: ClassicProblem, domains: ClassicDomains | None = None) -> tuple[KernelSchedule, ...]:
-    """Return the kernel factor without inspecting a selected node or edge choice."""
-    del problem
-    return domains.kernel if domains is not None else (KernelSchedule(Work(), Raster()),)
-
-
-def node_domain(
-    problem: ClassicProblem,
-    site: NodeId,
-    view: NodeView,
-    domains: ClassicDomains | None = None,
-) -> tuple[NodeSchedule, ...]:
-    """Return one node factor without inspecting any selected schedule."""
-    index = SiteIndex(problem.root)
-    if node_view(index.node(site)) != view:
-        raise ValueError(f"view does not classify {node_id_spelling(site)} in this problem")
-    if domains is not None:
-        try:
-            return domains.nodes[site]
-        except KeyError:
-            raise ValueError(f"classic domains do not contain {node_id_spelling(site)}") from None
-    if isinstance(view, Projection):
-        return (ProjectionSchedule(Tile()),)
-    return (ReductionSchedule(Tile(), Reduce()),)
-
-
-def edge_domain(
-    problem: ClassicProblem,
-    edge: EdgeSite,
-    domains: ClassicDomains | None = None,
-) -> tuple[EdgeSchedule, ...]:
-    """Return one edge factor without inspecting any selected schedule."""
-    index = SiteIndex(problem.root)
-    index.operand(edge)
-    if domains is not None:
-        try:
-            return domains.edges[edge]
-        except KeyError:
-            raise ValueError(f"classic domains do not contain {edge_site_spelling(edge)}") from None
-    return (EdgeSchedule(Stage.direct()),)
-
-
-def cartesian_assignments(p: Fold, t, *, domains: ClassicDomains | None = None) -> Iterator[tuple[ClassicSchedule, Acceptance]]:
-    """Enumerate ``D(p, t)`` and each compatibility verdict."""
-    problem = ClassicProblem(p, t)
-    context = ClassicScheduleContext(problem, domains)
-    for schedule in _cartesian_product(p, t, context, domains):
-        yield schedule, context.accepts(schedule)
-
-
-def _cartesian_product(
-    p: Fold,
-    t,
-    context: ClassicScheduleContext,
-    domains: ClassicDomains | None,
-) -> Iterator[ClassicSchedule]:
-    """Enumerate ``K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)`` without filtering."""
-    problem = ClassicProblem(p, t)
-    node_domains = tuple(node_domain(problem, site, context.views[site], domains) for site in context.index.nodes)
-    edge_domains = tuple(edge_domain(problem, edge, domains) for edge in context.index.edges)
-    for kernel, node_values, edge_values in product(
-        kernel_domain(problem, domains),
-        product(*node_domains),
-        product(*edge_domains),
-    ):
-        yield ClassicSchedule(
-            kernel,
-            dict(zip(context.index.nodes, node_values, strict=True)),
-            dict(zip(context.index.edges, edge_values, strict=True)),
-        )
-
-
-def enumerate_reference(
-    c: ScheduleRestriction,
-    p: Fold,
-    t,
-    *,
-    domains: ClassicDomains | None = None,
-) -> Iterator[ClassicSchedule]:
-    """Algorithm 1(c, p, t): restrict ``D(p, t)``, then retain compatible assignments."""
-    if not isinstance(c, ScheduleRestriction):
-        raise TypeError("Algorithm 1 requires one immutable ScheduleRestriction c")
-    problem = ClassicProblem(p, t)
-    context = ClassicScheduleContext(problem, domains)
-    for schedule in _cartesian_product(p, t, context, domains):
-        if not c.accepts(schedule):
-            continue
-        if context.accepts(schedule):
-            yield schedule
-
-
-def enumerate_classic(
-    c: ScheduleRestriction,
-    p: Fold,
-    t,
-    *,
-    traversal: Sequence[NodeId | EdgeSite] | None = None,
-    domains: ClassicDomains | None = None,
-) -> Iterator[ClassicSchedule]:
-    """Lazily enumerate complete assignments in any site order.
-
-    This traversal intentionally performs no semantic pruning.  Its set must therefore equal
-    :func:`enumerate_reference` for every site order; the walk may prune only ``p``/``t``
-    incompatibility prefixes while preserving the same complete set.
-    """
-    if not isinstance(c, ScheduleRestriction):
-        raise TypeError("Algorithm 1 requires one immutable ScheduleRestriction c")
-    problem = ClassicProblem(p, t)
-    context = ClassicScheduleContext(problem, domains)
-    canonical = (*context.index.nodes, *context.index.edges)
-    order = tuple(canonical if traversal is None else traversal)
-    if len(order) != len(canonical) or set(order) != set(canonical):
-        raise ValueError("classic traversal must contain every node and edge site exactly once")
-
-    def visit(position: int, nodes: dict, edges: dict) -> Iterator[ClassicSchedule]:
-        if position == len(order):
-            for kernel in kernel_domain(problem, domains):
-                schedule = ClassicSchedule(kernel, nodes, edges)
-                if c.accepts(schedule) and context.accepts(schedule):
-                    yield schedule
-            return
-        site = order[position]
-        if type(site) is int:
-            choices: Iterable = node_domain(problem, site, context.views[site], domains)
-            for choice in choices:
-                yield from visit(position + 1, {**nodes, site: choice}, edges)
-            return
-        for choice in edge_domain(problem, site, domains):
-            yield from visit(position + 1, nodes, {**edges, site: choice})
-
-    yield from visit(0, {}, {})
+        return self.context.stage_key(edge)
 
 
 __all__ = [
-    "Acceptance",
     "AxisAgreement",
     "CLASSIC_EDGE_FAMILIES",
     "CLASSIC_FAMILIES",
     "CLASSIC_NODE_FAMILIES",
+    "ClassicAssignment",
     "ClassicProblem",
     "ClassicMaterialization",
     "ClassicDomains",
-    "ClassicSchedule",
     "ClassicScheduleCodec",
     "ClassicScheduleContext",
     "EdgeSchedule",
+    "classic_cartesian_assignments",
     "edge_site_spelling",
+    "enumerate_classic_reference",
     "KernelSchedule",
     "FragmentAgreement",
     "LocalSupport",
     "NodeSchedule",
     "ProjectionSchedule",
     "ReductionSchedule",
-    "ScheduleRestriction",
-    "Refusal",
-    "SiteIndex",
-    "cartesian_assignments",
-    "edge_domain",
-    "edge_key",
-    "enumerate_classic",
-    "enumerate_reference",
-    "kernel_domain",
-    "node_domain",
     "node_id_spelling",
-    "node_key",
     "parse_edge_site",
     "parse_node_id",
-    "reduction_sites",
-    "stage_edges",
-    "tile_sites",
 ]

@@ -71,11 +71,12 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `030_cut` then
-offers the maximal fused tree beside every semantically closed stored Fold-edge cut whose workspace dtypes are
-determined (an undeterminable seam is not offered — the offer and the realization must agree), and
-`035_split_reduce` offers the unsplit tree beside every cross-CTA reduce split the head fold admits — both
-STRUCTURAL forks whose chosen side replaces the kernel with fresh unmapped pieces. A bare `PLACE=cut` pin names the
+`020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The one cut phase has
+two ordered slices. `030_cut` first offers the maximal fused tree beside every semantically closed stored Fold-edge
+cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer and realization must
+agree). `035_split_reduce` then offers the unsplit tree beside every cross-CTA reduce split the head fold admits.
+Both are structural forks whose chosen side replaces the kernel with fresh unmapped pieces. A bare `PLACE=cut` pin
+names the
 placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than through the
 codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone, a seam
 whose workspace dtypes stay undetermined).
@@ -120,22 +121,22 @@ kernel raster domain is projected separately from static grid facts. The compati
 choice only beside a tiled contraction; symbolic grids expose only the direct choice. Static 2-D grids project direct,
 `gm8`, `gn4`, and `gn8`; the schedule restriction excludes the transposed values unless an exact parameter selects one.
 The
-stage domain is projected once per operand edge from target-filtered transport choices. Local support records retain
-the resolved node–edge tuples without putting slab sizes into either public factor; compatibility therefore rejects
-mixed transport assignments, and selected non-direct edges are resolved again only during materialization. The
-production traversal follows support-compatible prefixes. When `c` can prove that it names at most one complete
-assignment, the scheduler validates that assignment directly against the unchanged domains and compatibility
-relation; an opaque or partial `c` supplies no such proof and follows Algorithm 1's traversal. Bounded tests compare
-the complete set against the literal node × edge × kernel product.
+stage domain is projected once per operand edge from target-filtered transport choices. After `c` has selected one
+node and its incident edge values, the context derives their local support without putting slab sizes into either
+public factor; compatibility therefore rejects mixed transport assignments, and selected non-direct edges are
+resolved again only during materialization. The production traversal follows compatible prefixes. When `c + p + t`
+can prove that a prefix has no completion, the context may reject it without constructing later support. Bounded tests
+compare the complete set against the literal node × edge × kernel product.
 The fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete
-typed `ClassicSchedule`, only the search boundary encodes exact node and consumer scopes, and only materialization
+typed `Schedule`, only the search boundary encodes exact node and consumer scopes, and only materialization
 derives placed geometry and resolved transport facts. Schedule parameters restrict Algorithm 1 without changing any
 factor or overriding target, shape, addressing, or compatibility constraints. A partial row containing scoped keys is
 inert on a kernel where all of those keys are foreign; its bare kernel values travel with it instead of accidentally
 restricting every cut piece.
 
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
-Σ over the partial and finalize it produces — so `035_split_reduce` stands beside the cut, BEFORE scheduling: the
+Σ over the partial and finalize it produces — so `035_split_reduce` is the second slice of the cut phase, BEFORE
+assignment composition. The
 rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges, its cone's
 row-invariant statistic staying full-row in every partition; any other fold slices through the generic
 `Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides its own row. The chain form keeps
@@ -162,21 +163,22 @@ candidate set and one result:
     D(p, t) = K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)
     Algorithm 1(c, p, t) = {a ∈ D(p, t) | c.accepts(a) ∧ accepts(p, t, a)}
 
-There is no production-specific product and no second notion of membership. Production carries `c` intact through
-the traversal and evaluates it only for a complete assignment; the visitor never unpacks the restriction to filter a
-kernel, node, or edge prefix. Static support derived solely from `p` and `t` may prune incompatible prefixes, but the
-walk must enumerate exactly Algorithm 1(c, p, t); traversal order can change only evaluation cost. Every leaf crosses
-the complete compatibility relation once at the strict codec boundary, then carries that accepted typed assignment
-and canonical row through search and materialization. Downstream reads never repeat the compatibility walk. Bounded
-spaces are exhaustively compared with the literal Cartesian reference. That compatibility pruning matters because on
+There is no production-specific product and no second notion of membership. The generic visitor carries `c + p + t`
+intact and never unpacks its restriction or imports classic scheduling. The context may reject a prefix only when its
+combined state proves that no completion can satisfy the same relation; it must still enumerate exactly
+Algorithm 1(c, p, t), so traversal order can change only evaluation cost. Every leaf crosses the complete
+compatibility relation once at the strict codec boundary, then carries that accepted typed assignment and canonical
+row through search and materialization. Downstream reads never repeat the compatibility walk. Bounded spaces are
+exhaustively compared with the literal Cartesian reference. That compatibility pruning matters because on
 flash attention the unconstrained product is 8.9e6 against 13,280 compatible rows, and on an EXL3 coded linear 5.3e12
 against 19,407,312.
 
-Placement is the outer enumeration. `030_cut` projects the fused/cut choices and applies the `PLACE` restriction; each
-realized choice produces zero or more fresh kernel problems. Only after a kernel has no remaining cuttable seam, or
-its placement has been decided, may `040_schedule` evaluate Algorithm 1(c, p, t). A fresh piece that enters the
-current sweep after `030_cut` is therefore skipped by `040_schedule` unconditionally until the next cut pass sees it.
-Schedule refusal is never used to discover that cut enumeration should have happened first.
+The cut phase is the outer enumeration. `030_cut` projects fused/cut placement choices, then `035_split_reduce`
+projects unsplit/split reduction choices. Each passes its independent domain through the generic
+`schedule(CutScheduleContext(...))` driver. Only after both slices are consumed may `040_schedule` pass
+`ClassicScheduleContext` to that same driver for Algorithm 1(c, p, t). A fresh piece that enters a sweep after either
+structural slice is skipped by `040_schedule` until the next sweep completes its cut phase. Context refusal is never
+used to discover that structural enumeration should have happened first.
 
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated
@@ -500,7 +502,8 @@ that canonical input:
   explores its placement first.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
-  changes which kernels exist, so `035_split_reduce` offers it beside `030_cut` before any schedule is enumerated.
+  changes which kernels exist, so `035_split_reduce` offers it after stored-edge placement and before any assignment
+  is enumerated.
   Each fresh piece then enters the ordinary schedule pass with the partition receipt described below.
 
 **Every split piece is a new kernel.** The rewrite consumes the scheduled kernel and returns fresh unmapped Tile IR
@@ -551,7 +554,7 @@ codec's atom token and priced by the `MMA_acc_bits` feature; f16 only (mma.sync 
 ladder, and two-dimensional thread tiles × per-thread register tiles (`block_threads ≤ 1024`), with the per-cell
 `""` tile as one more member. The normal cooperative-reduction catalog is likewise the fixed cooperative-width × ILP
 product. The scheduler projects these alongside the warp and transport catalogs. Every accepted leaf is a complete
-`ClassicSchedule` with exact integer node ids and `(consumer, operand)` edge tuples. Schedule parameters restrict
+`Schedule` with exact integer node ids and `(consumer, operand)` edge tuples. Schedule parameters restrict
 complete assignments without
 changing those exact domains.
 The producer band is a fixed kernel-domain factor (`""`, `+p1`, `+p2`; since step 7 a resolved band is spelled in
@@ -564,8 +567,9 @@ stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
-edge, 5090). The **redundant-statistic split-K** form is no longer a schedule row: the structural
-`035_split_reduce` fork slices the contraction across CTAs BEFORE scheduling, σ-reindexing the per-cell cone to
+edge, 5090). The **redundant-statistic split-K** form is no longer an assignment row: the structural
+`035_split_reduce` pass
+slices the contraction across CTAs BEFORE assignment composition, σ-reindexing the per-cell cone to
 absolute k while the k-invariant stat prologue stays full-row in every partition (each recomputes it, which is
 cheap on the small-free decode shapes and is left to evidence to price), and the wrapping zero-axis fold's
 projection folds into the deferred finalize. Multi-channel (gate/up) nodes split too: the sliced contraction

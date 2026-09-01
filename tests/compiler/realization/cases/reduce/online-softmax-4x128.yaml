@@ -37,7 +37,6 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE: ''
       REDUCE: coop
       WORK: t128
     identity: 8f4f04f0071c65d7bf4dc720f512d53b98aa62517c4b9de7bbfbb5966cef3223

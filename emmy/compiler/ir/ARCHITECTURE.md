@@ -69,22 +69,22 @@ schedule, materialization, output specifications, and knobs belong to `TileOp`, 
 
 The [schedule package](schedule/ARCHITECTURE.md) separates schedule-wide interfaces and reusable choices from concrete
 implementations. `schedule/classic.py` owns the semantic model for the ordinary grid/CTA/warp/thread/register schedule.
-A `ClassicProblem` contains only an unscheduled `Fold` tree and target. Its immutable `SiteIndex` assigns one stable
+A `ClassicProblem` contains only an unscheduled `Fold` tree and target. `ClassicScheduleContext` assigns one stable
 integer node id to each Fold identity and one `(consumer, operand)` edge site to every consumer operand position, so a
 shared producer is scheduled once while each use receives an independent transport choice. The reusable views in
 `schedule/views.py` read only the Fold at a node id; target facts cannot affect whether that site is a projection,
 reduction, or contraction-capable reduction. `TileOp` caches the same nodes and edges in that stable enumeration order.
 
-`ClassicSchedule` is an immutable, typed assignment of kernel, node, and edge choices. Direct work, flat raster,
-untiled nodes, serial reductions, and direct edges are explicit values rather than missing fields. Choice values never
-carry site identities, paths, target facts, encodings, or materialization results: `Tile` is axis-free and `Stage`
-contains no slab names or resolved K chunk. The wire codec is injective: empty `TILE` means only per-cell, while a
-parallel unit-register thread tile spells `f1`; `WORK` never changes the meaning of an empty node choice.
+`Schedule` is the immutable, generic assignment of kernel, node, and edge choices. Direct work, flat raster, untiled
+nodes, serial reductions, and direct edges are explicit values rather than missing fields. Choice values never carry
+site identities, paths, target facts, encodings, or materialization results: `Tile` is axis-free and `Stage` contains
+no slab names or resolved K chunk. The wire codec is injective: empty `TILE` means only per-cell, while a parallel
+unit-register thread tile spells `f1`; `WORK` never changes the meaning of an empty node choice.
 `ClassicMaterialization` separately maps accepted sites to `PlacedTile`
 geometry and `ResolvedStage` transport facts. Construction enforces the value types; completeness, site scope,
 node-sum agreement, worker inventory and thread limits, producer-band/TMA agreement, raster eligibility, target
 choice availability, and current per-contraction transport agreement need the problem and are enforced by
-`ClassicScheduleContext.accepts`. Every enumeration and decode leaf crosses that complete-assignment boundary exactly
+`ClassicScheduleContext`. Every enumeration and decode leaf crosses that complete-assignment boundary exactly
 once before search or lowering can observe it. A validated leaf retains its canonical codec row; inspection and
 materialization reuse that row and typed assignment instead of repeating the compatibility walk. Encoding an arbitrary
 schedule remains a validating public boundary.
@@ -96,15 +96,14 @@ Fold program `p`, and target `t`, Algorithm 1 is exactly:
     D(p, t) = K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)
     Algorithm 1(c, p, t) = {a ∈ D(p, t) | c.accepts(a) ∧ accepts(p, t, a)}
 
-The enumerator carries the one `ScheduleRestriction` context intact and consults it only on complete assignments. It
-never unpacks `c` to prune a kernel, node, or edge prefix. A restriction cannot mutate a domain or introduce a choice.
-Static support retains derived physical-axis and fragment-seam facts outside the choice values. Domain membership and
-local-support lookup use immutable indexes built from `p` and `t`; production may prune only prefixes known to violate
-their compatibility relation. Validating a leaf must never linearly scan a factor whose choices are already finite and
-hashable. The literal reference enumerator remains the oracle. Bounded-product checks and traversal-order tests require
-every traversal order to produce the same complete set. The lowering-side implementation is currently being rebuilt
-behind `_classic.ClassicScheduleUnavailable`; the semantic model and this product contract remain the boundary the
-reconstruction must satisfy.
+The one `ClassicScheduleContext` is the immutable `c + p + t` prefix. It owns restriction and compatibility state and
+composes each lazily derived `LocalSupport`, followed by the kernel factor, through `extend`. The generic enumerator
+never unpacks `c` or imports classic scheduling. Static support retains derived physical-axis and fragment-seam facts
+outside the choice values. Domain membership uses immutable indexes; local support is derived only after the context
+has selected one node and its incident edge values, so a precise restriction does not construct the rest of the
+relation. Production may prune only prefixes whose `c + p + t` state proves they have no completion. The literal
+reference enumerator remains the oracle. Bounded-product checks and traversal-order tests require every traversal
+order to produce the same complete set; the lowering implementation must satisfy that product contract.
 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not
@@ -140,7 +139,7 @@ in Loop IR until total lift; there is no impure `Lambda` construction path.
   not totally order the chain. The resulting geometry, rather than source names, reaches Tile IR placement.
 - **Loop → tile** (after `lowering/tile`): `LoopOp` nodes are replaced by
   `TileOp` holding the structural-IR root `op` directly (`tile/ir` — one `Fold` kind), structural
-  placement, one accepted site-indexed `ClassicSchedule`, and separate `ClassicMaterialization`
+  placement, one accepted site-indexed `Schedule`, and separate `ClassicMaterialization`
   facts. A kernel's structure is read from each node's derived classification, not a Python kernel
   type. `010_lift` lifts the `Fold` tree (the loop nest reconstructed on demand, each reduce `Loop`
   carrying its `AxisRole` — the ONLY loop annotation; the algebra is the term's own
@@ -167,9 +166,8 @@ in Loop IR until total lift; there is no impure `Lambda` construction path.
   (dynamic `seq_len`) is supported — the `StridedLoop`'s `< seq_len`
   bound is the runtime-extent mask (idle lanes fold the identity; no
   ceil-div / clamp) and the `Dim` name is threaded as a runtime `int`
-  arg. The cross-CTA split (`035_split_reduce`), `reg` fold, a symbolic FREE
-  axis (dynamic grid), strided rows, and the tensor-core `warp_tile`
-  are reserved future tiers.
+  arg. Cross-CTA reduction splits are structural choices in `035_split_reduce`. A symbolic FREE axis
+  (dynamic grid), strided rows, and the tensor-core `warp_tile` are reserved future tiers.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
   `CudaOp` carrying rendered source.
 
@@ -196,8 +194,7 @@ subclass, so a full body tree hashes structurally end-to-end. This makes
 without a try/except fallback for unhashable stmts. To "edit" a frozen
 Stmt, return a fresh instance via `dataclasses.replace(stmt, field=value)`;
 `__post_init__` coercions use `object.__setattr__`. Ops, by contrast,
-are NOT frozen — the engine mutates `op.source` / `op.knobs` / `op.inputs` /
-`op.outputs` post-construction. Op fields stored inside Stmts (e.g.
+are frozen and unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside Stmts (e.g.
 `Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`,
 not `ElementwiseOp`) so the surrounding Stmt's hashability isn't poisoned.
 
@@ -450,7 +447,8 @@ Construction never fails: unresolved names are data, and chaining scope levels m
 `backward_cone` with the previous one's `external_reads`. `Body.defs_die_at(members, roots=…, allowed=…)` is the
 matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
-`lowering/tile/035_split_reduce`) — eligibility judgments stay in the rules, per `pipeline/passes/ARCHITECTURE.md`. The
+`lowering/tile/035_split_reduce`) — eligibility judgments stay in the rules, per
+`pipeline/passes/ARCHITECTURE.md`. The
 `classify_fragment_epilogue` walk (`ir/pure/algebra.py`) deliberately does NOT use it: it is a single pass
 interleaving reduce-scope flags with its negative-form blocker reporting, a different operator than the cone's
 any-dep taint.
@@ -652,7 +650,7 @@ general `(maximum, denominator, expectations…)` twisted carrier, including whe
 nested the statistics inside a computed probability edge; softmax and masked or unmasked SDPA are arity variants, not
 separate matchers. Placement and cross-CTA split are structural phases before site construction. Classic scheduling
 classifies the resulting Fold tree, assigns each node once and every consumer operand edge independently, then stores
-one complete typed assignment on `TileOp.classic`. Unsupported shapes remain unmapped; scheduling never annotates or
+one complete typed assignment on `TileOp.schedule`. Unsupported shapes remain unmapped; scheduling never annotates or
 rewrites the Fold tree.
 
 See [`tile/ARCHITECTURE.md`](tile/ARCHITECTURE.md) for the exact storage and boundary contract.

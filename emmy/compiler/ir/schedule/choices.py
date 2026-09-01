@@ -85,7 +85,7 @@ def _canonical_choice(codec: str, spec: str | None, choice):
 class Level(enum.Enum):
     """One hardware level the reduce axis can be partitioned across, coarse→fine."""
 
-    GRID = "grid"  # across CTAs (split-K) — realized by the structural 035_split_reduce fork, never the in-kernel walk
+    GRID = "grid"  # across CTAs (split-K) — realized by 035_split_reduce, never the in-kernel walk
     BLOCK = "block"  # cooperative threads within a CTA (warp shuffle / smem tree)
     REG = "reg"  # ILP register-fold accumulators
     SERIAL = "serial"  # the per-thread serial remainder (never spelled — derived)
@@ -652,8 +652,8 @@ def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Work | None:
     a ``t8x4`` scalar tile — or worse, a ``w4x8`` warp tile — compatible with a 32-wide coop that
     neither realizes.
 
-    ONE home for the rule: the private enumerator uses it to prune incompatible prefixes and
-    ``ClassicScheduleContext.accepts`` uses it again at each complete typed leaf."""
+    ONE home for the rule: ``ClassicScheduleContext.extend`` uses it while composing compatible
+    prefixes and ``require`` checks arbitrary complete assignments at the public boundary."""
     work = derive_workers(tiles)
     if coop > 1:
         band = Work(kind="thread", units=(coop, 1))

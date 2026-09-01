@@ -316,7 +316,7 @@ def packed_readings(nodes, inputs) -> frozendict:
     """Each node's ``(B copy, pair)`` packed readings, by object identity.
 
     Both are a function of the node and the kernel's typed inputs, so this is
-    :attr:`~emmy.compiler.ir.tile.TileOp.packed_readings` — read there, never re-matched at a
+    :meth:`~emmy.compiler.ir.tile.TileOp.packed_reading` — read there, never re-matched at a
     call site and never carried through a schedule choice.
     """
     return frozendict({id(node): (match_packed_b_node(node, inputs), match_packed_pair_node(node, inputs)) for node in nodes})

@@ -610,7 +610,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     def operand(self, edge: EdgeSite):
         if not _is_edge_site(edge):
             raise KeyError(f"invalid edge site {edge!r}")
-        return self.tile_op.operand(edge)
+        consumer, operand = edge
+        try:
+            return self.node(consumer).operands[operand]
+        except (TypeError, IndexError):
+            raise KeyError(f"unknown classic edge site {edge!r}") from None
 
     def producer(self, edge: EdgeSite) -> NodeId | None:
         value = self.operand(edge)

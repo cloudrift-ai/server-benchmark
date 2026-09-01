@@ -560,14 +560,9 @@ class TileOp(Op):
         return tuple(out)
 
     @cached_property
-    def nodes(self) -> tuple[Fold, ...]:
-        """The term's Fold nodes in stable schedule order."""
-        return tuple(site.node for site in self.sites)
-
-    @cached_property
     def node_edges(self) -> tuple[EdgeSite, ...]:
         """Every consumer operand position in stable schedule order."""
-        return tuple((consumer, operand) for consumer, node in enumerate(self.nodes) for operand in range(len(node.operands)))
+        return tuple((consumer, operand) for consumer, site in enumerate(self.sites) for operand in range(len(site.node.operands)))
 
     @cached_property
     def _node_ids(self) -> dict[int, NodeId]:
@@ -580,16 +575,6 @@ class TileOp(Op):
         except KeyError:
             raise KeyError("Fold is not a node of this TileOp") from None
 
-    def operand(self, edge: EdgeSite):
-        """The operand edge one consumer position addresses."""
-        consumer, operand = edge
-        if type(consumer) is not int or not 0 <= consumer < len(self.sites):
-            raise KeyError(f"unknown edge site {edge!r}")
-        try:
-            return self.sites[consumer].node.operands[operand]
-        except (TypeError, IndexError):
-            raise KeyError(f"unknown edge site {edge!r}") from None
-
     @cached_property
     def incident_edges(self) -> frozendict[NodeId, tuple[EdgeSite, ...]]:
         """Each consumer's operand positions."""
@@ -601,7 +586,7 @@ class TileOp(Op):
     @cached_property
     def views(self) -> frozendict[NodeId, NodeView]:
         """Each node site classified as a projection or a reduction, without target input."""
-        return frozendict(dict(enumerate(node_view(node) for node in self.nodes)))
+        return frozendict(dict(enumerate(node_view(site.node) for site in self.sites)))
 
     @cached_property
     def tile_sites(self) -> tuple[NodeId, ...]:
@@ -626,16 +611,15 @@ class TileOp(Op):
         )
 
     @cached_property
-    def packed_readings(self) -> frozendict:
-        """Each CONTRACTION's ``(B copy, pair)`` packed-operand readings, by object identity.
-
-        Only a contraction has the operand roles the readings match on, so a non-contraction node
-        is simply absent — callers read through :meth:`packed_reading`."""
-        return packed_readings(tuple(node for node in self.nodes if is_contraction(node)), self.inputs)
+    def _packed_readings(self) -> frozendict:
+        return packed_readings(tuple(site.node for site in self.sites if is_contraction(site.node)), self.inputs)
 
     def packed_reading(self, node) -> tuple:
-        """One node's packed-operand readings; ``(None, None)`` where the shape cannot apply."""
-        return self.packed_readings.get(id(node), (None, None))
+        """One node's ``(B copy, pair)`` packed-operand readings.
+
+        Only a contraction carries the operand roles the readings match on, so anything else
+        answers ``(None, None)`` rather than being absent."""
+        return self._packed_readings.get(id(node), (None, None))
 
     @cached_property
     def contractions(self) -> frozendict[NodeId, ContractionFacts]:

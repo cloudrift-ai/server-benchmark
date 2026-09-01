@@ -105,7 +105,7 @@ def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
 
     assert len(inventory.sites) == 4
     assert inventory.node_id(shared) == inventory.node_id(shared)  # one site, however many uses
-    uses = tuple(edge for edge in inventory.node_edges if inventory.operand(edge) is shared)
+    uses = tuple(edge for edge in inventory.node_edges if inventory.sites[edge[0]].node.operands[edge[1]] is shared)
     assert uses == ((inventory.node_id(left), 0), (inventory.node_id(right), 0))
 
 
@@ -484,7 +484,7 @@ def test_context_requires_a_tiled_contraction_for_grouped_raster() -> None:
 def test_problem_context_schedule_and_materialization_are_pickle_safe() -> None:
     context = ClassicScheduleContext(*_problem(_sum()))
     restored_context = pickle.loads(pickle.dumps(context))
-    restored_node = restored_context.tile_op.nodes[0]
+    restored_node = restored_context.tile_op.sites[0].node
     assert restored_context.site(restored_node) == 0
     assert restored_context.extend(_direct(restored_context)).assignment.kernel == KernelSchedule(Work(), Raster())
 
@@ -583,11 +583,9 @@ def test_tile_op_caches_the_stable_schedule_inventory() -> None:
 
     # one walk per kernel, and every structural reading is a field of its site records
     assert tile.sites is tile.sites
-    assert tile.nodes is tile.nodes
     assert tile.node_edges is tile.node_edges
-    assert tile.nodes == tuple(site.node for site in tile.sites)
-    assert tile.node_edges == tuple((c, e) for c, node in enumerate(tile.nodes) for e in range(len(node.operands)))
-    assert tuple(tile.node_id(node) for node in tile.nodes) == tuple(range(len(tile.nodes)))
+    assert tile.node_edges == tuple((c, e) for c, s in enumerate(tile.sites) for e in range(len(s.node.operands)))
+    assert tuple(tile.node_id(s.node) for s in tile.sites) == tuple(range(len(tile.sites)))
 
     # the walk's labels are POSITIONS in this kernel's tree, so they belong to the TileOp and not
     # to the shared subterms it is built from: every node but the root has a reaching parent, and

@@ -81,7 +81,8 @@ def node_view(node: Fold) -> NodeView:
 def _sibling_fragment_edges(owner) -> dict[int, NodeId]:
     """Map each sibling-step consumer to the one contraction producing its computed edge."""
     out = {}
-    for node in owner.nodes:
+    for site in owner.sites:
+        node = site.node
         if node.axis is None or is_contraction(node) or node.combine is None:
             continue
         steps = node.step_stmts()

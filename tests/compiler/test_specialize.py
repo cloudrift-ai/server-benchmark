@@ -1,7 +1,11 @@
+import numpy as np
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.expr import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
+from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 from emmy.compiler.specialize import specialize_program
 
 
@@ -61,3 +65,40 @@ def test_specialize_program_rejects_invalid_binding_values():
             assert "positive integers" in str(exc)
         else:
             raise AssertionError(f"accepted invalid binding {invalid!r}")
+
+
+def test_specialize_program_keeps_a_coordinate_predicate_out_of_the_extent_range():
+    """An unbound symbolic dimension is a tensor EXTENT and is therefore at least 1; a
+    ``select`` is a predicate over the output's own coordinates and carries no such floor.
+    Reading a coordinate as an extent folds ``out_coord_1 < 1`` to false, which drops the
+    first source of every two-source IndexMap — the NVFP4 pair table (``_f4_pair_table``)
+    then decodes each byte's high nibble into both halves, and the folded literal is an
+    integer where the select is read as a mask.
+
+    Pinned on the values, not on the expression shape: the specialized op must still put
+    source 0 in column 0."""
+    rows = Dim("num_tokens", hint=32)
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (rows, 4)), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("low", (4,)), node_id="low")
+    graph.add_node(InputOp(), [], Tensor("high", (4,)), node_id="high")
+    graph.add_node(
+        IndexMapOp(
+            out_shape=(4, 2),
+            sources=(
+                IndexSource(input_idx=0, coord_map=(placeholder(0),), select=placeholder(1).lt(Literal(1, "int"))),
+                IndexSource(input_idx=1, coord_map=(placeholder(0),)),
+            ),
+        ),
+        ["low", "high"],
+        Tensor("pairs", (4, 2)),
+        node_id="pairs",
+    )
+    graph.inputs, graph.outputs = ["x", "low", "high"], ["pairs"]
+
+    specialized = specialize_program(graph, {"num_tokens": 16})
+
+    low = np.arange(4, dtype=np.float32)
+    high = np.arange(4, dtype=np.float32) + 10
+    pairs = specialized.nodes["pairs"].op.forward(low, high)
+    assert np.array_equal(pairs, np.stack([low, high], axis=-1))

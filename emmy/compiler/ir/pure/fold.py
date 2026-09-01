@@ -34,6 +34,7 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
 from emmy.compiler.ir.stmt.base import _axis_identity
+from emmy.compiler.ir.stmt.body import _member_reads
 
 
 def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
@@ -660,8 +661,15 @@ class Fold:
         never a free name. The body is pure; synthesized Loop IR must pass through total lift
         before it can enter a projection. Results default to the body's last definition unless
         the caller explicitly names the values passed through to a consumer."""
-        operands = _unique_edges(tuple(operands))
         b = Body.coerce(body) if body is not None else Body()
+        if any(isinstance(stmt, Fold) for stmt in b):
+            # A term handed in as a BODY member is an operand edge that has not been spelled as
+            # one yet. Separating here — rather than leaving it for a later rewrite — is what
+            # keeps a lambda body free of nested terms: a Fold tree composes through operands,
+            # and two composition mechanisms are one too many.
+            names = tuple(results) if results is not None else (_map_results(b) or ())
+            return _ordered_projection((*operands, *b), names)
+        operands = _unique_edges(tuple(operands))
         params = tuple(n for s in operands for n in _operand_result_names(s))
         if results is None:
             results = _map_results(b) or params[:1]
@@ -948,6 +956,44 @@ def stmt_axis_names(stmts) -> set[str]:
         for b in s.nested():
             out |= stmt_axis_names(b)
     return out
+
+
+def _ordered_projection(members, results: tuple[str, ...]) -> Fold:
+    """Factor an ordered pure cone without moving a Fold ahead of an earlier scalar producer.
+
+    A projection evaluates every operand before its scalar body, so a source sequence
+    ``Fold; scalar; Fold`` cannot flatten both terms into sibling operands — the later one reads
+    the scalar, and as an edge it would splice ahead of its own provider. The prefix becomes a
+    source projection of the later Fold instead.
+
+    It lives beside :meth:`Fold.projection`, the constructor that needs it: separating terms out
+    of a body is a FORMATION rule, not something a later pass repairs.
+    """
+    members = Body(members)
+    scalar_seen = False
+    split = None
+    for index, stmt in enumerate(members):
+        if isinstance(stmt, Fold):
+            if scalar_seen:
+                split = index
+                break
+        else:
+            scalar_seen = True
+
+    if split is not None:
+        prefix, suffix = members[:split], members[split:]
+        needed = set(results)
+        for stmt in suffix:
+            needed.update(_member_reads(stmt))
+        bridge = tuple(name for stmt in prefix for name in stmt.defines() if name in needed)
+        assert bridge, "a separated pure prefix must feed its suffix"
+        source = _ordered_projection(prefix, bridge)
+        return _ordered_projection((source, *suffix), results)
+
+    operands = _unique_edges(tuple(stmt for stmt in members if isinstance(stmt, Fold)))
+    body = Body(stmt for stmt in members if not isinstance(stmt, Fold))
+    params = tuple(name for edge in operands for name in _operand_result_names(edge))
+    return Fold(axis=None, operands=operands, lift=Lambda.closing(params, body, tuple(results)))
 
 
 def operand_body(op) -> tuple[Stmt, ...]:

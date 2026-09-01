@@ -100,6 +100,18 @@ def test_post_members_close_after_the_merge() -> None:
     assert combines[0] < i_post, "the trailing segment reads the merged carrier"
 
 
+def test_a_transposed_band_on_a_chain_member_binds_serial() -> None:
+    """The ``coop-t`` band's σ-substitution and guarded close assume the fold is the kernel ROOT,
+    so the chain arm cannot realize one. It must fall to the degenerate serial arm — realizing it
+    as a PLAIN coop band would mint one kernel from two knob spellings."""
+    bound = factorize(_chain_tile(ReducePlan.of(coop=32, coop_transposed=True)), root=None)
+    flat = _flat(bound.body)
+    assert not any(isinstance(s, StridedLoop) for s in flat), "a transposed band is not offered the chain arm"
+    assert any(isinstance(s, Loop) for s in flat), "the member still folds serially per cell"
+    assert not any(a.name.endswith("_co") for a in bound.axes)
+    assert bound.block_threads is None
+
+
 def _two_member_tile(plan_a: ReducePlan, plan_b: ReducePlan) -> TileOp:
     red_a = _reduce("k", 128, "acc", "scale", "x")
     red_b = _reduce("j", 256, "acc2", "mid", "y")

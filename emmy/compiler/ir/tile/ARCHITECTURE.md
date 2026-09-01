@@ -164,7 +164,8 @@ retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, ever
 nvcc). The schedule walk mirrors the fact for depth: a fold reached deeper than a chain-form root's direct body
 members still offers only the serial fold, since the body recursion emits it serially per cell regardless of
 partition. A DIRECT member is not so limited — the retained reduce above is one — and offers the full non-transposed
-reduce catalog instead, bound through the chain arm ahead of the strided loop.
+reduce catalog instead (absent a swept or streamed boundary store, neither of which the chain arm's lane-distributed
+close can realize), bound through the chain arm ahead of the strided loop.
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
 specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or

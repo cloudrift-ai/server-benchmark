@@ -526,6 +526,10 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             and not op.operands
             and all(spec.sweep is None and not set(spec.write.values) <= observed for spec in output_specs)
         ):
+            # A transposed (``coop-t``) band's σ-substitution and guarded close assume the fold is
+            # the kernel ROOT, so the chain arm cannot realize one; ``_contraction_reduces`` can
+            # still stamp it on a contraction member, and realizing it as a PLAIN coop band would
+            # mint one kernel from two knob spellings. Excluded here, it falls to the serial arm.
             parts = tuple(
                 (member, p)
                 for member in op.body
@@ -533,6 +537,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
                 and member.axis is not None
                 and (p := ctx.sched.get("REDUCE", member)) is not None
                 and (p.coop > 1 or p.reg > 1)
+                and not p.coop_transposed
             )
         if parts:
             state, fold, close, lane = _tile_chain_members(op, parts, ctx, tail, out_val, output_specs)

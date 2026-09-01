@@ -298,8 +298,9 @@ def build_golden_groups(
         # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus
         # ``MMA_tier`` — see its rationale in ``search/data/group.py``) filters here, before
         # the pool is packed, so the trained-under view is exactly what the Group stores.
-        # ``feature_view`` keeps the routing features whatever the spec says, so a narrower
-        # ``--features`` cannot silently misroute a symbolic-axis pool.
+        # The view is the whole rule, routing stamp included: a spec that drops it packs pools that
+        # ``pack_features`` labels static, which ``GoldenGroup.from_dicts`` and ``LinearModel.score_rows``
+        # refuse rather than misroute.
         feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
         packed = pack_features(feats)
         # Second stage: two enumerations can still land on one pool — the same program recorded in different

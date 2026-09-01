@@ -33,7 +33,8 @@ def test_default_feature_view_keeps_the_geometry_and_atom_features():
     f32 sibling. Everything else (the shape/hardware pass-throughs) is constant within a pool."""
     keep = feature_view(DEFAULT_FEATURES)
     sample = {"D_waves": 1.0, "D_bk_gap": 2.0, "MMA_tier": 3.0, "MMA_acc_bits": 4.0, "MMA_atom_m": 5.0, "S_ext_free_prod": 6.0, "D_": 7.0}
-    assert {k for k in sample if keep(k)} == {"D_waves", "D_bk_gap", "D_", "MMA_tier", "MMA_acc_bits"}
+    sample["S_ext_n_symbolic_axis"] = 0.0  # named by the view: the pool's weight set is read off it
+    assert {k for k in sample if keep(k)} == {"D_waves", "D_bk_gap", "D_", "MMA_tier", "MMA_acc_bits", "S_ext_n_symbolic_axis"}
 
 
 def test_matmul_view_is_exact_names_through_the_one_parser():
@@ -282,10 +283,11 @@ def test_routing_stamp_selects_the_weight_set_and_never_becomes_a_coordinate():
         assert "S_ext_n_symbolic_axis" not in descent_cols(group.feat_names)
     # The tier decides nothing, but it still has to AGREE: it and the stamp are the same fact arriving
     # by two routes, so a disagreement means one of them is wrong and the pool would otherwise train
-    # under the wrong weight set with nothing reporting it.
-    with pytest.raises(ValueError, match="disagree about the weight set"):
+    # under the wrong weight set with nothing reporting it. The second case is also what a feature view
+    # that stopped naming the stamp produces, which is why the message names both causes.
+    with pytest.raises(ValueError, match="the case tier says"):
         GoldenGroup.from_dicts("gpuA/x", "x", "warp", "gpuA", "x", 0, [{"D_a": 1.0, "S_ext_n_symbolic_axis": 1.0}])
-    with pytest.raises(ValueError, match="disagree about the weight set"):
+    with pytest.raises(ValueError, match="does not name the stamp"):
         GoldenGroup.from_dicts("gpuA/x", "x", "dyn", "gpuA", "x", 0, [{"D_a": 1.0}])
 
 
@@ -344,13 +346,22 @@ def test_matrix_is_memoized_and_read_only():
     assert other.shape == (2, 1) and g.matrix(["D_a", "D_b"]).shape == (2, 2)
 
 
-def test_no_feature_view_can_drop_the_routing_stamp():
-    """Routing is not a view choice. A spec that names neither the stamp nor a prefix covering it still
-    keeps it — otherwise every pool would route to the static weight set and the run would report a
-    dataset with zero dynamic groups rather than an error."""
-    for spec in (DEFAULT_FEATURES, MATMUL_FEATURES, "D_waves"):
+def test_every_shipped_view_names_the_routing_stamp():
+    """A view that drops the routing stamp labels every pool static: the weight set is read off the stamp when
+    the rows are packed, so the run reports a dataset with zero dynamic groups rather than an error, and nothing
+    downstream can tell that from a genuinely static corpus.
+
+    The filter no longer protects against that by exempting the stamp from every spec — a column filter knows
+    its patterns and the name it is asked about, and an exemption made the recorded spec a lie about what was
+    kept. So each shipped view NAMES the stamp, and this is the check that catches one that forgets. The eval's
+    view is not here because it is not a constant: it is the union of what the models declare
+    (``Prior.columns``), which names the stamp for the same reason."""
+    for spec in (DEFAULT_FEATURES, MATMUL_FEATURES, TREE_FEATURES):
         assert feature_view(spec)("S_ext_n_symbolic_axis"), spec
-    assert not feature_view("D_waves")("S_ext_free_prod")  # only the routing features are exempt
+    # And the filter keeps nothing it was not given: an unnamed stamp drops like any other column, which is
+    # what ``LinearModel.score_rows`` refuses a pool over.
+    assert not feature_view("D_waves")("S_ext_n_symbolic_axis")
+    assert not feature_view("D_waves")("S_ext_free_prod")
 
 
 def test_tree_view_drops_only_what_a_tree_re_derives():
@@ -365,7 +376,9 @@ def test_tree_view_drops_only_what_a_tree_re_derives():
     # a relation BETWEEN two columns, and the knob x state block whose state operand is not a column.
     for name in ("D_threads", "D_cells", "D_aspect", "D_stage_depth", "D_splitk", "D_pow2_threads", "D_bn_ge_bm", "D_splitk_excess"):
         assert keep(name), name
-    assert keep("S_ext_n_symbolic_axis"), "the routing stamp is exempt from every view, exclusions included"
+    # The one kept column outside the D_*/MMA_* families: one tree prices both regimes by splitting on the
+    # stamp, where the linear model needs a second weight vector.
+    assert keep("S_ext_n_symbolic_axis") and not default("S_ext_free_prod")
 
 
 def test_feature_view_exclusions_apply_to_names_and_globs():

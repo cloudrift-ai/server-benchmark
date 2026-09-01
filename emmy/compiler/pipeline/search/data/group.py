@@ -35,7 +35,9 @@ constructs anything, so a group is built once, already knowing every verified ro
 fit's case tier (``thread`` / ``warp`` / ``dyn`` / ``reduce`` / ``pointwise``) and is a REPORT LABEL only — it
 decides nothing.
 The weight set a group scores under is ``dynamic``, read off the routing stamp exactly as the deployed prior
-reads it. ``shape`` is the cross-validation fold group, and is the one identity here that decides something
+reads it — which is why the stamp has to survive whatever view packed the rows, and why every view that feeds a
+routing model names it (:func:`feature_view`).
+``shape`` is the cross-validation fold group, and is the one identity here that decides something
 structural: two goldens sharing it enumerate the same candidates, so a fold that separated them would train on
 the answer.
 """
@@ -49,7 +51,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from emmy.compiler.pipeline.search.data.freeze import freeze_reason
-from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row, knob_features
+from emmy.compiler.pipeline.search.features import is_dynamic_row, knob_features
 from emmy.compiler.structural import digest
 
 # The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
@@ -60,15 +62,20 @@ from emmy.compiler.structural import digest
 # routing stamp is the same kind of quantity, which is why the LINEAR model narrows it out of its own
 # coordinates (:func:`~..prior.linear_model.descent_cols`) while the matrix still carries it for a tree to split on.
 #
+# ``S_ext_n_symbolic_axis`` is the exception, named because that carrying is neither optional nor automatic any
+# more: a pool's weight set is read off the stamp when its rows are packed, so a view without it labels every
+# pool static and the fit reports zero dynamic cases rather than an error.
+#
 # ``MMA_acc_bits`` is load-bearing: the f16-accumulate fork is spelled in the TILE codec's atom token, so a row
 # taking it is identical under every ``D_*`` feature to its f32-accumulate sibling. While the view dropped it,
 # 93% of a fast-math pool's rows sat in a tied pair no weight vector could separate, and 125 of the 280 RTX 5090
 # matmul goldens had a tied candidate ahead of them in emission order — unrankable at top-1 by construction.
 # The remaining ``MMA_*`` (``MMA_atom_m/n/k``, ``MMA_a_bits``) measured exactly neutral, so they stay out.
-DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits"
+DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits,S_ext_n_symbolic_axis"
 
-# The matmul view: every feature that can actually move a matmul candidate's rank, and no other. An
-# ordinary spec for :func:`feature_view` — pass it as ``--features``; nothing else filters.
+# The matmul view: every feature that can actually move a matmul candidate's rank, plus the routing stamp,
+# which moves no rank but decides which weight set does the ranking. An ordinary spec for :func:`feature_view` —
+# pass it as ``--features``; nothing else filters.
 #
 # Two classes are excluded, both provably free to drop rather than judged uninteresting. Measured over
 # the RTX 5090 matmul goldens (286 pools, 36.6 M candidates):
@@ -76,8 +83,9 @@ DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits"
 # CONSTANT WITHIN EVERY POOL — the feature never varies between a pool's candidates, so a linear model
 # adds the same contribution to all of them and the term cancels out of the ranking exactly. Dropped:
 # ``D_bk_ge32``, ``D_l2_bk``, ``D_neg_masked_k/m/n``, ``D_pow2_threads``, ``D_raster_gn``,
-# ``D_stage_split`` (nothing enumerates it yet), and the four ``S_ext_*`` shape stamps (constant within
-# a shape by construction). ``D_pow2_threads`` is the striking one: it carries the shipped artifact's
+# ``D_stage_split`` (nothing enumerates it yet), and every ``S_ext_*`` shape stamp except the routing one
+# (constant within a shape by construction; the routing stamp is kept for the reason below, and is not a
+# coordinate either). ``D_pow2_threads`` is the striking one: it carries the shipped artifact's
 # LARGEST weight (+136.5, the cold-deploy incident weight) and cannot change a matmul ranking at all.
 #
 # GLOBALLY AFFINE DUPLICATES — a scaled copy of a kept feature (verified exact, residual at float
@@ -89,9 +97,9 @@ DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits"
 #
 # Both exclusions are expressiveness-neutral by construction — the model can express exactly the same
 # ranking functions with these 53 coordinates as with all 72 — so this buys a smaller, faster,
-# better-identified fit, not a different model. (Naming no ``S_ext_*`` stamp costs the view nothing on the
-# weight-set choice either: :attr:`Group.dynamic` carries the answer, and the linear fit narrows the stamp
-# out of its coordinates regardless of the view.)
+# better-identified fit, not a different model. The routing stamp is the one ``S_ext_*`` the view keeps, and it
+# is not a coordinate either: :attr:`Group.dynamic` is read off it when the pool is packed, and the linear fit
+# narrows it back out of its descent (:func:`~..prior.linear_model.descent_cols`).
 #
 # ``D_stage_prefetch`` is the one feature here that is a step rather than a measurement — see its
 # definition in ``search/features.py`` for why the linear model cannot form it from ``D_stage_depth``.
@@ -104,7 +112,7 @@ MATMUL_FEATURES = (
     "D_stage_reg_depth,D_stage_tma,"
     "D_threads,D_tile_m,D_tile_n,D_tilen_clean,D_tma_aspect,D_tma_grid_m,D_tma_grid_n,D_tma_l2_splitk,"
     "D_tma_log2_area,D_w_grid_aspect,D_w_grid_m,D_w_grid_n,D_w_l2_bk,D_w_near_bk,D_wspec_warps,"
-    "MMA_a_bits,MMA_acc_bits"
+    "MMA_a_bits,MMA_acc_bits,S_ext_n_symbolic_axis"
 )
 
 
@@ -139,17 +147,24 @@ def feature_view(spec: str):
     drop it. Excluding is the safe direction: an unforeseen feature arrives in the view, where at worst the
     model ignores it.
 
-    :data:`~..features.ROUTING_FEATURES` are kept by EVERY view, named or not, and cannot be excluded.
-    They select a weight set rather than contribute a term, and the packed column is what a tree splits the
-    two regimes on, so keeping them costs a view nothing. A view that could drop them would instead route
-    every pool to the static weight set and report a fit with zero dynamic cases — silently, since nothing
-    downstream can tell an unfittable dynamic set from a genuinely static dataset. What keeps the stamp out
-    of a LINEAR descent is the model class narrowing its own coordinates
+    The spec is the whole rule. This filter knows two things — the patterns it was given and the name it is
+    asked about — and nothing about what any column MEANS. It used to exempt
+    :data:`~..features.ROUTING_FEATURES` from every spec, which is model knowledge (that one column selects a
+    weight set) living in the data layer, and it made the recorded spec a lie: a fit whose provenance said
+    ``"D_*,MMA_tier,MMA_acc_bits"`` had in fact trained on one more column. Two fits are only comparable when
+    the recorded specs match, so the spec has to be the truth about what was kept.
+
+    A view that feeds a model which routes therefore NAMES the routing stamp: :data:`DEFAULT_FEATURES`,
+    :data:`MATMUL_FEATURES` and the tree's ``TREE_FEATURES`` all do, and ``eval prior --dataset golden``
+    derives its spec from what the models declare (``Prior.columns``). Forgetting it is caught twice — at
+    commit time by the test over the shipped specs, and at scoring time by ``LinearModel.score_rows``, which
+    refuses a pool that carries no stamp rather than routing all of it to the static weight set. What keeps the
+    stamp out of a LINEAR descent is still the model class narrowing its own coordinates
     (:func:`~..prior.linear_model.descent_cols`), not the dataset withholding the column."""
     pats = [p.strip() for p in spec.split(",") if p.strip()]
     keep = _matcher([p for p in pats if not p.startswith("-")])
     drop = _matcher([p[1:] for p in pats if p.startswith("-")])
-    return lambda name: name in ROUTING_FEATURES or (keep(name) and not drop(name))
+    return lambda name: keep(name) and not drop(name)
 
 
 def feature_matrix(feats: list[dict[str, float]], names: list[str], *, fill: float = 0.0) -> np.ndarray:
@@ -336,8 +351,9 @@ class GoldenGroup(Group):
         _, matrix, dynamic = packed
         if dynamic != (tier == "dyn"):
             raise ValueError(
-                f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — "
-                f"the source record's flag and its featurized rows disagree about the weight set"
+                f"{key}: the routing stamp says dynamic={dynamic} but the case tier says {tier!r} — either the "
+                f"source record's flag disagrees with its featurized rows, or the feature view these rows were "
+                f"packed under does not name the stamp"
             )
         rows = (goldens,) if isinstance(goldens, int) else goldens
         ids = tuple(sorted({int(i) for i in rows}))

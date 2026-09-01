@@ -47,13 +47,21 @@ from emmy.compiler.pipeline.knob import (
 # meaning. The shipped linear artifacts were schema-migrated with the bump: their retired
 # ``D_stage_ring`` coefficient moved to ``D_stage_prefetch``, the identical ``depth >= 2`` signal,
 # so the scoring function did not change and no synthetic refit was needed.
+#
+# Retirements like that one are now ENFORCED rather than only described: an artifact declares
+# the columns it reads (``Prior.columns``), and a test asserts the shipped artifact declares no
+# column this featurizer has stopped producing. A weight on a retired column is dead — the pool
+# never stamps the name, so the term can only ever score ``0.0``.
 FEATURIZER_VERSION = 4
 
 # The features that SELECT a weight set rather than describe a candidate — the ``S_ext_n_symbolic_axis`` stamp
 # a masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
-# spelling, so a dataset can read it without importing a model; what to DO with it stays with the model classes
-# (``prior/linear_model.py``: the two weight sets, and ``descent_cols``, which keeps the stamp out of the linear
-# descent because a pool-constant term cancels out of a within-pool ranking).
+# spelling; what to DO with it stays with the model classes (``prior/linear_model.py``: the two weight sets, and
+# ``descent_cols``, which keeps the stamp out of the linear descent because a pool-constant term cancels out of
+# a within-pool ranking).
+#
+# The data layer knows this name through :func:`is_dynamic_row` alone, which labels a packed pool: a feature
+# view filters on its spec and nothing else, so a view that feeds a routing model names the stamp itself.
 #: The ``H_opt`` value of the DEPLOYABLE regime — the nvcc opt level ``compile`` / ``run`` / ``tune``
 #: all compile at, and therefore the only one a measurement is worth anything under. Rows carrying
 #: any other value came from a deliberately pinned sweep or from the era when tuning ranked at

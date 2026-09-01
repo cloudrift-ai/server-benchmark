@@ -168,7 +168,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/strategy/` | The search shapes: `base.SearchStrategy`, `greedy.GreedyStrategy`, `two_level.TwoLevelStrategy`. |
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `diagnostics.py` backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `linear.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/data/group.Group`, one layer down: a pool is data, not a fitter detail. |
 | `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — the rank metrics, the three calibration paths and the reachability ratio all resolve here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
-| `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, the derived `ShapeKey` index, and `group.py`'s `Group` — one candidate pool packed as a matrix plus one label per row. The base says nothing about what the labels mean, which is all a ranking metric needs; `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and only it can be asked which rows are the answer. `group_measured` builds base groups from benched node rows, labelled with measured µs. Nothing here imports `search/prior/`: a group carries every column it was given, and each model class narrows to the ones it wants when it asks for the matrix — `TREE_FEATURES`, the view argued entirely from what a tree can re-derive, lives with the CatBoost trainer for the same reason. |
+| `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, the derived `ShapeKey` index, and `group.py`'s `Group` — one candidate pool packed as a matrix plus one label per row. The base says nothing about what the labels mean, which is all a ranking metric needs; `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and only it can be asked which rows are the answer. `group_measured` builds base groups from benched node rows, labelled with measured µs. Nothing here imports `search/prior/`: a group carries every column it was given, and each model class narrows to the ones it wants when it asks for the matrix — `TREE_FEATURES`, the view argued entirely from what a tree can re-derive, lives with the CatBoost trainer for the same reason. The dependency runs the other way for the column set itself: `Prior.columns` publishes what a model reads — weights, the interaction's inputs and the routing stamp — so a BUILDER can pack for the models it is about to score instead of restating their columns or widening to everything the featurizer can spell. `feature_view` filters on its spec alone, so a view feeding a model that routes names the routing column like any other. |
 | `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
 | `search/audit.py` | The verified-tier drift audit: one MATCH / DRIFT / GAP verdict per consultation, collected off a whole card's graphs under isolated evidence. Backs the `emmy eval golden --serving-config` release gate. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
@@ -1477,10 +1477,46 @@ same corpus, the same sampling draw and the same rows. Each golden's compile con
 count and smem specs — never the host's. Building them for the host's context makes golden ranks machine-dependent,
 because the occupancy features then describe tiles for a GPU that is not the one the row came from.
 
-The eval builds its pools over the FULL featurization while a fit trains under its trainer's feature view. The view is
-a property of the model being fitted, and the eval scores two model classes: the linear half reads only its own weight
-names, so its ranks are identical either way, while the online half regresses on the `S_*` / `H_*` columns a narrow
-view drops and would otherwise be asked about a kernel with no shape.
+**The eval builds its pools over the columns its halves declare; a fit trains under its trainer's feature view.** The
+asymmetry is the two commands' opposite relation to the model. A fit DEFINES the columns of a model that does not exist
+yet — its view is an input and the artifact's weight names are an output — so it keeps `--features`, and deriving that
+view from the incumbent artifact would freeze the vocabulary against ever gaining a feature. An eval CONSUMES models it
+already holds, so it asks them (`Prior.columns`) instead of naming a view: the linear half declares both weight sets
+plus the atomic-free gate's inputs, and the online half declares the `S_*` / `H_*` columns it regressed on, which a
+narrow view would drop and leave it asked about a kernel with no shape.
+
+Narrowing cannot move a rank WITHIN a pool: an absent column and a column outside a model's own list are the same
+thing to `score_rows` — it projects the pool onto its own names either way, and `Group.matrix` builds column `j` from
+`feat_names[j]` regardless of how wide the stored matrix is.
+
+It can change which POOLS THERE ARE, and that is the part to know before comparing two reports. A golden pool's
+identity is a digest of its packed matrix (`_pool_identity` in `commands/fit.py`), so two enumerations separated only
+by columns the scoring models do not read — `H_*`, every `S_*` but the routing stamp, the unweighted `D_*` — pack
+identically under a derived view and fold into ONE group. Measured over the `softmax` goldens against the shipped
+offline half's declaration: 27 groups under `"*"` and 26 under it, where the V100's `layer3.i020` and `layer3.i028`
+softmax-reduce pools (32 rows each, same pinned row) become one. `positives` follows, 27 to 26, because a group's
+label set is a set of row indices.
+
+Merging is the per-group semantic doing its job — a group IS a candidate pool, and two goldens that compete over the
+same candidates with the same answer are one question, which is why a group's rank is the best over its goldens. What
+it is not is invisible: `groups`, `positives` and a merged pool's rank all move, and the view is derived from the
+halves being scored, so a run with an online checkpoint present can form different pools than one without. The eval
+records the view it used under the same `features` header key the fit records `--features` under; two reports are
+comparable when that key matches, and not otherwise.
+
+The union is a superset of what any one `score_rows` call packs, never the exact list: see `LinearModel.cols_for`
+for why scoring the static weight set over the union would perturb a reported rank, and why the routing stamp is
+declared but not packed into the matmul.
+
+**A feature view keeps what its spec names, and nothing else.** `feature_view` used to exempt the routing stamp from
+every spec, which put model knowledge — that one column selects a weight set — inside a column filter, and made the
+recorded spec a lie: a fit whose provenance said `D_*,MMA_tier,MMA_acc_bits` had trained on one more column than
+that. Two fits are only comparable when their recorded specs match, so the spec has to be the truth about what was
+kept. Each shipped view now names the stamp (`DEFAULT_FEATURES`, `MATMUL_FEATURES`, `TREE_FEATURES` — the tree's
+is an exclusion-style view over `D_*` / `MMA_*`, which never covered the stamp by construction), the eval derives
+its view from what the models declare, and a view that forgets is caught three ways: by the test over the shipped
+specs, by `GoldenGroup.from_dicts` refusing a `dyn`-tier case whose packed rows say static, and by
+`LinearModel.score_rows` refusing a pool that carries no stamp.
 
 **The per-fork view is retired.** Until 2026-08 this part also documented three node-tree diagnostics: fork-sibling
 regret (what following the prior's pick at each fork cost, bucketed by knob family), a golden-anchored descent (how

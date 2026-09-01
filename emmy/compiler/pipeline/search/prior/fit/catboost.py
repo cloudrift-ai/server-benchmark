@@ -76,8 +76,11 @@ logger = logging.getLogger(__name__)
 # ``D_splitk_deficit`` / ``D_splitk_roundtrip`` / ``D_near_kchunks`` / ``D_scalar_on_warp_eligible`` —
 # whose state operand (the needed split count, the reduce extent, the warp-eligibility stamp) is not a
 # candidate column at all, so no split on the pool can recover it.
+#
+# ``S_ext_n_symbolic_axis`` is the one kept column outside the ``D_*`` / ``MMA_*`` families, and is named
+# because nothing else here would keep it: splitting on the stamp is how ONE tree prices both regimes.
 TREE_FEATURES = (
-    "D_*,MMA_tier,MMA_acc_bits,"
+    "D_*,MMA_tier,MMA_acc_bits,S_ext_n_symbolic_axis,"
     "-D_l2_threads,-D_l2_reuse,-D_cells_cap,"
     "-D_near_threads,-D_near_area,-D_near_cells,-D_near_intensity,-D_near_tilen,-D_near_waves,-D_w_near_bk,-D_square,"
     "-D_stage_prefetch,-D_bk_ge32,-D_splitk_le2,-D_ctas_ge_sm,-D_bn_band,-D_bm_band,-D_tilen_clean,"

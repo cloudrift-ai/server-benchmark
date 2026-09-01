@@ -72,7 +72,7 @@ def _dtype_key(edge, scope: dict | None) -> tuple:
     same with or without a scope, so the unscoped and scoped walks share their entries."""
     # Identity keying is only valid while the tree is alive — which it is for every caller, who
     # holds the root across the walk.
-    captures = sorted(edge.deps()) if isinstance(edge, Fold) else ()
+    captures = ()  # a term captures nothing, so an edge's dtypes are occurrence-independent
     if not captures or not scope:
         return (id(edge), ())
     return (id(edge), tuple((name, getattr(scope.get(name), "name", None)) for name in captures))

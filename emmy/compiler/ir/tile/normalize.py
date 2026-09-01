@@ -326,8 +326,8 @@ def fed_by_body(fold: Fold, body) -> bool:
     LEAVES in the body is what the classic reduce domain then reads as a chain-form root's direct
     members, so the two answer the same question from opposite ends: this decides which folds stay,
     membership decides which of them partition."""
-    feeds = {name for stmt in body if not isinstance(stmt, Fold) for name in stmt.defines()}
-    return bool(feeds) and not feeds.isdisjoint(fold.deps())
+    del body  # a term reads no sibling definition: its values arrive through operand edges
+    return False
 
 
 def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
@@ -382,7 +382,7 @@ def _edge_free_names(edge) -> frozenset[str]:
     level binds. A scope-blind union would count a sibling-bound name (the statistic cone reading
     the eps its source operand provides) as free, and the close rewrites would re-fire forever on
     an edge that is already closed."""
-    return frozenset(edge.deps()) if isinstance(edge, Fold) else frozenset()
+    return frozenset()  # a term captures nothing — values arrive through its own operand edges
 
 
 def _carries_iteration(node) -> bool:
@@ -844,7 +844,7 @@ def _share_common_cones(root: Fold) -> Fold:
             current = replace(current, operands=operands)
         if any(piece is not stmt for piece, stmt in zip(body, node.lift.body, strict=True)):
             current = current.with_bodies((Body(body),))
-        bucket = canon.setdefault((current.structural_key(), current.deps(), current.defines()), [])
+        bucket = canon.setdefault((current.structural_key(), current.defines()), [])
         for prior in bucket:
             if prior == current or unify_key(prior) == unify_key(current):
                 seen[id(node)] = prior

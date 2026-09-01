@@ -837,25 +837,13 @@ class Fold:
         observed = "" if self.observe is None else Body.coerce(self.observe.body).structural_key(structural=False)
         return digest(body, observed)
 
-    def deps(self) -> tuple[str, ...]:
-        """SSA names captured by the term rather than supplied through its ``lift`` params."""
-        return self._deps
-
-    @cached_property
-    def _deps(self) -> tuple[str, ...]:
-        # DECLARED, not discovered. What this term needs from outside is its :attr:`environment`
-        # tail — the params no operand supplies — plus whatever its operand EDGES need in turn: a
-        # ``Load``'s index names, a nested term's own environment, recursively. The old spelling
-        # walked free names and subtracted params, which is why a capture could hide in here
-        # instead of being refused at formation.
-        #
-        # The observer contributes nothing: it is a ``Lambda``, so it is closed, and its params
-        # are ``(axis, *combine.results)`` — every one of them bound by this fold.
-        reads = set(self.environment)
-        for edge in self.operands:
-            reads.update(edge.deps())
-        bound = set(self.lift.params[: len(self.lift.params) - len(self.environment)])
-        return tuple(sorted(reads - bound))
+    # NO ``deps``. A term is closed: its VALUES arrive through operand edges bound positionally
+    # to lift params, so there is no SSA name it reads from an enclosing scope — the base
+    # ``Stmt.deps`` default of ``()`` is exactly right and overriding it would be a claim to the
+    # contrary. The ITERATION SPACE is a separate channel and always was: an axis is not a value
+    # the term depends on but the space it is evaluated over, carried by :attr:`free_axes` and, on
+    # the edges themselves, by each ``Load``'s index ``exprs`` (which already duplicated every name
+    # the old ``deps`` reported — that duplication is what made this look load-bearing).
 
     def exprs(self):
         """No index / predicate ``Expr`` of its own — a term's coordinates live on the ``Load``

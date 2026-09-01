@@ -180,10 +180,10 @@ flash attention the unconstrained product is 8.9e6 against 13,280 compatible row
 against 19,407,312.
 
 The cut phase is the outer enumeration. `030_cut` reaches a fixpoint over fused/cut placement choices and then
-unsplit/split reduction choices. Each domain enters the generic driver through `ScheduleContext.only_cuts(...)`.
-`040_schedule` follows and supplies `ClassicScheduleContext` to that same driver for Algorithm 1(c, p, t). A
-structural realization creates ordinary fresh kernels, so any later placement or split decision is discovered by the
-same pass rather than by a classic-context refusal.
+unsplit/split reduction choices and emits those pass-native structural forks directly. `040_schedule` follows and
+supplies `ClassicScheduleContext` to the generic driver for Algorithm 1(c, p, t). A structural realization creates
+ordinary fresh kernels, so any later placement or split decision is discovered by the same pass rather than by a
+classic-context refusal.
 
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated

@@ -10,15 +10,16 @@ operations are a lazy frontier and composition:
     for pick in context.extensions():
         next = context.extend(pick)
 
-The assignment type is opaque to the generic driver, and each context explicitly reports completion. Classic picks
-are partial `Schedule` values; a cut-only context uses the cut choice directly rather than storing it in a schedule
-field. A returned context contains the composed facts and leaves the original unchanged; incompatibility raises
-`ScheduleRefused`. `extend` is also the validation boundary for a complete classic assignment supplied directly by a
-pinned golden, even when that assignment was not emitted by `extensions`. The generic `schedule(context)` recursively
-composes those lazy frontiers and yields only complete assignments. Recursion is the generic Algorithm 1 traversal;
-consumers do not write a family-specific visitor or feed contexts back themselves. The driver knows no concrete
-family, pipeline fork type, site order, restriction, or enumeration slice. The pipeline's generic schedule-fork
-adapter preserves the same contexts as deferred search branches without adding compatibility logic.
+Every context assignment and extension is a `Schedule[KernelT, NodeT, EdgeT]`; a non-`None` kernel marks completion.
+Edge options implement the small `Edge` contract, whose `is_cut()` query lets `ScheduleContext.only_cuts()` expose
+the cut-bearing part of the same frontier without manufacturing another context. A returned context contains the
+composed facts and leaves the original unchanged; incompatibility raises `ScheduleRefused`. `extend` is also the
+validation boundary for a complete classic assignment supplied directly by a pinned golden, even when that
+assignment was not emitted by `extensions`. The generic `schedule(context)` recursively composes those lazy frontiers
+and yields only complete assignments. Recursion is the generic Algorithm 1 traversal; consumers do not write a
+family-specific visitor or feed contexts back themselves. The driver knows no concrete family, pipeline fork type,
+site order, restriction, or enumeration slice. The pipeline's generic schedule-fork adapter preserves the same
+contexts as deferred search branches without adding compatibility logic.
 
 Classic assignment contexts additionally expose the independent kernel, node, and edge factors.
 `enumerate_classic_reference` is their literal Cartesian oracle:
@@ -64,6 +65,5 @@ a second schedule family should demonstrate any shared codec contract before one
 
 The structural cut phase runs before assignment composition. The single `030_cut` pass reaches a fixpoint over two
 ordered domains: stored-Fold-edge placement first, then cross-CTA reduction splitting. Every successful choice and
-fresh piece re-enters the same rule. Each domain uses the first-class `ScheduleContext.only_cuts(...)` entry point,
-while `040_schedule` supplies a `ClassicScheduleContext`. Both use the generic schedule/context traversal without
-adding cuts to schedule values.
+fresh piece re-enters the same rule. `030_cut` emits its pass-native structural forks directly; it does not manufacture
+a schedule context for them. `040_schedule` supplies a `ClassicScheduleContext` to the generic schedule traversal.

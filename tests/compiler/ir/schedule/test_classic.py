@@ -16,6 +16,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Channel, Fold, Lambda, M
 from emmy.compiler.ir.schedule import (
+    Edge,
     PlacedTile,
     Placement,
     Raster,
@@ -515,9 +516,28 @@ def test_classic_types_implement_the_schedule_interfaces() -> None:
     assert issubclass(ClassicScheduleContext, ScheduleContext)
 
 
-def test_generic_driver_returns_one_independent_choice_domain() -> None:
-    assignments = advance_schedule(ScheduleContext.only_cuts(("fuse", "cut")))
-    assert tuple(assignments) == ("fuse", "cut")
+def test_only_cuts_filters_edge_extensions() -> None:
+    class TestEdge(Edge):
+        def __init__(self, cut: bool):
+            self.cut = cut
+
+        def is_cut(self) -> bool:
+            return self.cut
+
+    class TestContext(ScheduleContext[object, object, TestEdge]):
+        @property
+        def assignment(self) -> Schedule[object, object, TestEdge]:
+            return Schedule(None, {}, {})
+
+        def extensions(self):
+            yield Schedule(None, {}, {(0, 0): TestEdge(False)})
+            yield Schedule(None, {}, {(0, 0): TestEdge(True)})
+
+        def extend(self, pick):
+            raise AssertionError("only_cuts does not compose extensions")
+
+    (cut,) = TestContext().only_cuts()
+    assert cut.edges[(0, 0)].is_cut()
 
 
 def test_generic_fork_adapter_drives_a_schedule_context_lazily() -> None:

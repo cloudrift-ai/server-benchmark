@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule import ScheduleContext, schedule
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import MissingSiteError, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -159,5 +158,4 @@ def rewrite(match: Match, root: Node, ctx=None):
     if choices is None:
         raise RuleSkipped("no pending kernel-set cut")
     choices = choices if isinstance(choices, list) else [choices]
-    options = tuple(schedule(ScheduleContext.only_cuts(choices)))
-    return list(options) if len(options) > 1 else options[0]
+    return choices if len(choices) > 1 else choices[0]

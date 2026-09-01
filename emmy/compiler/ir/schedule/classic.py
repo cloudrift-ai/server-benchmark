@@ -17,7 +17,7 @@ from frozendict import frozendict
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.structural import instance_memo
 
-from .base import Schedule, ScheduleContext, ScheduleRefused
+from .base import Edge, Schedule, ScheduleContext, ScheduleRefused
 from .choices import (
     PlacedTile,
     Raster,
@@ -112,7 +112,7 @@ NodeSchedule = ProjectionSchedule | ReductionSchedule
 
 
 @dataclass(frozen=True)
-class EdgeSchedule:
+class EdgeSchedule(Edge):
     """The transport choice of one operand use."""
 
     stage: Stage
@@ -120,6 +120,9 @@ class EdgeSchedule:
     def __post_init__(self) -> None:
         if not isinstance(self.stage, Stage):
             raise TypeError("classic edge STAGE must be a Stage choice")
+
+    def is_cut(self) -> bool:
+        return False
 
 
 type ClassicAssignment = Schedule[KernelSchedule, NodeSchedule, EdgeSchedule]
@@ -519,7 +522,7 @@ class ClassicProblem:
 
 
 @dataclass(frozen=True)
-class ClassicScheduleContext(ScheduleContext[ClassicAssignment]):
+class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeSchedule]):
     """Immutable classic ``c + p + t`` compatibility-composition state."""
 
     problem: ClassicProblem
@@ -749,10 +752,6 @@ class ClassicScheduleContext(ScheduleContext[ClassicAssignment]):
     @property
     def assignment(self) -> ClassicAssignment:
         return self._assignment
-
-    @property
-    def complete(self) -> bool:
-        return self.assignment.kernel is not None
 
     def extensions(self) -> Iterator[ClassicAssignment]:
         """Yield a lazy compatible frontier of one node and its incident edges."""

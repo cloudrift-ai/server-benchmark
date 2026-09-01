@@ -1,6 +1,6 @@
 """Schedule interfaces and reusable choices."""
 
-from .base import Schedule, ScheduleContext, ScheduleRefused, schedule
+from .base import Edge, Schedule, ScheduleContext, ScheduleRefused, schedule
 from .choices import (
     AtomKind,
     FoldMove,
@@ -26,6 +26,7 @@ __all__ = [
     "AtomKind",
     "ClassicSites",
     "Contraction",
+    "Edge",
     "EdgeSite",
     "FoldMove",
     "Level",

@@ -3,15 +3,12 @@
 The interface deliberately exposes no domain catalog, site order, restriction object, or schedule
 family. A context chooses the smallest useful frontier, and :func:`schedule` lazily composes that
 frontier. For example, the classic context groups one node with its incident edges so it can reject
-mixed transport and fragment-seam combinations before they create subtrees. Structural passes use
-the first-class :meth:`ScheduleContext.only_cuts` entry point for a domain that has no assignment
-composition.
+mixed transport and fragment-seam combinations before they create subtrees.
 
 Three invariants make those different granularities one enumeration:
 
-* ``assignment`` is immutable and ``complete`` says whether it is a leaf. The assignment type is
-  opaque to the driver: classic enumeration uses :class:`Schedule`, while structural cut
-  enumeration uses the cut choice itself.
+* ``assignment`` is an immutable kernel × node × edge :class:`Schedule`; a non-``None`` kernel
+  marks a complete leaf.
 * ``extensions`` yields a lazy, context-aware frontier. It may omit picks already proved
   incompatible, but must retain a route to every accepted complete assignment.
 * ``extend`` is the authority. It accepts a frontier pick or a complete assignment supplied by a
@@ -24,7 +21,7 @@ the lazy enumeration; no schedule-family visitor or product materialization exis
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Self
 
@@ -33,8 +30,16 @@ from frozendict import frozendict
 from .views import EdgeSite, NodeId
 
 
+class Edge(ABC):
+    """A schedule-family edge option."""
+
+    @abstractmethod
+    def is_cut(self) -> bool:
+        """Whether this option separates its producer and consumer into different kernels."""
+
+
 @dataclass(frozen=True)
-class Schedule[KernelT, NodeT, EdgeT]:
+class Schedule[KernelT, NodeT, EdgeT: Edge]:
     """One immutable kernel × node × edge assignment, possibly still incomplete."""
 
     kernel: KernelT | None
@@ -64,7 +69,7 @@ class ScheduleRefused(ValueError):
     """A pick cannot compose with the immutable schedule context."""
 
 
-class ScheduleContext[AssignmentT](ABC):
+class ScheduleContext[KernelT, NodeT, EdgeT: Edge](ABC):
     """One immutable prefix of a compatible enumeration.
 
     Implementations own frontier granularity, compatibility, restrictions, and validation. They
@@ -74,64 +79,34 @@ class ScheduleContext[AssignmentT](ABC):
 
     @property
     @abstractmethod
-    def assignment(self) -> AssignmentT:
-        """The immutable assignment prefix decided so far."""
-
-    @property
-    @abstractmethod
-    def complete(self) -> bool:
-        """Whether :attr:`assignment` is a complete leaf."""
+    def assignment(self) -> Schedule[KernelT, NodeT, EdgeT]:
+        """The immutable kernel × node × edge assignment prefix decided so far."""
 
     @abstractmethod
-    def extensions(self) -> Iterator[AssignmentT]:
+    def extensions(self) -> Iterator[Schedule[KernelT, NodeT, EdgeT]]:
         """Yield the next lazy frontier without losing any accepted completion."""
 
+    def only_cuts(self) -> Iterator[Schedule[KernelT, NodeT, EdgeT]]:
+        """Yield frontier extensions containing at least one cut edge."""
+        return (extension for extension in self.extensions() if any(edge.is_cut() for edge in extension.edges.values()))
+
     @abstractmethod
-    def extend(self, pick: AssignmentT) -> Self:
+    def extend(self, pick: Schedule[KernelT, NodeT, EdgeT]) -> Self:
         """Compose a partial or complete pick, or raise when it is incompatible."""
 
-    @staticmethod
-    def only_cuts[CutT](options: Iterable[CutT]) -> ScheduleContext[CutT | None]:
-        """Return a context whose complete assignments are exactly the supplied structural cuts."""
-        return _ChoiceContext(tuple(options))
 
-
-@dataclass(frozen=True)
-class _ChoiceContext[ChoiceT](ScheduleContext[ChoiceT | None]):
-    """One independent choice factor, used by :meth:`ScheduleContext.only_cuts`."""
-
-    options: tuple[ChoiceT, ...]
-    _assignment: ChoiceT | None = None
-
-    @property
-    def assignment(self) -> ChoiceT | None:
-        return self._assignment
-
-    @property
-    def complete(self) -> bool:
-        return self.assignment is not None
-
-    def extensions(self) -> Iterator[ChoiceT | None]:
-        return iter(()) if self.complete else iter(self.options)
-
-    def extend(self, pick: ChoiceT | None) -> _ChoiceContext[ChoiceT]:
-        if self.complete or pick is None or not any(pick is option for option in self.options):
-            raise ScheduleRefused("pick is outside the structural cut domain")
-        return _ChoiceContext(self.options, pick)
-
-
-def schedule[AssignmentT](
-    context: ScheduleContext[AssignmentT],
+def schedule[KernelT, NodeT, EdgeT](
+    context: ScheduleContext[KernelT, NodeT, EdgeT],
     *,
     recursive: bool = True,
-) -> Iterator[ScheduleContext[AssignmentT] | AssignmentT]:
+) -> Iterator[ScheduleContext[KernelT, NodeT, EdgeT] | Schedule[KernelT, NodeT, EdgeT]]:
     """Lazily enumerate complete assignments, or one frontier for a generic tree adapter."""
     for pick in context.extensions():
         try:
             child = context.extend(pick)
         except ScheduleRefused:
             continue
-        if child.complete:
+        if child.assignment.kernel is not None:
             yield child.assignment
         elif recursive:
             yield from schedule(child)
@@ -139,4 +114,4 @@ def schedule[AssignmentT](
             yield child
 
 
-__all__ = ["Schedule", "ScheduleContext", "ScheduleRefused", "schedule"]
+__all__ = ["Edge", "Schedule", "ScheduleContext", "ScheduleRefused", "schedule"]

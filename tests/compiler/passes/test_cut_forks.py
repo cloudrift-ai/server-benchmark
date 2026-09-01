@@ -50,18 +50,10 @@ from tests.compiler.helpers import direct_classic_leaf, requires_cuda
 
 _CTX = Context.from_target((12, 0))
 _CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
-_SCHEDULE = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule")
 
 
 def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
     graph.add_node(InputOp(), [], Tensor(name, shape, dtype), node_id=name)
-
-
-def test_cut_and_assignment_passes_share_the_generic_schedule_driver() -> None:
-    from emmy.compiler.ir.schedule import schedule
-
-    assert _CUT.schedule is schedule
-    assert import_module("emmy.compiler.pipeline.fork").schedule is schedule
 
 
 def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:

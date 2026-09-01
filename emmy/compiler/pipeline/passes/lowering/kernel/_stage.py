@@ -720,15 +720,10 @@ class SyncTransport:
                 vals.append(val)
             hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p] == "hoist" for nm in deep_defines(stmt)}
             vals = [val if val in hoisted_defs else f"{val}__c{j}" for j, val in enumerate(vals)]
-            # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
-            # stmts: the stat-row loads, whose value is identical across the run's cells) emit once,
-            # unsuffixed, and per-cell references pass through to them; VECTOR positions (a scalar
-            # gmem ``Load`` whose last-dim index advances by exactly +1 per cell — the cone's
-            # k-indexed operand read) merge the run's V scalar 2 B loads into ONE vector ``Load``
-            # binding every cell's suffixed name (one 16 B ld like the cp.async fill, instead of V
-            # scalar loads — the compute fill issued 3.6x cuBLAS's LSU instructions). Everything
-            # else replicates per cell as before.
-            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in deep_defines(st)}
+            # HOISTED positions emit once, unsuffixed. VECTOR positions merge a stride-1 run into
+            # one vector ``Load``. Everything else replicates per cell, renaming only definitions
+            # visible so far plus the current statement's nested scope.
+            local: set[str] = set()
             for p in range(len(cell_stmts[0])):
                 if plans[p] == "hoist":
                     body.append(cell_stmts[0][p])
@@ -736,11 +731,14 @@ class SyncTransport:
                 if plans[p] == "vector":
                     ld = cell_stmts[0][p]
                     body.append(Load(names=tuple(f"{ld.names[0]}__c{j}" for j in range(v)), input=ld.input, index=ld.index, dtype=ld.dtype))
-                    continue
-                for j in range(v):
-                    sfx = f"__c{j}"
-                    ren = lambda nm, sfx=sfx, local=local: f"{nm}{sfx}" if nm in local else nm  # noqa: E731
-                    body.append(cell_stmts[j][p].rewrite(ren))
+                else:
+                    for j in range(v):
+                        sfx = f"__c{j}"
+                        position_local = local | deep_defines(cell_stmts[j][p])
+                        ren = lambda nm, sfx=sfx, local=position_local: f"{nm}{sfx}" if nm in local else nm  # noqa: E731
+                        body.append(cell_stmts[j][p].rewrite(ren))
+                stmt = cell_stmts[0][p]
+                local |= set(stmt.defines()) | {acc.name for nested in stmt.nested() for acc in nested.accums}
             # ONE vector Write per run (the run is ``V`` contiguous 16-byte-aligned cells, so the
             # store is a single st.128 like the cp.async fill's chunk deposit) — V scalar 2 B
             # stores at 16 B thread stride were 8-way bank-conflicted, and the downstream

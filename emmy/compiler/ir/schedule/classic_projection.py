@@ -53,7 +53,6 @@ from emmy.compiler.ir.schedule.classic import (
     edge_site_spelling,
     node_id_spelling,
 )
-from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.views import ContractionFacts, Projection, Reduction
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
@@ -273,7 +272,7 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
 def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
     """Project tensor-core atoms from contraction, dtype, address, and target facts."""
     tail = projection_tail(tile)
-    packed = packed_readings(tile, node)
+    packed = tile.packed_reading(node)
     if _node_refusal(tile, target, node, _fragment_epilogue_ok(tail, _fold_states(tile.op)), packed) is not None:
         return ()
     return _atom_families(tile, target, node, tail, packed)
@@ -370,7 +369,7 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
             continue
         if _needs_fill(state.tile, node, choice.tile):
             candidates = (Stage(depth=1), Stage(depth=2))
-            if packed_readings(state.tile, node)[0] is not None:
+            if state.tile.packed_reading(node)[0] is not None:
                 candidates = (*candidates, *catalogs[True])
         else:
             supported.setdefault(direct, None)

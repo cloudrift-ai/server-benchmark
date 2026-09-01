@@ -20,10 +20,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from frozendict import frozendict
+
 from emmy.compiler.ir.pure.fold import Fold, operand_body
 from emmy.compiler.ir.stmt import Assign, Load
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.structural import instance_memo
 
 
 def _idx_vars(index) -> set[str]:
@@ -311,16 +312,14 @@ def match_packed_pair_node(node, inputs) -> BlockScaledPair | None:
     return BlockScaledPair(a=sides[0][1], b=tuple(split for _, split in sides[1:]), block=sides[0][0].block)
 
 
-def packed_readings(tile_op, node) -> tuple[PackedKBlockB | None, BlockScaledPair | None]:
-    """The contraction's two packed readings, memoized on the kernel that types its operands.
+def packed_readings(nodes, inputs) -> frozendict:
+    """Each node's ``(B copy, pair)`` packed readings, by object identity.
 
-    Both are a function of the node and the kernel's typed inputs, so every consumer that holds a
-    ``TileOp`` derives them here instead of carrying them through a schedule choice.
+    Both are a function of the node and the kernel's typed inputs, so this is
+    :attr:`~emmy.compiler.ir.tile.TileOp.packed_readings` — read there, never re-matched at a
+    call site and never carried through a schedule choice.
     """
-    memo = instance_memo(tile_op, "_memo_packed_readings")
-    if id(node) not in memo:
-        memo[id(node)] = (match_packed_b_node(node, tile_op.inputs), match_packed_pair_node(node, tile_op.inputs))
-    return memo[id(node)]
+    return frozendict({id(node): (match_packed_b_node(node, inputs), match_packed_pair_node(node, inputs)) for node in nodes})
 
 
 __all__ = [

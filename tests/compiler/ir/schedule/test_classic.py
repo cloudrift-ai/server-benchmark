@@ -51,8 +51,6 @@ from emmy.compiler.ir.schedule.views import (
     Projection,
     Reduction,
     node_view,
-    schedule_edges,
-    schedule_nodes,
 )
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import TileOp
@@ -583,11 +581,20 @@ def test_tile_op_caches_the_stable_schedule_inventory() -> None:
     root = Fold.projection(operands=(left, right), body=Body(), results=("sum", "sum"))
     tile = TileOp(op=root)
 
-    assert tile.nodes == schedule_nodes(tile.op)
+    # one walk per kernel, and every structural reading is a field of its site records
+    assert tile.sites is tile.sites
     assert tile.nodes is tile.nodes
-    assert tile.node_edges == schedule_edges(tile.nodes)
     assert tile.node_edges is tile.node_edges
+    assert tile.nodes == tuple(site.node for site in tile.sites)
+    assert tile.node_edges == tuple((c, e) for c, node in enumerate(tile.nodes) for e in range(len(node.operands)))
     assert tuple(tile.node_id(node) for node in tile.nodes) == tuple(range(len(tile.nodes)))
+
+    # the walk's labels are POSITIONS in this kernel's tree, so they belong to the TileOp and not
+    # to the shared subterms it is built from: every node but the root has a reaching parent, and
+    # a node reached down two paths keeps the first.
+    assert all(site.parent is not None for site in tile.sites[1:])
+    assert tile.sites[0].parent is None
+    assert not any(site.derived for site in tile.sites)
 
 
 def test_tile_requires_complete_materialization() -> None:

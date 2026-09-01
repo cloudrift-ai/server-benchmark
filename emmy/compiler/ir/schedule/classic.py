@@ -28,7 +28,6 @@ from .choices import (
     derive_inventory,
     resolve_site_tile,
 )
-from .packing import packed_readings
 from .views import ContractionFacts, EdgeSite, NodeId, NodeView, Projection, Reduction
 
 CLASSIC_FAMILIES = ("TILE", "REDUCE", "STAGE")
@@ -253,7 +252,7 @@ def _resolve_stage(
 ) -> ResolvedStage | None:
     from . import staging  # noqa: PLC0415
 
-    packed = packed_readings(tile_op, node)
+    packed = tile_op.packed_reading(node)
     packed_copy = packed[0] is not None and choice.transport in ("smem-async", "smem-tma")
     if _needs_fill(tile_op, node, plan) and not packed_copy:
         return staging.resolve_fill_stage(
@@ -914,12 +913,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             self._refuse("one contraction currently requires one transport choice across its operands", site)
         from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
 
-        placement = instance_memo(tile_op, "_memo_classic_sched")
-        sched = placement.get("sched")
-        if sched is None:
-            sched = Sched(tile_op, place=tile_op.place.on_grid())
-            placement["sched"] = sched
-        geometry = sched.placed(fold, node.tile)
+        geometry = Sched(tile_op, place=tile_op.place.on_grid()).placed(fold, node.tile)
         if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
             cache[key] = None
             return None
@@ -939,7 +933,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             resolved.discard(None)
             resolved_stage = next(iter(resolved)) if len(resolved) == 1 else None
         elif _needs_fill(tile_op, fold, node.tile):
-            packed_copy = packed_readings(tile_op, fold)[0] is not None and stage.transport in ("smem-async", "smem-tma")
+            packed_copy = tile_op.packed_reading(fold)[0] is not None and stage.transport in ("smem-async", "smem-tma")
             if not packed_copy and stage not in (Stage(depth=1), Stage(depth=2)):
                 cache[key] = None
                 return None
@@ -975,7 +969,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 else ()
             ),
             raster_eligible=node.tile.is_tiled and isinstance(view, Reduction) and view.contraction is not None,
-            producer_eligible=not (packed_readings(tile_op, fold)[0] is not None and stage.transport == "smem-tma"),
+            producer_eligible=not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
         )
         cache[key] = support
         return support

@@ -34,10 +34,12 @@ from emmy.compiler.ir.pure.fold import Fold, is_contraction
 
 
 class Visit(NamedTuple):
-    """One node the walk reaches: the term, the axes in scope where it is read, the segment path
-    addressing it from the root, and whether it lives in a derived evaluation."""
+    """One node the walk reaches: the term, the node that reached it, the axes in scope where it is
+    read, the segment path addressing it from the root, and whether it lives in a derived
+    evaluation. ``parent`` is ``None`` at the root."""
 
     node: object
+    parent: object
     axes: tuple
     segments: tuple[str, ...]
     derived: bool
@@ -89,15 +91,21 @@ def children(node, axes: tuple = (), derived: bool = False) -> tuple[tuple, ...]
     return tuple(visit for member, label, member_derived in labelled for visit in _descend(member, inner, label, member_derived))
 
 
-def walk(node, axes: tuple = (), segments: tuple[str, ...] | None = None, derived: bool = False) -> Iterator[Visit]:
+def walk(
+    node,
+    axes: tuple = (),
+    segments: tuple[str, ...] | None = None,
+    derived: bool = False,
+    parent: object = None,
+) -> Iterator[Visit]:
     """``node`` and every stored Fold under it, preorder, each as a :class:`Visit`.
 
     Preorder is a stable discovery order, not schedule semantics. Any scheduling consumer must
     produce the same compatible assignment set under another traversal."""
     segments = (segment(node),) if segments is None else segments
-    yield Visit(node, axes, segments, derived)
+    yield Visit(node, parent, axes, segments, derived)
     for child, inner, label, child_derived in children(node, axes, derived):
-        yield from walk(child, inner, (*segments, label), child_derived)
+        yield from walk(child, inner, (*segments, label), child_derived, node)
 
 
 __all__ = ["Visit", "children", "segment", "walk"]

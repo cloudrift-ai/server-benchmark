@@ -163,10 +163,15 @@ def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> N
         "cone_seam",
         lambda *_: (_ for _ in ()).throw(AssertionError("the fill must reuse the prescan's seam")),
     )
-    assert _rows(FIXTURES["fused_norm_linear"]())
+    rows = _rows(FIXTURES["fused_norm_linear"]())
+    assert rows
     assert calls
-    keys = [(id(cone), k_name) for cone, k_name in calls]
-    assert len(keys) == len(set(keys))
+    # ONE distinct seam, read once per TileOp that composes over the term -- the unscheduled tile
+    # plus each materialized candidate re-validating itself -- and never once per candidate PLAN,
+    # which is the cost this guards. The facts are cached on the kernel, so the bound is the number
+    # of kernels, not the size of the search.
+    assert len({(id(cone), k_name) for cone, k_name in calls}) == 1
+    assert len(calls) < len(rows)
 
 
 @pytest.mark.parametrize("case, tile_sites, reduce_sites", (("fused_norm_linear", 1, 2), ("flash_pair", 2, 3)))
@@ -434,7 +439,13 @@ def _per_cell_reductions(root, output_specs=()) -> set:
     excluded here by ``is_tiled``.
     """
     con = next(stmt for stmt in root.body if is_contraction(stmt))
-    tile = SimpleNamespace(output_specs=output_specs, op=root, inputs={}, place=SimpleNamespace(free=()))
+    tile = SimpleNamespace(
+        output_specs=output_specs,
+        op=root,
+        inputs={},
+        place=SimpleNamespace(free=()),
+        packed_reading=lambda _node: (None, None),
+    )
     domain = _classic._contraction_domain(tile, None, con, ContractionFacts(k_axis=con.axis))
     return {choice.reduce for choice in domain if not choice.tile.is_tiled}
 

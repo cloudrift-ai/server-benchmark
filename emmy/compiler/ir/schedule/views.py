@@ -7,9 +7,8 @@ from dataclasses import dataclass
 from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold, cone_seam, deep_reads, edge_free_axes, is_contraction
-from emmy.compiler.ir.pure.tree import children, walk
+from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.ir.stmt import Accum, Body
-from emmy.compiler.structural import instance_memo
 
 type NodeId = int
 type EdgeSite = tuple[NodeId, int]
@@ -79,26 +78,6 @@ def node_view(node: Fold) -> NodeView:
     )
 
 
-def schedule_nodes(root: Fold) -> tuple[Fold, ...]:
-    """Return Fold nodes in stable preorder, keeping one entry per object identity."""
-    memo = instance_memo(root, "_memo_schedule_views")
-    if "nodes" in memo:
-        return memo["nodes"]
-    nodes = []
-    seen = set()
-    for visit in walk(root):
-        if isinstance(visit.node, Fold) and id(visit.node) not in seen:
-            seen.add(id(visit.node))
-            nodes.append(visit.node)
-    memo["nodes"] = tuple(nodes)
-    return memo["nodes"]
-
-
-def schedule_edges(nodes: tuple[Fold, ...]) -> tuple[EdgeSite, ...]:
-    """Return every consumer operand position in stable node order."""
-    return tuple((consumer, operand) for consumer, node in enumerate(nodes) for operand in range(len(node.operands)))
-
-
 def _sibling_fragment_edges(owner) -> dict[int, NodeId]:
     """Map each sibling-step consumer to the one contraction producing its computed edge."""
     out = {}
@@ -121,47 +100,23 @@ def _sibling_fragment_edges(owner) -> dict[int, NodeId]:
     return out
 
 
-def schedule_views(root: Fold) -> frozendict[NodeId, NodeView]:
-    """Each node site classified, memoized on the ROOT — the term owns the reading, so every
-    ``TileOp`` over one term shares it instead of re-deriving per wrapper."""
-    memo = instance_memo(root, "_memo_schedule_views")
-    if "views" not in memo:
-        memo["views"] = frozendict(dict(enumerate(node_view(node) for node in schedule_nodes(root))))
-    return memo["views"]
-
-
 def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
-    """Every contraction's :class:`ContractionFacts`, memoized on the root for the same reason."""
-    memo = instance_memo(owner.op, "_memo_schedule_views")
-    if "contractions" not in memo:
-        memo["contractions"] = frozendict(_contraction_facts(owner))
-    return memo["contractions"]
-
-
-def _contraction_facts(owner) -> dict[NodeId, ContractionFacts]:
     """Derive every contraction's :class:`ContractionFacts` from ``owner``'s term alone.
 
-    ``owner`` is whatever indexes the sites — today the :class:`~emmy.compiler.ir.tile.TileOp`,
-    read through ``op`` / ``nodes`` / ``node_sites`` / ``views`` / ``node_at`` / ``node_id`` so this
-    layer states the reading without importing the tile layer that owns the term.
+    ``owner`` is the kernel that indexes the sites — the :class:`~emmy.compiler.ir.tile.TileOp`,
+    read through ``nodes`` / ``node_sites`` / ``views`` / ``node_at`` / ``node_id`` / ``parents`` /
+    ``derived``, so this layer states the reading without importing the tile layer that owns it.
     """
-    parents: dict[int, Fold] = {}
-    derived: set[int] = set()
-    for visit in walk(owner.op):
-        if visit.derived:
-            derived.add(id(visit.node))
-        for child, _axes, _segment, _child_derived in children(visit.node):
-            parents.setdefault(id(child), visit.node)
     sibling = _sibling_fragment_edges(owner)
     facts = {}
     for site in owner.node_sites:
         view = owner.views[site]
         if not isinstance(view, Reduction) or view.contraction is None:
             continue
-        node = owner.node_at(site)
-        parent = parents.get(id(node))
+        record = owner.sites[site]
+        node, parent = record.node, record.parent
         if (
-            id(node) in derived
+            record.derived
             and node.axis.extent.is_static
             and node.axis.extent.as_static() == 1
             and isinstance(parent, Fold)
@@ -187,7 +142,7 @@ def _contraction_facts(owner) -> dict[NodeId, ContractionFacts]:
             need=need if need is not None else (owner.node_id(producer) if producer is not None else None),
             need_step=need is not None,
         )
-    return facts
+    return frozendict(facts)
 
 
 def _operand_position(node: Fold, wanted) -> int:
@@ -207,7 +162,4 @@ __all__ = [
     "Reduction",
     "contraction_facts",
     "node_view",
-    "schedule_views",
-    "schedule_edges",
-    "schedule_nodes",
 ]

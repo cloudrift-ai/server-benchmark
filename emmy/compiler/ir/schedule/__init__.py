@@ -29,8 +29,6 @@ from .views import (
     Projection,
     Reduction,
     node_view,
-    schedule_edges,
-    schedule_nodes,
 )
 
 __all__ = [
@@ -62,7 +60,5 @@ __all__ = [
     "derive_workers",
     "node_view",
     "resolve_site_tile",
-    "schedule_edges",
-    "schedule_nodes",
     "schedule",
 ]

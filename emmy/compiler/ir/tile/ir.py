@@ -42,8 +42,10 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_free_axes, is_contraction, operand_body
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
+from emmy.compiler.ir.pure.tree import Visit, walk
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.views import (
     ContractionFacts,
     EdgeSite,
@@ -52,9 +54,7 @@ from emmy.compiler.ir.schedule.views import (
     Projection,
     Reduction,
     contraction_facts,
-    schedule_edges,
-    schedule_nodes,
-    schedule_views,
+    node_view,
 )
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
@@ -542,23 +542,41 @@ class TileOp(Op):
         validate(self.schedule, self, place=self.place, workers=self.workers)
 
     @cached_property
+    def sites(self) -> tuple[Visit, ...]:
+        """The ONE walk over this kernel's term, one record per node identity, indexed by node id.
+
+        Every structural reading is a FIELD of these records — the node, the parent that reached
+        it, the axes in scope there, its segment path, whether it is derived evaluation — so the
+        walk runs once per kernel and nothing re-derives a label it already carries. Those labels
+        are POSITIONS in this kernel's tree, which is why they live here and never on the shared
+        subterms the tree is built from: one Fold reached down two paths has two parents, and keeps
+        the first that reached it.
+        """
+        out, seen = [], set()
+        for visit in walk(self.op) if isinstance(self.op, Fold) else ():
+            if id(visit.node) not in seen:
+                seen.add(id(visit.node))
+                out.append(visit)
+        return tuple(out)
+
+    @cached_property
     def nodes(self) -> tuple[Fold, ...]:
         """The term's Fold nodes in stable schedule order."""
-        return schedule_nodes(self.op) if isinstance(self.op, Fold) else ()
+        return tuple(site.node for site in self.sites)
 
     @cached_property
     def node_edges(self) -> tuple[EdgeSite, ...]:
         """Every consumer operand position in stable schedule order."""
-        return schedule_edges(self.nodes)
+        return tuple((consumer, operand) for consumer, node in enumerate(self.nodes) for operand in range(len(node.operands)))
 
     @cached_property
     def node_sites(self) -> tuple[NodeId, ...]:
         """Every node identity, in stable schedule order."""
-        return tuple(range(len(self.nodes)))
+        return tuple(range(len(self.sites)))
 
     @cached_property
     def _node_ids(self) -> dict[int, NodeId]:
-        return {id(node): node_id for node_id, node in enumerate(self.nodes)}
+        return {id(site.node): node_id for node_id, site in enumerate(self.sites)}
 
     def node_id(self, node: Fold) -> NodeId:
         """Return ``node``'s schedule identity by object identity."""
@@ -569,9 +587,9 @@ class TileOp(Op):
 
     def node_at(self, site: NodeId) -> Fold:
         """The node one identity addresses."""
-        if type(site) is not int or not 0 <= site < len(self.nodes):
+        if type(site) is not int or not 0 <= site < len(self.sites):
             raise KeyError(f"unknown node site {site!r}")
-        return self.nodes[site]
+        return self.sites[site].node
 
     def operand(self, edge: EdgeSite):
         """The operand edge one consumer position addresses."""
@@ -601,7 +619,7 @@ class TileOp(Op):
     @cached_property
     def views(self) -> frozendict[NodeId, NodeView]:
         """Each node site classified as a projection or a reduction, without target input."""
-        return schedule_views(self.op) if isinstance(self.op, Fold) else frozendict()
+        return frozendict(dict(enumerate(node_view(node) for node in self.nodes)))
 
     @cached_property
     def tile_sites(self) -> tuple[NodeId, ...]:
@@ -626,8 +644,20 @@ class TileOp(Op):
         )
 
     @cached_property
+    def packed_readings(self) -> frozendict:
+        """Each CONTRACTION's ``(B copy, pair)`` packed-operand readings, by object identity.
+
+        Only a contraction has the operand roles the readings match on, so a non-contraction node
+        is simply absent — callers read through :meth:`packed_reading`."""
+        return packed_readings(tuple(node for node in self.nodes if is_contraction(node)), self.inputs)
+
+    def packed_reading(self, node) -> tuple:
+        """One node's packed-operand readings; ``(None, None)`` where the shape cannot apply."""
+        return self.packed_readings.get(id(node), (None, None))
+
+    @cached_property
     def contractions(self) -> frozendict[NodeId, ContractionFacts]:
-        """The per-contraction structure every schedule choice over this term shares."""
+        """The per-contraction structure every schedule choice over this kernel shares."""
         return contraction_facts(self) if isinstance(self.op, Fold) else frozendict()
 
     def __getstate__(self):

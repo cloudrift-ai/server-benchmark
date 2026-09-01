@@ -496,7 +496,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     lowering = reloaded_db.lookup_lowering(original_loop.identity_key(with_io=True, with_knobs=True))
     assert lowering is not None and lowering.child_key == fallback_key
     candidates = [{**live_features, **fallback}, {**live_features, **route}]
-    assert _db_measured_pick(_db_measured_index(reloaded_db, ctx), candidates) == (0, 153.45)
+    assert _db_measured_pick(_db_measured_index(reloaded_db, ctx).ok, candidates) == (0, 153.45)
     reloaded_db.close()
     persist_proposal_rankings(path, document, targets[0], rankings)
     reloaded, reloaded_targets = load_working_targets(path)

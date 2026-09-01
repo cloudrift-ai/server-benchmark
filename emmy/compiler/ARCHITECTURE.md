@@ -175,6 +175,87 @@ the gate/up matmul can stream fp8 bytes with the scale on the accumulator epilog
 ordinary outcome — a fusion-band decision upstream of the tile binding, shared with the constant path.
 Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
 
+**NVFP4 checkpoints.** The dtype layer carries the storage format — `f4e2m1x2` (a uint8 element holding a packed
+pair of e2m1 codes) with its LUT decode `decode_f4x2` and a raw-byte CUDA spelling. `loader/quant.py` recognizes
+both checkpoint config conventions (modelopt, compressed-tensors `nvfp4-pack-quantized`; MXFP4's 32-element blocks
+stay excluded) and dequantizes the packed trio `<key>` + `<key>_scale` (e4m3, read as raw bits) + `<key>_scale_2`
+(f32) for the accuracy twin via `dequantize_nvfp4` — `fuse_nvfp4_scales` collapses the two scale levels into one
+f16 tensor, the format's single rounding point. At graph birth, `spell_quantized_constants` rewrites each NVFP4
+weight constant into its decode cone. The packed-bits constant feeds a pair-table gather; the e4m3 block-scale
+constant and the f32 per-tensor scale (`weight_scale_2`) fuse into one f16 scale that multiplies the gathered
+values, one scale per 16 along the last axis. The 256×2 byte-to-value-pair table is a `ConstantOp` whose
+`source_graph` computes it at bind time; `from_f4e2m1` decodes the code halves inside that subgraph.
+
+A contraction (the matmul-shaped node) consuming that cone reads two ways, both fork siblings on the tensor-core
+tier. The general one is the computed-B reading every producer cone gets: loop fusion merges the decode into the
+contraction's own loop nest and the sync compute-fill evaluates it per shared-memory cell, so no decoded weight
+materializes between kernels, but the weight crosses global memory as 16-bit values. The specialized one is the
+**packed byte-slab stage**, and it is where the format's size advantage survives to the fragment: `_packed`
+recognizes the cone (a packed-pair bits load feeding a value-pair gather, times a factor whose every contraction-axis
+reference is block-guarded), the weight's bits then copy VERBATIM into a byte slab at half a 16-bit slab's traffic,
+its block scales decode once per block into a small companion slab, and one fragment loader reads both — decoding
+each byte's two codes through a constant value table and applying the block's scale. That table exists for f16 and
+bf16 fragments alike — every e2m1 value is exact in both — so a bf16 trace, which is what Qwen models produce,
+takes the same path. The W8A16 mul-hoist (the scale
+multiply moved out of the reduction loop onto the accumulator) still does not apply: an NVFP4 scale varies along the
+contraction axis, so it does not commute out of the fold. The packed stage's scope is the shape its loader is
+written for — either copy transport, an N-major weight of 16-value blocks under a 16-bit atom whose K step is that
+same 16; anything else declines to the general reading, which computes the same values. A TMA box deposits its byte
+slab dense where cp.async pads each row, so the two forms differ in slab size and row stride, not in what they drain.
+
+**Static 4-bit activations (the declared W4A4 program).** An NVFP4 checkpoint that declares static 4-bit input
+activations and stores per-linear `input_scale` tensors (modelopt's calibrated activation `scale_2`, one f32 =
+calibration amax / (6 · 448)) marks its linears for W4A4. `loader.quant.spell_static_fp4_activations` runs after
+`spell_quantized_constants`, whose spelled weight cones are the marker it reads, and writes the quantize→dequantize
+round trip in front of each marked linear, in the same
+shared-vocabulary algebra: per 16-element K block, the e4m3 scale round trip (`to_f8e4m3(amax / (6·s2))`), ONE
+f32→f16 rounding of the fused scale (`fuse_nvfp4_scales` parity), the e2m1 encode over the rounded scale, the pair
+pack into an `f4e2m1x2` buffer, and the same pair-table-gather decode chain the weight side spells. Both matmul
+operands then read as one decode-chain shape, the graph's own meaning becomes Σ x̂·ŵ for the marked matmuls, and the
+numpy backend stays the parity oracle for every lowering of it. Two halves spell the round trip, and the split
+decides what reaches memory: equal-valued `input_scale` tensors over one activation share the QUANTIZE (a fused
+projection group calibrates to one scale), while each consumer gets its own reconstruction. Loop fusion materializes
+an activation's fan-out point, so a shared activation reaches its matmuls as the packed codes beside their raw e4m3
+block scales — the same two leaves a packed weight constant stores — rather than as a dense 16-bit buffer with the
+codes dissolved into the producer. Unmarked linears keep their 16-bit activations. One parity property is inherent
+rather than a defect: behind a COMPUTED producer the two backends reach
+the encodes with epsilon-different upstream values, and a block whose scale ratio lands within that epsilon of a
+rounding boundary flips one code — parity there is distributional (median exact, rare flips bounded by the
+quantization step), where direct-feed comparisons stay tight.
+
+Both readings still hand the tensor cores 16-bit fragments, because every mma before Blackwell multiplies 16-bit or
+8-bit operands. Consumer Blackwell adds one that multiplies the 4-bit codes THEMSELVES and applies each 16-value
+block's scale in hardware — registered as the `mma_m16n8k64_e2m1_f32` atom, where a matmul carries no decode at all.
+A marked matmul reaches it when BOTH operands read as packed decode chains: the schedule offers the atom, the stage
+resolves FOUR byte slabs (both operands' codes, both operands' raw e4m3 block scales), and the drain loads two data
+fragments through the same byte gathers the fp8 k32 atoms use plus one scale register per side. The per-tensor scale
+levels ride the epilogue. Both block-scale slabs always COPY — the cell takes the stored e4m3 byte itself, so the fill
+the 16-bit drain needs for its fused scale has nothing left to evaluate. The codes copy too when they are stored, and
+are compute-FILLED when this matmul's own kernel produces them: loop fusion materializes an activation's fan-out
+point, so an activation read by one kernel keeps its quantize inline, and the fill then evaluates that same cone once
+per slab cell instead of once per output element. Filled codes reach the cell but keep 16-bit traffic on that operand,
+since the fill still reads the unquantized activation to encode from.
+
+That last move is why the native lowering carries a bounded gap rather than the exact oracle every other lowering
+answers to. The declared program applies `f16(block_scale x tensor_scale)` per element — the single fused rounding
+above — and the instruction applies the raw block scale itself with the tensor level factored out, so the two are not
+the same expression and no reassociation connects them. The gap is one f16 rounding of a per-block constant per side,
+about 2^-11 relative; the native path is therefore checked to a tolerance, and every other reading keeps the exact
+check. Dropping the fusion would close it and is recorded as a follow-up.
+
+**Mixed-scheme checkpoints.** A checkpoint may quantize different leaves differently, and the two
+recognizers answer independently rather than exclusively: each asks whether ANY declared weight group is
+its own scheme. modelopt spells this as `quant_algo: "MIXED_PRECISION"` with one `config_groups` entry per
+scheme (nvidia/Qwen3.6-27B-NVFP4 puts its attention and delta-net projections in fp8 and its MLP and lm_head in NVFP4);
+compressed-tensors spells it by simply carrying groups of both widths, which already worked. Both spellers
+then run over the checkpoint and each takes the leaves whose STORED SIBLINGS are its own — the NVFP4 trio
+(`<key>` + `<key>_scale` + `<key>_scale_2`, checked first because its `<key>_scale` would otherwise shadow
+the fp8 pairing), the fp8 pair (`<key>` at an fp8 dtype + `<key>_scale` or `<key>_scale_inv`), and anything
+matching neither passes through unquantized. Which scheme a leaf uses was never a config question, so
+recognition is the only thing mixed checkpoints needed. The recognizers still decline each other's PURE
+checkpoints; `checkpoint_quant_summary` names both schemes for the mixed case, since a boot log naming one
+would misreport half the model.
+
 **Native MXFP4 expert inputs.** OpenAI gpt-oss stores each routed matrix as uint8 `*_blocks` (two FP4 nibbles per
 byte, 32 values per group) plus uint8 E8M0 `*_scales`; the published DeepSeek V4 dialect stores the same bytes under
 its own names. `loader.quant.spell_mxfp4_inputs` re-mints a traced logical expert input at its packed

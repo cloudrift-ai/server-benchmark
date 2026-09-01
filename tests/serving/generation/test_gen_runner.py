@@ -177,9 +177,19 @@ def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
         runner.final_norm(np.zeros((1, 8), dtype=np.float16))
 
 
-@pytest.mark.parametrize(("quant_method", "coded_trunk"), [("exl3", True), ("awq", True), ("fp8", False)])
+@pytest.mark.parametrize(
+    ("quant_method", "coded_trunk"),
+    [("exl3", True), ("awq", True), ("fp8", False), ("modelopt", True)],
+)
 def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_method, coded_trunk):
-    """EXL3/AWQ stay checkpoint-coded; FP8 preserves its decoded trunk lane."""
+    """EXL3/AWQ/NVFP4 stay checkpoint-coded; FP8 preserves the decoded trunk lane.
+
+    NVFP4 (``modelopt``) sat in the decoded column while two defects made a coded trunk compute
+    silently wrong numbers — a packed operand that dropped its split-K slice base, and a plan-keyed
+    constant read that decoded the e4m3 block scales a second time. Both are fixed, and serving
+    parity against eager torch is what moved this row: the coded and decoded trunks agree
+    bit-for-bit on a layer's q/k/v, and both match eager torch on the rest of the layer.
+    """
     import json
 
     from emmy.compiler.loader import safetensors
@@ -187,6 +197,8 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     from emmy.serving.gen_runner import EmmyGenRunner
 
     quant_config = {"quant_method": quant_method}
+    if quant_method == "modelopt":
+        quant_config["quant_algo"] = "NVFP4"
     if quant_method == "awq":
         quant_config.update(bits=4, version="gemm", zero_point=True)
     (tmp_path / "config.json").write_text(json.dumps({"quantization_config": quant_config}))

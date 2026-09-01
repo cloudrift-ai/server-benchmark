@@ -169,11 +169,13 @@ def _read_shard(
     norms) take the same torch route, read as f32 values (the loader's value
     dtype for bf16). Everything else keeps the numpy path bit-identical.
 
-    ``bits_keys`` names fp8-stored keys whose CONSUMING constant (an in-graph
-    node or a ``source_graph`` record leaf) carries an f8 graph dtype — those
-    bind the RAW uint8 bit pattern, no LUT decode, no scale; the graph's own
-    decode cone owns the value semantics. Every other fp8 key decodes to f32
-    values as before.
+    ``bits_keys`` names fp8-stored keys that must arrive as the RAW uint8 bit
+    pattern — no LUT decode, no scale — because the caller's side owns the value
+    semantics: either the consuming constant (an in-graph node or a
+    ``source_graph`` record leaf) carries an f8 graph dtype and the graph's own
+    decode cone decodes, or the caller runs the decode itself (the NVFP4 twin
+    read fuses the e4m3 block scales with the tensor scale from bits). Every
+    other fp8 key decodes to f32 values as before.
 
     Returns the fp8 keys read, ``{key: canonical fp8 token}`` — how callers
     tell a decoded-fp8 array from a natively-float one after the read.
@@ -204,16 +206,23 @@ def _read_shard(
     return fp8
 
 
-def load_sources_by_path(model_id_or_path: str, paths) -> dict[str, np.ndarray]:
+def load_sources_by_path(model_id_or_path: str, paths, bits_paths=frozenset()) -> dict[str, np.ndarray]:
     """Read the checkpoint tensors ``paths`` names, keyed by the REQUESTED path.
 
     The path-keyed sibling of :func:`load_constants_from_safetensors`, for callers that hold a
     plan rather than a graph — the serving trunk binds an ``ExecutionPlan``'s ``WeightSpec``
-    source paths (``serving/gen_runner.py``), and a plan carries no node dtypes to key the
-    raw-bits rule on. Every key reads at its STORED value dtype (fp8 decodes to f32, BF16 reads
-    as f32 — the loader convention; int carriers such as EXL3's ``.trellis`` codes keep their
-    stored words). A path with no matching key is simply absent from the result, so the caller
-    can fall back to a live module for it."""
+    source paths (``serving/gen_runner.py``). Every key reads at its STORED value dtype (fp8
+    decodes to f32, BF16 reads as f32 — the loader convention; int carriers such as EXL3's
+    ``.trellis`` codes keep their stored words). A path with no matching key is simply absent from
+    the result, so the caller can fall back to a live module for it.
+
+    ``bits_paths`` names the paths that must arrive as RAW fp8 BITS instead — the same rule
+    :func:`load_constants_from_safetensors` keys on a node's graph dtype, supplied here by the
+    caller because a plan reaches this function without its graph. A constant whose graph dtype is
+    an f8 dtype owns its own decode (an NVFP4 block scale feeding a ``from_f8e4m3`` cone), so
+    decoding it here would decode it TWICE and compute silently wrong numbers.
+    ``WeightSpec.source_dtype`` is what lets a plan answer this; a pack predating that field names
+    nothing here and keeps the historical stored-dtype read."""
     model_dir = _resolve_model_dir(model_id_or_path)
     index = _build_index(model_dir)
     by_shard: dict[str, list[str]] = {}
@@ -224,9 +233,10 @@ def load_sources_by_path(model_id_or_path: str, paths) -> dict[str, np.ndarray]:
             continue
         resolved[path] = key
         by_shard.setdefault(str(index[key]), []).append(key)
+    bits_keys = frozenset(key for path, key in resolved.items() if path in bits_paths)
     sources: dict[str, np.ndarray] = {}
     for shard_path, keys in by_shard.items():
-        _read_shard(shard_path, keys, sources)
+        _read_shard(shard_path, keys, sources, bits_keys=bits_keys)
     return {path: sources[key] for path, key in resolved.items() if key in sources}
 
 

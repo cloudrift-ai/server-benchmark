@@ -62,6 +62,7 @@ from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.fork import Fork, iter_leaves
 from emmy.compiler.pipeline.knob import family_pins, schedule_pin_fingerprint
 from emmy.compiler.pipeline.passes.lowering._addr import gmem_axis_step, split_addressable
+from emmy.compiler.pipeline.passes.lowering._packed import match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.passes.lowering.tile import _staging as staging
 from emmy.compiler.pipeline.passes.lowering.tile._tree import children, walk
 from emmy.compiler.pipeline.search.space import (
@@ -93,6 +94,7 @@ class _ContractionFacts:
     seam: tuple | None = None
     producer: Fold | None = None
     need: str | None = None
+    packed: tuple = (None, None)
     need_step: bool = False
 
 
@@ -135,6 +137,8 @@ def _contraction_facts(tile: TileOp, target, context: ClassicScheduleContext) ->
             continue
         if id(node) in facts:
             continue
+        packed = (match_packed_b_node(node, tile.inputs), match_packed_pair_node(node, tile.inputs))
+        refusal = _node_refusal(tile, target, node, fragment_epilogue, packed)
         parent = parents.get(id(node))
         if (
             id(node) in derived
@@ -147,11 +151,7 @@ def _contraction_facts(tile: TileOp, target, context: ClassicScheduleContext) ->
             seam = ((), (), tuple(parent.combine.results[: -len(node.combine.results)]))
             k_axis = parent.axis
         else:
-            seam = (
-                cone_seam(node.a, node.axis.name)
-                if isinstance(node.a, Fold) and _node_refusal(tile, target, node, fragment_epilogue) is None
-                else None
-            )
+            seam = cone_seam(node.a, node.axis.name) if isinstance(node.a, Fold) and refusal is None else None
             k_axis = node.axis
         producer = None
         if isinstance(node.a, Fold):
@@ -161,7 +161,14 @@ def _contraction_facts(tile: TileOp, target, context: ClassicScheduleContext) ->
         need_step = need is not None
         if need is None and producer is not None:
             need = node_id_spelling(context.site(producer))
-        facts[id(node)] = _ContractionFacts(k_axis, seam, producer, need, need_step)
+        facts[id(node)] = _ContractionFacts(
+            k_axis=k_axis,
+            seam=seam,
+            producer=producer,
+            need=need,
+            packed=packed,
+            need_step=need_step,
+        )
     return facts
 
 
@@ -190,6 +197,8 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
         return (Reduce(),)
     if any(spec.sweep is not None and edge_refs_axis(node, spec.sweep.name) for spec in tile.output_specs):
         return (Reduce(),)
+    if isinstance(tile.op, Fold) and tile.op.axis is None and not tile.op.operands:
+        return (Reduce(),)
     transposed_ok = _transposed_reduction_ok(tile)
     return (
         Reduce(),
@@ -207,6 +216,8 @@ def _reduce_moves(state, node, key: str | None) -> list[Reduce]:
     del key
     tile = state.tile
     if node.observed or any(spec.sweep is not None and edge_refs_axis(node, spec.sweep.name) for spec in tile.output_specs):
+        return [Reduce()]
+    if isinstance(tile.op, Fold) and tile.op.axis is None and not tile.op.operands:
         return [Reduce()]
     transposed_ok = getattr(state, "transposed_ok", None)
     if transposed_ok is None:
@@ -248,7 +259,7 @@ def _channel_dtype(tile: TileOp, node, target):
     return next(iter(eligible)) if len(eligible) == 1 else None
 
 
-def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool) -> str | None:
+def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: tuple = (None, None)) -> str | None:
     """Return why static node facts rule out every tensor-core atom."""
     ring = node.semiring
     if ring is None or tuple(operator.name for operator in ring) != ("multiply", "add"):
@@ -265,6 +276,10 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool) -> str | 
         return "a nested scheduling site inhabits the B edge"
 
     dtype = edge_dtypes(node.a, tile.inputs)[0]
+    if packed[1] is not None:
+        return None
+    if dtype is not None and dtype.logical_elems != 1:
+        return f"a packed {dtype} A pairs with no packed peer; no atom multiplies packed codes against decoded ones"
     if dtype is not None and dtype.nbytes == 1:
         if not isinstance(node.a, Load):
             return "fp8 fragment loads require a materialized A edge"
@@ -320,7 +335,7 @@ def _atom_refusal(
     return _split_store_refusal(tail, free, atom.shape, shapes)
 
 
-def _atom_families(tile: TileOp, target, node, tail: list) -> tuple[str, ...]:
+def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None, None)) -> tuple[str, ...]:
     """Project every tensor-core atom allowed by static node and target facts."""
     dtype = edge_dtypes(node.a, tile.inputs)[0]
     a_is_load = isinstance(node.a, Load)
@@ -332,6 +347,11 @@ def _atom_families(tile: TileOp, target, node, tail: list) -> tuple[str, ...]:
             name for name in names if _atom_refusal(ATOM_REGISTRY[name], dtype, a_step, a_is_load, tail, tile.place.free, shapes) is None
         )
 
+    if (pair := packed[1]) is not None:
+        if any(operand.bits is None for operand in pair.b):
+            return ()
+        weights = {tile.inputs[operand.bits.input].dtype for operand in pair.b}
+        return atoms_for(next(iter(weights)), ctx=target) if len(weights) == 1 else ()
     if dtype is not None and dtype.nbytes == 1:
         return bindable(atoms_for(dtype, ctx=target))
     atom_dtype = dtype if atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
@@ -358,22 +378,17 @@ def _computed_edge(node) -> bool:
     return any(isinstance(edge, Fold) and edge.axis is None for edge in (node.a, *(channel.b for channel in node.channels)))
 
 
-def _supports_scalar(node) -> bool:
-    """Whether the scalar atom can carry every contraction channel."""
-    return len(node.channels) == 1
-
-
 def _needs_fill(tile: TileOp, node, plan: Tile) -> bool:
     """Whether one warp choice requires the shared-memory compute fill."""
     return plan.is_warp and (_computed_edge(node) or len(node.channels) > 1 or staging.converting_a(node, plan.atom, tile.inputs))
 
 
-def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
+def _warp_atoms(tile: TileOp, target, node, packed: tuple = (None, None)) -> tuple[str, ...]:
     """Project tensor-core atoms from contraction, dtype, address, and target facts."""
     tail = projection_tail(tile)
-    if _node_refusal(tile, target, node, _fragment_epilogue_ok(tail, _fold_states(tile.op))) is not None:
+    if _node_refusal(tile, target, node, _fragment_epilogue_ok(tail, _fold_states(tile.op)), packed) is not None:
         return ()
-    return _atom_families(tile, target, node, tail)
+    return _atom_families(tile, target, node, tail, packed)
 
 
 def _contraction_domain(
@@ -384,12 +399,13 @@ def _contraction_domain(
 ) -> tuple[ReductionSchedule, ...]:
     """Project one contraction's locally realizable scalar and tensor-core choices."""
     per_cell_reductions = _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
-    allowed_atoms = _warp_atoms(tile, target, node)
+    allowed_atoms = _warp_atoms(tile, target, node, facts.packed)
     wide_warp_tiles = tuple(
         plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
     )
+    scalar_tiles = scalar_tile_moves() if len(node.channels) == 1 else (Tile(),)
     catalog = (
-        *(scalar_tile_moves() if _supports_scalar(node) else ()),
+        *scalar_tiles,
         *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),
         *wide_warp_tiles,
     )
@@ -493,7 +509,8 @@ def _resolve_stage(
     facts: _ContractionFacts,
 ) -> ResolvedStage | None:
     """Resolve one copy transport without consulting any selected edge assignment."""
-    if _needs_fill(tile, node, plan):
+    packed_copy = facts.packed[0] is not None and choice.transport in ("smem-async", "smem-tma")
+    if _needs_fill(tile, node, plan) and not packed_copy:
         return staging.resolve_fill_stage(
             node,
             placed,
@@ -505,7 +522,14 @@ def _resolve_stage(
             producer=facts.producer,
         )
     if plan.is_warp:
-        return staging.resolve_warp_stage(node, placed, choice, target.max_dynamic_smem, tile.inputs)
+        return staging.resolve_warp_stage(
+            node,
+            placed,
+            choice,
+            target.max_dynamic_smem,
+            tile.inputs,
+            readings=facts.packed,
+        )
     return staging.resolve_scalar_stage(node, placed, choice, tile.inputs, target.max_dynamic_smem)
 
 
@@ -579,7 +603,8 @@ def _local_support(
         if not stage.is_direct:
             return None
     elif _needs_fill(state.tile, node, choice.tile):
-        if stage not in (Stage(depth=1), Stage(depth=2)):
+        packed_copy = facts.packed[0] is not None and stage.transport in ("smem-async", "smem-tma")
+        if not packed_copy and stage not in (Stage(depth=1), Stage(depth=2)):
             return None
         resolved_stage = _resolve_stage(state.tile, state.target, node, choice.tile, geometry, stage, facts)
     elif not stage.is_direct:
@@ -606,6 +631,7 @@ def _local_support(
             _fragment_agreements(site, choice.tile, geometry, resolved_stage, facts, state.producer_sites) if facts is not None else ()
         ),
         raster_eligible=choice.tile.is_tiled,
+        producer_eligible=not (facts is not None and facts.packed[0] is not None and stage.transport == "smem-tma"),
     )
 
 
@@ -627,6 +653,9 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
             continue
         if _needs_fill(state.tile, node, choice.tile):
             candidates = (Stage(depth=1), Stage(depth=2))
+            facts = state.contraction_facts[id(node)]
+            if facts.packed[0] is not None:
+                candidates = (*candidates, *catalogs[True])
         else:
             supported.setdefault(direct, None)
             candidates = catalogs[choice.tile.is_warp]

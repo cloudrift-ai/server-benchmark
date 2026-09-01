@@ -874,6 +874,42 @@ def deep_reads(stmts: list[Stmt]) -> set[str]:
     return out
 
 
+def loaded_buffers(node) -> set[str]:
+    """Every graph BUFFER loaded under ``node`` — a term, a stmt, or a body of them.
+
+    ``Body.loads`` walks ``Stmt.nested()``, and a Fold's operand EDGES are not nested statements:
+    :meth:`Fold.nested` yields the lift body, and nothing at all for a contraction, whose algebra
+    is meant to read as edges rather than body deps. That is fine for a fully flattened stream,
+    but a lowered body still carries Folds as TERMS wherever a region kept them
+    (:class:`~emmy.compiler.ir.tile.ir.ProjectionRegion` holds its cones as terms), so asking the
+    lowered body alone silently under-reports every buffer beneath such an edge.
+
+    Ask this whenever the answer must cover what a consumer of the STORED tree will reach — the
+    cut declaring a piece's graph inputs, ordering pieces by the workspaces they read. A cut that
+    declared the lowered view instead named fewer inputs than the kernel the materializer built
+    from the same tree went on to read, and the workspace producers, unreferenced, were pruned as
+    orphans."""
+    out: set[str] = set()
+    seen: set[int] = set()
+    stack = [node]
+    while stack:
+        item = stack.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, Load):
+            out.add(item.input)
+        elif isinstance(item, Fold):
+            stack.extend(item.operands)
+            stack.extend(item.lift.body)
+        elif isinstance(item, (list, tuple, Body)):
+            stack.extend(item)
+        else:
+            for body in item.nested():
+                stack.extend(body)
+    return out
+
+
 def stmt_axis_names(stmts) -> set[str]:
     """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
     sitting in the body needs no special case — it is a ``Stmt``, so its children are reached through
@@ -1046,11 +1082,12 @@ def _(s: Fold, rename, sigma, axis_fn):
 
 __all__ = [
     "Channel",
-    "Fold",
     "deep_defines",
     "deep_reads",
     "edge_refs_axis",
+    "Fold",
     "is_contraction",
+    "loaded_buffers",
     "operand_body",
     "operand_name",
     "refs_axis",

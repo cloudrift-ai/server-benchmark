@@ -725,7 +725,9 @@ class EmmyGenModel(nn.Module, SupportsPP):
         return IntermediateTensors({"hidden_states": hidden})
 
     def _attn_aliased(self, layer, q, k, v):
-        """vLLM paged attention writing INTO the M=1 post twin's ``attn_out`` input backing —
+        """vLLM paged attention writing INTO the post program's ``attn_out`` input backing —
+        whichever tier :meth:`post_attn_backing` routes these rows to (M=1, the decode bucket, the
+        exact prefill chunk, or the symbolic program), not the M=1 twin alone —
         ``Attention.forward`` minus its own output allocation, so ``run_device``'s prefix upload
         self-copy-skips (the seam copy drops out of the captured decode graph). Returns ``None``
         to fall back to the ordinary module call (no tier covers these rows, or the layer still

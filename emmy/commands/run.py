@@ -24,9 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 def register_run_command(subparsers):
+    from emmy.commands.compile import add_quantize_arg  # noqa: PLC0415
     from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
 
     parser = subparsers.add_parser("run", help="Compile + run a model / inline torch expression on the CUDA backend")
+    add_quantize_arg(parser)
     parser.add_argument(
         "input",
         nargs="?",
@@ -291,6 +293,11 @@ def _handle_run_once(args):
     # Model ID or --code: trace to a frontend graph + keep the runnable module
     # (+ example inputs) so accuracy / --bench compare against real torch.
     graph, _base_name, bundle = load_or_trace(args)
+    quantized_checkpoint = None
+    if getattr(args, "quantize", None):
+        from emmy.commands.compile import _quantize_traced  # noqa: PLC0415
+
+        quantized_checkpoint = _quantize_traced(graph, bundle, args)
     module, example_args, example_kwargs = bundle
 
     dump = CompilerDump.resolve(args.dump_dir)
@@ -311,13 +318,21 @@ def _handle_run_once(args):
     # table needs the cuBLAS / aten kernel rows in the captured CSV beside
     # the ``k_*`` rows.
     skip_accuracy = config.ncu_child()
+    # ``--quantize`` compiles a DIFFERENT program from the module it traced, on purpose: the
+    # graph declares the quantization, so eager torch is no longer its reference and the eager
+    # tolerance is not a statement about this program. The comparison still runs and still
+    # prints — the delta it reports IS the quantization error, which is worth seeing — but it
+    # stops gating. The oracle for a quantized program is the numpy backend on the same graph.
+    quantized = bool(getattr(args, "quantize", None))
+    if quantized:
+        logger.info("--quantize: eager torch is the UNQUANTIZED module, so its delta is reported, not enforced")
 
     if not args.bench:
         # No bench: the accuracy probe is the command's whole GPU action. It stays
         # in-process — the ``--debug`` per-launch dumps and the ncu child's profiled
         # launches live here — so a hung kernel still poisons this process's stream.
         try:
-            input_data = _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=args.input)
+            input_data = _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=quantized_checkpoint or args.input)
         except RuntimeError as exc:
             logger.error(exc)
             sys.exit(1)
@@ -328,8 +343,9 @@ def _handle_run_once(args):
                     dump.dump_per_launch_values(backend.last_debug_result.per_launch)
                 err = _check_accuracy(run_result.outputs, _eager_output(module, example_args, example_kwargs))
                 if err is not None:
-                    logger.error(err)
-                    sys.exit(1)
+                    logger.log(logging.INFO if quantized else logging.ERROR, "%s", err)
+                    if not quantized:
+                        sys.exit(1)
             else:
                 # ncu child: one emmy launch (our metrics) + one eager forward
                 # (the reference rows for the comparison table); no accuracy diff.
@@ -361,7 +377,7 @@ def _handle_run_once(args):
     pinned = list(getattr(args, "golden_configs", None) or []) + (_ab_samples(args.ab, dynamic=args.dynamic) if args.ab else [])
     trace_payload = {
         "code": args.code,
-        "input": args.input,
+        "input": quantized_checkpoint or args.input,
         "adapter": getattr(args, "adapter", "causal-lm"),
         "layer": args.layer,
         "seq_len": args.seq_len,
@@ -383,7 +399,7 @@ def _handle_run_once(args):
                     wall_timeout_s=_compare_wall_s(compiled, backend, base_s=_GREEDY_COMPARE_BASE_S),
                     warmup=args.warmup,
                     iters=args.iters,
-                    accuracy=not skip_accuracy,
+                    accuracy=not (skip_accuracy or quantized),
                     want_ref=bool(pinned),
                     strict_accuracy=strict_correctness,
                 )

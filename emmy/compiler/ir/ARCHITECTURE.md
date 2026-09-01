@@ -124,6 +124,17 @@ These are term operations spelled the same way so one canonicalizer and one deep
 vocabularies; they are not statement behaviour, and `Fold` has no `render`. Impure computation stays
 in Loop IR until total lift; there is no impure `Lambda` construction path.
 
+**`nested()` is the STATEMENT protocol, and it deliberately does not reach a Fold's operand edges**
+— it yields the lift body, and nothing at all for a contraction, whose algebra is meant to read as
+edges rather than body deps. Every walk built on it (`Body.iter`, and so `Body.loads` /
+`Body.writes`) therefore answers for a fully flattened stream only. A lowered body is not always
+one: a term survives lowering wherever a region kept it (`ProjectionRegion` holds its cones as
+terms), and a walk over `Fold.lower()` then silently under-reports everything beneath such an edge.
+Ask `loaded_buffers` instead whenever the answer must cover what a consumer of the STORED tree will
+reach — the kernel materializer walks that tree, so anything deciding a node's graph inputs has to
+see what it sees. Asking the lowered view there is what let a cut declare fewer inputs than the
+kernel it produced went on to read.
+
 ## Invariants by stage
 
 - **Frontend → tensor** (after `decomposition`): `LinearOp`, `MatmulOp`,
@@ -559,6 +570,17 @@ emits back to `i`, the symbolic-shape counterpart of the literal-divisor
 Symbolic-extent axes get `[0, sentinel]` ranges (non-negativity for the inner
 `(i*c + …)//c → i` div fold) instead of being dropped.
 
+`_div_mod_decompose` also sees through a division standing in its way (`A / d`
+decomposes by `n` once `A` decomposes by `n·d`), and through a sum whose one
+addend is a clean multiple of the divisor (the partner then owns the whole
+remainder, so restating it as `n·(x/n) + x%n` suffices). Together those separate
+a sub-byte-packed operand address: an NVFP4 weight spells `((row·K + k)/2) %
+(K/2)`, holding the row axis inside a division, and the decomposition puts the
+row on the quotient side where a consumer asking "does this index still mention
+the row outside a div/mod" can see it. The `loop/canonicalize` axis re-fusion is
+that consumer, and its answer decides whether a packed matmul binds a
+contraction at all.
+
 ### `loop/splicer.py` — LoopOp merger
 
 The machinery `pipeline/passes/loop/fusion/010_merge_loop_ops.py` calls to splice a DAG of `LoopOp` nodes. `Sigma`
@@ -670,8 +692,8 @@ directly (no separate AST class).
 | `Sync`             | `__syncthreads()` barrier.                                        |
 | `TreeHalve`        | Cross-thread tree reduction over a smem buffer.                   |
 | `RegFragment`      | Per-thread `mma.sync` register array declaration, zero-initialized for C. The established m16n8k16 layout uses A/B/C counts 4/2/4 for f16/f16/f32; the Volta m8n8k4 layout carries explicit 2/2/8 counts because one instruction realizes four PTX cells arranged as one logical 16×16 tile. Carries instruction shape, dtype, and an optional explicit register count. The opaque `nvcuda::wmma` nodes remain retired. |
-| `LdmatrixLoad`     | Load one operand into a `RegFragment`. The m16n8k16 layout can use `ldmatrix.sync.aligned.m8n8.x{4,trans}.b16` from shared memory or a global-memory-direct gather with the same lane map. SM70 has no `ldmatrix`, so the Volta m8n8k4 layout uses its cooperative gather for both address spaces: a global pointer for the direct path or a shared-slab pointer after synchronous-copy staging; its four computation groups duplicate the appropriate A or B quadrant. `b_trans=True` marks a `[N, K]` weight and selects the corresponding transposed gather. Guards clamp M/N lanes and zero masked K elements in both layouts. |
-| `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. |
+| `LdmatrixLoad`     | Load one operand into a `RegFragment`. The m16n8k16 layout can use `ldmatrix.sync.aligned.m8n8.x{4,trans}.b16` from shared memory or a global-memory-direct gather with the same lane map. SM70 has no `ldmatrix`, so the Volta m8n8k4 layout uses its cooperative gather for both address spaces: a global pointer for the direct path or a shared-slab pointer after synchronous-copy staging; its four computation groups duplicate the appropriate A or B quadrant. `b_trans=True` marks a `[N, K]` weight and selects the corresponding transposed gather. Guards clamp M/N lanes and zero masked K elements in both layouts. A 1-byte staged slab (`byte_slab=True`) has no `ldmatrix` below sm_100a and drains through the cooperative gather too; when it also carries a `scale_buffer` the slab holds PACKED PAIRS (an NVFP4 weight — one byte, two K elements, and one scale per k block in that companion slab), and the loader decodes both codes through the f16 value table and scales them as it fills the fragment. |
+| `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. The BLOCK-SCALED fp4 form (`m16n8k64`, `kind::mxf4nvf4`) additionally carries `sfa_frag` / `sfb_frag`: both multiplicands are packed e2m1 pairs and the instruction applies one ue4m3 scale per 16 K elements itself, so the call passes those two scale registers where the others repeat the accumulator. Its data fragments reuse the fp8 byte loaders — the k64 4-bit lane map is the k32 8-bit one, over a row of K/2 bytes — leaving only the scale loaders new. It assembles only for the arch-suffixed consumer-Blackwell target, which the plan requests through `KernelSpec.arch_specific` (the flag TMA also sets). |
 | `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (`emmy_mma_promote_f16acc`: PTX `cvt.f32.f16` + add per element) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
 | `FragmentLoad`     | Load one scalar tensor element per C-fragment element using the shared fragment layout's absolute row/column coordinates. The residence evaluator uses it when a Fold Lambda reads a materialized source at fragment residence. |
 | `FragmentSelect`   | Coordinate-predicated uniform values over one C fragment. It substitutes each fragment element's absolute row/column through the shared fragment layout, then uses scalar `Select` branch order and casts exactly; fragment-valued or per-cell branches fail closed at the lifting boundary. |

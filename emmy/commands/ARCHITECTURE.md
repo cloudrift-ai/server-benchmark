@@ -135,6 +135,13 @@ max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
 identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
+`compile --quantize <scheme>` quantizes a TRACED module's linear weights and compiles the result. It is deliberately
+not a second way to build a quantized graph: `loader/synthesize.py` writes a real checkpoint and the ordinary
+spellers read it, so the program is the one that checkpoint would give and the directory is on disk to inspect
+(`--dump-dir` keeps it, else a temp dir whose path is logged). The weight side is derived from each tensor; the
+activation scale is calibrated over the trace's ONE example input, by modelopt's own formula, and written into the
+checkpoint so the number is readable rather than implied. It needs a linear whose weight is a module parameter —
+`a @ b` over two tensors has none, and says so.
 For isolated frontend-graph runs, the worker returns the symbolic environment used for execution with its benchmark
 result; `run` uses that same binding when rendering dynamic per-kernel grid statistics.
 For a single-layer trace, the loader derives a missing attention `layer_type` from

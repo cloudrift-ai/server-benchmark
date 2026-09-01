@@ -168,6 +168,7 @@ class LocalSupport:
     axes: tuple[AxisAgreement, ...] = ()
     fragments: tuple[FragmentAgreement, ...] = ()
     raster_eligible: bool = False
+    producer_eligible: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.node, (ProjectionSchedule, ReductionSchedule)):
@@ -400,6 +401,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     _axes: Mapping[str, tuple[int, int]] = field(default_factory=frozendict, repr=False)
     _fragments: Mapping[tuple[str, str], tuple] = field(default_factory=frozendict, repr=False)
     _raster_eligible: bool = field(default=False, repr=False)
+    _producer_eligible: bool = field(default=True, repr=False)
     _predicate: Callable[[ClassicAssignment], bool] = field(default=_allow_schedule, repr=False, compare=False)
     _pins: Mapping[str, tuple[tuple[str, str], ...]] | None = field(default=None, repr=False, compare=False)
     _allow_f16_accumulate: bool = field(default=True, repr=False, compare=False)
@@ -467,8 +469,6 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                     "_allowed_works",
                     frozenset((kernel.work.kind, kernel.work.units) for kernel in self._restricted_kernels),
                 )
-            if self.position == 0 and not self.assignment.nodes:
-                self._validate_local_pin_support()
 
     def _build_space(self) -> _ClassicSpace:
         folds = schedule_nodes(self.problem.root)
@@ -739,44 +739,6 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         for support in frontier:
             yield Schedule(None, {site: support.node}, support.edges)
 
-    def _validate_local_pin_support(self) -> None:
-        """Reject a non-direct STAGE parameter that no local node/edge support can realize."""
-        assert self.domains is not None and self._restricted_nodes is not None and self._restricted_edges is not None
-        for site in self.node_sites:
-            stage_keys = tuple(dict.fromkeys(self.stage_key(edge) for edge in self.incident_edges(site) if edge in self.stage_edges))
-            if not any(pin for key in stage_keys for pin in self._applicable_pins("STAGE", key)):
-                continue
-            edge_domains = tuple((edge, self._restricted_edges[edge]) for edge in self.incident_edges(site))
-            if not self.domains.compatible_frontier(
-                site,
-                self._restricted_nodes[site],
-                edge_domains,
-                None,
-                (),
-                (),
-                (),
-                self._allowed_works,
-            ):
-                self._raise_empty_pinned_frontier(("STAGE",), site)
-
-    def _raise_empty_pinned_frontier(self, families: tuple[str, ...], site: NodeId | None = None) -> None:
-        """Keep an authoritative parameter refusal loud when no compatible pick realizes it."""
-        if self._pins is None:
-            return
-        keys = {
-            "WORK": ("WORK",),
-            "RASTER": ("RASTER",),
-            "TILE": (self.node_key("TILE", site),) if site in self.tile_sites else (),
-            "REDUCE": (self.node_key("REDUCE", site),) if site in self.reduction_sites else (),
-            "STAGE": tuple(dict.fromkeys(self.stage_key(edge) for edge in self.incident_edges(site) if edge in self.stage_edges))
-            if site is not None
-            else (),
-        }
-        for family in families:
-            for key in keys[family]:
-                if pins := self._applicable_pins(family, key):
-                    raise ValueError(f"{family} pin {pins[-1]!r} at {key} does not resolve to a compatible schedule")
-
     def extend(self, pick: ClassicAssignment) -> ClassicScheduleContext:
         """Compose a frontier pick or validate and accept one complete assignment."""
         if not isinstance(pick, Schedule) or self.assignment.kernel is not None:
@@ -840,6 +802,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             _axes=axes,
             _fragments=fragments,
             _raster_eligible=self._raster_eligible or support.raster_eligible,
+            _producer_eligible=self._producer_eligible and support.producer_eligible,
         )
 
     def _support_refusal(self, site: NodeId, support: LocalSupport) -> str | None:
@@ -1070,6 +1033,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             _axes=frozendict(),
             _fragments=frozendict(),
             _raster_eligible=False,
+            _producer_eligible=True,
             _predicate=_allow_schedule,
             _pins=None,
             _allow_f16_accumulate=True,
@@ -1095,7 +1059,12 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
 
     def _kernel_composes(self, kernel: KernelSchedule) -> bool:
         work = self._work or Work()
-        return kernel.work.kind == work.kind and kernel.work.units == work.units and (kernel.raster.is_direct or self._raster_eligible)
+        return (
+            kernel.work.kind == work.kind
+            and kernel.work.units == work.units
+            and (not kernel.work.producer or self._producer_eligible)
+            and (kernel.raster.is_direct or self._raster_eligible)
+        )
 
     def _supports_global(self, family: str, value: str) -> bool:
         return any(key.partition("@")[0] == family and value in self.values(key) for key in self.keys())
@@ -1151,7 +1120,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if choice.tile.is_warp:
             atom = choice.tile.atom
             pinned = self._tile_is_pinned(site, choice.tile)
-            if atom.operand_dtype("a").nbytes == 1 and not self._allow_fp8 and not pinned:
+            if atom.operand_dtype("a").logical_elems == 1 and atom.operand_dtype("a").nbytes == 1 and not self._allow_fp8 and not pinned:
                 return False
             if atom.operand_dtype("c").nbytes == 2 and not self._allow_f16_accumulate and not pinned:
                 return False
@@ -1197,7 +1166,12 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             if choice.tile.is_warp:
                 atom = choice.tile.atom
                 pinned = self._tile_is_pinned(site, choice.tile)
-                if atom.operand_dtype("a").nbytes == 1 and not self._allow_fp8 and not pinned:
+                if (
+                    atom.operand_dtype("a").logical_elems == 1
+                    and atom.operand_dtype("a").nbytes == 1
+                    and not self._allow_fp8
+                    and not pinned
+                ):
                     self._refuse("FP8 TILE is outside the precision restriction", site)
                 if atom.operand_dtype("c").nbytes == 2 and not self._allow_f16_accumulate and not pinned:
                     self._refuse("f16-accumulate TILE is outside the precision restriction", site)

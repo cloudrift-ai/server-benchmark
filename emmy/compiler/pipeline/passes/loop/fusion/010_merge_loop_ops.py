@@ -3,7 +3,9 @@
 Separate consumers become output ports of one kernel. All roots enter the
 same worklist, so shared upstream statements remain one SSA definition.
 
-Fusion has only correctness boundaries. Tile lifting and scheduling never gate fusion.
+Fusion has only correctness boundaries. Neither tile lifting, nor scheduling, nor speed narrows
+it. A region does stop at one buffer: a PACKED one it computes (:func:`_packed_readers`). That
+boundary is semantic, not a profitability judgement.
 """
 
 from __future__ import annotations
@@ -18,6 +20,74 @@ from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 PATTERN = [Pattern("producer", LoopOp)]
 
 
+def _packed_readers(graph: Graph, region: set[str]) -> set[str]:
+    """The members of ``region`` that read a PACKED buffer the region itself computes, plus
+    everything downstream of them inside it.
+
+    Packed here means the storage sense: one stored element carries several logical values
+    (``dtype.logical_elems > 1`` — two e2m1 codes to the byte), not a concatenated projection.
+
+    Why the region stops there, when fusion is otherwise maximal. A packed dtype states a relation
+    between a tensor's stored extent and its logical one: the stored last axis is half the logical
+    one (``dtype.py``). Only a tensor carries that relation. The splice deletes the tensor. The
+    codes then survive as an ``Assign`` at the packed dtype — a value with no extent. A consumer's
+    index no longer names one of them; it names half a byte. The merged body answers that by
+    carrying the graph's own pack arithmetic into the consumer, deriving the whole byte at every
+    logical index and reading one half of it.
+
+    The splice also goes ONE WAY, and that is what makes this a refusal rather than a merge
+    evidence could cut back: no ``030_cut`` seam offers a packed workspace, so the merged form
+    would be the only one left rather than the widest of several. ``passes/ARCHITECTURE.md`` works
+    that half through, beside the seam dtypes it turns on.
+
+    Both halves of the returned set matter. The readers are the nodes whose merge does the
+    splicing: ``splice_graph`` decides a Load is a splice edge on its producer being in the
+    region, never on the buffer also being live. One reader left behind therefore dissolves the
+    buffer, however live it is elsewhere. Their descendants leave with them to keep the region
+    free of holes — drop a downstream-closed subset and every path between two survivors stays
+    inside the remainder, so the merged node cannot come to depend on a node that depends on it.
+
+    Only buffers the region's own ``LoopOp``s write are in question. A packed CONSTANT — every
+    quantized weight — is already stored, and a region reads it as an ordinary external input.
+    """
+    packed = {
+        buf
+        for nid in region
+        for buf in graph.nodes[nid].buffer_names()
+        if (t := graph.buffer(buf)) is not None and t.dtype.logical_elems > 1
+    }
+    dropped: set[str] = set()
+    pending = [reader for buf in packed for reader in graph.buffer_users(buf) if reader in region]
+    while pending:
+        nid = pending.pop()
+        if nid in dropped:
+            continue
+        dropped.add(nid)
+        pending.extend(user for user in graph.users(nid) if user in region)
+    # Whatever is left feeding ONLY what departed leaves with it. A cut materializes every buffer
+    # crossing it, so a survivor whose entire readership is on the far side buys nothing: its value
+    # is stored once and read once, and it is stored at whatever shape it happens to have — a
+    # broadcast left behind this way writes one value per logical element where its source held one
+    # per block. Releasing it puts the computation back beside its single reader and moves the
+    # boundary onto the source, which is the narrower buffer and the one the reader can index.
+    #
+    # A node writing the PACKED buffer itself never leaves: that buffer is the boundary this
+    # function exists to place, and releasing it would dissolve the extent the whole refusal
+    # protects. A node read from outside the region also stays — its value has to be stored for
+    # those readers whatever happens here.
+    changed = True
+    while changed:
+        changed = False
+        for nid in region - dropped:
+            if packed & set(graph.nodes[nid].buffer_names()):
+                continue
+            users = graph.users(nid)
+            if users and all(user in dropped for user in users):
+                dropped.add(nid)
+                changed = True
+    return dropped
+
+
 def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple[str, ...]] | None:
     """Return the maximal downstream ``LoopOp`` region and its live buffers."""
     region: set[str] = set()
@@ -28,6 +98,7 @@ def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple
             continue
         region.add(nid)
         pending.extend(user for user in graph.users(nid) if isinstance(graph.nodes[user].op, LoopOp))
+    region -= _packed_readers(graph, region)
     if len(region) < 2:
         return None
     live = _live_outputs(graph, region)

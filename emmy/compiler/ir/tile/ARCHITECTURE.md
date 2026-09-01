@@ -156,6 +156,14 @@ member: hoisting it onto an operand edge would lower it outside the sweep loop, 
 identifier (DeepSeek-V4 post16's per-column sum was the live case). A contraction is exempt because post-init
 promotes a sweep its operands read into a real free axis right after normalization.
 
+A fold FED by the body — one whose subtree captures a name a plain body member defines — is likewise never hoisted,
+no matter what kind: a projection evaluates its operands before its scalar body, so the capture would read a value
+that does not exist yet. The `closed` gate reads only the fold's own lift and cannot see a nested capture; the
+composed placement cut builds exactly this shape (the consumer piece's workspace loads and rsqrt chain feed the
+retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
+nvcc). The schedule walk mirrors the fact: every fold under such a chain-form root offers only the serial fold,
+since the materializer binds the projection body whole.
+
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
 specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or
 split into row-major quotient/remainder coordinates by a pure reshape. The `n` coordinate may already be free or may

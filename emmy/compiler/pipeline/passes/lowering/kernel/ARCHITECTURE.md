@@ -259,7 +259,17 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
 `RegEpilogue` (`extra_accs`). Materialized A copies into the same single A slab; computed A evaluates into it. Both
-forms use the synchronous compute fill because the gmem-direct and byte-copy MMA paths remain single-channel.
+forms use the synchronous compute fill because the gmem-direct and single-sided byte-copy MMA paths remain
+single-channel. The block-scaled fp4 cell is the exception: it carries N channels on cp.async, staging `2 + 2N` slabs
+over the one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
+
+**A bridged seam value keeps its own dtype.** A computed operand's cone splits at its K seam into a row-invariant
+prologue and a per-cell body, and the prologue publishes its results through smem rows the cell reads back — so
+those rows are the only place a bridged value's dtype is declared (`cone_stat_dtypes`, typed the way `edge_dtypes`
+types an edge's results; a name whose statement kind carries no dtype keeps the float default). Declaring every row
+`float` decides the CELL's arithmetic too: a value that crosses as an integer — a pack's shift amount, a nibble
+mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
+rather than computing something wrong.
 
 **Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
 sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
@@ -274,6 +284,41 @@ every chunk 16 B-aligned and takes the drain from 4-way bank conflicts to ≤ 2-
 TMA byte slab (the U8 `CUtensorMap`) deposits dense and eats the measured conflicts. Legality
 (`resolve_warp_stage`'s byte arm): 16-divisible inner spans (and, canonical-B, a 16-divisible gmem row stride N);
 the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements.
+
+**Staged packed-pair (NVFP4) weights — the byte slab plus a block-scale slab.** A packed weight is a COMPUTED B, so
+the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading
+moves 16-bit values through global memory, which is the whole point of a 4-bit format thrown away. The specialized
+reading keeps it. `_packed.match_packed_b_node` recognizes the node (the ONE question the offer, the resolver and
+the materializer all ask, so they cannot drift apart), and `_atom._packed_operands` stages THREE slabs where the
+ordinary matmul stages two: A and the weight's raw bits as `cp.async` peers, plus the weight's block scales as the
+`SyncTransport`'s compute-filled operand. The bits slab is half the K width of a 16-bit one (one byte is two K
+elements) and is addressed canonically — row `n`, byte column `k / 2` over the checkpoint's `[N, K/2]` buffer —
+rather than through the cone's flattened reshape arithmetic, which says the same thing in a form no fill can chunk.
+The scale slab is `tile_n × bk_elems/block` and single-buffer: its fill is compute, which runs on the drain's own
+threads, so ringing it buys no overlap. Evaluating the scale cone at ONE k per block instead of at every k is
+exactly the block-invariance the matcher proved.
+
+The drain is one loader reading both slabs (`LdmatrixLoad.scale_buffer`, rendered as
+`emmy_mma_load_b_smem_trans_f4s_<dtype>`): per fragment element pair it reads one byte, looks both 4-bit codes up in
+a constant value table, and multiplies each by the block's scale. The mma B fragment's own lane map is what makes
+the byte read whole: a lane's two adjacent K positions ARE a stored pair. `render._f4_staged_prelude` emits one
+loader per fragment dtype the kernel actually drains — f16 and bf16, since every e2m1 value is exact in both (the
+format's largest magnitude is 6 and its finest step 0.5, so one mantissa bit carries it). The tables are generated
+from `dtype.F4_VALUES`, so the kernels and the numpy decode stay one table of values, and an f16 kernel never
+carries the bf16 form. Legality (`resolve_warp_stage`'s packed arm) scopes the stage to what those loaders are
+written for — a copy transport, an N-major weight of 16-value blocks under an f16 or bf16 atom whose K step is that
+same 16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8
+slab has. Everything outside the scope declines and keeps the general reading.
+
+Both copy transports carry it, differing in one thing: a cp.async fill pads the byte rows (`BYTE_SLAB_PAD`, for the
+drain's bank spread) while a TMA box deposits DENSE, so its slab is unpadded and its drain reads the narrower row
+stride — the same split the fp8 byte slab makes, and the budget sizes each accordingly. TMA adds the hardware's own
+demands: every box dim within 256, and 16 B-aligned inner spans and gmem row strides per operand at its own width.
+The two also compose differently with the scale fill. cp.async rides INSIDE the `sync` producer as an asynchronous
+peer, because both are issued by the same threads under one CTA barrier. A TMA copy is armed on an mbarrier by one
+elected thread and waited on by parity, which no compute fill folds into — so the packed TMA form is TWO operand
+groups over one drain segment (`pipelined_kloop` already schedules a list of them): the box copies ring at the
+stage's depth, the compute-filled scale slab stays single-buffer.
 
 **Warp specialization (the producer band → `TileOp.workers`; rows spell it as `WORK`'s `+p<n>` suffix, which is also
 how it is pinned — the `WSPEC` key is retired).** A resolved `WarpSpec` splits the SAME staged phases across two

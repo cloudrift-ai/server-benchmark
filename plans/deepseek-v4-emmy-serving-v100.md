@@ -73,10 +73,12 @@ CUDA-12 `libnvrtc` preload only if that probe fails, using the path present in t
 - The emmy wheel + `cupy-cuda12x` install into the image cleanly beside vLLM's pins, and `emmy.serving.register` is
   importable there.
 
-## Stage 0 — unblock the twins (compiler; hard prerequisite) — **REOPENED; `pre16` blocks serving on current main**
+## Stage 0 — unblock the twins (compiler; hard prerequisite) — **all three twins COMPILE; `post4096` RUNTIME blocks**
 
 The first round closed (2026-08-25, below). Loop fusion was then rewritten under it, and the same class of pathology
-came back on both twins — see "Round two" after the original diagnosis.
+came back on both twins ("Round two"). Round two is now closed too — `pre16` runs in 8.18 s and `post4096` compiles,
+builds and launches — but round three found the remaining blocker one layer down: the plan the greedy selects for
+`post4096` contains a serially-impractical kernel, so a boot still stalls in the first prefill forward.
 
 ### Round one — the `post` twin (2026-08-25) — closed
 
@@ -114,33 +116,58 @@ does not inherit the workaround and dies with "invalid value for --gpu-architect
 must run inside the 1Cat image (NVRTC 12.9 native, verified) or in a venv without the NVRTC-13 pin. The inventory is
 untuned (no knobs or timings) and is therefore NOT promoted to the canonical path; it regenerates in ~60 s.
 
-### Round two — fusion rewritten under the twins (2026-08-28/29) — `post` closed, `pre` OPEN
+### Round two — fusion rewritten under the twins (2026-08-28/29) — CLOSED
 
 **Make loop fusion maximal and multi-output (#648, `bff3e3444`) landed after gate (c) passed** and broke both remaining
-twins. Two of the three defects are fixed; the third blocks serving on current main.
+twins. All three defects are now fixed:
 
 | twin | at `ab1ad4592` (pre-#648) | at `bff3e3444` (#648) | now |
 | --- | --- | --- | --- |
 | `expert16` | compiles | 11 same-scope redeclarations, nvcc rejects | fixed by #671 |
 | `post16` | compiles | lowering never terminates | fixed by #676, ~57 s on the V100 |
-| `pre16` | 3 kernels, 0.001 s | 1 kernel, never returns | **OPEN** |
+| `pre16` | 3 kernels, 0.001 s | 1 kernel, never returns | fixed; **8.18 s verified at main+#692** |
 
-`pre16` lowers to a single kernel holding two 4-deep nests, each `a2<4096 × a3<4 × a4<16384 × a1<16384` ≈ 4.4 × 10¹²
-iterations per thread. The inner `a1` reduce is the loop-invariant RMSNorm sum-of-squares, recomputed under the full
-crossed product instead of once. Re-measured on `324ebfe93` (#684): unchanged, so #682/#683/#684 do not address it.
+`pre16` lowered to a single kernel recomputing the loop-invariant RMSNorm sum-of-squares under a crossed product
+(≈ 4.4 × 10¹² iterations/thread) because `_close_projection` sank the sibling reduce into a nested contraction's
+evaluation domain. The fix needed provider closure generalized from "direct body-member host" to lexical environments
+for every `Fold` occurrence, so an operand-edge capture closes into a dependent seam (`CutSite.requires`) — landed via
+#682 (provider-closed statistics seams) and #688 (one scoped-lambda `Closure` concept); the residual placement-cut
+correctness bugs ride #692 (also PR #686's standalone form). Re-verified 2026-08-31 on `claude/attr-v100`
+(main + #692): `pre16` builds 1 kernel and `run_once` returns in 8.182 s.
 
-Localized: Loop IR is correct through stages 04–06 (the reduce is a sibling); Tile IR stage 07 sinks it into an operand
-edge at depth 4, in `_close_projection` (`emmy/compiler/ir/tile/normalize.py`). A scope guard refusing to attach a
-provider beneath a fold binder takes `pre16` from never-returning to **8.192 s on the V100**, but regresses 7
-`attention/*.yaml` realization cases: with the guard the statistics cone stays an operand-edge capture, and `_cut.py`
-records seam hosts only for direct lift-body members, so the capture is hostless and its seam is silently dropped.
-Closing it needs provider closure generalized from "direct body-member host" to lexical environments for every `Fold`
-occurrence, so an operand-edge capture closes into a dependent seam (`CutSite.requires`). WIP, explicitly not for merge:
-branch `fix/close-projection-multiplicity`.
+### Round three — `post4096`'s placement (2026-08-30/31) — compile CLOSED by #692, runtime OPEN
 
-**Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and does NOT reproduce on current main — a boot
-there stalls in the first kernel that executes (observed: 2 h 37 min, no progress). Stage 4 cannot warm or bake until
-`pre16` compiles to something executable.
+With `pre16` fixed, the TP8×PP2 boot got past compile and died in whole-program capture on a cut-workspace
+`KeyError`; fixing that (piece inputs declared from the lossy lowered view — `loaded_buffers` is the honest reader)
+exposed the real problem: `post4096`'s fused monster `k_linear_softmax_matmul_mean_reduce_3052e1` does **2⁵⁵ worst
+per-thread serial trips** (`block_threads=1`) — the recomputation blowup of maximal fusion — and no evidence could
+steer placement away from it. PR #692 fixes the whole chain, each step verified on the host:
+
+- **Attribution**: one hang condemned every kernel in the terminal (70 failures / 7 distinct errors); the watchdog
+  names the culprit, so only that kernel earns the `bench_fail` row (re-tune: 15/15 rows correct).
+- **Disqualification**: a kernel whose every measured variant failed prices its structural arm at `inf`, matched
+  exactly.
+- **The composed cut compiles**: the consumer piece's IR was scope-inverted (normalize hoisted a fold whose subtree
+  captures body-defined names; ILP replication renamed `deps()`-channel reads) — 17 nvcc errors → 0; the two-cut
+  plan builds and launches at 2³⁰ trips.
+- **The composed cut is on the ballot**: the unpinned fork offered plain seams only (2 of the monster's 33); now
+  every seam is offered with its transitive `requires` closure as one composed arm, and the feared recursion
+  explosion is measured convergent.
+
+**Measured (2026-08-31, V100): an unpinned `post4096` compile with clean attributed evidence selects a composed cut
+on its own — 52 kernels, worst 2³⁷ (was 2⁵⁵), placement terminating in 327 s.** Still not servable: 2³⁷ serial
+trips is hours per launch (the 2³⁰ two-cut variant ran 2.6 h without completing before being killed). Two named
+gaps stand between here and a boot that serves, both follow-ups to #692:
+
+1. **Partition the monster** — the selected route is serial (`block_threads=1`). The reduce tier must emit a
+   sibling-provider chain (the piece's workspace-rsqrt captures) ahead of a cooperative/ILP loop; today such folds
+   legally offer only the serial fold. This is where actual serving latency comes from.
+2. **Let evidence elect the deeper route** — a tune pass over the new ballot so composed arms carry measured
+   latencies (today the 2³⁷-vs-2³⁰ choice is prior-guessed), or the monotone serial-work prior feature.
+
+**Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot compiles
+but stalls in the first `post4096` prefill forward. Stage 4 cannot warm or bake until the partitioned route exists
+(gap 1 above), and the golden re-record should follow it, not precede it.
 
 ## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
 
@@ -232,8 +259,9 @@ expert destinations, PP transport, and mixed scheduling — token IDs either agr
 
 ### Gate (c) — PASSED (2026-08-26, real checkpoint at TP8 × PP2, at `ab1ad4592`)
 
-**Does not reproduce on current main** — see Stage 0 round two. The result below stands as evidence that the seam,
-the loader and the plugin are correct; re-running it needs `pre16` to compile to something executable again.
+**Does not reproduce on current main** — see Stage 0 round three. The result below stands as evidence that the seam,
+the loader and the plugin are correct; re-running it needs `post4096`'s selected plan to be executable at serving
+speed (the partitioned composed-cut route).
 
 `deepseek-ai/DeepSeek-V4-Flash-0731` serves through `EmmyGenModel` on the 16× V100 SXM3 host, in the pinned 1Cat
 image, at TP8 × PP2 with `--max-model-len 4096 --kv-cache-dtype fp8 --block-size 256` and eager execution:
@@ -290,7 +318,7 @@ recorded expert program is the one serving binds.
 The golden re-record is NOT done: `golden/v100_sm70.yaml` is still the #558 recording from before any of this, so it
 covers the routed-expert kernels not at all and they resolve from reservoir/prior evidence instead. Correctness is
 unaffected, but Stage 4 must not warm, bake or seal until the re-record happens on the host — which is itself blocked
-behind Stage 0 round two.
+behind Stage 0 round three's runtime gap.
 
 ## Stage 4 — image + release plumbing
 
@@ -349,8 +377,10 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 Stage −1: DONE (~2 h). Stage 0 round one: DONE (fixed upstream by #602). Stage 1: DONE (#651). Stage 2: DONE (#656).
 Stage 3 in-repo: DONE (#662); gate (c) passed once at `ab1ad4592`, gate (d)'s token-ID half with it.
 
-**Stage 0 round two is the critical path.** `expert16` and `post16` are closed (#671, #676); `pre16` is open and holds
-everything behind it. The measured guard says the fix works; landing it is the seam-machinery change described above —
-call it 2–5 days, and it lands in a subsystem three other PRs (#677/#678/#682) touched inside a week, so coordinate.
-Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days.
-Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The compiler, not the fork ABI, is now the dominant uncertainty.
+**Stage 0 round three's runtime gap is the critical path.** All three twins compile (`expert16` #671, `post16` #676,
+`pre16` #682/#688, `post4096`'s placement #692 — merge #692, and close #686 as superseded by it). What holds
+everything behind it now is partitioning `post4096`'s composed-cut consumer: the reduce tier emitting a
+sibling-provider chain ahead of a cooperative/ILP loop — a scoped codegen capability, call it 2–5 days — plus a tune
+pass over the new placement ballot so evidence, not the prior, elects the route. Then Stage 4: 2–4 days on-host
+(re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days. Adding stage 6 (MXFP4 + tuning) is a
+further 1–3 weeks. The compiler, not the fork ABI, remains the dominant uncertainty.

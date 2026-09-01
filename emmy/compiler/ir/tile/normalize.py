@@ -312,6 +312,18 @@ def _normalize_body(body: Body, axes: tuple[str, ...], implicit_axes: frozenset[
     return Body(out)
 
 
+def fed_by_body(fold: Fold, body) -> bool:
+    """Whether ``fold``'s subtree captures a name a plain (non-Fold) member of ``body`` defines.
+
+    A projection evaluates its operands before its scalar body, so such a fold can never move onto
+    an operand edge — the names it captures would not exist yet. ``Fold.deps()`` is the memoized
+    deep capture set (its own lift's free names plus every operand edge's, recursively), so the
+    check costs one set intersection. Read by the hoist below and by the schedule walk's
+    serial-only gate, so the two cannot drift."""
+    feeds = {name for stmt in body if not isinstance(stmt, Fold) for name in stmt.defines()}
+    return bool(feeds) and not feeds.isdisjoint(fold.deps())
+
+
 def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
     """Move closed child Folds from a zero-axis body onto operand edges.
 
@@ -321,12 +333,20 @@ def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset
     at kernel scope, where the axis is an undefined identifier (``head``'s sweep case — the fold
     must stay the projection's body member; found live on DeepSeek-V4 post16's per-column sum,
     ``k_div_36``). A CONTRACTION is exempt: ``TileOp.__post_init__`` promotes a sweep its operands
-    read into a real free axis right after normalization, so the hoisted edge stays bound."""
+    read into a real free axis right after normalization, so the hoisted edge stays bound.
+
+    A fold FED by the body is never hoisted either — no matter what kind: the ``closed`` gate
+    reads only the fold's own lift, but hoisting moves the whole subtree, and a subtree capturing
+    a name the remaining body defines (:func:`fed_by_body`) would evaluate before its provider.
+    The composed placement cut builds exactly this shape — the consumer piece's workspace loads
+    and their rsqrt chain feed the retained reduce — and hoisting it emitted every capture as an
+    undefined identifier at nvcc (DeepSeek-V4 post4096's two-cut ``…mean_reduce`` piece)."""
     candidates = [
         stmt
         for stmt in root.body
         if isinstance(stmt, Fold)
         and Closure(stmt.lift, axes).closed
+        and not fed_by_body(stmt, root.body)
         and (is_contraction(stmt) or not any(edge_refs_axis(stmt, name) for name in sweep_axes))
     ]
     if not candidates:

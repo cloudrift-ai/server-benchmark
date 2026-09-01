@@ -70,6 +70,44 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     return (pro, cell, stats) if stats else ((), cell, ())
 
 
+def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, object]:
+    """The dtype each value bridged across the cone's K seam carries (:func:`cone_seam`).
+
+    The prologue runs once per tile row and publishes its results through smem rows the cell reads
+    back, so those rows are the only place a bridged value's dtype is declared. Declaring them all
+    float would decide the CELL's arithmetic too: a value that crosses as an integer — a shift
+    amount, a nibble mask — comes back f32, and the bit operations reading it have no f32 spelling.
+
+    Typed the same way :func:`edge_dtypes` types an edge's results, over the prologue's flat stmt
+    list. A name whose stmt kind carries no dtype is absent from the result; its row keeps the
+    float default."""
+    env: dict[str, object] = {}
+    for stmt in pro:
+        if isinstance(stmt, Load):
+            tensor = inputs.get(stmt.input) if inputs else None
+            env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
+        elif isinstance(stmt, Assign):
+            args = [env.get(name) for name in stmt.args]
+            env[stmt.name] = stmt.dtype or (get_dtype(dtype_promote(stmt.op.name, [d.name for d in args])) if all(args) else None)
+        elif isinstance(stmt, Init):
+            env[stmt.name] = stmt.dtype
+        else:
+            env.update((name, None) for name in stmt.defines())
+    return {nm: dt for nm in stats if (dt := env.get(nm)) is not None}
+
+
+def _dtype_key(edge, scope: dict | None) -> tuple:
+    """An edge's cache key: its identity plus the dtypes its CAPTURES resolve to at this
+    occurrence. Captures are what make the answer occurrence-dependent; an edge with none keys the
+    same with or without a scope, so the unscoped and scoped walks share their entries."""
+    # Identity keying is only valid while the tree is alive — which it is for every caller, who
+    # holds the root across the walk.
+    captures = sorted(edge.deps()) if isinstance(edge, Fold) else ()
+    if not captures or not scope:
+        return (id(edge), ())
+    return (id(edge), tuple((name, getattr(scope.get(name), "name", None)) for name in captures))
+
+
 def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict | None = None) -> tuple:
     """Infer an edge's result dtypes in the lexical scope where the edge occurs.
 
@@ -80,16 +118,17 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
     capturing seam whose occurrences resolve to equal providers, and equal providers type equally.
     """
     cache = {} if cache is None else cache
-    if id(edge) in cache:
-        return cache[id(edge)]
+    key = _dtype_key(edge, scope)
+    if key in cache:
+        return cache[key]
     if isinstance(edge, Load):
         tensor = inputs.get(edge.input) if inputs else None
         result = (tensor.dtype if tensor is not None else None,) * len(edge.names)
-        cache[id(edge)] = result
+        cache[key] = result
         return result
     if not isinstance(edge, Fold):
         result = (None,) * len(_operand_result_names(edge))
-        cache[id(edge)] = result
+        cache[key] = result
         return result
 
     env = dict(scope or {})
@@ -118,7 +157,7 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
     else:
         carried = lifted[: len(edge.combine.results)]
         result = carried + tuple(env.get(name) for name in _operand_result_names(edge)[len(carried) :])
-    cache[id(edge)] = result
+    cache[key] = result
     return result
 
 
@@ -551,6 +590,7 @@ __all__ = [
     "axis_names",
     "carries_partition",
     "cone_seam",
+    "cone_stat_dtypes",
     "edge_dtypes",
     "head",
     "make_cone",

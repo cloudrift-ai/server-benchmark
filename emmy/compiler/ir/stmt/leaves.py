@@ -213,6 +213,14 @@ class Load(Stmt):
         # literal-const buffers.)
         lit = ctx.literal_constants.get(self.input) if ctx.literal_constants else None
         if lit is not None and self.is_scalar:
+            # An INTEGER constant keeps its own element dtype. Folding it to f32 would decide the
+            # CONSUMER's arithmetic too: ``Assign.render`` reads its args' dtypes to choose between
+            # the native integer spelling and the f32 promotion, and the bit operations (a pack's
+            # shift, a nibble mask) have no f32 spelling at all. Float constants keep the f32
+            # binding, which is what every consumer of them already computes in.
+            if self.dtype is not None and self.dtype.name in _INTEGER_DTYPES:
+                ctx.ssa_dtypes[self.names[0]] = self.dtype.name
+                return [f"{pad}{ctx.type_name(self.dtype.name)} {self.names[0]} = {int(lit)};"]
             ctx.ssa_dtypes[self.names[0]] = "f32"
             return [f"{pad}{ctx.type_name('f32')} {self.names[0]} = {_float_lit(lit)};"]
         # Prefer the stamped ``self.dtype`` (set by ``030_stamp_types``);

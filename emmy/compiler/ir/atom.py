@@ -31,11 +31,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from emmy.compiler.dtype import BF16, F8E4M3, F8E5M2, F16, F32, DataType
+from emmy.compiler.dtype import BF16, F8E4M3, F8E5M2, F16, F32, DataType, F4E2M1x2
 
 # Canonical dtype token → the PTX instruction's dtype field, where they differ. The mma wrapper
 # names (``emmy_mma_m16n8k32_e4m3_f32``) and the atom-name convention both spell the PTX token.
-_PTX_DTYPE: dict[str, str] = {"f8e4m3": "e4m3", "f8e5m2": "e5m2"}
+_PTX_DTYPE: dict[str, str] = {"f8e4m3": "e4m3", "f8e5m2": "e5m2", "f4e2m1x2": "e2m1"}
 
 
 @dataclass(frozen=True)
@@ -210,6 +210,21 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
         (16, 8, 32),
         (("a", F8E5M2), ("b", F8E5M2), ("c", F32)),
         target_feature="has_fp8_mma",
+    ),
+    # The block-scaled fp4 cell. Both multiplicands are PACKED e2m1 pairs, so ``k`` counts 64
+    # values in 32 bytes a row, and the instruction applies one ue4m3 scale per 16 of them
+    # itself — scales the fragment loaders supply as two extra registers, which is why this atom
+    # cannot share the plain mma's three-operand call. Both operands must therefore reach it
+    # already quantized; a f16 activation has to be encoded first. The accumulate is f32-only:
+    # ptxas refuses an ``.f16 … .f16`` spelling of the block-scaled form (measured on sm_120a,
+    # CUDA 12.9 — "Unexpected instruction types"), so the ``F16_MMA_F32_ACC`` precision knob has
+    # no sibling of this atom to offer.
+    "mma_m16n8k64_e2m1_f32": AtomKind(
+        "mma_m16n8k64_e2m1_f32",
+        (16, 8, 64),
+        (("a", F4E2M1x2), ("b", F4E2M1x2), ("c", F32)),
+        fragment_registers=(("a", 4), ("b", 2), ("c", 4)),
+        target_feature="has_block_scaled_f4_mma",
     ),
 }
 

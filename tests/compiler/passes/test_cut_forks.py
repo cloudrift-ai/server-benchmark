@@ -24,7 +24,13 @@ from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
-from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _producer_order, _workspace_axes, cuttable_seams
+from emmy.compiler.pipeline.passes.lowering.tile._cut import (
+    CutSite,
+    _environments,
+    _producer_order,
+    _workspace_axes,
+    cuttable_seams,
+)
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
@@ -358,11 +364,15 @@ def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
         _CUT.rewrite(match, node)
 
 
-def test_bare_place_cut_consumes_its_rootmost_decision() -> None:
+def test_bare_place_cut_keeps_recursing_on_fresh_pieces() -> None:
     fragment = _nested_attention_cut({"PLACE": "cut"})
-    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    node = _piece_with_seam(fragment)
+    match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
 
-    assert pieces and all(node.op.placement_decided for node in pieces)
+    assert not node.op.placement_decided
+    with pinned_knobs({"PLACE": "cut"}):
+        fork = _CUT.rewrite(match, node)
+    assert "cut" in fork.knobs.values()
 
 
 def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
@@ -628,3 +638,94 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
 
     unpinned = GoldenRecord(knobs={}, **{**fields, "pins": ()})
     assert unpinned.pool_group != a.pool_group, "the pin regime is a group-key term"
+
+
+def test_a_fold_held_by_a_plain_statement_still_gets_an_environment() -> None:
+    """A plain statement binds axes, not SSA definitions — but it can HOLD a stored fold.
+
+    ``ProjectionRegion`` keeps its cones as terms, and a fold reached only that way had no lexical
+    environment at all, so provider closure could not resolve its captures and silently dropped its
+    seam. The canonical tree walk alternates node-wise and statement-wise for the same reason."""
+    from emmy.compiler.ir.pure import Lambda
+    from emmy.compiler.ir.tile.ir import ProjectionRegion
+
+    cone = Fold.projection(body=Body((Assign(name="c", op="relu", args=("x",)),)), results=("c",))
+    region = ProjectionRegion(axis=Axis("j", 4), lift=Lambda(params=("j",), body=Body((cone,)), results=("c",)))
+    root = Fold.projection(
+        body=Body((Load(name="x", input="a", index=(Var("j"),)), region, Assign(name="out", op="copy", args=("c",)))),
+        results=("out",),
+    )
+
+    assert id(cone) in _environments(root), "a cone a region holds must still resolve its captures"
+    assert _environments(root)[id(cone)] == [(root,)]
+
+
+def _cone_seam(providers: tuple = (), requires: tuple = ()) -> CutSite:
+    """A bare seam record standing in for a clustered operand cone."""
+    node = Fold.projection(body=Body((Load(name="w", input="w", index=(Var("n"), Var("k"))),)), results=("w",))
+    return CutSite(node=node, spelling="PLACE@b", axes=(Axis("n", 8), Axis("k", 8)), dtypes=(F16,), providers=providers, requires=requires)
+
+
+def test_two_cones_that_close_over_different_sources_are_not_one_value() -> None:
+    """Clustering merges cones that are alpha-equivalent — but a capture is a FREE name.
+
+    Two B cones can spell ``w[n,k] * x`` identically while one host defines ``x = sum(a)`` and the
+    other ``x = sum(b)``; normalization refuses to sink either reduce, so both cones keep the same
+    free name. Merging them materializes one and lets the other read it, which silently hands the
+    second contraction the first's value. The closure is part of the value."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
+
+    first_source = Fold.projection(body=Body((Load(name="x", input="a", index=(Var("k"),)),)), results=("x",))
+    second_source = Fold.projection(body=Body((Load(name="x", input="b", index=(Var("k"),)),)), results=("x",))
+    consumer = object()
+
+    same = [_cone_seam(requires=(("x", first_source),)), _cone_seam(requires=(("x", first_source),))]
+    differing = [_cone_seam(requires=(("x", first_source),)), _cone_seam(requires=(("x", second_source),))]
+
+    clustered = _cluster_value_seams(same, {id(seam.node): consumer for seam in same})
+    assert len(clustered) == 1 and len(clustered[0].siblings) == 1
+
+    kept = _cluster_value_seams(differing, {id(seam.node): consumer for seam in differing})
+    assert len(kept) == 2 and not any(seam.siblings for seam in kept)
+
+
+def test_a_required_producer_keeps_its_own_seam() -> None:
+    """A dependent reads its producer's workspace by the name that producer BINDS.
+
+    Clustering re-points a value at its representative, whose result names are its own, so folding
+    a required producer into somebody else's cluster leaves the requirement naming a seam that no
+    longer exists — or, worse, one that binds a different name."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
+
+    # The producer is deliberately NOT first: the cluster representative is whoever leads, so a
+    # required producer that trails would be folded away as a sibling.
+    twin, producer = _cone_seam(), _cone_seam()
+    dependent = _cone_seam(requires=(("w", producer.node),))
+    consumer = object()
+    seams = [twin, producer, dependent]
+
+    kept = _cluster_value_seams(seams, {id(seam.node): consumer for seam in seams})
+
+    assert any(seam.node is producer.node for seam in kept), "the required producer must survive as its own seam"
+    assert not any(sibling is producer.node for seam in kept for sibling, _ in seam.siblings)
+
+
+def test_a_dependent_seam_is_an_unpinned_composed_arm() -> None:
+    """The unpinned fork offers a dependent seam WITH its transitive producer closure — one arm,
+    composed exactly as the pin path composes it. The plain-only ballot could never elect the one
+    placement measured to work on DeepSeek-V4 post4096 (a dependent seam's closure), however the
+    evidence ranked: the arm was not offered."""
+    match, graph = _composed_case_match()
+    node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    options = _CUT.rewrite(match, node)
+    arms = [dict(option.knobs) for option in options if "cut" in option.knobs.values()]
+    dependent = {
+        "PLACE@map.fold.a.map.fold.a32": "cut",
+        "PLACE@map.fold.a.map.fold.a31": "cut",
+        "PLACE@map.fold.a21": "cut",
+    }
+    assert dependent in arms, f"the dependent seam's closure must be one composed arm, got {arms}"
+    seams = cuttable_seams(node.op)
+    offered = {spelling for arm in arms for spelling in arm}
+    missing = {seam.spelling for seam in seams} - offered
+    assert not missing, f"every seam must appear on the ballot through some closure: {missing}"

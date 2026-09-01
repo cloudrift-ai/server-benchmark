@@ -225,3 +225,32 @@ def test_iteration_variables_are_not_captures() -> None:
 
 
 # --- the projection binder ----------------------------------------------------------------------- #
+
+
+def test_a_shared_cone_is_typed_in_each_occurrence_scope() -> None:
+    """``edge_dtypes`` answers per OCCURRENCE, not per object.
+
+    Normalization shares one Fold object between structurally identical cones, so the same cone
+    can sit under an f16 capture in one host and an f32 capture in another. Its result dtype is a
+    property of the occurrence, and a cache keyed on identity alone handed every occurrence the
+    first one's answer — which a cut then believes when it sizes the seam's workspace."""
+    from emmy.compiler.dtype import get as get_dtype
+    from emmy.compiler.ir.tile.ops import edge_dtypes
+    from emmy.compiler.tensor import Tensor
+
+    shared = Fold.projection(body=Body((Assign(name="y", op="relu", args=("x",)),)), results=("y",))
+    inputs = {"a": Tensor("a", (4,), get_dtype("f16")), "b": Tensor("b", (4,), get_dtype("f32"))}
+
+    def host(buf: str, out: str) -> Fold:
+        source = Fold.projection(body=Body((Load(name="x", input=buf, index=(Var("i"),)),)), results=("x",))
+        return Fold.projection(operands=(source, shared), body=Body((Assign(name=out, op="copy", args=("y",)),)), results=(out,))
+
+    # Both hosts stay referenced for the whole check: the cache keys on object identity, which is
+    # only stable while the keyed objects are alive.
+    narrow_host, wide_host = host("a", "z0"), host("b", "z1")
+    cache: dict = {}
+    narrow = edge_dtypes(narrow_host, inputs, cache)
+    wide = edge_dtypes(wide_host, inputs, cache)
+
+    assert [dtype.name for dtype in narrow] == ["f16"]
+    assert [dtype.name for dtype in wide] == ["f32"]

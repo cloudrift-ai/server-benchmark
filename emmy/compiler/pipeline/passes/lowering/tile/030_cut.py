@@ -16,8 +16,33 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, out
 PATTERN = [Pattern("root", TileOp)]
 
 
+def _seam_index(seams) -> dict[int, object]:
+    """``id(node) -> seam`` over every seam node AND its clustered siblings — a duplicate cone
+    folded into a cluster seam stays addressable: any member names the one shared decision."""
+    return {id(node): seam for seam in seams for node in (seam.node, *(sibling for sibling, _ in seam.siblings))}
+
+
+def _with_required(chosen, by_node: dict[int, object], refuse: frozenset = frozenset()) -> tuple:
+    """``chosen`` expanded with every transitively required producer seam — the ONE composition
+    walk the pin path and the unpinned fork share, so a dependent seam is the same composed
+    decision however it is reached. The requirement is structural (the dependent's piece reads
+    the producer's workspace), not a choice either route can decline; a requirement landing on a
+    ``refuse`` spelling (a pinned fuse) raises the contradiction."""
+    out = list(chosen)
+    queue = list(out)
+    while queue:
+        for _, producer in queue.pop().requires:
+            required = by_node[id(producer)]
+            if required.spelling in refuse:
+                raise ValueError(f"PLACE pins fuse {required.spelling!r}, the producer a pinned dependent cut requires")
+            if not any(member is required for member in out):
+                out.append(required)
+                queue.append(required)
+    return tuple(out)
+
+
 def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | None:
-    """The cut parameter restriction spelled by live PLACE pins, or ``None``.
+    """The authoritative placement the live PLACE pins spell for THIS kernel, or ``None``.
 
     This restriction is consumed entirely by the cut pass before classic schedule enumeration.
     Every scoped ``PLACE@site=cut`` pin that resolves on this kernel joins ONE composed decision —
@@ -35,9 +60,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | Non
         if value not in {"fuse", "cut"}:
             raise ValueError(f"bad PLACE value {value!r}; expected 'fuse' or 'cut'")
     all_sites = sites(tile.op)
-    # A duplicate cone folded into a cluster seam stays addressable: pinning any
-    # member's site names the one shared decision.
-    by_node = {id(node): seam for seam in seams for node in (seam.node, *(sibling for sibling, _ in seam.siblings))}
+    by_node = _seam_index(seams)
     cut: list = []
     fused: list[str] = []
     missing = False
@@ -57,17 +80,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | Non
         elif not any(chosen is seam for chosen in cut):
             cut.append(seam)
     cut = [seam for seam in cut if seam.spelling not in fused]
-    # A dependent seam's producers join the composed decision transitively: the requirement is
-    # structural (its piece reads the producer's workspace), not a choice a pin can decline.
-    queue = list(cut)
-    while queue:
-        for _, producer in queue.pop().requires:
-            required = by_node[id(producer)]
-            if required.spelling in fused:
-                raise ValueError(f"PLACE pins fuse {required.spelling!r}, the producer a pinned dependent cut requires")
-            if not any(chosen is required for chosen in cut):
-                cut.append(required)
-                queue.append(required)
+    cut = list(_with_required(cut, by_node, refuse=frozenset(fused)))
     if cut:
         return tuple(cut), "cut", True
     if fused:
@@ -87,8 +100,8 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | Non
         if not plain:
             return ("PLACE",), "fuse", False
         depth = {id(site.node): site.depth for site in all_sites}
-        seam = min(plain, key=lambda s: depth[id(s.node)])
-        return (seam,), value, True
+        seam = min(plain, key=lambda candidate: depth[id(candidate.node)])
+        return (seam,), value, False
     if missing:
         # A pin-driven compile whose scoped pins all address other kernels decides FUSE here —
         # deterministic, and the unpinned placement fork never returns under a pin.
@@ -117,14 +130,24 @@ def _placement_forks(match: Match, root: Node, tile: TileOp):
         )
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
+    # One structural arm per PRINCIPAL closure: a seam plus its transitively required producers,
+    # composed exactly as the pin path composes them (`_with_required`), so the evidence-driven
+    # route through a dependent seam is on the ballot — DeepSeek-V4 post4096's only working
+    # placement (33,000,000x fewer worst per-thread trips) was a dependent seam's closure, which
+    # the previous plain-only fork could never offer. Two seams whose closures coincide are one
+    # arm; a plain seam's closure is itself, so the plain arms are unchanged.
+    by_node = _seam_index(seams)
+    closures: dict[frozenset[str], tuple] = {}
+    for seam in seams:
+        closure = _with_required((seam,), by_node)
+        closures.setdefault(frozenset(member.spelling for member in closure), closure)
     options.extend(
-        # Provider-closed and dependent seams stay OUT of the unpinned fork: every kernel and
-        # every fresh piece hosts some (the piece copies its providers), so offering them makes
-        # recursive placement inexhaustible and the candidate walk explodes. A route through them
-        # is spelled by scoped pins, which realize every member in one composed decision.
-        DeferredFork(lambda seam=seam: realize(match, root, (seam,), renamed), {seam.spelling: "cut"}, structural=True)
-        for seam in seams
-        if not (seam.providers or seam.requires)
+        DeferredFork(
+            lambda closure=closure: realize(match, root, closure, renamed),
+            {member.spelling: "cut" for member in closure},
+            structural=True,
+        )
+        for closure in closures.values()
     )
     return options
 

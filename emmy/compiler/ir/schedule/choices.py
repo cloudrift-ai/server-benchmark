@@ -880,10 +880,13 @@ class WarpSpec:
 
     The band is DECIDED as inventory — it rides ``WORK``'s ``+p<n>`` (``Work.producer``), which
     is where the retired ``WSPEC`` knob's one live decision went. ``ClassicScheduleContext`` and
-    the private enumerator require a resolved TMA stage on an unsplit kernel. The box copy is issued by one elected
+    the private enumerator require a resolved TMA stage on an unsplit kernel that is not split
+    across CTAs and does not stage a packed byte slab. The box copy is issued by one elected
     thread onto a slot mbarrier any thread can parity-wait, so the fill moves warps freely, while
     ``cp.async``'s wait-group is issuing-thread-scoped and an ``smem`` compute fill has no async load
-    half.
+    half. The packed byte slab is refused for a different reason: its own TMA lowering returns the
+    plain staged K-loop and emits no split, so the widened block's spare warps reach the compute
+    body and a second thread arms the box-copy barrier.
 
     Materialized by the staged K-loop (``lowering/kernel/_stage.staged_kloop``): the producer band
     rides at the TAIL of the thread block (``threadIdx.x >= block_threads``), so the compute warps'

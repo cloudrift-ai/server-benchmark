@@ -27,8 +27,7 @@ def _classic(*, work: str, tile: str, reduce: str = "", stage: str = "", raster:
         "RASTER": raster,
         "TILE@n0": tile,
         "REDUCE@n0": reduce,
-        "STAGE@n0.e0": stage,
-        "STAGE@n0.e1": stage,
+        "STAGE@n0": stage,
     }
 
 

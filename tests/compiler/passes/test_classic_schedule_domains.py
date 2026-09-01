@@ -230,7 +230,7 @@ def test_overwide_reduction_is_in_the_domain_before_c_restricts_it(monkeypatch) 
     assert len(tuple(_enumerate_context(c))) == 1
 
 
-def test_multi_channel_contraction_domain_uses_the_warp_compute_fill() -> None:
+def test_multi_channel_contraction_domain_contains_per_cell_and_warp_compute_fill() -> None:
     m, n, k = Axis("m", 16), Axis("n", 16), Axis("k", 16)
     root = Fold.contraction(
         k_axis=k,
@@ -256,9 +256,12 @@ def test_multi_channel_contraction_domain_uses_the_warp_compute_fill() -> None:
         except ScheduleRefused:
             pass
 
-    assert all(choice.tile.is_warp for choice in domains.nodes[0])
-    assert compatible
-    assert all(choice.stage.transport == "smem" for child in compatible for choice in child.assignment.edges.values())
+    assert any(not choice.tile.is_tiled for choice in domains.nodes[0])
+    assert any(choice.tile.is_warp for choice in domains.nodes[0])
+    per_cell = [child for child in compatible if not child.assignment.nodes[0].tile.is_tiled]
+    warp = [child for child in compatible if child.assignment.nodes[0].tile.is_warp]
+    assert per_cell and all(choice.stage.is_direct for child in per_cell for choice in child.assignment.edges.values())
+    assert warp and all(choice.stage.transport == "smem" for child in warp for choice in child.assignment.edges.values())
 
 
 def test_tensor_core_enumeration_is_the_compatible_independent_product(monkeypatch) -> None:

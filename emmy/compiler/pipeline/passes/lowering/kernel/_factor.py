@@ -903,8 +903,14 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # offline-weights refit steering dynamic scalar SDPA onto the ILP fold).
     defined = {nm for s in rloop.body.iter() for nm in s.defines()}
     expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
+    # ... and the same for the SSA-deps channel: an ``Assign``'s args are name strings ``deps()``
+    # reports and ``exprs()`` does not, so a value defined ahead of the loop (a hoisted scalar
+    # load, a provider chain a cut left before the reduce) and read inside it is invisible to the
+    # Expr scan above. It is one value shared by every copy — renaming its uses (``in3__r1``)
+    # emits an undeclared identifier (surfaced by DeepSeek-V4 post4096's two-cut piece).
+    deps_external = {nm for s in rloop.body.iter() for nm in s.deps()} - defined
     protected = frozenset(
-        {axis.name, *(ax.name for ax in grid), *axis.extent_expr().free_vars(), *nested_axes, *expr_external}
+        {axis.name, *(ax.name for ax in grid), *axis.extent_expr().free_vars(), *nested_axes, *expr_external, *deps_external}
         | ({lane.name} if lane is not None else set())
     )
     # A twisted fold's masked tail clamps the STREAMED VALUE to the pivot fold's identity

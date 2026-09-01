@@ -363,12 +363,24 @@ def _plan_sources(plan, wrapper, np_dtype, ckpt_dir, id_to_key):
             f"(e.g. {unbindable[0]!r}) — a trellis linear that fell back to the folded checkpoint-basis cone "
             f"binds nothing here and the program would run weightless"
         )
+    from emmy.compiler.loader.quant import F8_SAFETENSORS_DTYPES
+
+    f8_dtypes = set(F8_SAFETENSORS_DTYPES.values())
     want = set()
+    bits = set()  # paths whose consuming node wants RAW fp8 bits, not decoded values
     for w in plan.weights.values():
-        want.update(p for p, _shape in w.source_parts)
+        paths = {p for p, _shape in w.source_parts}
         if w.source_path is not None:
-            want.add(w.source_path)
-    sources = load_sources_by_path(ckpt_dir, want) if want else {}
+            paths.add(w.source_path)
+        want |= paths
+        # ``graph_dtype`` is the constant node's OWN dtype in the graph — not
+        # ``ConstantOp.source_dtype``, which names the STORED dtype and is the opposite fact. An f8
+        # graph dtype owns its own decode (an NVFP4 block scale feeds a ``from_f8e4m3`` cone), so
+        # decoding it here would decode it twice. A plan written before the field carries ``None``
+        # and keeps the stored-dtype read.
+        if w.graph_dtype in f8_dtypes:
+            bits |= paths
+    sources = load_sources_by_path(ckpt_dir, want, bits_paths=frozenset(bits)) if want else {}
     missing = want - set(sources)
     if missing:
         for path, t in list(wrapper.named_parameters(remove_duplicate=False)) + list(wrapper.named_buffers(remove_duplicate=False)):
@@ -851,8 +863,9 @@ class EmmyGenRunner:
 
         warn_if_unpinned(model_id)  # covers both lanes below, including the plain from_pretrained one
         # A quantized checkpoint cannot go through ``from_pretrained`` (transformers would
-        # engage its own fp8 machinery); build the twin from config and stream the shards —
-        # dense trunk loaded as real values, expert tensors kept fp8 (``load_quantized_split``).
+        # engage its own quantizer machinery); build the twin from config and stream the shards —
+        # dense trunk loaded as real values (fp8 and NVFP4 decoded on read), expert tensors
+        # kept fp8 as raw bits; a packed NVFP4 expert raises (``load_quantized_split``).
         qdir = quantized_checkpoint_dir(model_id)
         if qdir is not None:
             # EXL3 and AWQ keep the TRUNK coded too: expanding either checkpoint before compile
@@ -863,13 +876,14 @@ class EmmyGenRunner:
                 checkpoint_quant_summary,
                 is_awq_checkpoint,
                 is_exl3_checkpoint,
+                is_nvfp4_checkpoint,
             )
             from emmy.compiler.trace.huggingface import load_quantized_split
 
-            # Generic EXL3/AWQ reconstruction algebra is dissolved before lowering, so its
+            # Generic EXL3/AWQ/NVFP4 reconstruction algebra is dissolved before lowering, so its
             # checkpoint sources can stay coded on the card. FP8 keeps the existing value-trunk
             # lane; only its routed experts are input-spelled today.
-            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir)
+            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.
@@ -1091,8 +1105,16 @@ class EmmyGenRunner:
         # :func:`_retarget_constants`). Everything else keeps the module lane.
         ckpt = None
         if (expert_store or {}).get("trunk") == "codes":
+            # VALUES are checkpoint keys, not twin paths: the coded-weight spellers resolve
+            # ``source_path`` against the safetensors index, where a family whose checkpoint names
+            # differ from its parameter names (a vision-language wrapper's ``model.language_model.``)
+            # has no such entry. Transformers' registered mapping, run backwards, supplies the real
+            # name — the same table the forward load reads.
+            from emmy.compiler.trace.huggingface import _checkpoint_key_renamer  # noqa: PLC0415
+
+            to_checkpoint = _checkpoint_key_renamer(model, reverse=True) or (lambda k: k)
             id_to_key = {
-                id(t): path
+                id(t): to_checkpoint(path)
                 for path, t in list(model.named_parameters(remove_duplicate=False)) + list(model.named_buffers(remove_duplicate=False))
             }
             ckpt = (expert_store["dir"], id_to_key)
@@ -1406,6 +1428,7 @@ class EmmyGenRunner:
             # decode-bucket twin bind the SAME weights — share one upload, not two.
             pre_consts: dict = {}
             post_consts: dict = {}
+
             with torch.device("cpu"):
                 if not static_only:
                     pre_programs.append(

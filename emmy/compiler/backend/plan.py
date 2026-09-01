@@ -112,7 +112,9 @@ class KernelSpec:
 
     source: str | None = None
     binary_key: str | None = None
-    uses_tma: bool = False
+    # Whether this kernel must compile for the arch-SUFFIXED target (``sm_120a``). TMA needs it,
+    # and so does the block-scaled fp4 mma, which ptxas refuses on the plain target.
+    arch_specific: bool = False
 
 
 @dataclass
@@ -126,12 +128,24 @@ class WeightSpec:
     exactly one of ``source_path`` / ``source_parts`` is set. ``generated`` is the third,
     self-contained alternative for deterministic source-free bind records: ``(numpy dtype
     string, shape, raw bytes)``. Assemble the pre-chain source via
-    ``loader.binder.assemble_source`` (duck-typed over both specs)."""
+    ``loader.binder.assemble_source`` (duck-typed over both specs).
+
+    ``graph_dtype`` is this constant node's OWN dtype in the graph, which is not always what the
+    checkpoint stores. Deliberately NOT called ``source_dtype``: ``ConstantOp`` already has a field
+    by that name meaning the STORED dtype — the opposite fact — and :func:`assemble_source` is
+    duck-typed over both types, so one name for two opposite meanings would be a trap. It exists so
+    a plan describes its own binding without the graph: an f8-stored tensor whose node dtype is an f8 dtype must arrive as
+    RAW BITS, because the graph's own decode cone owns the value semantics, while the same stored
+    tensor bound for a non-f8 node decodes to values. A plan-keyed loader cannot tell those apart
+    from the path alone, and reading the wrong one decodes twice and computes silently wrong
+    numbers. ``None`` means the field was never written (a pack serialized before it existed); the
+    loader then keeps the historical stored-dtype read."""
 
     source_path: str | None
     load_ops: tuple[tuple, ...] | None = ()
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()
     generated: tuple[str, tuple[int, ...], bytes] | None = None
+    graph_dtype: str | None = None
 
 
 @dataclass
@@ -157,6 +171,20 @@ class ExecutionPlan:
 # ---------------------------------------------------------------------------
 # Graph → plan projection
 # ---------------------------------------------------------------------------
+
+
+#: The block-scaled fp4 mma wrapper's name. A kernel carrying it must compile for the
+#: arch-suffixed target, the same requirement TMA has for a different reason.
+_BLOCK_SCALED_F4_WRAPPER = "emmy_mma_m16n8k64_e2m1_f32"
+
+
+def _needs_arch_isa(op) -> bool:
+    """Whether this kernel must compile for ``sm_<cc>a``.
+
+    TMA announces itself structurally through the descriptors. The fp4 mma has no such marker at
+    this layer — a plan carries the kernel's rendered source, not its statement tree — so the
+    wrapper name in that source is what identifies it."""
+    return bool(op.tma_descriptors) or _BLOCK_SCALED_F4_WRAPPER in op.kernel_source
 
 
 def plan_from_graph(graph: Graph) -> ExecutionPlan:
@@ -188,7 +216,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
             raise TypeError(f"plan_from_graph: node {nid!r} has non-CudaOp {type(op).__name__!r}; lowering must produce Graph[CudaOp].")
         spec = kernels.get(op.kernel_name)
         if spec is None:
-            kernels[op.kernel_name] = KernelSpec(source=op.kernel_source, uses_tma=bool(op.tma_descriptors))
+            kernels[op.kernel_name] = KernelSpec(source=op.kernel_source, arch_specific=_needs_arch_isa(op))
         elif spec.source != op.kernel_source:
             # Longstanding runtime semantics: launches resolve kernels by NAME and the first
             # source wins (repeated helper names like ``__partial`` ride the first-compiled
@@ -231,11 +259,13 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
             else:
                 logger.warning("plan: constant %r rides a bind record with unresolved leaves; weight will not rebind from a pack", nid)
                 load_ops = None
+        node = graph.nodes.get(nid)
         weights[nid] = WeightSpec(
             source_path=op.source_path,
             load_ops=load_ops,
             source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in op.source_parts),
             generated=generated,
+            graph_dtype=(node.output.dtype.name if node is not None and node.output is not None else None),
         )
 
     return ExecutionPlan(
@@ -472,7 +502,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             name: {
                 **({"source": spec.source} if spec.source is not None else {}),
                 **({"binary_key": spec.binary_key} if spec.binary_key is not None else {}),
-                "uses_tma": spec.uses_tma,
+                "arch_specific": spec.arch_specific,
             }
             for name, spec in plan.kernels.items()
         },
@@ -492,6 +522,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                     else {}
                 ),
                 **({"ops": [[k, list(a)] for k, a in w.load_ops]} if w.load_ops is not None else {}),
+                **({"dtype": w.graph_dtype} if w.graph_dtype is not None else {}),
             }
             for nid, w in plan.weights.items()
         },
@@ -546,7 +577,12 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
             for lc in d["launches"]
         ],
         kernels={
-            name: KernelSpec(source=spec.get("source"), binary_key=spec.get("binary_key"), uses_tma=bool(spec.get("uses_tma", False)))
+            name: KernelSpec(
+                source=spec.get("source"),
+                binary_key=spec.get("binary_key"),
+                # ``uses_tma`` is the key packs baked before the fp4 atom wrote; same meaning, narrower name.
+                arch_specific=bool(spec.get("arch_specific", spec.get("uses_tma", False))),
+            )
             for name, spec in d.get("kernels", {}).items()
         },
         weights={
@@ -563,6 +599,9 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                     if "generated" in w
                     else None
                 ),
+                # Absent in packs written before the field existed: keep ``None``, which the
+                # loader reads as the historical stored-dtype behaviour rather than guessing.
+                graph_dtype=w.get("dtype"),
             )
             for nid, w in d.get("weights", {}).items()
         },

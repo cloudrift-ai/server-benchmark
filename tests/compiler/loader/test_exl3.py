@@ -914,11 +914,18 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
 
 def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
     """The split partial reads the cone at ABSOLUTE k — no GPU, source only. Each CTA owns
-    ``kslice`` = K/2 columns, so both the materialized A load and the computed B cone's own
-    ``w_decoded_*`` reads must carry the ``<partition> · 64`` base; together the two partitions
-    cover K exactly, which IS the reassociation the split performs. The base is READ OFF the
-    source rather than spelled: a piece is a brand-new kernel, so its axes carry canonical
-    names and the pre-split axis name never reaches codegen."""
+    ``kslice`` = K/2 columns, so the computed B cone's reads must sit at their partition's own
+    offset; together the two partitions cover K exactly, which IS the reassociation the split
+    performs. The base is READ OFF the source rather than spelled: a piece is a brand-new kernel,
+    so its axes carry canonical names and the pre-split axis name never reaches codegen.
+
+    Read for the partition AXIS, not for a ``· 64`` product: index simplification folds the stride
+    into whatever term carries it (the trellis read divides by 16 first, so its base arrives as
+    ``· 4``). And a read reduced modulo a divisor of the stride sits at absolute k WITHOUT naming
+    the partition at all, because the two agree there — the trellis step table repeats every 16
+    columns and 64 is a multiple of 16, so the term folds away (which also saves the arithmetic in
+    the mma inner loop). Those reads are accepted on the congruence; the trellis weight reads, whose
+    quotient does see the partition, are held to naming it."""
     import re
 
     from emmy.compiler.context import Context
@@ -942,12 +949,21 @@ def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
     src = kernels[mma_partials[0]]
     bases = set(re.findall(r"(\w+) \* 64\b", src))
     assert len(bases) == 1, f"the partial must offset its reads by ONE partition base; got {sorted(bases)}"
-    base = f"{bases.pop()} * 64"
+    part = bases.pop()  # the partition AXIS; its stride is folded into whatever term carries it
     # ``w_decoded_tile_step`` is the cone's k-INDEXED read (the other decode tables are scalars or
     # are indexed by an already-offset value).
     decode = [ln for ln in src.splitlines() if "w_decoded_tile_step[" in ln]
     assert decode, "the partial must still stream the trellis decode cone"
-    assert all(base in ln for ln in decode), "every computed-B cone read must be σ-reindexed to absolute k"
+    carries_partition = re.compile(rf"\b{re.escape(part)}\b").search
+    for line in decode:
+        moduli = {int(m) for m in re.findall(r"% (\d+)", line)}
+        congruent = bool(moduli) and all(64 % m == 0 for m in moduli)
+        assert carries_partition(line) or congruent, f"a cone read is neither at the partition nor congruent to it: {line.strip()}"
+    # The trellis weight reads divide by 16 before indexing, so the partition survives there and
+    # absolute k stays observable — these keep the un-relaxed assertion.
+    trellis = [ln for ln in src.splitlines() if re.search(r"= w\[", ln)]
+    assert trellis, "the partial must still read the packed trellis"
+    assert all(carries_partition(ln) for ln in trellis), "every trellis weight read must be σ-reindexed to absolute k"
     assert kernels[mma_partials[0].removesuffix("__partial")], "the split must splice a finalize kernel"
 
 

@@ -826,7 +826,7 @@ def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, capl
 
     def drifted_tile(row):
         row = dict(row)
-        tile_key = next(key for key in row if key.startswith("TILE@"))
+        tile_key = next(key for key in row if key == "TILE" or key.startswith("TILE@"))
         row[tile_key] = "mma_m16n8k16_f16_f32/f9x9"
         return row
 

@@ -43,10 +43,10 @@ configs:
     - o
     - wr
   realizations:
-  - name: k_matmul_0ba8ca.80a630f4c45a
+  - name: k_matmul_97a08c.978d12b98b0f
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       STAGE: ''
-    identity: c68571d0e47ef088095de65bccac580870823a8dcd825fbc7b07666cee6dbac4
+    identity: a5afb7bfacef30985a314ff53b164641e0422d65aaaee1204b6d9ed19d6162aa

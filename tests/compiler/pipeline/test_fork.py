@@ -10,10 +10,12 @@ directly because graph-building must remain lazy.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass, replace
 
 import pytest
 
-from emmy.compiler.pipeline.fork import DeferredFork, Fork, Level, build_fork_tree
+from emmy.compiler.ir.schedule import Schedule, ScheduleContext
+from emmy.compiler.pipeline.fork import DeferredFork, Fork, Level, build_fork_tree, schedule_forks
 
 
 def _row(a: int, b: int, c: int) -> dict:
@@ -70,6 +72,47 @@ def test_deferred_structural_leaf_materializes_only_when_selected() -> None:
     assert made == []
     assert leaf.expand() == ["graph"]
     assert made == ["built"]
+
+
+def test_schedule_prefix_expansion_is_derived_once_and_returns_fresh_lists() -> None:
+    calls: list[tuple] = []
+
+    @dataclass(frozen=True)
+    class Context(ScheduleContext):
+        _assignment: Schedule
+
+        @property
+        def assignment(self):
+            return self._assignment
+
+        def extensions(self):
+            calls.append(tuple(self.assignment.nodes.items()))
+            if not self.assignment.nodes:
+                yield Schedule(None, {0: "node"}, {})
+            else:
+                yield Schedule("kernel", {}, {})
+
+        def extend(self, pick):
+            if pick.kernel is not None:
+                return replace(self, _assignment=Schedule(pick.kernel, self.assignment.nodes, self.assignment.edges))
+            return replace(self, _assignment=Schedule(None, {**self.assignment.nodes, **pick.nodes}, self.assignment.edges))
+
+    (branch,) = schedule_forks(
+        Context(Schedule(None, {}, {})),
+        branch_knobs={},
+        row_delta=lambda before, after: {},
+        leaf=lambda assignment: DeferredFork(lambda: assignment),
+        pool_id="test",
+        pool_bound=1,
+        pool_descent_bound=1,
+    )
+    first = branch.expand()
+    second = branch.expand()
+
+    assert calls == [(), ((0, "node"),)]
+    assert first == second and first is not second
+    first.clear()
+    assert branch.expand() == second
 
 
 def test_empty_params_raises():

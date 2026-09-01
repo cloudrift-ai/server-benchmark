@@ -1,11 +1,8 @@
-"""Fork interface + implementations: the deferred fork options the search
-engine ranks and resolves, and the hierarchical Fork-tree builder shared by
-pipeline rules that enumerate a knob cartesian.
+"""Deferred fork options and the lazy Fork-tree builders shared by pipeline rules.
 
 :class:`Fork` is the interface — ``knobs``, ``is_leaf``, ``expand()``.
-Implementations hold their producer's state as data:
-:class:`OptionFork` (a concrete ``Op``/``Graph`` leaf) and the tree node
-classes :class:`_Branch` / :class:`_Leaf` built by :func:`build_fork_tree`.
+Implementations hold their producer's state as data: :class:`OptionFork` is a concrete ``Op``/``Graph`` leaf, while
+:class:`_Branch` / :class:`_Leaf` are built by :func:`build_fork_tree`.
 
 The tree builder reads an addressable sequence of variant knob rows through
 the root :class:`_Branch`: each ``Level`` groups
@@ -17,13 +14,12 @@ its COMPLETE row as ``knobs`` — the row IS the variant identity (the
 the online prior key leaves and branches by knobs alone, no structural
 probing. ``expand()`` yields ``materialize(row)`` once the search engine
 resolves a leaf.
-Everything is lazy: construction reads no row, no Fork below the root exists until search expands
-it, and branches retain indices into the shared sequence rather than row copies. Siblings are
-emitted in grouping order — RANKING IS SEARCH POLICY: the
+Everything is lazy: construction reads no row, no Fork below the root exists until search expands it, and branches
+retain indices into the shared sequence rather than row copies. A schedule prefix caches its immutable derived
+children while each expansion returns a fresh list. Siblings are emitted in grouping order — RANKING IS SEARCH POLICY: the
 policies rank the frontier with the online prior (Forks carry no score).
 
-The engine in ``pipeline.py`` consumes ``fork.knobs`` flat (it doesn't walk
-ancestors): branch Forks pin their level's slice of the row, leaves carry
+The engine in ``pipeline.py`` consumes ``fork.knobs`` flat: branches pin their level's row slice, while leaves carry
 the whole row.
 """
 
@@ -153,7 +149,7 @@ class _ScheduleTree:
 
 @dataclass(frozen=True)
 class _ScheduleFork(Fork):
-    """One immutable prefix in a generic lazy schedule tree."""
+    """One immutable prefix in a generic lazy schedule tree, with its derived frontier cached."""
 
     tree: _ScheduleTree
     context: ScheduleContext
@@ -176,7 +172,11 @@ class _ScheduleFork(Fork):
         return self.tree.pool_descent_bound
 
     def expand(self) -> list[Fork]:
-        return self.tree.step(self.context, self.row)
+        cached = self.__dict__.get("_memo_expansion")
+        if cached is None:
+            cached = tuple(self.tree.step(self.context, self.row))
+            object.__setattr__(self, "_memo_expansion", cached)
+        return list(cached)
 
 
 def schedule_forks(

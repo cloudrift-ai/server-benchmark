@@ -161,8 +161,10 @@ no matter what kind: a projection evaluates its operands before its scalar body,
 that does not exist yet. The `closed` gate reads only the fold's own lift and cannot see a nested capture; the
 composed placement cut builds exactly this shape (the consumer piece's workspace loads and rsqrt chain feed the
 retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
-nvcc). The schedule walk mirrors the fact: every fold under such a chain-form root offers only the serial fold,
-since the materializer binds the projection body whole.
+nvcc). The schedule walk mirrors the fact for depth: a fold reached deeper than a chain-form root's direct body
+members still offers only the serial fold, since the body recursion emits it serially per cell regardless of
+partition. A DIRECT member is not so limited — the retained reduce above is one — and offers the full non-transposed
+reduce catalog instead, bound through the chain arm ahead of the strided loop.
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
 specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or

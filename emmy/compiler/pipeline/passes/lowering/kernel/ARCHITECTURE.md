@@ -38,11 +38,14 @@ it seals through the one `grid_tile` finalizer (the article's "schedule separate
   `lower`-then-refind) and builds its per-cell body via the recursion (`_emit`, below); the output stays one cell per
   thread (the 1×1 `atomize`, the grid riding `lead_axes` untiled).
 - **CHAIN members** (`_tile_chain_members`) — a chain-form root (a zero-axis `Fold` with no operand edge, so nothing
-  was peeled) carries its reduces as direct body members, and the partition rides THEM. The members emit in body
-  order: a plain segment runs per cell on every lane (the provider chain the partitioned member reads), each
-  partitioned member becomes its own strided fold + merge (the combine broadcasts in place, so a later segment reads
-  the merged carrier), and the trailing segment closes lane-distributed. Every cooperating member shares ONE lane
-  axis. A swept output spec has no lane-distributed close, so such a root stays serial.
+  was peeled) carries its reduces as direct body members, and the partition rides THEM. Only a DIRECT member binds
+  partitioned; a fold nested deeper under one stays serial, emitted per cell by the body recursion (`_emit`) like any
+  other nested reduce — the offer decides this, not the bind. The members emit in body order: a plain segment runs
+  per cell on every lane (the provider chain the partitioned member reads), each partitioned member becomes its own
+  strided fold + merge (the combine broadcasts in place, so a later segment reads the merged carrier), and the
+  trailing segment closes lane-distributed. Every cooperating member shares ONE lane axis. A swept output spec has no
+  lane-distributed close, and a streamed spec must splice into its own observed fold's reduce loop — unreachable once
+  that loop already sits in an earlier segment — so a root carrying either stays fully serial, decided at the offer.
 - **Degenerate** — nothing tiled: one thread per output cell (`_emit(op)` + an output-store glue).
 
 ### The recursive node walk (`_emit`) — one hierarchical emitter

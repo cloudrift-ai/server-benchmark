@@ -268,7 +268,10 @@ def test_the_split_node_is_priced_as_the_sum_of_its_pieces(monkeypatch) -> None:
 
     scored = {d.node_id: d.score for d in trace}
     total = greedy._resolved_price(terminal, trace, _CTX, _Flat())
-    assert total == pytest.approx(sum(scored.get(nid) if scored.get(nid) is not None else 7.0 for nid in kernels))
+    assert total.us == pytest.approx(sum(scored.get(nid) if scored.get(nid) is not None else 7.0 for nid in kernels))
+    # A Σ this prior scored is a prediction, and the price says so — the flag is what lets a
+    # kernel-set comparison refuse a part-predicted sum instead of trusting it.
+    assert total.measured is False
 
 
 def _softmax_scale_chain() -> Graph:

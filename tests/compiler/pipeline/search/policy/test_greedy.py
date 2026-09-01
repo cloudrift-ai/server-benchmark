@@ -333,8 +333,9 @@ def test_kernel_set_change_needs_a_trustworthy_prior(monkeypatch, trustworthy, t
     answers in µs. While the prior is untrustworthy the deploy half is the offline one, whose
     score is an ordinal proxy, so the splices are withdrawn and the measured fused side survives;
     a trustworthy prior still gets to change the kernel set."""
-    monkeypatch.setattr(greedy, "_price_graph", lambda *_a, **_kw: 0.00039)  # the proxy's fantasy
-    monkeypatch.setattr(greedy, "_price_op_leaf", lambda *_a, **_kw: 49.7336)  # the measured kernel
+    # The proxy's fantasy against the measured kernel — neither side wholly measured.
+    monkeypatch.setattr(greedy, "_price_graph", lambda *_a, **_kw: greedy.Price(0.00039, measured=False))
+    monkeypatch.setattr(greedy, "_price_op_leaf", lambda *_a, **_kw: greedy.Price(49.7336, measured=True))
     point, splice = _kernel_set_fork()
 
     pick = greedy.greedy_decide(prior=_ProxyPrior(trustworthy=trustworthy))(point)
@@ -342,6 +343,31 @@ def test_kernel_set_change_needs_a_trustworthy_prior(monkeypatch, trustworthy, t
     assert (pick is splice) is takes_the_cut
     if not takes_the_cut:
         assert leaf_knobs(pick).get("PLACE") is None, "the withdrawn class must not reach the ranking either"
+
+
+@pytest.mark.parametrize(
+    ("fragments_measured", "takes_the_cut"),
+    [(True, True), (False, False)],
+    ids=["every-fragment-measured", "one-fragment-predicted"],
+)
+def test_all_measured_kernel_set_change_needs_no_trusted_prior(monkeypatch, fragments_measured, takes_the_cut) -> None:
+    """The competence check is on the PROXY, not on the change. When both compared Σ are wholly
+    measured no prediction entered the comparison, so the argmin is two real latencies and an
+    untrustworthy prior is beside the point — the faster measured kernel set deploys. Take the
+    measurement away from any one fragment and the Σ is part prediction again, so it withdraws."""
+    monkeypatch.setattr(greedy, "_price_graph", lambda *_a, **_kw: greedy.Price(12.5, measured=fragments_measured))
+    monkeypatch.setattr(greedy, "_price_op_leaf", lambda *_a, **_kw: greedy.Price(49.7336, measured=True))
+    point, splice = _kernel_set_fork()
+
+    pick = greedy.greedy_decide(prior=_ProxyPrior(trustworthy=False))(point)
+
+    assert (pick is splice) is takes_the_cut
+
+
+def test_price_total_is_measured_only_when_every_summand_is() -> None:
+    """The Σ is what gets compared, so one prediction anywhere makes the whole sum a prediction."""
+    assert greedy.Price.total([greedy.Price(1.0, True), greedy.Price(2.0, True)]) == greedy.Price(3.0, True)
+    assert greedy.Price.total([greedy.Price(1.0, True), greedy.Price(2.0, False)]) == greedy.Price(3.0, False)
 
 
 # ---------------------------------------------------------------------------

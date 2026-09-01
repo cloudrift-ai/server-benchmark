@@ -178,10 +178,10 @@ against 19,407,312.
 
 The cut phase is the outer enumeration. `030_cut` projects fused/cut placement choices, then `035_split_reduce`
 projects unsplit/split reduction choices. Each passes its independent domain through the generic
-`schedule(CutScheduleContext(...))` driver. Only after both slices are consumed may `040_schedule` pass
-`ClassicScheduleContext` to that same driver for Algorithm 1(c, p, t). A fresh piece that enters a sweep after either
-structural slice is skipped by `040_schedule` until the next sweep completes its cut phase. Context refusal is never
-used to discover that structural enumeration should have happened first.
+`schedule(CutScheduleContext(...))` driver. `040_schedule` follows those passes and passes
+`ClassicScheduleContext` to that same driver for Algorithm 1(c, p, t). A structural realization creates ordinary
+fresh kernels, so any later placement or split decision is discovered by the same ordered pass sequence rather than
+by a classic-context refusal.
 
 **Legality is not a separate layer.** A candidate a node cannot realize is one its option list does not contain.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated
@@ -553,10 +553,9 @@ that canonical input:
   disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
   them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
   unmapped TileOps, so further legal cuts and schedules use the same ordinary passes. An unpinned cut may expose more
-  cut choices; a pinned cut consumes its restriction on every piece. A piece minted by a structural
-  apply joins the sweep after `030_cut`'s batch, so it reaches `040_schedule` first. If its placement is undecided and
-  a cuttable seam remains, the schedule pass skips it without probing schedule parameters; the next sweep's cut pass
-  explores its placement first.
+  cut choices; a scoped pin consumes its composed restriction on every piece, while a bare cut may recur on a fresh
+  piece. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific visitor
+  discovers or realizes another placement decision.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
   changes which kernels exist, so `035_split_reduce` offers it after stored-edge placement and before any assignment

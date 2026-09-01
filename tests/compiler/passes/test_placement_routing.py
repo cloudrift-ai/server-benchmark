@@ -104,7 +104,7 @@ def test_rms_norm_cut_pin_splits_statistic_and_scale() -> None:
 @pytest.mark.parametrize("spelling", ("PLACE", "PLACE@map", "PLACE@a1"))
 def test_norm_linear_each_closed_cone_pin_lowers(spelling: str) -> None:
     kernels = _kernels(_compile(_norm_linear_graph(), {spelling: "cut"}))
-    assert len(kernels) == (4 if spelling == "PLACE" else 2)
+    assert len(kernels) == 2
     assert any("__place_" in node.id for node in kernels)
     assert any(node.id == "y" for node in kernels)
 

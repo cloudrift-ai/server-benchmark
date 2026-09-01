@@ -264,9 +264,9 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     stamps the resolved ``Stage`` (eligibility + sizing run once, scheduler-side): a ``tma`` pin on a
     register-tiled scalar matmul resolves with the depth-aware fit-to-smem ``bk_elems`` derived (the
     scalar gmem→smem ring — ``depth`` is honored, the K-chunk sized so ``depth`` slots fit 48 KiB);
-    a ``sync`` pin — no contraction transport — leaves the compatible set empty rather than
-    selecting gmem-direct. The stamped ``knobs`` codec is the resolved spelling, so a restriction
-    always names the pipeline the kernel actually has."""
+    a ``sync`` pin — no contraction transport — is refused rather than selecting gmem-direct. The
+    stamped ``knobs`` codec is the resolved spelling, so a pin always names the pipeline the kernel
+    actually has."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     pin_classic(monkeypatch, {"TILE": "f2x2"})
@@ -283,42 +283,36 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     assert stage.bk_elems == 64, stage  # derived depth-aware fit-to-smem K-chunk (K=64 divides)
 
     pin_classic(monkeypatch, {"STAGE": "d1/smem"})  # reg needs a computed edge — declines on a materialized contraction
-    declined = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
-    tile_op = next(n.op for n in declined.nodes.values() if isinstance(n.op, TileOp))
-    assert tile_op.schedule is None and not tile_op.place.is_mapped
+    with pytest.raises(ValueError, match="does not resolve"):
+        Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
 
 
 def test_scalar_masked_n_stage_pin_refuses(monkeypatch) -> None:
     """A masked-N (overhanging inner dim) SCALAR-tier contraction must DECLINE cp.async / TMA
     staging: the B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
-    hang the kernel on the misaligned 16 B copy. The explicit restriction leaves the compatible
-    set empty instead of silently selecting gmem-direct."""
-
-    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    hang the kernel on the misaligned 16 B copy. An explicit pin refuses instead of silently
+    selecting gmem-direct."""
 
     pin_classic(monkeypatch, {"TILE": "f2x2"})  # tile_n=32 overhangs N=48 ⇒ masked-N
     monkeypatch.setenv("EMMY_WORK", "t16x16")
     pin_classic(monkeypatch, {"REDUCE": ""})  # serial K: isolate the stage resolution
     for stage in ("d1/smem-async", "d2/smem-async", "d2/smem-tma"):
         pin_classic(monkeypatch, {"STAGE": stage})
-        declined = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(M=64, N=48, K=64), ctx=Context.from_target((9, 0)))
-        tile_op = next(n.op for n in declined.nodes.values() if isinstance(n.op, TileOp))
-        assert tile_op.schedule is None and not tile_op.place.is_mapped
+        with pytest.raises(ValueError, match="does not resolve"):
+            Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(M=64, N=48, K=64), ctx=Context.from_target((9, 0)))
 
 
 def test_tma_stage_pin_refuses_below_sm90(monkeypatch) -> None:
-    """A ``d*/tma*`` STAGE restriction below sm_90 leaves no compatible assignment rather than
-    selecting gmem-direct. The same restriction at sm_90 resolves, and cp.async staging still
-    rings below sm_90."""
+    """A ``d*/tma*`` STAGE pin below sm_90 refuses rather than selecting gmem-direct. The same pin
+    at sm_90 resolves, and cp.async staging still rings below sm_90."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     pin_classic(monkeypatch, {"TILE": "f2x2"})
     monkeypatch.setenv("EMMY_WORK", "t16x16")
     pin_classic(monkeypatch, {"REDUCE": ""})
     pin_classic(monkeypatch, {"STAGE": "d2/smem-tma"})
-    declined = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((8, 9)))
-    tile_op = next(n.op for n in declined.nodes.values() if isinstance(n.op, TileOp))
-    assert tile_op.schedule is None and not tile_op.place.is_mapped
+    with pytest.raises(ValueError, match="requires sm_90"):
+        Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((8, 9)))
 
     # Control: cp.async is unaffected by the gate — a d2/smem-async pin still rings at sm_89.
     pin_classic(monkeypatch, {"STAGE": "d2/smem-async"})

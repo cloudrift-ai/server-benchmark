@@ -52,8 +52,8 @@ relation has no pipeline-side copy.
 assignments through that context, and encodes canonical `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` rows. There is
 no codec base class: a second schedule family should demonstrate any shared codec contract before one is extracted.
 
-The structural cut phase runs before assignment composition. `030_cut` exhausts stored-Fold-edge placement and
-`035_split_reduce` then decides the cross-CTA reduction split. Both pass their independent choice domain through
-`CutScheduleContext`; `040_schedule` passes the resulting classic assignment context. All three use the generic
-schedule/context contract. The cut context stores its one structural factor in the generic kernel field; it does not
-invent a second enumeration interface.
+The structural cut phase runs before assignment composition. `030_cut` decides stored-Fold-edge placement and
+`035_split_reduce` then decides the cross-CTA reduction split; fresh pieces re-enter those ordinary passes. Both pass
+their independent choice domain through `CutScheduleContext`; `040_schedule` passes the resulting classic assignment
+context. All three use the generic schedule/context contract. The cut context stores its one structural factor in the
+generic kernel field; it does not invent a second enumeration interface.

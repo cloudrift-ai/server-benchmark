@@ -239,12 +239,10 @@ def test_sm70_modern_atom_pin_restricts_the_schedule_to_empty(monkeypatch) -> No
 
 
 @pytest.mark.parametrize("stage", ["d1/smem-async", "d1/smem-tma"])
-def test_sm70_newer_stage_pin_restricts_the_schedule_to_empty(monkeypatch, stage) -> None:
+def test_sm70_newer_stage_pin_refuses(monkeypatch, stage) -> None:
     _pin(monkeypatch, VOLTA, stage=stage)
-    out = Pipeline.build(TILE_PASSES).run(_graph(), ctx=Context(compute_capability=(7, 0)))
-    tile = next(node.op for node in out.nodes.values() if isinstance(node.op, TileOp))
-
-    assert not tile.place.is_mapped and tile.schedule is None
+    with pytest.raises(ValueError, match="requires sm_"):
+        Pipeline.build(TILE_PASSES).run(_graph(), ctx=Context(compute_capability=(7, 0)))
 
 
 def test_requested_target_reaches_nvcc_arch_and_cubin_key(monkeypatch) -> None:

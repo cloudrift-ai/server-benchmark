@@ -750,7 +750,7 @@ class TreeHalve(Stmt):
     dtype: DataType = F32
     barrier_id: int = 0
     barrier_count: int | None = None
-    # Segment-indexed halving (the transposed b<n>t combine): each slab holds ``length``
+    # Segment-indexed halving (the transposed ``coop-t`` combine): each slab holds ``length``
     # SEGMENTS of ``inner[1]`` slots, and the tree halves the segment index at a fixed inner
     # slot — ``buf[t·scale + inner_var]`` vs ``buf[(t+s)·scale + inner_var]``, broadcast from
     # ``buf[inner_var]``. ``None`` keeps the flat ``buf[t]`` layout.
@@ -2069,7 +2069,7 @@ class RegStore(Stmt):
     scalar strided writes, while the ordinary contiguous-N case keeps packed pairs.
 
     ``atomic`` renders each store as an ``atomicAdd`` accumulate instead of a
-    plain assign — ``035_split_reduce``'s atomic finalize on the mma tier: every
+    plain assign — ``030_cut``'s atomic finalize on the mma tier: every
     split partition's C fragment adds into the (per-launch zero-init'd) output.
     f16 / bf16 keep the vectorized row pair (native packed-pair ``atomicAdd``);
     an f32 destination has no packed atomic below sm_90, so it drops to

@@ -71,7 +71,7 @@ class Window:
     instead of by name-suffix convention.
 
     ``base`` / ``bound`` are the slice's ABSOLUTE start / end in the parent's coordinates, set
-    when a cross-CTA split hands each CTA its own window of a reduce stream (``035_split_reduce``
+    when a cross-CTA split hands each CTA its own window of a reduce stream (``030_cut``
     shrinks the axis to the slice length): the fold walks its local ``[0, extent)`` and any
     consumer needing the absolute coordinate — gmem / TMA operand bases, the causal mask's key
     columns — adds ``base``. ``bound`` additionally stops a SYMBOLIC slice whose end falls

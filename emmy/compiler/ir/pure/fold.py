@@ -14,10 +14,9 @@ of its bound name), not by sitting in a statement list. The term becomes stateme
 place, :meth:`Fold.lower` / :attr:`Fold.loop`. See ``ir/ARCHITECTURE.md``, "Pure terms vs
 statements".
 
-The schedule is deliberately absent: the ``tile`` / ``reduce`` / ``stage`` slices live in
-``TileOp.schedule`` (``ir/tile/ir.py``), keyed by the tree-path codec, so the term is IMMUTABLE
-across the whole schedule search and kernel identity (:meth:`Fold.structural_key`) is the algebra
-alone.
+The schedule is deliberately absent: an accepted, site-indexed ``Schedule`` lives on the
+``TileOp`` boundary (``ir/tile/ir.py``), so the term is IMMUTABLE across the whole schedule search
+and kernel identity (:meth:`Fold.structural_key`) is the algebra alone.
 """
 
 from __future__ import annotations
@@ -306,8 +305,8 @@ class Fold:
     (``PLANAR`` / ``TWISTED`` / ``CONTRACTION``) is **derived** from those params (:attr:`role`),
     never stored. The fold ``Loop`` is **synthesized on
     demand** (:attr:`loop`), never stored — so the same node tiles under any
-    :class:`~emmy.compiler.ir.schedule.ReducePlan`, which is not a field here: the reduce
-    partition is a SLICE in ``TileOp.schedule``, read through ``ops.Sched``.
+    :class:`~emmy.compiler.ir.schedule.Reduce`, which is not a field here: the reduce
+    partition is a site choice in ``TileOp.schedule``, read through ``ops.Sched``.
 
     A reduce whose per-step partial COMPOSES another node — split-K's ``Fold ⊃ Fold``
     (whose ``axis`` ``ksplit`` differs from the inner ``k_axis`` ``kslice``, so no double-reduce),
@@ -320,10 +319,10 @@ class Fold:
     in the lift's structural sequence without becoming a ``Stmt``; :meth:`lower` is the one boundary
     that flattens it to the synthesized loop.
 
-    The reduce PARTITION (:class:`ReducePlan` — GRID split / BLOCK coop / REG ILP) is the schedule's,
-    not the node's: it is keyed into ``TileOp.schedule`` and read through ``ops.Sched``, which is why
-    ``lower`` cannot see it and ``identity_key(with_io=True, with_knobs=True)`` stays byte-identical whichever partition the fork
-    picked. See the NO-schedule-fields note on ``operands`` below."""
+    The reduce PARTITION (:class:`Reduce` — GRID split / BLOCK coop / REG ILP) is the schedule's,
+    not the node's: it is selected for the node site in ``TileOp.schedule`` and read through
+    ``ops.Sched``, which is why ``lower`` cannot see it and ``identity_key(with_io=True, with_knobs=True)`` stays byte-identical
+    whichever partition the fork picked. See the NO-schedule-fields note on ``operands`` below."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
 
@@ -336,10 +335,10 @@ class Fold:
     # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
     # needs. ``lower`` splices each edge's body before its first use (:func:`splice_operands`).
     operands: tuple = ()
-    # NO schedule fields: the ``tile`` / ``reduce`` / ``stage`` slices live in
-    # ``TileOp.schedule``, keyed by the tree-path codec key — the term is pure algebra, IMMUTABLE
-    # across the whole schedule search (a fork is a different map, never a rebuilt tree).
-    # A cross-CTA SLICE of the stream (flash split-KV) is not spelled here: ``035_split_reduce``
+    # NO schedule fields: node and edge choices live in ``TileOp.schedule`` — the term is pure
+    # algebra, IMMUTABLE across the whole schedule search (a fork is a different assignment,
+    # never a rebuilt tree).
+    # A cross-CTA SLICE of the stream (flash split-KV) is not spelled here: ``030_cut``
     # shrinks ``axis`` to the slice length and the slice's absolute base / end ride that axis's
     # :class:`~emmy.compiler.ir.axis.Window` — ONE windowing vocabulary, the same one an axis's
     # split parentage uses, read by the realizer and the mask machinery alike.
@@ -540,7 +539,7 @@ class Fold:
         """The single sliced contraction this outer reduce COMPOSES (split-K's
         reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``), or ``None`` — the identity-lift
         λ spelling (one inline node operand carrying the outer's exact accumulator state). The
-        structural probe the derived :attr:`role` reads (``035_split_reduce`` builds its sliced
+        structural probe the derived :attr:`role` reads (``030_cut`` builds its sliced
         partial directly, so the composition is a recognized FORM here, never a required input)."""
         if len(self.lift.body) or len(self.operands) != 1:
             return None
@@ -612,7 +611,7 @@ class Fold:
         slot; sharing never duplicates its load.
 
         Placement and schedule live nowhere here: the ``(m, n)`` axes ride ``TileOp.place`` and the
-        slices ``TileOp.schedule``, so a node's identity is its algebra alone."""
+        typed assignment rides ``TileOp.schedule``, so a node's identity is its algebra alone."""
         mul = ElementwiseImpl(product) if isinstance(product, str) else product
         plus = ElementwiseImpl(fold_op) if isinstance(fold_op, str) else fold_op
         if not (plus.associative and plus.commutative and plus.has_identity and mul.distributes_over(plus)):
@@ -875,6 +874,42 @@ def deep_reads(stmts: list[Stmt]) -> set[str]:
     return out
 
 
+def loaded_buffers(node) -> set[str]:
+    """Every graph BUFFER loaded under ``node`` — a term, a stmt, or a body of them.
+
+    ``Body.loads`` walks ``Stmt.nested()``, and a Fold's operand EDGES are not nested statements:
+    :meth:`Fold.nested` yields the lift body, and nothing at all for a contraction, whose algebra
+    is meant to read as edges rather than body deps. That is fine for a fully flattened stream,
+    but a lowered body still carries Folds as TERMS wherever a region kept them
+    (:class:`~emmy.compiler.ir.tile.ir.ProjectionRegion` holds its cones as terms), so asking the
+    lowered body alone silently under-reports every buffer beneath such an edge.
+
+    Ask this whenever the answer must cover what a consumer of the STORED tree will reach — the
+    cut declaring a piece's graph inputs, ordering pieces by the workspaces they read. A cut that
+    declared the lowered view instead named fewer inputs than the kernel the materializer built
+    from the same tree went on to read, and the workspace producers, unreferenced, were pruned as
+    orphans."""
+    out: set[str] = set()
+    seen: set[int] = set()
+    stack = [node]
+    while stack:
+        item = stack.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, Load):
+            out.add(item.input)
+        elif isinstance(item, Fold):
+            stack.extend(item.operands)
+            stack.extend(item.lift.body)
+        elif isinstance(item, (list, tuple, Body)):
+            stack.extend(item)
+        else:
+            for body in item.nested():
+                stack.extend(body)
+    return out
+
+
 def stmt_axis_names(stmts) -> set[str]:
     """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
     sitting in the body needs no special case — it is a ``Stmt``, so its children are reached through
@@ -942,9 +977,9 @@ def edge_refs_axis(edge, name: str) -> bool:
     can address) are the same question, so they share this one read.
 
     SCOPED: a nested loop that RE-BINDS the name shadows it, and indices under it name that inner
-    axis, not the enclosing one. Axis names collide across a tree by design (the codec spells
-    ``REDUCE@a.fold.k`` exactly for a cone statistic whose axis name matches the contraction's), so
-    an unscoped scan would read a row-invariant statistic as k-varying."""
+    axis, not the enclosing one. Axis names collide across a tree by design, while schedule identity
+    comes from the containing node site, so an unscoped scan would read a row-invariant statistic
+    as k-varying."""
 
     def refs(s: Stmt) -> bool:
         if name in s.binds_axes():  # a node re-binding the name shadows it — ``Fold.binds_axes`` is its iteration var
@@ -1047,11 +1082,12 @@ def _(s: Fold, rename, sigma, axis_fn):
 
 __all__ = [
     "Channel",
-    "Fold",
     "deep_defines",
     "deep_reads",
     "edge_refs_axis",
+    "Fold",
     "is_contraction",
+    "loaded_buffers",
     "operand_body",
     "operand_name",
     "refs_axis",

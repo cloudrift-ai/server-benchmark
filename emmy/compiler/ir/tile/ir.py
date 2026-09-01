@@ -11,31 +11,27 @@ combine.** The combine is not defined here — it is the :class:`~emmy.compiler.
 term (``ir/pure/fold.py``), which a ``TileOp`` holds whole in ``op``. What this module owns is
 everything the term deliberately does not carry:
 
-- the root-global schedule fields — the free-axis → grid :class:`~.schedule.Placement` (``place``),
-  the ONE worker inventory (``work``) and the warp-spec split (``workers``);
-- the per-node schedule SLICES in ``TileOp.schedule`` (``{codec key → resolved TilePlan /
-  ReducePlan / Stage}``, keyed by the tree-path codec and read through ``ops.Sched``);
+- the free-axis → grid :class:`~.schedule.Placement` (``place``), an accepted site-indexed
+  :class:`Schedule`, and its separate materialization;
 - the kernel's EFFECTS — the :class:`OutputSpec` decorations and the ``apply_output_specs`` /
   ``extract_output_specs`` pair that reconstitutes the effectful stmt stream from them.
 
 That split is the layer's invariant, not a convenience. The stored term is pure algebra, IMMUTABLE
-across the whole schedule search — a fork is a different slice map, never a rebuilt tree — which is
-what keeps kernel identity (``Op.body_identity`` over the derived ``loop_body``) schedule-free, with
-placement, slices and workers all excluded. Tile IR stores only pure terms; statements appear when the term is
+across the whole schedule search — a fork is a different assignment, never a rebuilt tree — which is
+what keeps kernel identity (``Op.identity_key`` over the derived ``loop_body``) schedule-free, with
+the schedule, materialization, placement binding and workers excluded. Tile IR stores only
+pure terms; statements appear when the term is
 lowered, never inside it (``ir/ARCHITECTURE.md``, "Pure terms vs statements").
 
 There is no per-kind kernel/schedule type: dispatch reads the role structurally off the node (a
 fold's role derives), so a projection, a reduction and a contraction all ride the same ``TileOp``.
-The kernel materializer reads the schedule off the slice beside the node — it never re-recognizes
-structure the tile IR already holds.
+The kernel materializer reads the schedule by site — it never re-recognizes structure the tile IR already holds.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from functools import cached_property
-
-from frozendict import frozendict
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
@@ -45,6 +41,8 @@ from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
+from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.views import EdgeSite, NodeId, schedule_edges, schedule_nodes
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
 from emmy.compiler.ir.stmt.base import _axis_identity
@@ -177,7 +175,7 @@ def _splice_streamed(stmts: list, write: Write) -> bool:
 def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> list[Stmt]:
     """Reassemble the EFFECTFUL projection stmt stream from a pure projection body + the
     kernel-boundary output specifications — the ONE reconstitution rule the scheduler's tail gates, the
-    materializer's zero-axis ``Fold`` peel and ``035_split_reduce`` share, so the lowered kernels stay
+    materializer's zero-axis ``Fold`` peel and ``030_cut`` share, so the lowered kernels stay
     byte-identical to the stored-``Write`` era. A plain store appends its ``Write``; consecutive
     ``sweep`` stores on one axis wrap the trailing run of stmts reading that axis
     (:func:`_sweep_start`) into one per-cell output ``Loop``, with the ``Write`` run last."""
@@ -419,38 +417,33 @@ class TileOp(Op):
 
     There is **no** let table: a computed operand is stored inline on its edge, and sharing is the
     product contraction's arity (see the module docstring), so stored trees are already
-    resolved and every walk is a plain tree walk. The per-node schedule SLICES live in
-    ``schedule``: ``{codec key → resolved TilePlan / ReducePlan / Stage}``, keyed by the
-    tree-path codec's canonical key (:mod:`~emmy.compiler.ir.tile.path` — a fold may carry all
-    three families at once, so the path alone cannot key the map; the family selects the slice
-    kind, so key and value agree by construction). The ``op`` term is pure algebra, IMMUTABLE
-    across the whole schedule search — a fork is a different map, never a rebuilt tree. Read /
-    write through :class:`~emmy.compiler.ir.tile.ops.Sched` (``ops.reduce_plan`` is the plan
-    accessor); ``lower`` never sees the slices, so kernel identity (``identity_key(with_io=True, with_knobs=True)``) is untouched."""
+    resolved and every walk is a plain tree walk. An accepted ``schedule`` assignment contains
+    choices only; ``materialization`` separately contains placed geometry and resolved transport
+    facts. There is no second schedule map or per-node schedule field. The ``op`` term is pure
+    algebra, IMMUTABLE across the whole schedule search. Read through
+    :class:`~emmy.compiler.ir.tile.ops.Sched`; ``lower`` never sees the schedule, so kernel identity
+    (``identity_key(with_io=True, with_knobs=True)``) is untouched."""
 
     op: object = None
     name: str = ""
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
-    schedule: frozendict = field(default_factory=frozendict)
+    # The accepted semantic assignment and its derived lowering facts. Unscheduled Tile IR carries
+    # neither; scheduling installs both together.
+    schedule: Schedule | None = field(default=None, compare=False, repr=False)
+    materialization: object | None = field(default=None, compare=False, repr=False)
     # The kernel's output specifications: every explicit ``Write`` (and the legacy rms/softmax
     # output-sweep spelling) as a kernel-boundary fact beside ``place``. Empty for a
     # bare reduction / contraction — its grid-cell store
     # stays the materializer's default glue (``_factor.with_store``). Consumers reconstitute
     # the effectful stmt stream via ``apply_output_specs`` — never read a ``Write`` out of the term.
     output_specs: tuple[OutputSpec, ...] = ()
-    # The ONE worker inventory (``ir.schedule.Workers``): the ``w``/``n`` worker
-    # tokens factored out of the per-site TILE values, derived at option assembly
-    # (``ops.Sched.seal_workers`` — loud on cross-site disagreement). ``None`` = the per-cell /
-    # pure-reduce forms (derived launch geometry). The wire format spells the inventory ONCE, in
-    # ``WORK``; the site values carry no worker tokens and the retired embedded spellings raise.
-    work: object = None
-    # Whether the graph-level Fold-edge placement decision is consumed. Unpinned and bare cut
-    # pieces keep the default ``False`` and may expose their own smaller seam set; a scoped cut
-    # sets it on both pieces because its one authoritative path decision cannot name a fresh tree.
+    # Whether the graph-level Fold-edge placement decision is consumed. Unpinned cut pieces keep
+    # the default ``False`` and may expose their own smaller seam set; a pinned cut sets it on both
+    # pieces because its authoritative decision cannot name a fresh tree.
     placement_decided: bool = False
     # Whether the split QUESTION is consumed for this kernel: the structural cross-CTA fork
-    # (``035_split_reduce``) declined it (the unsplit arm), or the kernel is a realized split's
+    # (``030_cut``) declined it (the unsplit arm), or the kernel is a realized split's
     # independent projection SIBLING — which has no sliced axis, so it carries this flag as its
     # consumed-split receipt (a ``REDUCE`` pin's ``g`` half strips on it). The partial / finalize
     # pieces need no flag: their sliced axis's partition ``Window`` is the receipt. Widening the
@@ -460,8 +453,6 @@ class TileOp(Op):
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)
-        if not isinstance(self.schedule, frozendict):
-            object.__setattr__(self, "schedule", frozendict(self.schedule))
         scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
         axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
         free_names = {axis.name for axis in self.place.free}
@@ -477,8 +468,8 @@ class TileOp(Op):
             if any(is_contraction(site.node) for site in sites(candidate)):
                 normalized = candidate
                 object.__setattr__(self, "place", replace(self.place, free=candidate_free))
-        if self.schedule and normalized != self.op:
-            raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
+        if self.schedule is not None and normalized != self.op:
+            raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
         contractions = tuple(site.node for site in sites(normalized) if is_contraction(site.node))
@@ -489,6 +480,7 @@ class TileOp(Op):
             and any(any(edge_refs_axis(edge, store.sweep.name) for edge in contraction.operands) for contraction in contractions)
         }
         if not promoted:
+            self._validate_schedule()
             return
         free_names = {axis.name for axis in self.place.free}
         extra = tuple(
@@ -520,9 +512,46 @@ class TileOp(Op):
         final_axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
         final_sweeps = frozenset(name for name in final_axes if name not in {axis.name for axis in self.place.free})
         renormalized = normalize_fold_tree(self.op, final_axes, sweep_axes=final_sweeps)
-        if self.schedule and renormalized != self.op:
-            raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
+        if self.schedule is not None and renormalized != self.op:
+            raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", renormalized)
+        self._validate_schedule()
+
+    def _validate_schedule(self) -> None:
+        """Enforce the schedule/materialization boundary on construction."""
+        if self.schedule is None and self.materialization is None:
+            return
+        if self.schedule is None or self.materialization is None:
+            raise ValueError("a scheduled TileOp requires both a schedule and materialization")
+        validate = getattr(self.materialization, "validate", None)
+        if not callable(validate):
+            raise TypeError("schedule materialization must provide validate(schedule, source, place=..., workers=...)")
+        validate(self.schedule, self, place=self.place, workers=self.workers)
+
+    @cached_property
+    def nodes(self) -> tuple[Fold, ...]:
+        """The term's Fold nodes in stable schedule order."""
+        return schedule_nodes(self.op) if isinstance(self.op, Fold) else ()
+
+    @cached_property
+    def node_edges(self) -> tuple[EdgeSite, ...]:
+        """Every consumer operand position in stable schedule order."""
+        return schedule_edges(self.nodes)
+
+    @cached_property
+    def _node_ids(self) -> dict[int, NodeId]:
+        return {id(node): node_id for node_id, node in enumerate(self.nodes)}
+
+    def node_id(self, node: Fold) -> NodeId:
+        """Return ``node``'s schedule identity by object identity."""
+        try:
+            return self._node_ids[id(node)]
+        except KeyError:
+            raise KeyError("Fold is not a node of this TileOp") from None
+
+    def __getstate__(self):
+        """Pickle stored fields only; derived schedule inventories recompute after transport."""
+        return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
 
     def pretty_body(self) -> str:
         """The structural dump — delegated to :mod:`~emmy.compiler.ir.tile._dump`, which owns
@@ -539,7 +568,7 @@ class TileOp(Op):
         ``Fold.lower()`` with every output specification attached at its owning scope), so the
         extents, the store program (index spelling, ``atomicAdd``, width, output sweeps) and a
         cut child's typed seam ``Load`` are all in the body. Schedule-free by construction:
-        ``lower`` never reads the schedule slices, and ``place``'s grid BINDING stays out (an
+        ``lower`` never reads the classic assignment, and ``place``'s grid BINDING stays out (an
         axis's launch coordinate is execution choice, not identity). A bare reduction carries no
         ``Write`` — its grid-cell store is materializer glue derived from ``place.grid``, so the
         empty store stream is itself derivable. Cached: the term and the kernel-boundary fields

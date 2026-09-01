@@ -15,7 +15,7 @@ The **unit** is the atom's parallel thread footprint (:attr:`lanes`): a warp (32
 thread (1) for scalar. So the warp tile and the scalar parallel thread-tile are the *same* tiling
 level — a 2-D grid of units — differing only in ``lanes``. ``block_threads = units · lanes``.
 
-``AtomKind`` rides on the ``atom`` field of :class:`~emmy.compiler.ir.schedule.TilePlan`;
+``AtomKind`` rides on the ``atom`` field of :class:`~emmy.compiler.ir.schedule.Tile`;
 the kernel-IR ``MmaSyncPtx`` / ``RegFragment`` / ``RegStore`` render off its logical ``shape``,
 PTX ``instruction_shape``, fragment-register counts, and ``operand_dtype`` per role; the ``TILE`` codec names an mma atom
 by its registry key
@@ -45,7 +45,7 @@ class AtomKind:
     ``operand_dtypes`` maps each role (``"a"`` / ``"b"`` / ``"c"``) to its element dtype;
     ``a``/``b`` are the multiplicands (f16 or bf16), ``c`` the accumulator (f32, or f16 on the
     ``..._f16_f16`` full-rate variant). Frozen + hashable so
-    it rides on a frozen ``TilePlan`` / ``Fold``. :attr:`lanes` is 32 — an mma is
+    it rides on a frozen ``Tile`` / ``Fold``. :attr:`lanes` is 32 — an mma is
     warp-cooperative (one warp executes a cell)."""
 
     name: str
@@ -129,7 +129,7 @@ class ScalarAtom:
     """The scalar fma leaf — one thread folds one output cell. The degenerate atom: a ``(1, 1,
     1)`` cell with ``lanes == 1``. No operand-dtype spec (the scalar body folds the carrier
     directly, dtypes resolved during lowering), so it carries only its identity. Selected when a
-    contraction has no tensor-core ``TilePlan`` (the register-tile / per-cell tier)."""
+    contraction has no tensor-core ``Tile`` (the register-tile / per-cell tier)."""
 
     name: str = "scalar"
     shape: tuple[int, int, int] = (1, 1, 1)
@@ -161,7 +161,7 @@ SCALAR_ATOM = ScalarAtom()
 Atom = AtomKind | ScalarAtom
 
 
-#: The registered mma atoms, keyed by the name the ``TILE`` codec (``a:<name>``) spells.
+#: The registered mma atoms, keyed by the bare name the ``TILE`` codec spells.
 #: NAMING CONVENTION: ``mma_<shape>_<ab_dtype>_<acc_dtype>`` — the compressed form of the PTX /
 #: CUTLASS ``D.A.B.C`` dtype order (``mma.sync...f32.f16.f16.f32`` / ``SM80_16x8x16_F32F16F16F32``),
 #: since the s16816 family always has A ≡ B and D ≡ C; a future mixed atom would extend to the
@@ -254,24 +254,12 @@ def atoms_for(ab_dtype: DataType | None, *, acc: DataType = F32, ctx=None) -> tu
     )
 
 
-#: Convenience aliases — the historical acc-unspecified spellings resolve to the common
-#: f32-accumulate atoms (they are also what every pre-convention golden / tune-DB row / pin
-#: spells). Accepted by :func:`atom_for`, so parse canonicalizes: an aliased ``TILE`` spelling
-#: re-spells with the canonical name (``TilePlan.spell`` reads ``atom.name``), which keeps the
-#: prior/DB ``tile_signature`` join consistent across old and new rows.
-ATOM_ALIASES: dict[str, str] = {
-    "mma_m16n8k16_f16": "mma_m16n8k16_f16_f32",
-    "mma_m16n8k16_bf16": "mma_m16n8k16_bf16_f32",
-}
-
-
 def atom_for(name: str) -> AtomKind:
-    """The registered :class:`AtomKind` for ``name`` (the ``TILE`` codec's ``a:<name>``); the
-    acc-unspecified aliases (:data:`ATOM_ALIASES`) resolve to their f32-accumulate atoms."""
+    """The registered :class:`AtomKind` for its one canonical ``TILE`` codec name."""
     try:
-        return ATOM_REGISTRY[ATOM_ALIASES.get(name, name)]
+        return ATOM_REGISTRY[name]
     except KeyError:
-        raise ValueError(f"unknown atom kind {name!r} (have {sorted(ATOM_REGISTRY)} + aliases {sorted(ATOM_ALIASES)})") from None
+        raise ValueError(f"unknown atom kind {name!r} (have {sorted(ATOM_REGISTRY)})") from None
 
 
-__all__ = ["ATOM_ALIASES", "ATOM_REGISTRY", "AtomKind", "atom_for"]
+__all__ = ["ATOM_REGISTRY", "AtomKind", "atom_for"]

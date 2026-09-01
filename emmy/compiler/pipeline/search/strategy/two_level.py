@@ -42,7 +42,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
-from emmy.compiler.pipeline.knob import stamp_schedule_families
+from emmy.compiler.pipeline.knob import complete_kernel_row
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.pipeline import Run, variant_label
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
@@ -168,12 +168,11 @@ def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
     A normal outer terminal sits at the loop dialect's end (:func:`outer_pipeline`), so its
     kernels are finalized ``LoopOp`` instances. A direct post-cut reproducer instead starts at an
     unscheduled ``TileOp``; it enters the same inner search so its rows keep the child identity
-    ordinary parent-route replay already consumes. A Tile root whose worker inventory is sealed
-    (``work`` set) is already scheduled and stays lowering-only. ``work`` is the only sealed
-    signal today, and it is ``None`` for the per-cell / pure-reduce forms too — such a root
-    re-enters the per-kernel search and re-decides its schedule from the same evidence, which is
-    redundant but not wrong; a dedicated scheduled marker on ``TileOp`` would tighten this."""
-    return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp) or (isinstance(n.op, TileOp) and n.op.work is None)]
+    ordinary parent-route replay already consumes. A Tile root carrying a classic ``Schedule`` is
+    already decided and stays lowering-only; the typed assignment is the exact scheduled marker."""
+    return [
+        (nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp) or (isinstance(n.op, TileOp) and n.op.schedule is None)
+    ]
 
 
 @dataclass
@@ -462,7 +461,7 @@ class TwoLevelStrategy(SearchStrategy):
                 searched_structural = False
                 if searched is not None:
                     searched_structural = searched[3]
-                    searched_knobs = dict(searched[0]) if searched_structural else stamp_schedule_families(searched[0])
+                    searched_knobs = dict(searched[0]) if searched_structural else complete_kernel_row(searched[0])
                     searched_us = searched[1]
                     searched_cuda_ops = searched[2]
                 results[op_idx] = OpResult(

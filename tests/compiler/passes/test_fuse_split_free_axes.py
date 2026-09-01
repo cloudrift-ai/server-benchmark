@@ -325,7 +325,7 @@ def _split_store_ok(index: tuple, shape: tuple, free_names=("m", "n"), atom=(16,
     """Whether an mma fragment store with output ``atom`` cells can address ``index`` — the
     scheduler's own gate (``_split_store_refusal``), so the roles mapping under test is the
     production one."""
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _split_store_refusal
+    from emmy.compiler.ir.schedule.classic_projection import _split_store_refusal
 
     free = tuple(Axis(nm, Dim(4)) for nm in free_names)
     shapes = {"out": Tensor("out", shape)}

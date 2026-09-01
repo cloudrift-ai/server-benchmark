@@ -29,20 +29,19 @@ class Ranked:
 def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
     """The planner's candidate enumeration for any ``graph`` — the SAME rows the scheduler's fork
     tree offers a live compile, captured by resolving the graph through ``TILE_PASSES`` with a
-    decide that flattens each fork's leaves (each leaf's knob row keyed by the CANONICAL codec
-    spelling — bare on a single-primary tree, ``TILE@dd``-style on flash — exactly
-    what ``tile_signature`` joins a golden against). ``family`` keeps only rows carrying that knob
+    decide that flattens each fork's leaves. Every leaf encodes one accepted classic ``Schedule``
+    with bare kernel keys and exact ``@n`` / ``@n.e`` sites, which is exactly what
+    ``tile_signature`` joins a golden against. ``family`` keeps only rows carrying that knob
     family (``"TILE"`` for a contraction pool); ``""`` keeps every row with a per-node schedule
     knob (a reduce's ``REDUCE`` fork). The one live-fork capture the matmul
     offline fitter and record evaluator share.
 
     Returns :class:`~.pool.Candidates` — the rows beside the size of the pools they came from.
     Under ``ctx.pool_sample`` the rows are a DRAW and ``total`` is the exact size, and BOTH count
-    the same population: distinct candidate pools. N same-shape kernels share one pool (the
-    schedule pool memo answers the later ones), so its draw is collected once and its size counted
-    once — a rank against ``total`` is a rank within the pool the fit actually ranks. With no
-    sample the rows are every kernel's fork rows and ``total`` is ``len(rows)``, so a caller that
-    reports both prints today's numbers unchanged."""
+    the same population: distinct schedule-space stamps. Equal problems produce the same stamp,
+    so their identical draw and total are collected once — a rank against ``total`` is a rank
+    within the space the fit actually ranks. With no sample the rows are every kernel's fork rows
+    and ``total`` is ``len(rows)``, so a caller that reports both prints today's numbers unchanged."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
@@ -61,9 +60,9 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
 
     def decide(fp):
         if sample is not None:
-            # One contribution per POOL, matching the totals sink's keyed dedupe: a fork whose
-            # kernel re-entered an already-drawn pool wrote no new totals entry, and appending its
-            # (identical) draw again would make ``rows`` and ``total`` count different populations.
+            # One contribution per schedule-space stamp, matching the totals sink's keyed dedupe:
+            # an equal problem overwrites the same total, and appending its identical draw again
+            # would make ``rows`` and ``total`` count different populations.
             opened = set(sample.totals) - seen_pools
             seen_pools.update(opened)
             if not opened:
@@ -72,7 +71,7 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
             row = leaf_knobs(leaf)
             # A schedule row always spells the kernel-global ``WORK``; a structural arm's knob
             # delta (a cut, the cross-CTA split's g-half or the unsplit receipt) never does — the
-            # stated row-identity marker (``_schedule._step``, the tile scheduler architecture).
+            # stated row-identity marker (the classic scheduler's leaf boundary).
             if WORK.name not in row:
                 continue
             if any(family_of(k) in wanted for k in row):
@@ -85,10 +84,25 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "") -> Candidates:
         # only an entirely empty fork means the schedule is not offered.
         option = next(iter_leaves(options), None)
         if option is None:
-            raise ValueError("the live pins admit no option at this fork, so no candidate row can be enumerated")
+            from emmy.compiler.pipeline.pipeline import NO_OPTION  # noqa: PLC0415
+
+            return NO_OPTION
         return option
 
-    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)
+    terminal, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(graph, decide)
+    if sample is None:
+        # A fully pinned classic problem can collapse without opening a policy-visible fork. Its
+        # complete row still belongs to the enumeration: read it from the realized kernel set so
+        # multi-kernel structural targets expose every independently scheduled problem.
+        from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+        from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES  # noqa: PLC0415
+
+        for node in terminal.nodes.values():
+            if not isinstance(node.op, TileOp) or WORK.name not in node.op.knobs:
+                continue
+            row = {key: value for key, value in node.op.knobs.items() if family_of(key) in SCHEDULE_FAMILIES}
+            if any(family_of(key) in wanted for key in row) and row not in rows:
+                rows.append(row)
     return Candidates(rows, sum(sample.totals.values()) if sample is not None else len(rows))
 
 

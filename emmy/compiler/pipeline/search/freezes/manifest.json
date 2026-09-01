@@ -8,8 +8,8 @@
     "rows": 1981
   },
   "created_at": "2026-08-26T07:56:29.842934+00:00",
-  "encoding_ver": 3,
-  "feat_ver": 3,
+  "encoding_ver": 4,
+  "feat_ver": 4,
   "files": {
     "nvidia_geforce_rtx_5090_sm120.yaml": {
       "compute_cap": [
@@ -18,12 +18,12 @@
       ],
       "gpu_name": "NVIDIA GeForce RTX 5090",
       "rows": 1981,
-      "sha256": "1bbcbe29ff86c1f4f0ec018e0c507bc43c67b1eec0b324e676ebd5a8a3bb0397"
+      "sha256": "f5b0134f039dafc0c7e7712100a5b4653763e852f1985d11205cc556b38502b0"
     }
   },
   "freeze_ver": 3,
   "kind": "emmy-node-freeze",
-  "knob_ver": 3,
+  "knob_ver": 4,
   "policy_note": "metric eval: rank-0 regret vs measured",
   "repo_commit": "524898fbfadd49aa74dae85ec4b1ade1f56d2d4a-dirty",
   "run_ids": [
@@ -406,6 +406,6 @@
     "bench-20260803T225951Z-ee18a8b2",
     "bench-20260803T230103Z-4e42dd2f"
   ],
-  "sha256": "05e9b904dcc327f373761017c23e4481a05f73a18d7dd94c162113fac6d3c482",
+  "sha256": "e65ff63b2755006a64b9ae86d8c3fd9509157c7aacbaa8aa58ad95bda2092576",
   "source_db": "/Users/natalia/Programming/deplodock/emmy/compiler/pipeline/search/freezes"
 }

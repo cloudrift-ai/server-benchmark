@@ -1,6 +1,7 @@
 """Focused tests for greedy schedule-space traversal."""
 
 import logging
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +11,7 @@ from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key, schedule_row_key
-from emmy.compiler.pipeline.pipeline import ForkPoint
+from emmy.compiler.pipeline.pipeline import NO_OPTION, ForkPoint
 from emmy.compiler.pipeline.search.golden import GoldenRecord
 from emmy.compiler.pipeline.search.policy import greedy
 from emmy.compiler.pipeline.search.policy.greedy import (
@@ -52,7 +53,72 @@ def test_db_measured_index_excludes_placement_route_totals(route) -> None:
     db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
     ctx = SimpleNamespace(structural_key=lambda: "ctx")
 
-    assert _db_measured_index_build(db, ctx) == {signature: [({"WORK": "t64"}, 7.0)]}
+    assert _db_measured_index_build(db, ctx).ok == {signature: [({"WORK": "t64"}, 7.0)]}
+
+
+def test_db_measured_index_collects_shapes_whose_every_measured_variant_failed() -> None:
+    """A ``bench_fail`` row is evidence too — the watchdog measured that variant not finishing.
+    When EVERY measured variant of one structural shape failed, the shape itself is disqualified;
+    one surviving ``ok`` variant means only some rows are bad and the shape stays rankable.
+
+    Failures are collected before the placement-route filter the ``ok`` tier applies: a route's
+    LATENCY is unattributable without a child-schedule receipt, but a kernel that hung is
+    attributable to the kernel whatever route produced it."""
+    doomed = frozenset({("S_shape", "4096")})
+    mixed = frozenset({("S_shape", "128")})
+    rows = [
+        SimpleNamespace(status="bench_fail", stats=SimpleNamespace(median=2_000_000.0), knobs={"S_shape": 4096, "WORK": "t32"}),
+        SimpleNamespace(status="bench_fail", stats=SimpleNamespace(median=2_000_000.0), knobs={"S_shape": 4096, "PLACE": "fuse"}),
+        SimpleNamespace(status="bench_fail", stats=SimpleNamespace(median=2_000_000.0), knobs={"S_shape": 128, "WORK": "t32"}),
+        SimpleNamespace(status="ok", stats=SimpleNamespace(median=7.0), knobs={"S_shape": 128, "WORK": "t64"}),
+    ]
+    db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
+    ctx = SimpleNamespace(structural_key=lambda: "ctx")
+
+    measured = _db_measured_index_build(db, ctx)
+    assert doomed in measured.failed, "every measured variant of this shape hit the watchdog"
+    assert mixed not in measured.failed, "a shape with one ok variant is not disqualified"
+    assert measured.ok == {mixed: [({"WORK": "t64"}, 7.0)]}
+
+
+def test_a_shape_whose_every_variant_failed_prices_as_infeasible() -> None:
+    """The disqualification's teeth: a slice containing a known-failed kernel prices ``inf``, so
+    any structural arm holding it loses the ``_priced_pick`` argmin to an arm that does not.
+
+    Without this the failures are invisible at deploy — the measured index carries ``ok`` rows
+    only, so a kernel every one of whose variants hung simply has no evidence and falls through to
+    the prior, which is exactly how DeepSeek-V4's post block kept its hanging fused arm across a
+    30-minute tune that recorded 40 failures for it."""
+    doomed = frozenset({("S_shape", "4096")})
+    op = SimpleNamespace(knobs={"S_shape": 4096}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=op)})
+    trace = [SimpleNamespace(node_id="n", score=5.0)]
+    ctx = SimpleNamespace(features=lambda: {})
+
+    assert greedy._resolved_price(terminal, trace, ctx, None).us == 5.0
+    disqualified = greedy._resolved_price(terminal, trace, ctx, None, failed={doomed: [2_000_000.0]})
+    assert disqualified == greedy.Price(math.inf, measured=True), "a failure row is a measurement, so the inf is measured"
+
+
+def test_a_disqualification_condemns_only_the_shape_that_was_measured() -> None:
+    """Elimination matches the signature EXACTLY, unlike the ranking tier's drift-tolerant
+    :func:`_sig_groups`. There a loose match only widens the candidate pool and a second filter
+    still has to agree on the tunable knobs; here nothing follows the match, so condemning every
+    shape that merely does not contradict a recorded failure disqualifies the whole program.
+    Measured: on DeepSeek-V4's post block the tolerant form priced all 17 leaves of one fork
+    ``inf``, which decides nothing at all."""
+    recorded = frozenset({("S_shape", "4096"), ("S_dtype_f16", "1.0")})
+    # Agrees on every SHARED key, so the drift-tolerant matcher would call it a hit; it is a
+    # different shape and must still be priced.
+    other = SimpleNamespace(knobs={"S_shape": 4096, "S_n_loop": 9}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=other)})
+    trace = [SimpleNamespace(node_id="n", score=5.0)]
+    ctx = SimpleNamespace(features=lambda: {})
+
+    assert greedy._sig_groups({recorded: [1.0]}, frozenset({("S_shape", "4096"), ("S_n_loop", "9")})), (
+        "the tolerant matcher does hit here — which is exactly why elimination must not use it"
+    )
+    assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}).us == 5.0
 
 
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
@@ -335,13 +401,12 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     wrapper = _BoundedFork(inner=blocked_point.options[0])
     blocked_point.options = [wrapper]
     blocked = {tile_identity(dict(row)) for row in rows}
-    with pytest.raises(RuntimeError, match="no live complete row"):
-        _stream_tiers(blocked_point, _CountingPrior(), blocked, {})
+    assert _stream_tiers(blocked_point, _CountingPrior(), blocked, {}) == (NO_OPTION, None, None)
     assert len(wrapper.expansions) == 1  # no retry and no exhaustive fallback
 
 
 # ---------------------------------------------------------------------------
-# greedy_decide — an untrustworthy prior may not settle a kernel-set change.
+# greedy_decide — an untrustworthy prior may not settle a MIXED kernel-set comparison.
 # ---------------------------------------------------------------------------
 
 
@@ -371,11 +436,11 @@ def _kernel_set_fork():
 
 
 @pytest.mark.parametrize(("trustworthy", "takes_the_cut"), [(False, False), (True, True)])
-def test_kernel_set_change_needs_a_trustworthy_prior(monkeypatch, trustworthy, takes_the_cut) -> None:
-    """A Σ-of-µs comparison across two kernel sets is only a latency comparison when the ranker
-    answers in µs. While the prior is untrustworthy the deploy half is the offline one, whose
-    score is an ordinal proxy, so the splices are withdrawn and the measured fused side survives;
-    a trustworthy prior still gets to change the kernel set."""
+def test_a_predicted_cut_may_not_beat_a_measured_fused_side(monkeypatch, trustworthy, takes_the_cut) -> None:
+    """A Σ-of-µs comparison across two kernel sets is only a latency comparison when both sides
+    are the same kind of number. While the prior is untrustworthy the deploy half is the offline
+    one, whose score is an ordinal proxy, so a predicted Σ against a measured one is withdrawn and
+    the measured fused side survives; a trustworthy prior still gets to change the kernel set."""
     # The proxy's fantasy against the measured kernel — neither side wholly measured.
     monkeypatch.setattr(greedy, "_price_graph", lambda *_a, **_kw: greedy.Price(0.00039, measured=False))
     monkeypatch.setattr(greedy, "_price_op_leaf", lambda *_a, **_kw: greedy.Price(49.7336, measured=True))
@@ -389,22 +454,38 @@ def test_kernel_set_change_needs_a_trustworthy_prior(monkeypatch, trustworthy, t
 
 
 @pytest.mark.parametrize(
-    ("fragments_measured", "takes_the_cut"),
-    [(True, True), (False, False)],
-    ids=["every-fragment-measured", "one-fragment-predicted"],
+    ("fused_measured", "fragments_measured", "takes_the_cut"),
+    [(True, True, True), (False, False, True), (True, False, False)],
+    ids=["both-measured", "both-predicted", "mixed"],
 )
-def test_all_measured_kernel_set_change_needs_no_trusted_prior(monkeypatch, fragments_measured, takes_the_cut) -> None:
-    """The competence check is on the PROXY, not on the change. When both compared Σ are wholly
-    measured no prediction entered the comparison, so the argmin is two real latencies and an
-    untrustworthy prior is beside the point — the faster measured kernel set deploys. Take the
-    measurement away from any one fragment and the Σ is part prediction again, so it withdraws."""
+def test_a_kernel_set_change_needs_one_kind_of_number_not_a_trusted_prior(
+    monkeypatch, fused_measured, fragments_measured, takes_the_cut
+) -> None:
+    """The competence check is on the MIX, not on the change. Two measured Σ are two real
+    latencies and need no trusted model. Two predicted Σ are one proxy read against itself — the
+    ordinary unmeasured pick, and the only thing that can cut a fused kernel on a machine where
+    nothing was ever measured. Only the mixed comparison lets an arbitrary magnitude decide, so
+    only it withdraws."""
     monkeypatch.setattr(greedy, "_price_graph", lambda *_a, **_kw: greedy.Price(12.5, measured=fragments_measured))
-    monkeypatch.setattr(greedy, "_price_op_leaf", lambda *_a, **_kw: greedy.Price(49.7336, measured=True))
+    monkeypatch.setattr(greedy, "_price_op_leaf", lambda *_a, **_kw: greedy.Price(49.7336, measured=fused_measured))
     point, splice = _kernel_set_fork()
 
     pick = greedy.greedy_decide(prior=_ProxyPrior(trustworthy=False))(point)
 
     assert (pick is splice) is takes_the_cut
+
+
+def test_a_disqualified_fused_side_loses_to_a_predicted_cut(monkeypatch) -> None:
+    """The competence check and the measured disqualification compose. An ``inf`` keep-fused Σ is
+    an ELIMINATION — the tune watched every variant of one of its kernels hang — and an
+    elimination has no magnitude for the offline proxy to corrupt, so it needs no trusted ranker:
+    any finite alternative beats it. Withdrawing the splices here would deploy the very kernel the
+    measurement condemned."""
+    monkeypatch.setattr(greedy, "_price_graph", lambda *_a, **_kw: greedy.Price(0.00039, measured=False))
+    monkeypatch.setattr(greedy, "_price_op_leaf", lambda *_a, **_kw: greedy.Price(math.inf, measured=True))
+    point, splice = _kernel_set_fork()
+
+    assert greedy.greedy_decide(prior=_ProxyPrior(trustworthy=False))(point) is splice
 
 
 def test_price_total_is_measured_only_when_every_summand_is() -> None:

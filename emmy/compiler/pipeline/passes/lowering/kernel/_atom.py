@@ -31,6 +31,7 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.atom import AtomKind
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -53,13 +54,12 @@ from emmy.compiler.ir.kernel.ir import (
 )
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_body, operand_name, subst_free
-from emmy.compiler.ir.schedule import Side, Stage, TilePlan
+from emmy.compiler.ir.schedule import Side, Stage, Tile
+from emmy.compiler.ir.schedule.packing import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat_dtypes, make_cone
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
-from emmy.compiler.pipeline.passes.lowering._packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -641,7 +641,7 @@ def _slab_operands(
     else). ``elems`` are the per-operand element dtypes (``DataType`` or ``None`` = the
     transport-level dtype) — a mixed-dtype scalar contraction (fp32 A × fp16 B) must size each slab
     and fill by its OWN element width. ``pads`` are the per-operand slab row pads in elements
-    (:data:`~emmy.compiler.pipeline.passes.lowering._addr.BYTE_SLAB_PAD` on a
+    (:data:`~emmy.compiler.ir.address.BYTE_SLAB_PAD` on a
     cp.async-staged byte slab; 0 everywhere else)."""
     ops: list[Operand] = []
     for i, (tag, is_row) in enumerate((("a", True), ("b", b_trans))):
@@ -816,7 +816,7 @@ class _BlockCols:
 def _child_contraction_block(
     *,
     child: Fold,
-    tile: TilePlan,
+    tile: Tile,
     k0: Expr,
     lead: tuple,
     ns: str,
@@ -1528,7 +1528,7 @@ def _scalar_bound(mn, offset, i: int, j: int):
     return cond
 
 
-def _scalar_protected(c: Fold, tile: TilePlan, lead: tuple = (), *, body: Body | tuple = ()) -> frozenset[str]:
+def _scalar_protected(c: Fold, tile: Tile, lead: tuple = (), *, body: Body | tuple = ()) -> frozenset[str]:
     """The shared iteration coordinates — the block / unit / loop / extent vars excluded from the
     per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names).
     ``lead`` is the kernel's leading (batch / ksplit) grid axes: one coordinate for the whole cell
@@ -1596,7 +1596,7 @@ class _AtomOps:
     descriptor" seam: one factory (:func:`_atom_ops`), no scattered ``isinstance``."""
 
     c: Fold  # the ALGEBRA — operand edges, K axis, channels
-    tile: TilePlan  # the SCHEDULE slice, PLACED (``TilePlan.at``): the atom + the ``(m, n)`` geometry
+    tile: Tile  # the SCHEDULE slice, PLACED (``Tile.at``): the atom + the ``(m, n)`` geometry
     stage: Stage | None = None
     inputs: object = None
     workers: object = None  # the resolved WarpSpec (None = uniform SIMT) — consumed by _staged
@@ -1681,7 +1681,7 @@ class _MmaOps(_AtomOps):
         """Per-operand slab element dtypes — the atom's operand dtype, except a 1-byte
         (fp8-stored) operand, whose slab keeps the STORAGE dtype: the raw bytes stage verbatim
         and the drain converts (W8A16) or repacks (the k32 atoms). Mirrors the resolver's dtype
-        legality (``_staging.resolve_warp_stage``), so a mismatch that staged would already
+        legality (``schedule.staging.resolve_warp_stage``), so a mismatch that staged would already
         have declined there."""
         out = []
         for edge, role in ((self.c.a, "a"), (self.c.b, "b")):
@@ -2079,7 +2079,7 @@ class _ScalarOps(_AtomOps):
 
 def _atom_ops(
     c: Fold,
-    tile: TilePlan,
+    tile: Tile,
     stage: Stage | None = None,
     inputs=None,
     workers=None,
@@ -2090,7 +2090,7 @@ def _atom_ops(
     slabs: tuple = (None, None),
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
-    stored algebra, ``tile`` the PLACED schedule slice (``TilePlan.at``) the geometry derives from.
+    stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from.
 
     A CONVERTING materialized ``a`` — an ``smem`` stage on a load whose dtype differs from the
     atom's — is normalized to its one-``Load`` cone HERE, at the decode boundary: the synchronous
@@ -2425,7 +2425,7 @@ def _fold_staged(
 
 def reduce_codegen(
     c: Fold,
-    tile: TilePlan,
+    tile: Tile,
     stage: Stage | None = None,
     inputs=None,
     workers=None,
@@ -2479,7 +2479,7 @@ def fold_store_tail(tail: tuple, fold: Fold, c: _ScheduledContraction) -> tuple:
 
 
 def fold_store_sink(
-    tile: TilePlan,
+    tile: Tile,
     effects: tuple,
     carried: dict[str, Value],
     frag_ns: str = "",
@@ -2531,7 +2531,7 @@ def fold_store_sink(
     return store
 
 
-def store_sink(c: Fold, tile: TilePlan, epilogue: Body | None = None, lead: tuple = (), frag_ns: str = ""):
+def store_sink(c: Fold, tile: Tile, epilogue: Body | None = None, lead: tuple = (), frag_ns: str = ""):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's zero-axis ``Fold`` wrapper + the store glue). A caller may replace

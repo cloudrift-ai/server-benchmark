@@ -54,15 +54,7 @@ configs:
       PLACE@map.fold.a.map.fold.fold.b.map3: cut
       PLACE@a.b.fold.a5: cut
     knobs:
-      REDUCE@a.b.fold.a4: coop
-      REDUCE@a.fold.a3: coop
-      REDUCE@a.map.fold.a8: coop
-      REDUCE@map.fold.a.fold.a81: coop
-      REDUCE@map.fold.a.map.fold.fold.a41: coop
-      REDUCE@map.fold.a21: coop
+      REDUCE: coop
       WORK: t8
-      TILE: ''
-      STAGE: ''
       LOOPIFY: '0'
-      RASTER: ''
     identity: f1ad5cd0046f299018abb0a3b43bb2d3e005f6b036f1d11c8d1522f2486ff4f0

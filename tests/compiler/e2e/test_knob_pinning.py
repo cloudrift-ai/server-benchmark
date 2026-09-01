@@ -240,7 +240,7 @@ def test_unstaged_atom_lowers_gmem_direct(monkeypatch):
     # Pin the WARP-tier geometry via a warp ``TILE`` codec (the over-ceiling ``f26x4`` register
     # tile + atom-K chunk) and leave STAGE unpinned — an explicit STAGE pin is authoritative (no
     # budget filter), but here we want the budget-aware filter to decline the over-budget staging so
-    # the operands fall to the gmem-direct path. The ``a:<atom>`` token forces the warp (mma) tier.
+    # the operands fall to the gmem-direct path. The bare atom token forces the warp (mma) tier.
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f26x4/k2")
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     compiled = CudaBackend().compile(g)  # no longer raises

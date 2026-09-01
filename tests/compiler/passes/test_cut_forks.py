@@ -13,7 +13,7 @@ from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
@@ -23,9 +23,17 @@ from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.loop_wire import loop_graph_to_wire
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule, RuleSkipped
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import Fork
-from emmy.compiler.pipeline.passes.lowering.tile._cut import CutSite, _producer_order, _workspace_axes, cuttable_seams
+from emmy.compiler.pipeline.passes.lowering.tile._cut import (
+    CutSite,
+    _environments,
+    _producer_order,
+    _workspace_axes,
+    cuttable_seams,
+    output_map,
+    realize,
+)
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
@@ -40,15 +48,41 @@ from emmy.compiler.pipeline.search.golden import (
 )
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import direct_classic_leaf, requires_cuda
 
 _CTX = Context.from_target((12, 0))
-_OFF = {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}
 _CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
 
 
 def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
     graph.add_node(InputOp(), [], Tensor(name, shape, dtype), node_id=name)
+
+
+def test_cut_and_assignment_passes_share_the_generic_schedule_driver() -> None:
+    from emmy.compiler.ir.schedule import schedule
+
+    assert _CUT.schedule is schedule
+    assert import_module("emmy.compiler.pipeline.fork").schedule is schedule
+
+
+def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
+    """A split piece can re-enter placement; cutting it must not make REDUCE pending again."""
+    from emmy.compiler.pipeline.passes.lowering.tile._split import split_pending
+
+    graph = _computed_operand_graph("a")
+    tile = graph.nodes["out"].op
+    partitioned = replace(tile.op, axis=replace(tile.op.axis, window=Window(parent=tile.op.axis, partition=True)))
+    graph.nodes["out"].op = replace(tile, op=partitioned)
+    pipeline = Pipeline.build(["lowering/tile"], select={"cut"})
+    match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
+    seams = cuttable_seams(match.root.op)
+    renamed = output_map(match.root)
+
+    fragment = realize(match, match.root, (seams[0],), renamed)
+
+    pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    assert pieces and all(piece.split_consumed for piece in pieces)
+    assert not any(split_pending(piece) for piece in pieces)
 
 
 def _computed_operand_graph(side: str) -> Graph:
@@ -197,11 +231,15 @@ def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
     return offered
 
 
-def _lower_cut(graph: Graph, spelling: str) -> Graph:
-    with pinned_knobs({spelling: "cut", **_OFF}):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=_CTX)
+def _lower(graph: Graph, placement: dict[str, str]) -> Graph:
+    with pinned_knobs(placement):
+        lowered, _ = Run(Pipeline.build(CUDA_PASSES), _CTX).resolve(graph, direct_classic_leaf)
     lowered.validate()
     return lowered
+
+
+def _lower_cut(graph: Graph, spelling: str) -> Graph:
+    return _lower(graph, {spelling: "cut"})
 
 
 def _nested_attention_cut(pins: dict[str, str]) -> Graph:
@@ -255,8 +293,7 @@ def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> Non
 
 
 def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:
-    with pinned_knobs({"PLACE": "fuse", **_OFF}):
-        lowered = Pipeline.build(CUDA_PASSES).run(_computed_operand_graph("a"), ctx=_CTX)
+    lowered = _lower(_computed_operand_graph("a"), {"PLACE": "fuse"})
     assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 1
 
 
@@ -344,19 +381,22 @@ def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
     assert pieces and all(node.op.placement_decided for node in pieces)
     node = _piece_with_seam(fragment)
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
-    with pinned_knobs({"PLACE@map.fold.a.fold.b1": "cut"}), pytest.raises(RuleSkipped, match="already placed"):
-        _CUT.rewrite(match, node)
+    with pinned_knobs({"PLACE@map.fold.a.fold.b1": "cut"}):
+        result = _CUT.rewrite(match, node)
+    options = result if isinstance(result, list) else [result]
+    assert options and all(not any(name.startswith("PLACE") for name in option.knobs) for option in options)
 
 
-def test_bare_place_cut_keeps_recursing_on_fresh_pieces() -> None:
+def test_bare_place_cut_is_consumed_once_by_both_pieces() -> None:
     fragment = _nested_attention_cut({"PLACE": "cut"})
     node = _piece_with_seam(fragment)
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
 
-    assert not node.op.placement_decided
+    assert node.op.placement_decided
     with pinned_knobs({"PLACE": "cut"}):
-        fork = _CUT.rewrite(match, node)
-    assert "cut" in fork.knobs.values()
+        result = _CUT.rewrite(match, node)
+    options = result if isinstance(result, list) else [result]
+    assert options and all(not any(name.startswith("PLACE") for name in option.knobs) for option in options)
 
 
 def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
@@ -400,6 +440,19 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     assert any(set(node.inputs) & workspaces for node in producers), "the nested value's producer must read a sibling workspace"
 
 
+def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
+    match, graph = _composed_case_match()
+    pins = {"PLACE": "cut", "PLACE@map.fold.a.map.fold.fold.b1": "cut"}
+
+    with pinned_knobs(pins):
+        fork = _CUT.rewrite(match, graph.nodes[match.root_node_id])
+
+    assert len(fork.knobs) == 2 and set(fork.knobs.values()) == {"cut"}
+    (fragment,) = fork.expand()
+    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    assert len(pieces) == 3 and all(node.op.placement_decided for node in pieces)
+
+
 def _composed_case_match() -> tuple[Match, Graph]:
     case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
     (record,) = load_golden_records(load_golden_file(case))
@@ -438,7 +491,7 @@ def test_dependent_seam_pins_pull_their_producer_into_the_composed_cut() -> None
     structural, so the pin cannot decline it."""
     match, graph = _composed_case_match()
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
-    with pinned_knobs({"PLACE@map.fold.a.map.fold.a32": "cut", **_OFF}):
+    with pinned_knobs({"PLACE@map.fold.a.map.fold.a32": "cut"}):
         fork = _CUT.rewrite(match, node)
     assert set(fork.knobs) == {
         "PLACE@map.fold.a.map.fold.a32",
@@ -467,7 +520,7 @@ def test_statistics_route_shares_the_row_reduction_across_output_keys() -> None:
                 stack.extend(current.lift.body)
         return out
 
-    with pinned_knobs({**_STAT_PINS, **_OFF}):
+    with pinned_knobs(_STAT_PINS):
         fragment = _CUT.rewrite(match, node).expand()[0]
     pieces = [piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp)]
     assert len(pieces) == 7  # six workspaces plus the consumer
@@ -564,23 +617,25 @@ def test_multi_output_kernel_record_joins_its_live_fork_by_derived_identity() ->
     graph.add_node(ElementwiseOp("negative"), ["hot"], Tensor("cold", (8,), "f16"), node_id="cold")
     graph.inputs, graph.outputs = ["x"], ["hot", "cold"]
     loop = Pipeline.build(LOOP_PASSES).run(graph.copy(), ctx=_CTX)
-    record = GoldenRecord(
-        knobs={},
-        **{
-            **_receipt_fields(),
-            "name": "fused.multi_output",
-            "pins": (),
-            "program_wire": graph_to_wire(graph),
-            "origins": (),
-            "loop_index": 0,
-            "loop_wire": loop_graph_to_wire(loop),
-        },
-    )
+    fields = {
+        **_receipt_fields(),
+        "name": "fused.multi_output",
+        "pins": (),
+        "program_wire": graph_to_wire(graph),
+        "origins": (),
+        "loop_index": 0,
+        "loop_wire": loop_graph_to_wire(loop),
+    }
+    record = GoldenRecord(knobs={}, **fields)
     _lowered, nodes = _target_kernel_nodes(record)
     assert len(nodes) == 1 and len(nodes[0].outputs) == 2, "the fused target must be ONE kernel writing two buffers"
 
-    assert kernel_identity(record) in _candidate_rows(record), "the derived identity names no kernel the live resolve offers"
-    assert decode_record(record) is None
+    identity = kernel_identity(record)
+    rows = _candidate_rows(record)
+    assert identity in rows, "the derived identity names no kernel the live resolve offers"
+    # The join is the subject; spelling one of that kernel's own rows shows the record decodes
+    # strictly through it too.
+    assert decode_record(GoldenRecord(knobs=dict(next(iter(rows[identity]))), **fields)) is None
 
 
 def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:
@@ -729,3 +784,94 @@ def test_a_recorded_schedule_row_never_routes() -> None:
     schedule_row = _routing_record({"WORK": "w4x1", "TILE": ""}, name="sdpa.schedule")
     assert not schedule_row.is_routing
     assert _deploy_kernels([schedule_row]) == _deploy_kernels([])
+
+
+def test_a_fold_held_by_a_plain_statement_still_gets_an_environment() -> None:
+    """A plain statement binds axes, not SSA definitions — but it can HOLD a stored fold.
+
+    ``ProjectionRegion`` keeps its cones as terms, and a fold reached only that way had no lexical
+    environment at all, so provider closure could not resolve its captures and silently dropped its
+    seam. The canonical tree walk alternates node-wise and statement-wise for the same reason."""
+    from emmy.compiler.ir.pure import Lambda
+    from emmy.compiler.ir.tile.ir import ProjectionRegion
+
+    cone = Fold.projection(body=Body((Assign(name="c", op="relu", args=("x",)),)), results=("c",))
+    region = ProjectionRegion(axis=Axis("j", 4), lift=Lambda(params=("j",), body=Body((cone,)), results=("c",)))
+    root = Fold.projection(
+        body=Body((Load(name="x", input="a", index=(Var("j"),)), region, Assign(name="out", op="copy", args=("c",)))),
+        results=("out",),
+    )
+
+    assert id(cone) in _environments(root), "a cone a region holds must still resolve its captures"
+    assert _environments(root)[id(cone)] == [(root,)]
+
+
+def _cone_seam(providers: tuple = (), requires: tuple = ()) -> CutSite:
+    """A bare seam record standing in for a clustered operand cone."""
+    node = Fold.projection(body=Body((Load(name="w", input="w", index=(Var("n"), Var("k"))),)), results=("w",))
+    return CutSite(node=node, spelling="PLACE@b", axes=(Axis("n", 8), Axis("k", 8)), dtypes=(F16,), providers=providers, requires=requires)
+
+
+def test_two_cones_that_close_over_different_sources_are_not_one_value() -> None:
+    """Clustering merges cones that are alpha-equivalent — but a capture is a FREE name.
+
+    Two B cones can spell ``w[n,k] * x`` identically while one host defines ``x = sum(a)`` and the
+    other ``x = sum(b)``; normalization refuses to sink either reduce, so both cones keep the same
+    free name. Merging them materializes one and lets the other read it, which silently hands the
+    second contraction the first's value. The closure is part of the value."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
+
+    first_source = Fold.projection(body=Body((Load(name="x", input="a", index=(Var("k"),)),)), results=("x",))
+    second_source = Fold.projection(body=Body((Load(name="x", input="b", index=(Var("k"),)),)), results=("x",))
+    consumer = object()
+
+    same = [_cone_seam(requires=(("x", first_source),)), _cone_seam(requires=(("x", first_source),))]
+    differing = [_cone_seam(requires=(("x", first_source),)), _cone_seam(requires=(("x", second_source),))]
+
+    clustered = _cluster_value_seams(same, {id(seam.node): consumer for seam in same})
+    assert len(clustered) == 1 and len(clustered[0].siblings) == 1
+
+    kept = _cluster_value_seams(differing, {id(seam.node): consumer for seam in differing})
+    assert len(kept) == 2 and not any(seam.siblings for seam in kept)
+
+
+def test_a_required_producer_keeps_its_own_seam() -> None:
+    """A dependent reads its producer's workspace by the name that producer BINDS.
+
+    Clustering re-points a value at its representative, whose result names are its own, so folding
+    a required producer into somebody else's cluster leaves the requirement naming a seam that no
+    longer exists — or, worse, one that binds a different name."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
+
+    # The producer is deliberately NOT first: the cluster representative is whoever leads, so a
+    # required producer that trails would be folded away as a sibling.
+    twin, producer = _cone_seam(), _cone_seam()
+    dependent = _cone_seam(requires=(("w", producer.node),))
+    consumer = object()
+    seams = [twin, producer, dependent]
+
+    kept = _cluster_value_seams(seams, {id(seam.node): consumer for seam in seams})
+
+    assert any(seam.node is producer.node for seam in kept), "the required producer must survive as its own seam"
+    assert not any(sibling is producer.node for seam in kept for sibling, _ in seam.siblings)
+
+
+def test_a_dependent_seam_is_an_unpinned_composed_arm() -> None:
+    """The unpinned fork offers a dependent seam WITH its transitive producer closure — one arm,
+    composed exactly as the pin path composes it. The plain-only ballot could never elect the one
+    placement measured to work on DeepSeek-V4 post4096 (a dependent seam's closure), however the
+    evidence ranked: the arm was not offered."""
+    match, graph = _composed_case_match()
+    node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    options = _CUT.rewrite(match, node)
+    arms = [dict(option.knobs) for option in options if "cut" in option.knobs.values()]
+    dependent = {
+        "PLACE@map.fold.a.map.fold.a32": "cut",
+        "PLACE@map.fold.a.map.fold.a31": "cut",
+        "PLACE@map.fold.a21": "cut",
+    }
+    assert dependent in arms, f"the dependent seam's closure must be one composed arm, got {arms}"
+    seams = cuttable_seams(node.op)
+    offered = {spelling for arm in arms for spelling in arm}
+    missing = {seam.spelling for seam in seams} - offered
+    assert not missing, f"every seam must appear on the ballot through some closure: {missing}"

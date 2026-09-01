@@ -8,9 +8,19 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
-from emmy.compiler.ir.schedule import TilePlan
+from emmy.compiler.ir.schedule import Raster, ResolvedStage, Schedule, Stage, Tile, Work
+from emmy.compiler.ir.schedule.classic import (
+    ClassicMaterialization,
+    ClassicProblem,
+    ClassicScheduleContext,
+    EdgeSchedule,
+    KernelSchedule,
+    Projection,
+    ProjectionSchedule,
+    ReductionSchedule,
+)
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, ReducePlan, TileOp, apply_output_specs
+from emmy.compiler.ir.tile import OutputSpec, Placement, Reduce, TileOp, apply_output_specs
 from emmy.compiler.ir.tile.ops import reduce_plan
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
@@ -23,18 +33,6 @@ def _sum_loop() -> Loop:
     acc = Accum(name="acc", value="x_e", op="add", axes=("k",))
     body = Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), acc))
     return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR)
-
-
-def _with_slice(tile, family, node, value):
-    """Attach one schedule slice by rebuilding — ops are frozen; a slice map is assembled
-    before construction, never written after."""
-    from dataclasses import replace
-
-    from emmy.compiler.ir.tile.ops import Sched
-
-    schedule = dict(tile.schedule)
-    Sched(tile.op, schedule, place=tile.place).put(family, node, value)
-    return replace(tile, schedule=schedule)
 
 
 def test_from_loop_reconstructs_the_loop_exactly() -> None:
@@ -75,17 +73,31 @@ def _tile(op) -> TileOp:
     return TileOp(op=op)
 
 
-def test_reduce_plan_reads_the_partition_off_the_schedule_dict() -> None:
+def _with_reduce(tile: TileOp, node: Fold, plan: Reduce) -> TileOp:
+    context = ClassicScheduleContext(ClassicProblem.from_tile(tile, target=None))
+    work = Work.parse(f"t{plan.coop}") if plan.coop > 1 else Work()
+    classic = Schedule(
+        KernelSchedule(work, Raster()),
+        {
+            site: ProjectionSchedule(Tile())
+            if isinstance(view, Projection)
+            else ReductionSchedule(Tile(), plan if context.node(site) is node else Reduce())
+            for site, view in context.views.items()
+        },
+        {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites},
+    )
+    return replace(tile, schedule=classic, materialization=ClassicMaterialization({}, {}))
 
-    plan = ReducePlan.of(coop=128)
+
+def test_reduce_plan_reads_the_partition_from_the_classic_schedule() -> None:
+
+    plan = Reduce.of(coop=128)
     red = fold_from_loop(_sum_loop())
     assert red is not None
     # A bare reduce root and a zero-axis projection both surface the partition keyed on the fold.
-    bare = _tile(red)
-    bare = _with_slice(bare, "REDUCE", red, plan)
+    bare = _with_reduce(_tile(red), red, plan)
     assert reduce_plan(bare) is plan
-    wrapped = _tile(Fold.projection(body=Body((Assign(name="rms", op="sqrt", args=("acc",)),)), operands=(red,)))
-    wrapped = _with_slice(wrapped, "REDUCE", red, plan)
+    wrapped = _with_reduce(_tile(Fold.projection(body=Body((Assign(name="rms", op="sqrt", args=("acc",)),)), operands=(red,))), red, plan)
     assert reduce_plan(wrapped) is plan
 
 
@@ -191,7 +203,6 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
         a=replace(c.a, index=tuple(sigma.apply(e) for e in c.a.index)),
         channels=(replace(c.channels[0], b=replace(c.b, index=tuple(sigma.apply(e) for e in c.b.index))),),
     )
-
     accs = inner.defines()
     init, combine = M(*(["add"] * len(accs)), names=accs)
     red = Fold(
@@ -207,8 +218,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     # (``Fold.composed``, the recognized split-K composition), never a role.
     assert red.role is AxisRole.PLANAR
     assert red.composed is inner
-    t = _tile(red)
-    t = _with_slice(t, "REDUCE", red, ReducePlan.of(cta=2, finalize="atomic"))
+    t = _with_reduce(_tile(red), red, Reduce.of(cta=2, finalize="atomic"))
     assert reduce_plan(t).cta == 2
     lo = red.lower()
     assert len(lo) == 1 and isinstance(lo[0], Loop) and lo[0].axis.name == "k_ks"
@@ -417,7 +427,7 @@ def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b(mo
     from emmy.compiler.dtype import F16
     from emmy.compiler.graph import Tensor
     from emmy.compiler.ir.kernel.ir import RegStore
-    from emmy.compiler.ir.schedule import Placement, Stage, Workers
+    from emmy.compiler.ir.schedule import Placement
     from emmy.compiler.pipeline.passes.lowering.kernel import _factor
 
     m, n, k, r = Axis("m", 16), Axis("n", 32), Axis("k", 16), Axis("r", 16)
@@ -469,23 +479,33 @@ def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b(mo
         body=Body((Assign(name="biased", op="add", args=("out", "row_bias")),)),
         results=("biased",),
     )
-    workers = Workers.parse("w1x1")
-    plan = TilePlan.parse("mma_m16n8k16_f16_f32/f1x4/k1", workers).at(m, n)
+    work = Work.parse("w1x1")
+    choice = Tile.parse("mma_m16n8k16_f16_f32/f1x4", work)
+    plan = choice.at(m, n)
+    stage = Stage(depth=1, transport="smem")
+    context = ClassicScheduleContext(ClassicProblem.from_tile(TileOp(op=root), target=None))
+    contraction_site = context.site(contraction)
+    staged_edges = tuple(edge for edge in context.edge_sites if edge[0] == contraction_site)
+    classic = Schedule(
+        KernelSchedule(work, Raster()),
+        {
+            site: ProjectionSchedule(Tile())
+            if isinstance(view, Projection)
+            else ReductionSchedule(choice if site == contraction_site else Tile(), Reduce())
+            for site, view in context.views.items()
+        },
+        {edge: EdgeSchedule(stage if edge in staged_edges else Stage.direct()) for edge in context.edge_sites},
+    )
     tile = TileOp(
         op=root,
         name="out",
         place=Placement(free=(m, n), grid=(m, n), mapped=True),
         output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="biased")),),
-    )
-    from emmy.compiler.ir.tile.ops import Sched
-
-    schedule: dict = {}
-    sched = Sched(tile.op, schedule, place=tile.place)
-    sched.put("TILE", contraction, plan)
-    sched.put("STAGE", contraction, Stage(depth=1, transport="smem", smem=("scaled",), bk_elems=16))
-    tile = replace(
-        tile,
-        schedule=schedule,
+        schedule=classic,
+        materialization=ClassicMaterialization(
+            {contraction_site: plan},
+            {edge: ResolvedStage(stage, smem=("scaled",), bk_elems=16) for edge in staged_edges},
+        ),
         inputs={
             "A": Tensor("A", (16, 16), F16),
             "Bias": Tensor("Bias", (16,), F16),
@@ -534,34 +554,57 @@ def test_an_inline_b_edge_is_walked_like_any_other_node() -> None:
     assert c.b in [s.node for s in sites(c)]
 
 
-# --- the ONE worker inventory (1r): TileOp.work derived from the TILE slices ---------------------- #
+# --- the one worker inventory -------------------------------------------------------------------- #
 
 
 def test_workers_derive_from_tile_slices_and_disagreement_is_loud() -> None:
     """``derive_workers`` folds each TILE value's embedded worker geometry into the one
-    kernel-global slot; two sites disagreeing on it is unrepresentable — the assembly FAILS LOUDLY
-    (today an inconsistent ``TILE@dd``/``TILE@pj`` pin pair could only miss rows silently)."""
+    kernel-global slot; two exact node sites disagreeing on it is unrepresentable — assembly FAILS
+    LOUDLY."""
     import pytest
 
-    from emmy.compiler.ir.schedule import Workers, derive_workers
+    from emmy.compiler.ir.schedule import Work, derive_workers
 
-    warp = TilePlan.parse("mma_m16n8k16_f16_f32/f1x2/k8", Workers.parse("w4x1"))
-    assert derive_workers([warp, warp]) == Workers(kind="warp", units=(4, 1))
-    assert derive_workers([TilePlan.parse("f4x8", Workers.parse("t16x8"))]) == Workers(kind="thread", units=(16, 8))
-    assert derive_workers([TilePlan()]) is None  # per-cell — no inventory to factor
+    warp = Tile.parse("mma_m16n8k16_f16_f32/f1x2/k8", Work.parse("w4x1"))
+    assert derive_workers([warp, warp]) == Work(kind="warp", units=(4, 1))
+    assert derive_workers([Tile.parse("f4x8", Work.parse("t16x8"))]) == Work(kind="thread", units=(16, 8))
+    assert derive_workers([Tile()]) is None  # per-cell — no inventory to factor
     with pytest.raises(ValueError, match="disagreeing worker geometry"):
-        derive_workers([warp, TilePlan.parse("mma_m16n8k16_f16_f32/f1x2/k8", Workers.parse("w2x1"))])
+        derive_workers([warp, Tile.parse("mma_m16n8k16_f16_f32/f1x2/k8", Work.parse("w2x1"))])
 
 
-def test_sealed_inventory_derives_off_the_schedule_dict() -> None:
-    from emmy.compiler.ir.schedule import Workers
-    from emmy.compiler.ir.tile.ops import Sched, sealed_inventory
+def test_scheduled_uses_only_the_accepted_kernel_choice() -> None:
+    from emmy.compiler.ir.schedule import Raster, Reduce, Schedule, Stage, Work
+    from emmy.compiler.ir.schedule.classic import (
+        ClassicProblem,
+        ClassicScheduleContext,
+        EdgeSchedule,
+        KernelSchedule,
+        ReductionSchedule,
+    )
+    from emmy.compiler.ir.tile.ops import scheduled
 
     c = _contraction()
-    t = _tile(c)
-    schedule: dict = {}
-    Sched(t.op, schedule, place=t.place).put("TILE", c, TilePlan.parse("f2", Workers.parse("t2")))
-    assert sealed_inventory(schedule, t.workers) == Workers(kind="thread", units=(2, 1))
+    context = ClassicScheduleContext(ClassicProblem.from_tile(TileOp(op=c), target=None))
+    site = context.node_sites[0]
+    plan = Tile.parse("f2", Work.parse("t2"))
+    m, n = Axis("m", 8), Axis("n", 8)
+    classic = Schedule(
+        KernelSchedule(Work.parse("t2"), Raster()),
+        {site: ReductionSchedule(plan, Reduce())},
+        {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites},
+    )
+    t = scheduled(
+        c,
+        name="typed",
+        place=Placement(free=(m, n), grid=(m, n), mapped=True),
+        knobs={"WORK": "t2"},
+        schedule=classic,
+        materialization=ClassicMaterialization({site: plan.at(m, n)}, {}),
+    )
+
+    assert t.schedule.kernel.work == Work(kind="thread", units=(2, 1))
+    assert not hasattr(t, "work")
 
 
 # --- an output sweep the bound reduce's cone reads ----------------------------------------------- #
@@ -598,7 +641,7 @@ def _sweep_reading_reduce_tile(plan=None, chain: bool = False) -> TileOp:
         scheduled = tile.op.operands[0]
         while scheduled.axis is None and scheduled.operands:
             scheduled = scheduled.operands[0]
-        tile = _with_slice(tile, "REDUCE", scheduled, plan)
+        tile = _with_reduce(tile, scheduled, plan)
     return tile
 
 
@@ -635,7 +678,7 @@ def test_partitioned_reduce_reading_the_output_sweep_refuses_the_row() -> None:
     from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 
     with pytest.raises(UnbindableProjection):
-        factorize(_sweep_reading_reduce_tile(ReducePlan.of(coop=4)), root=None)
+        factorize(_sweep_reading_reduce_tile(Reduce.of(coop=4)), root=None)
 
 
 def test_a_projection_chain_does_not_hide_the_partition_from_the_refusal() -> None:
@@ -652,4 +695,4 @@ def test_a_projection_chain_does_not_hide_the_partition_from_the_refusal() -> No
     tile = factorize(_sweep_reading_reduce_tile(chain=True), root=None)
     assert not _reads_axis_outside_its_loop(list(tile.body), "j")
     with pytest.raises(UnbindableProjection):
-        factorize(_sweep_reading_reduce_tile(ReducePlan.of(coop=4), chain=True), root=None)
+        factorize(_sweep_reading_reduce_tile(Reduce.of(coop=4), chain=True), root=None)

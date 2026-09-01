@@ -70,8 +70,8 @@ configs:
       TILE: ''
       WORK: t8
       REDUCE: coop
-      REDUCE@a.fold.a3: ''
-      REDUCE@a7: ''
+      REDUCE@n2: ''
+      REDUCE@n5: ''
       STAGE: ''
       RASTER: ''
     identity: c652057d2830890026194bcbeebdb67469ea58631f93d28fb7cd832f531700f0

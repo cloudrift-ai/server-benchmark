@@ -35,34 +35,54 @@ or by fitting the prior better, never by teaching this module a preference.
 **One competence check, and it is not a preference.** A structural
 (``Graph``-splicing) leaf changes the kernel SET, so ranking it compares two
 Σ-of-µs estimates across different kernels rather than two spellings of one.
-That comparison needs a ranker whose numbers ARE microseconds. While the
-prior is not :attr:`~emmy.compiler.pipeline.search.prior.base.Prior.trustworthy`
-— cold, or quarantined by the reservoir calibration — the deploy half is the
-offline prior, whose score is an ordinal proxy with arbitrary magnitude
-(``exp(-scale·quality)``, only its ORDER meaningful). Summed against a measured
-µs it is not a latency comparison at all: an unmeasured fragment prices below a
-measured kernel by five orders of magnitude, and measuring the fused side only
-widens the gap.
+Both sides must then be the same kind of number. While the prior is not
+:attr:`~emmy.compiler.pipeline.search.prior.base.Prior.trustworthy` — cold, or
+quarantined by the reservoir calibration — the deploy half is the offline
+prior, whose score is an ordinal proxy with arbitrary magnitude
+(``exp(-scale·quality)``, only its ORDER meaningful). A Σ of those against a
+Σ of measured µs is not a latency comparison at all: an unmeasured fragment
+prices below a measured kernel by five orders of magnitude, so the proxy side
+wins on scale rather than speed, and measuring the fused side only widens the
+gap.
 
-The check is on the PROXY, not on the change, so it lifts exactly where the
-proxy stops arbitrating: an untrustworthy prior may still take a structural
-option when the winning Σ and the keep-fused Σ are both wholly measured
-(:class:`Price`), because then no prediction entered the comparison and the
-argmin is two real latencies. Otherwise the splices are withdrawn (the
-``price_structural=False`` retirement) and every op-variant leaf still ranks by
-evidence alone. This withholds a whole class while nothing present can price it
-— never one leaf because another is safer, and never once measurement can
-answer.
+The check is on the MIX, not on the change (:func:`_may_change_kernel_set`), so
+it says nothing where both sides carry the same provenance (:class:`Price`).
+Two measured Σ are two real latencies and need no model to be trusted. Two
+predicted Σ are one proxy read against itself, which is the ordinary unmeasured
+pick the whole policy already degenerates to — and withholding there would
+withhold the cut a fused kernel needs precisely where nothing was ever
+measured. Only the mixed comparison is withdrawn (the same retirement
+``price_structural=False`` performs), and every op-variant leaf still ranks by
+evidence alone: a whole class withheld while nothing present can price it —
+never one leaf because another is safer.
+
+**A measurement can also DISQUALIFY.** The three tiers above all RANK, and a
+ranking needs a latency — which a ``bench_fail`` row does not have, only the
+watchdog's timeout sentinel. Those rows are still a recording of something that
+ran (or failed to), so they are read, but as an elimination rather than a score:
+where every measured variant of one structural signature failed, a slice
+containing that kernel prices ``inf`` (:func:`_resolved_price`) and any
+structural arm holding it loses the kernel-set argmin. Still evidence, still no
+preference — the alternative is that an all-failed kernel has no ``ok`` row,
+therefore no evidence at all, and falls through to the prior as though nothing
+were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
+every benched variant hung.
+
+A disqualification is itself a measurement, so the two rules above compose: the
+``inf`` price is :attr:`Price.measured`, and a disqualified keep-fused side is
+allowed to lose whatever the winner's provenance, because an elimination has no
+magnitude for the proxy to corrupt.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves, iter_leaves, leaf_knobs
@@ -252,15 +272,25 @@ def _measured_row(row: dict, ctx: Context, prior, db: object | None) -> bool:
         if ev is not None and ev([row]) is not None:
             return True
         if db is not None:
-            index = _db_measured_index(db, ctx)
+            index = _db_measured_index(db, ctx).ok
             return bool(index) and _db_measured_pick(index, [row]) is not None
     except Exception:  # noqa: BLE001
         return False
     return False
 
 
-def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, db: object | None = None) -> Price | None:
+def _resolved_price(
+    terminal: Graph, trace: list, ctx: Context, prior, db: object | None = None, failed: dict | None = None
+) -> Price | None:
     """Σ over a resolved slice's kernels of each one's estimated µs — the ONE cost rule.
+
+    ``failed`` is the measured DISQUALIFICATION (:class:`_Measured`): the structural signatures
+    whose every benched variant failed. A slice containing one prices ``inf``, so a structural arm
+    holding a kernel the tune watched hang loses the argmin to any arm that does not. That is not
+    a preference, it is the measurement — and without it those rows are invisible at deploy,
+    because the ranking index carries ``ok`` rows only, so an all-failed kernel has NO evidence
+    and falls through to the prior. The ``inf`` is :attr:`Price.measured`, since a failure row is a
+    recording of a run: disqualifying a side does not make the comparison a prediction.
 
     Per kernel: the price the resolution's own fork stamped (the winning leaf's µs, which the
     deploy evidence hierarchy chose), or — where the trace carries no score for it: a decide that
@@ -285,7 +315,19 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, db: objec
     for nid, node in terminal.nodes.items():
         if node.op.identity_key(with_io=True, with_knobs=True) is None:
             continue
-        row = {**ctx.features(), **(getattr(node.op, "knobs", None) or {})}
+        knobs = getattr(node.op, "knobs", None) or {}
+        row = {**ctx.features(), **knobs}
+        if failed:
+            sig = frozenset((k, str(v)) for k, v in knobs.items() if k.startswith("S_"))
+            # EXACT signature, deliberately not the drift-tolerant :func:`_sig_groups` the ranking
+            # tier uses. There, a loose match only widens the candidate pool and a second filter
+            # (``evidence_row_vouches``) still has to agree on the tunable knobs; here there is no
+            # second filter, so agreeing on merely the SHARED keys would condemn every shape that
+            # happens not to contradict one recorded failure — measured on DeepSeek-V4's post
+            # block, where it priced all 17 leaves of a fork ``inf`` and thereby decided nothing.
+            # An elimination must fail safe: a failure condemns the shape that was measured.
+            if sig in failed:
+                return Price(math.inf, True)
         us = scored.get(nid)
         if us is None:
             us = prior.mean_scores([row])[0] if prior is not None else None
@@ -328,7 +370,8 @@ def _price_kernel(
 
             ctx = _replace(ctx, kernel_cache=None)  # a replayed kernel offers no fork to price
         terminal, trace = Run(pipeline=_tile_pipeline(), ctx=ctx).resolve(single_node_graph(graph, nid), nested)
-        price = _resolved_price(terminal, trace, ctx, prior, db)
+        failed = _db_measured_index(db, ctx).failed if db is not None else None
+        price = _resolved_price(terminal, trace, ctx, prior, db, failed=failed)
     except Exception:  # noqa: BLE001 — a price-probe failure must never break compile
         price = None
     memo[key] = price
@@ -372,17 +415,36 @@ def _may_change_kernel_set(prior, winner: Price, fused: Price | None) -> bool:
     sites so they cannot diverge on it.
 
     A trustworthy prior may decide the comparison outright: that is what being calibrated in µs
-    means. An untrustworthy one may not arbitrate, but it does not have to — when both Σ are wholly
-    measured, no prediction entered the comparison and the argmin is a comparison of real
-    latencies, which needs no model to be trusted. Anything else (either side part-predicted)
-    withdraws, because the offline half's score is an ordinal proxy and a Σ mixing it with measured
-    µs is not a latency comparison at all.
+    means. An untrustworthy one may not arbitrate between two DIFFERENT KINDS of number, and that
+    is the whole check: the offline half's score is an ordinal proxy of arbitrary magnitude, so a
+    measured Σ against a predicted one is not a latency comparison at all — whichever side the
+    proxy lands on, it lands there by scale rather than by speed. Both sides measured, and the
+    argmin is two real latencies, which needs no model to be trusted. Both sides predicted, and it
+    is one model's proxy read against itself across two kernel sets — the ordinary unmeasured pick
+    the whole policy already degenerates to, not a µs claim, and withholding there would withhold
+    the cut a fused kernel needs precisely where nothing has ever been measured.
+
+    A DISQUALIFIED keep-fused side (a measured ``inf`` — the tune watched every variant of one of
+    its kernels fail) passes on its own, whatever the other side's provenance. Nothing is being
+    arbitrated there: an elimination has no magnitude for a proxy score to corrupt, and any finite
+    alternative beats it. Withdrawing on the proxy rule would deploy the kernel the measurement
+    condemned.
 
     A prior with no ``trustworthy`` surface — a bare ``mean_scores`` double — is taken at its
     word."""
-    if getattr(prior, "trustworthy", True):
+    if getattr(prior, "trustworthy", True) or fused is None:
         return True
-    return winner.measured and fused is not None and fused.measured
+    if fused.measured and fused.us == math.inf:
+        return True
+    return winner.measured == fused.measured
+
+
+#: :func:`_priced_pick`'s answer when every leaf priced but their provenance forbids the comparison
+#: (:func:`_may_change_kernel_set`). Distinct from ``None`` — a leaf nothing could price — because
+#: the two ask opposite things of the caller: an unpriceable fork hands EVERY leaf to the ordinary
+#: ranking (main's contract), while a refused comparison withdraws the structural class from it,
+#: since a ``Graph`` leaf's knob row is not something that ranking can read.
+WITHDRAWN = object()
 
 
 def _priced_pick(
@@ -390,7 +452,8 @@ def _priced_pick(
 ) -> object | None:
     """The priced argmin over a kernel-set fork's leaves — the structural
     (``Graph``-splicing) options and the keep-fused ``Op`` side alike — or
-    ``None`` when some leaf cannot be priced.
+    ``None`` when some leaf cannot be priced, or :data:`WITHDRAWN` when the
+    prices are there but may not be compared.
 
     This exists because the per-op prior scores ONE kernel's knob row, so its
     score for a multi-kernel ``Graph`` option is meaningless: the leaf carries
@@ -407,17 +470,10 @@ def _priced_pick(
     kernel families is exposed to the model's absolute-µs error, which does not
     cancel across sides the way it does among siblings of one fork.
 
-    So the argmin is only allowed to stand on two conditions, either of which
-    suffices: the prior is ``trustworthy``, or the winning Σ AND the best
-    keep-fused Σ are both wholly measured (:attr:`Price.measured`), where no
-    prediction entered either side and the µs are real on both. Otherwise this
-    decides nothing (:func:`_withdraw_structural` in the caller's terms) and the
-    kernel set stays as lowered.
-
-    ``None`` (an unpriceable leaf, or a comparison neither condition allows)
-    hands the fork back to the ordinary leaf ranking; the caller drops the
-    structural leaves from that ranking, since nothing here could price them
-    against the alternative."""
+    So the argmin is only allowed to stand on the conditions
+    :func:`_may_change_kernel_set` names — chiefly that the two Σ are the same
+    kind of number. Failing them this answers :data:`WITHDRAWN` and the kernel
+    set stays as lowered."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     priced = [
@@ -437,6 +493,7 @@ def _priced_pick(
     fused = [price for o, price in priced if not _is_structural_option(o)]
     if _may_change_kernel_set(prior, best_price, min(fused, key=lambda p: p.us) if fused else None):
         return best
+    return WITHDRAWN
     return None
 
 
@@ -448,7 +505,7 @@ def _priced_pick(
 _DB_INDEX_CACHE: dict = {}
 
 
-def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
+def _db_measured_index(db, ctx) -> _Measured:
     """Caching wrapper over :func:`_db_measured_index_build` — memoizes the built
     index per process on ``(db path, mtime, context keys)``, invalidated when the
     DB file's mtime changes. An in-memory DB (no ``_path``) or an unstatable file
@@ -476,23 +533,49 @@ def _db_measured_index(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
     return index
 
 
-def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float]]]:
-    """The tune DB's measured ``ok`` CUDA perf rows for this compile's regime.
+class _Measured(NamedTuple):
+    """One DB scan's two answers, because the scan is expensive and both come from the same rows.
+
+    ``ok`` RANKS — the measured rows a pick argmins over. ``failed`` DISQUALIFIES — the structural
+    signatures whose every measured variant failed, which is a different kind of answer and cannot
+    be expressed as a latency: a watchdog kill has no meaningful µs to rank with, only a sentinel."""
+
+    ok: dict[frozenset, list[tuple[dict, float]]]
+    failed: dict[frozenset, list[float]]
+
+
+def _db_measured_index_build(db, ctx) -> _Measured:
+    """The tune DB's measured CUDA perf rows for this compile's regime, split into what ranks and
+    what disqualifies.
 
     Rows are indexed by their ``S_*`` structural signature (stringified values because perf knobs
     round-trip JSON). One context key is sufficient: tune measures in the deployable regime, and
     ``Context.structural_key`` gives that regime one key however its flags are spelled. Rows from a
     deliberately non-deployable compile key elsewhere and are not consulted.
 
+    A non-``ok`` row is evidence too — the bench watchdog measured that variant not finishing — but
+    it is evidence a ranker cannot use, since its sentinel latency is a timeout constant rather
+    than a speed. It lands in ``failed`` instead, and only where NO variant of that signature was
+    measured ``ok``: one surviving row means the shape is realizable and merely has bad rows.
+    Failures are collected BEFORE the placement-route filter below, because a route's latency is
+    unattributable without a child-schedule receipt while a kernel that hung is attributable to
+    the kernel whatever route produced it.
+
     Best-effort: any failure returns an empty index so deploy falls back to the prior.
     """
 
     index: dict[frozenset, list[tuple[dict, float]]] = {}
+    survived: set[frozenset] = set()
+    failures: dict[frozenset, list[float]] = {}
     try:
         for row in db.iter_perf(ctx.structural_key(), backend="cuda"):
-            if row.status != "ok" or row.stats.median <= 0:
-                continue
             sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
+            if row.status != "ok":
+                failures.setdefault(sig, []).append(float(getattr(row.stats, "median", 0.0) or 0.0))
+                continue
+            survived.add(sig)
+            if row.stats.median <= 0:
+                continue
             tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
             # A placement route's latency belongs to the exact ordered child schedule tree that
             # ran. The perf schema carries no such receipt, so legacy route rows cannot be direct
@@ -501,8 +584,8 @@ def _db_measured_index_build(db, ctx) -> dict[frozenset, list[tuple[dict, float]
                 continue
             index.setdefault(sig, []).append((tun, float(row.stats.median)))
     except Exception:  # noqa: BLE001 — a DB consult failure must never break compile
-        return {}
-    return index
+        return _Measured({}, {})
+    return _Measured(index, {sig: us for sig, us in failures.items() if sig not in survived})
 
 
 def _sig_groups(index: dict[frozenset, list[tuple[dict, float]]], sig: frozenset) -> list[list[tuple[dict, float]]]:
@@ -801,7 +884,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     A SCHEDULE fork — a recognized ``TileOp`` root AND no structural offer, the two halves of
     "this fork decides how one kernel is scheduled": the fork's the deploy identity (``identity_key(with_io=True)``) selects the
     records; the fastest record whose spelled row is EXACTLY one enumerated leaf
-    (``canonical_row_key`` equality — no prefix, no any-of) decides. A record that matches the
+    (``schedule_row_key`` equality — no prefix, no any-of) decides. A record that matches the
     identity but equals no leaf is DRIFT: warn loudly and decide nothing (fail-closed — the fuzzy
     acceptance this tier replaced is what deployed wrong kernels).
 
@@ -815,7 +898,7 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     Under an active :func:`golden_audit` sink every SCHEDULE consultation also appends its verdict
     (MATCH / DRIFT / GAP) — the drift audit's only reading of this tier."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import drop_uninformative_scopes, schedule_row_key, values_equal  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import schedule_row_key, values_equal  # noqa: PLC0415
 
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None:
@@ -836,8 +919,8 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
         record = dict(target)
         for option in options:
             if isinstance(option, Fork) and not option.is_leaf:
-                branch = drop_uninformative_scopes(option.knobs)
-                if all(key in record and values_equal(key, record[key], value) for key, value in branch.items()):
+                prefix = dict(schedule_row_key(option.knobs))
+                if all(key in record and values_equal(key, record[key], value) for key, value in prefix.items()):
                     found = find_recorded(option.expand(), target)
                     if found is not None:
                         return found
@@ -921,7 +1004,8 @@ def _direct_measured_pick(fp: ForkPoint, blocked, db_index: dict) -> tuple[objec
     def find(options, record):
         for option in options:
             if isinstance(option, Fork) and not option.is_leaf:
-                if all(key in record and values_equal(key, record[key], value) for key, value in option.knobs.items()):
+                decisions = {key: value for key, value in option.knobs.items() if not key.startswith(("S_", "H_"))}
+                if all(key in record and values_equal(key, record[key], value) for key, value in decisions.items()):
                     found = find(children(option), record)
                     if found is not None:
                         return found
@@ -1037,7 +1121,7 @@ def _stream_tiers(
     leaf set. ``(leaf, None, None)`` is the degenerate plain return (≤1 leaf, or every leaf
     blocklisted — no score, no decision memo); ``(leaf, knobs, price)`` is the ranked pick."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import NO_OPTION, _is_structural_option  # noqa: PLC0415
 
     base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
     picker = getattr(the_prior, "pick", None)
@@ -1085,7 +1169,8 @@ def _stream_tiers(
     # The cold-pool budget: a pool whose minted bound exceeds _POOL_BUDGET is sampled by seeded
     # descents instead of walked — the tiers below then rank the drawn complete rows exactly as
     # they would the full pool. An empty draw fails explicitly: walking the full oversized pool
-    # would silently discard the bound, while returning a partial branch would violate the prior's
+    # would silently discard the bound. Report the empty subtree to the resolver so it can keep
+    # walking the current rule batch; returning a partial branch would violate the prior's
     # complete-row contract.
     bound = next((b for o in opts if (b := getattr(o, "pool_bound", None)) is not None), None)
     drawn = None
@@ -1093,7 +1178,7 @@ def _stream_tiers(
         pid = next((p for o in opts if (p := getattr(o, "pool_id", None)) is not None), "")
         drawn = _descent_sample(opts, pid, node_blocked)
         if not drawn:
-            raise RuntimeError(f"budgeted schedule pool {pid!r} produced no live complete row")
+            return NO_OPTION, None, None
     n_leaves = n_live = 0
     first: object = None
     sample_row: dict | None = None  # one live row — carries the fork's shared ``S_*`` signature
@@ -1115,8 +1200,10 @@ def _stream_tiers(
         if len(chunk) >= _CHUNK:
             scan(chunk)
             chunk = []
-    if n_leaves <= 1 or n_live == 0:
-        return (first if first is not None else next(iter_leaves(opts))), None, None
+    if n_leaves == 0:
+        return NO_OPTION, None, None
+    if n_leaves == 1 or n_live == 0:
+        return first, None, None
     if chunk:
         scan(chunk)
     if best_ev is not None:
@@ -1162,12 +1249,14 @@ def greedy_decide(
     be priced, all of them go on to that ranking anyway. Nothing ranks a
     structural leaf below another to keep a kernel set unchanged.
 
-    A splice may win on either of two conditions (:func:`_may_change_kernel_set`):
-    the prior is ``trustworthy``, or both compared Σ are wholly measured. An
-    untrustworthy prior prices through the offline half, whose score is an
-    ordinal proxy rather than µs, and a Σ of those against a measured µs is not
-    a latency comparison (module docstring, "One competence check") — but two
-    measured Σ need no trusted model to be compared. Failing both, the
+    A splice may win on any of three conditions (:func:`_may_change_kernel_set`):
+    the prior is ``trustworthy``, the two compared Σ carry the same provenance
+    (both measured, or both predicted), or the keep-fused Σ is a measured
+    disqualification. An untrustworthy prior prices through the offline half,
+    whose score is an ordinal proxy rather than µs, and a Σ of those against a
+    measured µs is not a latency comparison (module docstring, "One competence
+    check") — but two Σ of one kind are, and an eliminated side needs no
+    comparison at all. Failing all three, the
     splices are withdrawn, which is also what ``price_structural=False`` does
     for the two reasons that are not about speed — ``Pipeline.run``'s retry
     after a structural pick failed to LOWER, and the nested pricing probes,
@@ -1176,7 +1265,7 @@ def greedy_decide(
     ``identity_key(with_io=True, with_knobs=True)``."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    memo: dict[str, float | None] = {}  # exact variant key → predicted µs (None = unpriceable)
+    memo: dict[str, Price | None] = {}  # exact variant key → its price (None = unpriceable)
     #: The DECISION memo (:func:`_decision_key` → the winning row + its price) — same lifetime as
     #: the price memo, one compile attempt. A repeat offer replays by :func:`~emmy.compiler.pipeline.fork.find_leaf`
     #: descent; only genuinely new (key, blocklist) states pay the stream-and-score. The outer
@@ -1194,7 +1283,7 @@ def greedy_decide(
     verified_state: list = [None]
 
     def db_index() -> dict:
-        return db_state[0] or {}
+        return (db_state[0].ok if db_state[0] is not None else None) or {}
 
     def decide(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
@@ -1282,24 +1371,20 @@ def greedy_decide(
                     # row, so this is a single resolve, not one per enumerated leaf — keeping the
                     # two sides of the kernel-set comparison the same quantity (a fork-local row
                     # score would omit any further scored forks the fused resolution hits).
-                    # The fused side prices FIRST. On an untrustworthy prior a part-predicted fused
-                    # Σ can never satisfy the all-measured rule, so the splices need not be priced
-                    # at all — one nested resolve instead of one per splice, which keeps a cold
-                    # machine off a pricing path whose answer it may not use.
                     fused_price = _price_op_leaf(fp, leaf, the_prior, memo, db, decisions)
-                    if fused_price is None:
-                        # An unpriceable fused side: the old contract sends EVERY leaf to the
-                        # ordinary ranking, structural ones included — the flatten path keeps that.
+                    priced = [
+                        (o, _price_graph(_leaf_graph(o), fp.ctx, the_prior, memo, db, decisions) if fused_price is not None else None)
+                        for o in splices
+                    ]
+                    if fused_price is None or any(price is None for _, price in priced):
+                        # An unpriceable side: the old contract sends EVERY leaf to the ordinary
+                        # ranking, structural ones included — the flatten path below keeps that.
                         streamed = None
-                    elif _may_change_kernel_set(the_prior, fused_price, fused_price):
-                        priced = [(o, _price_graph(_leaf_graph(o), fp.ctx, the_prior, memo, db, decisions)) for o in splices]
-                        if any(price is None for _, price in priced):
-                            streamed = None  # an unpriceable splice: same old contract
-                        else:
-                            best_o, best_price = min(priced, key=lambda o_price: o_price[1].us)
-                            if best_price.us < fused_price.us and _may_change_kernel_set(the_prior, best_price, fused_price):
-                                fp.score = best_price.us
-                                return best_o
+                    else:
+                        best_o, best_price = min(priced, key=lambda o_price: o_price[1].us)
+                        if best_price.us < fused_price.us and _may_change_kernel_set(the_prior, best_price, fused_price):
+                            fp.score = best_price.us
+                            return best_o
                 if streamed is not None:
                     fp.score = price
                     if dkey is not None:
@@ -1331,15 +1416,20 @@ def greedy_decide(
                 leaves = [o for o in leaves if not _is_structural_option(o)] or leaves
             else:
                 pick = _priced_pick(fp, leaves, the_prior, memo, db, decisions)
-                if pick is not None:
-                    return pick
-                if not getattr(the_prior, "trustworthy", True):
-                    # The pricing decided nothing and an untrustworthy prior may not settle a
-                    # kernel set by ranking a ``Graph`` leaf's knob row, which means nothing.
-                    # Withdraw the class; the op-variant leaves still rank by evidence.
+                if pick is WITHDRAWN:
+                    # The prices exist but are not the same kind of number, so nothing present can
+                    # settle the kernel set — and ranking a ``Graph`` leaf's knob row would settle
+                    # it on a row that means nothing. Withdraw the class; the op-variant leaves
+                    # still rank by evidence.
                     leaves = [o for o in leaves if not _is_structural_option(o)] or leaves
+                elif pick is not None:
+                    return pick
         if len(leaves) <= 1:
-            return leaves[0] if leaves else next(iter_leaves(fp.options))
+            if leaves:
+                return leaves[0]
+            from emmy.compiler.pipeline.pipeline import NO_OPTION  # noqa: PLC0415
+
+            return NO_OPTION
         # The constant base under this fork's deltas: the offer op's knobs
         # (its ``S_*`` structural identity) plus the ``H_*`` host/hardware
         # regime — the feature base tune trained on (``two_level.inner_reward``).

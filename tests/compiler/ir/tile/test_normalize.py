@@ -12,10 +12,9 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Channel, Fold, Lambda, M, is_contraction
 from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
-from emmy.compiler.ir.schedule import TilePlan
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.normalize import _share_common_cones
+from emmy.compiler.ir.tile.normalize import _share_common_cones, normalize_fold_tree
 from emmy.compiler.ir.tile.path import family_sites, sites
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
@@ -138,20 +137,18 @@ def test_contraction_promotes_a_shared_store_sweep_once() -> None:
 
 
 def test_contraction_promotes_a_shared_store_sweep_after_grid_mapping() -> None:
-    """A scheduled/reloaded tile keeps promotion as a construction invariant."""
+    """A mapped tile keeps promotion as a construction invariant."""
     m, n = Axis("m", 8), Axis("n", 16)
     normalized = TileOp(op=_planar_matmul(), place=Placement(free=(m, n))).op
     tile = TileOp(
         op=normalized,
         place=Placement(free=(m,), grid=(m,), mapped=True),
-        schedule={"TILE": TilePlan(regs=(2, 2))},
         output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=n),),
     )
 
     assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
     assert tuple(axis.name for axis in tile.place.grid) == ("m", "n")
     assert tile.place.is_mapped
-    assert tile.schedule["TILE"] == TilePlan(regs=(2, 2))
     assert tile.output_specs[0].sweep is None
 
 
@@ -856,3 +853,43 @@ def test_total_lift_produces_canonical_contraction() -> None:
 
     assert tile.op.role is AxisRole.CONTRACTION
     assert tile.op.loop.role is AxisRole.CONTRACTION
+
+
+def _fed_chain_root(feed: bool) -> Fold:
+    """A zero-axis root whose body holds a scalar chain and a reduce; ``feed`` wires the reduce's
+    nested cone to CAPTURE the chain's result (the composed placement cut's consumer shape)."""
+    scale_arg = "v25" if feed else "left"
+    inner = Fold.projection(
+        operands=(Load(name="left", input="x", index=(Var("k"),)),),
+        body=Body((Assign(name="scaled", op="multiply", args=("left", scale_arg)),)),
+        results=("scaled",),
+    )
+    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    fold = Fold(
+        axis=Axis("k", Dim(8)),
+        operands=(inner,),
+        init=init,
+        lift=Lambda(params=("k", "scaled"), body=Body((Assign(name="acc__v", op="copy", args=("scaled",)),)), results=("acc__v",)),
+        combine=combine,
+    )
+    chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
+    return Fold.projection(body=Body((*chain, fold)), results=("acc",))
+
+
+def test_a_body_fed_fold_is_never_hoisted_onto_an_operand_edge() -> None:
+    """A projection evaluates its operands before its scalar body, so a member fold whose SUBTREE
+    captures a body-defined name must stay a member — ``Closure(...).closed`` reads only the
+    fold's own lift and cannot see the nested capture. Hoisting it emitted every capture as an
+    undefined identifier at nvcc (DeepSeek-V4 post4096's two-cut consumer piece)."""
+    out = normalize_fold_tree(_fed_chain_root(feed=True))
+
+    assert not out.operands, "the fed fold must stay a body member"
+    assert any(isinstance(s, Fold) for s in out.lift.body)
+
+
+def test_an_unfed_closed_fold_still_hoists() -> None:
+    """The guard narrows by the capture alone: the same shape with the cone reading only its own
+    operand keeps the hoist (and the dead chain stays in the body for later passes to judge)."""
+    out = normalize_fold_tree(_fed_chain_root(feed=False))
+
+    assert any(isinstance(e, Fold) and e.axis is not None for e in out.operands), "an unfed closed fold hoists"

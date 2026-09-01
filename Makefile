@@ -55,6 +55,7 @@ setup-ci:
 	python3.13 -m venv venv --prompt "emmy"
 	./venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
 	./venv/bin/pip install -e ".[compile,test,image]"
+	@touch venv/.setup-complete
 
 lint: setup
 	./venv/bin/ruff check
@@ -83,11 +84,12 @@ test-corpus-regen: setup
 	./venv/bin/python -m tests.compiler.realization.regen
 
 # Regenerate tests/durations.json — the checked-in per-test timings the conftest
-# LPT-buckets on, so CI's first (cache-less) run is balanced. Runs serially: xdist
-# workers contend for cores and would record inflated, unusable times. Commit the
-# result when the balance has drifted (a new heavy test, a big pass-cost change).
+# LPT-buckets on, so CI's first (cache-less) run is balanced. Runs through one xdist
+# worker: loadgroup stamps the canonical @cuda group suffixes the parallel suite
+# looks up, without concurrent workers inflating the measurements. Commit the result
+# when the balance has drifted (a new heavy test, a big pass-cost change).
 test-durations: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -q -p no:randomly --write-durations
+	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -q -p no:randomly -n 1 --dist=loadgroup --write-durations
 
 # The name the docs reference; the stock (no tune DB) lane is the default.
 bench-kernels: bench-kernels-clean

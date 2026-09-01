@@ -17,7 +17,7 @@ from emmy.compiler.dtype import F16
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Literal, Var
 from emmy.compiler.ir.pure.fold import Channel, Fold
-from emmy.compiler.ir.schedule import TilePlan, Workers
+from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _slab_operands, _sync_operands, _tile_base
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import CtaTile
@@ -37,7 +37,7 @@ def _row_residue(sibling: Expr, own: Expr) -> Expr:
 
 
 def _mn(m: int = 32, n: int = 1024):
-    tile = TilePlan.parse(f"{K16}/f1x4/k8", Workers.parse("w1x1"))
+    tile = Tile.parse(f"{K16}/f1x4/k8", Work.parse("w1x1"))
     return tile.at(Axis("m", Dim(m)), Axis("n", Dim(n))).mn
 
 

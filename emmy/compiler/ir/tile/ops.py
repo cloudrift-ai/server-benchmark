@@ -384,6 +384,8 @@ def scheduled(
     schedule=None,
     materialization=None,
     workers=None,
+    placement_decided: bool = False,
+    split_consumed: bool = False,
 ):
     """Build a scheduled ``TileOp`` from one accepted semantic assignment.
 
@@ -407,6 +409,8 @@ def scheduled(
         output_specs=tuple(output_specs),
         schedule=schedule,
         materialization=materialization,
+        placement_decided=placement_decided,
+        split_consumed=split_consumed,
     )
 
 

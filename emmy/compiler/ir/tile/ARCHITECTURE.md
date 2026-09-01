@@ -248,6 +248,8 @@ against the schedule. A classic materialization contains exactly the contraction
 placed geometry and exactly the edges whose accepted transport is non-direct. Every placed tile must equal the
 geometry derived from the structural placement and its axis-free choice; every resolved stage must retain its edge's
 choice. Construction rejects missing, extra, mismatched, or partly attached facts.
+Scheduling preserves the structural receipts that say placement and cross-CTA splitting were already consumed, so a
+scheduled cut child can be serialized and reloaded without exposing a different kernel set.
 
 `ir/schedule/classic.py` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
 

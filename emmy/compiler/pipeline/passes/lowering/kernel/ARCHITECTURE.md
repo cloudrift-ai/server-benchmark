@@ -37,6 +37,12 @@ it seals through the one `grid_tile` finalizer (the article's "schedule separate
   cross-thread combine (`emit_combine`), and the projection. It reads the reduce straight off the `Fold` node (no
   `lower`-then-refind) and builds its per-cell body via the recursion (`_emit`, below); the output stays one cell per
   thread (the 1×1 `atomize`, the grid riding `lead_axes` untiled).
+- **CHAIN members** (`_tile_chain_members`) — a chain-form root (a zero-axis `Fold` with no operand edge, so nothing
+  was peeled) carries its reduces as direct body members, and the partition rides THEM. The members emit in body
+  order: a plain segment runs per cell on every lane (the provider chain the partitioned member reads), each
+  partitioned member becomes its own strided fold + merge (the combine broadcasts in place, so a later segment reads
+  the merged carrier), and the trailing segment closes lane-distributed. Every cooperating member shares ONE lane
+  axis. A swept output spec has no lane-distributed close, so such a root stays serial.
 - **Degenerate** — nothing tiled: one thread per output cell (`_emit(op)` + an output-store glue).
 
 ### The recursive node walk (`_emit`) — one hierarchical emitter

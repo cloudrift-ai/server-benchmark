@@ -444,6 +444,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
       (:func:`_tile_reduce_axis` — ``coop`` lanes at the unit level, ``reg`` ILP chains at the
       register level, the carrier merge closing the fold). The output stays one cell per thread:
       the 1×1 ``atomize`` with the whole grid riding ``lead_axes`` untiled.
+    - a CHAIN-FORM root (a zero-axis :class:`Fold` with no operand edge, so nothing was peeled)
+      carries its reduces as direct body members: the partition rides THEM, and
+      :func:`_tile_chain_members` emits the members in body order around one shared lane axis.
     - anything else (a pure pointwise zero-axis fold, a trivial plan) tiles NOTHING — the degenerate
       one-thread-per-cell fold: the per-cell body (:func:`_emit`; a serial reduce ``Loop`` sits
       inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
@@ -509,7 +512,25 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # ``Fold`` was already peeled off by :func:`_factorize`).
         plan = (ctx.sched.get("REDUCE", op) or ReducePlan()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
-        if plan is None or (plan.coop <= 1 and plan.reg <= 1):
+        # A CHAIN-FORM root (a zero-axis ``Fold`` with no operand edge) carries its reduces as
+        # direct body members, so the partition rides THEM and the root's own plan is always
+        # absent. A swept output spec has no lane-distributed close, so such a root stays serial.
+        parts = ()
+        if isinstance(op, Fold) and op.axis is None and not op.operands and all(spec.sweep is None for spec in output_specs):
+            parts = tuple(
+                (member, p)
+                for member in op.body
+                if isinstance(member, Fold)
+                and member.axis is not None
+                and (p := ctx.sched.get("REDUCE", member)) is not None
+                and (p.coop > 1 or p.reg > 1)
+            )
+        if parts:
+            coop = max(p.coop for _, p in parts)
+            state, fold, close, lane = _tile_chain_members(op, parts, ctx, tail, out_val, output_specs)
+            t = replace(t, axes=(lane,)) if lane is not None else t
+            bt = coop if lane is not None else None
+        elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
             body = [*_emit(op, ctx, output_specs).body, *tail]
             root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= _projection_results(op.body))
             if root_specs:
@@ -965,3 +986,41 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
 
     fold = _strided_fold(op, rloop, plan, ctx, lane)
     return fill_stmts, fold, _lane_close(tail_src, lane, coop, ctx, out_val), lane
+
+
+def _tile_chain_members(
+    op: Fold, parts: tuple, ctx: Ctx, tail: tuple, out_val: str, output_specs: tuple
+) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
+    """Bind a chain-form root whose direct members carry partitioned reduce plans. Body members
+    emit IN ORDER: a plain segment per cell on every lane (the provider chain — redundant per
+    lane, and the ILP rename's external-name protection keeps its reads shared), each partitioned
+    member as its strided fold + merge (the combine broadcasts in place, so later segments read
+    the merged carrier on every lane), and the trailing segment closes lane-distributed. All
+    cooperating members share ONE lane axis — the walk's one-inventory rule already forced their
+    ``coop`` to agree. Kernel-boundary output specs arrive sweep-free here (the offer keeps every
+    member serial otherwise); a projection region owns its own writes, the rest append as plain
+    root writes."""
+    plans = {id(member): plan for member, plan in parts}
+    coop = max(plan.coop for _, plan in parts)
+    head = next(member for member, plan in parts if plan.coop == coop)
+    lane = Axis(name=f"{head.axis.name}_co", extent=coop) if coop > 1 else None
+    fold: list[Stmt] = []
+    segment: list = []
+    for member in op.body:
+        plan = plans.get(id(member))
+        if plan is None:
+            segment.append(member)
+            continue
+        fold.extend(_emit_body(Body(tuple(segment)), ctx, output_specs))
+        segment = []
+        # A member's own hoisted loop-invariant edges belong ahead of its partitioned loop, not
+        # inside it — ``_strided_fold`` takes the reduce ``Loop`` alone.
+        *hoisted, rloop = _emit(member, ctx).body
+        fold.extend(hoisted)
+        fold.extend(_strided_fold(member, rloop, plan, ctx, lane if plan.coop > 1 else None))
+    region_results = _projection_results(op.body)
+    trailing = [
+        *_emit_body(Body(tuple(segment)), ctx, output_specs),
+        *(spec.write for spec in output_specs if not set(spec.write.values) <= region_results),
+    ]
+    return [], fold, _lane_close([*trailing, *tail], lane, coop, ctx, out_val), lane

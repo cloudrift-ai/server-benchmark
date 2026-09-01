@@ -119,7 +119,11 @@ def _semiring_form(fold: Fold) -> _SemiringForm | None:
     plus = pluses[0]
     if not (plus.associative and plus.commutative and plus.has_identity):
         return None
-    if fold.init != (plus.identity,) * len(pluses) or fold.lift.params != (fold.axis.name,):
+    # Params beyond the axis are the ENVIRONMENT (:attr:`Fold.environment`) — the enclosing axes
+    # the lift binds now that a term carries no free names. ``fold.operands`` is empty here, so
+    # there is nothing else they could be; requiring a bare ``(axis,)`` would refuse every
+    # unfactored contraction that reads an enclosing coordinate, which is all of them.
+    if fold.init != (plus.identity,) * len(pluses) or fold.lift.params[:1] != (fold.axis.name,):
         return None
 
     body = fold.lift.body

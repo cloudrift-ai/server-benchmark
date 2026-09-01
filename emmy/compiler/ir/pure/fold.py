@@ -364,6 +364,7 @@ class Fold:
     def __post_init__(self) -> None:
         if not isinstance(self.init, tuple):
             object.__setattr__(self, "init", tuple(self.init))
+        self._bind_environment()
         if self.axis is None:
             # The ZERO-AXIS node: no iteration and no monoid, so the only formation fact is the
             # positional binding — one lift param per operand RESULT COMPONENT, no leading
@@ -371,7 +372,7 @@ class Fold:
             assert self.combine is None and not self.init, "a zero-axis Fold carries no monoid"
             assert self.observe is None, "a zero-axis Fold carries no per-step state to observe"
             bound = tuple(n for e in self.operands for n in _operand_result_names(e))
-            assert tuple(self.lift.params) == bound, f"lift params {self.lift.params} must bind the operands {bound} positionally"
+            assert self.lift.params[: len(bound)] == bound, f"lift params {self.lift.params} must bind the operands {bound} positionally"
             return
         # Formation validates the positional binding and the S × S → S arity; the ``carrier``
         # annotation is a DERIVED read (:attr:`carrier`), never a second stored spelling.
@@ -383,7 +384,7 @@ class Fold:
         # One lift param per operand RESULT COMPONENT (a product edge — split-K's sliced
         # multi-channel fold — binds every component), positionally.
         bound = tuple(n for e in self.operands for n in _operand_result_names(e))
-        assert tuple(lam.params[1:]) == bound, f"lift params {lam.params[1:]} must bind the operand edges {bound} positionally"
+        assert lam.params[1 : 1 + len(bound)] == bound, f"lift params {lam.params[1:]} must bind the operand edges {bound} positionally"
         assert len(lam.results) == n, "one lift result per monoid component"
         # The FAMILY claim is the formation gate: membership is program equality against the
         # registry (:func:`family_of`), so a foreign combine — twisted or otherwise — with no
@@ -412,6 +413,36 @@ class Fold:
         # singleton, no annotation: the pivot is component 0 (its injected term the score), a
         # literal-1 injection is a denominator, a value injection an expectation.
         assert isinstance(lam.results[0], str), "the twisted lift's pivot component must inject the score name"
+
+    def _bind_environment(self) -> None:
+        """BIND EVERYTHING the lift reads — the closedness invariant, established at formation.
+
+        A term is a function, so it has no free variables. Values arrive through operand edges
+        bound positionally; every remaining name the lift reads — an enclosing iteration axis, or
+        a value no operand yet supplies — is appended as a TRAILING param, so
+        ``lift.free_names()`` is empty for every stored Fold. That is what a bare
+        :class:`~emmy.compiler.ir.pure.lam.Lambda` could never check on its own: an axis reference
+        and a value reference are the same ``Var``, so the distinction cannot be made locally —
+        and once everything is bound, it does not have to be. WHAT supplies each param at the use
+        site (an enclosing loop's binder, a register already live, a workspace load) is a lowering
+        decision read off :attr:`environment`, never a property of the term.
+
+        Trailing, never interleaved: the operand correspondence is the param PREFIX, so appending
+        leaves every positional read of it intact."""
+        residual = self.lift.free_names()
+        if not residual:
+            return
+        object.__setattr__(self, "lift", replace(self.lift, params=(*self.lift.params, *sorted(residual))))
+
+    @property
+    def environment(self) -> tuple[str, ...]:
+        """The trailing lift params NO operand supplies — what this term must be applied to.
+
+        The declared successor of the free-name walk :meth:`deps` used to perform: it is read off
+        the stored params, not discovered by scanning an enclosing scope."""
+        lead = 1 if self.axis is not None else 0
+        bound = sum(len(_operand_result_names(edge)) for edge in self.operands)
+        return tuple(self.lift.params[lead + bound :])
 
     @property
     def role(self) -> AxisRole:
@@ -825,15 +856,16 @@ class Fold:
 
     @cached_property
     def _deps(self) -> tuple[str, ...]:
-        # Memoized like :attr:`family` / :attr:`_contraction`: the term is immutable, and the
-        # scope walks (``_member_reads``) ask a nested node's captures once per ENCLOSING level —
-        # uncached, a deep fused tree recomputes every subtree's reads per ancestor.
-        reads = set(self.lift.free_names())
+        # DECLARED, not discovered: the lift binds everything it reads (:meth:`_bind_environment`),
+        # so what this term needs from outside is exactly its :attr:`environment` tail plus
+        # whatever its operand edges need in turn. The old spelling walked free names and
+        # subtracted the params, which is why a capture could hide here rather than being refused.
+        reads = set(self.environment)
         if self.observe is not None:
-            reads.update(self.observe.free_names())
+            reads.update(self.observe.free_names() - set(self.lift.params))
         for edge in self.operands:
             reads.update(edge.deps())
-        return tuple(sorted(reads - set(self.lift.params)))
+        return tuple(sorted(reads - set(self.lift.params[: len(self.lift.params) - len(self.environment)])))
 
     def exprs(self):
         """No index / predicate ``Expr`` of its own — a term's coordinates live on the ``Load``
@@ -1101,8 +1133,17 @@ def _(s: Fold, rename, sigma, axis_fn):
     operands = tuple(_rewrite(edge, rename, sigma, axis_fn) for edge in s.operands)
     axis = axis_fn(s.axis) if s.axis is not None else None
     lead = (axis.name,) if axis is not None else ()
+    from emmy.compiler.ir.expr import Var  # noqa: PLC0415 — the rewrite tail's axis check
+
+    def _param(name: str) -> str:
+        # The environment tail may hold AXIS names, which rename through sigma (the body's own
+        # coordinate substitution), not through the SSA renamer. Taking sigma's answer when it has
+        # one keeps a param and every use of it in the body spelled the same way.
+        mapped = sigma.get(name) if sigma is not None else None
+        return mapped.name if isinstance(mapped, Var) else rename(name)
+
     lift = Lambda(
-        params=(*lead, *(rename(p) for p in s.lift.params[len(lead) :])),
+        params=(*lead, *(_param(p) for p in s.lift.params[len(lead) :])),
         body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
         results=tuple(rename(r) if isinstance(r, str) else r for r in s.lift.results),
     )

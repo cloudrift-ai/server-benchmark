@@ -27,7 +27,7 @@ from emmy.compiler.ir.pure.fold import Channel, is_contraction
 from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.schedule import classic_projection as _classic
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
-from emmy.compiler.ir.schedule.classic import _ContractionFacts
+from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp
 from emmy.compiler.ir.tile.ops import Sched
@@ -148,25 +148,30 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
 
 def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> None:
     """A computed-A cone is lowered once for its stat-row seam, not once per tile plan."""
-    from emmy.compiler.ir.tile import ops as tile_ops  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import staging, views  # noqa: PLC0415
 
     calls: list[tuple] = []
-    original = _classic.cone_seam
+    original = views.cone_seam
 
     def spy(cone, k_name):
         calls.append((cone, k_name))
         return original(cone, k_name)
 
-    monkeypatch.setattr(_classic, "cone_seam", spy)
+    monkeypatch.setattr(views, "cone_seam", spy)
     monkeypatch.setattr(
-        tile_ops,
+        staging,
         "cone_seam",
         lambda *_: (_ for _ in ()).throw(AssertionError("the fill must reuse the prescan's seam")),
     )
-    assert _rows(FIXTURES["fused_norm_linear"]())
+    rows = _rows(FIXTURES["fused_norm_linear"]())
+    assert rows
     assert calls
-    keys = [(id(cone), k_name) for cone, k_name in calls]
-    assert len(keys) == len(set(keys))
+    # ONE distinct seam, read once per TileOp that composes over the term -- the unscheduled tile
+    # plus each materialized candidate re-validating itself -- and never once per candidate PLAN,
+    # which is the cost this guards. The facts are cached on the kernel, so the bound is the number
+    # of kernels, not the size of the search.
+    assert len({(id(cone), k_name) for cone, k_name in calls}) == 1
+    assert len(calls) < len(rows)
 
 
 @pytest.mark.parametrize("case, tile_sites, reduce_sites", (("fused_norm_linear", 1, 2), ("flash_pair", 2, 3)))
@@ -311,7 +316,11 @@ def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> N
     rows = _rows(graph)
     assert rows, "the fused attention kernel must still enumerate"
     reduce_keys = {key for row in rows for key in row if key.startswith("REDUCE@")}
-    assert reduce_keys == {f"REDUCE@n{i}" for i in (1, 2, 5, 6, 10, 13, 14)}
+    # n11, not n10: the score contraction's A and B are BOTH norm cones here, and the one walk
+    # visits a contraction's edges by ROLE (a, then each channel's b) rather than in stored order,
+    # which puts the channels first — so the two cone subtrees, and the reduce sites inside them,
+    # number the other way round.
+    assert reduce_keys == {f"REDUCE@n{i}" for i in (1, 2, 5, 6, 11, 13, 14)}
 
 
 # --- the chain-form root's reduce domain -------------------------------------------------------- #
@@ -430,8 +439,14 @@ def _per_cell_reductions(root, output_specs=()) -> set:
     excluded here by ``is_tiled``.
     """
     con = next(stmt for stmt in root.body if is_contraction(stmt))
-    tile = SimpleNamespace(output_specs=output_specs, op=root, inputs={}, place=SimpleNamespace(free=()))
-    domain = _classic._contraction_domain(tile, None, con, _ContractionFacts(k_axis=con.axis))
+    tile = SimpleNamespace(
+        output_specs=output_specs,
+        op=root,
+        inputs={},
+        place=SimpleNamespace(free=()),
+        packed_reading=lambda _node: (None, None),
+    )
+    domain = _classic._contraction_domain(tile, None, con, ContractionFacts(k_axis=con.axis))
     return {choice.reduce for choice in domain if not choice.tile.is_tiled}
 
 
@@ -499,7 +514,7 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
 
     member = next(stmt for stmt in tile.op.body if isinstance(stmt, Fold))
     nested = next(stmt for stmt in member.lift.body if isinstance(stmt, Fold))
-    sched = Sched(tile.op, place=tile.place.on_grid())
+    sched = Sched(tile, place=tile.place.on_grid())
     member_key, nested_key = sched.key("REDUCE", member), sched.key("REDUCE", nested)
     ctx = Context.from_target(_CC)
 

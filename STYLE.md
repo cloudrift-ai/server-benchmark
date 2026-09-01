@@ -127,11 +127,23 @@ deep-copied and is not a `dict`.
 ### Derived values are first-class members, not `__dict__` stashes
 
 A derived value another module reads (a lowered body, an identity digest, a canonical rendering) is part of the
-owning type's interface: declare it as a `functools.cached_property` (mutable classes) or, on a frozen dataclass,
-through `structural.instance_memo` — the ONE sanctioned memo-table mechanism, whose owner's `__getstate__` strips it.
-Never invent a private slot with `obj.__dict__.get(...)` / `object.__setattr__(obj, "_my_cache", ...)` at a call
-site: an undeclared attribute is invisible to readers of the class, dodges pickling rules, and grows a second
-spelling of the same fact.
+owning type's interface: declare it as a `functools.cached_property` on the class that owns it, or compute it in
+`__post_init__`. This works on a frozen dataclass too — `cached_property` writes through `__dict__` directly, and a
+`__getstate__` that pickles only declared fields strips it.
+
+Never stash a derived value in a memo table keyed off some other object — `obj.__dict__.get(...)`,
+`object.__setattr__(obj, "_my_cache", ...)`, or a named memo-slot helper. An undeclared attribute is invisible to
+readers of the class, dodges pickling rules, grows a second spelling of the same fact, and smears one type's
+functionality across the modules that cache for it.
+
+**Pick the owner by what the value is a property OF.** A fact about a term's own value (its lowering, its free axes)
+belongs on the term. A fact about a node's POSITION in a tree — its parent, its segment path, whether it is derived
+evaluation — belongs on the object that owns that tree, never on the node: this IR shares subterms, so one Fold
+reached down two paths has two parents, and caching one of them on the value is a correctness hazard, not just a
+layering one. `TileOp` owns its kernel's site table for exactly this reason.
+
+If several wrappers over one value each re-derive the same fact, the fix is to stop re-deriving — not to hide a
+shared cache under the value they have in common.
 
 ### Dependency Injection for Testability
 

@@ -15,7 +15,8 @@ import re
 from dataclasses import dataclass
 from itertools import combinations
 
-from emmy.compiler.ir.pure.fold import Fold, is_contraction
+from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.structural import instance_memo
 
 #: The only family a tree path may address. Schedule identities belong to ``schedule.classic``.
@@ -61,84 +62,23 @@ class Site:
         return len(self.segments)
 
 
-def _seg(node) -> str:
-    # The ZERO-AXIS reading spells ``map`` and every iterating fold — contraction reading
-    # included — spells ``fold``, exactly as the three stored kinds did before the collapse, so
-    # every stored golden/DB key keeps meaning what it always meant.
-    return "map" if node.axis is None else "fold"
-
-
-#: One ``_walk`` visit: the node, its segment path, and whether it is in derived evaluation.
-_Visit = tuple[object, tuple[str, ...], bool]
-
-
-def _stmt_children(stmt):
-    """Structural nodes embedded in a plain stmt's nested bodies (a composed step reached through
-    a ``Loop`` — ``030``'s sliced partials)."""
-    for body in stmt.nested():
-        for child in body:
-            if isinstance(child, Fold):
-                yield child
-            else:
-                yield from _stmt_children(child)
-
-
-def _walk(node, prefix: tuple[str, ...], out: list[_Visit], derived: bool = False) -> None:
-    out.append((node, prefix, derived))
-    if not isinstance(node, Fold):
-        return
-    if is_contraction(node):
-        # The BILINEAR reading's edges carry the view-role labels ``a`` / ``b`` — the A/B split
-        # rides the stored operand order, so the labels are as stable as the term. This branch
-        # must precede the generic operand walk so a contraction cannot silently re-spell its structural path.
-        for label, edge in (("a", node.a), *(("b", ch.b) for ch in node.channels)):
-            if isinstance(edge, Fold):
-                _walk(edge, (*prefix, label), out, derived)
-        return
-    if node.axis is None:
-        for src in node.operands:
-            if isinstance(src, Fold):
-                _walk(src, (*prefix, _seg(src)), out, derived)
-        for s in node.body:
-            for child in _stmt_children(s) if not isinstance(s, Fold) else (s,):
-                _walk(child, (*prefix, _seg(child)), out, derived)
-        return
-    for edge in node.operands:
-        if isinstance(edge, Fold):
-            _walk(edge, (*prefix, _seg(edge)), out, derived)
-    # A Fold stored literally in the lift is a materializable child, just like an operand edge.
-    # Walk it before the derived program so it is not confused with synthesized combine material.
-    stored = {id(s) for s in node.lift.body if isinstance(s, Fold)}
-    for child in (s for s in node.lift.body if isinstance(s, Fold)):
-        _walk(child, (*prefix, _seg(child)), out, derived)
-    # The DERIVED evaluation's children — synthesized nodes (flash's PV, memoized on the fold)
-    # are real schedule sites, marked ``derived`` (combine material below the seam lattice).
-    # Operand edges and literal lift-body Fold children were walked above.
-    edge_ids = {id(e) for e in node.operands} | stored
-    for s in node.step_stmts():
-        if id(s) in edge_ids:
-            continue
-        for child in _stmt_children(s) if not isinstance(s, Fold) else (s,):
-            _walk(child, (*prefix, _seg(child)), out, True)
-
-
 def sites(root) -> tuple[Site, ...]:
     """Every structural node in ``root``'s tree as a :class:`Site`, root first — the ONE node walk
-    in the layer, shared by the resolver, the stampers and every plain "walk the nodes" reader.
+    in the layer — a reading of the ONE walk (:func:`~emmy.compiler.ir.pure.tree.walk`), which owns
+    the traversal rules and the segment vocabulary. This adds only what the CODEC needs: the
+    per-site ordinal among sites with identical ``(segments, axis)``, assigned in traversal order.
     An operand subtree has exactly one home (its edge), so the tree stays a tree and no visited set
-    is needed. Ordinals are assigned in traversal order among sites with identical
-    ``(segments, axis)``."""
+    is needed."""
     if root is None:
         return ()
-    nodes: list[_Visit] = []
-    _walk(root, (_seg(root),), nodes)
     counts: dict[tuple, int] = {}
     result: list[Site] = []
-    for node, segments, derived in nodes:
+    for visit in walk(root):
+        node = visit.node
         axis = node.axis.name if isinstance(node, Fold) and node.axis is not None else None
-        key = (segments, axis)
+        key = (visit.segments, axis)
         counts[key] = counts.get(key, 0) + 1
-        result.append(Site(node=node, axis=axis, segments=segments, ordinal=counts[key], derived=derived))
+        result.append(Site(node=node, axis=axis, segments=visit.segments, ordinal=counts[key], derived=visit.derived))
     return tuple(result)
 
 

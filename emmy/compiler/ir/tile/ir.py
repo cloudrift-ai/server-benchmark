@@ -33,16 +33,29 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 
+from frozendict import frozendict
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_refs_axis, is_contraction, operand_body
+from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_free_axes, is_contraction, operand_body
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
+from emmy.compiler.ir.pure.tree import Visit, walk
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
-from emmy.compiler.ir.schedule.views import EdgeSite, NodeId, schedule_edges, schedule_nodes
+from emmy.compiler.ir.schedule.packing import packed_readings
+from emmy.compiler.ir.schedule.views import (
+    ContractionFacts,
+    EdgeSite,
+    NodeId,
+    NodeView,
+    Projection,
+    Reduction,
+    contraction_facts,
+    node_view,
+)
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
 from emmy.compiler.ir.stmt.base import _axis_identity
@@ -477,7 +490,7 @@ class TileOp(Op):
             store.sweep.name
             for store in self.output_specs
             if store.sweep is not None
-            and any(any(edge_refs_axis(edge, store.sweep.name) for edge in contraction.operands) for contraction in contractions)
+            and any(any(store.sweep.name in edge_free_axes(edge) for edge in con.operands) for con in contractions)
         }
         if not promoted:
             self._validate_schedule()
@@ -529,18 +542,36 @@ class TileOp(Op):
         validate(self.schedule, self, place=self.place, workers=self.workers)
 
     @cached_property
-    def nodes(self) -> tuple[Fold, ...]:
-        """The term's Fold nodes in stable schedule order."""
-        return schedule_nodes(self.op) if isinstance(self.op, Fold) else ()
+    def sites(self) -> tuple[Visit, ...]:
+        """The ONE walk over this kernel's term, one record per node identity, indexed by node id.
+
+        Every structural reading is a FIELD of these records — the node, the parent that reached
+        it, the axes in scope there, its segment path, whether it is derived evaluation — so the
+        walk runs once per kernel and nothing re-derives a label it already carries. Those labels
+        are POSITIONS in this kernel's tree, which is why they live here and never on the shared
+        subterms the tree is built from: one Fold reached down two paths has two parents, and keeps
+        the first that reached it.
+        """
+        out, seen = [], set()
+        for visit in walk(self.op) if isinstance(self.op, Fold) else ():
+            if id(visit.node) not in seen:
+                seen.add(id(visit.node))
+                out.append(visit)
+        return tuple(out)
 
     @cached_property
-    def node_edges(self) -> tuple[EdgeSite, ...]:
+    def node_sites(self) -> tuple[NodeId, ...]:
+        """Every node identity, in stable schedule order."""
+        return tuple(range(len(self.sites)))
+
+    @cached_property
+    def edge_sites(self) -> tuple[EdgeSite, ...]:
         """Every consumer operand position in stable schedule order."""
-        return schedule_edges(self.nodes)
+        return tuple((consumer, operand) for consumer, site in enumerate(self.sites) for operand in range(len(site.node.operands)))
 
     @cached_property
     def _node_ids(self) -> dict[int, NodeId]:
-        return {id(node): node_id for node_id, node in enumerate(self.nodes)}
+        return {id(site.node): node_id for node_id, site in enumerate(self.sites)}
 
     def node_id(self, node: Fold) -> NodeId:
         """Return ``node``'s schedule identity by object identity."""
@@ -548,6 +579,68 @@ class TileOp(Op):
             return self._node_ids[id(node)]
         except KeyError:
             raise KeyError("Fold is not a node of this TileOp") from None
+
+    @cached_property
+    def incident_edges(self) -> frozendict[NodeId, tuple[EdgeSite, ...]]:
+        """Each consumer's operand positions."""
+        out: dict[NodeId, list[EdgeSite]] = {site: [] for site in range(len(self.sites))}
+        for edge in self.edge_sites:
+            out[edge[0]].append(edge)
+        return frozendict({site: tuple(edges) for site, edges in out.items()})
+
+    @cached_property
+    def views(self) -> tuple[NodeView, ...]:
+        """Each node site classified as a projection or a reduction, without target input.
+
+        Indexed BY node id, which is a dense ordinal — a tuple, not a map keyed by the integers it
+        is already ordered by.
+        """
+        return tuple(node_view(site.node) for site in self.sites)
+
+    def contracts(self, site: NodeId) -> bool:
+        """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want."""
+        view = self.views[site]
+        return isinstance(view, Reduction) and view.contraction is not None
+
+    @cached_property
+    def family_sites(self) -> frozendict[str, tuple[NodeId, ...]]:
+        """The node sites each classic node family can address, by family name.
+
+        One classification, filtered once per family, so a reader dispatches on the family NAME it
+        already holds instead of picking a differently-named member per family.
+        """
+        return frozendict(
+            {
+                "TILE": tuple(
+                    site
+                    for site in self.node_sites
+                    if self.contracts(site)
+                    or (isinstance(self.views[site], Projection) and site == 0 and not self.sites[site].node.operands)
+                ),
+                "REDUCE": tuple(site for site in self.node_sites if isinstance(self.views[site], Reduction)),
+            }
+        )
+
+    @cached_property
+    def stage_edges(self) -> tuple[EdgeSite, ...]:
+        """The operand positions a ``STAGE`` transport can address."""
+        return tuple(edge for edge in self.edge_sites if self.contracts(edge[0]))
+
+    @cached_property
+    def _packed_readings(self) -> frozendict:
+        return packed_readings(tuple(site.node for site in self.sites if is_contraction(site.node)), self.inputs)
+
+    def packed_reading(self, node) -> tuple:
+        """One node's ``(B copy, pair)`` packed-operand readings.
+
+        Only a contraction carries the operand roles the readings match on, so anything else
+        answers ``(None, None)`` rather than being absent."""
+        return self._packed_readings.get(id(node), (None, None))
+
+    @cached_property
+    def contractions(self) -> frozendict[NodeId, ContractionFacts]:
+        """The per-contraction structure every schedule choice over this kernel shares."""
+        return contraction_facts(self) if isinstance(self.op, Fold) else frozendict()
 
     def __getstate__(self):
         """Pickle stored fields only; derived schedule inventories recompute after transport."""

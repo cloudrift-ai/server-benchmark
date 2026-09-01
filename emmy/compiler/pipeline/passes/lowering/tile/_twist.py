@@ -10,7 +10,7 @@ from emmy.compiler.ir.pure import Fold, Lambda, component_ops, is_contraction
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.carrier import EXP_FAMILY, exp_combine_states
 from emmy.compiler.ir.pure.closure import Closure
-from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, operand_name, refs_axis
+from emmy.compiler.ir.pure.fold import _operand_result_names, edge_free_axes, operand_name, refs_axis
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Select
 from emmy.compiler.ir.stmt.body import _member_reads
@@ -227,7 +227,7 @@ def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) ->
     varying = {axis}
     members = []
     for stmt in cone.members:
-        direct = refs_axis(stmt, axis) or (isinstance(stmt, (Fold, Load)) and edge_refs_axis(stmt, axis))
+        direct = refs_axis(stmt, axis) or (isinstance(stmt, (Fold, Load)) and axis in edge_free_axes(stmt))
         if direct or varying & set(_member_reads(stmt)):
             members.append(stmt)
             varying.update(stmt.defines())

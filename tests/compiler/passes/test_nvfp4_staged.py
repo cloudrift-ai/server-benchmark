@@ -269,8 +269,8 @@ def _rows(node, inputs, axes, pins=None):
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     from emmy.compiler.ir.schedule.classic_projection import project_classic
 
-    problem, domains = project_classic(op, ctx)
-    context = ClassicScheduleContext(problem, domains)
+    domains = project_classic(op, ctx)
+    context = ClassicScheduleContext(op, ctx, domains)
     site = context.site(node)
     choices = tuple(choice for choice in domains.nodes[site] if choice.tile == tile.choice)
     edge_domains = tuple((edge, domains.edges[edge]) for edge in context.incident_edges(site))
@@ -812,8 +812,8 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
     target = Context.from_target((9, 0))
     from emmy.compiler.ir.schedule.classic_projection import project_classic
 
-    problem, domains = project_classic(op, target)
-    context = ClassicScheduleContext(problem, domains)
+    domains = project_classic(op, target)
+    context = ClassicScheduleContext(op, target, domains)
     site = context.site(node)
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     choices = tuple(choice for choice in domains.nodes[site] if choice.tile == tile.choice)

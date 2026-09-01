@@ -33,6 +33,7 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     output_map,
     realize,
 )
+from emmy.compiler.pipeline.passes.lowering.tile._pieces import projection_region_pieces, realize_projection_regions
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
@@ -180,6 +181,91 @@ def _projection_region_graph() -> Graph:
         node_id="out0",
     )
     graph.inputs, graph.outputs = ["a", "b", "c", "d"], ["out0", "out1"]
+    return graph
+
+
+def _shared_provider_region_graph() -> Graph:
+    """Two output regions, one reading a scalar provider from the shared prefix."""
+    m, n, p = Axis("m", 4), Axis("n", 4), Axis("p", 4)
+    contraction_axis, reduction_axis = Axis("k", 8), Axis("h", 8)
+    scaled = Fold.projection(
+        body=Body(
+            (
+                Load(name="qv", input="q", index=(Var("m"), Var("k"))),
+                Assign(name="av", op="multiply", args=("qv", "scale")),
+            )
+        ),
+        results=("av",),
+    )
+    contraction = Fold.contraction(
+        k_axis=contraction_axis,
+        a=scaled,
+        channels=(Channel(b=Load(name="wv", input="w", index=(Var("k"), Var("n"))), acc="acc"),),
+    )
+    reduction = Fold(
+        axis=reduction_axis,
+        lift=Lambda(
+            params=("h",),
+            body=Body((Load(name="rv", input="r", index=(Var("n"), Var("h"))),)),
+            results=("rv",),
+        ),
+        init=(0.0,),
+        combine=Lambda(
+            params=("red", "red__o"),
+            body=Body((Assign(name="red", op="add", args=("red", "red__o")),)),
+            results=("red",),
+        ),
+    )
+    inner = ProjectionRegion(
+        axis=n,
+        lift=Lambda(
+            params=("n", "m", "scale"),
+            body=Body(
+                (
+                    contraction,
+                    reduction,
+                    Assign(name="sum", op="add", args=("acc", "red")),
+                    Assign(name="result", op="add", args=("sum", "scale")),
+                )
+            ),
+            results=("result",),
+        ),
+    )
+    first = ProjectionRegion(axis=m, lift=Lambda(params=("m", "scale"), body=Body((inner,)), results=()))
+    second = ProjectionRegion(
+        axis=p,
+        lift=Lambda(
+            params=("p",),
+            body=Body((Load(name="other", input="z", index=(Var("p"),)),)),
+            results=("other",),
+        ),
+    )
+    tile = TileOp(
+        op=Fold.projection(
+            body=Body(
+                (
+                    Load(name="epsilon", input="epsilon", index=()),
+                    Assign(name="scale", op="reciprocal", args=("epsilon",)),
+                    first,
+                    second,
+                )
+            )
+        ),
+        output_specs=(
+            OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="result")),
+            OutputSpec(Write(output="other_out", index=(Var("p"),), value="other")),
+        ),
+    )
+    graph = Graph()
+    for name, shape in (("epsilon", ()), ("q", (4, 8)), ("w", (8, 4)), ("r", (4, 8)), ("z", (4,))):
+        _input(graph, name, shape, dtype="f32")
+    graph.add_node(
+        tile,
+        ["epsilon", "q", "w", "r", "z"],
+        outputs=(Tensor("out", (4, 4), F32), Tensor("other_out", (4,), F32)),
+        node_id="out",
+    )
+    graph.inputs, graph.outputs = ["epsilon", "q", "w", "r", "z"], ["out", "other_out"]
     return graph
 
 
@@ -437,6 +523,45 @@ def test_root_projection_region_pin_lowers_two_independently_scheduled_kernels()
     assert lowered.outputs == ["out0", "out1"]
     assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 2
     assert not any(isinstance(node.op, TileOp) for node in lowered.nodes.values())
+
+
+def test_composed_cut_keeps_a_shared_prefix_provider_on_an_output_piece() -> None:
+    """Replacing one nested Fold must not move the output piece's shared provider exclusively
+    under a sibling contraction and leave the piece's remaining consumer open."""
+    graph = _shared_provider_region_graph()
+    root = graph.nodes["out"]
+    match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize_projection_regions(match, root, projection_region_pieces(root.op))
+    piece = next(
+        node
+        for node in fragment.nodes.values()
+        if isinstance(node.op, TileOp) and any(spec.write.output == "out__split" for spec in node.op.output_specs)
+    )
+    assert set(piece.op.op.deps()) <= {axis.name for axis in piece.op.place.free}
+
+    seams = tuple(seam for seam in cuttable_seams(piece.op) if seam.node.axis is not None and seam.node.axis.name in {"k", "h"})
+    assert {seam.node.axis.name for seam in seams} == {"k", "h"}
+    composed = realize(
+        Match(graph=fragment, root_node_id=piece.id, rule=Rule(name="test", pattern=[])),
+        piece,
+        seams,
+        output_map(piece),
+        placement_decided=True,
+    )
+
+    for child in (node.op for node in composed.nodes.values() if isinstance(node.op, TileOp)):
+        assert set(child.op.deps()) <= {axis.name for axis in child.place.free}
+
+
+def test_root_region_cut_precedes_scoped_child_site_resolution() -> None:
+    """A root cut changes the kernel set before graph-scoped child paths become meaningful."""
+    graph = _shared_provider_region_graph()
+    tile = graph.nodes["out"].op
+
+    with pinned_knobs({"PLACE@root": "cut", "PLACE@a": "cut"}):
+        restriction = _CUT._placement_restriction(tile, cuttable_seams(tile), projection_region_pieces(tile))
+
+    assert restriction == (("PLACE@root",), "regions", {})
 
 
 def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:

@@ -78,6 +78,11 @@ inside the edge is not a capture and an already-closed edge never re-fires the r
 what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
 vector) becomes materializable once per key instead of recomputed per query row.
 
+Closing one captured edge does not make its provider exclusive to that edge. If another sibling operand still
+captures one of the provider's results, the provider remains at their shared enclosing projection as well as riding
+the closed edge. This remains true after a composed placement cut reconstructs the Fold tree with workspace loads;
+every fresh output-owning piece must stay closed under the same normalization.
+
 An iteration never crosses into a new evaluation domain. Attaching an iteration-bearing provider to a contraction
 operand would evaluate it once per step of every intervening binder; normalization therefore leaves that provider at
 its defining scope. Straight-line chains still close normally, and a reducing root's own axis counts as its existing

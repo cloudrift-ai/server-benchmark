@@ -100,6 +100,12 @@ def _placement_restriction(tile: TileOp, seams, region_pieces) -> tuple[tuple, s
             raise ValueError(f"bad PLACE value {value!r}; expected 'fuse' or 'cut'")
     all_sites = sites(tile.op)
     by_node = _seam_index(seams)
+    root_pin = next((value for name, value in pins if name == "PLACE@root"), None)
+    if root_pin == "cut" and region_pieces:
+        # The root boundary changes the kernel set before stored-edge placement. Pins for the
+        # resulting pieces are graph-scoped and must not be interpreted against the parent tree,
+        # where the same path can name an unrelated non-cuttable Fold.
+        return (("PLACE@root",), "regions", {})
     cut: list = []
     fused: list[str] = []
     root_value = None

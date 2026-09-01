@@ -566,9 +566,11 @@ that canonical input:
   The root output-region arm exists only when a zero-axis root is exactly a pure prefix followed by at least two
   `ProjectionRegion`s whose recursive results uniquely partition the output specifications and whose captures close
   over the prefix. `PLACE@root=cut` separates all sibling regions in one structural choice and lifts each region's
-  leading axes into that fresh piece's root-global placement. Bare `PLACE` retains its stored-edge primary semantics.
-  Fresh pieces re-enter this same fixpoint, so nested sibling regions need no second enumerator. This changes only
-  which kernels exist; node schedules and edge transports remain independent classic domains.
+  leading axes into that fresh piece's root-global placement. Because that choice changes the kernel set, it is
+  consumed before graph-scoped child `PLACE@site` pins are resolved against the fresh pieces; a coincident path in
+  the unsplit parent cannot capture a child's pin. Bare `PLACE` retains its stored-edge primary semantics. Fresh
+  pieces re-enter this same fixpoint, so nested sibling regions need no second enumerator. This changes only which
+  kernels exist; node schedules and edge transports remain independent classic domains.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
   changes which kernels exist, so `030_cut` offers it after stored-edge placement and before any assignment

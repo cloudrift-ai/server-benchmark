@@ -20,7 +20,7 @@ from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile import OutputSpec, Placement, ProjectionRegion, TileOp
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import Fork
@@ -139,6 +139,44 @@ def _mimo_graph() -> Graph:
         tile,
         ["a", "b", "c", "d"],
         outputs=(Tensor("out0", (8, 8), "f16"), Tensor("out1", (8, 8), "f16")),
+        node_id="out0",
+    )
+    graph.inputs, graph.outputs = ["a", "b", "c", "d"], ["out0", "out1"]
+    return graph
+
+
+def _projection_region_graph() -> Graph:
+    """A scalar Tile root over two independently owned contraction regions."""
+    k = Axis("k", 16)
+
+    def region(row: Axis, column: Axis, a: str, b: str, acc: str) -> ProjectionRegion:
+        product = Fold.contraction(
+            k_axis=k,
+            a=Load(name=f"{a}_v", input=a, index=(Var(row.name), Var("k"))),
+            channels=(Channel(b=Load(name=f"{b}_v", input=b, index=(Var("k"), Var(column.name))), acc=acc),),
+        )
+        inner = ProjectionRegion(
+            axis=column,
+            lift=Lambda(params=(column.name, row.name), body=Body((product,)), results=(acc,)),
+        )
+        return ProjectionRegion(axis=row, lift=Lambda(params=(row.name,), body=Body((inner,)), results=()))
+
+    m, n = Axis("m", 4), Axis("n", 8)
+    p, q = Axis("p", 8), Axis("q", 4)
+    tile = TileOp(
+        op=Fold.projection(body=Body((region(m, n, "a", "b", "first"), region(p, q, "c", "d", "second")))),
+        output_specs=(
+            OutputSpec(Write(output="out0", index=(Var("m"), Var("n")), value="first")),
+            OutputSpec(Write(output="out1", index=(Var("p"), Var("q")), value="second")),
+        ),
+    )
+    graph = Graph()
+    for name, shape in (("a", (4, 16)), ("b", (16, 8)), ("c", (8, 16)), ("d", (16, 4))):
+        _input(graph, name, shape)
+    graph.add_node(
+        tile,
+        ["a", "b", "c", "d"],
+        outputs=(Tensor("out0", (4, 8), "f16"), Tensor("out1", (8, 4), "f16")),
         node_id="out0",
     )
     graph.inputs, graph.outputs = ["a", "b", "c", "d"], ["out0", "out1"]
@@ -370,6 +408,35 @@ def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:
     lowered = _lower_cut(_mimo_graph(), cuts[0])
     assert lowered.outputs == ["out0", "out1"]
     assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 2
+
+
+def test_root_projection_region_cut_lifts_each_piece_placement() -> None:
+    offered = _offered(_projection_region_graph())
+    assert {"PLACE": "fuse"} in offered and {"PLACE@root": "cut"} in offered
+
+    graph = _projection_region_graph()
+    match = Match(graph=graph, root_node_id="out0", rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({"PLACE@root": "cut"}):
+        choice = _CUT.rewrite(match, graph.nodes["out0"])
+    choice = choice[0] if isinstance(choice, list) else choice
+    fragment = choice.expand()[0]
+    pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+
+    assert fragment.outputs == ["out0__split", "out1__split"]
+    assert [[axis.extent.as_static() for axis in piece.place.free] for piece in pieces] == [[4, 8], [8, 4]]
+    assert all(not piece.placement_decided for piece in pieces)
+    assert [{spec.write.output for spec in piece.output_specs} for piece in pieces] == [
+        {"out0__split"},
+        {"out1__split"},
+    ]
+
+
+def test_root_projection_region_pin_lowers_two_independently_scheduled_kernels() -> None:
+    lowered = _lower(_projection_region_graph(), {"PLACE@root": "cut"})
+
+    assert lowered.outputs == ["out0", "out1"]
+    assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 2
+    assert not any(isinstance(node.op, TileOp) for node in lowered.nodes.values())
 
 
 def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:

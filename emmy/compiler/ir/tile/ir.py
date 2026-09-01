@@ -232,12 +232,12 @@ def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> li
     return out
 
 
-def _projection_results(body) -> set[str]:
+def projection_results(body) -> set[str]:
     out = set()
     for member in body:
         if isinstance(member, ProjectionRegion):
             out.update(member.results)
-            out.update(_projection_results(member.body))
+            out.update(projection_results(member.body))
     return out
 
 
@@ -316,7 +316,7 @@ def lower_with_output_specs(op, specs) -> list[Stmt]:
 
     if isinstance(op, Fold) and op.axis is None:
         body = [*(stmt for edge in op.operands for stmt in operand_body(edge)), *lower_body(op.body)]
-        root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= _projection_results(op.body))
+        root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= projection_results(op.body))
         return apply_output_specs(body, root_specs, observed=observed_result_names(op))
     return apply_output_specs(op.lower(), specs, observed=observed_result_names(op))
 
@@ -690,6 +690,7 @@ __all__ = [
     "extract_output_specs",
     "lower_with_output_specs",
     "observed_result_names",
+    "projection_results",
 ]
 
 

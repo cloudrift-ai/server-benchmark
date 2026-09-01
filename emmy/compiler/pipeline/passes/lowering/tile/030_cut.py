@@ -1,8 +1,8 @@
 """Enumerate every kernel-set cut before schedule assignments.
 
-Stored-Fold-edge placement is the first domain and cross-CTA reduction splitting is the second.
-The rule runs to a fixpoint, so each successful choice and every fresh piece re-enters these ordered
-domains before scheduling.
+Output-region and stored-Fold-edge placement form the first domain; cross-CTA reduction splitting is the second. The
+rule runs to a fixpoint, so each successful choice and every fresh piece re-enters these ordered domains before
+scheduling.
 """
 
 from __future__ import annotations
@@ -16,7 +16,12 @@ from emmy.compiler.ir.tile.path import MissingSiteError, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import family_of, family_pins
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, output_map, realize
+from emmy.compiler.pipeline.passes.lowering.tile._cut import (
+    cuttable_seams,
+    output_map,
+    realize,
+)
+from emmy.compiler.pipeline.passes.lowering.tile._pieces import projection_region_pieces, realize_projection_regions
 from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
 
 PATTERN = [Pattern("root", TileOp)]
@@ -74,7 +79,7 @@ def _rootmost_plain(seams, all_sites, refuse: frozenset[str] = frozenset()):
     return min(plain, key=lambda candidate: depth[id(candidate.node)])
 
 
-def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
+def _placement_restriction(tile: TileOp, seams, region_pieces) -> tuple[tuple, str, dict] | None:
     """The authoritative placement spelled by live PLACE pins, or ``None``.
 
     This restriction is consumed entirely by the cut pass before classic schedule enumeration.
@@ -97,6 +102,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     by_node = _seam_index(seams)
     cut: list = []
     fused: list[str] = []
+    root_value = None
     missing = False
     for name, value in pins:
         if name == "PLACE":
@@ -105,6 +111,12 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
             site = resolve(tile.op, name, all_sites=all_sites)
         except MissingSiteError:
             missing = True  # the key addresses a seam of another kernel in the graph
+            continue
+        if site.node is tile.op:
+            if not region_pieces:
+                missing = True
+            else:
+                root_value = value
             continue
         if id(site.node) not in by_node:
             raise ValueError(f"PLACE pin {name!r} does not address a cuttable Fold edge in this kernel")
@@ -115,6 +127,8 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
             cut.append(seam)
     refused = frozenset(fused)
     cut = [seam for seam in cut if seam.spelling not in refused]
+    if root_value == "cut":
+        return (("PLACE@root",), "regions", {})
     bare = next(((name, value) for name, value in pins if name == "PLACE"), None)
     if bare is not None and bare[1] == "cut":
         seam = _rootmost_plain(seams, all_sites, refused)
@@ -122,14 +136,17 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
             cut.append(seam)
     cut = list(_with_required(cut, by_node, refuse=refused))
     if cut:
-        return tuple(cut), "cut"
+        extra = {"PLACE@root": "fuse"} if root_value == "fuse" else {}
+        return tuple(cut), "cut", extra
     if fused:
-        return (fused[0],), "fuse"
+        return (fused[0],), "fuse", {}
+    if root_value == "fuse":
+        return (("PLACE@root",), "fuse", {})
     for name, value in pins:
         if name != "PLACE":
             continue
         if value == "fuse":
-            return (name,), value
+            return (name,), value, {}
         # A bare ``PLACE=cut`` names the placement DECISION, not a site: the codec's primary
         # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (an unclosed
         # cone, a seam whose workspace dtypes stay undetermined), so a bare pin resolves among
@@ -138,36 +155,51 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
         # root-most plain seam and is consumed on the fresh pieces.
         seam = _rootmost_plain(seams, all_sites)
         if seam is None:
-            return ("PLACE",), "fuse"
-        return (seam,), value
+            return ("PLACE",), "fuse", {}
+        return (seam,), value, {}
     if missing:
         # A pin-driven compile whose scoped pins all address other kernels decides FUSE here —
         # deterministic, and the unpinned placement fork never returns under a pin.
-        return ("PLACE",), "fuse"
+        return ("PLACE",), "fuse", {}
     return None
 
 
 def _placement_forks(match: Match, root: Node, tile: TileOp):
     """Return the next stored-edge cut fork, or ``None`` when that domain is consumed."""
     seams = cuttable_seams(tile)
-    if not seams:
+    region_pieces = projection_region_pieces(tile)
+    if not seams and not region_pieces:
         return None
 
     renamed = output_map(root)
     match.output = renamed
-    pinned = _placement_restriction(tile, seams)
+    pinned = _placement_restriction(tile, seams, region_pieces)
     if pinned is not None:
-        chosen, value = pinned
+        chosen, value, extra = pinned
         if value == "fuse":
             (spelling,) = chosen
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
+        if value == "regions":
+            return DeferredFork(
+                lambda: realize_projection_regions(match, root, region_pieces),
+                {"PLACE@root": "cut"},
+                structural=True,
+            )
         return DeferredFork(
             lambda: realize(match, root, chosen, renamed, placement_decided=True),
-            {seam.spelling: "cut" for seam in chosen},
+            {**{seam.spelling: "cut" for seam in chosen}, **extra},
             structural=True,
         )
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
+    if region_pieces:
+        options.append(
+            DeferredFork(
+                lambda: realize_projection_regions(match, root, region_pieces),
+                {"PLACE@root": "cut"},
+                structural=True,
+            )
+        )
     by_node = _seam_index(seams)
     closures: dict[frozenset[str], tuple] = {}
     for seam in seams:

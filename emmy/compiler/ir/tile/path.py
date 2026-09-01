@@ -1,9 +1,10 @@
 """The structural placement path codec over the stored Fold tree.
 
-Grammar: ``PLACE@<node-path>[.<axis>][<n>] = value``. Placement addresses a stored Fold edge by
-position because it is a structural decision made before a classic problem exists. Its shortest
-unique path spelling is canonical; ambiguity and stale paths fail loudly. The retired
-``in.<operand>`` prefix and leading-``=`` value-name form remain reserved.
+Grammar: ``PLACE@<node-path>[.<axis>][<n>] = value``. Placement addresses a stored Fold edge by position because it
+is a structural decision made before a classic problem exists; ``PLACE@root`` addresses the root output-region
+boundary without admitting that boundary to bare ``PLACE`` resolution. A shortest unique path spelling is canonical;
+ambiguity and stale paths fail loudly. The retired ``in.<operand>`` prefix and leading-``=`` value-name form remain
+reserved.
 
 Classic choices never use this codec. A classic problem constructs sites only after every structural choice is
 consumed, and its strict codec addresses integer node ids and ``(consumer, operand)`` edge tuples.
@@ -23,7 +24,7 @@ from emmy.compiler.structural import instance_memo
 PATH_FAMILIES = ("PLACE",)
 
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
-_SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
+_SEGMENT_TOKENS = frozenset({"root", "map", "fold", "a", "b"})
 
 #: Split a final component into a literal prefix plus trailing digits. :func:`resolve` tries the
 #: unsplit literal first, then moves the split left one digit at a time. Thus ``a22`` can resolve as
@@ -239,6 +240,10 @@ def spell(root, family: str, node, *, all_sites: tuple[Site, ...] | None = None)
     discriminates, else the shortest anchored path subsequence (deepest anchors preferred), with
     the 1-based ordinal only on a true same-path collision. Stampers and stored evidence use this
     spelling and nothing else."""
+    if node is root:
+        if family not in PATH_FAMILIES:
+            family_sites(family, ())  # raise the structural-family error
+        return f"{family}@root"
     tables = instance_memo(root, "_memo_spellings")
     table = tables.get(family)
     if table is None:
@@ -281,6 +286,9 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
     parsed = parse_key(key)
     matched_key = parsed
     all_sites = sites(root) if all_sites is None else all_sites
+    if parsed.segments == ("root",) and parsed.axis is None and parsed.ordinal is None:
+        family_sites(parsed.family, ())  # validate the family without admitting root to bare PLACE
+        return all_sites[0] if all_sites else None
     fam_sites = family_sites(parsed.family, all_sites)
     if parsed.bare:
         if not fam_sites:

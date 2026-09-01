@@ -152,6 +152,15 @@ def test_family_sites_and_primary() -> None:
     assert primary("PLACE", placements).node is stream
 
 
+def test_root_placement_path_is_explicit_without_changing_the_bare_primary() -> None:
+    root, stream, _qk, _pv = _flash_tree()
+
+    assert spell(root, "PLACE", root) == "PLACE@root"
+    assert resolve(root, "PLACE@root").node is root
+    assert canonical(root, "PLACE@root") == "PLACE@root"
+    assert resolve(root, "PLACE").node is stream
+
+
 def test_site_is_a_frozen_value() -> None:
     s = Site(node=None, axis="k", segments=("fold",))
     assert s.depth == 1 and s.ordinal == 1

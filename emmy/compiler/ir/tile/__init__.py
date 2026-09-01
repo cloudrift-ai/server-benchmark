@@ -17,6 +17,7 @@ from emmy.compiler.ir.tile.ir import (
     extract_output_specs,
     lower_with_output_specs,
     observed_result_names,
+    projection_results,
 )
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 
@@ -34,6 +35,7 @@ __all__ = [
     "apply_output_specs",
     "lower_with_output_specs",
     "observed_result_names",
+    "projection_results",
     "normalize_fold_tree",
     "extract_output_specs",
 ]

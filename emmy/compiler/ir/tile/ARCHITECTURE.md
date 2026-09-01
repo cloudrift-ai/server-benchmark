@@ -281,13 +281,19 @@ kernel then constructs a fresh problem and fresh sites. Search ranks encoded acc
 consumes the typed assignment, so neither layer defines schedule membership.
 
 The single `lowering/tile/030_cut` pass reaches a fixpoint over kernel-set alternatives before scheduling: placement
-first, then cross-CTA reduction splitting. `PLACE` uses the same tree-path codec to address a
-stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
-writes the child Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with
-ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned cuts re-enter placement
-before scheduling; any pinned cut carries the consumed placement decision on both pieces and proceeds to reduction
-splitting. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation families nor
-filters legal cuts by profitability.
+first, then cross-CTA reduction splitting. `PLACE` uses the tree-path codec to address a stored non-root Fold edge.
+The explicit `PLACE@root` site applies only when a zero-axis root contains a pure prefix followed by independent
+output-owning `ProjectionRegion`s. Its cut sibling partitions all sibling regions in one structural choice, closes
+each region over the prefix, and lifts that region's leading axes into a fresh root-global placement. Bare `PLACE`
+still resolves only among stored Fold edges. Every fresh region piece re-enters the ordinary placement fixpoint, so
+nested sibling regions use the same rule rather than a separate traversal.
+
+The fused sibling preserves the maximal Fold tree; each semantically closed Fold-edge cut sibling writes the child
+Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with ordinary `Load`
+edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned cuts re-enter placement before scheduling;
+any pinned Fold-edge cut carries the consumed placement decision on both pieces and proceeds to reduction splitting.
+Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation families nor filters legal
+cuts by profitability.
 
 A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
 when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's

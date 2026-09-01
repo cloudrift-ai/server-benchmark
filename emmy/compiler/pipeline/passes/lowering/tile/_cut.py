@@ -17,7 +17,6 @@ from itertools import islice
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
-from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.pure.fold import (
@@ -36,6 +35,7 @@ from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
+from emmy.compiler.pipeline.passes.lowering.tile._pieces import input_fragment, piece_inputs
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 
@@ -529,25 +529,6 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     return tuple(axis for axis in seam.axes if axis.name in captures or (axis.extent.is_static and axis.extent.as_static() == 1))
 
 
-def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = ()) -> list[str]:
-    """A piece's graph inputs: its workspaces, then every buffer of ``root``'s the piece reads.
-
-    The read set is the STORED tree's (:func:`loaded_buffers`), not the lowered body's, because the
-    kernel this node becomes is materialized from that tree. A Fold a region keeps as a term hides
-    its operand edges from a lowered-body walk, so declaring the lowered view named fewer inputs
-    than the kernel went on to read; the workspace producers then had no consumer edge, were pruned
-    as orphans, and the launch asked for a buffer nothing had allocated."""
-    reads = loaded_buffers(fold)
-    return [*first, *(name for name in root.inputs if name in reads)]
-
-
-def _input_fragment(match: Match, root: Node) -> Graph:
-    fragment = Graph()
-    for name in root.inputs:
-        fragment.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(name), node_id=name)
-    return fragment
-
-
 def output_map(root: Node) -> dict[str, str]:
     """Stable temporary output names used by every cut sibling of ``root``."""
     return {name: f"{name}__placed" for name in root.buffer_names()}
@@ -675,7 +656,7 @@ def realize(
         others = {target: loads for target, loads in everything.items() if target not in replacements}
         produced_pieces.append((seam, _replace_fold(produced, others) if others else produced, axes, index, token, names, buffers))
 
-    fragment = _input_fragment(match, root)
+    fragment = input_fragment(match, root)
     all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
     # A producer reading another seam's workspace must follow the node that writes it. Strict
     # containment makes this dependency graph acyclic, including chains whose members have the
@@ -700,7 +681,7 @@ def realize(
         reads = loaded_buffers(produced)
         fragment.add_node(
             op=producer,
-            inputs=_piece_inputs(root, produced, tuple(buffer for buffer in all_buffers if buffer in reads)),
+            inputs=piece_inputs(root, produced, *(buffer for buffer in all_buffers if buffer in reads)),
             outputs=workspace_tensors,
             node_id=buffers[0],
         )
@@ -725,7 +706,7 @@ def realize(
     all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
     fragment.add_node(
         op=consumer,
-        inputs=_piece_inputs(root, parent_fold, all_buffers),
+        inputs=piece_inputs(root, parent_fold, *all_buffers),
         outputs=output_tensors,
         node_id=renamed_outputs[root.id],
     )

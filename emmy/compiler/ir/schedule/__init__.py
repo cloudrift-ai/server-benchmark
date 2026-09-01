@@ -18,7 +18,6 @@ from .choices import (
     Work,
     derive_inventory,
     derive_workers,
-    plan_workers,
     resolve_site_tile,
 )
 from .cut import CutScheduleContext
@@ -52,7 +51,6 @@ __all__ = [
     "derive_inventory",
     "derive_workers",
     "node_view",
-    "plan_workers",
     "resolve_site_tile",
     "schedule_edges",
     "schedule_nodes",

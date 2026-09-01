@@ -40,7 +40,6 @@ from emmy.compiler.ir.schedule.classic import (
     ClassicScheduleContext,
     EdgeSchedule,
     KernelSchedule,
-    LocalSupport,
     ProjectionSchedule,
     ReductionSchedule,
     classic_cartesian_assignments,
@@ -167,15 +166,6 @@ def _finite_domains(problem: ClassicProblem) -> ClassicDomains:
     tiled_node = ReductionSchedule(Tile(units=(1, 2)), Reduce())
     direct_edges = {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites}
     staged_edges = {edge: EdgeSchedule(Stage()) for edge in context.edge_sites}
-    support = {
-        (direct_node, tuple(direct_edges.items())): LocalSupport(direct_node, direct_edges),
-        (tiled_node, tuple(staged_edges.items())): LocalSupport(
-            tiled_node,
-            staged_edges,
-            work=Work.parse("t2"),
-            raster_eligible=True,
-        ),
-    }
     return ClassicDomains(
         kernel=(
             KernelSchedule(Work(), Raster()),
@@ -184,7 +174,6 @@ def _finite_domains(problem: ClassicProblem) -> ClassicDomains:
         ),
         nodes={site: (direct_node, tiled_node)},
         edges={edge: (direct_edges[edge], staged_edges[edge]) for edge in context.edge_sites},
-        _support=lambda candidate_site, node, edges: support.get((node, tuple(edges.items()))) if candidate_site == site else None,
     )
 
 
@@ -219,7 +208,7 @@ def test_context_indexes_finite_domain_membership(monkeypatch) -> None:
     many_kernel_choices = tuple(KernelSchedule(Work(kind="thread", units=(width, 1)), Raster()) for width in range(1, 65)) + (
         KernelSchedule(Work(), Raster()),
     )
-    domains = ClassicDomains(many_kernel_choices, domains.nodes, domains.edges, domains.local_support)
+    domains = ClassicDomains(many_kernel_choices, domains.nodes, domains.edges)
     context = ClassicScheduleContext(problem, domains)
     equals = KernelSchedule.__eq__
     calls = 0
@@ -318,11 +307,6 @@ def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
         kernel=(KernelSchedule(Work.parse("w1x4"), Raster()),),
         nodes={site: (node,)},
         edges={edge: (choice,) for edge, choice in edges.items()},
-        _support=lambda candidate_site, candidate_node, candidate_edges: (
-            LocalSupport(candidate_node, candidate_edges, work=Work.parse("w1x4"))
-            if candidate_site == site and candidate_node == node
-            else None
-        ),
     )
     schedule = Schedule(domains.kernel[0], {site: node}, edges)
 

@@ -525,8 +525,8 @@ class TileOp(Op):
             raise ValueError("a scheduled TileOp requires both a schedule and materialization")
         validate = getattr(self.materialization, "validate", None)
         if not callable(validate):
-            raise TypeError("schedule materialization must provide validate(schedule, root, place=..., workers=...)")
-        validate(self.schedule, self.op, place=self.place, workers=self.workers)
+            raise TypeError("schedule materialization must provide validate(schedule, source, place=..., workers=...)")
+        validate(self.schedule, self, place=self.place, workers=self.workers)
 
     @cached_property
     def nodes(self) -> tuple[Fold, ...]:

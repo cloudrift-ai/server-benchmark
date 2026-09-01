@@ -23,11 +23,11 @@ from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var
 from emmy.compiler.ir.schedule import Stage, Tile, Work
+from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import Channel, Fold
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.passes.lowering._packed import match_packed_b_node
-from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 from tests.compiler.helpers import requires_cuda
 
 K16 = "mma_m16n8k16_f16_f32"
@@ -269,11 +269,11 @@ def _rows(node, inputs, axes, pins=None):
     ctx = Context.from_target((8, 9))
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     domains = project_domains(op, ctx)
-    context = ClassicScheduleContext(ClassicProblem(op.op, ctx), domains)
+    context = ClassicScheduleContext(ClassicProblem.from_tile(op, ctx), domains)
     site = context.site(node)
     choices = tuple(choice for choice in domains.nodes[site] if choice.tile == tile.choice)
     edge_domains = tuple((edge, domains.edges[edge]) for edge in context.incident_edges(site))
-    rows = [next(iter(support.edges.values())).stage.spell() for support in domains.local_frontier(site, choices, edge_domains)]
+    rows = [next(iter(support.edges.values())).stage.spell() for support in context._local_frontier(site, choices, edge_domains)]
     pin = (pins or {}).get("STAGE")
     return [row for row in rows if pin is None or row == pin]
 
@@ -803,7 +803,7 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
     )
     target = Context.from_target((9, 0))
     domains = project_domains(op, target)
-    context = ClassicScheduleContext(ClassicProblem(op.op, target), domains)
+    context = ClassicScheduleContext(ClassicProblem.from_tile(op, target), domains)
     site = context.site(node)
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     choices = tuple(choice for choice in domains.nodes[site] if choice.tile == tile.choice)
@@ -811,5 +811,5 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
         (edge, tuple(choice for choice in domains.edges[edge] if choice.stage.spell() == "d1/smem-tma"))
         for edge in context.incident_edges(site)
     )
-    supports = domains.local_frontier(site, choices, edge_domains)
+    supports = context._local_frontier(site, choices, edge_domains)
     assert supports and all(not support.producer_eligible for support in supports)

@@ -23,9 +23,9 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
+from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
-from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 from emmy.compiler.pipeline.search.space import stage_moves
 from tests.compiler.helpers import classic_row, requires_cuda
 
@@ -200,7 +200,7 @@ def _run_w8a16(backend, stage_pin, x, bits, scale, m, n, k):
 
     from .test_fp8_operand_binding import _fp8_linear_graph
 
-    pins = classic_row({"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}, node=1)
+    pins = classic_row({"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""})
     with pinned_knobs(pins):
         compiled = backend.compile(_fp8_linear_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]

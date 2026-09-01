@@ -13,15 +13,17 @@ operations are a lazy frontier and composition:
 Each pick is itself a partial `Schedule`. A returned context contains the composed facts and leaves the original
 unchanged; incompatibility raises `ScheduleRefused`. `extend` is also the validation boundary for a complete assignment
 supplied directly by a pinned golden, even when that assignment was not emitted by `extensions`. The generic
-`schedule(context)` function applies exactly one lazy frontier and returns either child contexts or complete
-assignments. Consumers build a lazy tree by feeding each returned context back to the same function. The driver knows
-no concrete family, pipeline fork type, site order, restriction, or enumeration slice.
+`schedule(context)` recursively composes those lazy frontiers and yields only complete assignments. Recursion is the
+generic Algorithm 1 traversal; consumers do not write a family-specific visitor or feed contexts back themselves. The
+driver knows no concrete family, pipeline fork type, site order, restriction, or enumeration slice. The pipeline's
+generic schedule-fork adapter preserves the same contexts as deferred search branches without adding compatibility
+logic.
 
 Classic assignment contexts additionally expose the independent kernel, node, and edge factors.
 `enumerate_classic_reference` is their literal Cartesian oracle:
 
     D(p, t) = K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)
-    Algorithm 1(c, p, t) = {a ∈ D(p, t) | c.accepts(a) ∧ accepts(p, t, a)}
+    Algorithm 1(c, p, t) = {a ∈ D(p, t) | extend(c + p + t, a) succeeds}
 
 `ClassicScheduleContext` contains all three inputs and evaluates the two acceptance terms together. Its frontier may
 omit a pick when `c + p + t` proves that no completion exists, but repeated generic expansion must enumerate exactly
@@ -35,7 +37,8 @@ enumeration order; a concrete codec alone translates integer and tuple sites to 
 
 ## Classic schedule
 
-`ClassicScheduleContext` is the immutable `c + p + t` prefix. It projects the classic domains and owns all classic
+`ClassicScheduleContext` is the immutable `c + p + t` prefix. `ClassicProblem` carries the source TileOp, target, and
+derived contraction facts; `ClassicDomains` carries only the literal independent factors. The context owns all classic
 compatibility and restriction behavior:
 worker inventory, physical-axis agreement, fragment seams, raster eligibility, resource limits, producer-band/TMA
 agreement, target availability, pins, and precision restrictions. The independent domains hold choices only; an
@@ -51,6 +54,6 @@ no codec base class: a second schedule family should demonstrate any shared code
 
 The structural cut phase runs before assignment composition. `030_cut` exhausts stored-Fold-edge placement and
 `035_split_reduce` then decides the cross-CTA reduction split. Both pass their independent choice domain through
-`CutScheduleContext`; `040_schedule` passes the resulting classic assignment context. All three invoke the same
-generic `schedule(context)` function. The cut context stores its one structural factor in the generic kernel field; it
-does not invent a second enumeration interface.
+`CutScheduleContext`; `040_schedule` passes the resulting classic assignment context. All three use the generic
+schedule/context contract. The cut context stores its one structural factor in the generic kernel field; it does not
+invent a second enumeration interface.

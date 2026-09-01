@@ -442,7 +442,7 @@ def _serialize_op_fields(op: Op) -> dict:
         node_id_spelling,
     )
 
-    codec = ClassicScheduleCodec(ClassicScheduleContext(ClassicProblem(op.op, target=None)))
+    codec = ClassicScheduleCodec(ClassicScheduleContext(ClassicProblem.from_tile(op, target=None)))
     fields["schedule"] = codec.encode(op.schedule)
     if op.materialization is not None:
         fields["materialization"] = {

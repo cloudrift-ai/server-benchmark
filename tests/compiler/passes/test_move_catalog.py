@@ -23,7 +23,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.pure.fold import Channel, Fold
-from emmy.compiler.ir.schedule import Reduce, Tile, Work, plan_workers, resolve_site_tile
+from emmy.compiler.ir.schedule import Reduce, Tile, Work, derive_workers, resolve_site_tile
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
@@ -64,7 +64,7 @@ _EXPECTED_MOVES = [
 
 def _stored(plan: Tile) -> tuple[str, str]:
     """The (site ``TILE`` value, ``WORK`` inventory) pair a tile move stores."""
-    work = plan_workers(plan)
+    work = derive_workers((plan,))
     return plan.spell(), (work.spell() if work is not None else "")
 
 
@@ -269,10 +269,9 @@ def _computed_a_term() -> TileOp:
 def _rows_of(tile, ctx=None) -> list[dict]:
     """Every row ``tile`` enumerates — the leaves of the walk's own fork (a fully forced walk is
     still a one-leaf fork, so the engine records its row as a decision)."""
-    from emmy.compiler.ir.schedule import schedule
     from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
 
-    out = classic_forks(tile, "k", {}, ctx or Context.from_target((12, 0)), advance=schedule)
+    out = classic_forks(tile, "k", {}, ctx or Context.from_target((12, 0)))
     return [dict(leaf.knobs) for leaf in iter_leaves(out)]
 
 

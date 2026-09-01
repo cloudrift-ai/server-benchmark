@@ -107,10 +107,9 @@ not exist on a kernel addresses another kernel of the graph; a kernel none of th
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Only unpinned cuts leave the pieces undecided, so search can explore their smaller
 seams before scheduling.
-`040_schedule` is the classic assignment boundary. `_classic.py` realizes direct projection, plain-reduction,
-scalar-contraction,
-precision-gated tensor-core, materialized-operand copy staging, computed-operand and multi-channel smem compute-fill
-staging, fragment-compatible composed contractions, and kernel-global raster domains. A composed cross-CTA split
+`040_schedule` is the classic assignment boundary. `_classic.py` projects direct, plain-reduction,
+scalar-contraction, precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem
+compute-fill, and kernel-global raster domains. `ClassicScheduleContext` alone composes their compatibility. A cross-CTA split
 piece with several contraction schedule sites uses the same boundary. A split piece's partition receipt consumes the
 GRID stage
 before `c` is built, so its immutable schedule restriction contains only the remaining `REDUCE` stages; neither the
@@ -188,11 +187,11 @@ used to discover that structural enumeration should have happened first.
 Constraints that are a function of the MOVE live in the catalogs that generate it (the scalar tile space is generated
 under the CTA thread budget, so no member can exceed it; the stage catalog filters its copy transports through
 `Stage.available_on`, so a target without TMA never sees a TMA move — the atom registry's own shape); constraints that
-are a function of the NODE live beside the moves they filter — the warp tier's eligible atoms are read once per node
-from its algebra, its operand dtypes and the gmem addressing its fragment loaders and fragment store must reach, and
-the fragment seam's refusals (the paired register bound included) sit beside the option builder in `_classic`.
-`tile/_staging.py` is not a legality layer: it holds the three stage RESOLVERS (whose legal answer is a size) plus the
-compute fill's own node refusals, which live there because the fill is the move they filter. Nothing may narrow for
+are a function of the NODE are facts the context reads while composing a pick — the warp tier's eligible atoms are
+read once per node from its algebra, operand dtypes, and the gmem addressing its fragment loaders and fragment store
+must reach. Fragment-seam and paired-register refusals live only in `ClassicScheduleContext`.
+`ir/schedule/staging.py` holds the three stage RESOLVERS (whose legal answer is a size) plus the compute fill's source
+facts. The context alone decides whether the resolved fact composes. Nothing may narrow for
 SPEED — a slow candidate is a fork the evidence decides, never a row withheld. A cooperative band wider than its axis
 remains in the independent domain because idle lanes are legal; a restriction may select it without constructing a
 new value.
@@ -209,14 +208,13 @@ carry it. Once the parameter set contains scoped schedule pins, its bare kernel 
 they restrict a kernel where at least one scoped key resolves and are inert on kernels where every scoped key is
 foreign.
 
-**The walk IS the fork tree.** A branch holds the nodes still to decide, the context they must honour, and the row
-prefix decided so far; nothing below it exists until it expands. A level with one option is collapsed, so the fork
-tree carries choices only. Traversal order is the fork order — there is no separate level vocabulary to keep in step
-with the walk. Kernel-global `RASTER` leads. `WORK` is stamped the moment a site option claims an inventory, which the
-private partial assignment then refuses to change; neither ordering changes the Cartesian reference set.
+**The context IS the fork tree state.** The generic schedule-fork adapter holds the immutable context and row prefix;
+nothing below a branch exists until it expands. Classic contributes only row encoding and leaf materialization. Direct
+iteration uses the same generic recursive `schedule(context)` traversal. `WORK` is stamped when a site claims an
+inventory, which the next context refuses to change; traversal order never changes the Cartesian reference set.
 
 **Operand staging is resolved at option construction.** A contraction's option selects an axis- and size-free `Stage`
-choice. The resolvers (`tile/_staging.py`) answer with a separate `ResolvedStage` containing the slab names, resolved
+choice. The resolvers (`ir/schedule/staging.py`) answer with a separate `ResolvedStage` containing the slab names, resolved
 `bk_elems` chunk, and deepest ring the per-site smem budget (`ctx.max_dynamic_smem`) affords. An over-budget row is
 never offered rather than failing at materialization, while row identity reads only `ResolvedStage.choice`. Three
 transport families: the copy transports

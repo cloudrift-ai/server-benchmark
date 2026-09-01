@@ -17,17 +17,12 @@ PATTERN = [Pattern("root", TileOp)]
 
 
 def _seam_index(seams) -> dict[int, object]:
-    """``id(node) -> seam`` over every seam node AND its clustered siblings — a duplicate cone
-    folded into a cluster seam stays addressable: any member names the one shared decision."""
+    """Map every seam node and clustered sibling to its shared decision."""
     return {id(node): seam for seam in seams for node in (seam.node, *(sibling for sibling, _ in seam.siblings))}
 
 
 def _with_required(chosen, by_node: dict[int, object], refuse: frozenset = frozenset()) -> tuple:
-    """``chosen`` expanded with every transitively required producer seam — the ONE composition
-    walk the pin path and the unpinned fork share, so a dependent seam is the same composed
-    decision however it is reached. The requirement is structural (the dependent's piece reads
-    the producer's workspace), not a choice either route can decline; a requirement landing on a
-    ``refuse`` spelling (a pinned fuse) raises the contradiction."""
+    """Expand chosen seams with every transitively required producer seam."""
     out = list(chosen)
     queue = list(out)
     while queue:
@@ -42,13 +37,13 @@ def _with_required(chosen, by_node: dict[int, object], refuse: frozenset = froze
 
 
 def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | None:
-    """The authoritative placement the live PLACE pins spell for THIS kernel, or ``None``.
+    """The authoritative placement spelled by live PLACE pins, or ``None``.
 
     This restriction is consumed entirely by the cut pass before classic schedule enumeration.
     Every scoped ``PLACE@site=cut`` pin that resolves on this kernel joins ONE composed decision —
     the seams all live on this kernel's tree, so one realization cuts them together and the pieces
-    stay decided. A bare ``PLACE=cut`` consumes its one root-most cut the same way. A scoped pin whose site
-    path does not exist on this kernel addresses another kernel of the graph; a kernel none of
+    stay decided. A bare ``PLACE=cut`` consumes its root-most cut the same way. A scoped pin whose
+    site path does not exist on this kernel addresses another kernel of the graph; a kernel none of
     the pins address decides FUSE, so the unpinned fork never returns under a pin-driven compile.
     A pin that resolves to a site no cut realizes is an addressing error and raises. A scoped
     ``PLACE@site=fuse`` excludes that seam from the composed cut (alone, it decides fuse under
@@ -130,12 +125,6 @@ def _placement_forks(match: Match, root: Node, tile: TileOp):
         )
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
-    # One structural arm per PRINCIPAL closure: a seam plus its transitively required producers,
-    # composed exactly as the pin path composes them (`_with_required`), so the evidence-driven
-    # route through a dependent seam is on the ballot — DeepSeek-V4 post4096's only working
-    # placement (33,000,000x fewer worst per-thread trips) was a dependent seam's closure, which
-    # the previous plain-only fork could never offer. Two seams whose closures coincide are one
-    # arm; a plain seam's closure is itself, so the plain arms are unchanged.
     by_node = _seam_index(seams)
     closures: dict[frozenset[str], tuple] = {}
     for seam in seams:

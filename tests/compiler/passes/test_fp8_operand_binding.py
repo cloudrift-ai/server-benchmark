@@ -30,10 +30,10 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction
 from emmy.compiler.ir.schedule import Stage, Tile, Work
+from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
-from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 from tests.compiler.helpers import classic_row, requires_cuda
 
 # ===================================================================
@@ -308,7 +308,7 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda():
     backend = CudaBackend()
     # STAGE pinned to gmem-direct: this test anchors the gmem-direct fragment-convert spelling
     # (the staged byte-slab forms are ``test_fp8_staged``'s).
-    with pinned_knobs(classic_row({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}, node=1)):
+    with pinned_knobs(classic_row({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""})):
         compiled = backend.compile(_fp8_linear_graph(m, n, k))
 
     sources = [getattr(node.op, "kernel_source", None) for node in compiled.nodes.values()]

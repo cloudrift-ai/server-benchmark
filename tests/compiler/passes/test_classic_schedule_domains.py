@@ -43,7 +43,7 @@ def _reference(tile, target, domains, *, pins=None):
 
 def _schedule_leaves(tile, name, target):
     """Expand the lazy traversal while retaining its typed schedule leaves."""
-    return tuple(iter_leaves(classic_forks(tile, name, {}, target, advance=schedule)))
+    return tuple(iter_leaves(classic_forks(tile, name, {}, target)))
 
 
 def test_production_enumeration_is_the_compatible_independent_product() -> None:
@@ -248,7 +248,7 @@ def test_multi_channel_contraction_domain_contains_per_cell_and_warp_compute_fil
     )
     target = Context.from_target((12, 0))
     domains = project_domains(tile, target)
-    c = ClassicScheduleContext(ClassicProblem(root, target), domains)
+    c = ClassicScheduleContext(ClassicProblem.from_tile(tile, target), domains)
     compatible = []
     for pick in c.extensions():
         try:

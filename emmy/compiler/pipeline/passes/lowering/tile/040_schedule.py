@@ -60,7 +60,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     # enumeration, so every remaining cut must be explored before this inner enumeration starts.
     if (not tile.placement_decided and cuttable_seams(tile)) or split_pending(tile):
         raise RuleSkipped("cut enumeration precedes schedule enumeration")
-    options = classic_forks(tile, tile.name, tile.knobs, ctx, advance=schedule)
+    options = classic_forks(tile, tile.name, tile.knobs, ctx, driver=schedule)
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

@@ -610,7 +610,7 @@ def resolve_site_tile(spec: str | None, work: Work | None, coop: int = 1) -> Til
     return Tile.parse(spec, work)
 
 
-def plan_workers(plan: Tile | None) -> Work | None:
+def _plan_workers(plan: Tile | None) -> Work | None:
     """The worker inventory ONE tile plan implies — ``None`` for an untiled plan or a 1-thread
     thread inventory (a bare register strip: the per-cell forms keep their derived launch
     geometry). A plan stores ``(m, n)``; ``Work.units`` is the ``WORK`` codec's own order, so
@@ -630,7 +630,7 @@ def derive_workers(tiles) -> Work | None:
     disagrees must fail loudly, never be half-ignored)."""
     work: Work | None = None
     for plan in tiles:
-        w = plan_workers(plan)
+        w = _plan_workers(plan)
         if w is None:
             continue
         if work is None:

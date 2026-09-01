@@ -30,13 +30,15 @@ the whole row.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import Op
+
+from emmy.compiler.ir.schedule import Schedule, ScheduleContext
 
 
 class Fork(ABC):
@@ -126,6 +128,72 @@ class DeferredFork(Fork):
 
     def expand(self) -> list[Op | Graph | Fork]:
         return [self.materialize()]
+
+
+@dataclass(frozen=True)
+class _ScheduleTree:
+    """Shared callbacks and identity for one generic lazy schedule tree."""
+
+    branch_knobs: Mapping
+    driver: Callable
+    row_delta: Callable[[ScheduleContext, ScheduleContext], Mapping]
+    leaf: Callable[[Schedule], Fork]
+    pool_id: str
+    pool_bound: int
+    pool_descent_bound: int
+
+    def step(self, context: ScheduleContext, row: Mapping) -> list[Fork]:
+        forks = []
+        for child in self.driver(context, recursive=False):
+            if isinstance(child, Schedule):
+                forks.append(self.leaf(child))
+            else:
+                forks.append(_ScheduleFork(self, child, {**row, **self.row_delta(context, child)}))
+        return forks
+
+
+@dataclass(frozen=True)
+class _ScheduleFork(Fork):
+    """One immutable prefix in a generic lazy schedule tree."""
+
+    tree: _ScheduleTree
+    context: ScheduleContext
+    row: Mapping
+
+    @property
+    def knobs(self) -> dict:
+        return {**self.tree.branch_knobs, **self.row}
+
+    @property
+    def pool_id(self) -> str:
+        return self.tree.pool_id
+
+    @property
+    def pool_bound(self) -> int:
+        return self.tree.pool_bound
+
+    @property
+    def pool_descent_bound(self) -> int:
+        return self.tree.pool_descent_bound
+
+    def expand(self) -> list[Fork]:
+        return self.tree.step(self.context, self.row)
+
+
+def schedule_forks(
+    context: ScheduleContext,
+    *,
+    driver: Callable,
+    branch_knobs: Mapping,
+    row_delta: Callable[[ScheduleContext, ScheduleContext], Mapping],
+    leaf: Callable[[Schedule], Fork],
+    pool_id: str,
+    pool_bound: int,
+    pool_descent_bound: int,
+) -> list[Fork]:
+    """Represent any schedule context as a lazy pipeline Fork tree."""
+    tree = _ScheduleTree(dict(branch_knobs), driver, row_delta, leaf, pool_id, pool_bound, pool_descent_bound)
+    return tree.step(context, {})
 
 
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:

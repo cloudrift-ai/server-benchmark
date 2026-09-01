@@ -1213,9 +1213,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      LOOPIFY: '0'
-      REDUCE: coop
       WORK: t512
+      REDUCE: coop
+      LOOPIFY: '0'
+      RASTER: ''
     measurements:
       emmy_us: 2.3804
       reference_us: 121.8653

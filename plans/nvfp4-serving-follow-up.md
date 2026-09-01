@@ -75,6 +75,16 @@ obligation:
 Exit bar for this scope: `emmy serve nvidia/Qwen3-8B-NVFP4 --generate` reaches healthy in <= 20 min on
 the workstation and a probe token costs <= 1 min — testable, with tuned speed still step 2's claim.
 
+g1 measured at serving size (2026-09-01, deployable O3, whole target): gate+up m1 19.7 s -> 9.1 ms (2152x),
+m32 38.9 s -> 119.5 ms (326x) — the 100 ms bar missed by the NEXT gap, one notch narrower: four of the eight
+contraction pieces take the block-scaled cell at 21 us each; the other four structurally decline the warp
+tier (no offered tile binds) and cost 110 of the 119.5 ms. Bound like their siblings, the kernel sits ~9 ms.
+After the cut the decode step's dominator flips to fused q/k (97.5% of m1 time); their seam sets are
+enumerated and the same recipe applies. Deploy route decided (Ivan): record canonical goldens for the 5080
+(goldens carry cut pins, bypass prior and guard); blocked on a binder crash — the pair-decode table's
+source-graph select is an int literal where a bool mask belongs (`np.copyto(where=int64)` refuses;
+ir/tensor/ir.py moved in #689) — parity-checked fix in flight, golden recording resumes after.
+
 ## Step 2 — tuned and measured (dense 8B) — stacked on step 1
 
 Scope: NVFP4 twins arm (`serving/twins.py` + `scripts/capture_gen_twins.py`), tune, record goldens. Rented

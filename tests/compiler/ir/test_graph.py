@@ -217,7 +217,7 @@ def test_kernel_op_windowed_axis_roundtrip():
     assert op.smem_bytes() == 128 * 32 * 2
 
 
-def test_tile_op_scalar_atom_schedule_roundtrip():
+def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
     """A dumped tile-stage graph must rehydrate the scalar output-tile schedule."""
     import json
 
@@ -252,7 +252,17 @@ def test_tile_op_scalar_atom_schedule_roundtrip():
     )
     g.inputs, g.outputs = [x], ["out"]
 
+    calls = 0
+    extend = ClassicScheduleContext.extend
+
+    def counted(context, pick):
+        nonlocal calls
+        calls += 1
+        return extend(context, pick)
+
+    monkeypatch.setattr(ClassicScheduleContext, "extend", counted)
     loaded = Graph.from_dict(json.loads(json.dumps(g.to_dict(), default=str)))
+    assert calls == 1
     loaded_tile = loaded.nodes["out"].op
     loaded_context = ClassicScheduleContext(ClassicProblem.from_tile(loaded_tile, target=None))
     plan = loaded_tile.schedule.nodes[loaded_context.node_sites[0]].tile

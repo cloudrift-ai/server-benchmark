@@ -1485,9 +1485,9 @@ class ClassicScheduleCodec:
     def encode(self, schedule: ClassicAssignment) -> dict[str, str]:
         """Encode one accepted typed schedule in canonical scope order."""
         accepted = self.context.extend(schedule).assignment
-        return self.encode_accepted(accepted)
+        return self._encode(accepted)
 
-    def encode_accepted(self, schedule: ClassicAssignment) -> dict[str, str]:
+    def _encode(self, schedule: ClassicAssignment) -> dict[str, str]:
         """Encode a schedule already accepted by this codec's context traversal."""
         row = {
             "WORK": schedule.kernel.work.spell(),
@@ -1510,10 +1510,10 @@ class ClassicScheduleCodec:
 
     def decode(self, row: Mapping[str, str]) -> ClassicAssignment:
         """Decode one complete canonical row and reject every other key set or assignment."""
-        schedule = self.parse(row)
+        schedule = self._parse(row)
         return self._validate_row(schedule, row)
 
-    def parse(self, row: Mapping[str, str]) -> ClassicAssignment:
+    def _parse(self, row: Mapping[str, str]) -> ClassicAssignment:
         """Parse typed values before a reconstructed TileOp supplies materialization for validation."""
         self._check_keys(row)
 
@@ -1548,7 +1548,7 @@ class ClassicScheduleCodec:
     def _validate_row(self, schedule: ClassicAssignment, row: Mapping[str, str]) -> ClassicAssignment:
         """Validate a parsed assignment and its claimed canonical row exactly once."""
         accepted = self.context.extend(schedule).assignment
-        canonical = self.encode_accepted(accepted)
+        canonical = self._encode(accepted)
         if dict(row) != canonical:
             raise ValueError("classic schedule row is not its typed schedule's canonical encoding")
         return accepted

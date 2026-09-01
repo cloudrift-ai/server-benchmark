@@ -443,7 +443,7 @@ def _serialize_op_fields(op: Op) -> dict:
     )
 
     codec = ClassicScheduleCodec(ClassicScheduleContext(ClassicProblem.from_tile(op, target=None)))
-    fields["schedule"] = codec.encode(op.schedule)
+    fields["schedule"] = codec._encode(op.schedule)
     if op.materialization is not None:
         fields["materialization"] = {
             "tiles": {node_id_spelling(site): [repr(axis) for axis in placed.axes] for site, placed in op.materialization.tiles.items()},
@@ -486,7 +486,9 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
     context = ClassicScheduleContext(ClassicProblem.from_tile(source, target=None))
     codec = ClassicScheduleCodec(context)
     schedule_wire = _wire_mapping(schedule_row, "classic schedule")
-    schedule = codec.parse(schedule_wire)
+    schedule = codec._parse(schedule_wire)
+    if codec._encode(schedule) != dict(schedule_wire):
+        raise ValueError("classic schedule row is not its typed schedule's canonical encoding")
     fields["schedule"] = schedule
     materialization = _exact_wire_mapping(materialization_row, {"tiles", "stages"}, "classic materialization")
     tile_rows = _wire_mapping(materialization["tiles"], "classic materialization tiles")
@@ -511,11 +513,7 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
             raise ValueError(f"classic materialization names unknown edge site {spelling}")
         stages[edge] = ResolvedStage(schedule.edges[edge].stage, tuple(facts["smem"]), facts["bk_elems"])
     fields["materialization"] = ClassicMaterialization(tiles, stages)
-    tile = op_cls(**fields)
-    accepted_codec = ClassicScheduleCodec(ClassicScheduleContext(ClassicProblem.from_tile(tile, target=None)))
-    if accepted_codec.encode(schedule) != dict(schedule_wire):
-        raise ValueError("classic schedule row is not its typed schedule's canonical encoding")
-    return tile
+    return op_cls(**fields)
 
 
 def _wire_mapping(value, where: str) -> dict:

@@ -140,7 +140,6 @@ class _ProjectionState:
     target: object
     context: ClassicScheduleContext
     contraction_facts: dict
-    producer_sites: frozenset[str]
     sched: Sched
 
 
@@ -228,7 +227,6 @@ def _project_domains(tile: TileOp, target) -> tuple[ClassicProblem, ClassicDomai
         target,
         context,
         contraction_facts,
-        frozenset(facts.need for facts in contraction_facts.values() if facts.need is not None),
         Sched(tile.op, place=tile.place.on_grid()),
     )
     edge_domains = {}
@@ -425,7 +423,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
             dict(knobs),
             ctx,
             assignment,
-            frozendict({**prefix, **codec.encode_accepted(assignment)}),
+            frozendict({**prefix, **codec._encode(assignment)}),
             problem.contractions,
             pool_id,
         ),

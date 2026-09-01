@@ -56,11 +56,11 @@ its complete facts there rather than calling upward into domain projection. Per-
 indexes are derived memo tables, excluded from pickles and rebuilt after transport.
 
 `ClassicScheduleCodec` is the concrete strict wire boundary. It accepts a `ClassicScheduleContext`, validates complete
-assignments through that context, and encodes canonical `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` rows. There is
-one syntax-only `parse` step for graph reconstruction: materialization is decoded from the typed schedule, construction
-then validates the complete TileOp through the context, and canonical encoding is checked with that validated source.
-There is no codec base class: a second schedule family should demonstrate any shared codec contract before one is
-extracted.
+assignments through that context, and encodes canonical `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` rows. Graph
+reconstruction privately parses typed values so their separately encoded materialization sites can be decoded, checks
+canonical spelling, and lets complete TileOp construction perform the sole compatibility validation. The public codec
+surface remains strict `encode`/`decode`. There is no codec base class: a second schedule family should demonstrate any
+shared codec contract before one is extracted.
 
 The structural cut phase runs before assignment composition. `030_cut` decides stored-Fold-edge placement and
 `035_split_reduce` then decides the cross-CTA reduction split; fresh pieces re-enter those ordinary passes. Both pass

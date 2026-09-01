@@ -174,25 +174,37 @@ def test_context_owns_worker_and_transport_compatibility() -> None:
 
 def test_independent_nodes_compose_only_at_matching_physical_axis_geometry() -> None:
     """Algebraically reversed axes compose only when their physical widths still agree."""
-    from emmy.compiler.ir.schedule.classic import _LocalSupport
+    m, n = Axis("m", 8), Axis("n", 8)
+    first = Fold.contraction(
+        k_axis=Axis("k1", 8),
+        a=Load("a1", "a1", (Var("m"), Var("k1"))),
+        channels=(Channel(Load("b1", "b1", (Var("k1"), Var("n"))), "left"),),
+    )
+    second = Fold.contraction(
+        k_axis=Axis("k2", 8),
+        a=Load("a2", "a2", (Var("n"), Var("k2"))),
+        channels=(Channel(Load("b2", "b2", (Var("k2"), Var("m"))), "right"),),
+    )
+    root = Fold.projection(operands=(first, second), body=Body(), results=("left", "right"))
+    problem = ClassicProblem.from_tile(
+        TileOp(op=root, place=Placement(free=(m, n))),
+        Context.from_target((12, 0)),
+    )
 
-    node = ProjectionSchedule(Tile())
-    prefix = (("m", (1, 1)), ("n", (2, 1)))
-    compatible = _LocalSupport(node, {}, work=Work(), axes=(("n", 2, 1), ("m", 1, 1)))
-    incompatible = _LocalSupport(node, {}, work=Work(), axes=(("n", 1, 1), ("m", 2, 1)))
-
-    def refusal(support):
-        return ClassicScheduleContext._prefix_relation_refusal(
-            support,
-            work=Work(),
-            previous_nodes=(),
-            axes=prefix,
-            fragments=(),
-            allowed_works=None,
+    def pick(context, node, choice):
+        site = context.site(node)
+        return Schedule(
+            None,
+            {site: choice},
+            {edge: EdgeSchedule(Stage.direct()) for edge in context.incident_edges(site)},
         )
 
-    assert refusal(compatible) is None
-    assert refusal(incompatible) == "pick disagrees on physical-axis geometry"
+    context = ClassicScheduleContext(problem)
+    context = context.extend(pick(context, root, ProjectionSchedule(Tile())))
+    context = context.extend(pick(context, first, ReductionSchedule(Tile(regs=(1, 2)), Reduce())))
+    assert context.extend(pick(context, second, ReductionSchedule(Tile(regs=(2, 1)), Reduce())))
+    with pytest.raises(ScheduleRefused, match="pick disagrees on physical-axis geometry"):
+        context.extend(pick(context, second, ReductionSchedule(Tile(regs=(1, 2)), Reduce())))
 
 
 def _finite_domains(problem: ClassicProblem) -> ClassicDomains:

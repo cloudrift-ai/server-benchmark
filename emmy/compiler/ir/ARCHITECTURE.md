@@ -90,10 +90,10 @@ once before search or lowering can observe it. A validated leaf retains its cano
 materialization reuse that row and typed assignment instead of repeating the compatibility walk. Encoding an arbitrary
 schedule remains a validating public boundary.
 
-Graph reconstruction is the staged exception forced by the wire dependency: the codec first parses typed schedule
-values, those values identify the separately encoded materialization sites, and constructing the complete `TileOp`
-then validates the same context relation. The validated source's codec must reproduce the exact input row. Parsing
-alone is never an acceptance boundary.
+Graph reconstruction is the staged exception forced by the wire dependency: a private codec step parses typed schedule
+values and checks their canonical spelling, those values identify the separately encoded materialization sites, and
+constructing the complete `TileOp` then performs the one context validation. Parsing alone is never an acceptance
+boundary.
 
 Kernel, node, and edge domains are independent projections of static offers; none reads another selected choice.
 Their Cartesian product is the definition of the candidate space. For immutable schedule restriction `c`, unscheduled

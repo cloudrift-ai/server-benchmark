@@ -1,5 +1,6 @@
 """Focused tests for greedy schedule-space traversal."""
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -58,6 +59,17 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     assert materialized == []
 
 
+def _fork_point(options, *, rule: str, node_id: str = "node") -> ForkPoint:
+    """A ForkPoint over ``options`` — the real one, so ``fp.structural`` reads the engine's own
+    typed partition of the offers rather than a stand-in's hand-set flag."""
+    return ForkPoint(
+        match=SimpleNamespace(root_node_id=node_id, rule=SimpleNamespace(name=rule, pass_=None)),
+        options=options,
+        root_op=TileOp(op=Fold.projection(body=Body())),
+        ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
+    )
+
+
 def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) -> None:
     rows = [
         {"S_warp_eligible": 1.0, "RASTER": "", "TILE": "slow"},
@@ -72,11 +84,7 @@ def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) ->
         ),
         materialize=lambda _row: None,
     )
-    point = SimpleNamespace(
-        options=[tree],
-        node_id="node",
-        root_op=TileOp(op=Fold.projection(body=Body())),
-    )
+    point = _fork_point([tree], rule="040_schedule")
     record = SimpleNamespace(name="recorded-golden", knobs={"RASTER": "", "TILE": "recorded"}, emmy_us=1.25)
     monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
 
@@ -95,17 +103,32 @@ def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) ->
     assert audit[0]["verdict"] == "MATCH"
 
 
-def test_verified_pick_defers_a_structural_fork(monkeypatch) -> None:
-    structural = DeferredFork(materialize=lambda: None, structural=True)
-    point = SimpleNamespace(
-        options=[structural],
-        node_id="node",
-        root_op=TileOp(op=Fold.projection(body=Body())),
-    )
-    record = SimpleNamespace(name="recorded-golden", knobs={"TILE": "recorded"}, emmy_us=1.25)
+@pytest.mark.parametrize("with_fuse_arm", [False, True])
+def test_verified_pick_defers_a_structural_fork(monkeypatch, caplog, with_fuse_arm) -> None:
+    """A kernel-SET fork is not this tier's question, whichever shape it takes: the bare structural
+    offer, or a placement fork's non-structural FUSE arm beside its structural cut arms
+    (``030_cut``). Every arm spells ``PLACE``, so all of them canonicalize to the all-OFF schedule
+    row — comparing a recorded schedule row there let an all-OFF recording bind the fuse arm and
+    decide a placement off schedule evidence, and made every other recording read as drift on a
+    fork it was never about. The tier declines the whole fork, silently, so a drift warning keeps
+    meaning "this recording no longer realizes"."""
+    cut = DeferredFork(materialize=lambda: None, knobs={"a3": "cut"}, structural=True)
+    fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"}, structural=False)
+    point = _fork_point([fuse, cut] if with_fuse_arm else [cut], rule="030_cut")
     monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
 
-    assert _verified_pick(point, {"identity": [record]}, None) is None
+    all_off = SimpleNamespace(name="all-off-golden", knobs=dict.fromkeys(("WORK", "TILE", "REDUCE", "STAGE", "RASTER"), ""), emmy_us=1.25)
+    scheduled = SimpleNamespace(name="scheduled-golden", knobs={"WORK": "t512", "TILE": "recorded"}, emmy_us=1.25)
+    for record in (all_off, scheduled):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=greedy.logger.name):
+            assert _verified_pick(point, {"identity": [record]}, None) is None, f"{record.name} decided a kernel-set fork"
+        assert "drift" not in caplog.text, f"{record.name} was reported as drift on a kernel-set fork"
+
+    audit = []
+    with golden_audit(audit):
+        assert _verified_pick(point, {"identity": [all_off]}, None) is None
+    assert audit == [], "a kernel-set fork is not a SCHEDULE consultation and carries no verdict"
 
 
 # ---------------------------------------------------------------------------

@@ -718,7 +718,8 @@ def _verified_index(ctx: Context) -> dict:
 def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, float, dict | None] | None:
     """The strict verified-tier decision for one fork, or ``None``.
 
-    A SCHEDULE fork (the recognized ``TileOp`` root): the fork's the deploy identity (``identity_key(with_io=True)``) selects the
+    A SCHEDULE fork — a recognized ``TileOp`` root AND no structural offer, the two halves of
+    "this fork decides how one kernel is scheduled": the fork's the deploy identity (``identity_key(with_io=True)``) selects the
     records; the fastest record whose spelled row is EXACTLY one enumerated leaf
     (``canonical_row_key`` equality — no prefix, no any-of) decides. A record that matches the
     identity but equals no leaf is DRIFT: warn loudly and decide nothing (fail-closed — the fuzzy
@@ -728,10 +729,19 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     (MATCH / DRIFT / GAP) — the drift audit's only reading of this tier."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import drop_uninformative_scopes, schedule_row_key, values_equal  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None:
+        return None
+    # A fork carrying structural offers (``ForkPoint.structural`` — the engine's typed partition)
+    # is deciding the KERNEL SET: which pieces a placement cut leaves, or whether a reduction
+    # splits across CTAs. Its arms spell ``PLACE`` / split knobs, so every one of them
+    # canonicalizes to the same all-OFF schedule row and a recorded schedule row can only be
+    # compared against it by accident — an all-OFF recording equalled the fuse arm and decided the
+    # placement it was never about, and every other recording read as drift on a fork that is not
+    # this tier's question. Pricing (:func:`_priced_pick`) is what answers the kernel-set fork; the
+    # schedule fork below the chosen arm is where a record decides.
+    if fp.structural:
         return None
     identity = root.identity_key(with_io=True)
     recs = sched_idx.get(identity)
@@ -743,8 +753,6 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
         """Descend only branches compatible with one recorded row."""
         record = dict(target)
         for option in options:
-            if _is_structural_option(option):
-                return None
             if isinstance(option, Fork) and not option.is_leaf:
                 branch = drop_uninformative_scopes(option.knobs)
                 if all(key in record and values_equal(key, record[key], value) for key, value in branch.items()):
@@ -778,8 +786,6 @@ def _verified_pick(fp: ForkPoint, sched_idx: dict, blocked) -> tuple[object, flo
     by_key = {}
     live_count = 0
     for leaf in iter_leaves(fp.options):
-        if _is_structural_option(leaf):
-            return None
         knobs = leaf_knobs(leaf)
         if node_blocked is not None and _tile_blocked(knobs, node_blocked):
             continue

@@ -511,7 +511,12 @@ enumeration's emission order, which carries no meaning. Such a pick can be far o
 and that is an accepted outcome of the design — the fix is a measurement, a recorded golden, or a better-fitted
 prior, never a preference written into a pass or into this policy.
 
-1. the **verified goldens** recorded for this GPU (`greedy._verified_index` / `_verified_pick`): the record whose
+1. the **verified goldens** recorded for this GPU (`greedy._verified_index` / `_verified_pick`), consulted at a
+   SCHEDULE fork only — a recognized `TileOp` root AND no structural offer. A fork that also offers a kernel-set
+   change (a placement cut, a cross-CTA split) decides which kernels exist, not how one is scheduled: its arms spell
+   `PLACE` / split knobs, all of which canonicalize to the same all-OFF schedule row, so a recorded row there would
+   either match an arm by accident or read as drift on a question it never answered. Pricing decides those forks. At a
+   schedule fork the record whose
    the deploy identity (`identity_key(with_io=True)`) — the canonical digest of the complete schedule-free Loop-IR body the lifted term lowers
    to (free grid loops + `Fold.lower()` + the reconstituted output writes, through `Body.structural_key`'s
    canonicalization, so term re-spellings and compute-unit cluster siblings that lower alike share it), folded

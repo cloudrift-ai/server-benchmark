@@ -30,24 +30,29 @@ def _stamp_axes(loop: Loop) -> Loop:
     return replace(loop, body=Body(body))
 
 
-def lift_body(body) -> Body:
-    """Replace every reduction in one statement tree with a ``Fold``, in place."""
+def lift_body(body, axes: tuple[str, ...] = ()) -> Body:
+    """Replace every reduction in one statement tree with a ``Fold``, in place.
+
+    ``axes`` names the iteration variables the ENCLOSING loops bind, threaded down from
+    :func:`_peel`. A term cannot tell an axis from a value — both are a bare ``Var`` — but the
+    binder can, because it bound them; so the classification arrives from above rather than being
+    inferred by walking a lowered body for names that look axis-shaped."""
     out = []
     for stmt in Body.coerce(body):
         if not isinstance(stmt, Loop):
             nested = stmt.nested()
             if nested:
-                stmt = stmt.with_bodies(tuple(lift_body(child) for child in nested))
+                stmt = stmt.with_bodies(tuple(lift_body(child, axes) for child in nested))
             out.append(stmt)
             continue
         if stmt.is_reduce:
-            fold, trailing = scan_from_loop(stmt)
+            fold, trailing = scan_from_loop(stmt, axes)
             seeds = set(fold.combine.results)
             out = [s for s in out if not (isinstance(s, Init) and s.name in seeds)]
             out.append(fold)
             out.extend(trailing)
             continue
-        out.append(replace(stmt, body=lift_body(stmt.body)))
+        out.append(replace(stmt, body=lift_body(stmt.body, (*axes, stmt.axis.name))))
     return Body(tuple(out))
 
 
@@ -59,7 +64,7 @@ def fold_from_loop(loop: Loop) -> Fold:
     return fold
 
 
-def scan_from_loop(loop: Loop) -> tuple[Fold, tuple[Write, ...]]:
+def scan_from_loop(loop: Loop, axes: tuple[str, ...] = ()) -> tuple[Fold, tuple[Write, ...]]:
     """Lift one reduction from its explicit ``Accum`` statements. A per-step ``Write`` makes it a
     SCAN: the store observes the carried state, so the fold gains an observer — a pure per-step
     tap binding fresh ``<state>__obs`` names — and each store returns rewritten to read the
@@ -87,7 +92,11 @@ def scan_from_loop(loop: Loop) -> tuple[Fold, tuple[Write, ...]]:
     edges = tuple(stmt for stmt in step if isinstance(stmt, Fold))
     plain = Body(stmt for stmt in step if not isinstance(stmt, Fold))
     bound = tuple(name for edge in edges for name in _operand_result_names(edge))
-    lift = Lambda.closing((loop.axis.name, *bound), plain, tuple(stmt.value for stmt in accums))
+    # The enclosing binders' axes are declared because THEY said so, not because this term went
+    # looking: an edge's index coordinates are as much a param as anything in the step, and only
+    # the binder can say which names are axes at all.
+    scope = tuple(axis for axis in axes if axis != loop.axis.name and axis not in bound)
+    lift = Lambda.closing((loop.axis.name, *bound, *scope), plain, tuple(stmt.value for stmt in accums))
     init, combine = M(*(stmt.op for stmt in accums), names=names)
     if not writes:
         return Fold(axis=loop.axis, unroll=loop.unroll, operands=edges, lift=lift, init=init, combine=combine), ()
@@ -135,7 +144,7 @@ def _raw_loops(body) -> list[Loop]:
 def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
     """Peel free axes and lift the complete remaining nest as one Fold tree."""
     free, cell = _peel(op.body)
-    split = extract_output_specs(lift_body(cell))
+    split = extract_output_specs(lift_body(cell, tuple(axis.name for axis in free)))
     if split is None:
         raise ValueError("Loop IR effects cannot be represented as output specifications")
     body, output_specs = split

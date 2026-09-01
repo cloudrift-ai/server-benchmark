@@ -843,16 +843,19 @@ class Fold:
 
     @cached_property
     def _deps(self) -> tuple[str, ...]:
-        # DECLARED, not discovered: the lift binds everything it reads (:meth:`_bind_environment`),
-        # so what this term needs from outside is exactly its :attr:`environment` tail plus
-        # whatever its operand edges need in turn. The old spelling walked free names and
-        # subtracted the params, which is why a capture could hide here rather than being refused.
+        # DECLARED, not discovered. What this term needs from outside is its :attr:`environment`
+        # tail — the params no operand supplies — plus whatever its operand EDGES need in turn: a
+        # ``Load``'s index names, a nested term's own environment, recursively. The old spelling
+        # walked free names and subtracted params, which is why a capture could hide in here
+        # instead of being refused at formation.
+        #
+        # The observer contributes nothing: it is a ``Lambda``, so it is closed, and its params
+        # are ``(axis, *combine.results)`` — every one of them bound by this fold.
         reads = set(self.environment)
-        if self.observe is not None:
-            reads.update(self.observe.free_names() - set(self.lift.params))
         for edge in self.operands:
             reads.update(edge.deps())
-        return tuple(sorted(reads - set(self.lift.params[: len(self.lift.params) - len(self.environment)])))
+        bound = set(self.lift.params[: len(self.lift.params) - len(self.environment)])
+        return tuple(sorted(reads - bound))
 
     def exprs(self):
         """No index / predicate ``Expr`` of its own — a term's coordinates live on the ``Load``

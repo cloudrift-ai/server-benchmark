@@ -1,7 +1,7 @@
 """The semantic model for the classic grid/CTA/warp/thread/register schedule.
 
-``ClassicProblem`` and ``ClassicDomains`` define the independent product;
-``ClassicScheduleContext`` is its compatibility authority. ``ClassicScheduleCodec`` and
+``ClassicDomains`` defines the independent product and ``ClassicScheduleContext`` is its
+compatibility authority over one unscheduled ``TileOp`` and target. ``ClassicScheduleCodec`` and
 ``ClassicMaterialization`` are the wire and lowering boundaries for accepted assignments. Search
 state and pipeline Forks do not belong here.
 """
@@ -28,7 +28,8 @@ from .choices import (
     derive_inventory,
     resolve_site_tile,
 )
-from .views import ClassicSites, EdgeSite, NodeId, NodeView, Projection, Reduction
+from .packing import packed_readings
+from .views import ClassicSites, ContractionFacts, EdgeSite, NodeId, NodeView, Projection, Reduction
 
 CLASSIC_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
@@ -165,18 +166,6 @@ class _FragmentAgreement:
 
 
 @dataclass(frozen=True)
-class _ContractionFacts:
-    """Target-independent structure needed to compose one contraction schedule."""
-
-    k_axis: object
-    seam: tuple | None = None
-    producer: Fold | None = None
-    need: str | None = None
-    packed: tuple = (None, None)
-    need_step: bool = False
-
-
-@dataclass(frozen=True)
 class _LocalSupport:
     """Static support for one node choice and its incident edge choices.
 
@@ -205,6 +194,19 @@ class _LocalSupport:
         object.__setattr__(self, "edges", frozendict(self.edges))
 
 
+def _target_memo(tile_op, target, slot: str) -> dict:
+    """The named memo of one kernel's ``p + t`` derivations, riding the tile it derives from.
+
+    Every candidate schedule over one tile shares these tables, and the composition context is
+    replaced at each step, so the tile owns them. The target is retained beside its table so the
+    id keying it cannot be recycled while the table lives.
+    """
+    table = instance_memo(tile_op, slot)
+    if id(target) not in table:
+        table[id(target)] = (target, {})
+    return table[id(target)][1]
+
+
 def _computed_edge(node: Fold) -> bool:
     return any(isinstance(edge, Fold) and edge.axis is None for edge in (node.a, *(channel.b for channel in node.channels)))
 
@@ -225,7 +227,7 @@ def _kstep_refusal(k_axis, plan: Tile) -> str | None:
     return None if extent % step == 0 else f"warp TILE K-step {step} does not divide the static contraction K={extent}"
 
 
-def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: _ContractionFacts) -> str | None:
+def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
     from . import staging  # noqa: PLC0415
 
     refusal = _kstep_refusal(facts.k_axis, plan)
@@ -247,11 +249,12 @@ def _resolve_stage(
     plan: Tile,
     placed: PlacedTile,
     choice: Stage,
-    facts: _ContractionFacts,
+    facts: ContractionFacts,
 ) -> ResolvedStage | None:
     from . import staging  # noqa: PLC0415
 
-    packed_copy = facts.packed[0] is not None and choice.transport in ("smem-async", "smem-tma")
+    packed = packed_readings(tile_op, node)
+    packed_copy = packed[0] is not None and choice.transport in ("smem-async", "smem-tma")
     if _needs_fill(tile_op, node, plan) and not packed_copy:
         return staging.resolve_fill_stage(
             node,
@@ -270,7 +273,7 @@ def _resolve_stage(
             choice,
             target.max_dynamic_smem,
             tile_op.inputs,
-            readings=facts.packed,
+            readings=packed,
         )
     return staging.resolve_scalar_stage(node, placed, choice, tile_op.inputs, target.max_dynamic_smem)
 
@@ -280,25 +283,24 @@ def _fragment_agreements(
     plan: Tile,
     placed: PlacedTile,
     stage: ResolvedStage | None,
-    facts: _ContractionFacts,
-    producer_sites: frozenset[str],
+    facts: ContractionFacts,
+    producer_sites: frozenset[NodeId],
 ) -> tuple[_FragmentAgreement, ...]:
     out = []
-    key = node_id_spelling(site)
-    if key in producer_sites:
+    if site in producer_sites:
         if not plan.is_tiled:
             offer = ("free",)
         elif plan.is_warp:
             offer = ("warp", plan.atom.shape, plan.atom.fragment_layout, placed.n.units, placed.n.tile)
         else:
             offer = ("scalar",)
-        out.append(_FragmentAgreement("offer", key, offer))
+        out.append(_FragmentAgreement("offer", node_id_spelling(site), offer))
     if facts.need is not None:
         if plan.is_warp and stage is not None and stage.transport == "smem":
             need = ("step" if facts.need_step else "warp", plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems)
         else:
             need = ("free",)
-        out.append(_FragmentAgreement("need", facts.need, need))
+        out.append(_FragmentAgreement("need", node_id_spelling(facts.need), need))
     return tuple(out)
 
 
@@ -430,12 +432,12 @@ class ClassicMaterialization:
             raise TypeError("classic materialization requires a TileOp")
         from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
 
-        context = ClassicScheduleContext(ClassicProblem.from_tile(source, target=None))
+        context = ClassicScheduleContext(source)
         try:
             context.extend(schedule)
         except ScheduleRefused as error:
             raise ValueError(f"TileOp carries a refused classic schedule: {error}") from error
-        sites = context.problem.sites
+        sites = context.sites
         expected_tiles = {
             site
             for site, assignment in schedule.nodes.items()
@@ -461,47 +463,16 @@ class ClassicMaterialization:
 
 
 @dataclass(frozen=True)
-class ClassicProblem:
-    """The complete immutable problem ``p`` and target ``t`` for classic scheduling."""
-
-    root: Fold
-    target: object
-    tile_op: object = field(repr=False, compare=False)
-    contractions: Mapping[NodeId, _ContractionFacts] = field(repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.root, Fold):
-            raise TypeError("classic problem root must be a Fold")
-        if getattr(self.tile_op, "op", None) is not self.root:
-            raise ValueError("classic problem source must own its Fold root")
-        if not isinstance(self.contractions, Mapping) or any(
-            not _is_node_id(site) or not isinstance(facts, _ContractionFacts) for site, facts in self.contractions.items()
-        ):
-            raise TypeError("classic contraction facts must be keyed by node id")
-        object.__setattr__(self, "contractions", frozendict(self.contractions))
-
-    @classmethod
-    def from_tile(cls, tile_op, target) -> ClassicProblem:
-        """Project the immutable problem facts carried by one unscheduled tile."""
-        from .classic_projection import _problem  # noqa: PLC0415
-
-        return _problem(tile_op, target)
-
-    def __getstate__(self):
-        """Pickle immutable problem fields, never derived support caches."""
-        return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
-
-    @property
-    def sites(self) -> ClassicSites:
-        """The target-independent site and view index for this Fold root."""
-        return ClassicSites(self.root)
-
-
-@dataclass(frozen=True)
 class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeSchedule]):
-    """Immutable classic ``c + p + t`` compatibility-composition state."""
+    """Immutable classic ``c + p + t`` compatibility-composition state.
 
-    problem: ClassicProblem
+    The problem ``p`` is the unscheduled ``tile_op`` — its Fold root indexes every site through
+    :class:`ClassicSites`, and its typed inputs answer every operand-shape question — composed
+    against the target ``t``. Derivations shared by every candidate ride memo tables on the tile.
+    """
+
+    tile_op: object
+    target: object = None
     domains: ClassicDomains | None = None
     order: tuple[NodeId, ...] | None = None
     position: int = 0
@@ -523,6 +494,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     _restricted_edges: Mapping[EdgeSite, tuple[EdgeSchedule, ...]] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(getattr(self.tile_op, "op", None), Fold):
+            raise TypeError("classic composition requires a TileOp owning a Fold root")
         order = self.node_sites if self.order is None else tuple(self.order)
         if len(order) != len(self.node_sites) or set(order) != set(self.node_sites):
             raise ValueError("classic composition order must contain every node site exactly once")
@@ -580,28 +553,33 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 self._validate_stage_restriction()
 
     @property
+    def sites(self) -> ClassicSites:
+        """The target-independent site and view index of this kernel's Fold root."""
+        return ClassicSites(self.tile_op.op)
+
+    @property
     def node_sites(self) -> tuple[NodeId, ...]:
-        return self.problem.sites.node_sites
+        return self.sites.node_sites
 
     @property
     def edge_sites(self) -> tuple[EdgeSite, ...]:
-        return self.problem.sites.edge_sites
+        return self.sites.edge_sites
 
     @property
     def views(self) -> Mapping[NodeId, NodeView]:
-        return self.problem.sites.views
+        return self.sites.views
 
     @property
     def tile_sites(self) -> tuple[NodeId, ...]:
-        return self.problem.sites.tile_sites
+        return self.sites.tile_sites
 
     @property
     def reduction_sites(self) -> tuple[NodeId, ...]:
-        return self.problem.sites.reduction_sites
+        return self.sites.reduction_sites
 
     @property
     def stage_edges(self) -> tuple[EdgeSite, ...]:
-        return self.problem.sites.stage_edges
+        return self.sites.stage_edges
 
     @property
     def kernels(self) -> tuple[KernelSchedule, ...]:
@@ -626,27 +604,27 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return (EdgeSchedule(Stage.direct()),)
 
     def node(self, site: NodeId) -> Fold:
-        return self.problem.sites.node(site)
+        return self.sites.node(site)
 
     def site(self, node: Fold) -> NodeId:
-        return self.problem.sites.site(node)
+        return self.sites.site(node)
 
     def operand(self, edge: EdgeSite):
         if not _is_edge_site(edge):
             raise KeyError(f"invalid edge site {edge!r}")
-        return self.problem.sites.operand(edge)
+        return self.sites.operand(edge)
 
     def producer(self, edge: EdgeSite) -> NodeId | None:
-        return self.problem.sites.producer(edge)
+        return self.sites.producer(edge)
 
     def incident_edges(self, site: NodeId) -> tuple[EdgeSite, ...]:
-        return self.problem.sites.incident_edges(site)
+        return self.sites.incident_edges(site)
 
     def node_key(self, family: str, site: NodeId) -> str:
-        return classic_node_key(self.problem.sites, family, site)
+        return classic_node_key(self.sites, family, site)
 
     def stage_key(self, edge: EdgeSite) -> str:
-        return classic_stage_key(self.problem.sites, edge)
+        return classic_stage_key(self.sites, edge)
 
     def keys(self) -> tuple[str, ...]:
         stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.stage_edges))
@@ -754,7 +732,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         edge_domains: tuple[tuple[EdgeSite, tuple[EdgeSchedule, ...]], ...],
     ) -> tuple[_LocalSupport, ...]:
         """Derive one granular node-plus-incident-edge frontier lazily."""
-        cache = instance_memo(self.problem, "_memo_local_frontier")
+        cache = _target_memo(self.tile_op, self.target, "_memo_local_frontier")
         key = (site, id(nodes), tuple((edge, id(choices)) for edge, choices in edge_domains))
         if key in cache:
             return cache[key]
@@ -780,7 +758,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         """Filter one local frontier through this exact immutable prefix."""
         frontier = self._local_frontier(site, nodes, edge_domains)
         if self._work is not None:
-            indexes = instance_memo(self.problem, "_memo_frontier_by_work")
+            indexes = _target_memo(self.tile_op, self.target, "_memo_frontier_by_work")
             key = (site, id(nodes), tuple((edge, id(choices)) for edge, choices in edge_domains))
             if key not in indexes:
                 by_work = {}
@@ -801,7 +779,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             if not spelling or (key != "STAGE" and key not in self.keys()):
                 continue
             choice = Stage.parse(spelling)
-            if why := stage_target(choice, self.problem.target):
+            if why := stage_target(choice, self.target):
                 raise ValueError(why)
             if key == "STAGE" and not self._supports_global("STAGE", spelling):
                 raise ValueError(f"STAGE pin {spelling!r} does not resolve for this contraction")
@@ -914,21 +892,21 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         edges: Mapping[EdgeSite, EdgeSchedule],
     ) -> _LocalSupport | None:
         """Derive the local ``p + t`` facts and decide their compatibility in one place."""
-        facts = self.problem.contractions.get(site)
+        facts = self.sites.contractions.get(site)
         if facts is None:
             return self._intrinsic_support(site, node, edges)
-        materialization = getattr(self.problem.tile_op, "materialization", None)
-        if self.problem.target is None and (
+        materialization = getattr(self.tile_op, "materialization", None)
+        if self.target is None and (
             materialization is None
             or (node.tile.is_tiled and site not in materialization.tiles)
             or any(not choice.stage.is_direct and edge not in materialization.stages for edge, choice in edges.items())
         ):
             return None
-        cache = instance_memo(self.problem, "_memo_classic_local_support")
+        cache = _target_memo(self.tile_op, self.target, "_memo_classic_local_support")
         key = (site, node, tuple(edges.items()))
         if key in cache:
             return cache[key]
-        tile_op = self.problem.tile_op
+        tile_op = self.tile_op
         fold = self.node(site)
         view = self.views[site]
         incident = self.incident_edges(site)
@@ -939,11 +917,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             self._refuse("one contraction currently requires one transport choice across its operands", site)
         from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
 
-        problem_memo = instance_memo(self.problem, "_memo_classic_problem")
-        sched = problem_memo.get("sched")
+        placement = instance_memo(tile_op, "_memo_classic_sched")
+        sched = placement.get("sched")
         if sched is None:
             sched = Sched(tile_op.op, place=tile_op.place.on_grid())
-            problem_memo["sched"] = sched
+            placement["sched"] = sched
         geometry = sched.placed(fold, node.tile)
         if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
             cache[key] = None
@@ -958,19 +936,19 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             if not stage.is_direct:
                 cache[key] = None
                 return None
-        elif self.problem.target is None:
+        elif self.target is None:
             materialization = getattr(tile_op, "materialization", None)
             resolved = {materialization.stages.get(edge) for edge in edges} if materialization is not None else set()
             resolved.discard(None)
             resolved_stage = next(iter(resolved)) if len(resolved) == 1 else None
         elif _needs_fill(tile_op, fold, node.tile):
-            packed_copy = facts.packed[0] is not None and stage.transport in ("smem-async", "smem-tma")
+            packed_copy = packed_readings(tile_op, fold)[0] is not None and stage.transport in ("smem-async", "smem-tma")
             if not packed_copy and stage not in (Stage(depth=1), Stage(depth=2)):
                 cache[key] = None
                 return None
-            resolved_stage = _resolve_stage(tile_op, self.problem.target, fold, node.tile, geometry, stage, facts)
+            resolved_stage = _resolve_stage(tile_op, self.target, fold, node.tile, geometry, stage, facts)
         elif not stage.is_direct:
-            resolved_stage = _resolve_stage(tile_op, self.problem.target, fold, node.tile, geometry, stage, facts)
+            resolved_stage = _resolve_stage(tile_op, self.target, fold, node.tile, geometry, stage, facts)
         if not stage.is_direct and (resolved_stage is None or resolved_stage.choice != stage):
             cache[key] = None
             return None
@@ -994,13 +972,13 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                     geometry,
                     resolved_stage,
                     facts,
-                    frozenset(candidate.need for candidate in self.problem.contractions.values() if candidate.need is not None),
+                    frozenset(candidate.need for candidate in self.sites.contractions.values() if candidate.need is not None),
                 )
                 if isinstance(geometry, PlacedTile)
                 else ()
             ),
             raster_eligible=node.tile.is_tiled and isinstance(view, Reduction) and view.contraction is not None,
-            producer_eligible=not (facts.packed[0] is not None and stage.transport == "smem-tma"),
+            producer_eligible=not (packed_readings(tile_op, fold)[0] is not None and stage.transport == "smem-tma"),
         )
         cache[key] = support
         return support
@@ -1014,8 +992,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         """Derive the target-independent local relation when no finite domains are attached."""
         if site not in self.tile_sites and node.tile != Tile():
             return None
-        if node.tile.is_warp and hasattr(self.problem.target, node.tile.atom.target_feature):
-            if not node.tile.atom.available_on(self.problem.target):
+        if node.tile.is_warp and hasattr(self.target, node.tile.atom.target_feature):
+            if not node.tile.atom.available_on(self.target):
                 return None
         stages = {choice.stage for choice in edges.values()}
         if len(stages) > 1:
@@ -1025,9 +1003,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if any(not choice.stage.is_direct and not node.tile.is_tiled for choice in edges.values()):
             return None
         if any(
-            not choice.stage.is_direct
-            and hasattr(self.problem.target, "has_cp_async")
-            and not choice.stage.available_on(self.problem.target)
+            not choice.stage.is_direct and hasattr(self.target, "has_cp_async") and not choice.stage.available_on(self.target)
             for choice in edges.values()
         ):
             return None
@@ -1138,12 +1114,12 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     def _require_kernel_prefix(self, schedule: ClassicAssignment) -> None:
         """Validate the kernel facts not already proved by local prefix composition."""
         kernel_work = Work(schedule.kernel.work.kind, schedule.kernel.work.units)
-        warp_size = getattr(self.problem.target, "warp_size", 32)
+        warp_size = getattr(self.target, "warp_size", 32)
         compute_threads = kernel_work.count * (warp_size if kernel_work.kind == "warp" else 1)
         producer_threads = schedule.kernel.work.producer * warp_size
         if producer_threads > compute_threads:
             self._refuse("producer band cannot outnumber the compute band")
-        if compute_threads + producer_threads > getattr(self.problem.target, "max_threads_per_cta", 1024):
+        if compute_threads + producer_threads > getattr(self.target, "max_threads_per_cta", 1024):
             self._refuse("worker inventory exceeds the target thread limit")
         if not schedule.kernel.work.producer:
             return
@@ -1300,7 +1276,7 @@ class ClassicScheduleCodec:
         if not isinstance(context, ClassicScheduleContext):
             raise TypeError("classic codec requires a ClassicScheduleContext")
         self.context = context
-        self.sites = context.problem.sites
+        self.sites = context.sites
         stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.sites.stage_edges))
         self._key_order = (
             "WORK",
@@ -1339,7 +1315,7 @@ class ClassicScheduleCodec:
 
     def delta(self, before: ClassicScheduleContext, after: ClassicScheduleContext) -> dict[str, str]:
         """Encode the canonical row fields introduced by one compatibility step."""
-        if before.problem != self.context.problem or after.problem != self.context.problem:
+        if any(context.tile_op != self.context.tile_op for context in (before, after)):
             raise ValueError("classic codec delta requires contexts for its problem")
         row = {}
         assert before.order is not None and after.order is not None
@@ -1421,7 +1397,6 @@ class ClassicScheduleCodec:
 __all__ = [
     "CLASSIC_FAMILIES",
     "ClassicAssignment",
-    "ClassicProblem",
     "ClassicMaterialization",
     "ClassicDomains",
     "ClassicScheduleCodec",

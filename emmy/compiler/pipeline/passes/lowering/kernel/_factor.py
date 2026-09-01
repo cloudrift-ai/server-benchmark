@@ -53,13 +53,21 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, _unique_edges, edge_refs_axis, is_contraction, operand_body
+from emmy.compiler.ir.pure.fold import (
+    Fold,
+    _operand_result_names,
+    _unique_edges,
+    cone_seam,
+    edge_refs_axis,
+    is_contraction,
+    operand_body,
+)
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs, observed_result_names
-from emmy.compiler.ir.tile.ops import UnbindableProjection, cone_seam, projection_regions, sched_of
+from emmy.compiler.ir.tile.ops import UnbindableProjection, projection_regions, sched_of
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     clamp_last,

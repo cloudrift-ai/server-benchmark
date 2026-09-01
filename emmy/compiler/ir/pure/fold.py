@@ -932,6 +932,34 @@ def operand_body(op) -> tuple[Stmt, ...]:
     return (op,) if isinstance(op, Load) else tuple(op.lower())
 
 
+def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
+    """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
+    scanning stmts: the cone is ``Fold.projection(body=<the per-cell normalize>, operands=(<the row-invariant
+    prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
+    own zero-axis ``Fold`` over the stat ``Fold``) plus any row-invariant cone prefix, placed there
+    when the cone was built (:func:`make_cone` splits at the K seam once, structurally).
+
+    The split is the K SEAM, on the edges as on the stmts: an edge that never indexes the
+    contraction axis ``k_name`` is row-invariant and belongs to the prologue; a k-VARYING producer
+    edge (the attention score contraction the cone's ``exp(s − m)`` reads) is per-cell and splices
+    into the cell ahead of its first use, like any operand edge. Every fused norm→linear cone
+    carries the single row-invariant edge, so its seam reads exactly as it always did.
+
+    ``stats`` are the prologue results the cell reads — the values bridged through the stat smem
+    rows. Internal definitions are excluded: the prologue and cell may independently use the same
+    local SSA name. A prologue whose results go unread is dropped (nothing to bridge). The ONE seam
+    both sides read: the scheduler sizes the stat rows into the sync stage's smem budget, the
+    materializer fills them (``sync_stat_fill``)."""
+    if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
+        return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
+    varying = [edge_refs_axis(e, k_name) for e in cone.operands]
+    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in operand_body(e))
+    cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
+    pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in _operand_result_names(edge)}
+    stats = tuple(sorted(pro_results & deep_reads(list(cell))))
+    return (pro, cell, stats) if stats else ((), cell, ())
+
+
 def operand_name(op) -> str:
     """An operand edge's bound SSA name — the inline node's ``out``, or the ``Load``'s def. Free
     for the same reason as :func:`operand_body`."""

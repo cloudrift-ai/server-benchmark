@@ -7,7 +7,7 @@ derived role, reduce ``Axis``, and operand edges — comes directly from the tre
 facts off a synthesized nest is the inversion this module exists to prevent; :meth:`Fold.lower`
 is for callers that consume a body.
 
-This module holds the structural reads over a node tree — the cone seam (:func:`cone_seam`), the
+This module holds the structural reads over a node tree — the cone seam (:func:`~emmy.compiler.ir.pure.fold.cone_seam`), the
 iteration-space names (:func:`axis_names`) — plus the typed schedule accessor (:class:`Sched`). Lowering itself
 has ONE spelling and it lives on the node: :meth:`Fold.lower` (a fold flattens through
 :attr:`Fold.loop`, a wrapping projection appends its operand nests). Stored trees are already
@@ -25,9 +25,7 @@ from emmy.compiler.ir.pure.fold import (
     deep_reads,
     edge_refs_axis,
     is_contraction,
-    operand_body,
     refs_axis,
-    splice_operands,
     stmt_axis_names,
 )
 from emmy.compiler.ir.schedule import ClassicSites, PlacedTile, Reduce
@@ -40,34 +38,6 @@ from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
-
-
-def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
-    """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
-    scanning stmts: the cone is ``Fold.projection(body=<the per-cell normalize>, operands=(<the row-invariant
-    prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
-    own zero-axis ``Fold`` over the stat ``Fold``) plus any row-invariant cone prefix, placed there
-    when the cone was built (:func:`make_cone` splits at the K seam once, structurally).
-
-    The split is the K SEAM, on the edges as on the stmts: an edge that never indexes the
-    contraction axis ``k_name`` is row-invariant and belongs to the prologue; a k-VARYING producer
-    edge (the attention score contraction the cone's ``exp(s − m)`` reads) is per-cell and splices
-    into the cell ahead of its first use, like any operand edge. Every fused norm→linear cone
-    carries the single row-invariant edge, so its seam reads exactly as it always did.
-
-    ``stats`` are the prologue results the cell reads — the values bridged through the stat smem
-    rows. Internal definitions are excluded: the prologue and cell may independently use the same
-    local SSA name. A prologue whose results go unread is dropped (nothing to bridge). The ONE seam
-    both sides read: the scheduler sizes the stat rows into the sync stage's smem budget, the
-    materializer fills them (``sync_stat_fill``)."""
-    if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
-        return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
-    varying = [edge_refs_axis(e, k_name) for e in cone.operands]
-    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in operand_body(e))
-    cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
-    pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in _operand_result_names(edge)}
-    stats = tuple(sorted(pro_results & deep_reads(list(cell))))
-    return (pro, cell, stats) if stats else ((), cell, ())
 
 
 def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, object]:
@@ -584,7 +554,6 @@ __all__ = [
     "Sched",
     "axis_names",
     "carries_partition",
-    "cone_seam",
     "cone_stat_dtypes",
     "edge_dtypes",
     "head",

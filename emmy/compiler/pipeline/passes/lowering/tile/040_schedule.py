@@ -51,10 +51,10 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
     try:
-        problem, domains = project_classic(tile, ctx)
+        domains = project_classic(tile, ctx)
     except ClassicProjectionError:
         return []
-    context = ClassicScheduleContext(problem, domains).restrict(
+    context = ClassicScheduleContext(tile, ctx, domains).restrict(
         {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")},
         split_consumed=carries_partition(tile.op) or tile.split_consumed,
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
@@ -86,7 +86,6 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
             knobs=row,
             target=ctx,
             assignment=assignment,
-            problem=problem,
         ),
         pool_id=pool_id,
         pool_bound=domains.product_size,

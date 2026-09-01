@@ -24,7 +24,6 @@ from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Schedule, Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import (
     ClassicMaterialization,
-    ClassicProblem,
     ClassicScheduleContext,
     EdgeSchedule,
     KernelSchedule,
@@ -251,7 +250,7 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
     bare = TileOp(op=fold, name="k_stat")
     assert "REDUCE=" not in bare.pretty_body()
 
-    context = ClassicScheduleContext(ClassicProblem.from_tile(bare, target=None))
+    context = ClassicScheduleContext(bare)
     nodes = {
         site: ProjectionSchedule(Tile()) if isinstance(view, Projection) else ReductionSchedule(Tile(), Reduce.of(reg=4))
         for site, view in context.views.items()

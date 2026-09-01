@@ -435,14 +435,13 @@ def _serialize_op_fields(op: Op) -> dict:
     if not isinstance(op, TileOp) or op.schedule is None:
         return fields
     from emmy.compiler.ir.schedule.classic import (  # noqa: PLC0415
-        ClassicProblem,
         ClassicScheduleCodec,
         ClassicScheduleContext,
         edge_site_spelling,
         node_id_spelling,
     )
 
-    codec = ClassicScheduleCodec(ClassicScheduleContext(ClassicProblem.from_tile(op, target=None)))
+    codec = ClassicScheduleCodec(ClassicScheduleContext(op))
     fields["schedule"] = codec._encode(op.schedule)
     if op.materialization is not None:
         fields["materialization"] = {
@@ -475,7 +474,6 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
     from emmy.compiler.ir.schedule import PlacedTile, ResolvedStage  # noqa: PLC0415
     from emmy.compiler.ir.schedule.classic import (  # noqa: PLC0415
         ClassicMaterialization,
-        ClassicProblem,
         ClassicScheduleCodec,
         ClassicScheduleContext,
         parse_edge_site,
@@ -483,7 +481,7 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
     )
 
     source = op_cls(**fields)
-    codec = ClassicScheduleCodec(ClassicScheduleContext(ClassicProblem.from_tile(source, target=None)))
+    codec = ClassicScheduleCodec(ClassicScheduleContext(source))
     schedule_wire = _wire_mapping(schedule_row, "classic schedule")
     schedule = codec._parse(schedule_wire)
     if codec._encode(schedule) != dict(schedule_wire):

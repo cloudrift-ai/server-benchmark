@@ -20,11 +20,24 @@ from .choices import (
     derive_workers,
     resolve_site_tile,
 )
-from .views import ClassicSites, Contraction, EdgeSite, NodeId, NodeView, Projection, Reduction, node_view, schedule_edges, schedule_nodes
+from .views import (
+    ClassicSites,
+    Contraction,
+    ContractionFacts,
+    EdgeSite,
+    NodeId,
+    NodeView,
+    Projection,
+    Reduction,
+    node_view,
+    schedule_edges,
+    schedule_nodes,
+)
 
 __all__ = [
     "AtomKind",
     "ClassicSites",
+    "ContractionFacts",
     "Contraction",
     "EdgeSite",
     "FoldMove",

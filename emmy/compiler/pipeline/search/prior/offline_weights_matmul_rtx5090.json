@@ -1,6 +1,9 @@
 {
   "feat_ver": 4,
   "kind": "linear",
+  "unweighted_cols": [
+    "S_ext_n_symbolic_axis"
+  ],
   "weights": {
     "D_aspect": -1.6678268333456214,
     "D_bm_band": -0.8901032742830086,

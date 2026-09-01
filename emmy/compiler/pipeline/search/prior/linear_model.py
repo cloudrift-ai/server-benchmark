@@ -7,7 +7,20 @@ descends on — one fp16 golden enumerates ~78k rows, so the per-dict path is no
 module the two were separate transcriptions of the same formula kept in step by a parity test; drift between them
 would mean the fitter optimizing something other than what deploys. :meth:`LinearModel.score_rows` is the front
 door onto the matrix shape rather than a third shape: it takes a whole candidate pool and decides, once and here,
-which columns this model class wants out of it.
+which columns this model class wants out of it — through :meth:`LinearModel.cols_for`.
+
+**What a model reads is declared by its artifact.** This is the canonical statement of it; everything else
+points here. :attr:`LinearModel.columns` is the answer a pool BUILDER packs for, and it covers all three things
+this arithmetic touches: both weight sets, the interaction's two inputs (:data:`GATE_FEATURES`), and the routing
+stamp. The weight names are already in the artifact as dict keys, so only the rest is stored — the
+``unweighted_cols`` field — and :attr:`~LinearModel.columns` unions the two.
+
+The routing stamp is why the declaration could not be left implicit. It selects the weight set rather than
+entering the sum, so it is NOT among the columns packed into the matrix (:meth:`LinearModel.cols_for`) and it may
+never carry a weight — which means nothing derived from the weight keys can ever name it. A builder trusting such
+a derivation packs a pool with no stamp, and every candidate is then priced by the static weight set with no
+symptom at all, a pool without a stamp being exactly what a genuinely static pool looks like.
+:meth:`LinearModel.score_rows` refuses a pool that carries no stamp for that reason.
 
 The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features`` and
 ``mean_scores_features`` (``quality`` / ``quality_rows`` / ``score_rows`` are this module's own vocabulary, not
@@ -27,7 +40,8 @@ staged prologues locked out, occupancy over a free-dim product that excludes the
 under ``weights_dynamic``. That stamp must never ALSO be a fitted weight: it is constant across a candidate
 pool, so a linear term on it adds the same constant to every candidate and cancels exactly out of the
 within-pool ranking. The rank objective cannot see it, and whatever value a descent lands on
-there is decided by the regularizer and noise. It routes; it is never a coordinate.
+there is decided by the regularizer and noise. It routes; it is never a coordinate — but it is a column this
+model reads, so it is declared, and a feature view that feeds this model names it.
 """
 
 from __future__ import annotations
@@ -74,11 +88,18 @@ FITTED_PARAMS = ("atomic_free_weight", "atomic_free_split_threshold")
 # two lines once. Reordering to match the shipped file would instead change what a refit emits.
 PARAM_ORDER = ("scale", *FITTED_PARAMS)
 
-# The two features :func:`atomic_free_term` reads, each with the value an omitted featurization implies: no
-# deferred combine kernel, and a split count of 1. Spelled once — the dict path (:func:`gate_values`), the
-# matrix path (:func:`gate_columns`) and the fit-side column selection all read them from here, and a
-# disagreement between those would silently price the interaction differently on the two sides.
-GATE_DEFAULTS = {"D_finalize_kernel": 0.0, "D_splitk": 1.0}
+# The two features :func:`atomic_free_term` reads, in the order it takes them — the INTERACTION's input list,
+# not a column set. Which column is the finalize flag and which is the split count is the formula's business, and
+# the fitted pair in ``params`` prices exactly this formula. Spelled once so the dict path (:func:`gate_values`),
+# the matrix path (:func:`gate_columns`) and :meth:`LinearModel.cols_for` cannot disagree.
+#
+# ONE absent value, 0.0, on both access shapes — what :meth:`Group.matrix` fills a missing column with, so an
+# absent finalize flag zeroes the term because the formula says so at ``finalize == 0``. Each name used to carry
+# a default of its own instead (finalize 0.0, split count 1.0 — a count no featurization produces), applied when
+# the NAME was missing from the packed columns, which made "the view dropped this column" indistinguishable from
+# "the pool never stamped it". Neither reader can tell those apart, so the view case is checked where both are
+# visible: ``LinearTrainer.fit``, which sees the view and what the pools stamp.
+GATE_FEATURES = ("D_finalize_kernel", "D_splitk")
 
 
 def atomic_free_term(finalize_kernel, splitk, *, weight: float, threshold: float):
@@ -94,29 +115,29 @@ def atomic_free_term(finalize_kernel, splitk, *, weight: float, threshold: float
 
 
 def gate_values(feats: dict) -> tuple[float, ...]:
-    """:data:`GATE_DEFAULTS` read off one feature dict — the per-row twin of :func:`gate_columns`."""
-    return tuple(feats.get(name, default) for name, default in GATE_DEFAULTS.items())
+    """The interaction's inputs read off one feature dict — the per-row twin of :func:`gate_columns`, absent
+    key = 0.0 (:data:`GATE_FEATURES`)."""
+    return tuple(feats.get(name, 0.0) for name in GATE_FEATURES)
 
 
 def gate_columns(mat: np.ndarray, names) -> tuple[np.ndarray, ...]:
-    """:data:`GATE_DEFAULTS` read off a packed pool, one column each, defaulted exactly as
-    :func:`gate_values` defaults the dict path.
-
-    The default applies when the NAME is absent from ``names``, which is the matrix-side spelling of the dict
-    path's "key absent from the row". It cannot key off the VALUE: :meth:`Group.matrix` fills a name the pool
-    never stamped with a zeros column, so by then "unstamped" and "stamped 0.0" are the same bits, and defaulting
-    a present zero would rewrite a genuine ``D_splitk=0`` into a 1. The fitter also cannot trim the gate names
-    out per pool, because one ``names`` list indexes the weight vector for every pool in the fit.
-
-    So the two paths read a pool differently in exactly one situation: a gate name in ``names`` that the pool
-    never stamped. That does not arise — the featurizer stamps the split count alongside the finalize flag, and
-    over 1.33 M enumerated candidate rows the 536 917 carrying a nonzero finalize all carry ``D_splitk`` too.
-    Rows without a finalize are unaffected regardless, since it zeroes the whole term.
+    """The interaction's inputs read off a packed pool, one column each — the matrix twin of
+    :func:`gate_values`, a name ``names`` does not carry reading as the same 0.0 (:data:`GATE_FEATURES`).
 
     Copies, never column views: the fitter z-scores its pools IN PLACE, and these values must stay in raw units —
     the interaction compares a split COUNT against its threshold."""
     idx = {n: j for j, n in enumerate(names)}
-    return tuple(mat[:, idx[name]].copy() if name in idx else np.full(len(mat), default) for name, default in GATE_DEFAULTS.items())
+    return tuple(mat[:, idx[name]].copy() if name in idx else np.zeros(len(mat)) for name in GATE_FEATURES)
+
+
+def unweighted_cols(weights: dict[str, float], weights_dynamic: dict[str, float] | None) -> tuple[str, ...]:
+    """The columns a model with these weights reads WITHOUT weighting them: the routing stamp, plus any
+    interaction input a fit pruned out of both weight sets — :attr:`LinearModel.unweighted_cols`.
+
+    The WRITER's expression, called where a fit decides what its model reads (and again where the ship path
+    carries a dynamic set forward). A reader unions two artifact fields instead, and needs neither
+    :data:`GATE_FEATURES` nor ``ROUTING_FEATURES`` to do it."""
+    return tuple(sorted((set(GATE_FEATURES) | set(ROUTING_FEATURES)) - set(weights) - set(weights_dynamic or {})))
 
 
 def quality_columns(mat: np.ndarray, w: np.ndarray, gates: tuple[np.ndarray, np.ndarray], *, weight: float, threshold: float):
@@ -131,13 +152,17 @@ def quality_columns(mat: np.ndarray, w: np.ndarray, gates: tuple[np.ndarray, np.
 
 @dataclass(frozen=True)
 class LinearModel:
-    """A fitted linear ranker over ``features.knob_features`` — two weight sets, the scalar scoring params, and
-    nothing else. Immutable and comparable, so a fit result is a value the caller can diff, swap and serialize.
+    """A fitted linear ranker over ``features.knob_features`` — the columns it reads, two weight sets, the scalar
+    scoring params, and nothing else. Immutable and comparable, so a fit result is a value the caller can diff,
+    swap and serialize.
 
     ``weights_dynamic`` is ``None`` only inside an incomplete fit (a training slice with no symbolic-axis cases).
     A deploy artifact always carries both sets — :meth:`to_artifact` refuses to write a model that does not, and
     the caller substitutes its fallback set first."""
 
+    # The declared columns that are not weight keys — the routing stamp, and any interaction input pruned out
+    # of both weight sets. The other half of :attr:`columns`; :func:`unweighted_cols` is where a fit forms it.
+    unweighted_cols: tuple[str, ...]
     weights: dict[str, float]
     weights_dynamic: dict[str, float] | None
     # exp() argument scale — keeps the deployed proxy in a finite, sane range. Rank-neutral (a monotone
@@ -242,18 +267,57 @@ class LinearModel:
         without knowing which one they hold.
 
         Two things a caller must not re-derive, which is why they live here rather than at each call site.
-        The COLUMNS are the weight set's names UNION :data:`GATE_DEFAULTS`: the interaction's two inputs have
-        to be present whether or not the weight dict names them, since a pruned zero weight drops the key.
-        The WEIGHT SET comes from :meth:`weight_set`, so the static-vs-dynamic choice is made once, here,
-        and a second copy of that routing cannot drift from it.
+        The COLUMNS come from :meth:`cols_for`. The WEIGHT SET comes from :meth:`weight_set`, so the
+        static-vs-dynamic choice is made once, here, and a second copy of that routing cannot drift from it.
+
+        The pool must CARRY the routing stamp: ``Group.dynamic`` is read off it when the rows are packed, so a
+        pool that lost it arrives labelled static and would be priced entirely by the static weight set, whatever
+        its regime and with nothing in the result to say so (module docstring). Refusing makes that a failure
+        rather than a silence, for every builder — a feature view that stopped naming the stamp, a golden pool,
+        or measured rows recorded before the featurizer stamped it.
+
+        Nothing else about the pool is required. A column this model weights but the pool never stamped is the
+        ordinary absent case and scores 0.0 (:meth:`Group.matrix`'s fill for this model class), which is what a
+        reduce or pointwise pool legitimately looks like against an artifact fitted over every regime.
 
         ``None`` when the group needs the dynamic set and this model has none — the unfittable
         cross-validation fold. Asking :meth:`weight_set` instead would raise, and a fold harness wants an
         answer it can skip on, not an exception."""
+        if unstamped := [c for c in ROUTING_FEATURES if c not in group.feat_names]:
+            raise ValueError(
+                f"pool {group.key!r} carries no {unstamped} column: this model reads the routing stamp to pick a "
+                f"weight set, and without it every candidate would be priced as static whatever its regime"
+            )
         if group.dynamic and self.weights_dynamic is None:
             return None
-        names = sorted(set(self.weight_set(group.dynamic)) | set(GATE_DEFAULTS))
+        names = self.cols_for(group.dynamic)
         return self.quality_rows(group.matrix(names), names, dynamic=group.dynamic)
+
+    def cols_for(self, dynamic: bool) -> list[str]:
+        """The columns to PACK for one weight set's score: that set's names UNION :data:`GATE_FEATURES`. The
+        interaction's two inputs have to be present whether or not the weight dict names them, since a pruned
+        zero weight drops the key.
+
+        A subset of :attr:`columns`, without the routing stamp: the stamp selects this list rather than
+        entering the arithmetic (module docstring), and widening the matmul by a weightless column is exactly
+        what the next paragraph says not to do.
+
+        Per weight set rather than one list for both, which the declaration covers jointly. Scoring the static
+        set over the union of both would add a column carrying weight ``0.0`` — arithmetically nothing, but
+        ``mat @ w`` blocks differently at 60 columns than at 59 and the result moves in the last bits (measured:
+        up to 5.7e-14 on qualities of order 10^2, over the shipped artifact). That is not absorbable noise here:
+        :func:`~..metrics.dual_rank` counts EXACT float equality to build the pessimistic rank, so a
+        perturbation that splits a genuine score plateau moves a reported rank by the whole plateau's width, and
+        a rank is an integer no rounding can smooth."""
+        return sorted(set(self.weight_set(dynamic)) | set(GATE_FEATURES))
+
+    @property
+    def columns(self) -> tuple[str, ...]:
+        """Every column this model reads, from the artifact's two halves: the weight keys, plus
+        :attr:`unweighted_cols` for what carries no weight. Pack a pool over this and it is a pool this model can
+        score, without knowing anything else about it — see the module docstring for why that includes the
+        routing stamp."""
+        return tuple(sorted(set(self.weights) | set(self.weights_dynamic or {}) | set(self.unweighted_cols)))
 
     def weight_set(self, dynamic: bool) -> dict[str, float]:
         """The weight dict a row of this kind scores under — the ONE place the two sets are chosen between.
@@ -278,6 +342,7 @@ class LinearModel:
         params = obj.get("params", {})
         dyn = obj.get("weights_dynamic")
         return cls(
+            unweighted_cols=tuple(obj["unweighted_cols"]),
             weights=dict(obj.get("weights", {})),
             weights_dynamic=None if dyn is None else dict(dyn),
             scale=float(params["scale"]),
@@ -297,6 +362,9 @@ class LinearModel:
         return {
             "feat_ver": FEATURIZER_VERSION,
             "kind": "linear",
+            # Leads the weights: a reader meets the columns that carry no weight before the ones that do, and
+            # ``Prior.columns`` is this field unioned with the weight keys.
+            "unweighted_cols": list(self.unweighted_cols),
             "weights": self.weights,
             "weights_dynamic": self.weights_dynamic,
             "params": {name: float(getattr(self, name)) for name in PARAM_ORDER},

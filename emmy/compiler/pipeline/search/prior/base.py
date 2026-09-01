@@ -269,8 +269,30 @@ class Prior(ABC):
         The pool must carry every column the model reads. A group packed under a narrow feature view — the fit's
         ``D_*`` view, say — answers the linear model correctly, because its weight names are inside that view,
         while the online model's ``S_*`` / ``H_*`` columns would all fill absent and its predictions would be
-        about a kernel with no shape. Which columns a group carries is the BUILDER's decision, so an evaluation
-        that scores both halves builds its pools over the full featurization."""
+        about a kernel with no shape. Which columns a group carries is the BUILDER's decision, and :attr:`columns`
+        is how a builder asks instead of guessing."""
+
+    @property
+    @abstractmethod
+    def columns(self) -> tuple[str, ...]:
+        """Every column this model reads — what a builder must pack for :meth:`score_rows` to answer about the
+        kernel it was asked about rather than about a kernel with no shape. That includes columns the model
+        reads without weighting, the routing stamp above all; ``prior/linear_model.py``'s module docstring is
+        where the consequences of getting that wrong are written down.
+
+        This is a ``Prior``'s contract, NOT ``score_rows``'s: the fit-side scorers answer ``score_rows`` without
+        being ``Prior``\\ s (``fit/linear.LinearFit``, ``fit/catboost.CatBoostFit``) and are handed pools their own
+        trainer already packed to its own view, so they have nothing to ask and nobody to ask them. What this adds
+        is the ability to ASK. The column set was always there — a weight dict's keys, a booster's stored order —
+        but until it was published a caller could only restate it as a glob or widen to every column the featurizer
+        can spell.
+
+        A SUPERSET of what any single :meth:`score_rows` call packs, never the exact list: the linear model
+        reads one weight set at a time and this unions both, so a caller cannot under-request. Order is the
+        model's own; take a set if you need one.
+
+        Non-empty whenever :attr:`fitted`. An unfitted model has nothing to declare and is never asked — a report
+        drops such a half instead of showing it ranking at chance."""
 
     # --- deployable-evidence pick ------------------------------------------
 

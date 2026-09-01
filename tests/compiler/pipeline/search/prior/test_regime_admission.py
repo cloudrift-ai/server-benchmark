@@ -33,6 +33,10 @@ class _P(Prior):
     def score_rows(self, group):
         return None
 
+    @property
+    def columns(self) -> tuple[str, ...]:
+        return ()  # never fitted, so nothing to declare
+
 
 def _prior() -> _P:
     return _P()

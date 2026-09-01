@@ -49,7 +49,10 @@ _DEFAULT_FILE = Path(__file__).parent / "offline_weights.json"
 # ``kind`` has always been written; this is where it is finally read. A file naming an unknown kind is a
 # hard error, not a fallback to linear — see :func:`_load_artifact`.
 _KINDS = {
-    "linear": (LinearModel, ("weights", "weights_dynamic", "params"), linear_model.PARAM_ORDER),
+    # Each kind must say what it reads: ``unweighted_cols`` here (unioned with the weight keys — see
+    # ``LinearModel.columns``), the booster's positional ``cols`` for the tree. ``feat_ver`` is untouched by the
+    # requirement, because the featurizer's vocabulary did not change.
+    "linear": (LinearModel, ("unweighted_cols", "weights", "weights_dynamic", "params"), linear_model.PARAM_ORDER),
     # ``model_file`` (the sidecar path) is the current spelling; the inline base64 ``model`` is the pre-split
     # one, still readable so run artifacts written before the split keep loading. Either satisfies the check.
     "catboost": (CatBoostModel, ("cols", "params"), catboost_model.PARAM_ORDER),
@@ -115,6 +118,7 @@ class OfflinePrior(Prior):
         self,
         *,
         model=None,
+        unweighted_cols: tuple[str, ...] | None = None,
         weights: dict[str, float] | None = None,
         weights_dynamic: dict[str, float] | None = None,
         scale: float | None = None,
@@ -124,6 +128,7 @@ class OfflinePrior(Prior):
         super().__init__()
         # Keyed by LinearModel's own field names, which is what lets the merge below be a ``replace``.
         overrides = {
+            "unweighted_cols": unweighted_cols,
             "weights": weights,
             "weights_dynamic": weights_dynamic,
             "scale": scale,
@@ -159,6 +164,14 @@ class OfflinePrior(Prior):
     def model(self):
         """The scoring function this prior ranks with — a :class:`LinearModel` or a ``CatBoostModel``."""
         return self._model
+
+    @property
+    def columns(self) -> tuple[str, ...]:
+        """The artifact's own declared columns — straight through to the model, for the same reason
+        :meth:`score_rows` is: the model is the object that holds the declaration, and this adapter would only be
+        a second place to get it wrong. Always non-empty, so a caller never has to handle an offline half that
+        cannot say what it reads."""
+        return self._model.columns
 
     @property
     def fitted(self) -> bool:

@@ -605,7 +605,10 @@ def test_prior_reports_both_halves_over_benched_pools(run_cli, tmp_path):
 
     db_path = tmp_path / "n.db"
     db = SearchDB(db_path)
-    s = {"S_ext_free_prod": 1024.0, "S_ext_reduce_max": 512.0, "S_loop_depth": 2.0, "H_cc": 120.0, "H_opt": 3.0}
+    # ``S_ext_n_symbolic_axis`` is on every recorded row (the featurizer emits it unconditionally) and the
+    # linear half refuses a pool that cannot be routed, so a fixture row carries it too.
+    s = {"S_ext_free_prod": 1024.0, "S_ext_reduce_max": 512.0, "S_loop_depth": 2.0, "S_ext_n_symbolic_axis": 0.0}
+    s |= {"H_cc": 120.0, "H_opt": 3.0}
     db.record_nodes(
         [
             NodeRow("P", None, "ctx", "mm", s, 1.0, 1, gpu=_GPU, is_leaf=False),
@@ -671,7 +674,10 @@ def test_prior_writes_the_report_as_json(run_cli, tmp_path):
 
     db_path = tmp_path / "n.db"
     db = SearchDB(db_path)
-    s = {"S_ext_free_prod": 1024.0, "S_ext_reduce_max": 512.0, "S_loop_depth": 2.0, "H_cc": 120.0, "H_opt": 3.0}
+    # ``S_ext_n_symbolic_axis`` is on every recorded row (the featurizer emits it unconditionally) and the
+    # linear half refuses a pool that cannot be routed, so a fixture row carries it too.
+    s = {"S_ext_free_prod": 1024.0, "S_ext_reduce_max": 512.0, "S_loop_depth": 2.0, "S_ext_n_symbolic_axis": 0.0}
+    s |= {"H_cc": 120.0, "H_opt": 3.0}
     db.record_nodes(
         [
             NodeRow("c8", None, "ctx", "mm", {**s, "BM": 8}, 3.0, 2, gpu=_GPU, is_leaf=True),

@@ -389,7 +389,11 @@ one because it is what answers on a machine that has no local measurements yet �
 `OfflinePrior` scores a candidate with a linear formula over the `D_*` features — hand-designed descriptions of a
 tile's geometry and its occupancy — fitted ahead of time. It never falls back on the order the rule emitted its
 options in. The complete scoring function lives in the repo-checked artifact `search/prior/offline_weights.json`:
-both weight sets plus the scalar params, carrying a `feat_ver` version and a `provenance` block. The offline fitter
+both weight sets, the scalar params, a `feat_ver` version, a `provenance` block, and `unweighted_cols`. That last
+one is what makes the artifact say what it READS: `Prior.columns` is the weight keys unioned with it, and the part
+no weight key can spell is the routing stamp, which selects the weight set instead of contributing a term. A caller
+rebuilding the column set from the weight keys alone therefore always missed it — and packed pools that route every
+candidate to the static weight set with no symptom. The offline fitter
 writes it (`search/prior/fit/`, driven by `emmy fit`). Building the training cases from the goldens lives in
 `emmy/commands/fit.py`, because reconstructing the set of candidates a golden competed against needs the command
 layer's tracer for the golden's little PyTorch snippet, which `pipeline/` never imports.
@@ -441,8 +445,11 @@ What a newcomer needs to know about the fit:
   golden-rank metrics and catastrophic when scoring a fork, where a not-yet-decided knob scores such a feature 0.0.
   The penalty must be in raw units (`w_z/sd`), because after de-standardizing, the inflated weight looks like an
   ordinary O(1) weight.
-- **Loading is strict.** A missing artifact, or one whose `feat_ver` does not match, is a hard error — refit it, never
-  a silent fallback. The error comes from the artifact loader, and it surfaces in `tune` / `eval`, which load the
+- **Loading is strict.** A missing artifact, one whose `feat_ver` does not match, or one that does not say what it
+  reads (`unweighted_cols` here, the booster's `cols` in a tree artifact), is a hard error — refit it, never a silent
+  fallback. `feat_ver` is untouched by that requirement: it versions the FEATURIZER's column vocabulary, which this
+  did not change, and bumping it would discard every persisted reservoir and node row over an artifact schema change.
+  The error comes from the artifact loader, and it surfaces in `tune` / `eval`, which load the
   prior directly. A greedy compile wraps `load_prior` best-effort, so there a bad artifact does not abort the compile:
   it produces the no-prior resolve described under the hierarchy below (first leaf, with the DB tier lost along with
   the prior object). A weight key that is no longer used, inside an artifact of the current version, is
@@ -450,7 +457,10 @@ What a newcomer needs to know about the fit:
 - A separate `weights_dynamic` set ranks kernels whose tiles are masked because an axis is symbolic; it is selected on
   the stamped `S_ext_n_symbolic_axis`. That stamp **routes and never carries a weight**: the dataset packs it like
   any other column, and the linear fit narrows it out of its own descent coordinates (`descent_cols`) while a tree
-  splits on it to price both regimes in one model. The reason is identifiability: the stamp is constant
+  splits on it to price both regimes in one model. It is still a column the model READS, so the artifact declares
+  it, every training view names it, and `LinearModel.score_rows` refuses a pool that arrives without it — a pool
+  with no stamp is labelled static, and nothing downstream could tell that from a genuinely static one.
+  The reason it carries no weight is identifiability: the stamp is constant
   across a candidate pool, so a linear term on it shifts every candidate equally and cancels out of the within-pool
   ranking. The rank objective cannot see such a term at all, which makes whatever value a descent lands on there
   noise rather than a fitted quantity.

@@ -21,7 +21,7 @@ from emmy.compiler.pipeline.search.prior.fit import LinearFit, LinearTrainer
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.catboost import TREE_FEATURES
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
-from emmy.compiler.pipeline.search.prior.linear_model import LinearModel, descent_cols
+from emmy.compiler.pipeline.search.prior.linear_model import LinearModel, descent_cols, unweighted_cols
 
 # --- feature view ------------------------------------------------------------------
 
@@ -64,7 +64,7 @@ def test_a_merged_case_reports_its_positive_count():
     two. ``positives`` is what makes that visible: without it a metrics file with fewer groups looks like lost
     data rather than a pool that gained a second verified answer."""
     groups = [_case("m.512", "warp", "gpuA", pinned=1), _case("m.1024", "warp", "gpuA", pinned=(0, 2))]
-    model = LinearFit(LinearModel(weights={"D_a": -1.0}, weights_dynamic=None, scale=0.1, **SEED_PARAMS), [0], None)
+    model = LinearFit(_model({"D_a": -1.0}, None), [0], None)
     rows = fit_cv.evaluate_full_train(groups, model)["per_golden"]
     assert rows["gpuA/m.512"]["positives"] == 1
     assert rows["gpuA/m.1024"]["positives"] == 2
@@ -298,7 +298,7 @@ def test_a_routing_feature_may_never_carry_a_fitted_weight():
         sets = {"weights": {"D_a": 1.0}, "weights_dynamic": {"D_a": 1.0}}
         sets[field] = {**sets[field], "S_ext_n_symbolic_axis": 0.5}
         with pytest.raises(ValueError, match="never contributes a term"):
-            LinearModel(scale=0.1, atomic_free_weight=0.0, atomic_free_split_threshold=4.0, **sets)
+            LinearModel(unweighted_cols=unweighted_cols(**sets), scale=0.1, atomic_free_weight=0.0, atomic_free_split_threshold=4.0, **sets)
 
 
 def test_matrix_fill_declares_the_absent_semantics():
@@ -385,11 +385,22 @@ NAMES = ["D_a", "D_b"]
 SEED_PARAMS = {"atomic_free_weight": 0.0, "atomic_free_split_threshold": 4.0}
 
 
+def _model(weights, weights_dynamic) -> LinearModel:
+    """A model declaring exactly what it reads, the way a fit writes one."""
+    return LinearModel(
+        unweighted_cols=unweighted_cols(weights, weights_dynamic),
+        weights=weights,
+        weights_dynamic=weights_dynamic,
+        scale=0.1,
+        **SEED_PARAMS,
+    )
+
+
 # The fold trainer the command layer wires up: zero-seeded weights, samples=0. One instance serves
 # every fold — the trainer is immutable and its fit is pure.
 FOLD_TRAINER = LinearTrainer(
     feature_names=tuple(NAMES),
-    init=LinearModel(weights={}, weights_dynamic=None, scale=0.1, **SEED_PARAMS),
+    init=_model({}, None),
     samples=0,
     warm_start=False,
 )
@@ -486,7 +497,7 @@ def test_fittability_guard_excludes_fold_loudly():
 
 def _metrics():
     groups = _cases()
-    model = LinearFit(LinearModel(weights={"D_a": -1.0, "D_b": 0.25}, weights_dynamic={"D_a": -0.5}, scale=0.1, **SEED_PARAMS), [0], [0])
+    model = LinearFit(_model({"D_a": -1.0, "D_b": 0.25}, {"D_a": -0.5}), [0], [0])
     cv = fit_cv.run_folds(groups, trainer=FOLD_TRAINER, k=3)
     skipped = [
         ("gpuA", "attention.hd128", fit_cv.OUT_OF_SCOPE),

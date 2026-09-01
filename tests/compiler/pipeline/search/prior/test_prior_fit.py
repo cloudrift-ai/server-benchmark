@@ -19,8 +19,10 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.data.group import GoldenGroup, feature_matrix
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS
 from emmy.compiler.pipeline.search.metrics import rank_of_golden
 from emmy.compiler.pipeline.search.prior.fit import (
     DEFAULT_L2,
@@ -31,16 +33,16 @@ from emmy.compiler.pipeline.search.prior.fit import (
     mean_log_rank,
     raw_weights,
 )
-from emmy.compiler.pipeline.search.prior.linear_model import GATE_DEFAULTS, LinearModel, gate_values
+from emmy.compiler.pipeline.search.prior.linear_model import GATE_FEATURES, LinearModel, gate_values, unweighted_cols
 from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, OfflinePrior
 
 # Seed for the fitted scalar params — the interaction OFF at the shipped threshold, the state a
 # fresh fit starts from.
 SEED_PARAMS = np.array([0.0, 4.0])
 
-# The two features the OfflinePrior reads through the atomic-free interaction rather than as plain
-# linear terms — kept out of the synthetic rows below so that comparison isolates the linear part.
-_INTERACTION_FEATURES = {"D_finalize_kernel", "D_splitk"}
+# The interaction's inputs (:data:`GATE_FEATURES`) are kept out of the synthetic rows below, so that
+# comparison isolates the linear part.
+_INTERACTION_FEATURES = set(GATE_FEATURES)
 
 
 def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
@@ -69,7 +71,12 @@ def _synthetic_cases(n_cases=6, n_rows=40, n_feats=8, seed=1234):
 # ``warm_start=False`` anyway), the interaction seeded OFF at the shipped threshold, and the shipped
 # exp scale — which the trainer carries into the fitted model rather than fitting.
 SEED_MODEL = LinearModel(
-    weights={}, weights_dynamic=None, scale=0.1, atomic_free_weight=float(SEED_PARAMS[0]), atomic_free_split_threshold=float(SEED_PARAMS[1])
+    unweighted_cols=unweighted_cols({}, None),
+    weights={},
+    weights_dynamic=None,
+    scale=0.1,
+    atomic_free_weight=float(SEED_PARAMS[0]),
+    atomic_free_split_threshold=float(SEED_PARAMS[1]),
 )
 
 
@@ -171,7 +178,9 @@ def test_incumbent_weights_rank_identically_through_fit_eval_and_prior(dynamic):
 
     prior = OfflinePrior()
     linear_scores = feature_matrix(rows, names) @ w_vec
-    stamp = {"S_ext_n_symbolic_axis": 1.0} if dynamic else {}
+    # On every row either way: the featurizer emits the stamp unconditionally, 0.0 when no axis is symbolic,
+    # and a pool without it is one no model can route.
+    stamp = {"S_ext_n_symbolic_axis": 1.0 if dynamic else 0.0}
     proxies = np.array([prior.mean_score_features({**row, **stamp}) for row in rows])
 
     for i in range(len(rows)):
@@ -191,12 +200,20 @@ def test_dict_and_matrix_paths_score_identically(dynamic):
     art = json.loads(_DEFAULT_FILE.read_text())
     params = {"atomic_free_weight": 5.0, "atomic_free_split_threshold": 4.0}
     # ONE model object behind both paths — the prior scores dicts through it, the fit scores matrices.
-    model = LinearModel(weights=art["weights"], weights_dynamic=art["weights_dynamic"], scale=0.1, **params)
+    model = LinearModel(
+        unweighted_cols=tuple(art["unweighted_cols"]),
+        weights=art["weights"],
+        weights_dynamic=art["weights_dynamic"],
+        scale=0.1,
+        **params,
+    )
     prior, fit = OfflinePrior(model=model), LinearFit(model, [], [])
 
     rng = np.random.default_rng(11)
     names = sorted(set(art["weights"]) | _INTERACTION_FEATURES)
-    stamp = {"S_ext_n_symbolic_axis": 1.0} if dynamic else {}
+    # On every row either way: the featurizer emits the stamp unconditionally, 0.0 when no axis is symbolic,
+    # and a pool without it is one no model can route.
+    stamp = {"S_ext_n_symbolic_axis": 1.0 if dynamic else 0.0}
     rows = [
         {
             **{n: float(rng.integers(-2, 3)) for n in names if rng.random() > 0.3},
@@ -225,6 +242,7 @@ def test_an_unfittable_dynamic_fold_scores_as_none_rather_than_raising():
     Static pools still score normally on the same model: it is the missing WEIGHT SET that is the limit,
     not the model."""
     static_only = LinearModel(
+        unweighted_cols=unweighted_cols({"D_threads": 1.0}, None),
         weights={"D_threads": 1.0},
         weights_dynamic=None,
         scale=0.1,
@@ -233,7 +251,8 @@ def test_an_unfittable_dynamic_fold_scores_as_none_rather_than_raising():
     )
     rows = [{"D_threads": float(i), "S_ext_n_symbolic_axis": 1.0} for i in range(5)]
     dyn = GoldenGroup.from_dicts("x/d", "d", "dyn", "x", "d", 0, rows)
-    static = GoldenGroup.from_dicts("x/s", "s", "warp", "x", "s", 0, [{"D_threads": float(i)} for i in range(5)])
+    static_rows = [{"D_threads": float(i), "S_ext_n_symbolic_axis": 0.0} for i in range(5)]
+    static = GoldenGroup.from_dicts("x/s", "s", "warp", "x", "s", 0, static_rows)
 
     assert dyn.dynamic and not static.dynamic
     for caller in (static_only, LinearFit(static_only, [], [])):  # the model, and the fit that forwards to it
@@ -273,22 +292,26 @@ def test_model_artifact_round_trips():
     assert model.to_artifact(provenance={})["params"] == art["params"]
 
 
-def test_gate_values_and_gate_columns_agree_including_the_defaults():
-    """The interaction's two inputs are read one way for a dict and another for a matrix, and both
-    must yield the same numbers — including for a featurization that omits them, where the defaults
-    are the whole answer. Both now read :data:`GATE_DEFAULTS`, so this pins that they stay in step,
-    and that its ORDER is the order ``atomic_free_term`` takes its positional arguments in."""
-    assert tuple(GATE_DEFAULTS) == ("D_finalize_kernel", "D_splitk")  # finalize first, as the term reads them
+def test_gate_values_and_gate_columns_agree_on_the_one_absent_value():
+    """The interaction's two inputs are read one way for a dict and another for a matrix, and both must yield
+    the same numbers. There is one absent value now, 0.0 — the same one an absent weight feature scores and the
+    same one ``Group.matrix`` fills a column with — so the two shapes cannot disagree the way they could while
+    each name carried a default of its own (a fabricated split count of 1, and a finalize zero that silently
+    switched the whole term off).
 
-    present = {"D_finalize_kernel": 1.0, "D_splitk": 8.0}
-    absent: dict[str, float] = {"D_other": 3.0}
-    for feats in (present, absent):
-        # Like for like: a pool's column list IS its rows' feature names, which is what makes "the
-        # name is missing" and "the key is missing" the same condition on the two sides.
-        names = sorted(feats)
-        cols = gate_columns(feature_matrix([feats], names), names)
-        assert [float(c[0]) for c in cols] == list(gate_values(feats))
-    assert gate_values(absent) == tuple(GATE_DEFAULTS.values())  # nothing stamped → the declared defaults
+    :data:`GATE_FEATURES` is the order ``atomic_free_term`` takes its positional arguments in, so that is
+    pinned here too."""
+    assert GATE_FEATURES == ("D_finalize_kernel", "D_splitk")  # finalize first, as the term reads them
+
+    feats = {"D_finalize_kernel": 1.0, "D_splitk": 8.0, "D_other": 3.0}
+    names = sorted(feats)
+    # Like for like: a pool's column list IS its rows' feature names.
+    cols = gate_columns(feature_matrix([feats], names), names)
+    assert [float(c[0]) for c in cols] == list(gate_values(feats))
+    # A row inside the pool that lacks the keys its siblings carry: 0.0 on both sides, and the term is off
+    # because the formula says so at ``finalize == 0``, not because a default stood in for a value.
+    assert gate_values({"D_other": 3.0}) == (0.0, 0.0)
+    assert [float(c[0]) for c in gate_columns(feature_matrix([{"D_other": 3.0}], names), names)] == [0.0, 0.0]
 
 
 def test_gate_columns_survive_the_in_place_z_scoring():

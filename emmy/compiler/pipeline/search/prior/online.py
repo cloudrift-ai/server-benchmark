@@ -45,6 +45,15 @@ class OnlinePrior(Prior):
     def fitted(self) -> bool:
         return self._model is not None
 
+    @property
+    def columns(self) -> tuple[str, ...]:
+        """The columns the last :meth:`fit` regressed on, in the order the booster indexes them — already
+        persisted as the checkpoint's ``cols`` (:meth:`to_json`), so this publishes state rather than adding it.
+
+        Empty until the first fit: :meth:`fit` returns before assigning the model when the dataset yields no
+        columns, so a fitted half always has columns to declare."""
+        return tuple(self._cols or ())
+
     def fit(self) -> None:
         """Refit a fresh CatBoostRegressor on the whole bounded dataset (RMSE on
         ``log(latency µs)``). Columns are the sorted union of feature keys; an

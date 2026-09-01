@@ -139,6 +139,13 @@ class CatBoostModel:
         """Feature dicts packed into this model's own column order, absent key = :data:`ABSENT`."""
         return np.array([[f.get(c, ABSENT) for c in self.cols] for f in feats_list], dtype=float)
 
+    @property
+    def columns(self) -> tuple[str, ...]:
+        """:attr:`cols` under the shared protocol name (``Prior.columns``), so a pool builder can ask this model
+        class and the linear one the same question. Two spellings of one concept because ``cols`` is also the
+        artifact's schema key (:meth:`to_artifact`) and cannot move without breaking every written file."""
+        return self.cols
+
     def score_rows(self, group: Group) -> np.ndarray:
         """:meth:`quality_rows` over a whole packed pool — the pool-shaped entry point :class:`~..linear_model.LinearModel`
         also answers, and the ONE place the tree's column choice is made: :attr:`cols` in its own order,

@@ -42,7 +42,7 @@ from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
-from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
+from emmy.compiler.pipeline.search.prior.linear_model import LinearModel, unweighted_cols
 
 logger = logging.getLogger(__name__)
 
@@ -374,10 +374,10 @@ def _linear_trainers(args, names: list[str]):
     from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE  # noqa: PLC0415
 
     raw = storage.read_json(config.offline_path() or _DEFAULT_FILE)
-    if not isinstance(raw, dict) or "scale" not in (raw.get("params") or {}):
+    if not isinstance(raw, dict) or "scale" not in (raw.get("params") or {}) or "unweighted_cols" not in raw:
         raise SystemExit(
             f"no usable incumbent weights artifact to seed from at {config.offline_path() or _DEFAULT_FILE} "
-            f"(needs a 'params' block carrying 'scale')"
+            f"(needs a 'params' block carrying 'scale', and an 'unweighted_cols' declaration)"
         )
     # Lenient read (``LinearModel.from_artifact`` does not version-gate): a refit after a featurizer
     # change is exactly when versions mismatch, and a stale key simply seeds 0.0. A pre-2026-08-05
@@ -517,7 +517,8 @@ def handle_fit(args) -> None:
         # coordinate carries an EMPTY set, and that is still its answer, not a missing one.
         carried = incumbent.weights_dynamic if incumbent.weights_dynamic is not None else model.weights
         source = "incumbent" if incumbent.weights_dynamic is not None else "the static fit"
-        model = replace(model, weights_dynamic=carried)
+        # Re-declared with the carried set: a name the carried weights price is no longer unweighted.
+        model = replace(model, weights_dynamic=carried, unweighted_cols=unweighted_cols(model.weights, carried))
         notes = f"{notes}; dynamic set carried from {source}"
     provenance = {
         "fitted": datetime.date.today().isoformat(),

@@ -99,6 +99,16 @@ class FallbackPrior(Prior):
     def score_rows(self, group):
         return self._deploy.score_rows(group)
 
+    @property
+    def columns(self) -> tuple[str, ...]:
+        """The columns of whichever half owns deploys, matching :meth:`score_rows` exactly — a pool packed from
+        this must be the pool that half can score.
+
+        Spelled out rather than left to :meth:`__getattr__`, which forwards to the ONLINE half: it would answer
+        the online half's columns while ``score_rows`` scored the offline one, and the mismatch would look like
+        a correct answer."""
+        return self._deploy.columns
+
     def pick(self, rows: list[dict]) -> tuple[int, float]:
         # Measured -O3 evidence lives in the ONLINE half's reservoir (the
         # offline prior has no dataset), and applies even while the model is

@@ -38,10 +38,12 @@ from emmy.compiler.pipeline.search.metrics import best_rank
 from emmy.compiler.pipeline.search.prior.fit.tables import topk_table
 from emmy.compiler.pipeline.search.prior.linear_model import (
     FITTED_PARAMS,
+    GATE_FEATURES,
     LinearModel,
     descent_cols,
     gate_columns,
     quality_columns,
+    unweighted_cols,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,7 +146,8 @@ def fit_weights(
     sd[sd == 0] = 1.0
     # BEFORE the scaling, and as copies: the interaction compares a raw split COUNT against a raw
     # threshold, and the in-place pass below would otherwise both standardize those values and
-    # write through the column views.
+    # write through the column views. ``names`` carries the interaction's inputs — :meth:`LinearTrainer.fit`
+    # refuses a view without them — so this reads real columns rather than defaulting any.
     gates = [gate_columns(m, names) for m in mats]
     for m in mats:
         m -= mu
@@ -250,8 +253,22 @@ class LinearTrainer:
         be fit against the pair that will actually deploy.
 
         The static group list must be non-empty — the dynamic stage seeds from it. Callers guard
-        that; this does not."""
+        that; this does not.
+
+        Refuses a view that drops an interaction input the POOLS carry. The descent fits that term's weight
+        and threshold as coordinates, so without its columns it would search them against a term that is 0.0 for
+        every candidate and report the result as fitted. Asked against what the pools stamp rather than against
+        :data:`GATE_FEATURES` flatly, because the two absences are different: a corpus with no split-K finalize
+        anywhere (an all-pointwise slice) has nothing to price and is fit normally, while a view that hides a
+        finalize the pools do carry is the mistake worth refusing. One check here, at the entry point, rather
+        than a defaulted column deep in the scoring loop — which is what used to hide it."""
         names = list(descent_cols(self.feature_names))
+        stamped = {c for g in groups for c in GATE_FEATURES if c in g.feat_names}
+        if blind := sorted(stamped - set(names)):
+            raise ValueError(
+                f"the feature view drops {blind}, which the pools stamp and the atomic-free interaction reads — "
+                f"its fitted weight and threshold would be searched against a term that is 0.0 for every candidate"
+            )
         static_groups = [g for g in groups if not g.dynamic]
         dyn_groups = [g for g in groups if g.dynamic]
         rng = np.random.default_rng(self.random_state)
@@ -269,8 +286,13 @@ class LinearTrainer:
             l2=self.l2,
             objective=self.objective,
         )
+        static_weights = raw_weights(names, static_w, static_sd)
         model = LinearModel(
-            weights=raw_weights(names, static_w, static_sd),
+            # What this fit's model reads beyond its weights, written down once here and carried into the
+            # artifact. The dynamic stage below re-declares: a second weight set can price a name this one did
+            # not.
+            unweighted_cols=unweighted_cols(static_weights, None),
+            weights=static_weights,
             weights_dynamic=None,
             scale=self.init.scale,  # carried from the incumbent: rank-neutral, so the fit has no opinion on it
             **{n: float(v) for n, v in zip(FITTED_PARAMS, params, strict=True)},
@@ -291,7 +313,12 @@ class LinearTrainer:
             fit_params=False,
             objective=self.objective,
         )
-        return LinearFit(replace(model, weights_dynamic=raw_weights(names, dyn_w, dyn_sd)), static_ranks, dyn_ranks)
+        dyn_weights = raw_weights(names, dyn_w, dyn_sd)
+        return LinearFit(
+            replace(model, weights_dynamic=dyn_weights, unweighted_cols=unweighted_cols(model.weights, dyn_weights)),
+            static_ranks,
+            dyn_ranks,
+        )
 
 
 @dataclass(frozen=True)

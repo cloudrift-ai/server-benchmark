@@ -318,8 +318,10 @@ def fed_by_body(fold: Fold, body) -> bool:
     A projection evaluates its operands before its scalar body, so such a fold can never move onto
     an operand edge — the names it captures would not exist yet. ``Fold.deps()`` is the memoized
     deep capture set (its own lift's free names plus every operand edge's, recursively), so the
-    check costs one set intersection. Read by the hoist below and by the schedule walk's
-    serial-only gate, so the two cannot drift."""
+    check costs one set intersection. Read by the hoist below — its only caller. What the hoist
+    LEAVES in the body is what the classic reduce domain then reads as a chain-form root's direct
+    members, so the two answer the same question from opposite ends: this decides which folds stay,
+    membership decides which of them partition."""
     feeds = {name for stmt in body if not isinstance(stmt, Fold) for name in stmt.defines()}
     return bool(feeds) and not feeds.isdisjoint(fold.deps())
 

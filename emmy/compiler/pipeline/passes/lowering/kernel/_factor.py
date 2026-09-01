@@ -518,6 +518,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # loop, which the trailing append cannot reach once that loop sits in an earlier segment.
         # The offer mirrors both exclusions.
         parts = ()
+        # The streamed-store reading, derived ONCE for both arms below (a full tree walk): the
+        # chain gate here, and the degenerate arm's ``apply_output_specs``. Empty without specs,
+        # which is exactly when neither arm asks.
         observed = observed_result_names(op) if output_specs else frozenset()
         if (
             isinstance(op, Fold)
@@ -548,7 +551,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             if root_specs:
                 # ``observed`` streams a scan store into its reduce loop; every other spec keeps
                 # its kernel-tail reconstitution.
-                body = apply_output_specs(body, root_specs, observed=observed_result_names(op))
+                body = apply_output_specs(body, root_specs, observed=observed)
             state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
         elif plan.coop_transposed:
             # The ``coop-t`` k-major matvec partition: the innermost output axis splits into a

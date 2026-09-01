@@ -9,7 +9,9 @@ split choices remain separate from classic schedule choices.
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import replace as dc_replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,17 +23,25 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
 from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.pure.fold import Channel
+from emmy.compiler.ir.pure.fold import Channel, is_contraction
+from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.schedule import classic_projection as _classic
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
+from emmy.compiler.ir.schedule.classic import _ContractionFacts
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, Reduce
+from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp
+from emmy.compiler.ir.tile.ops import Sched
+from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, scan_from_loop
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import PoolSample
 
 _CC = (12, 0)
+
+#: The scheduling rule, reached through ``importlib`` because its module name starts with a digit.
+_SCHEDULE_RULE = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule")
 
 #: The knob pins the enumeration reads off the environment. A host with one set would enumerate a
 #: narrowed pool and fail the offer assertions here for a reason that has nothing to do with the
@@ -410,12 +420,30 @@ def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
     assert _classic._reduction_domain(_tile_stub(_chain_root(scan, red), (spec,)), red) == (Reduce(),)
 
 
+def _per_cell_reductions(root, output_specs=()) -> set:
+    """The reduce values ``_contraction_domain`` offers on the PER-CELL tier of ``root``'s
+    contraction — asked through the contraction projection itself, not through
+    ``_reduction_domain``, so that deleting the delegation between them fails this.
+
+    The stub carries no typed inputs, so ``_warp_atoms`` refuses every tensor-core atom and the
+    catalog is the scalar tiles alone; a tiled plan contracts K serially per register cell and is
+    excluded here by ``is_tiled``.
+    """
+    con = next(stmt for stmt in root.body if is_contraction(stmt))
+    tile = SimpleNamespace(output_specs=output_specs, op=root, inputs={}, place=SimpleNamespace(free=()))
+    domain = _classic._contraction_domain(tile, None, con, _ContractionFacts(k_axis=con.axis))
+    return {choice.reduce for choice in domain if not choice.tile.is_tiled}
+
+
 def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None:
-    """The contraction per-cell tier reads the SAME projection (``_contraction_domain`` delegates
-    to ``_reduction_domain``), so a contraction that is a direct chain member inherits the member
-    catalog, the transposed exclusion, and the swept / streamed serial-only gates with no
-    carve-out of its own. A contraction is a monoid with a ⊗ lift; nothing about the chain arm
-    reads its algebra.
+    """The contraction per-cell tier reads the SAME projection, so a contraction that is a direct
+    chain member inherits the member catalog, the transposed exclusion, and the swept / streamed
+    serial-only gates with no carve-out of its own. A contraction is a monoid with a ⊗ lift;
+    nothing about the chain arm reads its algebra.
+
+    Asked through ``_contraction_domain``, which is the only thing that makes this a test OF the
+    delegation: routed through ``_reduction_domain`` directly it would stay green with the
+    delegation deleted.
 
     Note the shape is projected directly here. ``normalize_fold_tree``'s hoist currently moves any
     contraction off a projection body onto an operand edge — absorbing whatever body value fed it —
@@ -436,7 +464,52 @@ def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None
         channels=(Channel(b=Load(name="b_e", input="B", index=(Var("k"),)), acc="acc"),),
     )
     root = _chain_root(con)
-    assert _classic._reduction_domain(_tile_stub(root), con) == _member_catalog()
+    assert _per_cell_reductions(root) == set(_member_catalog())
 
     swept = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
-    assert _classic._reduction_domain(_tile_stub(root, (swept,)), con) == (Reduce(),)
+    assert _per_cell_reductions(root, (swept,)) == {Reduce()}
+
+
+def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(unpinned) -> None:
+    """The refusal direction, through the real pin path. A ``REDUCE`` value scoped to a site whose
+    projected domain does not hold it empties that site's restriction, and the kernel enumerates NO
+    row at all — the pin is never quietly satisfied by the serial fold it did not name. That, not
+    a per-site exception, is what replaced the old walk's refusal: #691 made a pin a restriction on
+    the projected domain, so a partition a chain member cannot carry simply has nothing to select.
+
+    Only a SCOPED pin refuses. A graph-wide bare ``REDUCE: coop`` is applicable at a site only when
+    ``coop`` is already in that site's projected values, so on a serial-only member it is silently
+    inapplicable — the same adaptation that lets one ambient pin sweep a whole model.
+
+    The positive direction rides along: the DIRECT member's own site does enumerate under the same
+    pin, so a green assertion here cannot come from the kernel being unschedulable outright."""
+    inner_body = Body(
+        (
+            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
+            Assign(name="x_scaled", op="multiply", args=("x_e", "v25")),
+            Accum(name="acc_inner", value="x_scaled", op="add", axes=("k",)),
+        )
+    )
+    inner_loop = Loop(axis=Axis("k", 128), body=inner_body, role=AxisRole.PLANAR)
+    outer_body = Body((inner_loop, Accum(name="acc_outer", value="acc_inner", op="add", axes=("j",))))
+    outer = fold_from_loop(Loop(axis=Axis("j", 4), body=outer_body, role=AxisRole.PLANAR))
+    root = _chain_root(outer, results=("acc_outer",))
+    tile = TileOp(op=root, place=Placement(free=(Axis("m", 4),)), name="k_chain_probe", knobs={})
+    assert tile.op.axis is None and not tile.op.operands, "construction must preserve the chain form"
+
+    member = next(stmt for stmt in tile.op.body if isinstance(stmt, Fold))
+    nested = next(stmt for stmt in member.lift.body if isinstance(stmt, Fold))
+    sched = Sched(tile.op, place=tile.place.on_grid())
+    member_key, nested_key = sched.key("REDUCE", member), sched.key("REDUCE", nested)
+    ctx = Context.from_target(_CC)
+
+    def rows(pins: dict) -> list[dict]:
+        with pinned_knobs(pins):
+            return [dict(leaf.knobs) for leaf in iter_leaves(_SCHEDULE_RULE.classic_forks(tile, tile.name, {}, ctx))]
+
+    unpinned_rows = rows({})
+    assert {str(row[member_key]) for row in unpinned_rows} == {choice.spell() for choice in _member_catalog()}
+    assert {str(row[nested_key]) for row in unpinned_rows} == {""}, "the nested fold is serial-only"
+
+    assert rows({nested_key: "coop"}) == [], "a partition scoped to a serial-only site must enumerate nothing"
+    assert rows({member_key: "coop"}), "the direct member's own site still enumerates under the same value"

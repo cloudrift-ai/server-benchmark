@@ -192,7 +192,12 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     Shared by the contraction per-cell tier through :func:`_contraction_domain`'s delegation, and
     deliberately so: a contraction is a monoid with a ⊗ lift, so a contraction that is a direct
     chain member inherits the same member catalog, the same nested / swept / streamed serial-only
-    exclusions, and the same transposed exclusion, with no carve-out of its own.
+    exclusions, and the same transposed exclusion, with no carve-out of its own. That inheritance
+    is a stated decision, not live behavior: ``normalize_fold_tree``'s hoist absorbs whatever body
+    value fed a contraction and moves it onto an operand edge, and a root with an operand edge is
+    no longer chain-form — so no tree the compiler builds today reaches this arm carrying one. It
+    is written once here so a normalizer that later keeps one in place inherits the reading rather
+    than acquiring a different one by omission.
     """
     if node.observed:
         return (Reduce(),)

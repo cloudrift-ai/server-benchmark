@@ -9,7 +9,7 @@ spliced in as one).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
@@ -63,19 +63,26 @@ class Lambda:
             raise ValueError(f"Lambda results {missing} are not defined by the body or params")
 
     @classmethod
-    def binding(cls, fn: Lambda) -> Lambda:
-        """``fn`` with every name it reads bound — the closed form, made at CONSTRUCTION.
+    def closing(cls, params: tuple[str, ...], body, results: tuple) -> Lambda:
+        """Build a CLOSED lambda from its parts — the one former.
 
-        A term is a function, so it has no free variables. Values arrive through the operand edges
-        a consuming Fold binds positionally; every remaining name — an enclosing iteration axis, or
-        a value nothing supplies yet — is appended as a TRAILING param. Trailing, never
-        interleaved: the operand correspondence is the param PREFIX, so appending leaves every
-        positional read of it intact.
+        A term is a function, so it has no free variables. The caller supplies the params it
+        knows — a fold's iteration var, the names its operand edges bind — and every remaining
+        name the body reads is appended as a TRAILING param. Trailing, never interleaved: the
+        operand correspondence is the param PREFIX, so appending leaves every positional read of
+        it intact.
 
-        Callers form; :meth:`Fold.__post_init__` checks. A constructor that repaired its own input
-        would enforce nothing, so the two are deliberately separate."""
-        residual = fn.free_names()
-        return replace(fn, params=(*fn.params, *sorted(residual))) if residual else fn
+        Built in ONE step: the body is normalized here, so the residual is computed against the
+        same body the lambda stores rather than against a throwaway built open and rebuilt.
+
+        Callers form; :meth:`Fold._assert_closed` refuses. They stay separate because a
+        constructor that repaired its own input would enforce nothing."""
+        body = normalize_lambda_body(Body.coerce(body))
+        bound = set(params)
+        for stmt in body:
+            bound |= _exposed_defines(stmt)
+        residual = {name for stmt in body for name in _member_reads(stmt)} - bound
+        return cls(params=(*params, *sorted(residual)), body=body, results=tuple(results))
 
     @property
     def defined(self) -> frozenset[str]:

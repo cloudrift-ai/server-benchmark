@@ -689,7 +689,7 @@ class Fold:
         params = tuple(n for s in operands for n in _operand_result_names(s))
         if results is None:
             results = _map_results(b) or params[:1]
-        return cls(axis=None, operands=operands, lift=Lambda.binding(Lambda(params=params, body=b, results=tuple(results))))
+        return cls(axis=None, operands=operands, lift=Lambda.closing(params, b, tuple(results)))
 
     @cached_property
     def _derived_twisted(self) -> tuple[Stmt, ...]:

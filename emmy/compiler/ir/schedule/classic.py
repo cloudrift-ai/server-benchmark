@@ -452,7 +452,7 @@ class ClassicMaterialization:
         placement = Sched(source, place=place)
         for site, placed in self.tiles.items():
             choice = schedule.nodes[site].tile
-            expected = placement.placed(source_tile.node_at(site), choice)
+            expected = placement.placed(source_tile.sites[site].node, choice)
             if placed.choice != choice or placed != expected:
                 raise ValueError(f"materialized tile at {node_id_spelling(site)} does not derive from its classic choice")
         for edge, resolved in self.stages.items():
@@ -555,7 +555,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
 
     @property
     def node_sites(self) -> tuple[NodeId, ...]:
-        return self.tile_op.node_sites
+        return tuple(range(len(self.tile_op.sites)))
 
     @property
     def edge_sites(self) -> tuple[EdgeSite, ...]:
@@ -600,7 +600,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return (EdgeSchedule(Stage.direct()),)
 
     def node(self, site: NodeId) -> Fold:
-        return self.tile_op.node_at(site)
+        if type(site) is not int or not 0 <= site < len(self.tile_op.sites):
+            raise KeyError(f"unknown node site {site!r}")
+        return self.tile_op.sites[site].node
 
     def site(self, node: Fold) -> NodeId:
         return self.tile_op.node_id(node)
@@ -611,10 +613,14 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return self.tile_op.operand(edge)
 
     def producer(self, edge: EdgeSite) -> NodeId | None:
-        return self.tile_op.producer(edge)
+        value = self.operand(edge)
+        return self.tile_op.node_id(value) if isinstance(value, Fold) else None
 
     def incident_edges(self, site: NodeId) -> tuple[EdgeSite, ...]:
-        return self.tile_op.incident_edges(site)
+        try:
+            return self.tile_op.incident_edges[site]
+        except KeyError:
+            raise KeyError(f"unknown node site {site!r}") from None
 
     def node_key(self, family: str, site: NodeId) -> str:
         return classic_node_key(self.tile_op, family, site)
@@ -1340,7 +1346,7 @@ class ClassicScheduleCodec:
 
         work = Work.parse(row["WORK"])
         nodes: dict[NodeId, NodeSchedule] = {}
-        for site in self.tile_op.node_sites:
+        for site in self.tile_op.views:
             view = self.tile_op.views[site]
             reduce = None
             if isinstance(view, Reduction):

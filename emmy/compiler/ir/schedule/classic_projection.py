@@ -353,7 +353,7 @@ def _options(state: _ProjectionState, node) -> tuple:
 
 def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[EdgeSchedule, ...]:
     """Project the independent edge catalog; context composition decides compatibility."""
-    node = state.tile.node_at(site)
+    node = state.tile.sites[site].node
     view = state.tile.views[site]
     if not isinstance(view, Reduction) or view.contraction is None:
         return (EdgeSchedule(Stage.direct()),)
@@ -387,11 +387,11 @@ def project_classic(tile: TileOp, target) -> ClassicDomains:
     work_domain = {Work()}
     state = _ProjectionState(tile, target, Sched(tile, place=tile.place.on_grid()))
     edge_domains = {}
-    for site in tile.node_sites:
-        choices = _options(state, tile.node_at(site))
+    for site in range(len(tile.sites)):
+        choices = _options(state, tile.sites[site].node)
         nodes[site] = choices
         edge_choices = _edge_domain(state, site, choices)
-        edge_domains.update({edge: edge_choices for edge in tile.incident_edges(site)})
+        edge_domains.update({edge: edge_choices for edge in tile.incident_edges[site]})
         work_domain.update(
             work
             for choice in choices
@@ -439,7 +439,7 @@ def materialize_classic(
     placed = {}
     resolved = {}
     for site, choice in assignment.nodes.items():
-        node = tile.node_at(site)
+        node = tile.sites[site].node
         geometry = None
         if choice.tile.is_tiled and isinstance(choice, ReductionSchedule):
             geometry = sched.placed(node, choice.tile)

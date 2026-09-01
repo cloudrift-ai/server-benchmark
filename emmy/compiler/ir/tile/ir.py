@@ -570,11 +570,6 @@ class TileOp(Op):
         return tuple((consumer, operand) for consumer, node in enumerate(self.nodes) for operand in range(len(node.operands)))
 
     @cached_property
-    def node_sites(self) -> tuple[NodeId, ...]:
-        """Every node identity, in stable schedule order."""
-        return tuple(range(len(self.sites)))
-
-    @cached_property
     def _node_ids(self) -> dict[int, NodeId]:
         return {id(site.node): node_id for node_id, site in enumerate(self.sites)}
 
@@ -585,36 +580,23 @@ class TileOp(Op):
         except KeyError:
             raise KeyError("Fold is not a node of this TileOp") from None
 
-    def node_at(self, site: NodeId) -> Fold:
-        """The node one identity addresses."""
-        if type(site) is not int or not 0 <= site < len(self.sites):
-            raise KeyError(f"unknown node site {site!r}")
-        return self.sites[site].node
-
     def operand(self, edge: EdgeSite):
         """The operand edge one consumer position addresses."""
         consumer, operand = edge
+        if type(consumer) is not int or not 0 <= consumer < len(self.sites):
+            raise KeyError(f"unknown edge site {edge!r}")
         try:
-            return self.node_at(consumer).operands[operand]
+            return self.sites[consumer].node.operands[operand]
         except (TypeError, IndexError):
             raise KeyError(f"unknown edge site {edge!r}") from None
 
-    def producer(self, edge: EdgeSite) -> NodeId | None:
-        """The node identity an operand edge reaches, or ``None`` for a materialized edge."""
-        value = self.operand(edge)
-        return self.node_id(value) if isinstance(value, Fold) else None
-
     @cached_property
-    def _incident(self) -> dict[NodeId, tuple[EdgeSite, ...]]:
-        out: dict[NodeId, list[EdgeSite]] = {site: [] for site in self.node_sites}
+    def incident_edges(self) -> frozendict[NodeId, tuple[EdgeSite, ...]]:
+        """Each consumer's operand positions."""
+        out: dict[NodeId, list[EdgeSite]] = {site: [] for site in range(len(self.sites))}
         for edge in self.node_edges:
             out[edge[0]].append(edge)
-        return {site: tuple(edges) for site, edges in out.items()}
-
-    def incident_edges(self, site: NodeId) -> tuple[EdgeSite, ...]:
-        """Every operand position of one consumer."""
-        self.node_at(site)
-        return self._incident[site]
+        return frozendict({site: tuple(edges) for site, edges in out.items()})
 
     @cached_property
     def views(self) -> frozendict[NodeId, NodeView]:
@@ -626,15 +608,15 @@ class TileOp(Op):
         """The sites a ``TILE`` slice can address."""
         return tuple(
             site
-            for site in self.node_sites
+            for site in self.views
             if (isinstance(self.views[site], Reduction) and self.views[site].contraction is not None)
-            or (isinstance(self.views[site], Projection) and site == self.node_sites[0] and not self.nodes[site].operands)
+            or (isinstance(self.views[site], Projection) and site == 0 and not self.sites[site].node.operands)
         )
 
     @cached_property
     def reduction_sites(self) -> tuple[NodeId, ...]:
         """The sites a ``REDUCE`` choice can address."""
-        return tuple(site for site in self.node_sites if isinstance(self.views[site], Reduction))
+        return tuple(site for site in self.views if isinstance(self.views[site], Reduction))
 
     @cached_property
     def stage_edges(self) -> tuple[EdgeSite, ...]:

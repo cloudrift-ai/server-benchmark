@@ -36,7 +36,7 @@ def _stamped(root: Fold, plans: dict) -> TileOp:
         site: ProjectionSchedule(Tile())
         if isinstance(sites.views[site], Projection)
         else ReductionSchedule(Tile(), by_site.get(site, Reduce()))
-        for site in sites.node_sites
+        for site in sites.views
     }
     coop = max((plan.coop for plan in plans.values()), default=1)
     work = derive_inventory((Tile(),), coop=coop) or Work()

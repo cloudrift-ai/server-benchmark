@@ -103,9 +103,9 @@ def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
     root = Fold.projection(operands=(left, right), body=Body(), results=("left", "right"))
     inventory = TileOp(op=root)
 
-    assert len(inventory.node_sites) == 4
-    shared_site = inventory.node_id(shared)
-    uses = tuple(edge for edge in inventory.node_edges if inventory.producer(edge) == shared_site)
+    assert len(inventory.sites) == 4
+    assert inventory.node_id(shared) == inventory.node_id(shared)  # one site, however many uses
+    uses = tuple(edge for edge in inventory.node_edges if inventory.operand(edge) is shared)
     assert uses == ((inventory.node_id(left), 0), (inventory.node_id(right), 0))
 
 
@@ -113,7 +113,7 @@ def test_classification_binds_contraction_roles_to_consumer_operands() -> None:
     contraction = _contraction()
     inventory = TileOp(op=contraction)
 
-    view = node_view(inventory.node_at(inventory.node_sites[0]))
+    view = node_view(inventory.sites[0].node)
     assert view == Reduction(Contraction(a=1, channels=(0,)))
 
 

@@ -109,7 +109,7 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
     """
     sibling = _sibling_fragment_edges(owner)
     facts = {}
-    for site in owner.node_sites:
+    for site in range(len(owner.sites)):
         view = owner.views[site]
         if not isinstance(view, Reduction) or view.contraction is None:
             continue

@@ -18,9 +18,10 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.carrier import exp_combine_states
-from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda
+from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda, loaded_buffers
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, ProjectionRegion, TileOp
+from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import Fork
@@ -749,6 +750,64 @@ def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     assert len(pieces) == 3 and all(node.op.placement_decided for node in pieces)
+
+
+def test_selected_result_replacement_applies_a_nested_cut_to_its_retained_slice() -> None:
+    """A retained result slice remains a consumer of every nested seam cut beside it."""
+    k = Axis("k", 8)
+    nested = Fold(
+        axis=k,
+        lift=Lambda(
+            params=("k",),
+            body=Body((Load(name="value", input="values", index=(Var("k"),)),)),
+            results=("value",),
+        ),
+        init=(0.0,),
+        combine=Lambda(
+            params=("total", "total__o"),
+            body=Body((Assign(name="total", op="add", args=("total", "total__o")),)),
+            results=("total",),
+        ),
+    )
+    pair = Fold.projection(
+        operands=(nested, Load(name="other", input="other", index=())),
+        body=Body(
+            (
+                Assign(name="kept", op="copy", args=("total",), dtype=F32),
+                Assign(name="selected", op="copy", args=("other",), dtype=F32),
+            )
+        ),
+        results=("kept", "selected"),
+    )
+    root_fold = Fold.projection(
+        operands=(pair,),
+        body=Body((Assign(name="out", op="add", args=("kept", "selected"), dtype=F32),)),
+        results=("out",),
+    )
+    tile = TileOp(op=root_fold, name="out")
+    graph = Graph()
+    _input(graph, "values", (8,), dtype="f32")
+    _input(graph, "other", (), dtype="f32")
+    graph.add_node(tile, ["values", "other"], Tensor("out", (), F32), node_id="out")
+    graph.inputs, graph.outputs = ["values", "other"], ["out"]
+    node = graph.nodes["out"]
+    seams = cuttable_seams(tile)
+    selected = next(seam for seam in seams if seam.node is pair and seam.selected == "selected")
+    nested_seam = next(seam for seam in seams if seam.node is nested and seam.selected is None)
+
+    fragment = realize(
+        Match(graph=graph, root_node_id=node.id, rule=Rule(name="test", pattern=[])),
+        node,
+        (selected, nested_seam),
+        output_map(node),
+        placement_decided=True,
+    )
+
+    consumer = next(piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp) and "__place_" not in piece.id)
+    producer = next(piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp) and "values" in piece.inputs)
+    assert producer.id in loaded_buffers(consumer.op.op)
+    assert "values" not in loaded_buffers(consumer.op.op)
+    assert all(site.node.axis is None or site.node.axis.name != "k" for site in sites(consumer.op.op))
 
 
 def _composed_case_match() -> tuple[Match, Graph]:

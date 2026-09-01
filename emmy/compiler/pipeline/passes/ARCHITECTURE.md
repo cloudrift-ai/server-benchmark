@@ -105,7 +105,9 @@ rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (attention's statistics cone contains the score dots whose operand cones are
-cut beside it) — and all pieces set `placement_decided` and proceed to scheduling. A bare pinned cut consumes its one
+cut beside it). A selected-result seam's retained sibling slice is itself a consumer, so every other seam in the same
+decision replaces matching descendants inside that slice before the consumer is formed. All pieces set
+`placement_decided` and proceed to scheduling. A bare pinned cut consumes its one
 root-most cut the same way and may join scoped cuts in that single decision. A scoped pin whose site path does
 not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut

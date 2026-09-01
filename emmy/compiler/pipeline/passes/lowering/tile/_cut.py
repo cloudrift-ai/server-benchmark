@@ -525,7 +525,13 @@ def _unchanged(pieces: tuple, members) -> bool:
 
 def _replace_member(member, targets: dict[int, tuple]):
     if id(member) in targets:
-        return targets[id(member)]
+        # A selected-result replacement contains the retained sibling slice. That slice can
+        # still hold another seam selected by the SAME composed decision, so it remains a
+        # consumer and must see the other workspace substitutions. Drop only this target while
+        # walking its replacement: retaining it would recurse into itself, while dropping every
+        # target leaves nested producer cones live beside their already-emitted workspaces.
+        remaining = {target: replacement for target, replacement in targets.items() if target != id(member)}
+        return tuple(piece for replacement in targets[id(member)] for piece in _replace_member(replacement, remaining))
     if isinstance(member, Fold):
         return (_replace_fold(member, targets),)
     nested = member.nested()

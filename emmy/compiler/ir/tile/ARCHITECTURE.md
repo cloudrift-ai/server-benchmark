@@ -282,7 +282,7 @@ scheduled cut child can be serialized and reloaded without exposing a different 
   and semantically refused assignments.
 
 Structural choices are deliberately outside this algebra. A cut or split changes the kernel set first; every fresh
-kernel then constructs a fresh problem and fresh sites. Search ranks encoded accepted leaves and materialization
+kernel is itself the new site index. Search ranks encoded accepted leaves and materialization
 consumes the typed assignment, so neither layer defines schedule membership.
 
 The single `lowering/tile/030_cut` pass reaches a fixpoint over kernel-set alternatives before scheduling: placement
@@ -299,6 +299,15 @@ edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned cuts re
 any pinned Fold-edge cut carries the consumed placement decision on both pieces and proceeds to reduction splitting.
 Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation families nor filters legal
 cuts by profitability.
+
+A safe multi-result zero-axis Fold additionally exposes a structural `.result.<position>` child for an independent
+suffix result. The producer materializes that result's dependence slice at its own inferred dtype; the consumer
+retains the prefix slice and replaces only the selected name with a workspace load. Restricting the offer to a suffix
+keeps the parent's positional operand interface unchanged; splitting an interior result would need segmented
+retained edges. Result addresses are resolved by the placement codec but never join `path.sites`, the `TileOp`
+node/edge site index, or the `TILE`, `REDUCE`, and `STAGE` domains. The workspace still uses the ordinary
+captured-axis tuple. Quotienting or flattening repeated coordinates is a separate edge-transport decision, not part
+of result placement.
 
 A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
 when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's

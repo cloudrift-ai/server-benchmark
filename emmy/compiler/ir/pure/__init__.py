@@ -39,6 +39,7 @@ from emmy.compiler.ir.pure.fold import (
     operand_body,
     operand_name,
     refs_axis,
+    result_slice,
     splice_operands,
     stmt_axis_names,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "operand_body",
     "operand_name",
     "refs_axis",
+    "result_slice",
     "splice_operands",
     "stmt_axis_names",
     "rename_combine",

@@ -61,6 +61,7 @@ from emmy.compiler.ir.pure.fold import (
     edge_free_axes,
     is_contraction,
     operand_body,
+    result_slice,
 )
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.sigma import Sigma
@@ -270,13 +271,7 @@ def _cell_provider_closure(edge, siblings: tuple) -> tuple[object, frozenset[int
 
 def _provider_slice(provider, required: set[str]):
     """Narrow a projection provider to the result cone its cell consumer needs."""
-    results = _operand_result_names(provider)
-    if not isinstance(provider, Fold) or provider.axis is not None or required == set(results):
-        return provider
-    ordered = tuple(result for result in results if result in required)
-    cone = provider.body.backward_cone(ordered)
-    operands = tuple(edge for edge in provider.operands if set(_operand_result_names(edge)) & cone.external_reads)
-    return Fold.projection(operands=operands, body=Body(cone.members), results=ordered)
+    return result_slice(provider, required)
 
 
 def _close_cell_providers(contraction: Fold, siblings: tuple) -> tuple[Fold, frozenset[int]]:

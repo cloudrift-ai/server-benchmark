@@ -334,6 +334,55 @@ def _computed_value_expectation_tile() -> TileOp:
     )
 
 
+def _typed_value_projection_graph() -> Graph:
+    """A typed value contraction paired with a query-dependent result."""
+    query, column, key, inner = Axis("query", 4), Axis("column", 8), Axis("key", 16), Axis("v", 32)
+    value = Fold.contraction(
+        k_axis=inner,
+        a=Load(name="x_value", input="x", index=(Var("key"), Var("v"))),
+        channels=(Channel(b=Load(name="weight", input="weight", index=(Var("v"), Var("column"))), acc="value"),),
+    )
+    pair = Fold.projection(
+        operands=(value,),
+        body=Body(
+            (
+                Load(name="score", input="score", index=(Var("query"), Var("key"))),
+                Assign(name="probability", op="copy", args=("score",), dtype=F32),
+                Assign(name="rounded_value", op="copy", args=("value",), dtype=F16),
+            )
+        ),
+        results=("probability", "rounded_value"),
+    )
+    attention = Fold(
+        axis=key,
+        operands=(pair,),
+        lift=Lambda(
+            params=("key", "probability", "rounded_value"),
+            body=Body((Assign(name="weighted", op="multiply", args=("probability", "rounded_value")),)),
+            results=("weighted",),
+        ),
+        init=(0.0,),
+        combine=Lambda(
+            params=("out", "out__o"),
+            body=Body((Assign(name="out", op="add", args=("out", "out__o")),)),
+            results=("out",),
+        ),
+    )
+    tile = TileOp(
+        op=attention,
+        name="out",
+        place=Placement(free=(query, column)),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("query"), Var("column")), value="out")),),
+    )
+    graph = Graph()
+    _input(graph, "score", (4, 16))
+    _input(graph, "x", (16, 32))
+    _input(graph, "weight", (32, 8))
+    graph.add_node(tile, ["score", "x", "weight"], Tensor("out", (4, 8), "f16"), node_id="out")
+    graph.inputs, graph.outputs = ["score", "x", "weight"], ["out"]
+    return graph
+
+
 def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
     offered: list[dict] = []
     passes = TILE_PASSES if frontend else ["lowering/tile"]
@@ -485,6 +534,65 @@ def test_twisted_expectation_value_cut_uses_the_public_store_dtype() -> None:
 
     assert seams[("vacc",)].dtypes == (F16,)
     assert seams[("maximum", "denominator", "expectation")].dtypes == (F32, F32, F32)
+
+
+def test_selected_result_cut_uses_its_own_dtype_and_axes() -> None:
+    """A selected result retains its sibling without inheriting the sibling's query axis."""
+    graph = _typed_value_projection_graph()
+    tile = graph.nodes["out"].op
+    value = next(seam for seam in cuttable_seams(tile) if seam.selected == "rounded_value")
+
+    assert value.spelling == "PLACE@result.2"
+    assert value.dtypes == (F16,)
+    match = Match(graph=graph, root_node_id="out", rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({value.spelling: "cut"}):
+        fork = _CUT.rewrite(match, graph.nodes["out"])
+    assert fork.knobs == {value.spelling: "cut"} and _is_structural_option(fork)
+    (fragment,) = fork.expand()
+    producer = next(node for node in fragment.nodes.values() if "__place_" in node.id)
+    consumer = next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and node is not producer)
+
+    assert tuple(dim.as_static() for dim in producer.output.shape) == (8, 16)
+    assert producer.output.dtype == F16
+    assert [axis.name for axis in producer.op.place.free] == ["column", "key"]
+    lowered = Body(consumer.op.op.lower())
+    assert any(isinstance(stmt, Load) and stmt.name == "rounded_value" for stmt in lowered.iter())
+    assert any("probability" in stmt.defines() for stmt in lowered.iter())
+
+
+def test_a_result_needed_by_its_sibling_can_only_be_cut_as_a_whole() -> None:
+    axis = Axis("k", 4)
+    child = Fold.projection(
+        body=Body(
+            (
+                Load(name="raw", input="x", index=(Var("k"),)),
+                Assign(name="value", op="copy", args=("raw",), dtype=F32),
+                Assign(name="dependent", op="multiply", args=("value", "value")),
+            )
+        ),
+        results=("value", "dependent"),
+    )
+    root = Fold(
+        axis=axis,
+        operands=(child,),
+        lift=Lambda(
+            params=("k", "value", "dependent"),
+            body=Body((Assign(name="product", op="multiply", args=("value", "dependent")),)),
+            results=("product",),
+        ),
+        init=(0.0,),
+        combine=Lambda(
+            params=("out", "out__o"),
+            body=Body((Assign(name="out", op="add", args=("out", "out__o")),)),
+            results=("out",),
+        ),
+    )
+    tile = replace(TileOp(op=root), inputs={"x": Tensor("x", (4,), F32)}, outputs={"out": Tensor("out", (), F32)})
+
+    spellings = {seam.spelling for seam in cuttable_seams(tile)}
+
+    assert "PLACE@result.1" not in spellings
+    assert "PLACE@result.2" in spellings
 
 
 def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:

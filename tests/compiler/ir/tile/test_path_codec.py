@@ -9,7 +9,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.path import Site, _spellings, canonical, family_sites, parse_key, primary, resolve, sites, spell
+from emmy.compiler.ir.tile.path import Site, _spellings, canonical, family_sites, parse_key, primary, resolve, sites, spell, spell_result
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
@@ -100,6 +100,32 @@ def test_place_spelling_round_trips_for_nested_edges() -> None:
         key = spell(root, "PLACE", node)
         assert resolve(root, key).node is node
         assert canonical(root, key) == key
+
+
+def test_result_address_round_trips_without_becoming_a_schedule_site() -> None:
+    pair = Fold.projection(
+        body=Body((Assign(name="left", op="copy", args=("x",)), Assign(name="right", op="copy", args=("y",)))),
+        results=("left", "right"),
+    )
+    root = Fold.projection(operands=(pair,), results=("left",))
+    ordinary = sites(root)
+
+    key = spell_result(root, pair, 2, all_sites=ordinary)
+
+    assert key == "PLACE@result.2"
+    assert resolve(root, key, all_sites=ordinary) == Site(pair, None, ("map", "map"), result=2)
+    assert canonical(root, key, all_sites=ordinary) == key
+    assert len(sites(root)) == len(ordinary) == 2
+
+
+def test_result_address_rejects_a_nonexistent_component() -> None:
+    from emmy.compiler.ir.tile.path import MissingSiteError
+
+    child = Fold.projection(body=Body((Assign(name="only", op="copy", args=("x",)),)), results=("only",))
+    root = Fold.projection(operands=(child,), results=("only",))
+
+    with pytest.raises(MissingSiteError, match="names no result"):
+        resolve(root, "PLACE@result.2")
 
 
 def test_schedule_families_are_not_structural_paths() -> None:

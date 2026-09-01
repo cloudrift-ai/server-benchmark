@@ -74,7 +74,9 @@ post-decomposition Python source file for known format names.
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over two ordered domains. Placement first offers the maximal fused tree beside every
 semantically closed stored Fold-edge cut whose workspace dtypes are determined and, where the root has several
-independent output regions, beside one root output-region cut. Once placement is consumed, the pass offers the
+independent output regions, beside one root output-region cut. A safe multi-result zero-axis edge also offers each
+independently retained result under a `.result.<position>` address; the address is structural and never becomes a
+classic node or edge site. Once placement is consumed, the pass offers the
 unsplit tree beside every cross-CTA reduce split the head Fold admits. A selected cut or split replaces the kernel
 with fresh unmapped pieces. A bare
 `PLACE=cut` pin
@@ -380,6 +382,9 @@ decomposition may place one transient, shape-only buffer between the accumulator
 that direct private copy inherits the same accumulator dtype. Actual computation over private reduction state remains
 untyped, so normalization and softmax keep their f32 state until their own public result store. Fusion and placement
 then preserve the typed `copy` as an ordinary statement rather than reconstructing a boundary from graph topology.
+Index-map composition preserves that same distinction: it composes through a transient shape-only tensor, but stops
+at a non-transient producer because deleting that tensor would erase a source-program storage boundary before store
+rounding can spell its conversion.
 
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized
@@ -555,7 +560,12 @@ that canonical input:
   that seam rather than joining the offer: the raw bits dominate the fed-store workspace on both precision (exact vs
   re-rounded) and footprint (storage width vs store width), so there is no trade for the evidence to decide. Every
   seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
-  disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
+  disagree. An independent suffix result of a zero-axis Fold uses its own dependence slice and dtype, retains the
+  prefix result slice in the consumer, and replaces only selected reads. The suffix restriction preserves the
+  parent's positional operand interface; interior selection needs segmented retained edges. It keeps the ordinary
+  captured-axis workspace transport; flattening a quotient coordinate belongs to edge transport, not this
+  node-placement choice. A cut workspace retains captured
+  axes plus static unit axes: unit extents add no storage, while preserving
   them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
   unmapped TileOps, so further legal cuts and schedules use the same ordinary passes. An unpinned cut may expose more
   cut choices; any pinned cut consumes its restriction on every piece. If the parent already carries a cross-CTA

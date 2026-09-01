@@ -50,18 +50,24 @@ class _CutContext(ScheduleContext[DeferredFork, object, object]):
         return replace(self, _assignment=pick)
 
 
-def _seam_index(seams) -> dict[int, object]:
-    """Map every seam node and clustered sibling to its shared decision."""
-    return {id(node): seam for seam in seams for node in (seam.node, *(sibling for sibling, _ in seam.siblings))}
+def _seam_index(seams) -> dict[tuple[int, int | None], object]:
+    """Map every complete node or selected result to its shared decision."""
+    out = {}
+    for seam in seams:
+        results = tuple(seam.node.defines())
+        position = results.index(seam.selected) + 1 if seam.selected is not None else None
+        for node in (seam.node, *(sibling for sibling, _ in seam.siblings)):
+            out[(id(node), position)] = seam
+    return out
 
 
-def _with_required(chosen, by_node: dict[int, object], refuse: frozenset = frozenset()) -> tuple:
+def _with_required(chosen, by_node: dict[tuple[int, int | None], object], refuse: frozenset = frozenset()) -> tuple:
     """Expand chosen seams with every transitively required producer seam."""
     out = list(chosen)
     queue = list(out)
     while queue:
         for _, producer in queue.pop().requires:
-            required = by_node[id(producer)]
+            required = by_node[(id(producer), None)]
             if required.spelling in refuse:
                 raise ValueError(f"PLACE pins fuse {required.spelling!r}, the producer a pinned dependent cut requires")
             if not any(member is required for member in out):
@@ -72,7 +78,7 @@ def _with_required(chosen, by_node: dict[int, object], refuse: frozenset = froze
 
 def _rootmost_plain(seams, all_sites, refuse: frozenset[str] = frozenset()):
     """Return the root-most plain seam not excluded by a scoped fuse pin."""
-    plain = [seam for seam in seams if not (seam.providers or seam.requires) and seam.spelling not in refuse]
+    plain = [seam for seam in seams if seam.selected is None and not (seam.providers or seam.requires) and seam.spelling not in refuse]
     if not plain:
         return None
     depth = {id(site.node): site.depth for site in all_sites}
@@ -118,15 +124,15 @@ def _placement_restriction(tile: TileOp, seams, region_pieces) -> tuple[tuple, s
         except MissingSiteError:
             missing = True  # the key addresses a seam of another kernel in the graph
             continue
-        if site.node is tile.op:
+        if site.node is tile.op and site.result is None:
             if not region_pieces:
                 missing = True
             else:
                 root_value = value
             continue
-        if id(site.node) not in by_node:
+        seam = by_node.get((id(site.node), site.result))
+        if seam is None:
             raise ValueError(f"PLACE pin {name!r} does not address a cuttable Fold edge in this kernel")
-        seam = by_node[id(site.node)]
         if value == "fuse":
             fused.append(seam.spelling)
         elif not any(chosen is seam for chosen in cut):

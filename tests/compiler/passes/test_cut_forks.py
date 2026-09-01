@@ -27,6 +27,7 @@ from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     CutSite,
     _environments,
+    _external_reads,
     _producer_order,
     _workspace_axes,
     cuttable_seams,
@@ -645,6 +646,33 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
 
     unpinned = GoldenRecord(knobs={}, **{**fields, "pins": ()})
     assert unpinned.pool_group != a.pool_group, "the pin regime is a group-key term"
+
+
+def test_lowered_captures_resolve_in_program_order() -> None:
+    """A definition covers only the reads that FOLLOW it.
+
+    A stored tree may hold one value object at two positions — a projection member and, canonically
+    shared, deep inside a contraction-operand cone. A seam that keeps only the deeper position
+    lowers the definition inside the reduce loop, AFTER a shallower sibling read of the same name:
+    the name is still a capture the piece must receive as a provider. Order-blind resolution let
+    the later definition mask the read, offered the seam as closed, and cut a piece whose reader
+    had no definition — nvcc's undefined identifier on DeepSeek-V4 post4096's composed-cut
+    ``mean_reduce`` piece."""
+    scalar = Load(name="x", input="eps", index=())
+    cone = Fold.projection(body=Body((scalar, Assign(name="v", op="rsqrt", args=("x",)))), results=("v",))
+    weight = Load(name="w_e", input="w", index=(Var("k"),))
+    b_edge = Fold.projection(operands=(cone,), body=Body((weight, Assign(name="b", op="multiply", args=("w_e", "v")))), results=("b",))
+    inner = Fold.contraction(
+        k_axis=Axis("k", 8),
+        a=Load(name="a_e", input="a", index=(Var("k"),)),
+        channels=(Channel(b=b_edge, acc="acc"),),
+    )
+    node = Fold.projection(
+        body=Body((Assign(name="r", op="rsqrt", args=("x",)), inner, Assign(name="out", op="multiply", args=("r", "acc")))),
+        results=("out",),
+    )
+    assert "x" in node.deps(), "the stored tree knows the shallow read is a capture"
+    assert "x" in _external_reads(node), "the lowered accounting must agree: a later, deeper definition covers nothing"
 
 
 def test_a_fold_held_by_a_plain_statement_still_gets_an_environment() -> None:

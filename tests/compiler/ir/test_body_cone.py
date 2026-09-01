@@ -1,4 +1,4 @@
-"""Unit tests for ``Body.backward_cone`` / ``forward_cone`` / ``defs_die_at``.
+"""Unit tests for ``Body.backward_cone`` / ``defs_die_at``.
 
 The cone API is the shared dataflow substrate behind the rules that used to
 hand-roll slicing (``_split_demoted``, ``021_hoist_staged_loads_above_mask``)
@@ -84,23 +84,6 @@ def test_backward_cone_select_predicate_axis_is_read():
     )
     cone = body.backward_cone(["v"])
     assert "n" in cone.external_reads
-
-
-# --- forward_cone -----------------------------------------------------
-
-
-def test_forward_cone_taints_transitive_readers():
-    body = _cell()
-    cone = body.forward_cone([body[0]])  # seed: the unsafe Load a0
-    assert [s.defines()[0] for s in cone.members] == ["a0", "a1", "p", "acc"]
-    # b is read by a member but produced outside the cone.
-    assert "b" in cone.external_reads
-
-
-def test_forward_cone_skips_independent_stmts():
-    body = _cell()
-    cone = body.forward_cone([body[2]])  # seed: the B-side Load
-    assert [s.defines()[0] for s in cone.members] == ["b", "p", "acc"]
 
 
 # --- defs_die_at ------------------------------------------------------

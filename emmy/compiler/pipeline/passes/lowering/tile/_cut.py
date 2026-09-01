@@ -30,8 +30,9 @@ from emmy.compiler.ir.pure.fold import (
     loaded_buffers,
 )
 from emmy.compiler.ir.pure.tree import walk
-from emmy.compiler.ir.stmt import Assign, Body, Load, Write
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Write
+from emmy.compiler.ir.stmt.body import _exposed_defines
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lower_with_output_specs
 from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
@@ -147,10 +148,38 @@ def storage_frontier(node: Fold) -> Frontier | None:
     return Frontier(name=frontier, producer=side(prefix), residue=side(residue), dtype=result)
 
 
+def _ordered_captures(stmts, scope: frozenset[str]) -> set[str]:
+    """Names read before any definition, walking nested bodies in program order. A definition
+    covers only the reads that FOLLOW it; loop-carried accumulators are live on entry."""
+    captured: set[str] = set()
+    seen = set(scope)
+    for stmt in stmts:
+        reads = set(stmt.deps())
+        for expr in stmt.exprs():
+            reads |= expr.free_vars()
+        captured |= reads - seen
+        inner = seen | stmt.binds_axes() | set(stmt.defines())
+        for body in stmt.nested():
+            carried = {child.name for child in Body(body).iter() if isinstance(child, Accum)}
+            captured |= _ordered_captures(body, frozenset(inner | carried))
+        seen |= _exposed_defines(stmt)
+    return captured
+
+
 def _external_reads(node: Fold) -> frozenset[str]:
-    """Every lowered statement's scope-aware SSA and axis captures."""
-    lowered = Body(node.lower())
-    return lowered.forward_cone(lowered).external_reads
+    """Every lowered statement's scope-aware SSA and axis captures, in PROGRAM ORDER: a definition
+    covers only the reads that follow it. A stored tree may hold one value object at two positions
+    (a projection member and, canonically shared, deep inside a contraction-operand cone); the
+    deeper position lowers inside its reduce loop, AFTER a shallower sibling read of the same
+    name. Order-blind resolution let that later definition mask the read, offered the seam as
+    closed over the name, and cut a piece whose reader had no definition — nvcc's undefined
+    identifier on DeepSeek-V4 post4096's composed-cut ``mean_reduce`` piece.
+
+    Through the ONE reconstitution spelling, so a ``ProjectionRegion`` expands as materialization
+    expands it: a stored Fold reached as a term answers with ``deps()``, whose accounting
+    over-approximates a factored operand cone's internal spellings as reads — the expansion
+    lowers those cones and their definitions instead of asking."""
+    return frozenset(_ordered_captures(Body.coerce(lower_with_output_specs(node, ())), frozenset()))
 
 
 def _closed_at(node: Fold, axes: tuple) -> bool:
@@ -673,7 +702,13 @@ def realize(
     produced_pieces = []
     for seam, produced, axes, index, token, names, buffers, replacements in pieces:
         others = {target: loads for target, loads in everything.items() if target not in replacements}
-        produced_pieces.append((seam, _replace_fold(produced, others) if others else produced, axes, index, token, names, buffers))
+        piece = _replace_fold(produced, others) if others else produced
+        dangling = _external_reads(piece) - {axis.name for axis in seam.axes}
+        assert not dangling, f"cut piece for seam {seam.spelling!r} reads {sorted(dangling)} before any definition"
+        produced_pieces.append((seam, piece, axes, index, token, names, buffers))
+    outer_names = {axis.name for axis in tile.place.free} | {store.sweep.name for store in tile.output_specs if store.sweep is not None}
+    dangling = _external_reads(parent_fold) - outer_names
+    assert not dangling, f"cut consumer of {tile.name!r} reads {sorted(dangling)} before any definition"
 
     fragment = _input_fragment(match, root)
     all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]

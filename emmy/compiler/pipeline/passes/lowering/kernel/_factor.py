@@ -830,6 +830,86 @@ def _tile_reduce_axis_transposed(
     return [], [strided, *merge], tail_stmts, lanes_axes
 
 
+def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[Stmt]:
+    """The partitioned reduce loop for ONE fold — ``reg`` ILP chains striding ``coop·reg`` from the
+    lane's start, then the REG-tree merge and (when threads cooperate) the cross-thread combine.
+    ``rloop`` is the fold's already-emitted serial reduce ``Loop``; the caller owns any prologue
+    ``_emit`` hoisted ahead of it and any smem row-staging rewrite."""
+    coop, reg = plan.coop, plan.reg
+    alg = Reduction(op)
+    axis = rloop.axis
+    stride = coop * reg
+    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
+    start = Var(lane.name) if lane is not None else Literal(0, "int")
+
+    # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
+    # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
+    # accumulator (``StridedLoop.render``).
+    # The shared iteration coordinates (grid + reduce + lane axis vars) and the symbolic
+    # extent's runtime arg(s) (e.g. ``seq_len``) are common to every register copy — exclude
+    # them from the per-copy SSA rename. So too any nested loop-axis variable (a child contraction
+    # contraction's own reduce coordinate ``dd`` / ``j``): ``copy_cell``'s ``rewrite`` renames
+    # a var's USES but not a ``Loop``'s own axis DECLARATION, so suffixing the uses (``dd__r1``)
+    # while the ``for`` decl stays ``dd`` emits an undefined identifier. Each copy re-declares
+    # its own nested loop, so a shared name is correct (loop-scoped).
+    nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
+    # ... and ANY external name the body's index/extent Exprs read without defining — a symbolic
+    # dim can enter through a buffer's flattened STRIDES (a 4-D tensor's ``seq_len``) on an op
+    # whose own reduce extent is static, where none of the named sets above cover it; renaming
+    # such a use (``seq_len__r3``) emits an undeclared identifier (surfaced by the 2026-07-09
+    # offline-weights refit steering dynamic scalar SDPA onto the ILP fold).
+    defined = {nm for s in rloop.body.iter() for nm in s.defines()}
+    expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
+    # ... and the same for the SSA-deps channel: an ``Assign``'s args are name strings ``deps()``
+    # reports and ``exprs()`` does not, so a value defined ahead of the loop (a hoisted scalar
+    # load, a provider chain a cut left before the reduce) and read inside it is invisible to the
+    # Expr scan above. It is one value shared by every copy — renaming its uses (``in3__r1``)
+    # emits an undeclared identifier (surfaced by DeepSeek-V4 post4096's two-cut piece).
+    deps_external = {nm for s in rloop.body.iter() for nm in s.deps()} - defined
+    protected = frozenset(
+        {axis.name, *(ax.name for ax in ctx.grid), *axis.extent_expr().free_vars(), *nested_axes, *expr_external, *deps_external}
+        | ({lane.name} if lane is not None else set())
+    )
+    # A twisted fold's masked tail clamps the STREAMED VALUE to the pivot fold's identity
+    # (the ``exp`` family's running max, −inf) — see :func:`_mask_streamed`'s twisted form.
+    stream_identity = (str(alg.terms[0]), ElementwiseImpl("maximum").identity) if alg.twisted else None
+    copies: list[Stmt] = []
+    for r in range(reg):
+        copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
+    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
+
+    # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor
+    # (copy 0's names) + (when threads cooperate) the cross-thread combine, reassigning the carried
+    # state in place. The one shared tail a cooperative reduce and a future cooperative-K contraction
+    # both emit (``combine_tail``).
+    return [strided, *combine_tail(alg, reg=reg, coop=coop, lane=lane)]
+
+
+def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_val: str) -> list[Stmt]:
+    """The post-reduce projection close. A full-row output (softmax / RMSNorm) distributes its FREE
+    sweep across the coop lanes; a scalar output is written once, guarded to lane 0. With no
+    cooperation (coop == 1) the single thread runs the projection as-is. A raw REDUCE loop in the
+    tail (a restored sibling fold the classifier could not consume) is NOT a sweep: lane striding
+    it would leave each lane an uncombined partial, so it runs SERIALLY per lane — every lane
+    computes the identical full fold, and the tail's unguarded stores stay deterministic because
+    every lane writes the same value."""
+    if lane is None:
+        body_tail = with_store(tail, ctx.output, ctx.grid, out_val)
+    elif any(isinstance(s, Loop) and not s.is_reduce for s in tail):
+        body_tail = [
+            StridedLoop(axis=s.axis, start=Var(lane.name), step=Literal(coop, "int"), body=s.body, unroll=s.unroll)
+            if isinstance(s, Loop) and not s.is_reduce
+            else s
+            for s in tail
+        ]
+    elif any(isinstance(s, Loop) for s in tail):
+        body_tail = list(tail)  # reduce-bearing scalar tail: identical per lane, stores deterministic
+    else:
+        stored = with_store(tail, ctx.output, ctx.grid, out_val)
+        body_tail = [Cond(cond=BinaryExpr("==", Var(lane.name), Literal(0, "int")), body=tuple(stored))]
+    return body_tail
+
+
 def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
     """Tile the REDUCE axis per the node's cooperating :class:`ReducePlan` — the reduce counterpart
     of the output ``unit_tile`` / ``register_tile`` levels: ``coop`` lanes across threads (the
@@ -841,7 +921,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     cross-thread combine), the distributed projection close, and the lane :class:`Axis` (``None``
     for standalone ILP — one thread per cell, lane fixed at 0)."""
     grid = ctx.grid
-    coop, reg = plan.coop, plan.reg
+    coop = plan.coop
 
     # Build the per-cell reduce loop via the recursion (:func:`_emit`) off the :class:`Fold`
     # **node** — the walk reaches any nested contraction as a node. The algebra
@@ -850,10 +930,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # ``combine_states`` machinery folds either). A ``Fold`` has no prologue
     # ahead of its loop; the enclosing zero-axis ``Fold``'s projection is ``tail`` (already walked).
     (rloop,) = _emit(op, ctx).body
-    alg = Reduction(op)
     axis = rloop.axis
-    stride = coop * reg
-    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
 
     # The cooperative lane axis (Tile-decoded, innermost) — present only when threads
     # cooperate; standalone ILP (coop == 1) runs one thread per cell, lane fixed at 0.
@@ -886,69 +963,5 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
         rloop = replace(rloop, body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))
         tail_src = _restage_loads(tail_src, staged, smem_name, n_grid, grid_vars)
 
-    # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
-    # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
-    # accumulator (``StridedLoop.render``).
-    # The shared iteration coordinates (grid + reduce + lane axis vars) and the symbolic
-    # extent's runtime arg(s) (e.g. ``seq_len``) are common to every register copy — exclude
-    # them from the per-copy SSA rename. So too any nested loop-axis variable (a child contraction
-    # contraction's own reduce coordinate ``dd`` / ``j``): ``copy_cell``'s ``rewrite`` renames
-    # a var's USES but not a ``Loop``'s own axis DECLARATION, so suffixing the uses (``dd__r1``)
-    # while the ``for`` decl stays ``dd`` emits an undefined identifier. Each copy re-declares
-    # its own nested loop, so a shared name is correct (loop-scoped).
-    nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
-    # ... and ANY external name the body's index/extent Exprs read without defining — a symbolic
-    # dim can enter through a buffer's flattened STRIDES (a 4-D tensor's ``seq_len``) on an op
-    # whose own reduce extent is static, where none of the named sets above cover it; renaming
-    # such a use (``seq_len__r3``) emits an undeclared identifier (surfaced by the 2026-07-09
-    # offline-weights refit steering dynamic scalar SDPA onto the ILP fold).
-    defined = {nm for s in rloop.body.iter() for nm in s.defines()}
-    expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
-    # ... and the same for the SSA-deps channel: an ``Assign``'s args are name strings ``deps()``
-    # reports and ``exprs()`` does not, so a value defined ahead of the loop (a hoisted scalar
-    # load, a provider chain a cut left before the reduce) and read inside it is invisible to the
-    # Expr scan above. It is one value shared by every copy — renaming its uses (``in3__r1``)
-    # emits an undeclared identifier (surfaced by DeepSeek-V4 post4096's two-cut piece).
-    deps_external = {nm for s in rloop.body.iter() for nm in s.deps()} - defined
-    protected = frozenset(
-        {axis.name, *(ax.name for ax in grid), *axis.extent_expr().free_vars(), *nested_axes, *expr_external, *deps_external}
-        | ({lane.name} if lane is not None else set())
-    )
-    # A twisted fold's masked tail clamps the STREAMED VALUE to the pivot fold's identity
-    # (the ``exp`` family's running max, −inf) — see :func:`_mask_streamed`'s twisted form.
-    stream_identity = (str(alg.terms[0]), ElementwiseImpl("maximum").identity) if alg.twisted else None
-    copies: list[Stmt] = []
-    for r in range(reg):
-        copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
-    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
-
-    # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor
-    # (copy 0's names) + (when threads cooperate) the cross-thread combine, reassigning the carried
-    # state in place. The one shared tail a cooperative reduce and a future cooperative-K contraction
-    # both emit (``combine_tail``).
-    merge = combine_tail(alg, reg=reg, coop=coop, lane=lane)
-
-    # Post-reduce projection. A full-row output (softmax / RMSNorm) distributes its FREE sweep
-    # across the coop lanes; a scalar output is written once, guarded to lane 0. With no
-    # cooperation (coop == 1) the single thread runs the projection as-is. A raw REDUCE loop in
-    # the tail (a restored sibling fold the classifier could not consume) is NOT a sweep: lane
-    # striding it would leave each lane an uncombined partial, so it runs SERIALLY per lane —
-    # every lane computes the identical full fold, and the tail's unguarded stores stay
-    # deterministic because every lane writes the same value.
-    tail = tail_src
-    if lane is None:
-        body_tail = with_store(tail, ctx.output, grid, out_val)
-    elif any(isinstance(s, Loop) and not s.is_reduce for s in tail):
-        body_tail = [
-            StridedLoop(axis=s.axis, start=Var(lane.name), step=Literal(coop, "int"), body=s.body, unroll=s.unroll)
-            if isinstance(s, Loop) and not s.is_reduce
-            else s
-            for s in tail
-        ]
-    elif any(isinstance(s, Loop) for s in tail):
-        body_tail = list(tail)  # reduce-bearing scalar tail: identical per lane, stores deterministic
-    else:
-        stored = with_store(tail, ctx.output, grid, out_val)
-        body_tail = [Cond(cond=BinaryExpr("==", Var(lane.name), Literal(0, "int")), body=tuple(stored))]
-
-    return fill_stmts, [strided, *merge], body_tail, lane
+    fold = _strided_fold(op, rloop, plan, ctx, lane)
+    return fill_stmts, fold, _lane_close(tail_src, lane, coop, ctx, out_val), lane

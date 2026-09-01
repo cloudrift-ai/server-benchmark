@@ -149,6 +149,68 @@ def test_built_artifact_loads_through_offline_prior(tmp_path, monkeypatch):
     assert json.loads(path.read_text())["feat_ver"] == FEATURIZER_VERSION
 
 
+@pytest.mark.parametrize("path", sorted(_DEFAULT_FILE.parent.glob("offline_weights*.json")), ids=lambda p: p.stem)
+def test_every_shipped_artifact_declares_the_columns_it_cannot_weight(path):
+    """Every checked-in linear artifact must declare the columns it reads that no weight key can spell: the
+    routing stamp it picks a weight set with, and the interaction's two inputs wherever a fit pruned their
+    weights away. ``columns`` is the weight keys unioned with ``unweighted_cols``, so this is the whole of what
+    the second field is for — a model whose declaration missed one would hand a pool builder a short list and be
+    handed back a pool that silently misroutes, or prices the interaction off a zeros column.
+
+    Both files, because both are reachable: the sibling is a scoped experiment selected with
+    ``EMMY_OFFLINE_FILE`` / ``--offline-file``, and it is hand-maintained, which is exactly when a schema check
+    earns its place."""
+    art = json.loads(path.read_text())
+    declared = set(OfflinePrior(model=LinearModel.from_artifact(art)).columns)
+
+    assert set(GATE_FEATURES) <= declared
+    assert set(features.ROUTING_FEATURES) <= declared
+    # And the stored half is only ever the part the weights cannot carry.
+    assert set(art["unweighted_cols"]) == declared - set(art["weights"]) - set(art["weights_dynamic"] or {})
+
+
+def test_every_column_the_shipped_artifact_declares_is_still_produced():
+    """A weight for a column the featurizer no longer spells is a DEAD term — it can never be anything but
+    ``0.0``, because the pool never stamps the name and ``Group.matrix`` fills it with the linear model's
+    absent value. Nothing used to notice, because nothing could ask an artifact which columns it read.
+
+    This is not hypothetical drift. Retiring ``D_stage_ring`` is what collapsed the RTX 5090 matmul fit's
+    top-1 from 54 of 242 goldens to 4, and the shipped artifact carried that dead weight — its fourth-largest
+    by magnitude — for months, documented but unenforced. The ``FEATURIZER_VERSION`` 4 bump finally migrated
+    the coefficient onto ``D_stage_prefetch``, the identical ``depth >= 2`` signal, so the artifact now
+    declares nothing the featurizer has stopped producing.
+
+    What counts as "still produced" is measured by re-featurizing every recorded golden's OWN knobs: no
+    enumeration, no ``Context``, no GPU, and it enters through ``knob_features``, the same door the golden
+    group builder feeds. A column no recorded configuration exhibits is exactly as dead as one the featurizer
+    cannot spell."""
+    declared = set(OfflinePrior().columns)
+    produced: set[str] = set()
+    for record in GOLDEN_RECORDS:
+        if record.knobs:
+            produced |= set(features.knob_features({**record.structural_features, **record.knobs}))
+        if declared <= produced:
+            break  # every remaining record can only widen ``produced``, so the verdict is already fixed
+
+    assert declared - produced == set()
+
+
+def test_a_view_that_hides_a_stamped_interaction_input_is_refused():
+    """The fit searches the interaction's weight and threshold as descent coordinates. A view that drops
+    ``D_finalize_kernel`` while the pools carry it leaves the term at 0.0 for every candidate, so the search
+    walks two coordinates that cannot move the objective and the artifact ships whatever they landed on.
+
+    Refused at the trainer, which is the one place that sees both the view and what the pools stamp. A corpus
+    that never stamps the column at all is a different thing — nothing to price — and still fits: that is the
+    case the synthetic pools above are."""
+    cases, names = _synthetic_cases()
+    stamped = [replace(c, feat_names=(*c.feat_names, "D_finalize_kernel")) for c in cases]
+
+    _trainer(names).fit(cases)  # no finalize anywhere: nothing to hide, fits normally
+    with pytest.raises(ValueError, match="D_finalize_kernel"):
+        _trainer(names).fit(stamped)
+
+
 # --- incumbent rank agreement: fit-time eval vs deployed scoring -------------------
 
 

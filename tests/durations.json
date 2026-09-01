@@ -413,6 +413,7 @@
  "tests/compiler/pipeline/search/prior/test_catboost_model.py::test_the_tree_prices_the_two_regimes_from_the_routing_column": 0.05,
  "tests/compiler/pipeline/search/prior/test_catboost_model.py::test_two_artifacts_in_one_directory_do_not_collide": 0.08,
  "tests/compiler/pipeline/search/prior/test_fit_cv.py::test_handle_fit_writes_metrics_and_a_loadable_artifact": 0.05,
+ "tests/compiler/pipeline/search/prior/test_prior_fit.py::test_every_column_the_shipped_artifact_declares_is_still_produced": 3.26,
  "tests/compiler/pipeline/search/prior/test_prior_fit.py::test_fit_twice_is_byte_identical": 0.07,
  "tests/compiler/pipeline/search/prior/test_prior_fit.py::test_l2_default_is_rank_neutral_on_random_restart": 0.06,
  "tests/compiler/pipeline/search/prior/test_report.py::test_a_pool_too_small_for_a_metric_is_excluded_and_the_count_says_so": 0.38,

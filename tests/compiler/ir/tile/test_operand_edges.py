@@ -181,6 +181,20 @@ def test_contraction_deps_include_inline_operand_captures() -> None:
     assert "m_run" in node.deps()
 
 
+def test_an_operand_supplied_name_is_not_an_enclosing_capture() -> None:
+    """A factored operand cone's result reaches the lift through a param, not from the enclosing
+    scope. The read walk used to re-walk a member fold's lift without seeing its params, so every
+    enclosing lambda reported the name as a phantom capture — misdiagnosed as dangling on
+    DeepSeek-V4 post4096's whole-kernel root, and blocking sharing unification for the copies
+    that carry it. ``deps()`` is the scoped rollup; the walk must stop there (``Stmt.deps_deep``)."""
+    cone = Fold.projection(body=Body((Load(name="p", input="eps", index=()),)), results=("p",))
+    member = Fold.projection(operands=(cone,), body=Body((Assign(name="q", op="rsqrt", args=("p",)),)), results=("q",))
+    outer = Fold.projection(body=Body((member, Assign(name="out", op="rsqrt", args=("q",)))), results=("out",))
+
+    assert member.deps() == ()
+    assert outer.deps() == (), "an operand-supplied read must not surface as an enclosing capture"
+
+
 def test_cut_closure_does_not_confuse_a_sibling_loop_axis_for_scope() -> None:
     """A loop binding ``k`` in one operand does not scope a sibling operand's ``x[k]`` load."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at

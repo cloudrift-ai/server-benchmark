@@ -325,6 +325,7 @@ class Fold:
     whichever partition the fork picked. See the NO-schedule-fields note on ``operands`` below."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
+    deps_deep = True  # :meth:`deps` is the memoized scoped rollup — read walks must not re-walk the lift
 
     # The reduce axis — ``None`` is the ZERO-AXIS node (what zero-axis ``Fold`` was): no iteration, no monoid,
     # its ``lift`` the per-cell projection. The BILINEAR reading is a READING of this one

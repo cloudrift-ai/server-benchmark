@@ -89,6 +89,10 @@ def _member_reads(s: Stmt) -> frozenset[str]:
         for e in st.exprs():
             reads.update(e.free_vars() - bound)
         defs.update(st.defines())
+        if st.deps_deep:
+            return  # ``deps()`` already rolls up the subtree scope-correctly; the flat re-walk
+            # cannot see the lift's params, so a factored operand cone's result read inside the
+            # lift would leak out as a phantom capture
         inner_bound = bound | st.binds_axes()
         for body in st.nested():
             for c in body:

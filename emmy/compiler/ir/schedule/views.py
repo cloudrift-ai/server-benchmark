@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from frozendict import frozendict
 
-from emmy.compiler.ir.pure.fold import Fold, cone_seam, deep_reads, edge_refs_axis, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, cone_seam, deep_reads, edge_free_axes, is_contraction
 from emmy.compiler.ir.pure.tree import children, walk
 from emmy.compiler.ir.stmt import Accum, Body
 from emmy.compiler.structural import instance_memo
@@ -245,7 +245,7 @@ def _contraction_facts(site_index: ClassicSites) -> dict[NodeId, ContractionFact
             k_axis = node.axis
         producer = None
         if isinstance(node.a, Fold):
-            nested = tuple(site.node for site in sites(node.a) if is_contraction(site.node) and edge_refs_axis(site.node, k_axis.name))
+            nested = tuple(site.node for site in sites(node.a) if is_contraction(site.node) and k_axis.name in edge_free_axes(site.node))
             producer = nested[0] if len(nested) == 1 else None
         need = sibling.get(id(node))
         facts[site] = ContractionFacts(

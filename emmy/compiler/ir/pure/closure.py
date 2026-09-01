@@ -24,7 +24,7 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, operand_name
+from emmy.compiler.ir.pure.fold import Fold, edge_free_axes, operand_name
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body
@@ -74,7 +74,8 @@ class Closure:
         The wrapping lambda binds exactly the referenced axes, so :attr:`axes` doubles as the
         edge's positional capture correspondence (what the seam clustering pairs siblings by).
         """
-        params = tuple(axis for axis in axes if edge_refs_axis(operand, axis))
+        free = edge_free_axes(operand)
+        params = tuple(axis for axis in axes if axis in free)
         return cls(Lambda(params=params, body=Body((operand,)), results=(operand_name(operand),)), params)
 
     def canonical(self) -> Lambda:

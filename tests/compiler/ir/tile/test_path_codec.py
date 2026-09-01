@@ -222,15 +222,17 @@ def test_tile_axis_orientation_is_read_once_per_site(monkeypatch) -> None:
 
     root, product, _ = _norm_linear_tree()
     calls = []
-    original = tile_ops.edge_refs_axis
+    original = tile_ops.edge_free_axes
 
-    def spy(edge, name):
-        calls.append((edge, name))
-        return original(edge, name)
+    def spy(edge):
+        calls.append(edge)
+        return original(edge)
 
-    monkeypatch.setattr(tile_ops, "edge_refs_axis", spy)
+    monkeypatch.setattr(tile_ops, "edge_free_axes", spy)
     axes = (Axis("m", 128), Axis("n", 256))
     sched = tile_ops.Sched(root, place=Placement(free=axes, grid=axes))
     assert sched._mn_for(product) == axes
     assert sched._mn_for(product) == axes
-    assert len(calls) == 2
+    # both output axes are answered by ONE reading of the edge, and the site memo keeps the second
+    # ``_mn_for`` from asking again
+    assert len(calls) == 1

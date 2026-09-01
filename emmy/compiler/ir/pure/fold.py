@@ -845,6 +845,21 @@ class Fold:
         so a nested fold's ``k`` shadows an enclosing one of the same name."""
         return frozenset() if self.axis is None else frozenset({self.axis.name})
 
+    @cached_property
+    def free_axes(self) -> frozenset[str]:
+        """The names this term's LOWERING reads from an enclosing scope — the K-SEAM fact, derived
+        once for every axis instead of walked once per axis.
+
+        SCOPED: a nested fold that RE-BINDS a name shadows it, and indices under it name that inner
+        axis, not the enclosing one. Axis names collide across a tree by design, while schedule
+        identity comes from the containing node site, so an unscoped scan would read a row-invariant
+        statistic as k-varying.
+
+        Free VALUE names ride along with the axis names. Every caller asks about an axis, and
+        splitting the two needs the iteration-space reading (``ops.axis_names``) that sits above
+        this layer; a membership test is exact for the question actually asked."""
+        return _free_names(self.lower())
+
 
 def is_contraction(x) -> bool:
     """The BILINEAR reading of ``x`` — the predicate that replaced ``isinstance(_, Contraction)``
@@ -952,7 +967,7 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     materializer fills them (``sync_stat_fill``)."""
     if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
         return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
-    varying = [edge_refs_axis(e, k_name) for e in cone.operands]
+    varying = [k_name in edge_free_axes(e) for e in cone.operands]
     pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in operand_body(e))
     cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in _operand_result_names(edge)}
@@ -997,26 +1012,22 @@ def refs_axis(s: Stmt, name: str) -> bool:
     return any(refs_axis(child, name) for b in s.nested() for child in b)
 
 
-def edge_refs_axis(edge, name: str) -> bool:
-    """Whether an operand EDGE's producing stmts index the ENCLOSING axis ``name`` — the K-SEAM
-    test, applied to an edge instead of a stmt. A node's own operands hang off ``operands``, not
-    ``nested()``, so the question is asked of its LOWERING. The cone seam (which of a cone's edges
-    runs once per tile row and which per cell) and the site walk (which of them a schedule slice
-    can address) are the same question, so they share this one read.
+def _free_names(stmts) -> frozenset[str]:
+    """Every name ``stmts`` read from an enclosing scope, each stmt less the axis it binds."""
+    out: set[str] = set()
+    for stmt in stmts:
+        names = {name for expr in stmt.exprs() for name in expr.free_vars()}
+        for body in stmt.nested():
+            names |= _free_names(body)
+        out |= names - stmt.binds_axes()
+    return frozenset(out)
 
-    SCOPED: a nested loop that RE-BINDS the name shadows it, and indices under it name that inner
-    axis, not the enclosing one. Axis names collide across a tree by design, while schedule identity
-    comes from the containing node site, so an unscoped scan would read a row-invariant statistic
-    as k-varying."""
 
-    def refs(s: Stmt) -> bool:
-        if name in s.binds_axes():  # a node re-binding the name shadows it — ``Fold.binds_axes`` is its iteration var
-            return False
-        if any(name in e.free_vars() for e in s.exprs()):
-            return True
-        return any(refs(child) for b in s.nested() for child in b)
-
-    return any(refs(s) for s in operand_body(edge))
+def edge_free_axes(edge) -> frozenset[str]:
+    """One operand EDGE's :attr:`Fold.free_axes`. A node's own operands hang off ``operands``, not
+    ``nested()``, so the question is asked of its LOWERING. A ``Load`` edge is its own index
+    exprs — nothing to walk, so nothing to cache."""
+    return edge.free_axes if isinstance(edge, Fold) else _free_names(operand_body(edge))
 
 
 def subst_free(stmt: Stmt, sigma: Sigma) -> Stmt:
@@ -1025,7 +1036,7 @@ def subst_free(stmt: Stmt, sigma: Sigma) -> Stmt:
     binder re-binds a substituted name.
 
     ``rewrite``'s σ descends into every nested body. But axis names collide across a tree by
-    design (see :func:`edge_refs_axis`), so an occurrence under a ``Loop`` / reducing ``Fold``
+    design (see :func:`edge_free_axes`), so an occurrence under a ``Loop`` / reducing ``Fold``
     that re-binds a substituted name is a DIFFERENT variable: substituting it rewires the inner
     reduction onto the outer coordinate (the k-norm inside attention's K operand cone re-binds
     the contraction axis; a blind σ made its 128-element reduce read one slab element 128 times).
@@ -1112,7 +1123,7 @@ __all__ = [
     "Channel",
     "deep_defines",
     "deep_reads",
-    "edge_refs_axis",
+    "edge_free_axes",
     "Fold",
     "is_contraction",
     "loaded_buffers",

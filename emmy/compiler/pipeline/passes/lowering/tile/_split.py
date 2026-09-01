@@ -37,7 +37,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.algebra import component_ops
-from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, edge_refs_axis, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, edge_free_axes, is_contraction
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
@@ -289,7 +289,7 @@ def _sliced_edge(edge, sigma: Sigma, k_name: str):
     the split trades for parallelism; whether it pays on a given shape is evidence's decision."""
     if isinstance(edge, Load):
         return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
-    ops = tuple(e.rewrite(lambda nm: nm, sigma) if edge_refs_axis(e, k_name) else e for e in edge.operands)
+    ops = tuple(e.rewrite(lambda nm: nm, sigma) if k_name in edge_free_axes(e) else e for e in edge.operands)
     return replace(edge, operands=ops).with_bodies((Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in edge.body)),))
 
 

@@ -29,14 +29,14 @@ from emmy.compiler.ir.pure import (
 )
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
-from emmy.compiler.ir.pure.fold import _operand_result_names, edge_refs_axis, operand_name, refs_axis
+from emmy.compiler.ir.pure.fold import _operand_result_names, edge_free_axes, operand_name, refs_axis
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.structural import instance_memo
 
 
 def _operand_roles(operand, axes: tuple[str, ...]) -> frozenset[str]:
-    return frozenset(axis for axis in axes if edge_refs_axis(operand, axis))
+    return frozenset(axes) & edge_free_axes(operand)
 
 
 def _loads_axis_contiguously(operand, axis: str) -> bool:
@@ -208,7 +208,7 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
     axis_position = {name: i for i, name in enumerate(axes)}
     for left_name, right_name in form.arguments:
         left, right = extracted[left_name][0], extracted[right_name][0]
-        if not edge_refs_axis(left, fold.axis.name) or not edge_refs_axis(right, fold.axis.name):
+        if not all(fold.axis.name in edge_free_axes(edge) for edge in (left, right)):
             return fold
         left_roles, right_roles = _operand_roles(left, axes), _operand_roles(right, axes)
         left_only, right_only = left_roles - right_roles, right_roles - left_roles
@@ -349,7 +349,7 @@ def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset
         if isinstance(stmt, Fold)
         and Closure(stmt.lift, axes).closed
         and not fed_by_body(stmt, root.body)
-        and (is_contraction(stmt) or not any(edge_refs_axis(stmt, name) for name in sweep_axes))
+        and (is_contraction(stmt) or edge_free_axes(stmt).isdisjoint(sweep_axes))
     ]
     if not candidates:
         return root
@@ -589,7 +589,7 @@ def _decode_split(edge, axis_name: str):
 
     def varies(leaf: str) -> bool:
         if leaf in by_param:
-            return edge_refs_axis(by_param[leaf], axis_name)
+            return axis_name in edge_free_axes(by_param[leaf])
         return any(refs_axis(stmt, axis_name) for stmt in body.backward_cone((leaf,)).members)
 
     varying = [leaf for leaf in leaves if varies(leaf)]

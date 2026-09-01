@@ -368,7 +368,7 @@ class Fold:
     def __post_init__(self) -> None:
         if not isinstance(self.init, tuple):
             object.__setattr__(self, "init", tuple(self.init))
-        self._bind_environment()
+        self._coerce_lift()
         if self.axis is None:
             # The ZERO-AXIS node: no iteration and no monoid, so the only formation fact is the
             # positional binding — one lift param per operand RESULT COMPONENT, no leading
@@ -418,32 +418,17 @@ class Fold:
         # literal-1 injection is a denominator, a value injection an expectation.
         assert isinstance(lam.results[0], str), "the twisted lift's pivot component must inject the score name"
 
-    def _bind_environment(self) -> None:
-        """BIND EVERYTHING the lift reads — the closedness invariant, established at formation.
+    def _coerce_lift(self) -> None:
+        """Accept a bare ``Lambda`` and wrap it — WITHOUT binding anything.
 
-        A term is a function, so it has no free variables. Values arrive through operand edges
-        bound positionally; every remaining name the lift reads — an enclosing iteration axis, or
-        a value no operand yet supplies — is appended as a TRAILING param, so
-        ``lift.free_names()`` is empty for every stored Fold. That is what a bare
-        :class:`~emmy.compiler.ir.pure.lam.Lambda` could never check on its own: an axis reference
-        and a value reference are the same ``Var``, so the distinction cannot be made locally —
-        and once everything is bound, it does not have to be. WHAT supplies each param at the use
-        site (an enclosing loop's binder, a register already live, a workspace load) is a lowering
-        decision read off :attr:`environment`, never a property of the term.
-
-        Trailing, never interleaved: the operand correspondence is the param PREFIX, so appending
-        leaves every positional read of it intact."""
+        The wrap is where the invariant is checked: :class:`Closure` refuses a lambda that reads a
+        value it did not bind, so a lift arrives already closed or construction fails here. Forming
+        the environment is the CONSTRUCTION site's job (:meth:`Closure.binding`), not a fixup this
+        constructor performs — a constructor that repairs its own input enforces nothing."""
         from emmy.compiler.ir.pure.closure import Closure  # noqa: PLC0415 — closure imports fold
 
-        fn = self.lift.fn if isinstance(self.lift, Closure) else self.lift
-        residual = fn.free_names()
-        if residual:
-            fn = replace(fn, params=(*fn.params, *sorted(residual)))
-        # The FIELD is a Closure, whose formation gate refuses an open lambda — the invariant is
-        # carried by the type rather than restated at each construction site. The binding above is
-        # the migration seam: while captures remain it makes the gate satisfiable, and deleting it
-        # is what turns the invariant from established into ENFORCED.
-        object.__setattr__(self, "lift", Closure(fn, ()))
+        if not isinstance(self.lift, Closure):
+            object.__setattr__(self, "lift", Closure(self.lift, ()))
 
     @property
     def environment(self) -> tuple[str, ...]:
@@ -697,7 +682,9 @@ class Fold:
         params = tuple(n for s in operands for n in _operand_result_names(s))
         if results is None:
             results = _map_results(b) or params[:1]
-        return cls(axis=None, operands=operands, lift=Lambda(params=params, body=b, results=tuple(results)))
+        from emmy.compiler.ir.pure.closure import Closure  # noqa: PLC0415 — closure imports fold
+
+        return cls(axis=None, operands=operands, lift=Closure.binding(Lambda(params=params, body=b, results=tuple(results))))
 
     @cached_property
     def _derived_twisted(self) -> tuple[Stmt, ...]:

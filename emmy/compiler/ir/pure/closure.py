@@ -158,6 +158,21 @@ class Closure:
         return self.fn.free_names()
 
     @classmethod
+    def binding(cls, fn: Lambda) -> Closure:
+        """Close ``fn`` by BINDING what it reads — the construction-time former.
+
+        Every name the lambda still reads becomes a trailing param, so the result satisfies the
+        formation gate. Trailing, never interleaved: a consumer's operand correspondence is the
+        param PREFIX, so appending leaves every positional read of it intact.
+
+        This is the only sanctioned way to turn an open lambda into a Closure, and it belongs at
+        the CONSTRUCTION site — the place that knows what it is building and can bind correctly.
+        A term that acquires a free name some other way (a rewrite that edited a body without
+        maintaining its params) is a defect, and the gate is what reports it."""
+        residual = fn.free_names()
+        return cls(replace(fn, params=(*fn.params, *sorted(residual))) if residual else fn, ())
+
+    @classmethod
     def over_edge(cls, operand, axes: Iterable[str]) -> Closure:
         """Wrap one operand edge as a closure over the axes it references, kept in ``axes`` order.
 

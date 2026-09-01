@@ -16,19 +16,6 @@ from emmy.compiler.ir.stmt.base import pretty_body
 from emmy.compiler.ir.stmt.body import Body, _exposed_defines, _member_reads
 
 
-def body_free_names(body, bound) -> frozenset[str]:
-    """Names ``body`` reads that ``bound`` does not cover — the residual a FORMER binds.
-
-    A free function because there is no open ``Lambda`` to ask: construction refuses one, so the
-    discovery has to happen on the parts, before the binder exists.
-    """
-    reads = {name for stmt in body for name in _member_reads(stmt)}
-    covered = set(bound)
-    for stmt in body:
-        covered |= _exposed_defines(stmt)
-    return frozenset(reads - covered)
-
-
 @dataclass(frozen=True)
 class Lambda:
     """Explicit binders over the REUSED stmt vocabulary — the ONE binder kind, common to every IR
@@ -79,7 +66,7 @@ class Lambda:
         # every Lambda in the IR (a fold's lift, its combine, its observer) and needs no scope,
         # because binding everything removes the axis-vs-value distinction rather than deciding it.
         # :meth:`closing` FORMS a closed lambda from its parts; this only refuses.
-        free = body_free_names(self.body, self.params)
+        free = {name for stmt in self.body for name in _member_reads(stmt)} - defined
         if free:
             raise ValueError(
                 f"Lambda body reads {sorted(free)} it does not bind. Pass them as params — "
@@ -102,7 +89,15 @@ class Lambda:
         Callers form; :meth:`Fold._assert_closed` refuses. They stay separate because a
         constructor that repaired its own input would enforce nothing."""
         body = normalize_lambda_body(Body.coerce(body))
-        return cls(params=(*params, *sorted(body_free_names(body, params))), body=body, results=tuple(results))
+        bound = set(params)
+        for stmt in body:
+            bound |= _exposed_defines(stmt)
+        # Reads the body does not define, plus any RESULT it does not define either: a write may
+        # pass an enclosing value straight through (``o[j] = acc`` over an already-reduced
+        # accumulator), and that result has no def to name, so it binds as a param like any read.
+        residual = {name for stmt in body for name in _member_reads(stmt)}
+        residual |= {result for result in results if isinstance(result, str)}
+        return cls(params=(*params, *sorted(residual - bound)), body=body, results=tuple(results))
 
     @property
     def defined(self) -> frozenset[str]:

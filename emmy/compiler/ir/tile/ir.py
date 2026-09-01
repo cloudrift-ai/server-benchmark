@@ -41,7 +41,6 @@ from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_free_axes, is_contraction, operand_body
-from emmy.compiler.ir.pure.lam import body_free_names
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.pure.tree import Visit, walk
 from emmy.compiler.ir.schedule import Placement, WarpSpec
@@ -60,7 +59,7 @@ from emmy.compiler.ir.schedule.views import (
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
 from emmy.compiler.ir.stmt.base import _axis_identity
-from emmy.compiler.ir.stmt.body import _exposed_defines, _member_reads
+from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.path import sites
 
@@ -366,12 +365,9 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
                 # broadcasting an already-reduced accumulator, ``o[j] = acc``). Such a result is
                 # not a body def, so probe free names with results left off, then bind captured
                 # results as params alongside the body's own free reads.
-                bound = {stmt.axis.name} | {name for member in child_body for name in _exposed_defines(member)}
-                captured_results = tuple(value for value in results if value not in bound)
-                captures = tuple(sorted(body_free_names(child_body, (stmt.axis.name,)) | set(captured_results)))
                 region = ProjectionRegion(
                     axis=stmt.axis,
-                    lift=Lambda(params=(stmt.axis.name, *captures), body=child_body, results=results),
+                    lift=Lambda.closing((stmt.axis.name,), child_body, results),
                     unroll=stmt.unroll,
                 )
                 pure.append(region)

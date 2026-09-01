@@ -6,6 +6,14 @@
 # the piece's boundary store is a plain workspace write (no output sweep, no streamed result), so
 # nothing keeps it serial now. Neither cut alone reaches this shape: the three-cut route mints no
 # chain-form piece at all, and the six-cut route without the row leaves the partition to greedy.
+#
+# The member's own canonical key is the BARE REDUCE — it is the root-most reduce site of its piece
+# — so the row cannot address it by site, and a bare pin fans out over every kernel in the graph.
+# `REDUCE@a4: ''` is what makes the row discriminate anyway: the chain piece is the only kernel
+# carrying a nested contraction, so its row is the only one the pin set can satisfy, and a silent
+# revert of the member to the serial fold fails the offered oracle instead of borrowing a sibling
+# kernel's cooperative row. The scoped OFF is also the honest decision for that contraction, which
+# emits its a4 loop serially whatever the bare pin fans onto it.
 compute_cap:
 - 12
 - 0
@@ -65,6 +73,7 @@ configs:
       TILE: ''
       WORK: t8
       REDUCE: coop
+      REDUCE@a4: ''
       STAGE: ''
       RASTER: ''
     identity: f1ad5cd0046f299018abb0a3b43bb2d3e005f6b036f1d11c8d1522f2486ff4f0

@@ -292,14 +292,19 @@ def test_a_sweep_reading_fold_offers_only_the_serial_reduce(unpinned) -> None:
 def test_a_direct_member_of_a_chain_form_root_offers_the_catalog(unpinned) -> None:
     """A direct body member of a chain-form root binds through the chain arm — its provider chain
     emits ahead of the strided loop — so it offers the full catalog, minus the transposed band
-    (whose close assumes the kernel-root fold shape)."""
+    (whose close assumes the kernel-root fold shape). A live ``REDUCE`` pin is honored the same
+    way: a legal non-transposed partition binds exactly, and a transposed one is a recorded
+    refusal."""
     from types import SimpleNamespace
 
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.schedule import Workers
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+    from emmy.compiler.ir.tile import ReducePlan
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     body = Body(
         (
@@ -314,12 +319,22 @@ def test_a_direct_member_of_a_chain_form_root_offers_the_catalog(unpinned) -> No
     root = Fold.projection(body=Body((*chain, red)), results=("acc",))
     assert not root.operands, "the fed member must remain in the body for this shape to be under test"
 
-    def state(op):
-        return SimpleNamespace(tile=SimpleNamespace(output_specs=(), op=op), work_pin=None, transposed_ok=False)
+    def state(op, transposed_ok=False):
+        return SimpleNamespace(
+            tile=SimpleNamespace(output_specs=(), op=op), work_pin=Workers(kind="thread", units=(1, 32)), transposed_ok=transposed_ok
+        )
 
     moves = _schedule._reduce_moves(state(root), red, None)
-    assert len(moves) > 1, "the catalog must open for a direct chain member"
-    assert all(not p.coop_transposed for p in moves)
+    assert moves == [p for p in _schedule._reduce_catalog(state(root), 128) if not p.coop_transposed]
+
+    # A legal non-transposed pin is honored exactly, against the kernel's WORK inventory.
+    with pinned_knobs({"REDUCE": "coop"}):
+        assert _schedule._reduce_moves(state(root), red, "REDUCE") == [ReducePlan.of(coop=32)]
+    # A transposed pin still refuses on a chain member — its close assumes the kernel-root fold
+    # shape — even with ``transposed_ok=True``, proving the refusal is the chain arm's own, not
+    # the general transposed-geometry gate `_transposed_refusal` would raise at `transposed_ok=False`.
+    with pinned_knobs({"REDUCE": "coop-t"}), pytest.raises(_schedule.PinRefused, match="a chain-form member cannot realize it"):
+        _schedule._reduce_moves(state(root, transposed_ok=True), red, "REDUCE")
 
 
 def test_a_fold_nested_under_a_chain_member_offers_only_the_serial_reduce(unpinned) -> None:
@@ -359,7 +374,7 @@ def test_a_fold_nested_under_a_chain_member_offers_only_the_serial_reduce(unpinn
         )
 
     assert _schedule._reduce_moves(state(), inner, None) == [ReducePlan()]
-    with pinned_knobs({"REDUCE": "coop"}), pytest.raises(_schedule.PinRefused):
+    with pinned_knobs({"REDUCE": "coop"}), pytest.raises(_schedule.PinRefused, match="nested under a chain-form root's member"):
         _schedule._reduce_moves(state(), inner, "REDUCE")
 
 
@@ -367,15 +382,18 @@ def test_a_sweep_carrying_store_keeps_chain_members_serial(unpinned) -> None:
     """A chain-form root's boundary store carrying an output sweep keeps every direct member
     serial too — even one the sweep axis never enters — because the sweep loop must enclose the
     whole kernel tail and a partitioned member's lane-distributed close cannot re-run per swept
-    cell."""
+    cell. A live pin naming a partition is a recorded refusal naming the sweep, not a silent
+    drop."""
     from types import SimpleNamespace
 
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.schedule import Workers
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
     from emmy.compiler.ir.tile import OutputSpec, ReducePlan
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     body = Body(
         (
@@ -391,9 +409,13 @@ def test_a_sweep_carrying_store_keeps_chain_members_serial(unpinned) -> None:
     sweep_spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
 
     def state():
-        return SimpleNamespace(tile=SimpleNamespace(output_specs=(sweep_spec,), op=root), work_pin=None, transposed_ok=False)
+        return SimpleNamespace(
+            tile=SimpleNamespace(output_specs=(sweep_spec,), op=root), work_pin=Workers(kind="thread", units=(1, 32)), transposed_ok=False
+        )
 
     assert _schedule._reduce_moves(state(), red, None) == [ReducePlan()]
+    with pinned_knobs({"REDUCE": "coop"}), pytest.raises(_schedule.PinRefused, match="boundary store carries an output sweep"):
+        _schedule._reduce_moves(state(), red, "REDUCE")
 
 
 def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
@@ -401,15 +423,18 @@ def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
     loop keeps every OTHER direct member serial too: the trailing append that splices a streamed
     store cannot reach a loop that already sits in an earlier segment, so the whole kernel binds
     without a peel — same contract as the swept store, decided at the offer so the binder never
-    drops a stamped partition."""
+    drops a stamped partition. A live pin naming a partition is a recorded refusal naming the
+    streamed store, not a silent drop."""
     from types import SimpleNamespace
 
     from emmy.compiler.ir.axis import Axis, AxisRole
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.schedule import Workers
     from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
     from emmy.compiler.ir.tile import OutputSpec, ReducePlan
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, scan_from_loop
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     scan_body = Body(
         (
@@ -435,6 +460,15 @@ def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
     streamed_spec = OutputSpec(write=Write(output="running", index=(Var("m"), Var("j")), value=scan.observe.results[0]), sweep=None)
 
     def state():
-        return SimpleNamespace(tile=SimpleNamespace(output_specs=(streamed_spec,), op=root), work_pin=None, transposed_ok=False)
+        return SimpleNamespace(
+            tile=SimpleNamespace(output_specs=(streamed_spec,), op=root),
+            work_pin=Workers(kind="thread", units=(1, 32)),
+            transposed_ok=False,
+        )
 
     assert _schedule._reduce_moves(state(), red, None) == [ReducePlan()]
+    with (
+        pinned_knobs({"REDUCE": "coop"}),
+        pytest.raises(_schedule.PinRefused, match="streams into a sibling observed member's reduce loop"),
+    ):
+        _schedule._reduce_moves(state(), red, "REDUCE")

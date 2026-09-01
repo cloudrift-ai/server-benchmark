@@ -767,16 +767,15 @@ def _reduce_catalog(state: _State, extent: int) -> list[ReducePlan]:
 
 
 def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
-    """The reduce partitions this fold offers: the serial fold plus every :func:`coop_reduce_moves`
-    band the node admits — an observed fold (a scan) and a fold whose cone reads a boundary
-    store's sweep axis offer exactly the serial fold; a fold nested under a chain-form root's
-    direct members, and any fold of a sweep-carrying or streamed-store chain kernel, offer exactly
-    the serial fold; a DIRECT member offers the non-transposed catalog — or, under a ``REDUCE``
-    pin, the ONE partition that pin names, read
-    against the kernel's pinned inventory (the ``coop`` token's width lives in ``WORK``). A pin is
-    authoritative over the value; it cannot make a band this node has no geometry for legal, and
-    one that names no legal partition raises the refusal instead of silently emptying the
-    enumeration. Two pin exemptions, both restatements of where a decision lives:
+    """The reduce partitions this fold offers: the serial fold plus every :func:`coop_reduce_moves` band
+    the node admits — an observed fold (a scan) and a fold whose cone reads a boundary store's sweep
+    axis offer exactly the serial fold; a fold nested under a chain-form root's direct members, and
+    any fold of a sweep-carrying or streamed-store chain kernel, offer exactly the serial fold; a
+    DIRECT member offers the non-transposed catalog — or, under a ``REDUCE`` pin, the ONE partition
+    that pin names, read against the kernel's pinned inventory (the ``coop`` token's width lives in
+    ``WORK``). A pin is authoritative over the value; it cannot make a band this node has no geometry
+    for legal, and one that names no legal partition raises the refusal instead of silently emptying
+    the enumeration. Two pin exemptions, both restatements of where a decision lives:
 
     - The cross-CTA ``g<n>[a|k]`` half is the structural ``035_split_reduce`` fork's decision. It
       was realized by REPLACING the kernel it addressed, and the receipt is the sliced axis's
@@ -819,13 +818,13 @@ def _reduce_moves(state: _State, node, key: str | None) -> list[ReducePlan]:
         # member the normalize hoist keeps in place; every composed-cut and split piece). A DIRECT
         # body member binds through the chain arm — its sibling providers emit ahead of the
         # strided loop — so it offers the full catalog, minus the transposed band (whose close
-        # assumes the kernel-root fold shape). Two shapes keep the serial fold, decided HERE so no
-        # priced row is dropped at the binder: a fold nested DEEPER (the body recursion emits it
-        # serially per cell), and any member of a kernel whose boundary store carries an output
-        # sweep OR streams into a sibling observed member's reduce loop (the wrap would re-run a
-        # partitioned member per swept cell; the trailing splice cannot reach a loop that already
-        # sits in an earlier segment). The cross-CTA ``g`` half stays the split fork's decision —
-        # the shared pin arm consumes the receipt first.
+        # assumes the kernel-root fold shape). Three conditions keep the serial fold instead,
+        # decided HERE so no priced row is dropped at the binder: a fold nested DEEPER (the body
+        # recursion emits it serially per cell), a member of a kernel whose boundary store carries
+        # an output sweep (the wrap would re-run a partitioned member per swept cell), or one that
+        # streams into a sibling observed member's reduce loop (the trailing splice cannot reach a
+        # loop that already sits in an earlier segment). The cross-CTA ``g`` half stays the split
+        # fork's decision — the shared pin arm consumes the receipt first.
         direct = any(node is stmt for stmt in root.body)
         swept_store = any(spec.sweep is not None for spec in state.tile.output_specs)
         streamed_store = any(set(spec.write.values) <= observed_result_names(root) for spec in state.tile.output_specs)

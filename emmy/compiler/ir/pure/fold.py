@@ -1035,7 +1035,7 @@ def result_slice(edge, required: set[str]):
                 continue
             sliced = result_slice(operand, wanted)
             selected[id(operand)] = sliced
-            lowered = Body(sliced.lower())
+            lowered = Body(operand_body(sliced))
             captures = set(lowered.forward_cone(lowered).external_reads)
             if not captures <= needed:
                 needed.update(captures)

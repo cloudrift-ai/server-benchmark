@@ -599,6 +599,7 @@ def test_tile_requires_complete_materialization() -> None:
     root = _contraction()
     context = ClassicScheduleContext(_problem(root))
     site = context.node_sites[0]
+    m, n = Axis("m", 8), Axis("n", 8)
     plan = Tile(units=(1, 2))
     schedule = Schedule(
         KernelSchedule(Work.parse("t2"), Raster()),
@@ -606,12 +607,20 @@ def test_tile_requires_complete_materialization() -> None:
         {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites},
     )
 
+    with pytest.raises(ValueError, match="refused classic schedule"):
+        TileOp(
+            op=root,
+            place=Placement(free=(m, n)),
+            schedule=schedule,
+            materialization=ClassicMaterialization({}, {}),
+        )
+    placed = plan.at(m, n)
     with pytest.raises(ValueError, match="exactly the tiled node sites"):
         TileOp(
             op=root,
-            place=Placement(free=(Axis("m", 8), Axis("n", 8))),
+            place=Placement(free=(m, n)),
             schedule=schedule,
-            materialization=ClassicMaterialization({}, {}),
+            materialization=ClassicMaterialization({site: placed, site + 1: placed}, {}),
         )
 
 

@@ -430,7 +430,12 @@ class ClassicMaterialization:
             raise TypeError("classic materialization requires a TileOp")
         from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
 
-        sites = ClassicSites(source.op)
+        context = ClassicScheduleContext(ClassicProblem.from_tile(source, target=None))
+        try:
+            context.extend(schedule)
+        except ScheduleRefused as error:
+            raise ValueError(f"TileOp carries a refused classic schedule: {error}") from error
+        sites = context.problem.sites
         expected_tiles = {
             site
             for site, assignment in schedule.nodes.items()
@@ -441,11 +446,6 @@ class ClassicMaterialization:
         expected_stages = {edge for edge, assignment in schedule.edges.items() if not assignment.stage.is_direct}
         if set(self.stages) != expected_stages:
             raise ValueError("classic materialization must contain exactly the staged edge sites")
-        context = ClassicScheduleContext(ClassicProblem.from_tile(source, target=None))
-        try:
-            context.extend(schedule)
-        except ScheduleRefused as error:
-            raise ValueError(f"TileOp carries a refused classic schedule: {error}") from error
         placement = Sched(source.op, place=place)
         for site, placed in self.tiles.items():
             choice = schedule.nodes[site].tile

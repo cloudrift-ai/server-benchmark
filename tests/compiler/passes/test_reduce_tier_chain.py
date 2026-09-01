@@ -206,3 +206,42 @@ def test_a_contraction_chain_member_binds_through_the_chain_arm() -> None:
     assert [a.name for a in bound.axes if a.name.endswith("_co")] == ["k_co"]
     assert bound.block_threads == 64
     assert any(isinstance(s, (WarpShuffle, TreeHalve, Smem)) for s in flat), "the cross-thread combine must close the fold"
+
+
+def test_the_walk_offers_and_the_binder_realizes_two_partitioned_members(monkeypatch) -> None:
+    """End-to-end through the ACTUAL enumeration, no direct stamping: a chain kernel with two
+    reduce members enumerates rows where both members carry the coop band — a row holds ONE worker
+    inventory, which is what forces the shared width the binder's coop-agreement assert leans
+    on — and the materialized leaf binds through the chain arm with one shared lane axis striding
+    both folds."""
+    import importlib  # noqa: PLC0415
+
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import iter_leaves  # noqa: PLC0415
+
+    classic_forks = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
+    for var in ("EMMY_KNOBS", "EMMY_PLACE", "EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE", "EMMY_RASTER"):
+        monkeypatch.delenv(var, raising=False)
+    red_a = _reduce("k", 128, "acc", "scale", "x")
+    red_b = _reduce("j", 256, "acc2", "mid", "y")
+    chain = (Load(name="ws", input="cutbuf", index=(Var("m"),)), Assign(name="scale", op="rsqrt", args=("ws",)))
+    mid = Assign(name="mid", op="multiply", args=("acc", "scale"))
+    root = Fold.projection(body=Body((*chain, red_a, mid, red_b)), results=("acc2",))
+    tile = TileOp(op=root, place=_PLACE, name="k_two_member_probe", knobs={})
+
+    leaves = list(iter_leaves(classic_forks(tile, tile.name, {}, Context.from_target((12, 0)))))
+    keys = sorted({key for leaf in leaves for key in leaf.knobs if key.split("@", 1)[0] == "REDUCE"})
+    assert len(keys) == 2, f"both members must be keyed schedule sites: {keys}"
+    both = [leaf for leaf in leaves if all(str(leaf.knobs.get(key, "")) == "coop" for key in keys)]
+    assert both, "the enumeration must offer a row partitioning BOTH members"
+
+    (scheduled_tile,) = both[0].expand()
+    bound = factorize(scheduled_tile, root=None)
+    strided = [s for s in bound.body if isinstance(s, StridedLoop)]
+    assert len(strided) == 2, "each partitioned member emits its own strided fold"
+    lanes = [a for a in bound.axes if a.name.endswith("_co")]
+    assert len(lanes) == 1, "cooperating members share ONE lane axis"
+    width = lanes[0].extent.as_static()
+    assert [s.step.value for s in strided] == [width, width], "both folds stride by the one inventory's width"
+    assert [s.start for s in strided] == [Var(lanes[0].name), Var(lanes[0].name)]
+    assert bound.block_threads == width

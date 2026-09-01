@@ -12,7 +12,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda, M
-from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 
@@ -80,10 +80,17 @@ def scan_from_loop(loop: Loop) -> tuple[Fold, tuple[Write, ...]]:
     # FORM the lift closed: the step reads the enclosing grid / sweep axes this loop sits under
     # (a matmul cell's ``a0`` / ``a1``), and a term carries no free names, so they are bound here —
     # at the construction site, which is the one that knows it is turning a Loop into a term.
-    lift = Lambda.closing((loop.axis.name,), step, tuple(stmt.value for stmt in accums))
+    # SEPARATE the terms: a nested reduce in the step is an operand EDGE, never a member of the
+    # lift body. A Fold tree composes through operands — that is the tree — so a term embedded in
+    # a lambda body would be a second, competing composition mechanism. ``splice_operands`` places
+    # each edge before its first read, so lifting them out preserves evaluation order.
+    edges = tuple(stmt for stmt in step if isinstance(stmt, Fold))
+    plain = Body(stmt for stmt in step if not isinstance(stmt, Fold))
+    bound = tuple(name for edge in edges for name in _operand_result_names(edge))
+    lift = Lambda.closing((loop.axis.name, *bound), plain, tuple(stmt.value for stmt in accums))
     init, combine = M(*(stmt.op for stmt in accums), names=names)
     if not writes:
-        return Fold(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine), ()
+        return Fold(axis=loop.axis, unroll=loop.unroll, operands=edges, lift=lift, init=init, combine=combine), ()
     stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))
     if any(value not in names for value in stored):
         raise ValueError(f"reduce loop {loop.axis.name!r}: a per-step store may only observe the carried state {names}")
@@ -92,7 +99,7 @@ def scan_from_loop(loop: Loop) -> tuple[Fold, tuple[Write, ...]]:
         body=Body(tuple(Assign(name=f"{value}__obs", op="copy", args=(value,)) for value in stored)),
         results=tuple(f"{value}__obs" for value in stored),
     )
-    fold = Fold(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine, observe=observe)
+    fold = Fold(axis=loop.axis, unroll=loop.unroll, operands=edges, lift=lift, init=init, combine=combine, observe=observe)
     renamed = tuple(replace(stmt, values=tuple(f"{value}__obs" for value in stmt.values)) for stmt in writes)
     return fold, renamed
 

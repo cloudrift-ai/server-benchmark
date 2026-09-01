@@ -24,7 +24,6 @@ from __future__ import annotations
 import heapq
 from dataclasses import dataclass, field, replace
 from functools import cached_property
-from typing import TYPE_CHECKING
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
@@ -35,9 +34,6 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
 from emmy.compiler.ir.stmt.base import _axis_identity
-
-if TYPE_CHECKING:  # ``closure`` imports this module, so the type is a forward reference only
-    from emmy.compiler.ir.pure.closure import Closure
 
 
 def splice_operands(operands: tuple, stmts: tuple[Stmt, ...]) -> tuple[Stmt, ...]:
@@ -352,7 +348,7 @@ class Fold:
     # TRUE monoid's flat ``(init, combine)`` pair whose combine carries the REAL accumulator
     # names (its results). The serial step, the ``Accum`` forms and the ``carrier`` annotation
     # are DERIVED (:func:`_fold_derived_step` / ``__post_init__``). ------------------------------ #
-    lift: Closure = field(kw_only=True)  # coerced from a bare ``Lambda`` at formation (:meth:`_bind_environment`)
+    lift: Lambda = field(kw_only=True)  # CLOSED: ``lift.free_names()`` is empty (:meth:`_assert_closed`)
     init: tuple = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
     combine: Lambda | None = field(kw_only=True, default=None)  # S × S → S — THE ⊕; None at zero axes
     # The per-step OBSERVER — the scan spelling: a pure λ(k, s₁…sₙ) over the carried state,
@@ -368,7 +364,7 @@ class Fold:
     def __post_init__(self) -> None:
         if not isinstance(self.init, tuple):
             object.__setattr__(self, "init", tuple(self.init))
-        self._coerce_lift()
+        self._assert_closed()
         if self.axis is None:
             # The ZERO-AXIS node: no iteration and no monoid, so the only formation fact is the
             # positional binding — one lift param per operand RESULT COMPONENT, no leading
@@ -418,17 +414,28 @@ class Fold:
         # literal-1 injection is a denominator, a value injection an expectation.
         assert isinstance(lam.results[0], str), "the twisted lift's pivot component must inject the score name"
 
-    def _coerce_lift(self) -> None:
-        """Accept a bare ``Lambda`` and wrap it — WITHOUT binding anything.
+    def _assert_closed(self) -> None:
+        """A stored term reads nothing it does not bind — the CONTEXTUAL formation invariant.
 
-        The wrap is where the invariant is checked: :class:`Closure` refuses a lambda that reads a
-        value it did not bind, so a lift arrives already closed or construction fails here. Forming
-        the environment is the CONSTRUCTION site's job (:meth:`Closure.binding`), not a fixup this
-        constructor performs — a constructor that repairs its own input enforces nothing."""
-        from emmy.compiler.ir.pure.closure import Closure  # noqa: PLC0415 — closure imports fold
+        ``Lambda`` states this rule and cannot check it alone: an axis reference and a value
+        reference are the same ``Var``, so ``λ(k) → x[m, k]`` is legal where ``m`` is an ancestor's
+        axis and illegal where a sibling defines it. Binding EVERYTHING removes the distinction —
+        and with it the need to make it — so the check here is total and needs no scope at all.
 
-        if not isinstance(self.lift, Closure):
-            object.__setattr__(self, "lift", Closure(self.lift, ()))
+        Forming the closed lift is the construction site's job (:meth:`Lambda.binding`); this only
+        refuses. A constructor that repairs its own input enforces nothing, which is exactly how
+        captures accumulated before: the rule was stated in three docstrings and asserted nowhere.
+
+        WHAT supplies each param at the use site — an enclosing loop's binder, a register already
+        live, a workspace load — is a lowering decision read off :attr:`environment`, never a
+        property of the term."""
+        free = self.lift.free_names()
+        if free:
+            raise ValueError(
+                f"Fold lift reads {sorted(free)} it does not bind. A term carries no free names: values arrive "
+                f"through operand edges bound positionally, and anything else is a trailing param "
+                f"(Lambda.binding forms it at the construction site)."
+            )
 
     @property
     def environment(self) -> tuple[str, ...]:
@@ -682,9 +689,7 @@ class Fold:
         params = tuple(n for s in operands for n in _operand_result_names(s))
         if results is None:
             results = _map_results(b) or params[:1]
-        from emmy.compiler.ir.pure.closure import Closure  # noqa: PLC0415 — closure imports fold
-
-        return cls(axis=None, operands=operands, lift=Closure.binding(Lambda(params=params, body=b, results=tuple(results))))
+        return cls(axis=None, operands=operands, lift=Lambda.binding(Lambda(params=params, body=b, results=tuple(results))))
 
     @cached_property
     def _derived_twisted(self) -> tuple[Stmt, ...]:

@@ -77,7 +77,10 @@ def scan_from_loop(loop: Loop) -> tuple[Fold, tuple[Write, ...]]:
     write_ids = {id(stmt) for stmt in writes}
     step = Body(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
     names = tuple(stmt.name for stmt in accums)
-    lift = Lambda(params=(loop.axis.name,), body=step, results=tuple(stmt.value for stmt in accums))
+    # FORM the lift closed: the step reads the enclosing grid / sweep axes this loop sits under
+    # (a matmul cell's ``a0`` / ``a1``), and a term carries no free names, so they are bound here —
+    # at the construction site, which is the one that knows it is turning a Loop into a term.
+    lift = Lambda.binding(Lambda(params=(loop.axis.name,), body=step, results=tuple(stmt.value for stmt in accums)))
     init, combine = M(*(stmt.op for stmt in accums), names=names)
     if not writes:
         return Fold(axis=loop.axis, unroll=loop.unroll, lift=lift, init=init, combine=combine), ()

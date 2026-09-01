@@ -138,40 +138,6 @@ class Closure:
                 f"operand edges bound positionally to lift params; only the axes {list(self.axes)} may be free."
             )
 
-    # ---- the wrapped lambda's own interface, forwarded. A Closure IS the scoped lambda, so a
-    # consumer that only needs the binder reads it here rather than reaching through ``fn``. ----
-    @property
-    def params(self) -> tuple[str, ...]:
-        return self.fn.params
-
-    @property
-    def body(self) -> Body:
-        return self.fn.body
-
-    @property
-    def results(self) -> tuple:
-        return self.fn.results
-
-    def free_names(self) -> frozenset[str]:
-        """Empty for every Closure — the formation gate refuses an open lambda. Kept so a
-        ``Lambda`` and a ``Closure`` answer the same question the same way."""
-        return self.fn.free_names()
-
-    @classmethod
-    def binding(cls, fn: Lambda) -> Closure:
-        """Close ``fn`` by BINDING what it reads — the construction-time former.
-
-        Every name the lambda still reads becomes a trailing param, so the result satisfies the
-        formation gate. Trailing, never interleaved: a consumer's operand correspondence is the
-        param PREFIX, so appending leaves every positional read of it intact.
-
-        This is the only sanctioned way to turn an open lambda into a Closure, and it belongs at
-        the CONSTRUCTION site — the place that knows what it is building and can bind correctly.
-        A term that acquires a free name some other way (a rewrite that edited a body without
-        maintaining its params) is a defect, and the gate is what reports it."""
-        residual = fn.free_names()
-        return cls(replace(fn, params=(*fn.params, *sorted(residual))) if residual else fn, ())
-
     @classmethod
     def over_edge(cls, operand, axes: Iterable[str]) -> Closure:
         """Wrap one operand edge as a closure over the axes it references, kept in ``axes`` order.

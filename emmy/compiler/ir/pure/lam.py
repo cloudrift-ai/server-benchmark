@@ -9,7 +9,7 @@ spliced in as one).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
@@ -61,6 +61,21 @@ class Lambda:
         missing = [r for r in self.results if isinstance(r, str) and r not in defined]
         if missing:
             raise ValueError(f"Lambda results {missing} are not defined by the body or params")
+
+    @classmethod
+    def binding(cls, fn: Lambda) -> Lambda:
+        """``fn`` with every name it reads bound — the closed form, made at CONSTRUCTION.
+
+        A term is a function, so it has no free variables. Values arrive through the operand edges
+        a consuming Fold binds positionally; every remaining name — an enclosing iteration axis, or
+        a value nothing supplies yet — is appended as a TRAILING param. Trailing, never
+        interleaved: the operand correspondence is the param PREFIX, so appending leaves every
+        positional read of it intact.
+
+        Callers form; :meth:`Fold.__post_init__` checks. A constructor that repaired its own input
+        would enforce nothing, so the two are deliberately separate."""
+        residual = fn.free_names()
+        return replace(fn, params=(*fn.params, *sorted(residual))) if residual else fn
 
     @property
     def defined(self) -> frozenset[str]:

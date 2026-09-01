@@ -1474,7 +1474,7 @@ def _rename_buf_in_op(op, old: str, new: str):
             return replace(
                 term,
                 operands=tuple(rename_term(edge) for edge in term.operands),
-                lift=replace(term.lift.fn, body=rename_body(term.lift.body)),
+                lift=replace(term.lift, body=rename_body(term.lift.body)),
             )
 
         renamed = replace(

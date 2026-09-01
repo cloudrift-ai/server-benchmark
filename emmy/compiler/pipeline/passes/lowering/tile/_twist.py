@@ -110,7 +110,7 @@ def _denominator(fold: Fold, pivots: frozenset[str], score: Closure, axes: tuple
 def _twisted_pair(maximum: Fold, denominator: Fold) -> Fold:
     states = (maximum.combine.results[0], denominator.combine.results[0])
     other = tuple(f"{name}__o" for name in states)
-    lift = replace(maximum.lift.fn, results=(maximum.lift.results[0], 1.0))
+    lift = replace(maximum.lift, results=(maximum.lift.results[0], 1.0))
     combine = Lambda(params=states + other, body=Body(exp_combine_states(states, other)), results=states)
     return Fold(
         axis=maximum.axis,

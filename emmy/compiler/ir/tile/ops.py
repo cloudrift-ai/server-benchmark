@@ -35,7 +35,6 @@ from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
     classic_node_key,
     classic_stage_key,
-    validate_classic_assignment,
 )
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
@@ -425,10 +424,6 @@ def scheduled(
     is the sole worker-inventory source; the encoded row must agree with it."""
     if schedule is None:
         raise ValueError("cannot construct a scheduled TileOp without a Schedule")
-    try:
-        validate_classic_assignment(ClassicSites(op), schedule)
-    except ValueError as error:
-        raise ValueError(f"cannot construct a scheduled TileOp from an invalid assignment: {error}") from error
     work = schedule.kernel.work
     producer = workers.producer_warps if workers is not None else 0
     if work.producer != producer:

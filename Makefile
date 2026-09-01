@@ -55,6 +55,7 @@ setup-ci:
 	python3.13 -m venv venv --prompt "emmy"
 	./venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
 	./venv/bin/pip install -e ".[compile,test,image]"
+	@touch venv/.setup-complete
 
 lint: setup
 	./venv/bin/ruff check

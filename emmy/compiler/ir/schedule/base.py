@@ -30,16 +30,8 @@ from frozendict import frozendict
 from .views import EdgeSite, NodeId
 
 
-class Edge(ABC):
-    """A schedule-family edge option."""
-
-    @abstractmethod
-    def is_cut(self) -> bool:
-        """Whether this option separates its producer and consumer into different kernels."""
-
-
 @dataclass(frozen=True)
-class Schedule[KernelT, NodeT, EdgeT: Edge]:
+class Schedule[KernelT, NodeT, EdgeT]:
     """One immutable kernel × node × edge assignment, possibly still incomplete."""
 
     kernel: KernelT | None
@@ -69,7 +61,7 @@ class ScheduleRefused(ValueError):
     """A pick cannot compose with the immutable schedule context."""
 
 
-class ScheduleContext[KernelT, NodeT, EdgeT: Edge](ABC):
+class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
     """One immutable prefix of a compatible enumeration.
 
     Implementations own frontier granularity, compatibility, restrictions, and validation. They
@@ -85,10 +77,6 @@ class ScheduleContext[KernelT, NodeT, EdgeT: Edge](ABC):
     @abstractmethod
     def extensions(self) -> Iterator[Schedule[KernelT, NodeT, EdgeT]]:
         """Yield the next lazy frontier without losing any accepted completion."""
-
-    def only_cuts(self) -> Iterator[Schedule[KernelT, NodeT, EdgeT]]:
-        """Yield frontier extensions containing at least one cut edge."""
-        return (extension for extension in self.extensions() if any(edge.is_cut() for edge in extension.edges.values()))
 
     @abstractmethod
     def extend(self, pick: Schedule[KernelT, NodeT, EdgeT]) -> Self:
@@ -114,4 +102,4 @@ def schedule[KernelT, NodeT, EdgeT](
             yield child
 
 
-__all__ = ["Edge", "Schedule", "ScheduleContext", "ScheduleRefused", "schedule"]
+__all__ = ["Schedule", "ScheduleContext", "ScheduleRefused", "schedule"]

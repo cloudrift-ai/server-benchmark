@@ -14,7 +14,7 @@ another enumerator.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
@@ -106,7 +106,8 @@ def _contraction_facts(tile: TileOp, target, site_index: ClassicSites) -> dict[i
     for node, _axes in walk(root):
         if not (isinstance(node, Fold) and node.axis is not None and is_contraction(node)):
             continue
-        if id(node) in facts:
+        site = site_index.site(node)
+        if site in facts:
             continue
         packed = (match_packed_b_node(node, tile.inputs), match_packed_pair_node(node, tile.inputs))
         refusal = _node_refusal(tile, target, node, fragment_epilogue, packed)
@@ -132,7 +133,7 @@ def _contraction_facts(tile: TileOp, target, site_index: ClassicSites) -> dict[i
         need_step = need is not None
         if need is None and producer is not None:
             need = node_id_spelling(site_index.site(producer))
-        facts[id(node)] = _ContractionFacts(
+        facts[site] = _ContractionFacts(
             k_axis=k_axis,
             seam=seam,
             producer=producer,
@@ -348,7 +349,6 @@ class _ProjectionState:
     target: object
     sites: ClassicSites
     contraction_facts: dict
-    producer_sites: frozenset[str]
     sched: Sched
 
 
@@ -371,7 +371,7 @@ def _options(state: _ProjectionState, node) -> tuple:
         return tuple(ProjectionSchedule(plan) for plan in plans)
 
     choices = (
-        _contraction_domain(state.tile, state.target, node, state.contraction_facts[id(node)])
+        _contraction_domain(state.tile, state.target, node, state.contraction_facts[site])
         if view.contraction is not None
         else tuple(ReductionSchedule(Tile(), reduction) for reduction in _reduction_domain(state.tile, node))
     )
@@ -380,7 +380,7 @@ def _options(state: _ProjectionState, node) -> tuple:
         geometry = state.sched.placed(node, choice.tile)
         if choice.tile.is_tiled and not isinstance(geometry, PlacedTile):
             continue
-        facts = state.contraction_facts.get(id(node))
+        facts = state.contraction_facts.get(site)
         if (
             isinstance(geometry, PlacedTile)
             and facts is not None
@@ -411,7 +411,7 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
             continue
         if _needs_fill(state.tile, node, choice.tile):
             candidates = (Stage(depth=1), Stage(depth=2))
-            facts = state.contraction_facts[id(node)]
+            facts = state.contraction_facts[site]
             if facts.packed[0] is not None:
                 candidates = (*candidates, *catalogs[True])
         else:
@@ -425,8 +425,8 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
 
 
 def _problem(tile: TileOp, target) -> ClassicProblem:
-    problem = ClassicProblem(tile.op, target, tile)
-    return replace(problem, contractions=_contraction_facts(tile, target, problem.sites))
+    site_index = ClassicSites(tile.op)
+    return ClassicProblem(tile.op, target, tile, _contraction_facts(tile, target, site_index))
 
 
 def project_classic(tile: TileOp, target) -> tuple[ClassicProblem, ClassicDomains]:
@@ -441,7 +441,6 @@ def project_classic(tile: TileOp, target) -> tuple[ClassicProblem, ClassicDomain
         target,
         site_index,
         contraction_facts,
-        frozenset(facts.need for facts in contraction_facts.values() if facts.need is not None),
         Sched(tile.op, place=tile.place.on_grid()),
     )
     edge_domains = {}
@@ -521,7 +520,7 @@ def materialize_classic(
                 choice.tile,
                 geometry,
                 edge_choice.stage,
-                problem.contractions[id(node)],
+                problem.contractions[site],
             )
             if stage is None:
                 raise ValueError(f"accepted STAGE at {edge_site_spelling(edge)} did not resolve")

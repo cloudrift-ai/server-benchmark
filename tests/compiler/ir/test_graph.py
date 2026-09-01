@@ -219,6 +219,7 @@ def test_kernel_op_windowed_axis_roundtrip():
 
 def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
     """A dumped tile-stage graph must rehydrate the scalar output-tile schedule."""
+    import copy
     import json
 
     from emmy.compiler.ir.atom import ScalarAtom
@@ -268,6 +269,12 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
     plan = loaded_tile.schedule.nodes[loaded_context.node_sites[0]].tile
     assert isinstance(plan, ScheduleTile)
     assert isinstance(plan.atom, ScalarAtom)
+
+    grouped_projection = copy.deepcopy(g.to_dict())
+    schedule_row = grouped_projection["nodes"]["out"]["op_fields"]["schedule"]
+    schedule_row.update({"WORK": "t2", "TILE": "f1x2", "RASTER": "gm8"})
+    with pytest.raises(ValueError, match="RASTER requires a tiled contraction site"):
+        Graph.from_dict(grouped_projection)
 
 
 def test_stmt_eval_scope_reads_non_finite_literals():

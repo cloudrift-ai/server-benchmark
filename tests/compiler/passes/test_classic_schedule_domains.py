@@ -15,7 +15,6 @@ from emmy.compiler.ir.schedule.classic import (
     ClassicScheduleCodec,
     ClassicScheduleContext,
     ReductionSchedule,
-    enumerate_classic_reference,
 )
 from emmy.compiler.ir.schedule.classic_projection import project_classic
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
@@ -23,6 +22,7 @@ from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from tests.compiler.helpers import enumerate_classic_reference
 
 classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
 
@@ -74,36 +74,6 @@ def test_production_enumeration_is_the_compatible_independent_product() -> None:
     (materialized,) = leaves[0].expand()
     assert materialized.schedule == leaves[0].schedule
     assert materialized.place == tile.place.on_grid()
-
-
-def test_production_visit_evaluates_opaque_c_only_on_complete_assignments(monkeypatch) -> None:
-    m, n, k = Axis("m", 8), Axis("n", 8), Axis("k", 8)
-    root = Fold.contraction(
-        k_axis=k,
-        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
-    )
-    tile = TileOp(op=root, place=Placement(free=(m, n)))
-    target = Context.from_target((12, 0))
-    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
-    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [])
-    problem, domains = project_classic(tile, target)
-    context = ClassicScheduleContext(problem, domains)
-    seen = []
-
-    def accepts(assignment):
-        assert tuple(assignment.nodes) == context.node_sites
-        assert tuple(assignment.edges) == context.edge_sites
-        seen.append(assignment)
-        return True
-
-    restricted = context.with_restriction(accepts)
-    codec = ClassicScheduleCodec(context)
-    actual = tuple((_assignment, codec.encode_accepted(_assignment)) for _assignment in _enumerate_context(restricted))
-    reference = tuple(enumerate_classic_reference(context))
-
-    assert {_signature(codec, assignment) for assignment, _row in actual} == {_signature(codec, assignment) for assignment in reference}
-    assert seen == [assignment for assignment, _row in actual]
 
 
 def test_complete_c_proves_its_singleton_without_changing_domains() -> None:

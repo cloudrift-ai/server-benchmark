@@ -53,7 +53,7 @@ def fork_schedule(
     """Build and optionally sample a lazy fork tree from a semantic schedule context."""
 
     def leaf(assignment: Schedule) -> ScheduleLeaf:
-        row = frozendict({**row_prefix, **codec.encode_accepted(assignment)})
+        row = frozendict({**row_prefix, **codec._encode(assignment)})
         return ScheduleLeaf(assignment, row, dict(inherited_knobs), materialize, pool_id)
 
     roots = schedule_forks(

@@ -7,9 +7,10 @@ domains before scheduling.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 
 from emmy.compiler.graph import Node
+from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused, schedule
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import MissingSiteError, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -20,6 +21,28 @@ from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
 
 PATTERN = [Pattern("root", TileOp)]
 FIXPOINT = True
+
+
+@dataclass(frozen=True)
+class _CutContext(ScheduleContext[DeferredFork, object, object]):
+    """One immutable frontier over the cut pass's already-restricted structural choices."""
+
+    choices: tuple[DeferredFork, ...]
+    _assignment: Schedule = field(default_factory=lambda: Schedule(None, {}, {}), repr=False)
+
+    @property
+    def assignment(self) -> Schedule:
+        return self._assignment
+
+    def extensions(self):
+        if self.assignment.kernel is None:
+            for choice in self.choices:
+                yield Schedule(choice, {}, {})
+
+    def extend(self, pick: Schedule) -> _CutContext:
+        if self.assignment.kernel is not None or pick.nodes or pick.edges or pick.kernel not in self.choices:
+            raise ScheduleRefused("pick is outside the cut frontier")
+        return replace(self, _assignment=pick)
 
 
 def _seam_index(seams) -> dict[int, object]:
@@ -172,4 +195,5 @@ def rewrite(match: Match, root: Node, ctx=None):
     if choices is None:
         raise RuleSkipped("no pending kernel-set cut")
     choices = choices if isinstance(choices, list) else [choices]
-    return choices if len(choices) > 1 else choices[0]
+    options = [assignment.kernel for assignment in schedule(_CutContext(tuple(choices)))]
+    return options if len(options) > 1 else options[0]

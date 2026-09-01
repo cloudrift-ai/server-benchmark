@@ -11,18 +11,16 @@ operations are a lazy frontier and composition:
         next = context.extend(pick)
 
 Every context assignment and extension is a `Schedule[KernelT, NodeT, EdgeT]`; a non-`None` kernel marks completion.
-Edge options implement the small `Edge` contract, whose `is_cut()` query lets `ScheduleContext.only_cuts()` expose
-the cut-bearing part of the same frontier without manufacturing another context. A returned context contains the
-composed facts and leaves the original unchanged; incompatibility raises `ScheduleRefused`. `extend` is also the
-validation boundary for a complete classic assignment supplied directly by a pinned golden, even when that
-assignment was not emitted by `extensions`. The generic `schedule(context)` recursively composes those lazy frontiers
-and yields only complete assignments. Recursion is the generic Algorithm 1 traversal; consumers do not write a
-family-specific visitor or feed contexts back themselves. The driver knows no concrete family, pipeline fork type,
-site order, restriction, or enumeration slice. The pipeline's generic schedule-fork adapter preserves the same
-contexts as deferred search branches without adding compatibility logic.
+A returned context contains the composed facts and leaves the original unchanged; incompatibility raises
+`ScheduleRefused`. `extend` is also the validation boundary for a complete classic assignment supplied directly by a
+pinned golden, even when that assignment was not emitted by `extensions`. The generic `schedule(context)` recursively
+composes those lazy frontiers and yields only complete assignments. Recursion is the generic Algorithm 1 traversal;
+consumers do not write a family-specific visitor or feed contexts back themselves. The driver knows no concrete
+family, pipeline fork type, site order, restriction, or enumeration slice. The pipeline's generic schedule-fork
+adapter preserves the same contexts as deferred search branches without adding compatibility logic.
 
-Classic assignment contexts additionally expose the independent kernel, node, and edge factors.
-`enumerate_classic_reference` is their literal Cartesian oracle:
+Classic assignment contexts additionally expose the independent kernel, node, and edge factors. Tests retain a
+literal Cartesian oracle:
 
     D(p, t) = K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)
     Algorithm 1(c, p, t) = {a ∈ D(p, t) | extend(c + p + t, a) succeeds}
@@ -46,24 +44,24 @@ derived contraction facts; `ClassicDomains` carries only the literal independent
 compatibility and restriction behavior:
 worker inventory, physical-axis agreement, fragment seams, raster eligibility, resource limits, producer-band/TMA
 agreement, target availability, pins, and precision restrictions. The independent domains hold choices only; an
-expensive `LocalSupport` is derived lazily after the context has selected one node and its incident edge values. This
-node-plus-incident-edges frontier is granular enough to reject mixed transport and fragment-seam combinations before
-they create subtrees, without materializing the full node × edge product. `extensions` emits partial schedules at
-that granularity; `extend` derives and composes their support. Kernel picks form the final frontier. The fragment-seam
-relation has no pipeline-side copy.
+expensive local support record is derived lazily after the context has selected one node and its incident edge values.
+This node-plus-incident-edges frontier is granular enough to reject mixed transport and fragment-seam combinations
+before they create subtrees, without materializing the full node × edge product. `extensions` emits partial schedules
+at that granularity; `extend` derives and composes their support. Kernel picks form the final frontier. The
+fragment-seam relation has no pipeline-side copy.
 
 Classic domain projection, move catalogs, packed-operand readings, staging resolution, materialization, and
 compatibility all live in `ir/schedule`. Projection returns one `ClassicProblem` and its independent `ClassicDomains`;
 pipeline search neither defines nor filters those domains. `ir/schedule` may import other IR modules but never the
 pipeline layer. The pipeline retains only knob/pin reads, pool identity, sampling, and the generic lazy-Fork adapter.
 
-`ClassicScheduleCodec` is the concrete strict wire boundary. With a `ClassicScheduleContext` it validates compatibility;
-with `ClassicSites` it performs target-independent structural validation for graph serialization. It owns canonical
-complete-row and prefix-delta encoding for `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER`. There is no codec base
-class:
-a second schedule family should demonstrate any shared codec contract before one is extracted.
+`ClassicScheduleCodec` is the concrete strict wire boundary. Its public encode and decode operations validate through
+one `ClassicScheduleContext`; private syntax-only parsing and encoding let graph reconstruction attach materialization
+before the `TileOp` constructor performs that same validation once. It owns canonical complete-row and prefix-delta
+encoding for `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER`. There is no codec base class: a second schedule family
+should demonstrate any shared codec contract before one is extracted.
 
 The structural cut phase runs before assignment composition. The single `030_cut` pass reaches a fixpoint over two
 ordered domains: stored-Fold-edge placement first, then cross-CTA reduction splitting. Every successful choice and
-fresh piece re-enters the same rule. `030_cut` emits its pass-native structural forks directly; it does not manufacture
-a schedule context for them. `040_schedule` supplies a `ClassicScheduleContext` to the generic schedule traversal.
+fresh piece re-enters the same rule. `030_cut` presents its restricted structural frontier through a schedule context;
+`040_schedule` supplies a `ClassicScheduleContext`. Both passes use the same generic `schedule` traversal.

@@ -28,7 +28,7 @@ from emmy.compiler.ir.pure import (
     is_contraction,
 )
 from emmy.compiler.ir.pure.algebra import product_spine
-from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
+from emmy.compiler.ir.pure.closure import Closure, canonical_under, equivalent_clusters, value_captures
 from emmy.compiler.ir.pure.fold import _operand_result_names, edge_free_axes, operand_name, refs_axis
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import _member_reads
@@ -347,7 +347,7 @@ def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset
         stmt
         for stmt in root.body
         if isinstance(stmt, Fold)
-        and Closure(stmt.lift, axes).closed
+        and not value_captures(stmt.lift, axes)
         and not fed_by_body(stmt, root.body)
         and (is_contraction(stmt) or edge_free_axes(stmt).isdisjoint(sweep_axes))
     ]
@@ -389,16 +389,46 @@ def _carries_iteration(node) -> bool:
     return any(_carries_iteration(child) for child in children)
 
 
-def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
-    """The shared walk of both closing rewrites: establish the closure invariant on contractions.
+def _with_source(node: Fold, source) -> Fold:
+    """``node`` with ``source`` APPENDED to its operands and its lift rebound positionally.
 
-    A contraction's computed zero-axis operand may still carry value captures
-    (:attr:`~emmy.compiler.ir.pure.closure.Closure.value_captures` — sibling-defined data rather
+    Appended, never prepended: the path codec spells a site by its operand role and index, so
+    inserting ahead of the existing edges renumbers every child path and every stored ``PLACE@``
+    pin addressing them stops resolving. Appending leaves the existing indices alone and gives the
+    drained producer the next one. Evaluation order is not tuple order —
+    :func:`~emmy.compiler.ir.pure.fold.splice_operands` places each edge's body before its first
+    read, providers ahead of dependents — so the producer still lands before the value it feeds.
+
+    A zero-axis node rebuilds through :meth:`Fold.projection` (which re-derives its params); a
+    reducing node keeps its iteration var first and rebinds the rest, so the formation invariant —
+    one lift param per operand result component — holds at either position."""
+    operands = (*node.operands, source)
+    bound = tuple(name for edge in operands for name in _operand_result_names(edge))
+    if node.axis is None:
+        return Fold.projection(operands=operands, body=node.body, results=node.lift.results)
+    return replace(node, operands=operands, lift=replace(node.lift, params=(node.axis.name, *bound)))
+
+
+def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
+    """The shared walk of both closing rewrites: establish the closure invariant on EVERY node.
+
+    A computed zero-axis operand may still carry value captures
+    (:func:`~emmy.compiler.ir.pure.closure.value_captures` — sibling-defined data rather
     than axes); ``provider(edge, binders)`` returns the source edge that supplies them, or
     ``None`` to leave the operand open. ``binders`` counts only the iteration domains crossed
     BELOW ``root`` — a reducing root already evaluates inside its own axis, and a projection root
     has none — and each caller owns what a provider may take and what happens to the drained
-    chain afterwards."""
+    chain afterwards.
+
+    The walk does not ask what KIND of node it stands on. The closure invariant is a property of
+    the term — ``ir/pure/closure``: "a normalized term's values arrive through operand edges, and
+    the only names its lift may capture are axes bound by its ancestors" — so a projection's or a
+    twisted reduce's operand edge is closed by the same rule that closes a contraction's. The
+    drained edge carries its PRODUCER, never a reference to the enclosing scope: an operand that
+    named an outer value would be a capture with positional spelling, and the term would still not
+    be evaluable from its own parts. Sharing is restored by :func:`_share_common_cones`, and a
+    value that now has two producers becomes ONE seam at placement — the module-header rule.
+    """
 
     def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
         inner = (*binders, node.axis.name) if node.axis is not None else binders
@@ -407,8 +437,6 @@ def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
         current = replace(node, operands=operands) if operands != node.operands else node
         if body != current.body:
             current = current.with_bodies((body,))
-        if not is_contraction(current):
-            return current
 
         changed = False
         closed = []
@@ -420,9 +448,21 @@ def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
             if source is None:
                 closed.append(edge)
                 continue
-            closed.append(Fold.projection(operands=(source, *edge.operands), body=edge.body, results=edge.lift.results))
+            closed.append(_with_source(edge, source))
             changed = True
-        return replace(current, operands=tuple(closed)) if changed else current
+        current = replace(current, operands=tuple(closed)) if changed else current
+
+        # A fold sitting as a BODY MEMBER captures exactly as an operand edge does — attention's
+        # twisted per-key statistic reads the scale and the row maximum its siblings define. It
+        # takes them the same way: as operands carrying their producer, at whichever position it
+        # sits. Its own axis stays the lift's leading binder, so the drain is one move either way.
+        members = []
+        for stmt in current.body:
+            source = provider(stmt, binders) if isinstance(stmt, Fold) else None
+            members.append(stmt if source is None else _with_source(stmt, source))
+        if any(fresh is not prior for fresh, prior in zip(members, current.body, strict=True)):
+            current = current.with_bodies((Body(members),))
+        return current
 
     rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
     rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in root.body)
@@ -774,7 +814,7 @@ def _share_common_cones(root: Fold) -> Fold:
         # The whole-term alpha-quotient under an empty environment: free names (the captures) and
         # the bucket-pinned interface names make canonical equality mean equal VALUE.
         if id(fold) not in unify_keys:
-            unify_keys[id(fold)] = Closure(Lambda(params=(), body=Body((fold,)), results=fold.defines()), ()).canonical()
+            unify_keys[id(fold)] = canonical_under(Lambda(params=(), body=Body((fold,)), results=fold.defines()), ())
         return unify_keys[id(fold)]
 
     def member(stmt):

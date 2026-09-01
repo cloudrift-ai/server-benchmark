@@ -9,6 +9,13 @@ positionally) and what makes a tree position an instantiation: alpha-equal closu
 captures denote one value, while the same form under different captures stays distinct values of
 one function.
 
+A ``Closure`` is CLOSED BY CONSTRUCTION: :meth:`__post_init__` refuses one whose lambda reads a
+value it did not bind. The two things that must work on an OPEN lambda are free functions beside
+it — :func:`value_captures` (the question "is this closed?", which has to be askable about a term
+that is not) and :func:`canonical_under` (the sharing unification takes the alpha-quotient of
+whole terms that still capture). Keeping the invariant optional on the type is what let captures
+accumulate: nothing refused them, so every consumer grew a way to cope instead.
+
 Equivalence is a comparison-time VIEW, never a stored normal form — canonicalizing in place
 would clobber meaningful axis names in the tree. And it is a property, not a sharing mechanism:
 a rewrite may merge equivalent closures only where it supplies the binder that unifies their
@@ -47,6 +54,59 @@ def _lambda_members(body: Body):
                 yield from _lambda_members(nested)
 
 
+def value_captures(fn: Lambda, axes: Iterable[str]) -> frozenset[str]:
+    """Free names of ``fn`` that are NOT environment axes — data read from sibling definitions.
+
+    The QUESTION, asked of a lambda and a scope. It is a free function and not a
+    :class:`Closure` method because a Closure is closed by construction: asking whether something
+    is closed must be possible about a term that is not.
+    """
+    return fn.free_names() - frozenset(axes)
+
+
+def canonical_under(fn: Lambda, axes: tuple[str, ...]) -> Lambda:
+    """``fn``'s alpha-canonical form with the enclosing iteration ``axes`` renamed positionally.
+
+    Also a free function, for the same reason: the sharing unification takes the alpha-quotient of
+    whole terms that still capture (``tile/normalize._share_common_cones``), so canonicalization
+    cannot require the closed invariant.
+    """
+    members = tuple(_lambda_members(fn.body))
+    reads = {name for stmt in members for name in _member_reads(stmt)}
+    bound_axes = tuple(name for stmt in members for name in stmt.binds_axes())
+    axis_order = tuple(dict.fromkeys((*axes, *bound_axes)))
+    active_axes = tuple(name for name in axis_order if name in reads or name in fn.params or name in bound_axes)
+    names = {name: f"_a{i}" for i, name in enumerate(active_axes)}
+
+    p = 0
+    for name in fn.params:
+        if name not in names:
+            names[name] = f"_p{p}"
+            p += 1
+    v = 0
+    for stmt in members:
+        for name in stmt.defines():
+            if name not in names:
+                names[name] = f"_v{v}"
+                v += 1
+
+    def rename(name: str) -> str:
+        return names.get(name, name)
+
+    sigma = Sigma({name: Var(names[name]) for name in active_axes})
+
+    def rename_axis(axis: Axis) -> Axis:
+        name = names.get(axis.name)
+        return replace(axis, name=name) if name is not None else axis
+
+    renamed = Body(stmt.rewrite(rename, sigma, rename_axis) for stmt in fn.body)
+    return Lambda(
+        params=tuple(rename(name) for name in fn.params),
+        body=renamed,
+        results=tuple(rename(result) if isinstance(result, str) else result for result in fn.results),
+    )
+
+
 @dataclass(frozen=True, eq=False)
 class Closure:
     """A pure lambda scoped by the enclosing iteration axes it may capture, in binding order.
@@ -62,10 +122,21 @@ class Closure:
     def __post_init__(self) -> None:
         if not isinstance(self.axes, tuple):
             object.__setattr__(self, "axes", tuple(self.axes))
-        # ``fn`` purity is Lambda's own formation invariant; only the environment needs checking.
         stray = [axis for axis in self.axes if not isinstance(axis, str)]
         if stray:
             raise ValueError(f"Closure axes must be iteration-axis names, got {stray}")
+        # CLOSED BY CONSTRUCTION. ``Lambda`` states this rule and delegates it ("free names ⊆
+        # params ∪ enclosing iteration vars — the consuming Fold's check") but cannot decide it:
+        # an axis reference and a value reference are the same ``Var``, so ``λ(k) → x[m, k]`` is
+        # legal where ``m`` is an ancestor's axis and illegal where a sibling defines it. This is
+        # the type that carries both halves, so it is the type that enforces it — as a formation
+        # gate, not an optional method. Leaving it optional is how captures accumulated silently.
+        captures = value_captures(self.fn, self.axes)
+        if captures:
+            raise ValueError(
+                f"Closure captures {sorted(captures)} from an enclosing scope: a term's values arrive through "
+                f"operand edges bound positionally to lift params; only the axes {list(self.axes)} may be free."
+            )
 
     @classmethod
     def over_edge(cls, operand, axes: Iterable[str]) -> Closure:
@@ -89,59 +160,13 @@ class Closure:
 
     @cached_property
     def _canonical(self) -> Lambda:
-        fn = self.fn
-        members = tuple(_lambda_members(fn.body))
-        reads = {name for stmt in members for name in _member_reads(stmt)}
-        bound_axes = tuple(name for stmt in members for name in stmt.binds_axes())
-        axis_order = tuple(dict.fromkeys((*self.axes, *bound_axes)))
-        active_axes = tuple(name for name in axis_order if name in reads or name in fn.params or name in bound_axes)
-        names = {name: f"_a{i}" for i, name in enumerate(active_axes)}
-
-        p = 0
-        for name in fn.params:
-            if name not in names:
-                names[name] = f"_p{p}"
-                p += 1
-        v = 0
-        for stmt in members:
-            for name in stmt.defines():
-                if name not in names:
-                    names[name] = f"_v{v}"
-                    v += 1
-
-        def rename(name: str) -> str:
-            return names.get(name, name)
-
-        sigma = Sigma({name: Var(names[name]) for name in active_axes})
-
-        def rename_axis(axis: Axis) -> Axis:
-            name = names.get(axis.name)
-            return replace(axis, name=name) if name is not None else axis
-
-        renamed = Body(stmt.rewrite(rename, sigma, rename_axis) for stmt in fn.body)
-        return Lambda(
-            params=tuple(rename(name) for name in fn.params),
-            body=renamed,
-            results=tuple(rename(result) if isinstance(result, str) else result for result in fn.results),
-        )
+        return canonical_under(self.fn, self.axes)
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Closure) and self.canonical() == other.canonical()
 
     def __hash__(self) -> int:
         return hash(self.canonical())
-
-    @property
-    def value_captures(self) -> frozenset[str]:
-        """Free names that are NOT environment axes — data the term still reads from sibling
-        definitions. Empty in normal form: the closing rewrites in ``tile/normalize`` exist to
-        drain these into operand edges."""
-        return self.fn.free_names() - frozenset(self.axes)
-
-    @property
-    def closed(self) -> bool:
-        """Whether the lambda captures nothing beyond its environment axes."""
-        return not self.value_captures
 
 
 def equivalent_clusters(closures: Iterable[Closure]) -> tuple[tuple[int, ...], ...]:
@@ -156,4 +181,4 @@ def equivalent_clusters(closures: Iterable[Closure]) -> tuple[tuple[int, ...], .
     return tuple(tuple(cluster) for cluster in clusters.values())
 
 
-__all__ = ["Closure", "equivalent_clusters"]
+__all__ = ["canonical_under", "Closure", "equivalent_clusters", "value_captures"]

@@ -188,3 +188,14 @@ evidence-path direct test; the 2.0x cell gap to cuBLAS; `graph.to_dict()` round-
 - #689 (kernel identity off the canonical lowered body) landed after #499's measurements — recorded goldens
   may already be orphaned; step 2 re-records rather than trusts.
 - Inferact calibration unvouched until 4.3; alternates (`RadixArk/…`, `gittensor-model-hub/…`) queue behind it.
+
+## Step 1 serving milestone (2026-09-01 20:45)
+
+Boot 12: `emmy serve nvidia/Qwen3-8B-NVFP4 --generate` healthy in ~9 min; chat probe returned coherent
+text ("Hello, how can I help?", finish_reason stop) over the declared W4A4 program with the recorded cut
+kernels deployed (288 fragment-kernel builds in the log; routing lane + receipts + join all live).
+Deliverable 1.4 CLOSED on the workstation. Boot env kit: EMMY_TUNE_DB/EMMY_ONLINE_FILE at the run stores,
+EMMY_GEN_DECODE_BUCKET=32, EMMY_GEN_PREFILL_CAPACITY=256, LIBRARY_PATH=/run/opengl-driver/lib,
+TRITON_LIBCUDA_PATH=/run/opengl-driver/lib, --gpu-memory-utilization 0.82 --enforce-eager
+--num-gpu-blocks-override 256 --max-num-batched-tokens 256. Remaining for step 1: the 1.5 dump check
+(fragments+cell visible in builds — formalize), 1.6 full tests/serving on a CUDA box, checklist + PR.

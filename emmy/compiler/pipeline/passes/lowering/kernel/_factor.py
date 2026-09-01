@@ -514,9 +514,18 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
         # A CHAIN-FORM root (a zero-axis ``Fold`` with no operand edge) carries its reduces as
         # direct body members, so the partition rides THEM and the root's own plan is always
-        # absent. A swept output spec has no lane-distributed close, so such a root stays serial.
+        # absent. Two output-spec shapes keep such a root serial: a SWEPT spec has no
+        # lane-distributed close, and a STREAMED spec must splice into its observed fold's reduce
+        # loop, which the trailing append cannot reach once that loop sits in an earlier segment.
+        # The offer mirrors both exclusions.
         parts = ()
-        if isinstance(op, Fold) and op.axis is None and not op.operands and all(spec.sweep is None for spec in output_specs):
+        observed = observed_result_names(op) if output_specs else frozenset()
+        if (
+            isinstance(op, Fold)
+            and op.axis is None
+            and not op.operands
+            and all(spec.sweep is None and not set(spec.write.values) <= observed for spec in output_specs)
+        ):
             parts = tuple(
                 (member, p)
                 for member in op.body
@@ -526,10 +535,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
                 and (p.coop > 1 or p.reg > 1)
             )
         if parts:
-            coop = max(p.coop for _, p in parts)
             state, fold, close, lane = _tile_chain_members(op, parts, ctx, tail, out_val, output_specs)
             t = replace(t, axes=(lane,)) if lane is not None else t
-            bt = coop if lane is not None else None
+            bt = lane.extent.as_static() if lane is not None else None
         elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
             body = [*_emit(op, ctx, output_specs).body, *tail]
             root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= _projection_results(op.body))
@@ -1002,6 +1010,10 @@ def _tile_chain_members(
     root writes."""
     plans = {id(member): plan for member, plan in parts}
     coop = max(plan.coop for _, plan in parts)
+    # The lane axis is ONE width for every cooperating member, but each member strides and combines
+    # by its OWN ``plan.coop`` — a disagreeing pair would stride past its elements and combine only
+    # part of the lanes. The walk's one-inventory rule forces the agreement; check it, never assume.
+    assert len({plan.coop for _, plan in parts if plan.coop > 1}) <= 1, "cooperating chain members must share one coop width"
     head = next(member for member, plan in parts if plan.coop == coop)
     lane = Axis(name=f"{head.axis.name}_co", extent=coop) if coop > 1 else None
     fold: list[Stmt] = []

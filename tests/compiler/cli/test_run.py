@@ -1571,6 +1571,32 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     assert any("NOT benched" in f for f in row["flags"])
 
 
+def test_write_ab_json_records_a_node_free_kernel_schedule(tmp_path):
+    """A projection-only kernel has no classic node assignment, but its accepted schedule still
+    carries the complete kernel-scoped WORK and RASTER choices. Reporting must preserve that
+    accepted row after benchmarking instead of rejecting it as an incomplete node schedule."""
+    import json
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _write_ab_json
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    graph = Graph()
+    graph.add_node(
+        op=CudaOp(kernel_name="k_projection", knobs={"WORK": "", "RASTER": ""}),
+        inputs=[],
+        output=Tensor("o", (4,)),
+        node_id="n0",
+    )
+    args = SimpleNamespace(json=str(tmp_path / "ab.json"), code="x + 1", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1)
+
+    _write_ab_json(args, {}, graph, None, [], greedy_fail=None)
+
+    row = json.loads((tmp_path / "ab.json").read_text())["greedy"]["kernels"][0]
+    assert row["record_knobs"] == {"RASTER": "", "WORK": ""}
+
+
 def test_print_kernel_stats_greedy_bench_fail_row(capsys):
     """Degraded kernel table: ``bench=None`` + ``greedy_fail`` prints the greedy kernels
     with ``--`` timings, a ``bench_fail`` TOTAL, the failure reason as a ``!`` line, and the

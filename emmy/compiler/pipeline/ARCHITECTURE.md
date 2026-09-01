@@ -1288,8 +1288,8 @@ they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` v
 the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
 A promoted classic row is already complete: bare `WORK` and `RASTER`, with `TILE`, `REDUCE`, and `STAGE` bare when
 their family has one applicable node and `@n<N>`-qualified only when the family is ambiguous. `STAGE` records one
-transport choice per consumer node, including an explicit empty direct choice. Promotion rejects incomplete rows,
-aliases, and unknown sites. It never fills or repairs a recording.
+transport choice per consumer node, including an explicit empty direct choice; a node-free row contains only `WORK`
+and `RASTER`. Promotion rejects incomplete rows, aliases, and unknown sites. It never fills or repairs a recording.
 
 **A split's children persist as child-identity schedule receipts.** One flat `knobs` map decorates exactly one
 kernel, so a route whose cut splits the target into several kernels cannot record conflicting per-child schedules in

@@ -239,7 +239,7 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
     context = ClassicScheduleContext(source)
     classic = Schedule(
         KernelSchedule(Work(), Raster()),
-        {context.node_sites[0]: ProjectionSchedule(ScheduleTile())},
+        {context.tile_op.node_sites[0]: ProjectionSchedule(ScheduleTile())},
         {},
     )
     g = Graph()
@@ -265,7 +265,7 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
     assert calls == 1
     loaded_tile = loaded.nodes["out"].op
     loaded_context = ClassicScheduleContext(loaded_tile)
-    plan = loaded_tile.schedule.nodes[loaded_context.node_sites[0]].tile
+    plan = loaded_tile.schedule.nodes[loaded_context.tile_op.node_sites[0]].tile
     assert isinstance(plan, ScheduleTile)
     assert isinstance(plan.atom, ScalarAtom)
 

@@ -258,13 +258,10 @@ class Sched:
             site = self.tile.node_id(node)
         except KeyError as error:
             raise UnknownSiteError(str(error)) from None
-        if family == "TILE":
-            family_sites = self.tile.tile_sites
-        elif family == "REDUCE":
-            family_sites = self.tile.reduction_sites
-        elif family == "STAGE":
-            edges = self.tile.stage_edges
-            family_sites = tuple(dict.fromkeys(edge[0] for edge in edges))
+        if family == "STAGE":
+            family_sites = tuple(dict.fromkeys(edge[0] for edge in self.tile.stage_edges))
+        elif family in self.tile.family_sites:
+            family_sites = self.tile.family_sites[family]
         else:
             raise ValueError(f"unknown classic schedule family {family!r}")
         if site not in family_sites:

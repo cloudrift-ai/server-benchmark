@@ -560,7 +560,12 @@ class TileOp(Op):
         return tuple(out)
 
     @cached_property
-    def node_edges(self) -> tuple[EdgeSite, ...]:
+    def node_sites(self) -> tuple[NodeId, ...]:
+        """Every node identity, in stable schedule order."""
+        return tuple(range(len(self.sites)))
+
+    @cached_property
+    def edge_sites(self) -> tuple[EdgeSite, ...]:
         """Every consumer operand position in stable schedule order."""
         return tuple((consumer, operand) for consumer, site in enumerate(self.sites) for operand in range(len(site.node.operands)))
 
@@ -579,36 +584,47 @@ class TileOp(Op):
     def incident_edges(self) -> frozendict[NodeId, tuple[EdgeSite, ...]]:
         """Each consumer's operand positions."""
         out: dict[NodeId, list[EdgeSite]] = {site: [] for site in range(len(self.sites))}
-        for edge in self.node_edges:
+        for edge in self.edge_sites:
             out[edge[0]].append(edge)
         return frozendict({site: tuple(edges) for site, edges in out.items()})
 
     @cached_property
-    def views(self) -> frozendict[NodeId, NodeView]:
-        """Each node site classified as a projection or a reduction, without target input."""
-        return frozendict(dict(enumerate(node_view(site.node) for site in self.sites)))
+    def views(self) -> tuple[NodeView, ...]:
+        """Each node site classified as a projection or a reduction, without target input.
+
+        Indexed BY node id, which is a dense ordinal — a tuple, not a map keyed by the integers it
+        is already ordered by.
+        """
+        return tuple(node_view(site.node) for site in self.sites)
+
+    def contracts(self, site: NodeId) -> bool:
+        """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want."""
+        view = self.views[site]
+        return isinstance(view, Reduction) and view.contraction is not None
 
     @cached_property
-    def tile_sites(self) -> tuple[NodeId, ...]:
-        """The sites a ``TILE`` slice can address."""
-        return tuple(
-            site
-            for site in self.views
-            if (isinstance(self.views[site], Reduction) and self.views[site].contraction is not None)
-            or (isinstance(self.views[site], Projection) and site == 0 and not self.sites[site].node.operands)
+    def family_sites(self) -> frozendict[str, tuple[NodeId, ...]]:
+        """The node sites each classic node family can address, by family name.
+
+        One classification, filtered once per family, so a reader dispatches on the family NAME it
+        already holds instead of picking a differently-named member per family.
+        """
+        return frozendict(
+            {
+                "TILE": tuple(
+                    site
+                    for site in self.node_sites
+                    if self.contracts(site)
+                    or (isinstance(self.views[site], Projection) and site == 0 and not self.sites[site].node.operands)
+                ),
+                "REDUCE": tuple(site for site in self.node_sites if isinstance(self.views[site], Reduction)),
+            }
         )
-
-    @cached_property
-    def reduction_sites(self) -> tuple[NodeId, ...]:
-        """The sites a ``REDUCE`` choice can address."""
-        return tuple(site for site in self.views if isinstance(self.views[site], Reduction))
 
     @cached_property
     def stage_edges(self) -> tuple[EdgeSite, ...]:
         """The operand positions a ``STAGE`` transport can address."""
-        return tuple(
-            edge for edge in self.node_edges if isinstance(self.views[edge[0]], Reduction) and self.views[edge[0]].contraction is not None
-        )
+        return tuple(edge for edge in self.edge_sites if self.contracts(edge[0]))
 
     @cached_property
     def _packed_readings(self) -> frozendict:

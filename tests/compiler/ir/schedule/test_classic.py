@@ -87,12 +87,12 @@ def _problem(root: Fold, target=None) -> tuple[TileOp, object]:
 def _direct(context: ClassicScheduleContext) -> ClassicAssignment:
     nodes = {
         site: ProjectionSchedule(Tile()) if isinstance(view, Projection) else ReductionSchedule(Tile(), Reduce())
-        for site, view in context.views.items()
+        for site, view in enumerate(context.tile_op.views)
     }
     return Schedule(
         kernel=KernelSchedule(work=Work(), raster=Raster()),
         nodes=nodes,
-        edges={edge: EdgeSchedule(stage=Stage.direct()) for edge in context.edge_sites},
+        edges={edge: EdgeSchedule(stage=Stage.direct()) for edge in context.tile_op.edge_sites},
     )
 
 
@@ -105,7 +105,7 @@ def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
 
     assert len(inventory.sites) == 4
     assert inventory.node_id(shared) == inventory.node_id(shared)  # one site, however many uses
-    uses = tuple(edge for edge in inventory.node_edges if inventory.sites[edge[0]].node.operands[edge[1]] is shared)
+    uses = tuple(edge for edge in inventory.edge_sites if inventory.sites[edge[0]].node.operands[edge[1]] is shared)
     assert uses == ((inventory.node_id(left), 0), (inventory.node_id(right), 0))
 
 
@@ -139,7 +139,7 @@ def test_context_requires_complete_node_and_edge_coverage() -> None:
 def test_context_rejects_a_node_schedule_from_the_wrong_sum_arm() -> None:
     context = ClassicScheduleContext(*_problem(_sum()))
     schedule = _direct(context)
-    site = context.node_sites[0]
+    site = context.tile_op.node_sites[0]
     wrong = Schedule(schedule.kernel, {site: ProjectionSchedule(Tile())}, schedule.edges)
 
     with pytest.raises(ScheduleRefused, match="reduction site requires a reduction schedule"):
@@ -149,7 +149,7 @@ def test_context_rejects_a_node_schedule_from_the_wrong_sum_arm() -> None:
 def test_context_owns_worker_and_transport_compatibility() -> None:
     context = ClassicScheduleContext(*_problem(_contraction()))
     direct = _direct(context)
-    site = context.node_sites[0]
+    site = context.tile_op.node_sites[0]
 
     wrong_work = Schedule(KernelSchedule(Work.parse("t2"), Raster()), direct.nodes, direct.edges)
     with pytest.raises(ScheduleRefused, match="kernel WORK does not realize the node choices"):
@@ -157,7 +157,7 @@ def test_context_owns_worker_and_transport_compatibility() -> None:
 
     tiled = Tile(units=(1, 2))
     edges = dict(direct.edges)
-    edges[context.edge_sites[0]] = EdgeSchedule(Stage())
+    edges[context.tile_op.edge_sites[0]] = EdgeSchedule(Stage())
     mixed_transport = Schedule(
         KernelSchedule(Work.parse("t2"), Raster()),
         {site: ReductionSchedule(tiled, Reduce())},
@@ -201,11 +201,11 @@ def test_independent_nodes_compose_only_at_matching_physical_axis_geometry() -> 
 
 def _finite_domains(problem: tuple[TileOp, object]) -> ClassicDomains:
     context = ClassicScheduleContext(*problem)
-    site = context.node_sites[0]
+    site = context.tile_op.node_sites[0]
     direct_node = ReductionSchedule(Tile(), Reduce())
     tiled_node = ReductionSchedule(Tile(units=(1, 2)), Reduce())
-    direct_edges = {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites}
-    staged_edges = {edge: EdgeSchedule(Stage()) for edge in context.edge_sites}
+    direct_edges = {edge: EdgeSchedule(Stage.direct()) for edge in context.tile_op.edge_sites}
+    staged_edges = {edge: EdgeSchedule(Stage()) for edge in context.tile_op.edge_sites}
     return ClassicDomains(
         kernel=(
             KernelSchedule(Work(), Raster()),
@@ -213,7 +213,7 @@ def _finite_domains(problem: tuple[TileOp, object]) -> ClassicDomains:
             KernelSchedule(Work.parse("t2"), Raster("m", 8)),
         ),
         nodes={site: (direct_node, tiled_node)},
-        edges={edge: (direct_edges[edge], staged_edges[edge]) for edge in context.edge_sites},
+        edges={edge: (direct_edges[edge], staged_edges[edge]) for edge in context.tile_op.edge_sites},
     )
 
 
@@ -233,8 +233,8 @@ def test_domains_are_independent_projections_of_static_support() -> None:
     problem = _problem(_contraction())
     context = ClassicScheduleContext(*problem)
     domains = _finite_domains(problem)
-    site = context.node_sites[0]
-    edge = context.edge_sites[0]
+    site = context.tile_op.node_sites[0]
+    edge = context.tile_op.edge_sites[0]
 
     projected = ClassicScheduleContext(*problem, domains)
     assert projected.kernels == domains.kernel
@@ -284,7 +284,7 @@ def test_every_lazy_traversal_equals_the_cartesian_reference() -> None:
     context = ClassicScheduleContext(*problem, domains)
     reference = {_schedule_signature(schedule) for schedule in enumerate_classic_reference(context)}
 
-    for traversal in permutations(context.node_sites):
+    for traversal in permutations(context.tile_op.node_sites):
         reordered = ClassicScheduleContext(*problem, domains, order=traversal)
         assert {_schedule_signature(schedule) for schedule in _enumerate_context(reordered)} == reference
 
@@ -297,7 +297,7 @@ def test_every_lazy_traversal_equals_algorithm_one_under_pinned_c() -> None:
     context = ClassicScheduleContext(*problem, domains).restrict(pins)
     reference = {_schedule_signature(schedule) for schedule in enumerate_classic_reference(context)}
 
-    for traversal in permutations(context.node_sites):
+    for traversal in permutations(context.tile_op.node_sites):
         actual = _enumerate_context(ClassicScheduleContext(*problem, domains, order=traversal).restrict(pins))
         assert {_schedule_signature(schedule) for schedule in actual} == reference
 
@@ -318,7 +318,7 @@ def test_extend_accepts_a_complete_schedule_at_the_root_or_matching_prefix() -> 
 
 def test_context_rejects_incomplete_or_duplicate_composition_orders() -> None:
     problem = _problem(_sum())
-    site = ClassicScheduleContext(*problem).node_sites[0]
+    site = ClassicScheduleContext(*problem).tile_op.node_sites[0]
 
     with pytest.raises(ValueError, match="exactly once"):
         ClassicScheduleContext(*problem, order=(site, site))
@@ -335,10 +335,10 @@ def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
     )
     problem = (source, Context.from_target((12, 0)))
     base = ClassicScheduleContext(*problem)
-    site = base.node_sites[0]
+    site = base.tile_op.node_sites[0]
     tile = Tile(atom=ATOM_REGISTRY["mma_m16n8k16_f16_f16"], units=(1, 4), regs=(2, 2))
     node = ReductionSchedule(tile, Reduce())
-    edges = {edge: EdgeSchedule(Stage.direct()) for edge in base.edge_sites}
+    edges = {edge: EdgeSchedule(Stage.direct()) for edge in base.tile_op.edge_sites}
     domains = ClassicDomains(
         kernel=(KernelSchedule(Work.parse("w1x4"), Raster()),),
         nodes={site: (node,)},
@@ -419,7 +419,7 @@ def test_codec_resolves_explicit_unit_register_tile_against_kernel_work() -> Non
 
     schedule = codec.decode(row)
 
-    assert schedule.nodes[codec.context.node_sites[0]].tile == Tile(units=(2, 4))
+    assert schedule.nodes[codec.context.tile_op.node_sites[0]].tile == Tile(units=(2, 4))
 
 
 def test_codec_has_no_missing_unknown_or_alias_key_path() -> None:
@@ -444,7 +444,7 @@ def test_codec_rejects_a_noncanonical_value_spelling() -> None:
 def test_context_enforces_kernel_resource_and_producer_band_invariants() -> None:
     context = ClassicScheduleContext(*_problem(_contraction()))
     direct = _direct(context)
-    site = context.node_sites[0]
+    site = context.tile_op.node_sites[0]
     atom = ATOM_REGISTRY["mma_m16n8k16_f16_f32"]
 
     oversized = Schedule(
@@ -494,8 +494,8 @@ def test_problem_context_schedule_and_materialization_are_pickle_safe() -> None:
     assert dict(restored.nodes) == dict(schedule.nodes)
     assert dict(restored.edges) == dict(schedule.edges)
 
-    site = context.node_sites[0]
-    edge = context.edge_sites[0]
+    site = context.tile_op.node_sites[0]
+    edge = context.tile_op.edge_sites[0]
     placed = Tile(regs=(2, 1)).at(Axis("m", 8), Axis("n", 8))
     resolved = ResolvedStage(Stage(depth=1, transport="smem"), ("a_smem",), 8)
     materialization = pickle.loads(pickle.dumps(ClassicMaterialization({site: placed}, {edge: resolved})))
@@ -544,8 +544,8 @@ def test_generic_fork_adapter_drives_a_schedule_context_lazily() -> None:
 def test_schedule_is_immutable_without_schedule_family_mutators() -> None:
     context = ClassicScheduleContext(*_problem(_sum()))
     original = _direct(context)
-    site = context.node_sites[0]
-    edge = context.edge_sites[0]
+    site = context.tile_op.node_sites[0]
+    edge = context.tile_op.edge_sites[0]
     kernel = KernelSchedule(Work.parse("t2"), Raster())
     node = ReductionSchedule(Tile(units=(1, 2)), Reduce())
     edge_assignment = EdgeSchedule(Stage())
@@ -569,9 +569,9 @@ def test_schedule_and_materialization_reject_untyped_entries() -> None:
     with pytest.raises(TypeError, match="non-negative integer sites"):
         Schedule(schedule.kernel, {object(): next(iter(schedule.nodes.values()))}, schedule.edges)  # type: ignore[dict-item]
     with pytest.raises(ScheduleRefused, match="node assignments must contain"):
-        context.extend(Schedule(schedule.kernel, {context.node_sites[0]: object()}, schedule.edges))  # type: ignore[dict-item]
+        context.extend(Schedule(schedule.kernel, {context.tile_op.node_sites[0]: object()}, schedule.edges))  # type: ignore[dict-item]
     with pytest.raises(TypeError, match="tiles must map node ids to PlacedTile"):
-        ClassicMaterialization({context.node_sites[0]: Tile()}, {})  # type: ignore[dict-item]
+        ClassicMaterialization({context.tile_op.node_sites[0]: Tile()}, {})  # type: ignore[dict-item]
 
 
 def test_tile_op_caches_the_stable_schedule_inventory() -> None:
@@ -583,8 +583,8 @@ def test_tile_op_caches_the_stable_schedule_inventory() -> None:
 
     # one walk per kernel, and every structural reading is a field of its site records
     assert tile.sites is tile.sites
-    assert tile.node_edges is tile.node_edges
-    assert tile.node_edges == tuple((c, e) for c, s in enumerate(tile.sites) for e in range(len(s.node.operands)))
+    assert tile.edge_sites is tile.edge_sites
+    assert tile.edge_sites == tuple((c, e) for c, s in enumerate(tile.sites) for e in range(len(s.node.operands)))
     assert tuple(tile.node_id(s.node) for s in tile.sites) == tuple(range(len(tile.sites)))
 
     # the walk's labels are POSITIONS in this kernel's tree, so they belong to the TileOp and not
@@ -598,13 +598,13 @@ def test_tile_op_caches_the_stable_schedule_inventory() -> None:
 def test_tile_requires_complete_materialization() -> None:
     root = _contraction()
     context = ClassicScheduleContext(*_problem(root))
-    site = context.node_sites[0]
+    site = context.tile_op.node_sites[0]
     m, n = Axis("m", 8), Axis("n", 8)
     plan = Tile(units=(1, 2))
     schedule = Schedule(
         KernelSchedule(Work.parse("t2"), Raster()),
         {site: ReductionSchedule(plan, Reduce())},
-        {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites},
+        {edge: EdgeSchedule(Stage.direct()) for edge in context.tile_op.edge_sites},
     )
 
     with pytest.raises(ValueError, match="refused classic schedule"):
@@ -630,12 +630,12 @@ def test_tile_graph_round_trip_uses_the_strict_schedule_codec() -> None:
     root = _contraction()
     m, n = Axis("m", 8), Axis("n", 8)
     context = ClassicScheduleContext(*_problem(root))
-    site = context.node_sites[0]
+    site = context.tile_op.node_sites[0]
     plan = Tile(units=(1, 2))
     schedule = Schedule(
         KernelSchedule(Work.parse("t2"), Raster()),
         {site: ReductionSchedule(plan, Reduce())},
-        {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites},
+        {edge: EdgeSchedule(Stage.direct()) for edge in context.tile_op.edge_sites},
     )
     tile = TileOp(
         op=root,

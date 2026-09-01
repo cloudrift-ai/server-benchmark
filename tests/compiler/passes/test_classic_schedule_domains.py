@@ -126,7 +126,7 @@ def test_reduction_enumeration_filters_the_independent_product_by_compatibility(
     target = Context.from_target((12, 0))
     domains = project_classic(tile, target)
     context = ClassicScheduleContext(tile, target, domains)
-    site = context.node_sites[0]
+    site = context.tile_op.node_sites[0]
 
     expected_reductions = {Reduce(), *coop_reduce_moves()}
     assert {choice.reduce for choice in domains.nodes[site] if isinstance(choice, ReductionSchedule)} == expected_reductions
@@ -151,7 +151,7 @@ def test_scalar_contraction_enumeration_is_the_compatible_independent_product(mo
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
     domains = project_classic(tile, target)
     context = ClassicScheduleContext(tile, target, domains)
-    site = context.node_sites[0]
+    site = context.tile_op.node_sites[0]
 
     choices = domains.nodes[site]
     assert {choice.tile for choice in choices if isinstance(choice, ReductionSchedule) and choice.reduce == Reduce()} == set(
@@ -263,7 +263,7 @@ def test_tensor_core_enumeration_is_the_compatible_independent_product(monkeypat
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
     domains = project_classic(tile, target)
     context = ClassicScheduleContext(tile, target, domains)
-    site = context.node_sites[0]
+    site = context.tile_op.node_sites[0]
 
     warp_choices = tuple(choice for choice in domains.nodes[site] if isinstance(choice, ReductionSchedule) and choice.tile.is_warp)
     assert warp_choices
@@ -454,7 +454,7 @@ def test_schedule_restriction_drops_the_structural_split_stage_from_c() -> None:
     pins["REDUCE"] = (("REDUCE", "g2k"),)
     c = _context(tile, target, domains, pins=pins)
     assignments = tuple(enumerate_classic_reference(c))
-    site = ClassicScheduleContext(tile, target, domains).node_sites[0]
+    site = ClassicScheduleContext(tile, target, domains).tile_op.node_sites[0]
 
     assert assignments
     assert all(assignment.nodes[site].reduce == Reduce() for assignment in assignments)
@@ -489,7 +489,7 @@ def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
 
     staged = next(leaf for leaf in leaves if all(not choice.stage.is_direct for choice in leaf.schedule.edges.values()))
     materialized = staged.expand()[0]
-    assert set(materialized.materialization.stages) == set(context.edge_sites)
+    assert set(materialized.materialization.stages) == set(context.tile_op.edge_sites)
     assert all(stage.choice == staged.schedule.edges[edge].stage for edge, stage in materialized.materialization.stages.items())
 
 
@@ -520,7 +520,7 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
     domains = project_classic(tile, target)
     context = ClassicScheduleContext(tile, target, domains)
-    contraction = context.node_sites[0]
+    contraction = context.tile_op.node_sites[0]
 
     assert all({choice.stage.spell() for choice in choices} == {"", "d1/smem", "d2/smem"} for choices in domains.edges.values())
     reference = tuple(_reference(tile, target, domains))

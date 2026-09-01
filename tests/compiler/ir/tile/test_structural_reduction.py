@@ -81,9 +81,9 @@ def _with_reduce(tile: TileOp, node: Fold, plan: Reduce) -> TileOp:
             site: ProjectionSchedule(Tile())
             if isinstance(view, Projection)
             else ReductionSchedule(Tile(), plan if context.node(site) is node else Reduce())
-            for site, view in context.views.items()
+            for site, view in enumerate(context.tile_op.views)
         },
-        {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites},
+        {edge: EdgeSchedule(Stage.direct()) for edge in context.tile_op.edge_sites},
     )
     return replace(tile, schedule=classic, materialization=ClassicMaterialization({}, {}))
 
@@ -484,16 +484,16 @@ def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b(mo
     stage = Stage(depth=1, transport="smem")
     context = ClassicScheduleContext(TileOp(op=root))
     contraction_site = context.site(contraction)
-    staged_edges = tuple(edge for edge in context.edge_sites if edge[0] == contraction_site)
+    staged_edges = tuple(edge for edge in context.tile_op.edge_sites if edge[0] == contraction_site)
     classic = Schedule(
         KernelSchedule(work, Raster()),
         {
             site: ProjectionSchedule(Tile())
             if isinstance(view, Projection)
             else ReductionSchedule(choice if site == contraction_site else Tile(), Reduce())
-            for site, view in context.views.items()
+            for site, view in enumerate(context.tile_op.views)
         },
-        {edge: EdgeSchedule(stage if edge in staged_edges else Stage.direct()) for edge in context.edge_sites},
+        {edge: EdgeSchedule(stage if edge in staged_edges else Stage.direct()) for edge in context.tile_op.edge_sites},
     )
     tile = TileOp(
         op=root,
@@ -584,13 +584,13 @@ def test_scheduled_uses_only_the_accepted_kernel_choice() -> None:
 
     c = _contraction()
     context = ClassicScheduleContext(TileOp(op=c))
-    site = context.node_sites[0]
+    site = context.tile_op.node_sites[0]
     plan = Tile.parse("f2", Work.parse("t2"))
     m, n = Axis("m", 8), Axis("n", 8)
     classic = Schedule(
         KernelSchedule(Work.parse("t2"), Raster()),
         {site: ReductionSchedule(plan, Reduce())},
-        {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites},
+        {edge: EdgeSchedule(Stage.direct()) for edge in context.tile_op.edge_sites},
     )
     t = scheduled(
         c,

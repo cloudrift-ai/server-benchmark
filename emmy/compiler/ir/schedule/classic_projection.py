@@ -315,7 +315,7 @@ def _options(state: _ProjectionState, node) -> tuple:
     site = state.tile.node_id(node)
     view = state.tile.views[site]
     if isinstance(view, Projection):
-        if site not in state.tile.tile_sites or not state.tile.place.free:
+        if site not in state.tile.family_sites["TILE"] or not state.tile.place.free:
             return (ProjectionSchedule(Tile()),)
         inner = state.tile.place.free[-1]
         extent = inner.extent.as_static() if inner.extent.is_static else 0
@@ -405,7 +405,7 @@ def project_classic(tile: TileOp, target) -> ClassicDomains:
         )
     raster_values = (
         raster_moves()
-        if any(isinstance(view, Reduction) and view.contraction is not None for view in tile.views.values())
+        if any(isinstance(view, Reduction) and view.contraction is not None for view in tile.views)
         and all(axis.extent.is_static for axis in tile.place.free)
         else [""]
     )

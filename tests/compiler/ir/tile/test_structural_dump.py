@@ -253,12 +253,12 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
     context = ClassicScheduleContext(bare)
     nodes = {
         site: ProjectionSchedule(Tile()) if isinstance(view, Projection) else ReductionSchedule(Tile(), Reduce.of(reg=4))
-        for site, view in context.views.items()
+        for site, view in enumerate(context.tile_op.views)
     }
     classic = Schedule(
         KernelSchedule(Work(), Raster()),
         nodes,
-        {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites},
+        {edge: EdgeSchedule(Stage.direct()) for edge in context.tile_op.edge_sites},
     )
     scheduled = TileOp(
         op=fold,

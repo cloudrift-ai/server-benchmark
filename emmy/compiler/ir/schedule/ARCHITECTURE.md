@@ -34,10 +34,13 @@ indexes are immutable caches over those domains, not alternate definitions of me
 Reusable leaf choices such as `Work`, `Tile`, `Reduce`, `Stage`, and `Raster` contain neither sites nor target facts.
 The `TileOp` **is** the site index — there is no second object over the same term. It derives stable node ids,
 operand-edge sites, each site's projection or reduction view, and each contraction's schedule-independent
-`ContractionFacts` — its effective K axis, computed-A cone seam, nested producer, and fragment need. `ir/schedule/views`
-supplies the vocabulary (`node_view`, `Projection`, `Reduction`, `Contraction`, `ContractionFacts`) and the derivations
-the tile layer reads through; a contraction view belongs to a node site and expresses its operand roles as edge
-positions, and is not another Fold node. A concrete codec alone translates integer and tuple sites to wire spellings.
+`ContractionFacts` — its effective K axis, computed-A cone seam, nested producer, and fragment need.
+`ir/schedule/views` supplies the vocabulary (`node_view`, `Projection`, `Reduction`, `Contraction`,
+`ContractionFacts`) and the one derivation that is not a projection of the site table, `contraction_facts`; the tile
+layer reads through them. The composition context publishes the schedule-facing API (`node`, `site`, `operand`,
+`producer`, `incident_edges`, the key spellings) and does not re-export the kernel's structural members under second
+names. A contraction view belongs to a node site and expresses its operand roles as edge positions, and is not
+another Fold node. A concrete codec alone translates integer and tuple sites to wire spellings.
 
 The node list is the one walk in `ir/pure/tree.py`, deduplicated by object identity. That walk yields a `Visit` per
 node — the term, the axes in scope, the segment path, and whether it is derived evaluation — so the schedule's integer

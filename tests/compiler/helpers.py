@@ -18,13 +18,13 @@ def classic_cartesian_assignments(context):
     """Enumerate a classic context's literal kernel × node × edge test oracle."""
     from emmy.compiler.ir.schedule import Schedule, ScheduleRefused
 
-    nodes = tuple(context.node_choices(site) for site in context.node_sites)
-    edges = tuple(context.edge_choices(site) for site in context.edge_sites)
+    nodes = tuple(context.node_choices(site) for site in context.tile_op.node_sites)
+    edges = tuple(context.edge_choices(site) for site in context.tile_op.edge_sites)
     for kernel, node_values, edge_values in product(context.kernels, product(*nodes), product(*edges)):
         assignment = Schedule(
             kernel,
-            dict(zip(context.node_sites, node_values, strict=True)),
-            dict(zip(context.edge_sites, edge_values, strict=True)),
+            dict(zip(context.tile_op.node_sites, node_values, strict=True)),
+            dict(zip(context.tile_op.edge_sites, edge_values, strict=True)),
         )
         try:
             context.extend(assignment)

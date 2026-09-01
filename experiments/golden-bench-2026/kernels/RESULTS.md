@@ -1,5 +1,54 @@
 # Golden-bench kernel corpus
 
+## Post-#691 generic-schedule requalification (2026-09-01)
+
+The qualification branch was rebased onto main `b93a86c2`, which replaced the former classic schedule machinery with
+generic schedule composition. Two historical cut-local fixes were omitted during the rebase because main now owns
+their contracts more generally: stored-tree `loaded_buffers` supplies cut inputs and producer ordering, while
+`_stored_folds` supplies placement environments through projection regions. Main already carries regressions for both.
+
+The schedule audit found one compatibility authority and no second pipeline enumerator. `ClassicDomains` exposes
+independent kernel, node, and operand-edge factors; `ClassicScheduleContext` accepts their compatible subset; and the
+generic schedule walk is the only traversal. Grouping a node with its incident edges remains a pruning step under the
+current one-`STAGE`-per-consumer codec, not a collapsed assignment. A divergent-edge probe matched the literal
+Cartesian oracle, and traversal-order tests preserved the accepted set.
+
+All 210 realization cases had current derived halves after the schedule rewrite. GPU-free offered and realized replay
+matched every expectation; an exact sm_120 systemd sandbox slice passed 19 closed build/correct checks and retained
+five expected correctness gaps. No realization verdict changed, so the corpus required no regeneration or new xfail.
+
+The experiment goldens did contain schedule-codec drift. A strict current-candidate audit migrated 78 verified rows
+whose only difference was the applicable empty-family vocabulary; every stored measurement, program, proposal, and
+inventory row was preserved. Exact verified rows increased from 62 to 140. The audit deliberately left 9 unoffered
+rows, 5 substantive schedule mismatches, and 1 invalid `STAGE` pin unchanged, along with 32 verified, 78 proposal, and
+2 inventory records that carry no schedule row. Those require retuning or compiler investigation, not normalization.
+
+The fresh Qwen3-0.6B s512 trace on RTX 5090 now has six targets rather than the old nine. A small boundary was strictly
+correct at 1.390 µs versus 2.051 µs for `torch.compile`. The first large fused target did not complete unpinned
+compilation inside 90 seconds. Profiling attributed 32.9 seconds to structural pricing, including 65 nested kernel
+prices and 24.2 seconds of schedule-tree expansion. Caching each immutable schedule prefix's derived frontier reduced
+the same compile from 95.26 to 88.57 seconds without changing row order or target selection.
+
+An edge-first traversal prototype reduced that compile further to 45.77 seconds by avoiding repeated node × transport
+support checks, but it changed complete-row emission order. A tied structural price then selected an unsplit two-kernel
+route instead of the exact working golden's three-kernel route. The prototype was rejected in full: membership alone
+was unchanged, but deploy selection was not. Separating those factors safely therefore also requires canonical
+tie-breaking that is independent of traversal order; this branch does not mix that larger scoring change into the
+prefix cache.
+
+Pinning all legal cuts exposed 12 child schedules in 28.9 seconds and found one genuine compiler gap. A synchronous
+compute fill flattened nested definitions before replicating its cells, so a later loop-local binding captured an
+earlier outer read with the same SSA spelling and emitted 32 undefined suffixed CUDA names. The fix now accumulates
+visible top-level definitions in statement order while keeping ordinary nested definitions inside their block; the
+exact child lowers with the outer names intact. The complete cut route still exceeded the bounded 180-second replay,
+so no latency or replacement working golden was recorded.
+
+Current-head parity is therefore not established. The small sm_120 boundaries beat `torch.compile`, but the large
+attention target remains blocked first by repeated structural pricing and then by an unqualified large child. The next
+architecture work is traversal-order-independent structural tie-breaking followed by the edge/node factorization
+above, plus separate tuning or compiler work for the 15 nontrivial golden mismatches. The recorded Volta schedule also
+needs an exact V100 timing refresh after #691 before its historical latency can be called current.
+
 ## Manual child-schedule qualification after #689 (2026-08-29)
 
 Manual route selection confirmed that child scheduling works once placement exposes ordinary kernels. The exact source

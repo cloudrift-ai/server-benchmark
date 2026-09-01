@@ -113,6 +113,7 @@ def test_schedule_prefix_expansion_is_derived_once_and_returns_fresh_lists() -> 
     assert first == second and first is not second
     first.clear()
     assert branch.expand() == second
+    assert "_memo_expansion" not in branch.__getstate__()
 
 
 def test_empty_params_raises():

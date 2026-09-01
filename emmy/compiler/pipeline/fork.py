@@ -4,15 +4,11 @@
 Implementations hold their producer's state as data: :class:`OptionFork` is a concrete ``Op``/``Graph`` leaf, while
 :class:`_Branch` / :class:`_Leaf` are built by :func:`build_fork_tree`.
 
-The tree builder reads an addressable sequence of variant knob rows through
-the root :class:`_Branch`: each ``Level`` groups
-siblings by a (sub)tuple of knob values and collapses levels whose key has
-a single distinct value across the group (rows with an empty key skip the
-level). Below the last level every row becomes one :class:`_Leaf` carrying
-its COMPLETE row as ``knobs`` — the row IS the variant identity (the
-``S_*`` structural-feature knobs ride the merged dict), so the perf DB and
-the online prior key leaves and branches by knobs alone, no structural
-probing. ``expand()`` yields ``materialize(row)`` once the search engine
+The tree builder reads an addressable sequence of variant knob rows through the root :class:`_Branch`. Each ``Level``
+groups siblings by a knob subtuple and collapses levels whose key has one value (rows with an empty key skip the level).
+Below the last level every row becomes one :class:`_Leaf` carrying its COMPLETE row as ``knobs`` — the row IS the
+variant identity, including its ``S_*`` structural-feature knobs. The perf DB and online prior key forks by knobs.
+``expand()`` yields ``materialize(row)`` once the search engine
 resolves a leaf.
 Everything is lazy: construction reads no row, no Fork below the root exists until search expands it, and branches
 retain indices into the shared sequence rather than row copies. A schedule prefix caches its immutable derived
@@ -35,6 +31,7 @@ if TYPE_CHECKING:
     from emmy.compiler.ir.base import Op
 
 from emmy.compiler.ir.schedule import Schedule, ScheduleContext, schedule
+from emmy.compiler.structural import instance_memo
 
 
 class Fork(ABC):
@@ -171,12 +168,15 @@ class _ScheduleFork(Fork):
     def pool_descent_bound(self) -> int:
         return self.tree.pool_descent_bound
 
+    def __getstate__(self):
+        """Pickle the schedule prefix, never its derived children."""
+        return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
+
     def expand(self) -> list[Fork]:
-        cached = self.__dict__.get("_memo_expansion")
-        if cached is None:
-            cached = tuple(self.tree.step(self.context, self.row))
-            object.__setattr__(self, "_memo_expansion", cached)
-        return list(cached)
+        memo = instance_memo(self, "_memo_expansion")
+        if "children" not in memo:
+            memo["children"] = tuple(self.tree.step(self.context, self.row))
+        return list(memo["children"])
 
 
 def schedule_forks(

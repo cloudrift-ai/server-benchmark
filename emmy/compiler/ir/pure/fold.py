@@ -348,7 +348,7 @@ class Fold:
     # TRUE monoid's flat ``(init, combine)`` pair whose combine carries the REAL accumulator
     # names (its results). The serial step, the ``Accum`` forms and the ``carrier`` annotation
     # are DERIVED (:func:`_fold_derived_step` / ``__post_init__``). ------------------------------ #
-    lift: Lambda = field(kw_only=True)  # CLOSED: ``lift.free_names()`` is empty (:meth:`_assert_closed`)
+    lift: Lambda = field(kw_only=True)  # CLOSED by ``Lambda.__post_init__``; formed by :meth:`Lambda.closing`
     init: tuple = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
     combine: Lambda | None = field(kw_only=True, default=None)  # S × S → S — THE ⊕; None at zero axes
     # The per-step OBSERVER — the scan spelling: a pure λ(k, s₁…sₙ) over the carried state,
@@ -364,7 +364,6 @@ class Fold:
     def __post_init__(self) -> None:
         if not isinstance(self.init, tuple):
             object.__setattr__(self, "init", tuple(self.init))
-        self._assert_closed()
         if self.axis is None:
             # The ZERO-AXIS node: no iteration and no monoid, so the only formation fact is the
             # positional binding — one lift param per operand RESULT COMPONENT, no leading
@@ -413,29 +412,6 @@ class Fold:
         # singleton, no annotation: the pivot is component 0 (its injected term the score), a
         # literal-1 injection is a denominator, a value injection an expectation.
         assert isinstance(lam.results[0], str), "the twisted lift's pivot component must inject the score name"
-
-    def _assert_closed(self) -> None:
-        """A stored term reads nothing it does not bind — the CONTEXTUAL formation invariant.
-
-        ``Lambda`` states this rule and cannot check it alone: an axis reference and a value
-        reference are the same ``Var``, so ``λ(k) → x[m, k]`` is legal where ``m`` is an ancestor's
-        axis and illegal where a sibling defines it. Binding EVERYTHING removes the distinction —
-        and with it the need to make it — so the check here is total and needs no scope at all.
-
-        Forming the closed lift is the construction site's job (:meth:`Lambda.binding`); this only
-        refuses. A constructor that repairs its own input enforces nothing, which is exactly how
-        captures accumulated before: the rule was stated in three docstrings and asserted nowhere.
-
-        WHAT supplies each param at the use site — an enclosing loop's binder, a register already
-        live, a workspace load — is a lowering decision read off :attr:`environment`, never a
-        property of the term."""
-        free = self.lift.free_names()
-        if free:
-            raise ValueError(
-                f"Fold lift reads {sorted(free)} it does not bind. A term carries no free names: values arrive "
-                f"through operand edges bound positionally, and anything else is a trailing param "
-                f"(Lambda.binding forms it at the construction site)."
-            )
 
     @property
     def environment(self) -> tuple[str, ...]:

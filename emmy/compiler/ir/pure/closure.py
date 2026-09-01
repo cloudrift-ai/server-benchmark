@@ -54,16 +54,6 @@ def _lambda_members(body: Body):
                 yield from _lambda_members(nested)
 
 
-def value_captures(fn: Lambda, axes: Iterable[str]) -> frozenset[str]:
-    """Free names of ``fn`` that are NOT environment axes — data read from sibling definitions.
-
-    The QUESTION, asked of a lambda and a scope. It is a free function and not a
-    :class:`Closure` method because a Closure is closed by construction: asking whether something
-    is closed must be possible about a term that is not.
-    """
-    return fn.free_names() - frozenset(axes)
-
-
 def canonical_under(fn: Lambda, axes: tuple[str, ...]) -> Lambda:
     """``fn``'s alpha-canonical form with the enclosing iteration ``axes`` renamed positionally.
 
@@ -131,12 +121,12 @@ class Closure:
         # legal where ``m`` is an ancestor's axis and illegal where a sibling defines it. This is
         # the type that carries both halves, so it is the type that enforces it — as a formation
         # gate, not an optional method. Leaving it optional is how captures accumulated silently.
-        captures = value_captures(self.fn, self.axes)
-        if captures:
-            raise ValueError(
-                f"Closure captures {sorted(captures)} from an enclosing scope: a term's values arrive through "
-                f"operand edges bound positionally to lift params; only the axes {list(self.axes)} may be free."
-            )
+        # No capture check: ``Lambda`` itself refuses a body that reads what it does not bind, so
+        # every ``fn`` reaching here is already closed. ``axes`` names WHICH of its params are the
+        # enclosing environment — what :meth:`canonical` renames positionally — not a permission.
+        stray_axes = [axis for axis in self.axes if axis not in self.fn.params]
+        if stray_axes:
+            raise ValueError(f"Closure axes {stray_axes} are not params of the lambda they scope")
 
     @classmethod
     def over_edge(cls, operand, axes: Iterable[str]) -> Closure:
@@ -181,4 +171,4 @@ def equivalent_clusters(closures: Iterable[Closure]) -> tuple[tuple[int, ...], .
     return tuple(tuple(cluster) for cluster in clusters.values())
 
 
-__all__ = ["canonical_under", "Closure", "equivalent_clusters", "value_captures"]
+__all__ = ["canonical_under", "Closure", "equivalent_clusters"]

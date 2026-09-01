@@ -28,7 +28,7 @@ from emmy.compiler.ir.pure import (
     is_contraction,
 )
 from emmy.compiler.ir.pure.algebra import product_spine
-from emmy.compiler.ir.pure.closure import Closure, canonical_under, equivalent_clusters, value_captures
+from emmy.compiler.ir.pure.closure import Closure, canonical_under, equivalent_clusters
 from emmy.compiler.ir.pure.fold import _operand_result_names, edge_free_axes, operand_name, refs_axis
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import _member_reads
@@ -351,7 +351,7 @@ def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset
         stmt
         for stmt in root.body
         if isinstance(stmt, Fold)
-        and not value_captures(stmt.lift, axes)
+        and set(stmt.environment) <= set(axes)  # captures nothing but axes in scope
         and not fed_by_body(stmt, root.body)
         and (is_contraction(stmt) or edge_free_axes(stmt).isdisjoint(sweep_axes))
     ]
@@ -584,7 +584,7 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
     outside = {result for result in root.lift.results if isinstance(result, str)}
     outside.update(name for stmt in kept for name in _member_reads(stmt))
     if root.observe is not None:
-        outside.update(root.observe.free_names())
+        outside.update(root.observe.params)  # closed: its reads ARE its params (axis + carried state)
     if moved_defs & outside:
         return root  # the chain does not die into the closed edges — moving it would duplicate work
     return replace(root, operands=rewritten_operands, lift=replace(root.lift, body=kept))

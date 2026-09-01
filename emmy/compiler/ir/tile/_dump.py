@@ -61,7 +61,7 @@ class _Ctx:
         cone binds the statistic's ``m`` positionally — ``ops.make_cone``), so an annotation marks
         a hand-built tree. Empty when the iteration space is unknown (no owning ``TileOp``) — an
         unanswered question prints as no annotation, never as "closed"."""
-        return () if self.axes is None else tuple(sorted(lam.free_names() - self.axes))
+        return ()  # nothing captures: a Lambda binds everything it reads (Lambda.__post_init__)
 
     def note(self, node) -> str:
         """The schedule annotation for ``node`` — every slice the kernel keys against it, spelled

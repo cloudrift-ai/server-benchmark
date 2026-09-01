@@ -10,11 +10,23 @@ spliced in as one).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import cached_property
 
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.stmt.base import pretty_body
 from emmy.compiler.ir.stmt.body import Body, _exposed_defines, _member_reads
+
+
+def body_free_names(body, bound) -> frozenset[str]:
+    """Names ``body`` reads that ``bound`` does not cover — the residual a FORMER binds.
+
+    A free function because there is no open ``Lambda`` to ask: construction refuses one, so the
+    discovery has to happen on the parts, before the binder exists.
+    """
+    reads = {name for stmt in body for name in _member_reads(stmt)}
+    covered = set(bound)
+    for stmt in body:
+        covered |= _exposed_defines(stmt)
+    return frozenset(reads - covered)
 
 
 @dataclass(frozen=True)
@@ -61,6 +73,18 @@ class Lambda:
         missing = [r for r in self.results if isinstance(r, str) and r not in defined]
         if missing:
             raise ValueError(f"Lambda results {missing} are not defined by the body or params")
+        # CLOSED. A lambda is a function, so it has no free variables — every name its body reads
+        # is a param or one of its own defs. This is the invariant the docstring used to state and
+        # delegate to "the consuming Fold's check", which nothing performed; stating it here covers
+        # every Lambda in the IR (a fold's lift, its combine, its observer) and needs no scope,
+        # because binding everything removes the axis-vs-value distinction rather than deciding it.
+        # :meth:`closing` FORMS a closed lambda from its parts; this only refuses.
+        free = body_free_names(self.body, self.params)
+        if free:
+            raise ValueError(
+                f"Lambda body reads {sorted(free)} it does not bind. Pass them as params — "
+                f"Lambda.closing(params, body, results) appends whatever the body still reads."
+            )
 
     @classmethod
     def closing(cls, params: tuple[str, ...], body, results: tuple) -> Lambda:
@@ -78,11 +102,7 @@ class Lambda:
         Callers form; :meth:`Fold._assert_closed` refuses. They stay separate because a
         constructor that repaired its own input would enforce nothing."""
         body = normalize_lambda_body(Body.coerce(body))
-        bound = set(params)
-        for stmt in body:
-            bound |= _exposed_defines(stmt)
-        residual = {name for stmt in body for name in _member_reads(stmt)} - bound
-        return cls(params=(*params, *sorted(residual)), body=body, results=tuple(results))
+        return cls(params=(*params, *sorted(body_free_names(body, params))), body=body, results=tuple(results))
 
     @property
     def defined(self) -> frozenset[str]:
@@ -91,21 +111,6 @@ class Lambda:
         for s in self.body:
             out |= _exposed_defines(s)
         return frozenset(out)
-
-    def free_names(self) -> frozenset[str]:
-        """Names the body reads that this lambda does not bind — the contextual-invariant read
-        the consuming Fold checks against its iteration vars."""
-        return self._free_names
-
-    @cached_property
-    def _free_names(self) -> frozenset[str]:
-        # Memoized: the lambda is immutable, and every scope walk that reaches a nested Fold asks
-        # its lift's free names again — uncached, a deep fused tree pays the full body walk once
-        # per enclosing level.
-        reads: set[str] = set()
-        for s in self.body:
-            reads |= _member_reads(s)
-        return frozenset(reads) - self.defined
 
     def __getstate__(self):
         """Pickle the stored fields only — memoized reads recompute after transport."""

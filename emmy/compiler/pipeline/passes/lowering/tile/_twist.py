@@ -298,7 +298,7 @@ def _normalized_exp(edge: Fold, axis: str, axes: tuple[str, ...]) -> _Normalized
     if current is None or reference is None or reference != current[0]:
         return _decline("normalized exponential", f"the weight's score {score_name!r} is not the statistic's own score")
 
-    free = set(statistic.lift.free_names()) - {*axes, statistic.axis.name}
+    free = set(statistic.environment) - {*axes, statistic.axis.name}
     provider_cone = body.backward_cone(free)
     captures = tuple(name for stmt in provider_cone.members for name in stmt.defines() if name in free)
     if set(captures) != free:

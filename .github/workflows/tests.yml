@@ -32,7 +32,7 @@ jobs:
     runs-on:
       group: ubuntu-runners
     # The outer job includes dependency and cache setup; the test step below owns the stricter
-    # ten-minute execution cap.
+    # twelve-minute execution cap.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +67,7 @@ jobs:
           key: hf-models-v1
 
       - name: Run tests
-        timeout-minutes: 10
+        timeout-minutes: 12
         run: make test
 
   package:

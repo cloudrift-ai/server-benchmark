@@ -99,99 +99,10 @@ def schedule_edges(nodes: tuple[Fold, ...]) -> tuple[EdgeSite, ...]:
     return tuple((consumer, operand) for consumer, node in enumerate(nodes) for operand in range(len(node.operands)))
 
 
-@dataclass(frozen=True)
-class ClassicSites:
-    """The node and edge sites, and their schedule views, derived from one Fold root."""
-
-    root: Fold
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.root, Fold):
-            raise TypeError("classic sites require a Fold root")
-
-    def _memo(self) -> dict:
-        return instance_memo(self.root, "_memo_classic_sites")
-
-    @property
-    def nodes(self) -> tuple[Fold, ...]:
-        return schedule_nodes(self.root)
-
-    @property
-    def node_sites(self) -> tuple[NodeId, ...]:
-        return tuple(range(len(self.nodes)))
-
-    @property
-    def edge_sites(self) -> tuple[EdgeSite, ...]:
-        return schedule_edges(self.nodes)
-
-    @property
-    def views(self) -> frozendict[NodeId, NodeView]:
-        memo = self._memo()
-        if "views" not in memo:
-            memo["views"] = frozendict({site: node_view(self.nodes[site]) for site in self.node_sites})
-        return memo["views"]
-
-    @property
-    def tile_sites(self) -> tuple[NodeId, ...]:
-        return tuple(
-            site
-            for site in self.node_sites
-            if (isinstance(self.views[site], Reduction) and self.views[site].contraction is not None)
-            or (isinstance(self.views[site], Projection) and site == self.node_sites[0] and not self.nodes[site].operands)
-        )
-
-    @property
-    def reduction_sites(self) -> tuple[NodeId, ...]:
-        return tuple(site for site in self.node_sites if isinstance(self.views[site], Reduction))
-
-    @property
-    def stage_edges(self) -> tuple[EdgeSite, ...]:
-        return tuple(
-            edge for edge in self.edge_sites if isinstance(self.views[edge[0]], Reduction) and self.views[edge[0]].contraction is not None
-        )
-
-    def node(self, site: NodeId) -> Fold:
-        if type(site) is not int or not 0 <= site < len(self.nodes):
-            raise KeyError(f"unknown node site {site!r}")
-        return self.nodes[site]
-
-    def site(self, node: Fold) -> NodeId:
-        memo = self._memo()
-        if "site_by_identity" not in memo:
-            memo["site_by_identity"] = {id(value): site for site, value in enumerate(self.nodes)}
-        try:
-            return memo["site_by_identity"][id(node)]
-        except KeyError:
-            raise KeyError("Fold is not a node of these classic sites") from None
-
-    def operand(self, edge: EdgeSite):
-        consumer, operand = edge
-        try:
-            return self.node(consumer).operands[operand]
-        except (TypeError, IndexError):
-            raise KeyError(f"unknown classic edge site {edge!r}") from None
-
-    def producer(self, edge: EdgeSite) -> NodeId | None:
-        value = self.operand(edge)
-        return self.site(value) if isinstance(value, Fold) else None
-
-    def incident_edges(self, site: NodeId) -> tuple[EdgeSite, ...]:
-        self.node(site)
-        return tuple(edge for edge in self.edge_sites if edge[0] == site)
-
-    @property
-    def contractions(self) -> frozendict[NodeId, ContractionFacts]:
-        """The per-contraction structure every schedule choice over this root shares."""
-        memo = self._memo()
-        if "contractions" not in memo:
-            memo["contractions"] = frozendict(_contraction_facts(self))
-        return memo["contractions"]
-
-
-def _sibling_fragment_edges(site_index: ClassicSites) -> dict[int, NodeId]:
+def _sibling_fragment_edges(owner) -> dict[int, NodeId]:
     """Map each sibling-step consumer to the one contraction producing its computed edge."""
     out = {}
-    for node in site_index.nodes:
+    for node in owner.nodes:
         if node.axis is None or is_contraction(node) or node.combine is None:
             continue
         steps = node.step_stmts()
@@ -206,27 +117,49 @@ def _sibling_fragment_edges(site_index: ClassicSites) -> dict[int, NodeId]:
             cone = Body(tuple(steps[:position])).backward_cone(reads)
             producers = tuple(stmt for stmt in cone.members if is_contraction(stmt))
             if len(producers) == 1:
-                out[id(consumer)] = site_index.site(producers[0])
+                out[id(consumer)] = owner.node_id(producers[0])
     return out
 
 
-def _contraction_facts(site_index: ClassicSites) -> dict[NodeId, ContractionFacts]:
-    """Derive every contraction's :class:`ContractionFacts` from the root alone."""
+def schedule_views(root: Fold) -> frozendict[NodeId, NodeView]:
+    """Each node site classified, memoized on the ROOT — the term owns the reading, so every
+    ``TileOp`` over one term shares it instead of re-deriving per wrapper."""
+    memo = instance_memo(root, "_memo_schedule_views")
+    if "views" not in memo:
+        memo["views"] = frozendict(dict(enumerate(node_view(node) for node in schedule_nodes(root))))
+    return memo["views"]
+
+
+def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
+    """Every contraction's :class:`ContractionFacts`, memoized on the root for the same reason."""
+    memo = instance_memo(owner.op, "_memo_schedule_views")
+    if "contractions" not in memo:
+        memo["contractions"] = frozendict(_contraction_facts(owner))
+    return memo["contractions"]
+
+
+def _contraction_facts(owner) -> dict[NodeId, ContractionFacts]:
+    """Derive every contraction's :class:`ContractionFacts` from ``owner``'s term alone.
+
+    ``owner`` is whatever indexes the sites — today the :class:`~emmy.compiler.ir.tile.TileOp`,
+    read through ``op`` / ``nodes`` / ``node_sites`` / ``views`` / ``node_at`` / ``node_id`` so this
+    layer states the reading without importing the tile layer that owns the term.
+    """
     from emmy.compiler.ir.tile.path import sites  # noqa: PLC0415 — the tile layer reads these views
 
-    root = site_index.root
+    root = owner.op
     parents: dict[int, Fold] = {}
-    for node in site_index.nodes:
+    for node in owner.nodes:
         for child, _child_axes in children(node):
             parents.setdefault(id(child), node)
     derived = {id(site.node) for site in sites(root) if site.derived}
-    sibling = _sibling_fragment_edges(site_index)
+    sibling = _sibling_fragment_edges(owner)
     facts = {}
-    for site in site_index.node_sites:
-        view = site_index.views[site]
+    for site in owner.node_sites:
+        view = owner.views[site]
         if not isinstance(view, Reduction) or view.contraction is None:
             continue
-        node = site_index.node(site)
+        node = owner.node_at(site)
         parent = parents.get(id(node))
         if (
             id(node) in derived
@@ -252,7 +185,7 @@ def _contraction_facts(site_index: ClassicSites) -> dict[NodeId, ContractionFact
             k_axis=k_axis,
             seam=seam,
             producer=producer,
-            need=need if need is not None else (site_index.site(producer) if producer is not None else None),
+            need=need if need is not None else (owner.node_id(producer) if producer is not None else None),
             need_step=need is not None,
         )
     return facts
@@ -266,7 +199,6 @@ def _operand_position(node: Fold, wanted) -> int:
 
 
 __all__ = [
-    "ClassicSites",
     "Contraction",
     "ContractionFacts",
     "EdgeSite",
@@ -274,7 +206,9 @@ __all__ = [
     "NodeView",
     "Projection",
     "Reduction",
+    "contraction_facts",
     "node_view",
+    "schedule_views",
     "schedule_edges",
     "schedule_nodes",
 ]

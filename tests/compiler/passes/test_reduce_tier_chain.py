@@ -17,7 +17,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.schedule.views import ClassicSites, Projection
+from emmy.compiler.ir.schedule.views import Projection
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, StridedLoop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
@@ -30,8 +30,8 @@ def _stamped(root: Fold, plans: dict) -> TileOp:
     """A scheduled ``TileOp`` carrying ``plans`` (member node → :class:`Reduce`) as its accepted
     classic assignment. The kernel ``WORK`` derives from the widest cooperative plan, because the
     assignment's own validation requires the inventory to realize the node choices."""
-    sites = ClassicSites(root)
-    by_site = {sites.site(node): plan for node, plan in plans.items()}
+    sites = TileOp(op=root)
+    by_site = {sites.node_id(node): plan for node, plan in plans.items()}
     nodes = {
         site: ProjectionSchedule(Tile())
         if isinstance(sites.views[site], Projection)

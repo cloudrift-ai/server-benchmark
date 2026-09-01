@@ -210,7 +210,7 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
         return None
     node = head(tile.op)
     assert node is not None and node.axis is not None
-    key = Sched(tile.op).key("REDUCE", node) or "REDUCE"
+    key = Sched(tile).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
     element = axis_of(key)
     pin = REDUCE.narrow_at(element) if element else REDUCE.raw()

@@ -8,6 +8,7 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import Site, _spellings, canonical, family_sites, parse_key, primary, resolve, sites, spell
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
@@ -204,7 +205,7 @@ def test_identity_miss_is_loud_never_the_untiled_path() -> None:
     root, stream, qk, pv = _flash_tree()
     copy = dataclasses.replace(qk)
     assert copy == qk and copy is not qk
-    sched = Sched(root)
+    sched = Sched(TileOp(op=root))
     with pytest.raises(UnknownSiteError):
         sched.site_of(copy)
     with pytest.raises(UnknownSiteError):
@@ -212,7 +213,7 @@ def test_identity_miss_is_loud_never_the_untiled_path() -> None:
     assert sched.site_of(qk).node is qk
     plain = _planar_fold()
     wrapper = Fold.projection(body=Body((Assign(name="o", op="copy", args=(plain.out,)),)), operands=(plain,))
-    assert Sched(wrapper).key("TILE", plain) is None  # a real site, family declines — not an identity miss
+    assert Sched(TileOp(op=wrapper)).key("TILE", plain) is None  # a real site, family declines — not an identity miss
 
 
 def test_tile_axis_orientation_is_read_once_per_site(monkeypatch) -> None:
@@ -230,7 +231,7 @@ def test_tile_axis_orientation_is_read_once_per_site(monkeypatch) -> None:
 
     monkeypatch.setattr(tile_ops, "edge_free_axes", spy)
     axes = (Axis("m", 128), Axis("n", 256))
-    sched = tile_ops.Sched(root, place=Placement(free=axes, grid=axes))
+    sched = tile_ops.Sched(TileOp(op=root), place=Placement(free=axes, grid=axes))
     assert sched._mn_for(product) == axes
     assert sched._mn_for(product) == axes
     # both output axes are answered by ONE reading of the edge, and the site memo keeps the second

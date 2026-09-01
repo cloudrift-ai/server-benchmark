@@ -21,7 +21,6 @@ from .choices import (
     resolve_site_tile,
 )
 from .views import (
-    ClassicSites,
     Contraction,
     ContractionFacts,
     EdgeSite,
@@ -36,7 +35,6 @@ from .views import (
 
 __all__ = [
     "AtomKind",
-    "ClassicSites",
     "ContractionFacts",
     "Contraction",
     "EdgeSite",

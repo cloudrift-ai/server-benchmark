@@ -251,10 +251,12 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
 
 `ir/schedule/classic.py` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
 
-- `ClassicScheduleContext` composes the unscheduled `TileOp` and its target, and assigns one stable integer id per Fold
-  identity and one distinct `(consumer id, operand position)` tuple per edge, including multiple uses of one producer.
+- `ClassicScheduleContext` composes the unscheduled `TileOp` and its target. The `TileOp` itself is the site index:
+  one stable integer id per Fold identity, one distinct `(consumer id, operand position)` tuple per edge (including
+  multiple uses of one producer), each site's view, and each contraction's `ContractionFacts`.
 - Reusable schedule views classify one Fold without target input. A contraction records consumer-relative operand
-  positions; it does not mint alternate nodes or edge identities. `TileOp` caches both stable inventories.
+  positions; it does not mint alternate nodes or edge identities. The derivations memoize on the Fold ROOT, so every
+  `TileOp` over one term shares them; the `TileOp` properties are accessors, not a second cache.
 - `KernelSchedule`, `ProjectionSchedule` / `ReductionSchedule`, and `EdgeSchedule` contain choices only. They do not
   cache paths, classifications, shapes, placed geometry, resolved shared-memory sizes, or codec spellings.
 - `ClassicScheduleContext` derives local support after selecting a node and its incident edges. `extend` composes it

@@ -28,7 +28,7 @@ from emmy.compiler.ir.pure.fold import (
     refs_axis,
     stmt_axis_names,
 )
-from emmy.compiler.ir.schedule import ClassicSites, PlacedTile, Reduce
+from emmy.compiler.ir.schedule import PlacedTile, Reduce
 from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
     classic_node_key,
@@ -212,11 +212,13 @@ class Sched:
     outside that node's classified schedule sum, fails loudly.
     """
 
-    def __init__(self, root, place=None, schedule=None, materialization=None) -> None:
-        self.root = root
+    def __init__(self, tile, place=None, schedule=None, materialization=None) -> None:
+        if not isinstance(getattr(tile, "op", None), Fold):
+            raise TypeError("a schedule view reads a TileOp — it is the term's site index")
+        self.tile = tile
+        self.root = tile.op
         self.schedule = schedule
         self.materialization = materialization
-        self.sites = ClassicSites(root)
         #: The kernel's free→grid :class:`~emmy.compiler.ir.schedule.Placement`. A ``TILE`` slice
         #: is geometry over an ``(m, n)`` output pair, and WHICH pair is a function of the site's
         #: position in the tree — so the binding belongs here, on the scheduling structure, and
@@ -253,28 +255,28 @@ class Sched:
     def key(self, family: str, node) -> str | None:
         """The canonical node-family key, or ``None`` when the family does not apply."""
         try:
-            site = self.sites.site(node)
+            site = self.tile.node_id(node)
         except KeyError as error:
             raise UnknownSiteError(str(error)) from None
         if family == "TILE":
-            family_sites = self.sites.tile_sites
+            family_sites = self.tile.tile_sites
         elif family == "REDUCE":
-            family_sites = self.sites.reduction_sites
+            family_sites = self.tile.reduction_sites
         elif family == "STAGE":
-            edges = self.sites.stage_edges
+            edges = self.tile.stage_edges
             family_sites = tuple(dict.fromkeys(edge[0] for edge in edges))
         else:
             raise ValueError(f"unknown classic schedule family {family!r}")
         if site not in family_sites:
             return None
         if family == "STAGE":
-            return classic_stage_key(self.sites, next(edge for edge in self.sites.stage_edges if edge[0] == site))
-        return classic_node_key(self.sites, family, site)
+            return classic_stage_key(self.tile, next(edge for edge in self.tile.stage_edges if edge[0] == site))
+        return classic_node_key(self.tile, family, site)
 
     def get(self, family: str, node):
         if self.schedule is None:
             return None
-        site = self.sites.site(node)
+        site = self.tile.node_id(node)
         assignment = self.schedule.nodes[site]
         if family == "TILE":
             return assignment.tile if assignment.tile.is_tiled else None
@@ -301,7 +303,7 @@ class Sched:
         possible where there used to be three hand-written ``.at(...)`` calls."""
         if self.schedule is None or self.materialization is None:
             return None
-        return self.materialization.tiles.get(self.sites.site(node))
+        return self.materialization.tiles.get(self.tile.node_id(node))
 
     def placed(self, node, plan):
         """``plan`` bound to the ``(m, n)`` output axes a ``TILE`` slice at ``node``'s site tiles —
@@ -368,7 +370,7 @@ class Sched:
 def sched_of(tile) -> Sched:
     """Return the typed schedule view of a ``TileOp``."""
     return Sched(
-        tile.op,
+        tile,
         place=tile.place,
         schedule=tile.schedule,
         materialization=tile.materialization,

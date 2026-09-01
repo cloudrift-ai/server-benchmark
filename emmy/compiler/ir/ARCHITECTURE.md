@@ -70,7 +70,7 @@ schedule, materialization, output specifications, and knobs belong to `TileOp`, 
 The [schedule package](schedule/ARCHITECTURE.md) separates schedule-wide interfaces and reusable choices from concrete
 implementations. `schedule/classic.py` owns the semantic model for the ordinary grid/CTA/warp/thread/register schedule.
 The problem compatibility composes against is the unscheduled `TileOp` itself, paired with a target.
-`ClassicSites` assigns one stable integer node id to each Fold identity and one `(consumer, operand)` edge site to every
+The `TileOp` assigns one stable integer node id to each Fold identity and one `(consumer, operand)` edge site to every
 consumer operand position, so a shared producer is scheduled once while each use receives an independent transport
 choice. It also derives each node site's projection or reduction view, and each contraction's schedule-independent
 `ContractionFacts`, from the Fold alone; target facts cannot affect whether a site is a projection, reduction, or

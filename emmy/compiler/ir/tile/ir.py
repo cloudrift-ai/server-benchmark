@@ -33,6 +33,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 
+from frozendict import frozendict
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
@@ -42,7 +44,18 @@ from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_free_axes, is_co
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
-from emmy.compiler.ir.schedule.views import EdgeSite, NodeId, schedule_edges, schedule_nodes
+from emmy.compiler.ir.schedule.views import (
+    ContractionFacts,
+    EdgeSite,
+    NodeId,
+    NodeView,
+    Projection,
+    Reduction,
+    contraction_facts,
+    schedule_edges,
+    schedule_nodes,
+    schedule_views,
+)
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
 from emmy.compiler.ir.stmt.base import _axis_identity
@@ -539,6 +552,11 @@ class TileOp(Op):
         return schedule_edges(self.nodes)
 
     @cached_property
+    def node_sites(self) -> tuple[NodeId, ...]:
+        """Every node identity, in stable schedule order."""
+        return tuple(range(len(self.nodes)))
+
+    @cached_property
     def _node_ids(self) -> dict[int, NodeId]:
         return {id(node): node_id for node_id, node in enumerate(self.nodes)}
 
@@ -548,6 +566,69 @@ class TileOp(Op):
             return self._node_ids[id(node)]
         except KeyError:
             raise KeyError("Fold is not a node of this TileOp") from None
+
+    def node_at(self, site: NodeId) -> Fold:
+        """The node one identity addresses."""
+        if type(site) is not int or not 0 <= site < len(self.nodes):
+            raise KeyError(f"unknown node site {site!r}")
+        return self.nodes[site]
+
+    def operand(self, edge: EdgeSite):
+        """The operand edge one consumer position addresses."""
+        consumer, operand = edge
+        try:
+            return self.node_at(consumer).operands[operand]
+        except (TypeError, IndexError):
+            raise KeyError(f"unknown edge site {edge!r}") from None
+
+    def producer(self, edge: EdgeSite) -> NodeId | None:
+        """The node identity an operand edge reaches, or ``None`` for a materialized edge."""
+        value = self.operand(edge)
+        return self.node_id(value) if isinstance(value, Fold) else None
+
+    @cached_property
+    def _incident(self) -> dict[NodeId, tuple[EdgeSite, ...]]:
+        out: dict[NodeId, list[EdgeSite]] = {site: [] for site in self.node_sites}
+        for edge in self.node_edges:
+            out[edge[0]].append(edge)
+        return {site: tuple(edges) for site, edges in out.items()}
+
+    def incident_edges(self, site: NodeId) -> tuple[EdgeSite, ...]:
+        """Every operand position of one consumer."""
+        self.node_at(site)
+        return self._incident[site]
+
+    @cached_property
+    def views(self) -> frozendict[NodeId, NodeView]:
+        """Each node site classified as a projection or a reduction, without target input."""
+        return schedule_views(self.op) if isinstance(self.op, Fold) else frozendict()
+
+    @cached_property
+    def tile_sites(self) -> tuple[NodeId, ...]:
+        """The sites a ``TILE`` slice can address."""
+        return tuple(
+            site
+            for site in self.node_sites
+            if (isinstance(self.views[site], Reduction) and self.views[site].contraction is not None)
+            or (isinstance(self.views[site], Projection) and site == self.node_sites[0] and not self.nodes[site].operands)
+        )
+
+    @cached_property
+    def reduction_sites(self) -> tuple[NodeId, ...]:
+        """The sites a ``REDUCE`` choice can address."""
+        return tuple(site for site in self.node_sites if isinstance(self.views[site], Reduction))
+
+    @cached_property
+    def stage_edges(self) -> tuple[EdgeSite, ...]:
+        """The operand positions a ``STAGE`` transport can address."""
+        return tuple(
+            edge for edge in self.node_edges if isinstance(self.views[edge[0]], Reduction) and self.views[edge[0]].contraction is not None
+        )
+
+    @cached_property
+    def contractions(self) -> frozendict[NodeId, ContractionFacts]:
+        """The per-contraction structure every schedule choice over this term shares."""
+        return contraction_facts(self) if isinstance(self.op, Fold) else frozendict()
 
     def __getstate__(self):
         """Pickle stored fields only; derived schedule inventories recompute after transport."""

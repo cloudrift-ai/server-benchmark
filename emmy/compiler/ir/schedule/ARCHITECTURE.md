@@ -32,20 +32,25 @@ independent domain, and is not inspected by the generic traversal. Restriction-f
 indexes are immutable caches over those domains, not alternate definitions of membership.
 
 Reusable leaf choices such as `Work`, `Tile`, `Reduce`, `Stage`, and `Raster` contain neither sites nor target facts.
-`ClassicSites` is the formal target-independent reading of one Fold root: it derives stable node ids, operand-edge
-sites, each site's projection or reduction view, and each contraction's schedule-independent `ContractionFacts` — its
-effective K axis, computed-A cone seam, nested producer, and fragment need — while storing only the root. A contraction
-view belongs to a node site and expresses its operand roles as edge positions; it is not another Fold node. A concrete
-codec alone translates integer and tuple sites to wire spellings. The node list is the one walk in `ir/pure/tree.py`,
-deduplicated by object identity — the schedule layer does not carry its own copy of the three rules that walk exists
-to write once.
+The `TileOp` **is** the site index — there is no second object over the same term. It derives stable node ids,
+operand-edge sites, each site's projection or reduction view, and each contraction's schedule-independent
+`ContractionFacts` — its effective K axis, computed-A cone seam, nested producer, and fragment need. `ir/schedule/views`
+supplies the vocabulary (`node_view`, `Projection`, `Reduction`, `Contraction`, `ContractionFacts`) and the derivations
+the tile layer reads through; a contraction view belongs to a node site and expresses its operand roles as edge
+positions, and is not another Fold node. A concrete codec alone translates integer and tuple sites to wire spellings.
+
+The node list is the one walk in `ir/pure/tree.py`, deduplicated by object identity — the schedule layer does not carry
+its own copy of the three rules that walk exists to write once. **Every derivation memoizes on the ROOT, not on the
+wrapper**: several `TileOp`s exist over one term across a lowering, and a cache on the wrapper silently re-derives per
+wrapper. `schedule_nodes`, `schedule_views` and `contraction_facts` all key their memo on the Fold root, and the
+`TileOp` properties are accessors over it.
 
 ## Classic schedule
 
 `ClassicScheduleContext` is the immutable `c + p + t` prefix: the problem `p` is the unscheduled TileOp itself and `t`
 its target, held as two fields, and `ClassicDomains` carries only the literal independent factors. There is no separate
 problem object. Everything a schedule choice cannot change is derived from those two and memoized on the term it
-derives from — a contraction's `ContractionFacts` on the Fold root (`ClassicSites.contractions`), the packed operand
+derives from — a contraction's `ContractionFacts` on the Fold root (`TileOp.contractions`), the packed operand
 readings and the placement on the TileOp, and the per-target support tables on the TileOp beside their target. The
 context owns all classic compatibility and restriction behavior:
 worker inventory, physical-axis agreement, fragment seams, raster eligibility, resource limits, producer-band/TMA

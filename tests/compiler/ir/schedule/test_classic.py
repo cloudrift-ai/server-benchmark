@@ -47,7 +47,6 @@ from emmy.compiler.ir.schedule.classic import (
     parse_node_id,
 )
 from emmy.compiler.ir.schedule.views import (
-    ClassicSites,
     Contraction,
     Projection,
     Reduction,
@@ -104,19 +103,19 @@ def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
     left = Fold.projection(operands=(shared,), body=Body((Assign("left", "add", ("sum", "sum")),)), results=("left",))
     right = Fold.projection(operands=(shared,), body=Body((Assign("right", "add", ("sum", "sum")),)), results=("right",))
     root = Fold.projection(operands=(left, right), body=Body(), results=("left", "right"))
-    inventory = ClassicSites(root)
+    inventory = TileOp(op=root)
 
     assert len(inventory.node_sites) == 4
-    shared_site = inventory.site(shared)
-    uses = tuple(edge for edge in inventory.edge_sites if inventory.producer(edge) == shared_site)
-    assert uses == ((inventory.site(left), 0), (inventory.site(right), 0))
+    shared_site = inventory.node_id(shared)
+    uses = tuple(edge for edge in inventory.node_edges if inventory.producer(edge) == shared_site)
+    assert uses == ((inventory.node_id(left), 0), (inventory.node_id(right), 0))
 
 
 def test_classification_binds_contraction_roles_to_consumer_operands() -> None:
     contraction = _contraction()
-    inventory = ClassicSites(contraction)
+    inventory = TileOp(op=contraction)
 
-    view = node_view(inventory.node(inventory.node_sites[0]))
+    view = node_view(inventory.node_at(inventory.node_sites[0]))
     assert view == Reduction(Contraction(a=1, channels=(0,)))
 
 

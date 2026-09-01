@@ -29,7 +29,7 @@ from .choices import (
     resolve_site_tile,
 )
 from .packing import packed_readings
-from .views import ClassicSites, ContractionFacts, EdgeSite, NodeId, NodeView, Projection, Reduction
+from .views import ContractionFacts, EdgeSite, NodeId, NodeView, Projection, Reduction
 
 CLASSIC_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
@@ -125,7 +125,7 @@ class EdgeSchedule:
 type ClassicAssignment = Schedule[KernelSchedule, NodeSchedule, EdgeSchedule]
 
 
-def classic_node_key(sites: ClassicSites, family: str, site: NodeId) -> str:
+def classic_node_key(sites, family: str, site: NodeId) -> str:
     """Return the canonical key for one node-scoped classic family."""
     family_sites = {"TILE": sites.tile_sites, "REDUCE": sites.reduction_sites}.get(family)
     if family_sites is None:
@@ -135,7 +135,7 @@ def classic_node_key(sites: ClassicSites, family: str, site: NodeId) -> str:
     return family if len(family_sites) == 1 else f"{family}@{node_id_spelling(site)}"
 
 
-def classic_stage_key(sites: ClassicSites, edge: EdgeSite) -> str:
+def classic_stage_key(sites, edge: EdgeSite) -> str:
     """Return the canonical key for one staged consumer."""
     if edge not in sites.stage_edges:
         raise ValueError(f"{edge_site_spelling(edge)} is not a STAGE edge")
@@ -437,21 +437,23 @@ class ClassicMaterialization:
             context.extend(schedule)
         except ScheduleRefused as error:
             raise ValueError(f"TileOp carries a refused classic schedule: {error}") from error
-        sites = context.sites
+        source_tile = context.tile_op
         expected_tiles = {
             site
             for site, assignment in schedule.nodes.items()
-            if assignment.tile.is_tiled and isinstance(sites.views[site], Reduction) and sites.views[site].contraction is not None
+            if assignment.tile.is_tiled
+            and isinstance(source_tile.views[site], Reduction)
+            and source_tile.views[site].contraction is not None
         }
         if set(self.tiles) != expected_tiles:
             raise ValueError("classic materialization must contain exactly the tiled node sites")
         expected_stages = {edge for edge, assignment in schedule.edges.items() if not assignment.stage.is_direct}
         if set(self.stages) != expected_stages:
             raise ValueError("classic materialization must contain exactly the staged edge sites")
-        placement = Sched(source.op, place=place)
+        placement = Sched(source, place=place)
         for site, placed in self.tiles.items():
             choice = schedule.nodes[site].tile
-            expected = placement.placed(sites.node(site), choice)
+            expected = placement.placed(source_tile.node_at(site), choice)
             if placed.choice != choice or placed != expected:
                 raise ValueError(f"materialized tile at {node_id_spelling(site)} does not derive from its classic choice")
         for edge, resolved in self.stages.items():
@@ -467,7 +469,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     """Immutable classic ``c + p + t`` compatibility-composition state.
 
     The problem ``p`` is the unscheduled ``tile_op`` — its Fold root indexes every site through
-    :class:`ClassicSites`, and its typed inputs answer every operand-shape question — composed
+    its own site index, and its typed inputs answer every operand-shape question — composed
     against the target ``t``. Derivations shared by every candidate ride memo tables on the tile.
     """
 
@@ -553,33 +555,28 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 self._validate_stage_restriction()
 
     @property
-    def sites(self) -> ClassicSites:
-        """The target-independent site and view index of this kernel's Fold root."""
-        return ClassicSites(self.tile_op.op)
-
-    @property
     def node_sites(self) -> tuple[NodeId, ...]:
-        return self.sites.node_sites
+        return self.tile_op.node_sites
 
     @property
     def edge_sites(self) -> tuple[EdgeSite, ...]:
-        return self.sites.edge_sites
+        return self.tile_op.node_edges
 
     @property
     def views(self) -> Mapping[NodeId, NodeView]:
-        return self.sites.views
+        return self.tile_op.views
 
     @property
     def tile_sites(self) -> tuple[NodeId, ...]:
-        return self.sites.tile_sites
+        return self.tile_op.tile_sites
 
     @property
     def reduction_sites(self) -> tuple[NodeId, ...]:
-        return self.sites.reduction_sites
+        return self.tile_op.reduction_sites
 
     @property
     def stage_edges(self) -> tuple[EdgeSite, ...]:
-        return self.sites.stage_edges
+        return self.tile_op.stage_edges
 
     @property
     def kernels(self) -> tuple[KernelSchedule, ...]:
@@ -604,27 +601,27 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return (EdgeSchedule(Stage.direct()),)
 
     def node(self, site: NodeId) -> Fold:
-        return self.sites.node(site)
+        return self.tile_op.node_at(site)
 
     def site(self, node: Fold) -> NodeId:
-        return self.sites.site(node)
+        return self.tile_op.node_id(node)
 
     def operand(self, edge: EdgeSite):
         if not _is_edge_site(edge):
             raise KeyError(f"invalid edge site {edge!r}")
-        return self.sites.operand(edge)
+        return self.tile_op.operand(edge)
 
     def producer(self, edge: EdgeSite) -> NodeId | None:
-        return self.sites.producer(edge)
+        return self.tile_op.producer(edge)
 
     def incident_edges(self, site: NodeId) -> tuple[EdgeSite, ...]:
-        return self.sites.incident_edges(site)
+        return self.tile_op.incident_edges(site)
 
     def node_key(self, family: str, site: NodeId) -> str:
-        return classic_node_key(self.sites, family, site)
+        return classic_node_key(self.tile_op, family, site)
 
     def stage_key(self, edge: EdgeSite) -> str:
-        return classic_stage_key(self.sites, edge)
+        return classic_stage_key(self.tile_op, edge)
 
     def keys(self) -> tuple[str, ...]:
         stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.stage_edges))
@@ -892,7 +889,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         edges: Mapping[EdgeSite, EdgeSchedule],
     ) -> _LocalSupport | None:
         """Derive the local ``p + t`` facts and decide their compatibility in one place."""
-        facts = self.sites.contractions.get(site)
+        facts = self.tile_op.contractions.get(site)
         if facts is None:
             return self._intrinsic_support(site, node, edges)
         materialization = getattr(self.tile_op, "materialization", None)
@@ -920,7 +917,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         placement = instance_memo(tile_op, "_memo_classic_sched")
         sched = placement.get("sched")
         if sched is None:
-            sched = Sched(tile_op.op, place=tile_op.place.on_grid())
+            sched = Sched(tile_op, place=tile_op.place.on_grid())
             placement["sched"] = sched
         geometry = sched.placed(fold, node.tile)
         if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
@@ -972,7 +969,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                     geometry,
                     resolved_stage,
                     facts,
-                    frozenset(candidate.need for candidate in self.sites.contractions.values() if candidate.need is not None),
+                    frozenset(candidate.need for candidate in self.tile_op.contractions.values() if candidate.need is not None),
                 )
                 if isinstance(geometry, PlacedTile)
                 else ()
@@ -1276,14 +1273,17 @@ class ClassicScheduleCodec:
         if not isinstance(context, ClassicScheduleContext):
             raise TypeError("classic codec requires a ClassicScheduleContext")
         self.context = context
-        self.sites = context.sites
-        stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.sites.stage_edges))
+        self.tile_op = context.tile_op
+        stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.tile_op.stage_edges))
         self._key_order = (
             "WORK",
             "RASTER",
-            *(classic_node_key(self.sites, "TILE", site) for site in self.sites.tile_sites),
-            *(classic_node_key(self.sites, "REDUCE", site) for site in self.sites.reduction_sites),
-            *(classic_stage_key(self.sites, next(edge for edge in self.sites.stage_edges if edge[0] == site)) for site in stage_consumers),
+            *(classic_node_key(self.tile_op, "TILE", site) for site in self.tile_op.tile_sites),
+            *(classic_node_key(self.tile_op, "REDUCE", site) for site in self.tile_op.reduction_sites),
+            *(
+                classic_stage_key(self.tile_op, next(edge for edge in self.tile_op.stage_edges if edge[0] == site))
+                for site in stage_consumers
+            ),
         )
         self._keys = frozenset(self._key_order)
 
@@ -1298,19 +1298,19 @@ class ClassicScheduleCodec:
             "WORK": schedule.kernel.work.spell(),
             "RASTER": schedule.kernel.raster.spell(),
         }
-        for site in self.sites.tile_sites:
-            row[classic_node_key(self.sites, "TILE", site)] = schedule.nodes[site].tile.spell()
-        for site in self.sites.reduction_sites:
+        for site in self.tile_op.tile_sites:
+            row[classic_node_key(self.tile_op, "TILE", site)] = schedule.nodes[site].tile.spell()
+        for site in self.tile_op.reduction_sites:
             assignment = schedule.nodes[site]
             assert isinstance(assignment, ReductionSchedule)
-            row[classic_node_key(self.sites, "REDUCE", site)] = assignment.reduce.spell()
-        stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.sites.stage_edges))
+            row[classic_node_key(self.tile_op, "REDUCE", site)] = assignment.reduce.spell()
+        stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.tile_op.stage_edges))
         for site in stage_consumers:
-            edges = tuple(edge for edge in self.sites.stage_edges if edge[0] == site)
+            edges = tuple(edge for edge in self.tile_op.stage_edges if edge[0] == site)
             stages = {schedule.edges[edge].stage for edge in edges}
             if len(stages) != 1:
                 raise ValueError(f"{node_id_spelling(site)}: one STAGE value must cover every operand edge")
-            row[classic_stage_key(self.sites, edges[0])] = stages.pop().spell()
+            row[classic_stage_key(self.tile_op, edges[0])] = stages.pop().spell()
         return row
 
     def delta(self, before: ClassicScheduleContext, after: ClassicScheduleContext) -> dict[str, str]:
@@ -1346,18 +1346,18 @@ class ClassicScheduleCodec:
 
         work = Work.parse(row["WORK"])
         nodes: dict[NodeId, NodeSchedule] = {}
-        for site in self.sites.node_sites:
-            view = self.sites.views[site]
+        for site in self.tile_op.node_sites:
+            view = self.tile_op.views[site]
             reduce = None
             if isinstance(view, Reduction):
-                reduce = Reduce.parse(row[classic_node_key(self.sites, "REDUCE", site)], work)
+                reduce = Reduce.parse(row[classic_node_key(self.tile_op, "REDUCE", site)], work)
             tile = (
                 resolve_site_tile(
-                    row[classic_node_key(self.sites, "TILE", site)],
+                    row[classic_node_key(self.tile_op, "TILE", site)],
                     work,
                     reduce.coop if reduce is not None else 1,
                 )
-                if site in self.sites.tile_sites
+                if site in self.tile_op.tile_sites
                 else Tile()
             )
             nodes[site] = ProjectionSchedule(tile) if reduce is None else ReductionSchedule(tile, reduce)
@@ -1365,10 +1365,10 @@ class ClassicScheduleCodec:
             KernelSchedule(work, Raster.parse(row["RASTER"])),
             nodes,
             {
-                edge: EdgeSchedule(Stage.parse(row[classic_stage_key(self.sites, edge)]))
-                if edge in self.sites.stage_edges
+                edge: EdgeSchedule(Stage.parse(row[classic_stage_key(self.tile_op, edge)]))
+                if edge in self.tile_op.stage_edges
                 else EdgeSchedule(Stage.direct())
-                for edge in self.sites.edge_sites
+                for edge in self.tile_op.node_edges
             },
         )
 

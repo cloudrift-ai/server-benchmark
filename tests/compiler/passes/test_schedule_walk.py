@@ -499,7 +499,7 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
 
     member = next(stmt for stmt in tile.op.body if isinstance(stmt, Fold))
     nested = next(stmt for stmt in member.lift.body if isinstance(stmt, Fold))
-    sched = Sched(tile.op, place=tile.place.on_grid())
+    sched = Sched(tile, place=tile.place.on_grid())
     member_key, nested_key = sched.key("REDUCE", member), sched.key("REDUCE", nested)
     ctx = Context.from_target(_CC)
 

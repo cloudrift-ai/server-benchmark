@@ -33,7 +33,8 @@ with pinned_knobs({"TILE": "f2"}):
 for _nid, node in sorted(c.nodes.items()):
     src = getattr(node.op, "kernel_source", None)
     if src:
-        print(node.op.kernel_name, hashlib.sha1(src.encode()).hexdigest())
+        marker = "VS" if "_vs_" in src else "--"
+        print(node.op.kernel_name, marker, hashlib.sha1(src.encode()).hexdigest())
 """
 
 
@@ -51,4 +52,5 @@ def _render_once(tmp_path, tag):
 def test_kernel_source_identical_across_processes(tmp_path):
     a = _render_once(tmp_path, "a")
     b = _render_once(tmp_path, "b")
+    assert "VS" in a, "the traced module no longer emits a vectorized store — the covered path is gone, repick the module"
     assert a == b, f"kernel sources differ across processes (cache re-keys every boot):\n--- a\n{a}\n--- b\n{b}"

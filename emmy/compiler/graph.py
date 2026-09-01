@@ -482,7 +482,8 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
         parse_node_id,
     )
 
-    context = ClassicScheduleContext(ClassicProblem(fields["op"], target=None))
+    source = op_cls(**fields)
+    context = ClassicScheduleContext(ClassicProblem.from_tile(source, target=None))
     codec = ClassicScheduleCodec(context)
     schedule = codec.decode(_wire_mapping(schedule_row, "classic schedule"))
     fields["schedule"] = schedule

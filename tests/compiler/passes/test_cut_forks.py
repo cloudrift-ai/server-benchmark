@@ -64,6 +64,13 @@ def test_cut_and_assignment_passes_share_the_generic_schedule_driver() -> None:
     assert _SCHEDULE.schedule is schedule
 
 
+def test_cut_passes_precede_assignment_enumeration() -> None:
+    rules = Pipeline.build(["lowering/tile"]).passes[0].rules
+    order = {rule.name: position for position, rule in enumerate(rules)}
+
+    assert order["030_cut"] < order["035_split_reduce"] < order["040_schedule"]
+
+
 def _computed_operand_graph(side: str) -> Graph:
     m, n, k = Axis("m", 8), Axis("n", 8), Axis("k", 16)
     computed = Fold.projection(

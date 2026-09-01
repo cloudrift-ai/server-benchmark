@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from typing import Self
+
+from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.structural import instance_memo
@@ -43,6 +46,100 @@ class Reduction:
 
 
 type NodeView = Projection | Reduction
+
+
+@dataclass(frozen=True)
+class ScheduleInventory:
+    """Stable target-independent node, edge, and classification indexes for one Fold tree."""
+
+    nodes: tuple[Fold, ...]
+    edges: tuple[EdgeSite, ...]
+    site_by_identity: Mapping[int, NodeId]
+    views: Mapping[NodeId, NodeView]
+    incident: Mapping[NodeId, tuple[EdgeSite, ...]]
+
+    @classmethod
+    def from_root(
+        cls,
+        root: Fold,
+        *,
+        nodes: tuple[Fold, ...] | None = None,
+        edges: tuple[EdgeSite, ...] | None = None,
+    ) -> Self:
+        nodes = schedule_nodes(root) if nodes is None else nodes
+        edges = schedule_edges(nodes) if edges is None else edges
+        sites = tuple(range(len(nodes)))
+        return cls(
+            nodes,
+            edges,
+            frozendict({id(node): site for site, node in enumerate(nodes)}),
+            frozendict({site: node_view(nodes[site]) for site in sites}),
+            frozendict({site: tuple(edge for edge in edges if edge[0] == site) for site in sites}),
+        )
+
+    def __getstate__(self):
+        """Serialize structural indexes; object-identity keys are rebuilt on load."""
+        return {
+            "nodes": self.nodes,
+            "edges": self.edges,
+            "views": self.views,
+            "incident": self.incident,
+        }
+
+    def __setstate__(self, state) -> None:
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "site_by_identity", frozendict({id(node): site for site, node in enumerate(self.nodes)}))
+
+    @property
+    def node_sites(self) -> tuple[NodeId, ...]:
+        return tuple(range(len(self.nodes)))
+
+    @property
+    def tile_sites(self) -> tuple[NodeId, ...]:
+        return tuple(
+            site
+            for site, view in self.views.items()
+            if (isinstance(view, Reduction) and view.contraction is not None)
+            or (isinstance(view, Projection) and site == 0 and not self.nodes[site].operands)
+        )
+
+    @property
+    def reduction_sites(self) -> tuple[NodeId, ...]:
+        return tuple(site for site, view in self.views.items() if isinstance(view, Reduction))
+
+    @property
+    def stage_edges(self) -> tuple[EdgeSite, ...]:
+        return tuple(
+            edge for edge in self.edges if isinstance(self.views[edge[0]], Reduction) and self.views[edge[0]].contraction is not None
+        )
+
+    def node(self, site: NodeId) -> Fold:
+        if type(site) is not int or not 0 <= site < len(self.nodes):
+            raise KeyError(f"unknown node site {site!r}")
+        return self.nodes[site]
+
+    def site(self, node: Fold) -> NodeId:
+        try:
+            return self.site_by_identity[id(node)]
+        except KeyError:
+            raise KeyError("Fold is not a node of this schedule inventory") from None
+
+    def operand(self, edge: EdgeSite):
+        if not isinstance(edge, tuple) or len(edge) != 2:
+            raise KeyError(f"invalid edge site {edge!r}")
+        consumer, operand = edge
+        try:
+            return self.node(consumer).operands[operand]
+        except IndexError:
+            raise KeyError(f"unknown operand {operand} at node {consumer}") from None
+
+    def producer(self, edge: EdgeSite) -> NodeId | None:
+        value = self.operand(edge)
+        return self.site(value) if isinstance(value, Fold) else None
+
+    def incident_edges(self, site: NodeId) -> tuple[EdgeSite, ...]:
+        return self.incident[site]
 
 
 def node_view(node: Fold) -> NodeView:
@@ -126,6 +223,7 @@ __all__ = [
     "NodeView",
     "Projection",
     "Reduction",
+    "ScheduleInventory",
     "node_view",
     "schedule_edges",
     "schedule_nodes",

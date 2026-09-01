@@ -19,8 +19,8 @@ driver knows no concrete family, pipeline fork type, site order, restriction, or
 generic schedule-fork adapter preserves the same contexts as deferred search branches without adding compatibility
 logic.
 
-Classic assignment contexts additionally expose the independent kernel, node, and edge factors.
-`enumerate_classic_reference` is their literal Cartesian oracle:
+Classic assignment contexts additionally expose the independent kernel, node, and edge factors. Tests compare the
+generic traversal with their literal Cartesian oracle:
 
     D(p, t) = K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)
     Algorithm 1(c, p, t) = {a ∈ D(p, t) | extend(c + p + t, a) succeeds}
@@ -32,17 +32,19 @@ independent domain, and is not inspected by the generic traversal. Restriction-f
 indexes are immutable caches over those domains, not alternate definitions of membership.
 
 Reusable leaf choices such as `Work`, `Tile`, `Reduce`, `Stage`, and `Raster` contain neither sites nor target facts.
-`views.py` owns reusable target-independent Fold views. `TileOp.nodes` and `TileOp.node_edges` cache their stable
-enumeration order; a concrete codec alone translates integer and tuple sites to wire spellings.
+`views.py` owns the reusable target-independent `ScheduleInventory` over Fold views. `TileOp.nodes` and
+`TileOp.node_edges` cache its stable enumeration order; identity indexes are rebuilt after pickling, and a concrete
+codec alone translates integer and tuple sites to wire spellings.
 
 ## Classic schedule
 
-`ClassicScheduleContext` is the immutable `c + p + t` prefix. `ClassicProblem` carries the source TileOp, target, and
-derived contraction facts; `ClassicDomains` carries only the literal independent factors. The context owns all classic
-compatibility and restriction behavior:
+`ClassicScheduleContext` is the immutable `c + p + t` prefix. `ClassicProblem` is constructed only from a complete
+source TileOp and carries the target plus every derived contraction and refusal fact; there is no weaker root-only
+problem. `ClassicDomains` carries only the literal independent factors. The context owns all classic compatibility and
+restriction behavior:
 worker inventory, physical-axis agreement, fragment seams, raster eligibility, resource limits, producer-band/TMA
-agreement, target availability, pins, and precision restrictions. The independent domains hold choices only; an
-expensive `LocalSupport` is derived lazily after the context has selected one node and its incident edge values. This
+agreement, target availability, pins, and precision restrictions. The independent domains hold choices only; local
+compatibility evidence is derived lazily after the context has selected one node and its incident edge values. This
 node-plus-incident-edges frontier is granular enough to reject mixed transport and fragment-seam combinations before
 they create subtrees, without materializing the full node × edge product. `extensions` emits partial schedules at
 that granularity; `extend` derives and composes their support. Kernel picks form the final frontier. The fragment-seam

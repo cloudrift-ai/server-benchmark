@@ -24,7 +24,7 @@ Empty enumeration remains a skip rather than a guessed schedule.
 from __future__ import annotations
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule import schedule
+from emmy.compiler.ir.schedule import schedule as schedule
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork
@@ -53,7 +53,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
         f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
-    options = classic_forks(tile, tile.name, tile.knobs, ctx, driver=schedule)
+    options = classic_forks(tile, tile.name, tile.knobs, ctx)
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

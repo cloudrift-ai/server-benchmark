@@ -12,8 +12,8 @@ from emmy.compiler.ir.schedule.classic import (
     ClassicProblem,
     ClassicScheduleCodec,
     ClassicScheduleContext,
+    ProjectionSchedule,
     ReductionSchedule,
-    enumerate_classic_reference,
 )
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
@@ -22,6 +22,7 @@ from emmy.compiler.pipeline.passes.lowering.tile import _classic as classic
 from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_context, classic_forks, project_domains
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.search.space import coop_reduce_moves, scalar_tile_moves
+from tests.compiler.helpers import enumerate_classic_reference
 
 
 def _signature(codec, assignment) -> tuple[tuple[str, str], ...]:
@@ -57,41 +58,11 @@ def test_production_enumeration_is_the_compatible_independent_product() -> None:
     leaves = _schedule_leaves(tile, "pointwise", target)
 
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == reference
-    assert len(reference) == domains.product_size == 1
+    assert len(reference) == domains.product_size
+    assert any(isinstance(choice, ProjectionSchedule) and choice.tile == Tile(regs=(1, 2)) for choice in domains.nodes[0])
     (materialized,) = leaves[0].expand()
     assert materialized.schedule == leaves[0].schedule
     assert materialized.place == tile.place.on_grid()
-
-
-def test_production_visit_evaluates_opaque_c_only_on_complete_assignments(monkeypatch) -> None:
-    m, n, k = Axis("m", 8), Axis("n", 8), Axis("k", 8)
-    root = Fold.contraction(
-        k_axis=k,
-        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
-    )
-    tile = TileOp(op=root, place=Placement(free=(m, n)))
-    target = Context.from_target((12, 0))
-    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
-    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [])
-    problem = ClassicProblem(root, target)
-    domains = project_domains(tile, target)
-    context = ClassicScheduleContext(problem, domains)
-    seen = []
-
-    def accepts(assignment):
-        assert tuple(assignment.nodes) == context.node_sites
-        assert tuple(assignment.edges) == context.edge_sites
-        seen.append(assignment)
-        return True
-
-    restricted = context.with_restriction(accepts)
-    codec = ClassicScheduleCodec(context)
-    actual = tuple((_assignment, codec._encode_accepted(_assignment)) for _assignment in _enumerate_context(restricted))
-    reference = tuple(enumerate_classic_reference(context))
-
-    assert {_signature(codec, assignment) for assignment, _row in actual} == {_signature(codec, assignment) for assignment in reference}
-    assert seen == [assignment for assignment, _row in actual]
 
 
 def test_complete_c_proves_its_singleton_without_changing_domains() -> None:
@@ -110,7 +81,7 @@ def test_complete_c_proves_its_singleton_without_changing_domains() -> None:
     assert root is not None
     tile = TileOp(op=root, place=Placement(free=(Axis("n", 64),)))
     target = Context.from_target((12, 0))
-    problem = ClassicProblem(root, target)
+    problem = ClassicProblem.from_tile(tile, target)
     domains = project_domains(tile, target)
     context = ClassicScheduleContext(problem, domains)
     codec = ClassicScheduleCodec(context)
@@ -143,7 +114,7 @@ def test_reduction_enumeration_filters_the_independent_product_by_compatibility(
     assert root is not None
     tile = TileOp(op=root, place=Placement(free=(Axis("n", 512),)))
     target = Context.from_target((12, 0))
-    problem = ClassicProblem(tile.op, target)
+    problem = ClassicProblem.from_tile(tile, target)
     domains = project_domains(tile, target)
     context = ClassicScheduleContext(problem, domains)
     site = context.node_sites[0]
@@ -169,7 +140,7 @@ def test_scalar_contraction_enumeration_is_the_compatible_independent_product(mo
     tile = TileOp(op=root, place=Placement(free=(m, n)))
     target = Context.from_target((12, 0))
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
-    problem = ClassicProblem(tile.op, target)
+    problem = ClassicProblem.from_tile(tile, target)
     domains = project_domains(tile, target)
     context = ClassicScheduleContext(problem, domains)
     site = context.node_sites[0]
@@ -282,7 +253,7 @@ def test_tensor_core_enumeration_is_the_compatible_independent_product(monkeypat
     monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
-    problem = ClassicProblem(tile.op, target)
+    problem = ClassicProblem.from_tile(tile, target)
     domains = project_domains(tile, target)
     context = ClassicScheduleContext(problem, domains)
     site = context.node_sites[0]
@@ -453,7 +424,7 @@ def test_schedule_restriction_drops_the_structural_split_stage_from_c() -> None:
     root = dc_replace(root, axis=dc_replace(parent, extent=1024, window=Window(parent=parent, partition=True)))
     tile = TileOp(op=root, place=Placement(free=(Axis("n", 512),)))
     target = Context.from_target((12, 0))
-    problem = ClassicProblem(root, target)
+    problem = ClassicProblem.from_tile(tile, target)
     domains = project_domains(tile, target)
     pins = {family: () for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
     pins["REDUCE"] = (("REDUCE", "g2k"),)
@@ -480,7 +451,7 @@ def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
     )
     target = Context.from_target((12, 0))
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [Stage.parse("d1/smem-async")])
-    problem = ClassicProblem(tile.op, target)
+    problem = ClassicProblem.from_tile(tile, target)
     domains = project_domains(tile, target)
     context = ClassicScheduleContext(problem, domains)
 
@@ -524,7 +495,7 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     warp = Tile.parse("mma_m16n8k16_f16_f32/f1x1", Work.parse("w1x1"))
     monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
-    problem = ClassicProblem(tile.op, target)
+    problem = ClassicProblem.from_tile(tile, target)
     domains = project_domains(tile, target)
     context = ClassicScheduleContext(problem, domains)
     contraction = context.node_sites[0]

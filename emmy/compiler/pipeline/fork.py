@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import Op
 
-from emmy.compiler.ir.schedule import Schedule, ScheduleContext
+from emmy.compiler.ir.schedule import Schedule, ScheduleContext, schedule
 
 
 class Fork(ABC):
@@ -135,7 +135,6 @@ class _ScheduleTree:
     """Shared callbacks and identity for one generic lazy schedule tree."""
 
     branch_knobs: Mapping
-    driver: Callable
     row_delta: Callable[[ScheduleContext, ScheduleContext], Mapping]
     leaf: Callable[[Schedule], Fork]
     pool_id: str
@@ -144,7 +143,7 @@ class _ScheduleTree:
 
     def step(self, context: ScheduleContext, row: Mapping) -> list[Fork]:
         forks = []
-        for child in self.driver(context, recursive=False):
+        for child in schedule(context, recursive=False):
             if isinstance(child, Schedule):
                 forks.append(self.leaf(child))
             else:
@@ -183,7 +182,6 @@ class _ScheduleFork(Fork):
 def schedule_forks(
     context: ScheduleContext,
     *,
-    driver: Callable,
     branch_knobs: Mapping,
     row_delta: Callable[[ScheduleContext, ScheduleContext], Mapping],
     leaf: Callable[[Schedule], Fork],
@@ -192,7 +190,7 @@ def schedule_forks(
     pool_descent_bound: int,
 ) -> list[Fork]:
     """Represent any schedule context as a lazy pipeline Fork tree."""
-    tree = _ScheduleTree(dict(branch_knobs), driver, row_delta, leaf, pool_id, pool_bound, pool_descent_bound)
+    tree = _ScheduleTree(dict(branch_knobs), row_delta, leaf, pool_id, pool_bound, pool_descent_bound)
     return tree.step(context, {})
 
 

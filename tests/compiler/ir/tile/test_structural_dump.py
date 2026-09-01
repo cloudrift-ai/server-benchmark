@@ -251,7 +251,7 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
     bare = TileOp(op=fold, name="k_stat")
     assert "REDUCE=" not in bare.pretty_body()
 
-    context = ClassicScheduleContext(ClassicProblem(fold, target=None))
+    context = ClassicScheduleContext(ClassicProblem.from_tile(bare, target=None))
     nodes = {
         site: ProjectionSchedule(Tile()) if isinstance(view, Projection) else ReductionSchedule(Tile(), Reduce.of(reg=4))
         for site, view in context.views.items()

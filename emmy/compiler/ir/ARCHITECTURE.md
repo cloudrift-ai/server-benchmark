@@ -95,16 +95,16 @@ Their Cartesian product is the definition of the candidate space. For immutable 
 Fold program `p`, and target `t`, Algorithm 1 is exactly:
 
     D(p, t) = K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)
-    Algorithm 1(c, p, t) = {a ∈ D(p, t) | c.accepts(a) ∧ accepts(p, t, a)}
+    Algorithm 1(c, p, t) = {a ∈ D(p, t) | extend(c + p + t, a) succeeds}
 
 The one `ClassicScheduleContext` is the immutable `c + p + t` prefix. It owns restriction and compatibility state and
-composes each lazily derived `LocalSupport`, followed by the kernel factor, through `extend`. The generic enumerator
-never unpacks `c` or imports classic scheduling. Static support retains derived physical-axis and fragment-seam facts
-outside the choice values. Domain membership uses immutable indexes; local support is derived only after the context
-has selected one node and its incident edge values, so a precise restriction does not construct the rest of the
-relation. Production may prune only prefixes whose `c + p + t` state proves they have no completion. The literal
-reference enumerator remains the oracle. Bounded-product checks and traversal-order tests require every traversal
-order to produce the same complete set; the lowering implementation must satisfy that product contract.
+composes each node and its incident edges, followed by the kernel factor, through `extend`. The generic enumerator
+never unpacks `c` or imports classic scheduling. The context's complete `ClassicProblem` retains derived physical-axis
+and fragment-seam facts outside the choice values. Domain membership uses immutable indexes; local support is derived
+only after the context has selected one node and its incident edge values, so a precise restriction does not construct
+the rest of the relation. Production may prune only prefixes whose `c + p + t` state proves they have no completion.
+The literal reference enumerator remains the oracle. Bounded-product checks and traversal-order tests require every
+traversal order to produce the same complete set; the lowering implementation must satisfy that product contract.
 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not

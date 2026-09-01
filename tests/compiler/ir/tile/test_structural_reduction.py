@@ -74,7 +74,7 @@ def _tile(op) -> TileOp:
 
 
 def _with_reduce(tile: TileOp, node: Fold, plan: Reduce) -> TileOp:
-    context = ClassicScheduleContext(ClassicProblem(tile.op, target=None))
+    context = ClassicScheduleContext(ClassicProblem.from_tile(tile, target=None))
     work = Work.parse(f"t{plan.coop}") if plan.coop > 1 else Work()
     classic = Schedule(
         KernelSchedule(work, Raster()),
@@ -483,7 +483,7 @@ def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b(mo
     choice = Tile.parse("mma_m16n8k16_f16_f32/f1x4", work)
     plan = choice.at(m, n)
     stage = Stage(depth=1, transport="smem")
-    context = ClassicScheduleContext(ClassicProblem(root, target=None))
+    context = ClassicScheduleContext(ClassicProblem.from_tile(TileOp(op=root), target=None))
     contraction_site = context.site(contraction)
     staged_edges = tuple(edge for edge in context.edge_sites if edge[0] == contraction_site)
     classic = Schedule(
@@ -585,7 +585,7 @@ def test_scheduled_uses_only_the_accepted_kernel_choice() -> None:
     from emmy.compiler.ir.tile.ops import scheduled
 
     c = _contraction()
-    context = ClassicScheduleContext(ClassicProblem(c, target=None))
+    context = ClassicScheduleContext(ClassicProblem.from_tile(TileOp(op=c), target=None))
     site = context.node_sites[0]
     plan = Tile.parse("f2", Work.parse("t2"))
     m, n = Axis("m", 8), Axis("n", 8)

@@ -31,11 +31,8 @@ from emmy.compiler.ir.pure.fold import (
     stmt_axis_names,
 )
 from emmy.compiler.ir.schedule import PlacedTile, Reduce
-from emmy.compiler.ir.schedule.classic import (
-    ClassicProblem,
-    ClassicScheduleContext,
-    ReductionSchedule,
-)
+from emmy.compiler.ir.schedule.classic import ReductionSchedule
+from emmy.compiler.ir.schedule.views import ScheduleInventory
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
@@ -246,7 +243,7 @@ class Sched:
         self.root = root
         self.schedule = schedule
         self.materialization = materialization
-        self.context = ClassicScheduleContext(ClassicProblem(root, target=None))
+        self.inventory = ScheduleInventory.from_root(root)
         #: The kernel's free→grid :class:`~emmy.compiler.ir.schedule.Placement`. A ``TILE`` slice
         #: is geometry over an ``(m, n)`` output pair, and WHICH pair is a function of the site's
         #: position in the tree — so the binding belongs here, on the scheduling structure, and
@@ -283,28 +280,29 @@ class Sched:
     def key(self, family: str, node) -> str | None:
         """The canonical node-family key, or ``None`` when the family does not apply."""
         try:
-            site = self.context.site(node)
+            site = self.inventory.site(node)
         except KeyError as error:
             raise UnknownSiteError(str(error)) from None
         if family == "TILE":
-            family_sites = self.context.tile_sites
+            family_sites = self.inventory.tile_sites
         elif family == "REDUCE":
-            family_sites = self.context.reduction_sites
+            family_sites = self.inventory.reduction_sites
         elif family == "STAGE":
-            edges = self.context.stage_edges
+            edges = self.inventory.stage_edges
             family_sites = tuple(dict.fromkeys(edge[0] for edge in edges))
         else:
             raise ValueError(f"unknown classic schedule family {family!r}")
         if site not in family_sites:
             return None
         if family == "STAGE":
-            return self.context.stage_key(next(edge for edge in self.context.stage_edges if edge[0] == site))
-        return self.context.node_key(family, site)
+            consumers = tuple(dict.fromkeys(edge[0] for edge in edges))
+            return "STAGE" if len(consumers) == 1 else f"STAGE@n{site}"
+        return family if len(family_sites) == 1 else f"{family}@n{site}"
 
     def get(self, family: str, node):
         if self.schedule is None:
             return None
-        site = self.context.site(node)
+        site = self.inventory.site(node)
         assignment = self.schedule.nodes[site]
         if family == "TILE":
             return assignment.tile if assignment.tile.is_tiled else None
@@ -331,7 +329,7 @@ class Sched:
         possible where there used to be three hand-written ``.at(...)`` calls."""
         if self.schedule is None or self.materialization is None:
             return None
-        return self.materialization.tiles.get(self.context.site(node))
+        return self.materialization.tiles.get(self.inventory.site(node))
 
     def placed(self, node, plan):
         """``plan`` bound to the ``(m, n)`` output axes a ``TILE`` slice at ``node``'s site tiles —
@@ -424,11 +422,6 @@ def scheduled(
     is the sole worker-inventory source; the encoded row must agree with it."""
     if schedule is None:
         raise ValueError("cannot construct a scheduled TileOp without a Schedule")
-    context = ClassicScheduleContext(ClassicProblem(op, target=None))
-    try:
-        context.extend(schedule)
-    except ValueError as error:
-        raise ValueError(f"cannot construct a scheduled TileOp from a refused assignment: {error}") from error
     work = schedule.kernel.work
     producer = workers.producer_warps if workers is not None else 0
     if work.producer != producer:

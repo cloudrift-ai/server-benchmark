@@ -172,7 +172,7 @@ def test_compile_golden_substring_resolves_dynamic(run_cli, monkeypatch):
     # Hide CUDA from the subprocess: --golden scopes to the live card's recordings,
     # so the name only resolves everywhere via the off-GPU multi-card union.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    rc, stdout, stderr = run_cli("compile", "--golden", "qkv.h4096.dynM", "--ir", "cuda")
+    rc, stdout, stderr = run_cli("compile", "--golden", "o_proj.h4096.dynM", "--ir", "cuda")
     assert rc == 0, f"stderr: {stderr}"
     assert "int seq_len" in stdout, f"expected masked-tile ``int seq_len`` from the dynamic golden, got:\n{stdout[:500]}"
 

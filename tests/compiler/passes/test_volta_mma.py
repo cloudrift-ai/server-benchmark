@@ -17,7 +17,6 @@ from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.space import MAX_FRAGMENT_REGISTERS, warp_tile_moves
 from emmy.compiler.target import set_target
-from tests.compiler.helpers import pin_classic
 
 VOLTA = "mma_m8n8k4_f16_f32"
 AMPERE = "mma_m16n8k16_f16_f32"
@@ -48,10 +47,10 @@ def _norm_linear_graph(*, m: int = 16, n: int = 16, k: int = 16) -> Graph:
 
 
 def _pin(monkeypatch, atom: str, *, tile: str = "f1x1", stage: str = "") -> None:
-    pin_classic(monkeypatch, {"TILE": f"{atom}/{tile}"})
+    monkeypatch.setenv("EMMY_TILE", f"{atom}/{tile}")
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    pin_classic(monkeypatch, {"STAGE": stage})
-    pin_classic(monkeypatch, {"REDUCE": ""})
+    monkeypatch.setenv("EMMY_STAGE", stage)
+    monkeypatch.setenv("EMMY_REDUCE", "")
 
 
 def _source(graph: Graph, ctx: Context) -> tuple[str, dict]:

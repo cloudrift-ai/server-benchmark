@@ -21,7 +21,7 @@ from emmy.compiler.loader.exl3 import (
     pack_trellis,
     trellis_windows,
 )
-from tests.compiler.helpers import classic_row, requires_cuda
+from tests.compiler.helpers import requires_cuda
 from tests.support.checkpoints import exl3_linear_tensors
 
 rng = np.random.default_rng(7)
@@ -29,9 +29,9 @@ rng = np.random.default_rng(7)
 
 def _direct_trellis_schedule() -> dict[str, str]:
     """The complete direct schedule for the three trellis lowering sites."""
-    row = {}
+    row = {"WORK": "", "RASTER": ""}
     for node in (1, 2, 6):
-        row.update(classic_row({"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, node=node))
+        row.update({f"TILE@n{node}": "", f"REDUCE@n{node}": "", f"STAGE@n{node}": ""})
     return row
 
 

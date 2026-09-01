@@ -57,25 +57,6 @@ requires_sm90 = pytest.mark.skipif(
 )
 
 
-def classic_row(knobs: dict[str, str], *, node: int | None = None) -> dict[str, str]:
-    """Spell a classic test row, using global families unless a site is required."""
-    row: dict[str, str] = {}
-    for family, value in knobs.items():
-        if family in {"WORK", "RASTER"}:
-            row[family] = value
-        elif family in {"TILE", "REDUCE", "STAGE"}:
-            row[family if node is None else f"{family}@n{node}"] = value
-        else:
-            row[family] = value
-    return row
-
-
-def pin_classic(monkeypatch, knobs: dict[str, str], *, node: int | None = None) -> None:
-    """Publish a classic row, using global families unless a site is required."""
-    for key, value in classic_row(knobs, node=node).items():
-        monkeypatch.setenv(f"EMMY_{key.upper()}", str(value))
-
-
 def direct_classic_leaf(fork_point):
     """Select the direct classic schedule without flattening the schedule tree."""
     from emmy.compiler.pipeline.fork import Fork

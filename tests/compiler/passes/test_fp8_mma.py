@@ -37,7 +37,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 from emmy.compiler.pipeline.passes.lowering.tile import _classic as sched
-from tests.compiler.helpers import classic_row, requires_cuda
+from tests.compiler.helpers import requires_cuda
 
 K32 = "mma_m16n8k32_e4m3_f32"
 
@@ -304,7 +304,7 @@ def test_k32_mma_matches_lut_reference_cuda():
     m, n, k = 32, 64, 64
     rng = np.random.default_rng(11)
     backend = CudaBackend()
-    with pinned_knobs(classic_row({"TILE": f"{K32}/f2x2", "WORK": "w1x4", "REDUCE": "", "STAGE": ""})):
+    with pinned_knobs({"TILE": f"{K32}/f2x2", "WORK": "w1x4", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32" in s), None)
@@ -393,7 +393,7 @@ def test_w8a8_static_act_quant_e2e_cuda():
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with pinned_knobs(classic_row({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": "", "PLACE": "cut"})):
+    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": "", "PLACE": "cut"}):
         compiled = backend.compile(_w8a8_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     assert any("__nv_fp8_e4m3(" in s and "x_f8[" in s for s in srcs), "no encode kernel materializing x_f8"
@@ -490,7 +490,7 @@ def test_w8a8_dynamic_per_token_amax_cuda():
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with pinned_knobs(classic_row({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""})):
+    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_dyn_w8a8_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32" in s), None)

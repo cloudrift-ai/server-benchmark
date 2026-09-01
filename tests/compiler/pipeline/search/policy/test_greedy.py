@@ -20,7 +20,6 @@ from emmy.compiler.pipeline.search.policy.greedy import (
     golden_audit,
     tile_identity,
 )
-from tests.compiler.helpers import pin_classic
 
 
 @pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@a": "cut"}, {"PLACE@a": "cut", "WORK": "t32"}))
@@ -392,8 +391,6 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
         return out
 
     monkeypatch.setattr(greedy, "_price_kernel", spy)
-    for node in range(4):
-        pin_classic(monkeypatch, {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, node=node)
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (16, 32), "f16"), node_id="x")
     prev = "x"

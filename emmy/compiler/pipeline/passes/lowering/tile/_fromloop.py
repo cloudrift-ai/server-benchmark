@@ -153,7 +153,7 @@ def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
         axes = ", ".join(inner.axis.name for inner in raw)
         raise ValueError(f"total lift left raw inner loops: {axes}")
     return TileOp(
-        op=Fold.projection(body=Body(body)),
+        op=Fold.projection(body=Body(body), axes=tuple(axis.name for axis in free)),
         name=name,
         place=Placement(free=tuple(free)),
         inputs=dict(op.inputs),

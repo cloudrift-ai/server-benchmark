@@ -650,7 +650,7 @@ class Fold:
         return cls(axis=k_axis, operands=operands, lift=lift, init=init, combine=combine)
 
     @classmethod
-    def projection(cls, operands: tuple = (), *, body=None, results: tuple | None = None) -> Fold:
+    def projection(cls, operands: tuple = (), *, body=None, results: tuple | None = None, axes: tuple[str, ...] = ()) -> Fold:
         """A ZERO-AXIS fold — the pointwise / projection cell (what the zero-axis fold kind was).
         No axis and no monoid: the synthesized binder IS the ``lift`` and IS the per-cell compute,
         so softmax's normalize, the relu epilogue and flash's ``divide(O, l)`` are this node over
@@ -668,12 +668,16 @@ class Fold:
             # keeps a lambda body free of nested terms: a Fold tree composes through operands,
             # and two composition mechanisms are one too many.
             names = tuple(results) if results is not None else (_map_results(b) or ())
-            return _ordered_projection((*operands, *b), names)
+            return _ordered_projection((*operands, *b), names, axes)
         operands = _unique_edges(tuple(operands))
         params = tuple(n for s in operands for n in _operand_result_names(s))
         if results is None:
             results = _map_results(b) or params[:1]
-        return cls(axis=None, operands=operands, lift=Lambda.closing(params, b, tuple(results)))
+        # ``axes`` is the enclosing iteration scope, supplied BY THE BINDER — the term cannot tell
+        # an axis from a value, so the caller that bound them says which is which. Declared beside
+        # the operand results; a caller with no scope to declare passes none and nothing changes.
+        scope = tuple(axis for axis in axes if axis not in params)
+        return cls(axis=None, operands=operands, lift=Lambda.closing((*params, *scope), b, tuple(results)))
 
     @cached_property
     def _derived_twisted(self) -> tuple[Stmt, ...]:
@@ -944,7 +948,7 @@ def stmt_axis_names(stmts) -> set[str]:
     return out
 
 
-def _ordered_projection(members, results: tuple[str, ...]) -> Fold:
+def _ordered_projection(members, results: tuple[str, ...], axes: tuple[str, ...] = ()) -> Fold:
     """Factor an ordered pure cone without moving a Fold ahead of an earlier scalar producer.
 
     A projection evaluates every operand before its scalar body, so a source sequence
@@ -973,13 +977,14 @@ def _ordered_projection(members, results: tuple[str, ...]) -> Fold:
             needed.update(_member_reads(stmt))
         bridge = tuple(name for stmt in prefix for name in stmt.defines() if name in needed)
         assert bridge, "a separated pure prefix must feed its suffix"
-        source = _ordered_projection(prefix, bridge)
-        return _ordered_projection((source, *suffix), results)
+        source = _ordered_projection(prefix, bridge, axes)
+        return _ordered_projection((source, *suffix), results, axes)
 
     operands = _unique_edges(tuple(stmt for stmt in members if isinstance(stmt, Fold)))
     body = Body(stmt for stmt in members if not isinstance(stmt, Fold))
     params = tuple(name for edge in operands for name in _operand_result_names(edge))
-    return Fold(axis=None, operands=operands, lift=Lambda.closing(params, body, tuple(results)))
+    scope = tuple(axis for axis in axes if axis not in params)
+    return Fold(axis=None, operands=operands, lift=Lambda.closing((*params, *scope), body, tuple(results)))
 
 
 def operand_body(op) -> tuple[Stmt, ...]:

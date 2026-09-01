@@ -29,7 +29,7 @@ from emmy.compiler.ir.pure import (
 )
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.closure import Closure, canonical_under, equivalent_clusters
-from emmy.compiler.ir.pure.fold import _operand_result_names, edge_free_axes, operand_name, refs_axis
+from emmy.compiler.ir.pure.fold import _operand_result_names, _ordered_projection, edge_free_axes, operand_name, refs_axis
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.structural import instance_memo
@@ -49,39 +49,6 @@ def _loads_axis_contiguously(operand, axis: str) -> bool:
         return False
     form = affine_form(operand.index[-1], {axis})
     return form is not None and form[1].get(axis) == 1
-
-
-def _ordered_projection(members: Iterable, results: tuple[str, ...]) -> Fold:
-    """Factor an ordered pure cone without moving a Fold ahead of an earlier scalar producer.
-
-    A projection evaluates every operand before its scalar body.  When the source sequence is
-    ``Fold; scalar; Fold``, the prefix must therefore become a source projection of the latter
-    Fold instead of flattening both Folds into sibling operands.
-    """
-    members = Body(members)
-    scalar_seen = False
-    split = None
-    for index, stmt in enumerate(members):
-        if isinstance(stmt, Fold):
-            if scalar_seen:
-                split = index
-                break
-        else:
-            scalar_seen = True
-
-    if split is not None:
-        prefix, suffix = members[:split], members[split:]
-        needed = set(results)
-        for stmt in suffix:
-            needed.update(_member_reads(stmt))
-        bridge = tuple(name for stmt in prefix for name in stmt.defines() if name in needed)
-        assert bridge, "a separated pure prefix must feed its suffix"
-        source = _ordered_projection(prefix, bridge)
-        return _ordered_projection((source, *suffix), results)
-
-    operands = tuple(stmt for stmt in members if isinstance(stmt, Fold))
-    body = Body(stmt for stmt in members if not isinstance(stmt, Fold))
-    return Fold.projection(operands=operands, body=body, results=results)
 
 
 def _extract_operand(body: Body, name: str):
@@ -342,7 +309,7 @@ def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset
         return root
     candidate_ids = {id(candidate) for candidate in candidates}
     remaining = Body(stmt for stmt in root.body if id(stmt) not in candidate_ids)
-    hoisted = Fold.projection(operands=(*root.operands, *candidates), body=remaining, results=root.lift.results)
+    hoisted = Fold.projection(operands=(*root.operands, *candidates), body=remaining, results=root.lift.results, axes=axes)
     return _passthrough(hoisted) or hoisted
 
 
@@ -502,14 +469,14 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
             return None
         moved_members.update(id(stmt) for stmt in cone.members)
         moved_edges.update(id(edge) for edge in edges)
-        hoisted = _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names), axes, sweep_axes)
+        hoisted = _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names, axes=axes), axes, sweep_axes)
         return _passthrough(hoisted) or hoisted
 
     rewritten_operands, rewritten_body = _close_tree(root, provider)
     if not moved_members and not moved_edges:
         if rewritten_operands == root.operands and rewritten_body == root.body:
             return root
-        return Fold.projection(operands=rewritten_operands, body=rewritten_body, results=root.lift.results)
+        return Fold.projection(operands=rewritten_operands, body=rewritten_body, results=root.lift.results, axes=axes)
 
     candidates = tuple(stmt for stmt in rewritten_body if id(stmt) in moved_members)
     moved_defs = {name for stmt in candidates for name in stmt.defines()}
@@ -524,7 +491,7 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
     remaining_operands = tuple(
         edge for edge in rewritten_operands if id(edge) not in moved_edges or live & set(_operand_result_names(edge))
     )
-    return Fold.projection(operands=remaining_operands, body=remaining_body, results=root.lift.results)
+    return Fold.projection(operands=remaining_operands, body=remaining_body, results=root.lift.results, axes=axes)
 
 
 def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
@@ -556,7 +523,7 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
         if binders and any(_carries_iteration(member) for member in cone.members):
             return None
         moved.update(id(stmt) for stmt in cone.members)
-        return _hoist_closed_folds(Fold.projection(body=Body(cone.members), results=names), axes, sweep_axes)
+        return _hoist_closed_folds(Fold.projection(body=Body(cone.members), results=names, axes=axes), axes, sweep_axes)
 
     rewritten_operands, rewritten_body = _close_tree(root, provider)
     if not moved:

@@ -50,7 +50,7 @@ def test_split_reduce_projection_epilogue(monkeypatch):
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE@N1", "g2a")
+    monkeypatch.setenv("EMMY_REDUCE", "g2a")
     with pytest.raises(ValueError, match="must distribute over the add"):
         CudaBackend().compile(graph_from_code(_L2_SPLIT_REDUCE)[0])
 

@@ -307,6 +307,36 @@ def test_algorithm_one_keeps_restriction_inside_the_immutable_context() -> None:
         context._predicate = lambda _schedule: True
 
 
+def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
+    problem = ClassicProblem(_contraction(), target=None)
+    base = ClassicScheduleContext(problem)
+    site = base.node_sites[0]
+    tile = Tile(atom=ATOM_REGISTRY["mma_m16n8k32_e4m3_f32"], units=(1, 4), regs=(2, 2))
+    node = ReductionSchedule(tile, Reduce())
+    edges = {edge: EdgeSchedule(Stage.direct()) for edge in base.edge_sites}
+    domains = ClassicDomains(
+        kernel=(KernelSchedule(Work.parse("w1x4"), Raster()),),
+        nodes={site: (node,)},
+        edges={edge: (choice,) for edge, choice in edges.items()},
+        _support=lambda candidate_site, candidate_node, candidate_edges: (
+            LocalSupport(candidate_node, candidate_edges, work=Work.parse("w1x4"))
+            if candidate_site == site and candidate_node == node
+            else None
+        ),
+    )
+    schedule = Schedule(domains.kernel[0], {site: node}, edges)
+
+    policy_only = ClassicScheduleContext(problem, domains).restrict({}, allow_fp8=False)
+    with pytest.raises(ScheduleRefused, match="precision restriction"):
+        policy_only.extend(schedule)
+
+    authored = ClassicScheduleContext(problem, domains).restrict(
+        {"TILE": (("TILE", tile.spell()),)},
+        allow_fp8=False,
+    )
+    assert authored.extend(schedule).assignment == schedule
+
+
 def test_node_ids_are_integers_with_one_wire_spelling() -> None:
     assert parse_node_id(node_id_spelling(3)) == 3
     with pytest.raises(ValueError, match="non-negative"):

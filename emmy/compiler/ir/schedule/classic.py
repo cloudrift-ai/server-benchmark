@@ -1150,11 +1150,24 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return False
         if choice.tile.is_warp:
             atom = choice.tile.atom
-            if atom.operand_dtype("a").nbytes == 1 and not self._allow_fp8:
+            pinned = self._tile_is_pinned(site, choice.tile)
+            if atom.operand_dtype("a").nbytes == 1 and not self._allow_fp8 and not pinned:
                 return False
-            if atom.operand_dtype("c").nbytes == 2 and not self._allow_f16_accumulate:
+            if atom.operand_dtype("c").nbytes == 2 and not self._allow_f16_accumulate and not pinned:
                 return False
         return True
+
+    def _tile_is_pinned(self, site: NodeId, tile: Tile) -> bool:
+        """Whether ``c`` explicitly selects this TILE value at ``site``.
+
+        Precision controls restrict unpinned enumeration policy; an authored TILE still selects a
+        legal independent-domain value. Keeping that exception here makes pinned full schedules
+        and lazy extension use the same restriction relation.
+        """
+        if self._pins is None or site not in self.tile_sites:
+            return False
+        key = self.node_key("TILE", site)
+        return bool(self._applicable_pins("TILE", key)) and self._allows_value("TILE", key, tile.spell())
 
     def _edge_restriction_allows(self, edge: EdgeSite, choice: EdgeSchedule) -> bool:
         """Whether one independent edge value can still satisfy ``c``."""
@@ -1183,9 +1196,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 self._refuse("REDUCE is outside the schedule restriction", site)
             if choice.tile.is_warp:
                 atom = choice.tile.atom
-                if atom.operand_dtype("a").nbytes == 1 and not self._allow_fp8:
+                pinned = self._tile_is_pinned(site, choice.tile)
+                if atom.operand_dtype("a").nbytes == 1 and not self._allow_fp8 and not pinned:
                     self._refuse("FP8 TILE is outside the precision restriction", site)
-                if atom.operand_dtype("c").nbytes == 2 and not self._allow_f16_accumulate:
+                if atom.operand_dtype("c").nbytes == 2 and not self._allow_f16_accumulate and not pinned:
                     self._refuse("f16-accumulate TILE is outside the precision restriction", site)
         for edge, choice in schedule.edges.items():
             if edge in self.stage_edges and not self._allows_value("STAGE", self.stage_key(edge), choice.stage.spell()):

@@ -310,6 +310,7 @@
  "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-warp-k-split-staged.yaml-correct]@cuda": 20.5,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-a-gmem_xfail_correct.yaml-realized]": 9.5,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-b-gmem_xfail_correct.yaml-realized]": 9.0,
+ "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-reshape-b-tma_xfail_correct.yaml-realized]": 5.0,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-slice-a-gmem.yaml-realized]": 1.31,
  "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-serial.yaml-realized]": 11.7,
  "tests/compiler/realization/test_realization.py::test_realization[reduce/cross-cta-flash-kernel.yaml-realized]": 6.9,

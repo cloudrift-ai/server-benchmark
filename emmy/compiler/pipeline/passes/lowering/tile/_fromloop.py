@@ -12,7 +12,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda, M
-from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, edge_free_axes
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 
@@ -87,7 +87,10 @@ def scan_from_loop(loop: Loop) -> tuple[Fold, tuple[Write, ...]]:
     edges = tuple(stmt for stmt in step if isinstance(stmt, Fold))
     plain = Body(stmt for stmt in step if not isinstance(stmt, Fold))
     bound = tuple(name for edge in edges for name in _operand_result_names(edge))
-    lift = Lambda.closing((loop.axis.name, *bound), plain, tuple(stmt.value for stmt in accums))
+    # The reduce binds its own axis; its edges' remaining coordinates are declared beside the
+    # operand results, so every axis the term reads is a param rather than a lexical coincidence.
+    edge_axes = tuple(sorted({axis for edge in edges for axis in edge_free_axes(edge)} - {loop.axis.name} - set(bound)))
+    lift = Lambda.closing((loop.axis.name, *bound, *edge_axes), plain, tuple(stmt.value for stmt in accums))
     init, combine = M(*(stmt.op for stmt in accums), names=names)
     if not writes:
         return Fold(axis=loop.axis, unroll=loop.unroll, operands=edges, lift=lift, init=init, combine=combine), ()

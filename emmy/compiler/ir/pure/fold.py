@@ -670,10 +670,15 @@ class Fold:
             names = tuple(results) if results is not None else (_map_results(b) or ())
             return _ordered_projection((*operands, *b), names)
         operands = _unique_edges(tuple(operands))
-        params = tuple(n for s in operands for n in _operand_result_names(s))
+        bound = tuple(n for s in operands for n in _operand_result_names(s))
         if results is None:
-            results = _map_results(b) or params[:1]
-        return cls(axis=None, operands=operands, lift=Lambda.closing(params, b, tuple(results)))
+            results = _map_results(b) or bound[:1]
+        # Declare the axes the OPERAND EDGES read, not only the ones the lift body does. An edge's
+        # index (``x[m, k]``) is as much a coordinate this term is evaluated at as anything in the
+        # body, and ``Lambda.closing`` cannot see it — edges are not body members. Leaving them out
+        # is what made "binds everything" cover only half the term.
+        edge_axes = tuple(sorted({axis for edge in operands for axis in edge_free_axes(edge)} - set(bound)))
+        return cls(axis=None, operands=operands, lift=Lambda.closing((*bound, *edge_axes), b, tuple(results)))
 
     @cached_property
     def _derived_twisted(self) -> tuple[Stmt, ...]:

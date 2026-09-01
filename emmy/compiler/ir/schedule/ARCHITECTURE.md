@@ -55,6 +55,22 @@ compatibility all live in `ir/schedule`. Projection returns one `ClassicProblem`
 pipeline search neither defines nor filters those domains. `ir/schedule` may import other IR modules but never the
 pipeline layer. The pipeline retains only knob/pin reads, pool identity, sampling, and the generic lazy-Fork adapter.
 
+A reduction domain is projected from node and kernel facts alone, so the shapes the kernel factorizer cannot bind are
+decided once, at the offer, and never dropped from a priced row later. Under a chain-form root — a zero-axis `Fold`
+with no operand edge, the shape every composed-cut and split piece binds through — a DIRECT body member carries the
+cooperative and ILP catalog minus the transposed band, while a node nested deeper, or any node of a kernel whose
+boundary store carries an output sweep or streams into a sibling observed member, carries the serial fold only. The
+contraction per-cell tier reads that same projection, so a contraction inherits every one of those readings rather
+than restating them — a stated decision rather than live behavior, since the normalize hoist absorbs a contraction's
+body feed and moves it onto an operand edge, which ends the chain form, so no tree built today reaches that arm
+carrying one.
+
+A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and
+cannot manufacture a value the projection withheld. A value scoped to a site that does not offer it empties that
+site's restriction and the kernel enumerates no row — the loud direction. A bare family pin is applicable at a site
+only when the value already belongs to that site's projected values, which is what lets one ambient pin sweep a whole
+model; on a site that cannot carry it, it is silently inapplicable rather than refused.
+
 `ClassicScheduleCodec` is the concrete strict wire boundary. Its public encode and decode operations validate through
 one `ClassicScheduleContext`; private syntax-only parsing and encoding let graph reconstruction attach materialization
 before the `TileOp` constructor performs that same validation once. It owns canonical complete-row and prefix-delta

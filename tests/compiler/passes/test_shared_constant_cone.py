@@ -75,7 +75,7 @@ def _gate_up_graph() -> Graph:
 @pytest.fixture
 def _scalar_tier(monkeypatch):
     """Pin the mma family off — the channels then fold serially in ONE loop body, the scope that clashes."""
-    pin_classic(monkeypatch, {"TILE": "", "STAGE": ""})
+    pin_classic(monkeypatch, {"WORK": ""})
 
 
 def test_sibling_cones_share_one_declaration_of_a_broadcast_constant(_scalar_tier) -> None:

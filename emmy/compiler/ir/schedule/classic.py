@@ -515,7 +515,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                     "_unsupported_global",
                     not self._ignore_unsupported_global
                     and any(
-                        key == family and not self._supports_global(family, value)
+                        key == family and value and not self._supports_global(family, value)
                         for family, pins in self._pins.items()
                         for key, value in pins
                     ),
@@ -545,6 +545,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                     "_allowed_works",
                     frozenset((kernel.work.kind, kernel.work.units) for kernel in self._restricted_kernels),
                 )
+            if self.position == 0 and not self.assignment.nodes:
+                self._validate_stage_restriction()
 
     def _build_space(self) -> _ClassicSpace:
         folds = schedule_nodes(self.problem.root)
@@ -849,6 +851,30 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 indexes[key] = {work: tuple(supports) for work, supports in by_work.items()}
             frontier = (*indexes[key].get(None, ()), *indexes[key].get(self._work, ()))
         return tuple(support for support in frontier if self._support_refusal(site, support) is None)
+
+    def _validate_stage_restriction(self) -> None:
+        """Keep an addressed non-direct STAGE restriction authoritative and diagnostic."""
+        assert self._pins is not None and self._restricted_nodes is not None and self._restricted_edges is not None
+        if not self.stage_edges:
+            return
+        from .staging import stage_target  # noqa: PLC0415
+
+        for key, spelling in self._pins["STAGE"]:
+            if not spelling or (key != "STAGE" and key not in self.keys()):
+                continue
+            choice = Stage.parse(spelling)
+            if why := stage_target(choice, self.problem.target):
+                raise ValueError(why)
+            if key == "STAGE" and not self._supports_global("STAGE", spelling):
+                raise ValueError(f"STAGE pin {spelling!r} does not resolve for this contraction")
+        for site in self.node_sites:
+            keys = tuple(dict.fromkeys(self.stage_key(edge) for edge in self.incident_edges(site) if edge in self.stage_edges))
+            pins = tuple(pin for key in keys for pin in self._applicable_pins("STAGE", key) if pin)
+            if not pins:
+                continue
+            edge_domains = tuple((edge, self._restricted_edges[edge]) for edge in self.incident_edges(site))
+            if not self._compatible_frontier(site, self._restricted_nodes[site], edge_domains):
+                raise ValueError(f"STAGE pin {pins[-1]!r} does not resolve for this contraction")
 
     def extend(self, pick: ClassicAssignment) -> ClassicScheduleContext:
         """Compose a frontier pick or validate and accept one complete assignment."""

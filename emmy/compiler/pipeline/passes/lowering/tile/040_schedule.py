@@ -35,8 +35,6 @@ from emmy.compiler.pipeline.fork import Fork
 # are plain strings and a function, which that scan does not see.
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
-from emmy.compiler.pipeline.passes.lowering.tile._split import split_pending
 
 PATTERN = [Pattern("root", TileOp)]
 
@@ -55,11 +53,6 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
         f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
-    # A structural apply can mint a fresh kernel after ``030_cut`` has run in the current sweep.
-    # Do not probe the schedule space and defer only after a refusal: the cut domain is the outer
-    # enumeration, so every remaining cut must be explored before this inner enumeration starts.
-    if (not tile.placement_decided and cuttable_seams(tile)) or split_pending(tile):
-        raise RuleSkipped("cut enumeration precedes schedule enumeration")
     options = classic_forks(tile, tile.name, tile.knobs, ctx, driver=schedule)
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")

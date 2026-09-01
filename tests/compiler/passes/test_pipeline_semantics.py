@@ -22,6 +22,8 @@ from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp, ScanOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.pipeline.knob import family_value
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 _backend = NumpyBackend()
 rng = np.random.default_rng(0)
@@ -160,16 +162,13 @@ def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
 
     tiled = Pipeline.build(TILE_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
     scan_tile = next(node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp) and node.id == "out")
-    assert scan_tile.schedule == {}
-    assert scan_tile.knobs["REDUCE"] == "" and scan_tile.knobs["WORK"] == ""
+    assert scan_tile.schedule is not None
+    assert family_value(scan_tile.knobs, "REDUCE") == "" and scan_tile.knobs["WORK"] == ""
 
-    from emmy.compiler.pipeline.search.space import REDUCE, WORK
-
-    with WORK.pinned("t4"), REDUCE.pinned("coop"):
+    with pinned_knobs({"WORK": "t4", "REDUCE": "coop"}):
         pinned = Pipeline.build(TILE_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
     pinned_scan = next(node.op for node in pinned.nodes.values() if isinstance(node.op, TileOp) and node.id == "out")
-    assert pinned_scan.schedule == {}
-    assert pinned_scan.knobs["REDUCE"] == "" and pinned_scan.knobs["WORK"] == ""
+    assert pinned_scan.schedule is None and not pinned_scan.place.is_mapped
 
     lowered = Pipeline.build(CUDA_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
     source = next(

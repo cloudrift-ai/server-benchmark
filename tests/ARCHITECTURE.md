@@ -43,7 +43,7 @@ Three small organizing directories are also intentional:
 |---|---|
 | `benchmark/models/` | named-model configuration contracts spanning recipes, experiments, and runtime images |
 | `serving/generation/` | the generation runner, loop, capture, and vLLM generation adapter as one serving workflow |
-| `support/` | ordinary data builders shared across source-subsystem boundaries; never tests or pytest hooks |
+| `support/` | suite-wide data shared across source-subsystem boundaries; never tests or pytest hooks |
 
 Do not add a directory merely to shorten a file listing. These directories exist because their tests share one workflow
 or span several source trees. `compiler/passes/` and `perf/` carry their own `ARCHITECTURE.md`; read those before adding
@@ -143,7 +143,8 @@ directly; they never import from another test module or from `conftest.py`.
   removed or broken and when it should come back. For a deliberate whole-subsystem removal whose casualties span
   dozens of files, prefer one registry module of exact node ids applied as a **strict** xfail from the root
   `conftest.py` — exact ids, never path globs, so each id is an acceptance obligation and the list shrinking to
-  empty is the completion gate (the tile-scheduler rebuild ran this way; the registry was deleted when it emptied).
+  empty is the completion gate. Arbitrary assertion failures stay visible, and strict XPASS closes recovered
+  obligations.
 - **Card-conditional expectations stay inline**, non-strict, at their own test — a flaky or SKU-specific failure
   needs a reason that names the condition.
 
@@ -184,8 +185,9 @@ overlaid on top. The committed file exists because CI starts every job with an e
 bucketing never fired there and the long poles landed wherever chance put them. It records only entries at or above
 0.05 s (a few hundred lines rather than the full ~2600, and 99% of the suite's wall time); anything unlisted is
 assumed to cost 0.05 s. Regenerate it with `make test-durations` — which REPLACES the file with that run's timings, so
-renamed and deleted tests drop out instead of lingering as ghost slots the bucketer plans around. Point it at the whole
-suite, never a subset.
+renamed and deleted tests drop out instead of lingering as ghost slots the bucketer plans around. The refresh runs on
+one xdist loadgroup worker: execution stays serial, while CUDA node IDs keep the canonical ``@cuda`` / ``@cuda-cli``
+suffixes the parallel suite uses for lookup. Point it at the whole suite, never a subset.
 
 Two things keep it honest. `make test` passes `--durations=25`, so every run (CI included) prints its slowest tests and
 a new long pole shows up in the log immediately. And the session-end gate in `conftest.py` fails any run where a test
@@ -217,7 +219,7 @@ requires `EMMY_RUN_DIT_PRETRAINED=1`, so normal CI never downloads the multi-gig
 mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;
 on sm_80-89 it is pin-only and currently non-functional for two independent reasons — the `sm_NNa` arch-accelerated
 target the TMA path emits is rejected by nvcc (`Unsupported gpu architecture 'sm_89a'`), and `ldmatrix` itself faults
-at runtime on at least Ada (sm_89). Tests that **force** the warp tier via a warp `TILE` codec (`a:<atom>/…`) + `STAGE`
+at runtime on at least Ada (sm_89). Tests that **force** the warp tier via a warp `TILE` codec (`<atom>/…`) + `STAGE`
 carry `requires_sm90` so they skip below sm_90 instead of faulting (a single warp-tier fault corrupts the shared `cuda`
 context and cascades `cudaErrorIllegalAddress` into every later test on the worker, CUDA or not). The warp-tier matmul
 coverage all lives in `test_matmul_coverage.py` — the scalar vs warp `TILE` accuracy/structure matrix, the

@@ -42,9 +42,9 @@ configs:
       FAST_MATH: false
       PLACE@a7: cut
     knobs:
-      TILE@a2: mma_m16n8k16_f16_f32/f1x2
-      TILE@pj: mma_m16n8k16_f16_f32/f1x1
-      STAGE@pj: d1/smem
+      TILE@n3: mma_m16n8k16_f16_f32/f1x2
+      TILE@n4: mma_m16n8k16_f16_f32/f1x1
+      STAGE@n4: d1/smem
       WORK: w1x1
       REDUCE: ''
       RASTER: ''

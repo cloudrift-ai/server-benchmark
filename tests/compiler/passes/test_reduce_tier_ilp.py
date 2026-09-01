@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.schedule import ReducePlan
+from emmy.compiler.ir.schedule import Reduce
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import Ctx, _tile_reduce_axis
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -44,7 +44,7 @@ def test_an_external_ssa_read_is_shared_by_every_ilp_copy() -> None:
     sched = SimpleNamespace(get=lambda *_: None)
     ctx = Ctx(grid=(Axis("m", 4),), inputs={}, output="o", sched=sched)
 
-    _state, fold, _close, _lane = _tile_reduce_axis(red, ReducePlan.of(reg=2), ctx, tail=(), out_val="acc")
+    _state, fold, _close, _lane = _tile_reduce_axis(red, Reduce.of(reg=2), ctx, tail=(), out_val="acc")
 
     read = _names_read(fold)
     assert "alpha__r1" not in read, "the shared external value must not be renamed per copy"

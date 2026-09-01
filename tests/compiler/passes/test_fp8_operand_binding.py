@@ -29,11 +29,11 @@ from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction
-from emmy.compiler.ir.schedule import Stage, TilePlan, Workers
+from emmy.compiler.ir.schedule import Stage, Tile, Work
+from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
-from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
 from tests.compiler.helpers import requires_cuda
 
 # ===================================================================
@@ -209,7 +209,7 @@ def _warp_contraction():
     a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F16)
     b = Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3)
     node = Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),))
-    tile = TilePlan.parse("mma_m16n8k16_f16_f32/f4x1/k4", Workers.parse("w1x8")).at(m, n)
+    tile = Tile.parse("mma_m16n8k16_f16_f32/f4x1/k4", Work.parse("w1x8")).at(m, n)
     return node, tile
 
 
@@ -373,7 +373,7 @@ def _packed_inputs():
 
 
 def test_packed_kblock_b_matches_the_spelled_shape():
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_kblock_b
+    from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
     body = _packed_kblock_body()
     cone = list(Body(tuple(body)).backward_cone(["v4"]).members)
@@ -386,7 +386,7 @@ def test_packed_kblock_b_matches_the_spelled_shape():
 def test_packed_kblock_b_declines_misaligned_row_stride():
     # (n*24 + k)/16 is NOT constant on k blocks of 16 — the k-free addend must be a
     # multiple of the divisor.
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_kblock_b
+    from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
     body = _packed_kblock_body(scale_stride=24)
     got = match_packed_kblock_b(list(Body(tuple(body)).backward_cone(["v4"]).members), "a2", _packed_inputs())
@@ -394,7 +394,7 @@ def test_packed_kblock_b_declines_misaligned_row_stride():
 
 
 def test_packed_kblock_b_declines_naked_k_scale():
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_kblock_b
+    from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
     body = _packed_kblock_body(scale_k=Var("a2"))
     got = match_packed_kblock_b(list(Body(tuple(body)).backward_cone(["v4"]).members), "a2", _packed_inputs())
@@ -402,7 +402,7 @@ def test_packed_kblock_b_declines_naked_k_scale():
 
 
 def test_packed_kblock_b_declines_without_a_packed_load():
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_kblock_b
+    from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
     inputs = _packed_inputs()
     inputs["w_bits"] = Tensor("w_bits", (4096, 16), F8E4M3)
@@ -414,7 +414,7 @@ def test_packed_kblock_b_declines_mixed_guarded_and_naked_k():
     # One index expr holds a guarded division AND a bare k: the naked flag alone must
     # decline (the guard set is non-empty, so the single-block check would pass).
     from emmy.compiler.ir.expr import BinaryExpr, Literal
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_kblock_b
+    from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
     n, k = Var("a1"), Var("a2")
     flat = BinaryExpr("+", BinaryExpr("*", n, Literal(32, "int")), k)
@@ -426,7 +426,7 @@ def test_packed_kblock_b_declines_mixed_guarded_and_naked_k():
 def test_packed_kblock_b_declines_squared_gather():
     # multiply(in3, in3): the gathered value on both args leaves no factor — None, not
     # an exception.
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_kblock_b
+    from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
     body = _packed_kblock_body()
     body[-1] = Assign(name="v4", op="multiply", args=("in3", "in3"))

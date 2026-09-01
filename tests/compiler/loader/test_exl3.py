@@ -27,6 +27,14 @@ from tests.support.checkpoints import exl3_linear_tensors
 rng = np.random.default_rng(7)
 
 
+def _direct_trellis_schedule() -> dict[str, str]:
+    """The complete direct schedule for the three trellis lowering sites."""
+    row = {"WORK": "", "RASTER": ""}
+    for node in (1, 2, 6):
+        row.update({f"TILE@n{node}": "", f"REDUCE@n{node}": "", f"STAGE@n{node}": ""})
+    return row
+
+
 def _random_trellis(kt, nt, K):
     """Any random int16 words form a valid circular code stream — the format has no invalid bytes."""
     return rng.integers(-(2**15), 2**15, (kt, nt, 16 * K)).astype(np.int16)
@@ -546,6 +554,7 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     from emmy.compiler.ir.frontend.ir import LinearOp
     from emmy.compiler.loader.quant import spell_trellis_inputs
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (1, 128), "f16"), node_id="x")
@@ -554,7 +563,9 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     graph.inputs, graph.outputs = ["x", "w"], ["y"]
     spell_trellis_inputs(graph, {"w": (0, (8, 8, 32))})
 
-    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
+    # Placement is the cut parameter; c independently names one complete schedule.
+    with pinned_knobs({"PLACE": "fuse", **_direct_trellis_schedule()}):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
     cuda = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert cuda
     assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
@@ -617,7 +628,12 @@ def _prefer_mma_leaf(fp):
 
 
 def test_input_spelling_streams_computed_b_through_tensor_cores():
-    """A generic expanding B cone compute-fills a canonical slab and drains through mma.sync."""
+    """A generic expanding B cone compute-fills a canonical slab and drains through mma.sync.
+
+    The assertion is about one schedule, so ``c`` names that complete schedule. Leaving any key
+    open asks Algorithm 1 for unrelated members of the large independent product before this
+    source assertion can run.
+    """
     from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
@@ -626,6 +642,7 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
     from emmy.compiler.loader.quant import spell_trellis_inputs
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16, 128), "f16"), node_id="x")
@@ -641,7 +658,33 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
     def choose_sync_mma(fp):
         return _prefer_mma_leaf(fp)
 
-    lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(graph, choose_sync_mma)
+    row = {
+        "WORK": "w1x1",
+        "RASTER": "",
+        "TILE@n1": "mma_m16n8k16_f16_f32/f1x2",
+        "TILE@n2": "mma_m16n8k16_f16_f32/f1x2",
+        "TILE@n6": "",
+        "TILE@n9": "mma_m16n8k16_f16_f32/f1x2",
+        "TILE@n12": "",
+        "REDUCE@n1": "",
+        "REDUCE@n2": "",
+        "REDUCE@n6": "",
+        "REDUCE@n9": "",
+        "REDUCE@n12": "",
+        "STAGE@n1.e0": "d1/smem",
+        "STAGE@n1.e1": "d1/smem",
+        "STAGE@n1.e2": "d1/smem",
+        "STAGE@n2.e0": "d1/smem",
+        "STAGE@n2.e1": "d1/smem",
+        "STAGE@n6.e0": "",
+        "STAGE@n6.e1": "",
+        "STAGE@n9.e0": "d1/smem",
+        "STAGE@n9.e1": "d1/smem",
+        "STAGE@n12.e0": "",
+        "STAGE@n12.e1": "",
+    }
+    with pinned_knobs(row):
+        lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target((12, 0))).resolve(graph, choose_sync_mma)
     cuda = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     streamed = [op for op in cuda if "emmy_bitcast" in op.kernel_source and "mma.sync.aligned" in op.kernel_source]
     assert len(streamed) == 1
@@ -672,7 +715,9 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.loader.quant import spell_trellis_inputs
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.fork import iter_leaves
     from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.compiler.helpers import device_compute_capability
 
     capability = device_compute_capability()
@@ -688,17 +733,14 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
     # Preserve the same computed-B lowering boundary as the GPU-less source test above.
     graph.outputs.extend(["y_left_flat", "y_core_reduce"])
 
-    selected = []
-
     def choose_lane(fp):
-        leaf = _prefer_mma_leaf(fp)
-        row = dict(getattr(leaf, "knobs", {}) or {})
-        if _computed_b_rows([row]):
-            selected.append(row)
-        return leaf
+        return next(iter_leaves(fp.options))
 
-    lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target(capability)).resolve(graph, choose_lane)
-    assert selected
+    pins = {"PLACE": "fuse", "WORK": "w1x1", "STAGE": "d1/smem", "REDUCE": "", "RASTER": ""}
+    if lane == "mma":
+        pins["TILE"] = "mma_m16n8k16_f16_f32/f1x2"
+    with pinned_knobs(pins):
+        lowered, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.from_target(capability)).resolve(graph, choose_lane)
     sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert any("emmy_bitcast" in source for source in sources)
     if lane == "mma":
@@ -833,11 +875,9 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
     """The computed-B warp lane admits the cross-CTA split — no GPU, the OFFER only.
 
     RE-EXPRESSED against the structural split fork: the cross-CTA ``g`` half is a kernel-set
-    decision (``035_split_reduce``), never a schedule row — ``golden_eval``'s rows spell no ``g``
-    by design — and a resolve's decide cannot observe the offer either: the count replay
-    (``_replay_structural_decision``) applies the unsplit arm inline once the cut fork decided
-    fuse on the same kernel. So the offer is asked of ``split_forks`` itself, on the kernel the
-    cut fork surfaced. The pinned realization is covered by
+    decision (``030_cut``), never a schedule row — ``golden_eval``'s rows spell no ``g`` by
+    design. The offer is asked of ``split_forks`` itself to isolate computed-B legality from the
+    placement domain and later scheduling. The pinned realization is covered by
     ``test_computed_b_split_k_matches_decoded_linear`` and
     ``test_computed_b_split_partial_reindexes_the_cone``."""
     from emmy.compiler.context import Context
@@ -850,13 +890,17 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     captured = []
 
+    class _Captured(Exception):
+        pass
+
     def decide(fp):
         if fp.structural:
             captured.append((fp.match, fp.match.graph.nodes[fp.node_id]))
-            return fp.options[0]  # keep the one-kernel fused arm; the offer is inspected below
+            raise _Captured
         return next(iter_leaves(fp.options))
 
-    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_trellis_linear_graph(), decide)
+    with pytest.raises(_Captured):
+        Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_trellis_linear_graph(), decide)
     assert captured, "the trellis linear must surface its structural fork"
     match, node = captured[0]
     options = split_forks(match, node)
@@ -888,7 +932,7 @@ def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
 
     def computed_b_leaf(fp):
         return _prefer_mma_leaf(fp)
@@ -938,7 +982,7 @@ def test_computed_b_split_k_matches_decoded_linear(monkeypatch):
         pytest.skip("the computed-B tensor-core lane requires SM80 or newer")
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
     tensors, decoded = exl3_linear_tensors("layer", 128, 128, K=2, cb=0)
     picked: list[dict] = []
 
@@ -1075,6 +1119,7 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
     from emmy.compiler.ir.frontend.ir import LinearOp
     from emmy.compiler.loader.quant import spell_trellis_constants
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources
 
     tensors, _ref = exl3_linear_tensors("layer", 128, 128, K=2, cb=2)
@@ -1085,7 +1130,9 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
     graph.inputs, graph.outputs = ["x"], ["y"]
     assert spell_trellis_constants(graph, str(tmp_path)) == 1
 
-    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
+    # Placement is the cut parameter; c independently names one complete schedule.
+    with pinned_knobs({"PLACE": "fuse", **_direct_trellis_schedule()}):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
     assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
     plan = plan_from_graph(lowered)
     paths = {weight.source_path for weight in plan.weights.values() if weight.source_path is not None}

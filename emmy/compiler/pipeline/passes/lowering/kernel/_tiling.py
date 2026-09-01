@@ -1,6 +1,6 @@
 """The generic tiling layer — where a schedule's PLAN becomes actual :class:`Axis` objects.
 
-The schedule decides (a ``TilePlan`` / ``ReducePlan`` / ``Stage``, and which axis plays m, n or
+The schedule decides (a ``Tile`` / ``Reduce`` / ``Stage``, and which axis plays m, n or
 k); nothing it produces is an axis a kernel loops over. This module is the other half: the four
 levels a contraction's output cell is tiled through — GRID block / UNIT / REGISTER / ATOM —
 realized as the bound ``Tile`` axes plus the per-cell coordinate arithmetic that indexes them.
@@ -161,6 +161,6 @@ def grid_tile(
         block_threads=block_threads,
         aux_threads=aux_threads,
         raster_axes=raster_axes,
-        raster_group=(raster.group if raster is not None and raster_axes is not None else None),
-        raster_orient=(raster.orient if raster is not None else "m"),
+        raster_group=(raster.group if raster is not None and not raster.is_direct and raster_axes is not None else None),
+        raster_orient=(raster.orient if raster is not None and not raster.is_direct else "m"),
     )

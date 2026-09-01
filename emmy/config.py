@@ -444,7 +444,7 @@ def gen_routing_histogram_interval(default: int = 0) -> int:
 def gen_m1_tier(default: int = 1) -> int:
     """``EMMY_GEN_M1_TIER`` — build and route the static M=1 (gemv-class) decode twins for
     T=1 steps (default 1 = ON since 2026-07-24). The tier's matvecs run the transposed
-    ``g<w>k/b<n>t`` partition at the k-major serving layout's gemv floor (o_proj 8.1 µs,
+    ``g<w>k/coop-t`` partition at the k-major serving layout's gemv floor (o_proj 8.1 µs,
     qkv 14, down 76, gate_up 142 on the 5090), and the flip criterion held e2e: c=1 TPOT
     17.92/18.98 beats the bucket-32 path's 18.0/19.1 with c=8/c=64 unchanged (m1 routes
     only T==1). Set 0 to fall back to bucket-padded decode at T=1. The remaining ~1.6 ms

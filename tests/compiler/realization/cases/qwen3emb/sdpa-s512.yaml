@@ -44,14 +44,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@a3: ''
-      TILE@pj: ''
+      TILE@n3: ''
+      TILE@n4: f1
       REDUCE: ''
-      REDUCE@a3: ''
-      REDUCE@pj: ''
       STAGE: ''
-      STAGE@a3: ''
-      STAGE@pj: ''
       RASTER: ''
       WORK: t32x8
     identity: 9c8a42133ad9c2256db0858eebcdd8da42b8e2995c4198b4250ffce8bea43ce9

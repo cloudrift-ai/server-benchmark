@@ -17,16 +17,18 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.golden import GoldenRecord
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import direct_classic_leaf
 
 _CTX = Context.from_target((12, 0))
-_SCALAR = {"WORK": "", "TILE": "", "STAGE": "", "REDUCE": "", "RASTER": ""}
 
 
 def _compile(graph: Graph, placement: dict[str, str]) -> Graph:
-    with pinned_knobs({**placement, **_SCALAR}):
-        return Pipeline.build(CUDA_PASSES).run(graph, ctx=_CTX)
+    with pinned_knobs(placement):
+        lowered, _ = Run(Pipeline.build(CUDA_PASSES), _CTX).resolve(graph, direct_classic_leaf)
+    return lowered
 
 
 def _kernels(graph: Graph):
@@ -116,9 +118,14 @@ def test_scoped_cut_preserves_every_multi_output_parent_port() -> None:
 
 
 def test_pinned_transposed_coop_band_still_refuses_without_a_free_axis() -> None:
-    with pytest.raises(ValueError, match="innermost free axis"):
-        with pinned_knobs({"PLACE": "fuse", "WORK": "t256", "REDUCE": "coop-t"}):
-            Pipeline.build(CUDA_PASSES).run(_rms_graph(rows=1), ctx=_CTX)
+    """An incompatible schedule restriction leaves the placed TileOp unmapped."""
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import TILE_PASSES
+
+    with pinned_knobs({"PLACE": "fuse", "WORK": "t256", "REDUCE": "coop-t"}):
+        declined = Pipeline.build(TILE_PASSES).run(_rms_graph(rows=1), ctx=_CTX)
+    tile_op = next(node.op for node in declined.nodes.values() if isinstance(node.op, TileOp))
+    assert tile_op.schedule is None and not tile_op.place.is_mapped
 
 
 @pytest.mark.parametrize("value", ("cut", "fuse"))

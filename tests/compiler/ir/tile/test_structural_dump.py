@@ -11,24 +11,30 @@ exists to prevent, and it was the bulk of the output.
 
 These pin: (a) every stored param of each node kind reaches the dump; (b) edges say which lambda
 params they bind, nest, are labelled by inhabitant, and appear exactly once; (c) nothing derived
-appears — including the one slice whose site is synthesized, which lands in the schedule region
-rather than reconstructing its node; (d) schedule slices annotate a node only when the owning
-``TileOp`` supplies them — never from the term; (e) a λ that is not closed says what it captures.
+appears; (d) accepted schedule choices annotate a node only when the owning ``TileOp`` supplies
+them — never from the term; (e) a λ that is not closed says what it captures.
 """
 
 from __future__ import annotations
-
-from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold
-from emmy.compiler.ir.schedule import Placement, ReducePlan, TilePlan
+from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Schedule, Stage, Tile, Work
+from emmy.compiler.ir.schedule.classic import (
+    ClassicMaterialization,
+    ClassicProblem,
+    ClassicScheduleContext,
+    EdgeSchedule,
+    KernelSchedule,
+    Projection,
+    ProjectionSchedule,
+    ReductionSchedule,
+)
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
-from emmy.compiler.ir.tile._dump import pretty, unplaced_slices
-from emmy.compiler.ir.tile.ops import Sched
+from emmy.compiler.ir.tile._dump import pretty
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
@@ -188,24 +194,6 @@ def test_an_edge_is_rendered_once_not_once_per_derived_position() -> None:
     assert text.count("operand[a_e]: load x[m, kslice]") == 1
 
 
-def test_a_slice_keyed_against_derived_material_prints_in_the_schedule_region() -> None:
-    """The one thing the derived branch carried that storage cannot: a slice whose site is a
-    synthesized node. It is a SCHEDULE fact, so it lands in the schedule region — the term is not
-    reconstructed to hang it on."""
-    fold = _stat_fold()
-    tile = TileOp(op=fold, name="k_stat")
-    tile = replace(tile, schedule={**tile.schedule, "TILE@pj": TilePlan(regs=(1, 64))})  # a key no stored node claims
-    assert unplaced_slices(tile) == [("TILE@pj", tile.schedule["TILE@pj"])]
-    text = tile.pretty_body()
-    assert "    schedule" in text and "└─ TILE@pj = f64" in text
-    # A kernel whose every key lands on a stored node has no such region at all.
-    plain = TileOp(op=fold, name="k_stat")
-    schedule: dict = {}
-    Sched(plain.op, schedule).put("REDUCE", fold, ReducePlan.of(reg=4))
-    plain = replace(plain, schedule=schedule)
-    assert unplaced_slices(plain) == [] and "schedule" not in plain.pretty_body()
-
-
 # --- a λ that is not closed says so -------------------------------------------------------------- #
 
 
@@ -255,7 +243,7 @@ def test_the_capture_set_is_omitted_when_the_iteration_space_is_unknown() -> Non
     assert "captures" not in "\n".join(pretty(_capturing_cone()))
 
 
-# --- schedule slices annotate from the TileOp, never from the term ------------------------------ #
+# --- accepted choices annotate from the TileOp, never from the term ----------------------------- #
 
 
 def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> None:
@@ -263,10 +251,22 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
     bare = TileOp(op=fold, name="k_stat")
     assert "REDUCE=" not in bare.pretty_body()
 
-    scheduled = TileOp(op=fold, name="k_stat")
-    sched_map: dict = {}
-    Sched(scheduled.op, sched_map).put("REDUCE", fold, ReducePlan.of(reg=4))
-    scheduled = replace(scheduled, schedule=sched_map)
+    context = ClassicScheduleContext(ClassicProblem.from_tile(bare, target=None))
+    nodes = {
+        site: ProjectionSchedule(Tile()) if isinstance(view, Projection) else ReductionSchedule(Tile(), Reduce.of(reg=4))
+        for site, view in context.views.items()
+    }
+    classic = Schedule(
+        KernelSchedule(Work(), Raster()),
+        nodes,
+        {edge: EdgeSchedule(Stage.direct()) for edge in context.edge_sites},
+    )
+    scheduled = TileOp(
+        op=fold,
+        name="k_stat",
+        schedule=classic,
+        materialization=ClassicMaterialization({}, {}),
+    )
     assert "⟨REDUCE=r4⟩" in scheduled.pretty_body()
     # The annotation is the TileOp's; the term is untouched by it.
     assert "REDUCE=" not in "\n".join(pretty(fold))

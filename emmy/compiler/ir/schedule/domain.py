@@ -1,8 +1,8 @@
 """The candidate domain as a CONSTRAINED INTEGER SET — declare the dimensions, declare the
 multiplicative bounds that couple them, enumerate the legal points.
 
-This is the machinery for generating a family's candidate values from its stated constraints
-instead of curating them by hand (:mod:`~emmy.compiler.pipeline.search.space`'s move grids). The
+This is the machinery for generating a schedule family's candidate values from its stated
+constraints instead of curating them by hand. The
 constraints that bound a schedule family are products of the unknowns — ``wm·wn·32 ≤ 1024`` (the
 CTA thread budget), ``fm·fn ≤ 32`` (the C-fragment budget) — so the feasible set is not convex and
 there is no coordinate change that makes both the products and the bounds affine at once: prime

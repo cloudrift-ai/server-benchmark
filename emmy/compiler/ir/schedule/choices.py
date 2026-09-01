@@ -1,21 +1,17 @@
-"""Tile schedule type system — how a kernel's axes bind to the hardware, and the codecs that ser/des
-the schedule knobs.
+"""Reusable schedule choices — how a kernel's axes bind to hardware.
 
-This root ``ir`` module is the merge of the former ``ir/tile/{codec,role,schedule}.py``. The schedule
-value types are used by both the tile IR and the kernel materializer, so they live at the ir root
-beside :mod:`~emmy.compiler.ir.atom`, not under ``ir/tile``.
+The value types are used by both the tile IR and the kernel materializer, so they live outside any
+one concrete schedule implementation.
 
 **The schedule is separate from the combine.** The combine (the ⊕) lives in the op tree
-(:mod:`emmy.compiler.ir.pure.algebra` + :mod:`~emmy.compiler.ir.tile.ir`); the
-schedule — which axes are parallel, how the reduce axis partitions across hardware levels — is the
-**codec value types** here (:class:`ReducePlan` / :class:`TilePlan` / :class:`Stage` /
-:class:`WarpSpec` + :class:`Placement`). The per-node slices live in ``TileOp.schedule`` (1r —
-keyed by the tree-path codec, read through ``ops.Sched`` — the term itself carries no schedule
-field) beside the thin root :class:`~emmy.compiler.ir.tile.ir.TileOp`
-fields (``place`` / ``work`` / ``workers``).
+(:mod:`emmy.compiler.ir.pure.algebra` + :mod:`~emmy.compiler.ir.tile.ir`). This module owns the
+leaf choice types (:class:`Reduce` / :class:`Tile` / :class:`Stage` / :class:`WarpSpec` plus
+:class:`Placement`); :mod:`emmy.compiler.ir.schedule.classic` composes them into the accepted
+kernel, node, and edge assignment stored on ``TileOp.schedule``. The Fold term itself carries no
+schedule field.
 
 A reduction's only freedom is **how the reduce axis is partitioned across hardware levels**
-(:class:`ReducePlan`); the combine *mechanism* at each level is **derived** from the level
+(:class:`Reduce`); the combine *mechanism* at each level is **derived** from the level
 (:meth:`ReduceStage.combine`), and the combine *algebra* rides the carrier (the ``Twist``). So the
 same op + the same materializer extend across kernel kinds — only the carrier and the partition
 change.
@@ -28,17 +24,18 @@ optional ``workers: WarpSpec | None`` root field (``None`` = uniform SIMT), a pr
 *over* the fixed pipeline.
 
 **The codec values are SITE-LOCAL**: a kernel's worker inventory is spelled exactly once, in the
-``WORK`` family (:class:`Workers`), so a ``TILE`` value carries no unit widths
+``WORK`` family (:class:`Work`), so a ``TILE`` value carries no unit widths
 (``<atom>/f<FM>x<FN>[/k<bk>]`` warp | ``f<fn>[x<fm>]`` scalar) and a ``REDUCE`` value no coop width
-(``[g<n>[a|k]][/coop[-t]][/r<n>]``). Both therefore ``parse`` **against** a :class:`Workers` and are
-hand-written here; :func:`resolve_site_tile` is the one rule resolving the single ambiguity that
-spelling has (an empty ``TILE`` beside a thread inventory). There is no second, self-contained
-reading — the retired embedded-worker grammar (``a:<atom>/w../f..``, ``n../f..``, ``b<n>``) raises.
+(``[g<n>[a|k]][/coop[-t]][/r<n>]``). Both therefore ``parse`` **against** a :class:`Work` and are
+hand-written here. The empty ``TILE`` is only the per-cell choice; a parallel unit-register thread
+tile spells ``f1``, so the site value and ``WORK`` decode without cross-family inference. There is
+no second, self-contained reading — the retired embedded-worker grammar
+(``a:<atom>/w../f..``, ``n../f..``, ``b<n>``) raises.
 
 ``STAGE`` — the one codec that needs no inventory — parses and spells by hand for the same reason,
-so **every** codec here is now read the same way: one ``/``-separated token string, order-free, each
-field binding at most once. There is no schema engine any more; it was built to serve four codecs,
-and the site-local rewrite left it serving one.
+so **every** codec here is now read the same way: one canonical ``/``-separated token string, with
+one token order and each field binding at most once. There is no schema engine any more; it was
+built to serve four codecs, and the site-local rewrite left it serving one.
 
 The tunable knob *declarations* that spell the live codecs (``WORK`` / ``TILE`` / ``STAGE`` /
 ``REDUCE``) live one layer up in :mod:`emmy.compiler.pipeline.search.space` — they are ``Knob``
@@ -51,7 +48,6 @@ from __future__ import annotations
 import enum
 import re
 from dataclasses import dataclass
-from dataclasses import field as dc_field
 from dataclasses import replace as dc_replace
 
 from emmy.compiler.ir.atom import SCALAR_ATOM, Atom, AtomKind, atom_for
@@ -60,18 +56,25 @@ from emmy.compiler.ir.expr import Expr, Literal
 
 # ===========================================================================================
 # The one rule every codec below shares. Each value type parses and spells its own grammar by
-# hand — the site-local TILE / REDUCE against a Workers inventory, STAGE on its own.
+# hand — the site-local TILE / REDUCE against a Work inventory, STAGE on its own.
 # ===========================================================================================
 
 
 def _codec_width(num: str, *, tok: str, codec: str) -> int:
     """Parse a codec field's positive-integer width, rejecting empty / non-numeric / ``< 1``
-    values with a clear message. A ``1`` width is the legal identity (the level is off); only
-    ``0`` / negatives / non-digits are rejected. The ``codec`` name rides the message so a bad
-    pin names the knob it came from (``bad REDUCE token ...`` / ``bad TILE token ...``)."""
+    values with a clear message. A semantic width of ``1`` is the legal identity but is omitted
+    from the canonical wire spelling. The ``codec`` name rides the message so a bad pin names the
+    knob it came from (``bad REDUCE token ...`` / ``bad TILE token ...``)."""
     if not num.isdigit() or int(num) < 1:
         raise ValueError(f"bad {codec} token {tok!r}: expected a positive integer width, got {num!r}")
     return int(num)
+
+
+def _canonical_choice(codec: str, spec: str | None, choice):
+    """Return ``choice`` only when ``spec`` is its one wire spelling."""
+    if spec is not None and spec != choice.spell():
+        raise ValueError(f"{codec} spelling {spec!r} is not canonical; expected {choice.spell()!r}")
+    return choice
 
 
 # ===========================================================================================
@@ -82,7 +85,7 @@ def _codec_width(num: str, *, tok: str, codec: str) -> int:
 class Level(enum.Enum):
     """One hardware level the reduce axis can be partitioned across, coarse→fine."""
 
-    GRID = "grid"  # across CTAs (split-K) — realized by the structural 035_split_reduce fork, never the in-kernel walk
+    GRID = "grid"  # across CTAs (split-K) — realized by 030_cut, never the in-kernel walk
     BLOCK = "block"  # cooperative threads within a CTA (warp shuffle / smem tree)
     REG = "reg"  # ILP register-fold accumulators
     SERIAL = "serial"  # the per-thread serial remainder (never spelled — derived)
@@ -93,14 +96,14 @@ class FoldMove(enum.Enum):
     :class:`Level` (where the reduced axis sits), never tuned and never re-decided at a consumer.
     :meth:`ReduceStage.combine` is the ONE selector; every fold emitter consumes its output —
     ``_factor.emit_combine`` (SHFL butterfly / SMEM tree at scalar residence) and
-    ``035_split_reduce`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
+    ``030_cut`` (the cross-CTA ATOMIC / KERNEL finalize as a graph rewrite)."""
 
     SERIAL = "serial"  # no cross-unit combine (the serial / reg remainder)
     REG = "reg"  # register tree (ILP) — TODO(reg)
     SHFL = "shfl"  # lane-level ``__shfl_xor_sync`` butterfly (within-warp)
     SMEM = "smem"  # cross-warp / block-wide smem tree-halve (within-block)
-    ATOMIC = "atomic"  # cross-CTA ``atomicAdd`` finalize (035_split_reduce's one-kernel arm)
-    KERNEL = "kernel"  # cross-CTA workspace + deferred sibling combine kernel (035_split_reduce)
+    ATOMIC = "atomic"  # cross-CTA ``atomicAdd`` finalize (030_cut's one-kernel arm)
+    KERNEL = "kernel"  # cross-CTA workspace + deferred sibling combine kernel (030_cut)
 
 
 @dataclass(frozen=True)
@@ -111,7 +114,7 @@ class ReduceStage:
     implies the fold, and a BLOCK width derives warp-shuffle vs hierarchical-smem from the
     warp size. ``width`` is power-of-two for BLOCK (the butterfly / tree reorder).
 
-    ``finalize`` is meaningful only at ``GRID``: how ``035_split_reduce`` realizes the cross-CTA
+    ``finalize`` is meaningful only at ``GRID``: how ``030_cut`` realizes the cross-CTA
     combine — ``"atomic"`` (the partial kernel ``atomicAdd``\\ s into the output, one kernel,
     additive carriers only) or ``"kernel"`` (a deferred sibling combine kernel over a
     workspace, the only legal arm for a twisted carrier). The ``g<n>[a|k]`` codec letter."""
@@ -119,12 +122,26 @@ class ReduceStage:
     level: Level
     width: int = 1
     finalize: str = "kernel"  # GRID only: "atomic" | "kernel" (the g<n> finalize letter)
-    # BLOCK only (the ``b<n>t`` codec letter): swap the cooperative thread mapping for a
+    # BLOCK only (the ``coop-t`` codec token): swap the cooperative thread mapping for a
     # k-major B operand — warp lanes sweep the OUTPUT axis (contiguous B loads at every k
     # step) and the k partition rides the upper thread bits; the combine becomes the
     # lane-indexed smem tree across k-slices (no shuffle stage — each lane holds a
     # different output). The interleaved default keeps lanes on the reduce axis.
     transposed: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.level, Level):
+            raise TypeError("ReduceStage level must be a Level")
+        if type(self.width) is not int or self.width < 1:
+            raise ValueError(f"ReduceStage width must be a positive integer, got {self.width!r}")
+        if self.finalize not in ("atomic", "kernel"):
+            raise ValueError(f"ReduceStage finalize must be atomic or kernel, got {self.finalize!r}")
+        if self.level is not Level.GRID and self.finalize != "kernel":
+            raise ValueError("only a GRID ReduceStage can select atomic finalization")
+        if type(self.transposed) is not bool:
+            raise TypeError("ReduceStage transposed must be a bool")
+        if self.level is not Level.BLOCK and self.transposed:
+            raise ValueError("only a BLOCK ReduceStage can transpose its cooperative mapping")
 
     def combine(self, *, warp_size: int, segmented: bool = False) -> tuple[FoldMove, ...]:
         """The derived per-level combine fold(s), fine→coarse within this stage — the ONE
@@ -132,7 +149,7 @@ class ReduceStage:
 
         - ``SERIAL`` / ``REG`` → ``()`` (no cross-unit combine; REG-fold is TODO(reg)).
         - ``GRID`` → ``(ATOMIC,)`` or ``(KERNEL,)`` per the ``finalize`` letter (the split-K
-          cross-CTA move — realized by the structural ``035_split_reduce`` fork; the carrier /
+          cross-CTA move — realized by the structural ``030_cut`` fork; the carrier /
           projection refusals live beside that offer, which alone holds the context).
         - ``BLOCK`` → the intra-CTA hierarchy: a lone ``SHFL`` when ``segmented`` (the
           per-row segmented butterfly for strided-cooperative rows) or ``width ≤ warp``
@@ -155,7 +172,7 @@ class ReduceStage:
 
 
 @dataclass(frozen=True)
-class ReducePlan:
+class Reduce:
     """The kernel's single reduce partition — the **tuned widths only**, coarse→fine.
 
     There is one reduce fold per kernel (1:1 and singular — the fold owns the axis),
@@ -165,11 +182,29 @@ class ReducePlan:
 
     stages: tuple[ReduceStage, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.stages, tuple) or any(not isinstance(stage, ReduceStage) for stage in self.stages):
+            raise TypeError("Reduce stages must be a tuple of ReduceStage values")
+        levels = tuple(stage.level for stage in self.stages)
+        canonical = tuple(level for level in (Level.GRID, Level.BLOCK, Level.REG) if level in levels)
+        if levels != canonical or any(stage.width == 1 for stage in self.stages):
+            raise ValueError("Reduce stages must be unique, active, and ordered GRID -> BLOCK -> REG")
+
     @classmethod
-    def of(cls, *, cta: int = 1, coop: int = 1, reg: int = 1, finalize: str = "kernel", coop_transposed: bool = False) -> ReducePlan:
+    def of(cls, *, cta: int = 1, coop: int = 1, reg: int = 1, finalize: str = "kernel", coop_transposed: bool = False) -> Reduce:
         """Build a plan from per-level widths (1 = absent). Order is coarse→fine:
         GRID (cta) → BLOCK (coop) → REG (reg). ``finalize`` rides the GRID stage;
-        ``coop_transposed`` rides the BLOCK stage (the ``b<n>t`` k-major lane swap)."""
+        ``coop_transposed`` rides the BLOCK stage (the ``coop-t`` k-major lane swap)."""
+        if any(type(width) is not int or width < 1 for width in (cta, coop, reg)):
+            raise ValueError(f"Reduce widths must be positive integers, got cta={cta!r}, coop={coop!r}, reg={reg!r}")
+        if finalize not in ("atomic", "kernel"):
+            raise ValueError(f"Reduce finalize must be atomic or kernel, got {finalize!r}")
+        if type(coop_transposed) is not bool:
+            raise TypeError("Reduce coop_transposed must be a bool")
+        if cta == 1 and finalize != "kernel":
+            raise ValueError("Reduce finalization is meaningful only when cta > 1")
+        if coop == 1 and coop_transposed:
+            raise ValueError("Reduce cooperative transposition is meaningful only when coop > 1")
         stages: list[ReduceStage] = []
         if cta > 1:
             stages.append(ReduceStage(Level.GRID, cta, finalize=finalize))
@@ -197,7 +232,7 @@ class ReducePlan:
         return "/".join(parts)
 
     @classmethod
-    def parse(cls, spec: str | None, work: Workers | None) -> ReducePlan:
+    def parse(cls, spec: str | None, work: Work | None) -> Reduce:
         """Decode a ``REDUCE`` value against the kernel's ``WORK`` inventory (inverse of
         :meth:`spell` — the coop width is ``work.count``, never the string). Empty / ``None`` =
         the scalar serial fold. An unknown token raises, so a width-carrying spelling (the retired
@@ -219,7 +254,11 @@ class ReducePlan:
                 reg = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
                 raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t] / r<n>)")
-        return cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed)
+        return _canonical_choice(
+            "REDUCE",
+            spec,
+            cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed),
+        )
 
     @property
     def parallel(self) -> int:
@@ -232,7 +271,7 @@ class ReducePlan:
 
     @property
     def needs_split(self) -> bool:
-        """True iff any stage is a cross-CTA GRID split (``035_split_reduce`` territory)."""
+        """True iff any stage is a cross-CTA GRID split (``030_cut`` territory)."""
         return any(s.level is Level.GRID for s in self.stages)
 
     def _width(self, level: Level) -> int:
@@ -267,29 +306,12 @@ class ReducePlan:
 
     @property
     def coop_transposed(self) -> bool:
-        """True iff the BLOCK stage carries the ``b<n>t`` k-major lane swap."""
+        """True iff the BLOCK stage carries the ``coop-t`` k-major lane swap."""
         return any(s.transposed for s in self.stages if s.level is Level.BLOCK)
 
 
-#: Pin-input aliases for the scalar tier — an explicit ``a:``-prefixed spelling of the (atom-less)
-#: scalar output tile, symmetric with the warp form's ``a:<atom>``. ``a:scalar`` names the scalar atom
-#: (:data:`~emmy.compiler.ir.atom.SCALAR_ATOM`'s name); ``a:none`` is an alias. **Pin vocabulary only**
-#: — a producer never emits these: :meth:`TilePlan.parse` strips them, so the alias never rides a
-#: stored knob dict. Lets a pin force the scalar tier explicitly instead of the invisible empty
-#: string.
-_SCALAR_ATOM_ALIASES = frozenset({"a:scalar", "a:none"})
-
-
-def _strip_scalar_atom(spec: str | None) -> str:
-    """Drop any ``a:scalar`` / ``a:none`` token from ``spec``, returning the bare scalar body
-    (``""`` when the alias was the only token — the per-cell tier)."""
-    if not spec:
-        return spec or ""
-    return "/".join(t for t in spec.split("/") if t.strip() not in _SCALAR_ATOM_ALIASES)
-
-
 @dataclass(frozen=True)
-class TilePlan:
+class Tile:
     """The contraction's output tile — **one descriptor for both tiers**, discriminated by
     :attr:`atom`: a tensor-core :class:`AtomKind` (the warp mma tile) or the scalar
     :class:`~emmy.compiler.ir.atom.ScalarAtom` (the register sub-tile, the ``Scalar``
@@ -311,44 +333,50 @@ class TilePlan:
     units: tuple[int, int] = (1, 1)  # (m, n): warp (WM, WN) / scalar (par_m, par_n)
     regs: tuple[int, int] = (1, 1)  # (m, n): warp (FM, FN) / scalar (reg_m, reg_n)
     bk: int = 1  # K-chunk per inner mma step, in atom_k units (mma only; 1 for scalar)
-    #: The PLACEMENT this tile is over — the ``(m, n)`` output axes the widths above tile. Bound by
-    #: the caller that owns the grid (:meth:`at`), so the slice derives its own ``(m, n)`` reading
-    #: (:attr:`mn`) instead of a separate view object carrying axes beside the plan.
-    #: ``compare=False``: the axes are placement, not a search dimension — two plans differing only
-    #: in placement are the SAME tile, so enumeration dedup, the stamped row and ``spell()`` (which
-    #: never reads them) are untouched, and no axis can leak into a knob value / golden / prior key.
-    axes: tuple[Axis, Axis] | None = dc_field(default=None, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.atom, (AtomKind, type(SCALAR_ATOM))):
+            raise TypeError("Tile atom must be an AtomKind or the scalar atom")
+        if not isinstance(self.atom, AtomKind) and self.atom != SCALAR_ATOM:
+            raise ValueError("Tile scalar atom must use the canonical scalar value")
+        if isinstance(self.atom, AtomKind) and atom_for(self.atom.name) != self.atom:
+            raise ValueError(f"Tile atom {self.atom.name!r} is not the registered canonical value")
+        for field, widths in (("units", self.units), ("regs", self.regs)):
+            if not isinstance(widths, tuple) or len(widths) != 2 or any(type(width) is not int or width < 1 for width in widths):
+                raise ValueError(f"Tile {field} must be two positive integer widths, got {widths!r}")
+        if type(self.bk) is not int or self.bk < 1:
+            raise ValueError(f"Tile bk must be a positive integer, got {self.bk!r}")
+        if not self.is_warp and self.bk != 1:
+            raise ValueError("a scalar Tile cannot carry an mma K chunk")
 
     def spell(self) -> str:
         """The ``TILE`` codec value for this tile — SITE-LOCAL: the worker tokens live in the
         kernel-global ``WORK`` family, so the warp form is ``<atom>/f<FM>x<FN>[/k<bk>]`` (the atom
         name bare — the tier discriminator IS the worker kind, never a per-``TILE`` spelling) and
-        the scalar form ``f<fn>[x<fm>]`` (``""`` for the per-cell tier). Never the pin-only
-        ``a:scalar`` alias."""
+        the scalar form ``f<fn>[x<fm>]``. The per-cell tier alone spells ``""``; a parallel
+        unit-register thread tile spells ``f1`` so the wire representation is unambiguous."""
         if self.is_warp:
             k = f"/k{self.bk}" if self.bk > 1 else ""
             return f"{self.atom.name}/f{self.reg_m}x{self.reg_n}{k}"
         if not any(v > 1 for v in self.regs):
-            return ""
+            return "f1" if any(v > 1 for v in self.units) else ""
         # The scalar value is n-then-m — the codec's order, applied here rather than stored.
         return f"f{self.reg_n}" if self.reg_m == 1 else f"f{self.reg_n}x{self.reg_m}"
 
     @classmethod
-    def parse(cls, spec: str | None, work: Workers | None) -> TilePlan:
+    def parse(cls, spec: str | None, work: Work | None) -> Tile:
         """Decode a ``TILE`` value against the kernel's ``WORK`` inventory (inverse of
         :meth:`spell` — the unit widths come from ``work``, never the string): the warp form
         ``<atom>/f<FM>x<FN>[/k<bk>]`` or the scalar ``f<fn>[x<fm>]``. Empty / ``None`` is the
-        per-cell tier — beside a thread inventory it can also be the unit-register thread tile,
-        the ONE ambiguity :func:`resolve_site_tile` resolves. The pin-only ``a:scalar`` /
-        ``a:none`` aliases (an explicit spelling of the scalar tier) are stripped first, so
-        ``a:scalar`` alone is per-cell and ``a:scalar/f4x8`` a register-tiled scalar. An unknown
-        token raises, so the retired embedded-worker spellings (``a:<atom>/w../f..``, ``n../f..``)
-        are a loud error, not a silent second reading."""
-        s = _strip_scalar_atom((spec or "").strip()).strip("/").strip()
+        per-cell tier; ``f1`` is the unit-register thread tile when ``WORK`` supplies a parallel
+        thread inventory. An unknown token raises, so retired
+        aliases and embedded-worker spellings (``a:<atom>/w../f..``, ``n../f..``) are loud errors,
+        not silent second readings."""
+        s = spec or ""
         if not s:
-            return cls()
+            return _canonical_choice("TILE", spec, cls())
         tokens = s.split("/")
-        # ``Workers.units`` is the WORK codec's own order (warp m-then-n, thread n-then-m); a plan
+        # ``Work.units`` is the WORK codec's own order (warp m-then-n, thread n-then-m); a plan
         # stores (m, n), so the thread inventory transposes on the way in.
         units = (1, 1) if work is None else (tuple(work.units) if work.kind == "warp" else (work.units[1], work.units[0]))
         atom = None
@@ -373,7 +401,8 @@ class TilePlan:
                 bk = _codec_width(t[1:], tok=t, codec="TILE")
             else:
                 raise ValueError(f"TILE {spec!r}: unknown token {t!r} (expect [<atom>/]f<fn>[x<fm>][/k<bk>])")
-        return cls(units=units, regs=regs) if atom is None else cls(atom=atom, units=units, regs=regs, bk=bk)
+        choice = cls(units=units, regs=regs) if atom is None else cls(atom=atom, units=units, regs=regs, bk=bk)
+        return _canonical_choice("TILE", spec, choice)
 
     @property
     def is_warp(self) -> bool:
@@ -385,6 +414,16 @@ class TilePlan:
         """True iff this materializes a tile: a warp tile always does; a scalar tile only when some
         unit / register width > 1 (else it is the per-cell tier — one thread per output cell)."""
         return self.is_warp or any(v > 1 for v in (*self.units, *self.regs))
+
+    def is_canonical_for(self, work: Work | None) -> bool:
+        """Whether this site-local value round-trips under the kernel ``WORK`` inventory."""
+        if not self.is_warp and self.units == (1, 1) and self.regs == (1, 1):
+            return True
+        if self.is_warp:
+            return work is not None and work.kind == "warp" and self.units == work.units
+        if work is None or work.kind == "direct":
+            return self.units == (1, 1)
+        return work.kind == "thread" and self.units == (work.units[1], work.units[0])
 
     @property
     def units_m(self) -> int:
@@ -429,20 +468,35 @@ class TilePlan:
         bt = self.block_threads
         return bt if bt > 1 else None
 
-    def at(self, m_axis: Axis, n_axis: Axis) -> TilePlan:
-        """This tile BOUND to its placement — the ``(m, n)`` output axes it tiles. The caller that
-        owns the grid decides them (the trailing grid pair for a root kernel; a flash consumer
-        supplies its own), so a plan travels axis-free through the enumeration and picks up its
-        placement where the geometry is actually read."""
-        return dc_replace(self, axes=(m_axis, n_axis))
+    def at(self, m_axis: Axis, n_axis: Axis) -> PlacedTile:
+        """Derive placed geometry without adding axes to this choice value."""
+        return PlacedTile(self, (m_axis, n_axis))
 
-    def placed_on(self, place: Placement) -> TilePlan:
+    def placed_on(self, place: Placement) -> PlacedTile | Tile:
         """This tile bound to the ROOT contraction's ``(m, n)`` — :attr:`Placement.root_mn` — and
         left UNPLACED when the grid cannot supply the pair. The scheduler binds through here at
         option assembly and :meth:`Sched.tile_of` re-derives the same pair for a reader that takes
         the slice off the tree, so the depth-1 rule and its degradation are stated ONCE."""
-        mn = place.root_mn
-        return self.at(*mn) if mn is not None else self
+        axes = place.root_mn
+        return self.at(*axes) if axes is not None else self
+
+
+@dataclass(frozen=True)
+class PlacedTile:
+    """Materialization geometry derived from an axis-free :class:`Tile` choice and two axes."""
+
+    choice: Tile
+    axes: tuple[Axis, Axis]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.choice, Tile):
+            raise TypeError("PlacedTile choice must be a Tile")
+        if not isinstance(self.axes, tuple) or len(self.axes) != 2 or any(not isinstance(axis, Axis) for axis in self.axes):
+            raise TypeError("PlacedTile axes must be two Axis values")
+
+    def __getattr__(self, name: str):
+        """Expose choice geometry to lowering without duplicating its fields."""
+        return getattr(object.__getattribute__(self, "choice"), name)
 
     # ---- the (m, n) output sides: each axis paired with its derived per-CTA tile geometry (width /
     # unit / register counts) + the bound block/unit var names (the original m/n names live in the
@@ -451,8 +505,6 @@ class TilePlan:
     def mn(self) -> tuple[Side, Side]:
         """The ``(m, n)`` output :class:`Side` pair — each placed axis with its derived geometry.
         Requires :meth:`at` to have bound the placement; :attr:`m` / :attr:`n` index it."""
-        if self.axes is None:
-            raise ValueError("TilePlan.mn: the tile is unplaced — bind the (m, n) output axes with .at(m, n) first")
         dims = ((self.tile_m, self.units_m, self.reg_m), (self.tile_n, self.units_n, self.reg_n))
         return tuple(
             Side(axis=ax, tile=tile, units=units, reg=reg, block=ax.name + "_b", unit=ax.name + "_u")
@@ -469,24 +521,41 @@ class TilePlan:
 
 
 @dataclass(frozen=True)
-class Workers:
+class Work:
     """The kernel's ONE worker inventory (1r in-memory; the step-7 ``WORK`` wire family) — the
     per-site ``w``/``n`` worker tokens factored out of the ``TILE`` values into a single
     kernel-global slot (``w4x1`` warps for the mma tier / ``t16x8`` threads for the scalar tier /
     ``t512`` the 1-D cooperative width), plus the ``+p<n>`` PRODUCER band the retired ``WSPEC``
     family spelled (aux warps are inventory too). Derived at option assembly from the TILE
-    slices (:func:`derive_workers`), FAILING LOUDLY when two sites disagree — an inconsistent
-    ``TILE@dd``/``TILE@pj`` pin pair could only miss rows silently; the slot makes the
-    disagreement unrepresentable. Kernel-global-ness encodes today's TRUE invariant:
+    node choices (:func:`derive_workers`), FAILING LOUDLY when two sites disagree. The explicit
+    slot makes an inconsistent pair of exact node-site choices unrepresentable. Kernel-global-ness
+    encodes today's TRUE invariant:
     fragment-resident dataflow between composed folds shares the warp map."""
 
-    kind: str  # "warp" (mma tier) | "thread" (scalar / coop tiers)
-    units: tuple[int, int]  # the native codec order of the TILE value the slot came from
+    kind: str = "direct"  # direct | warp (mma tier) | thread (scalar / coop tiers)
+    units: tuple[int, int] = (1, 1)  # the native codec order of the TILE value the slot came from
     producer: int = 0  # dedicated producer warps (the WSPEC absorb — ``+p<n>``; warp kind only)
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("direct", "warp", "thread"):
+            raise ValueError(f"bad Work kind {self.kind!r} (expect direct | warp | thread)")
+        if not isinstance(self.units, tuple) or len(self.units) != 2 or any(type(width) is not int or width < 1 for width in self.units):
+            raise ValueError(f"Work units must be two positive widths, got {self.units!r}")
+        if type(self.producer) is not int or self.producer < 0:
+            raise ValueError(f"Work producer band must be a non-negative integer, got {self.producer!r}")
+        if self.kind == "direct" and (self.units != (1, 1) or self.producer):
+            raise ValueError("direct Work cannot carry worker geometry or a producer band")
+        if self.kind != "warp" and self.producer:
+            raise ValueError("a producer band requires warp Work")
+
+    @property
+    def is_direct(self) -> bool:
+        """Whether this choice leaves launch geometry to the direct per-cell path."""
+        return self.kind == "direct"
 
     @property
     def count(self) -> int:
-        """Workers in the inventory (warps or threads, by ``kind``) — the COMPUTE band; the
+        """Work in the inventory (warps or threads, by ``kind``) — the COMPUTE band; the
         producer band is on top."""
         return self.units[0] * self.units[1]
 
@@ -494,6 +563,8 @@ class Workers:
         """The ``WORK`` codec string: ``w<M>x<N>[+p<np>]`` (warps; both dims always) /
         ``t<N>x<M>`` (the scalar thread tile, native n-then-m order) / ``t<N>`` (the 1-D
         cooperative width — a trailing ``x1`` is suppressed for threads only)."""
+        if self.is_direct:
+            return ""
         if self.kind == "warp":
             base = f"w{self.units[0]}x{self.units[1]}"
             return f"{base}+p{self.producer}" if self.producer else base
@@ -502,12 +573,12 @@ class Workers:
         return f"t{self.units[0]}x{self.units[1]}"
 
     @classmethod
-    def parse(cls, spec: str | None) -> Workers | None:
+    def parse(cls, spec: str | None) -> Work:
         """Decode a ``WORK`` codec string (inverse of :meth:`spell`); ``""`` / ``None`` = no
         inventory (the per-cell / pure-reduce forms keep their derived launch geometry)."""
         if not spec:
-            return None
-        s = spec.strip()
+            return _canonical_choice("WORK", spec, cls())
+        s = spec
         producer = 0
         if "+" in s:
             s, _, band = s.partition("+")
@@ -525,47 +596,41 @@ class Workers:
         if kind == "thread" and producer:
             raise ValueError(f"WORK {spec!r}: a producer band needs the warp inventory")
         units = (int(dims[0]), int(dims[1]) if len(dims) == 2 else 1)
-        return cls(kind=kind, units=units, producer=producer)
+        return _canonical_choice("WORK", spec, cls(kind=kind, units=units, producer=producer))
 
 
-def resolve_site_tile(spec: str | None, work: Workers | None, coop: int = 1) -> TilePlan:
-    """The :class:`TilePlan` a row denotes — :meth:`TilePlan.parse` plus the ONE ambiguity the
-    site spelling has: an EMPTY ``TILE`` beside a THREAD ``WORK`` inventory is the unit-register
-    parallel thread tile (a tile whose register sub-tile is ``f1x1`` spells ``""``), UNLESS the
-    row's ``REDUCE`` claims those threads as a cooperative band — then ``TILE`` stays the per-cell
-    tier. Every reader that reconstructs a plan from a row (the scheduler's materialize, the
-    featurizers) resolves through this one rule.
+def resolve_site_tile(spec: str | None, work: Work | None, coop: int = 1) -> Tile:
+    """Decode one exact site-local :class:`Tile` spelling against the kernel inventory.
 
-    ``coop`` is the reduce's cooperative WIDTH, not its spelling: every caller with a resolved
-    ``ReducePlan`` in hand passes ``red.coop``, and the one caller holding only strings parses it
-    once, where it already handles a malformed value."""
-    plan = TilePlan.parse(spec, work)
-    if (spec or "").strip() or work is None or work.kind != "thread" or coop > 1:
-        return plan  # a claimed thread inventory IS the coop band — TILE stays per-cell
-    return TilePlan(units=(work.units[1], work.units[0]))  # WORK's t<n>x<m> onto the plan's (m, n)
+    ``coop`` remains in the signature for row consumers that resolve ``TILE`` and ``REDUCE``
+    together, but no longer disambiguates the tile: ``""`` is always per-cell and ``f1`` is the
+    parallel unit-register thread tile. The distinction therefore survives encode/decode without
+    consulting another node's claim on the shared ``WORK`` inventory."""
+    del coop
+    return Tile.parse(spec, work)
 
 
-def plan_workers(plan: TilePlan | None) -> Workers | None:
+def _plan_workers(plan: Tile | None) -> Work | None:
     """The worker inventory ONE tile plan implies — ``None`` for an untiled plan or a 1-thread
     thread inventory (a bare register strip: the per-cell forms keep their derived launch
-    geometry). A plan stores ``(m, n)``; ``Workers.units`` is the ``WORK`` codec's own order, so
-    the thread inventory transposes on the way out — the inverse of :meth:`TilePlan.parse`."""
+    geometry). A plan stores ``(m, n)``; ``Work.units`` is the ``WORK`` codec's own order, so
+    the thread inventory transposes on the way out — the inverse of :meth:`Tile.parse`."""
     if plan is None or not plan.is_tiled:
         return None
     units = (plan.units_m, plan.units_n) if plan.is_warp else (plan.units_n, plan.units_m)
-    w = Workers(kind="warp" if plan.is_warp else "thread", units=units)
+    w = Work(kind="warp" if plan.is_warp else "thread", units=units)
     return None if (w.kind == "thread" and w.count == 1) else w
 
 
-def derive_workers(tiles) -> Workers | None:
-    """Fold the worker inventory out of a kernel's resolved ``TILE`` slices (``TilePlan`` values,
-    any iterable) — ``None`` when no slice tiles (the per-cell / pure-reduce forms keep their
+def derive_workers(tiles) -> Work | None:
+    """Fold the worker inventory out of a kernel's typed ``Tile`` choices (any iterable) —
+    ``None`` when no choice tiles (the per-cell / pure-reduce forms keep their
     derived launch geometry). Raises on DISAGREEMENT between sites: one kernel has ONE worker
     inventory (the flash QK/PV pair shares the warp map by construction; a pin pair that
     disagrees must fail loudly, never be half-ignored)."""
-    work: Workers | None = None
+    work: Work | None = None
     for plan in tiles:
-        w = plan_workers(plan)
+        w = _plan_workers(plan)
         if w is None:
             continue
         if work is None:
@@ -575,8 +640,8 @@ def derive_workers(tiles) -> Workers | None:
     return work
 
 
-def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Workers | None:
-    """The kernel's ONE worker inventory, folded out of its resolved ``TILE`` slices and then
+def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Work | None:
+    """The kernel's ONE worker inventory, folded out of its typed ``Tile`` choices and then
     reconciled with a cooperative ``REDUCE`` width and a ``+p`` producer band. ``None`` when
     nothing tiles and no band cooperates (the per-cell / pure-reduce forms keep their derived
     launch geometry).
@@ -587,11 +652,11 @@ def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Workers | No
     a ``t8x4`` scalar tile — or worse, a ``w4x8`` warp tile — compatible with a 32-wide coop that
     neither realizes.
 
-    ONE home for the rule: the enumerator wraps this to DROP a row whose slices disagree and
-    ``ops.seal_workers`` lets it raise, so the two can no longer answer differently."""
+    ONE home for the rule: ``ClassicScheduleContext.extend`` uses it while composing compatible
+    prefixes and ``require`` checks arbitrary complete assignments at the public boundary."""
     work = derive_workers(tiles)
     if coop > 1:
-        band = Workers(kind="thread", units=(coop, 1))
+        band = Work(kind="thread", units=(coop, 1))
         if work is not None and work != band:
             raise ValueError(f"disagreeing worker geometry: TILE workers {work.spell()} vs coop width {coop} — one kernel, one inventory")
         work = band
@@ -629,7 +694,7 @@ class Placement:
     def root_mn(self) -> tuple[Axis, Axis] | None:
         """The ``(m, n)`` output axes a ROOT (depth-1) contraction tiles — the grid's TRAILING
         pair — or ``None`` when the grid cannot supply them (unmapped, or rank < 2: the caller's
-        untiled path). The one home of the depth-1 rule; :meth:`TilePlan.placed_on` and
+        untiled path). The one home of the depth-1 rule; :meth:`Tile.placed_on` and
         :meth:`Sched._mn_for` both read it."""
         grid = tuple(self.grid)
         return (grid[-2], grid[-1]) if len(grid) >= 2 else None
@@ -654,7 +719,7 @@ class Placement:
 #: evaluating a computed edge into its slab), ``cp.async`` (``smem-async``) and TMA
 #: (``smem-tma``). An EMPTY ``STAGE`` is no intermediate at all: gmem→register on a
 #: materialized operand, register-to-register on a computed one.
-_TRANSPORTS = ("smem", "smem-async", "smem-tma")
+_TRANSPORTS = ("direct", "smem", "smem-async", "smem-tma")
 
 #: The ``STAGE`` grammar, rendered into every parse error so a bad pin names what it could have said.
 _STAGE_EXPECT = "expect d<n> / smem|smem-async|smem-tma / p<n>"
@@ -667,19 +732,11 @@ class Stage:
     operand-staging knob, decided by the tile schedule and materialized in
     ``010_materialize``.
 
-    A constructed ``Stage`` means staging is **on** (the reused gmem operands ride a shared-
-    memory slab); ``schedule.stage is None`` is the register / gmem-direct baseline (no
-    slab). Spelled by the ``STAGE`` codec ``d<depth>/sync|cp|tma[/split][/p<reg_depth>]``
-    (decided by the tile schedule). A stage stamped on a ``TileOp`` is **RESOLVED**, not the raw
-    pin: the scheduler runs eligibility + sizing against the node ONCE
-    (resolved schedule-side for a contraction's operand
-    pipeline, the shared-row detection for the reduce tier) and stamps the result — or ``None``
-    when the pin can't engage (gmem-direct) — so the materializer applies it verbatim, deciding
-    nothing. Two fields are derived at resolution and never spelled by the codec: ``smem`` (empty
-    for a contraction pipeline — both operands stage; the ONE detected row buffer for the
-    shared-row stage) and ``bk_elems`` (the contraction slab's K-chunk in elements — the
-    codec-spelled ``TilePlan.bk · atom_k`` on the warp tier, the fit-to-smem derivation on the
-    scalar tier; 0 for the 1-D shared row).
+    ``Stage.direct()`` is the register / gmem-direct baseline (no slab); every other ``Stage``
+    means staging is **on** (the reused gmem operands ride a shared-memory slab). Spelled by the
+    ``STAGE`` codec ``d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]``
+    (decided by the tile schedule). Eligibility and sizing produce a separate
+    :class:`ResolvedStage`; this choice never stores shared-memory names or a derived K chunk.
 
     The pipeline has two buffering levels down the memory hierarchy, each with its own depth:
     ``depth`` is the **gmem→smem** ring (a synchronous slot fill or the cp.async / TMA prefetch
@@ -687,7 +744,7 @@ class Stage:
     fragment-load ping-pong over the inner atom-K steps, breaking the WAR hazard on the operand fragments). They are
     orthogonal — ``d3/smem-async/p2`` is a 3-deep gmem ring feeding a 2-deep register ping-pong.
     ``reg_depth = 1`` (the default) is the "optional register" OFF point (no inner prefetch).
-    The slab K-*granularity* (how much K is resident) is ``TilePlan.bk``, NOT a third depth
+    The slab K-*granularity* (how much K is resident) is ``Tile.bk``, NOT a third depth
     here — granularity and buffer depth are kept distinct.
 
     Rotation and refill discipline are NOT fields: the staged K-loop derives the slot count from
@@ -696,17 +753,27 @@ class Stage:
 
     depth: int = 1  # gmem→smem ring depth over the reduce loop (1 = single buffer, no prefetch)
     transport: str = "smem"  # smem | smem-async | smem-tma (the intermediate and its fill mechanism)
-    smem: tuple[str, ...] = ()  # operands staged through smem (derived at resolution; not in the codec)
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
-    bk_elems: int = 0  # contraction slab K-chunk, elements (derived at resolution; not in the codec)
 
     def __post_init__(self) -> None:
         if self.transport not in _TRANSPORTS:
             raise ValueError(f"bad Stage transport {self.transport!r} (expect smem | smem-async | smem-tma)")
-        if self.depth < 1:
-            raise ValueError(f"Stage depth must be ≥ 1, got {self.depth}")
-        if self.reg_depth < 1:
-            raise ValueError(f"Stage reg_depth must be ≥ 1, got {self.reg_depth}")
+        if type(self.depth) is not int or self.depth < 1:
+            raise ValueError(f"Stage depth must be a positive integer, got {self.depth!r}")
+        if type(self.reg_depth) is not int or self.reg_depth < 1:
+            raise ValueError(f"Stage reg_depth must be a positive integer, got {self.reg_depth!r}")
+        if self.transport == "direct" and (self.depth != 1 or self.reg_depth != 1):
+            raise ValueError("direct Stage cannot carry pipeline depths")
+
+    @classmethod
+    def direct(cls) -> Stage:
+        """The explicit no-intermediate transport choice."""
+        return cls(transport="direct")
+
+    @property
+    def is_direct(self) -> bool:
+        """Whether the operand moves directly to registers."""
+        return self.transport == "direct"
 
     @classmethod
     def parse(cls, spec: str | None) -> Stage:
@@ -716,16 +783,16 @@ class Stage:
         materialized edge, evaluating a computed one, converting when the dtypes differ — the
         cp.async ring, or TMA; the ABSENCE of a stage means no intermediate at all — gmem→register
         for a materialized operand, register→register evaluation for a computed one), and an
-        optional ``p<reg_depth>`` (smem→register double-buffer depth). Empty / ``None`` = the depth-1 ``smem`` default (the
-        caller maps an empty ``STAGE`` to ``stage=None``, the gmem-direct baseline — ``parse`` is
-        only reached on a non-empty spec). ``smem`` is filled in later by the scheduler.
+        optional ``p<reg_depth>`` (smem→register double-buffer depth). Empty / ``None`` is the
+        explicit gmem-direct choice. Shared-memory names and K extent are resolved later.
 
-        Binding is order-free, but each token binds at most ONCE: a repeat has no last-one-wins
-        reading a caller could have meant — ``d2/smem-async/d3`` would land ``d3/smem-async`` and ``smem/smem-tma``
-        would land ``d1/smem-tma``, each quietly deploying a kernel the pin did not name. Raises
+        Tokens have one canonical order, and each field binds at most once: reordered or repeated
+        fields raise instead of quietly deploying a kernel the pin did not name. Raises
         ``ValueError`` and only ``ValueError`` on any malformed input (the featurizers degrade on
         it), naming the codec so a bad pin names its knob."""
-        s = (spec or "").strip()
+        s = spec or ""
+        if not s:
+            return _canonical_choice("STAGE", spec, cls.direct())
         seen: set[str] = set()
         depth, transport, reg_depth = 1, "smem", 1
 
@@ -746,12 +813,14 @@ class Stage:
                 reg_depth = _codec_width(t[1:], tok=t, codec="STAGE")
             else:
                 raise ValueError(f"bad STAGE token {t!r} ({_STAGE_EXPECT})")
-        return cls(depth=depth, transport=transport, reg_depth=reg_depth)
+        return _canonical_choice("STAGE", spec, cls(depth=depth, transport=transport, reg_depth=reg_depth))
 
     def spell(self) -> str:
-        """The ``STAGE`` codec string for this stage (inverse of :meth:`parse`). ``smem`` is
-        derived, so it is not spelled; ``reg_depth`` is spelled only when ≥ 2 (the ``p1``
-        default is omitted, so an unstaged-register config round-trips byte-identical)."""
+        """The ``STAGE`` codec string for this stage (inverse of :meth:`parse`). Depth and
+        transport are explicit; ``reg_depth`` is spelled only when ≥ 2 (the ``p1`` default is
+        omitted)."""
+        if self.is_direct:
+            return ""
         toks = [f"d{self.depth}", self.transport]
         if self.reg_depth > 1:
             toks.append(f"p{self.reg_depth}")
@@ -777,19 +846,42 @@ class Stage:
 
 
 @dataclass(frozen=True)
+class ResolvedStage:
+    """Materialization facts derived from a :class:`Stage` choice at one problem edge."""
+
+    choice: Stage
+    smem: tuple[str, ...] = ()
+    bk_elems: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.choice, Stage):
+            raise TypeError("ResolvedStage choice must be a Stage")
+        if not isinstance(self.smem, tuple) or any(not isinstance(name, str) for name in self.smem):
+            raise TypeError("ResolvedStage smem names must be a tuple of strings")
+        if self.choice.is_direct:
+            raise ValueError("a direct Stage has no resolved materialization")
+        if type(self.bk_elems) is not int or self.bk_elems < 0:
+            raise ValueError(f"resolved stage bk_elems must be a non-negative integer, got {self.bk_elems!r}")
+
+    def __getattr__(self, name: str):
+        """Expose the originating choice to lowering without copying its fields."""
+        return getattr(object.__getattribute__(self, "choice"), name)
+
+
+@dataclass(frozen=True)
 class WarpSpec:
     """The producer band — the dedicated warps split off the uniform pipeline to drive the
     ``Stage`` gmem→smem load half, ORTHOGONAL to the pipeline (``reduce`` / ``tile`` / ``stage``):
     it adds no pipeline parameter, only the warp split. The COMPUTE (mma-consumer) warps are
-    implicit, sized by ``TilePlan.units``, so the CTA launches ``TilePlan.block_threads +
+    implicit, sized by ``Tile.units``, so the CTA launches ``Tile.block_threads +
     32·producer_warps`` threads. ``workers is None`` on the schedule is uniform SIMT (every warp
     does every role's work, software-pipelined in-warp); a constructed ``WarpSpec`` means
     specialization is on.
 
-    The band is DECIDED as inventory — it rides ``WORK``'s ``+p<n>`` (``Workers.producer``), which
-    is where the retired ``WSPEC`` knob's one live decision went. Whether a row may offer it at all
-    is the ``_schedule._band_*_refusal`` family: a resolved TMA stage, un-split, on a kernel that is
-    not split across CTAs, and not over a packed byte slab. The box copy is issued by one elected
+    The band is DECIDED as inventory — it rides ``WORK``'s ``+p<n>`` (``Work.producer``), which
+    is where the retired ``WSPEC`` knob's one live decision went. ``ClassicScheduleContext`` and
+    the private enumerator require a resolved TMA stage on an unsplit kernel that is not split
+    across CTAs and does not stage a packed byte slab. The box copy is issued by one elected
     thread onto a slot mbarrier any thread can parity-wait, so the fill moves warps freely, while
     ``cp.async``'s wait-group is issuing-thread-scoped and an ``smem`` compute fill has no async load
     half. The packed byte slab is refused for a different reason: its own TMA lowering returns the
@@ -802,7 +894,11 @@ class WarpSpec:
     mbarrier), the compute warps parity-wait, drain and release the slot on an "empty" mbarrier
     ring, with ``SetMaxNReg`` register redistribution between the branches."""
 
-    producer_warps: int = 0
+    producer_warps: int
+
+    def __post_init__(self) -> None:
+        if type(self.producer_warps) is not int or self.producer_warps < 1:
+            raise ValueError(f"producer_warps must be a positive integer, got {self.producer_warps!r}")
 
     def spell(self) -> str:
         """The band's ``p<n>`` spelling — the dump's ``band`` line; ``""`` for no band."""
@@ -811,29 +907,48 @@ class WarpSpec:
 
 @dataclass(frozen=True)
 class Raster:
-    """The CTA rasterization order — the ``RASTER`` codec, kernel-scoped like ``WSPEC`` (one launch
-    order per grid; no ``@<axis>`` key). It changes NO per-CTA work, layout, or schedule — only
+    """The CTA rasterization order — the bare kernel-scoped ``RASTER`` choice (one launch order
+    per grid). It changes NO per-CTA work, layout, or schedule — only
     which flat CTA id maps to which ``(m, n)`` output block tile: ``gm<G>`` iterates ``G`` M
     block-tiles fastest within each launch stripe (consecutive CTAs then share the streamed B
     slab, so its repeat reads hit L2 instead of DRAM — the 2026-07-12 4090 NCU finding measured
     the flat order streaming B once per M-row, ``A + C + B×2`` exactly); ``gn<G>`` is the
-    transpose (A the streamed operand). ``""`` / ``None`` = the flat N-fastest row-major order.
-    Eligible only on a 2-D-tiled contraction grid (``Tile.raster_axes``, stamped by the kernel
-    materializer's ``grid_tile`` seal)."""
+    transpose (A the streamed operand). The explicit ``Raster()`` choice is the flat N-fastest row-major order.
+    Eligible only on a 2-D-tiled contraction grid (the kernel IR tile's ``raster_axes``, stamped
+    by the materializer's ``grid_tile`` seal)."""
 
-    orient: str  # "m" (group M block-tiles) | "n" (group N block-tiles)
-    group: int  # stripe group size, ≥ 2
+    orient: str = "direct"  # direct | m (group M block-tiles) | n (group N block-tiles)
+    group: int = 1  # stripe group size, ≥ 2 when grouped
+
+    def __post_init__(self) -> None:
+        if type(self.group) is not int:
+            raise ValueError(f"Raster group must be an integer, got {self.group!r}")
+        if self.orient == "direct":
+            if self.group != 1:
+                raise ValueError("direct Raster must have group 1")
+            return
+        if self.orient not in ("m", "n") or self.group < 2:
+            raise ValueError(f"grouped Raster requires m/n orientation and group >= 2, got {self.orient!r}/{self.group}")
+
+    @property
+    def is_direct(self) -> bool:
+        """Whether CTA ids use the ordinary flat row-major order."""
+        return self.orient == "direct"
+
+    def spell(self) -> str:
+        """Return the canonical ``RASTER`` value."""
+        return "" if self.is_direct else f"g{self.orient}{self.group}"
 
     @classmethod
-    def parse(cls, spec: str | None) -> Raster | None:
-        """Decode ``gm<G>`` / ``gn<G>`` (``""`` / ``None`` → ``None``, the flat order). Raises
+    def parse(cls, spec: str | None) -> Raster:
+        """Decode ``gm<G>`` / ``gn<G>`` (``""`` / ``None`` → explicit flat order). Raises
         ``ValueError`` on any other spelling — the loud pin contract."""
         if not spec:
-            return None
+            return _canonical_choice("RASTER", spec, cls())
         m = _RASTER_RE.fullmatch(spec)
         if m is None or int(m.group(2)) < 2:
             raise ValueError(f"RASTER: expected gm<G> / gn<G> with G >= 2 (or empty for the flat order), got {spec!r}")
-        return cls(orient=m.group(1), group=int(m.group(2)))
+        return _canonical_choice("RASTER", spec, cls(orient=m.group(1), group=int(m.group(2))))
 
 
 _RASTER_RE = re.compile(r"g([mn])(\d+)")
@@ -856,12 +971,12 @@ def _overhangs(axis: Axis, tile: int) -> bool:
 class Side:
     """One tiled output axis of a contraction — the outer ``m`` or inner ``n`` — paired with its
     derived per-CTA tile geometry. The two ride as a ``(m, n)`` pair (:attr:`Fold.mn`)
-    mirroring :class:`TilePlan`'s own ``units`` / ``regs`` tuples, so the factorizer
+    mirroring :class:`Tile`'s own ``units`` / ``regs`` tuples, so the factorizer
     threads one object per axis instead of a dozen loose ``*_m`` / ``*_n`` args. The tile width,
     unit / register counts, and bound block/unit var names are derived from an axis + a
-    :class:`TilePlan`; the ``mask`` / ``ext`` follow from the axis + width.
+    :class:`Tile`; the ``mask`` / ``ext`` follow from the axis + width.
 
-    Lives here, beside ``TilePlan``, because it is SCHEDULE geometry, not algebra: ``ir/tile/ir.py``
+    Lives here, beside ``Tile``, because it is SCHEDULE geometry, not algebra: ``ir/tile/ir.py``
     already imports this module, so a tile-side home would make the schedule slice unable to derive
     its own ``(m, n)`` reading."""
 
@@ -892,13 +1007,15 @@ __all__ = [
     "FoldMove",
     "Level",
     "Placement",
+    "PlacedTile",
     "Side",
-    "ReducePlan",
+    "Reduce",
     "ReduceStage",
     "Raster",
+    "ResolvedStage",
     "Stage",
-    "TilePlan",
+    "Tile",
     "WarpSpec",
-    "Workers",
+    "Work",
     "derive_workers",
 ]

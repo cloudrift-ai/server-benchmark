@@ -2,7 +2,7 @@
 
 The split changes the kernel SET, exactly like a ``PLACE`` cut: a kernel that splits does not run,
 so its cost is the Σ over the pieces it produces (``policy/greedy._resolved_price``), which is why
-the split is a fork BESIDE ``030_cut`` and not a schedule row. It runs BEFORE scheduling — the
+the split is the ``030_cut`` fork and not a schedule row. It runs BEFORE scheduling — the
 rewrite consumes only the stored :class:`Fold` algebra, never a schedule decision — and each piece
 is a fresh unmapped :class:`TileOp` that re-enters the pass scan and decides its own row at
 ``040_schedule`` like any newly lifted tree.
@@ -38,7 +38,8 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.algebra import component_ops
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, edge_refs_axis, is_contraction
-from emmy.compiler.ir.schedule import ReducePlan, Workers
+from emmy.compiler.ir.schedule import Reduce, Work
+from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
@@ -53,9 +54,9 @@ from emmy.compiler.ir.tile.ir import apply_output_specs
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_tail
 from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline import Match
-from emmy.compiler.pipeline.fork import DeferredFork, Fork
+from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row
-from emmy.compiler.pipeline.search.space import REDUCE, WORK, splitk_moves
+from emmy.compiler.pipeline.search.space import REDUCE, WORK
 
 logger = logging.getLogger(__name__)
 
@@ -178,16 +179,26 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
 # ---- the offer: the unsplit tree beside every split the head fold admits ---------------------- #
 
 
-def split_forks(match: Match, root: Node) -> list[Fork] | None:
+def split_pending(tile: TileOp) -> bool:
+    """Whether this kernel still has a cross-CTA split decision for ``030_cut`` to consume."""
+    node = head(tile.op)
+    return (
+        node is not None
+        and node.axis is not None
+        and node.combine is not None
+        and not node.observed
+        and not carries_partition(tile.op)
+        and not tile.split_consumed
+    )
+
+
+def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None) -> list[DeferredFork] | None:
     """The split fork for ``root``'s kernel — the unsplit tree first, then one STRUCTURAL option
     per :func:`splitk_moves` member the head fold admits — or ``None`` when there is nothing to
     decide (no reduce fold, or the kernel is itself a piece of a realized split: the sliced axis's
-    partition ``Window`` is the receipt, so the pieces re-entering the scan skip here and an
-    ambient pin can never split twice). In the engine's batch order the pieces reach ``040`` FIRST
-    (the splice lands mid-batch, and the scan only wraps back to ``030``/``035`` after ``040``
-    schedules them, whose ``tile.schedule`` guard then skips) — traced empirically on a pinned
-    ``g2k`` matmul resolve — so the receipt's LIVE consumer is ``040``'s pin path (the ``g``-half
-    strip); the check here bites only on a piece ``040`` could not schedule.
+    partition ``Window`` is the receipt, so the pieces re-entering the cut fixpoint and skip here;
+    an ambient pin can never split twice). ``040_schedule`` then consumes the same receipt when it
+    strips the pin's ``g`` half before composing each piece's own assignment.
 
     A ``REDUCE`` pin is authoritative over its cross-CTA ``g<n>[a|k]`` half and ONLY that half:
     the rest of the value (``coop`` / ``r<n>``) is the pieces' own schedule, which the walk reads
@@ -195,20 +206,17 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
     raises the recorded refusal (``REDUCE`` has no choice of tier, so there is no drop layer);
     a pin with no ``g`` half decides UNSPLIT, exactly as a spelled row with no ``g`` half does."""
     tile: TileOp = root.op
-    node = head(tile.op)
-    if node is None or node.axis is None or node.combine is None:
+    if not split_pending(tile):
         return None
-    if node.observed:
-        return None  # a scan preserves its stream order — there is no split question to decide
-    if carries_partition(tile.op):
-        return None  # a piece of a realized split — the partition was consumed
-    key = Sched(tile.op, {}).key("REDUCE", node) or "REDUCE"
-    unsplit = DeferredFork(lambda: replace(tile, split_consumed=True), {key: ""})
+    node = head(tile.op)
+    assert node is not None and node.axis is not None
+    key = Sched(tile.op).key("REDUCE", node) or "REDUCE"
+    unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
     element = axis_of(key)
     pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
     tail = projection_tail(tile)
     if pin is not None:
-        plan = ReducePlan.parse(pin, Workers.parse(WORK.raw()))
+        plan = Reduce.parse(pin, Work.parse(WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
         _enforce(splitk_width(node.axis, plan.cta))
@@ -220,7 +228,7 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("no split offered: %s", why)
         return [unsplit]
-    options: list[Fork] = [unsplit]
+    options: list[DeferredFork] = [unsplit]
     atomic_why = atomic_finalize(node, tail, tile.outputs)
     for plan in splitk_moves():
         why = splitk_width(node.axis, plan.cta) or (atomic_why if plan.finalize == "atomic" else None)
@@ -232,8 +240,8 @@ def split_forks(match: Match, root: Node) -> list[Fork] | None:
     return options
 
 
-def _split_fork(match: Match, root: Node, key: str, cta: int, finalize: str) -> Fork:
-    spelling = ReducePlan.of(cta=cta, finalize=finalize).spell()
+def _split_fork(match: Match, root: Node, key: str, cta: int, finalize: str) -> DeferredFork:
+    spelling = Reduce.of(cta=cta, finalize=finalize).spell()
     return DeferredFork(lambda: realize_split(match, root, cta, finalize), {key: spelling}, structural=True)
 
 

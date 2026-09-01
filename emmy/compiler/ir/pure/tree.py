@@ -1,19 +1,18 @@
 """The ONE walk over a stored Fold tree.
 
-Both tile passes read the same tree and differ only in what they take from it: ``030_cut`` keeps the
-cut forks, ``040_schedule`` keeps the schedule forks. The walk itself is the same question — which
-Folds are stored under this one, and what axes are in scope where each is read — so it is asked
-once, here.
+``030_cut`` uses this walk to find structural seams. Classic scheduling may use the same walk to
+discover sites, but its candidate set is the compatible subset of independent node and edge
+domains: preorder may affect evaluation cost, never membership. The walk answers which Folds are
+stored under this one and what axes are in scope where each is read.
 
 Three rules that are easy to get wrong separately, which is why they are written once:
 
 - **A stored Fold is not always a direct member.** One can sit inside a plain statement's nested
   body (a composed step reached through a ``Loop``), so the walk alternates node-wise and
   statement-wise. A walker that only reads ``operands`` and ``lift.body`` silently loses those.
-- **A DERIVED site is a real schedule site.** A λ-spelled fold's derived evaluation
+- **A DERIVED node is a real classic site.** A λ-spelled fold's derived evaluation
   (``Fold.step_stmts``) can synthesize a node no stored member carries — flash's PV contraction,
-  memoized on the fold so it has one identity — and the schedule must reach it: the tree-path codec
-  keys it, the kernel materializer reads its slices. "Derived" here means exactly that: a node the
+  memoized on the fold so it has one identity — and the schedule must reach it. "Derived" means a node the
   derived step yields that is neither an operand edge nor a literal lift-body member. The cut pass
   is unaffected — it filters through ``path.family_sites("PLACE", …)``, which excludes derived
   sites, so a derived node contributes scopes but never a cuttable edge.
@@ -50,9 +49,8 @@ def children(node, axes: tuple = ()) -> tuple[tuple[Fold, tuple], ...]:
         return ()
     inner = axes if node.axis is None else (*axes, node.axis)
     members = (*node.operands, *node.lift.body)
-    # A contraction's children are exactly its a/b operand edges — the tree-path codec walks it in
-    # a dedicated branch that never reads ``step_stmts()``, so the derived extension must not
-    # either, or the two walks would key different node sets.
+    # A contraction's children are exactly its operand edges. Its derived step repeats those
+    # nodes, so reading it here would create duplicate classic sites.
     if node.axis is not None and not is_contraction(node):
         stored = {id(m) for m in members}
         members = (*members, *(s for s in node.step_stmts() if id(s) not in stored))
@@ -62,8 +60,8 @@ def children(node, axes: tuple = ()) -> tuple[tuple[Fold, tuple], ...]:
 def walk(node, axes: tuple = ()) -> Iterator[tuple[object, tuple]]:
     """``node`` and every stored Fold under it, preorder, each with its axes in scope.
 
-    Preorder is not incidental: it is the order the schedule walk decides in and the order
-    materialization re-resolves in, so the two cannot disagree about a Fold."""
+    Preorder is a stable discovery order, not schedule semantics. Any scheduling consumer must
+    produce the same compatible assignment set under another traversal."""
     yield node, axes
     for child, inner in children(node, axes):
         yield from walk(child, inner)

@@ -1,6 +1,6 @@
-"""A cross-CTA split mints BRAND-NEW kernels — the invariant ``035_split_reduce`` realizes.
+"""A cross-CTA split mints BRAND-NEW kernels — the invariant ``030_cut`` realizes.
 
-The split is a STRUCTURAL fork beside ``030_cut``, decided BEFORE scheduling (a ``REDUCE`` pin's
+The split is a STRUCTURAL fork inside ``030_cut``, decided BEFORE scheduling (a ``REDUCE`` pin's
 ``g<n>[a|k]`` half is authoritative over it); its rewrite returns a different set of nodes, and
 those nodes are new kernels:
 
@@ -32,7 +32,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
-from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, STRUCT_PREFIX, decision_view, family_of
+from emmy.compiler.pipeline.knob import STRUCT_PREFIX, decision_view, family_of
 from emmy.compiler.pipeline.pipeline import Run
 
 _CTX = Context.from_target((12, 0))
@@ -177,7 +177,8 @@ def test_each_piece_decides_its_own_row(monkeypatch) -> None:
     kernels = _kernels(out)
     assert set(kernels) == {"o", "o__partial"}
     for row in kernels.values():
-        assert set(SCHEDULE_FAMILIES) <= {family_of(k) for k in row}, row
+        families = {family_of(k) for k in row}
+        assert {"WORK", "RASTER", "REDUCE"} <= families, row
     scheduled = {d.node_id for d in trace if "schedule" in d.rule_name}
     assert scheduled >= {"o", "o__partial"}, f"each piece must be offered its own schedule fork, saw {scheduled}"
 

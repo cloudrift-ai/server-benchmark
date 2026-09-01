@@ -193,4 +193,4 @@ def test_a_row_the_freeze_would_refuse_is_refused_here_too():
     ]
     groups, dropped = group_measured(rows)
     assert [g.latency_us.tolist() for g in groups] == [[500.0]]
-    assert sorted(dropped) == ["implausible value", "stale feat_ver 1 != current 3"]
+    assert sorted(dropped) == ["implausible value", "stale feat_ver 1 != current 4"]

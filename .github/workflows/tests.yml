@@ -31,8 +31,8 @@ jobs:
   test:
     runs-on:
       group: ubuntu-runners
-    # A hung suite must fail rather than occupy a runner indefinitely. The healthy run is
-    # single-digit minutes, so 20 leaves ample headroom while still failing fast on a regression.
+    # The outer job includes dependency and cache setup; the test step below owns the stricter
+    # twelve-minute execution cap.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +67,7 @@ jobs:
           key: hf-models-v1
 
       - name: Run tests
+        timeout-minutes: 12
         run: make test
 
   package:

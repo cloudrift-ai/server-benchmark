@@ -21,11 +21,17 @@ article's "schedule separate from combine" thesis. The tier machinery all lives 
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Load
+from emmy.compiler.ir.pure.fold import deep_defines
+from emmy.compiler.ir.sigma import Sigma
+from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan
+from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan, sched_of
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 
@@ -41,13 +47,53 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
     rplan = reduce_plan(tile) if tile.op is not None else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 035_split_reduce"
     try:
-        return KernelOp(body=_drop_repeated_declarations(Body((factorize(tile, root),))), name=tile.name)
+        materialized = _pointwise_strip(tile, factorize(tile, root))
+        return KernelOp(body=_drop_repeated_declarations(Body((materialized,))), name=tile.name)
     except UnbindableProjection as exc:
         # The offered row has no multi-root binding (e.g. it tiles two contraction operands of a
         # projection whose outputs do not partition by root). The row stays OFFERED — the
         # realization corpus pins that — and the compile declines it here: the skip is recorded,
         # the node stays a TileOp, and the greedy blocklist retry resolves onto the next row.
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
+
+
+def _pointwise_strip(tile: TileOp, materialized):
+    """Realize a root projection's register strip after its stable schedule sites were consumed."""
+    if tile.op is None or tile.op.axis is not None or tile.schedule is None:
+        return materialized
+    plan = sched_of(tile).get("TILE", tile.op)
+    if plan is None:
+        return materialized
+    inner = tile.place.free[-1]
+    width = plan.reg_n
+    if not inner.extent.is_static or inner.extent.as_static() % width:
+        raise ValueError("pointwise TILE must divide the static inner free extent")
+    definitions = {name for stmt in materialized.body for name in deep_defines(stmt)}
+    loads = []
+    computes = []
+    writes = []
+    for offset in range(width):
+
+        def rename(name: str, offset: int = offset) -> str:
+            return f"{name}__u{offset}" if name in definitions else name
+
+        sigma = Sigma(
+            {
+                inner.name: BinaryExpr(
+                    "+",
+                    BinaryExpr("*", Var(inner.name), Literal(width, "int")),
+                    Literal(offset, "int"),
+                )
+            }
+        )
+        for stmt in materialized.body:
+            rewritten = stmt.rewrite(rename, sigma)
+            target = loads if isinstance(rewritten, Load) else writes if isinstance(rewritten, Write) else computes
+            target.append(rewritten)
+    axes = tuple(
+        replace(axis, extent=Dim(axis.extent.as_static() // width)) if axis.name == inner.name else axis for axis in materialized.axes
+    )
+    return replace(materialized, axes=axes, body=Body((*loads, *computes, *writes)))
 
 
 def _drop_repeated_declarations(body: Body) -> Body:

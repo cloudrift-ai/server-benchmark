@@ -13,17 +13,14 @@ another enumerator.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from frozendict import frozendict
 
-from emmy.compiler.dim import Dim
-from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.pure.fold import Fold, deep_reads, edge_refs_axis, is_contraction
+from emmy.compiler.ir.atom import ATOM_REGISTRY
+from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis
 from emmy.compiler.ir.schedule import (
     PlacedTile,
-    Placement,
     Raster,
     Reduce,
     Stage,
@@ -43,28 +40,22 @@ from emmy.compiler.ir.schedule.classic import (
     KernelSchedule,
     ProjectionSchedule,
     ReductionSchedule,
-    _atom_refusal,
     _ContractionFacts,
     _kstep_refusal,
     _needs_fill,
     _plan_node_refusal,
     _resolve_stage,
+    _warp_atoms,
     edge_site_spelling,
     node_id_spelling,
 )
-from emmy.compiler.ir.schedule.views import Projection, Reduction, ScheduleInventory
-from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Body, Load, Loop, Write
+from emmy.compiler.ir.schedule.views import Projection, Reduction
+from emmy.compiler.ir.stmt import Loop
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ir import OutputSpec
-from emmy.compiler.ir.tile.ops import Sched, carries_partition, cone_seam, edge_dtypes, projection_tail, scheduled
-from emmy.compiler.ir.tile.path import sites
+from emmy.compiler.ir.tile.ops import Sched, carries_partition, projection_tail, scheduled
 from emmy.compiler.pipeline.fork import Fork, iter_leaves, schedule_forks
 from emmy.compiler.pipeline.knob import family_pins, schedule_pin_fingerprint
-from emmy.compiler.pipeline.passes.lowering._addr import gmem_axis_step
-from emmy.compiler.pipeline.passes.lowering._packed import match_packed_b_node, match_packed_pair_node
-from emmy.compiler.pipeline.passes.lowering.tile._tree import children, walk
 from emmy.compiler.pipeline.search.space import (
     F16_MMA_F32_ACC,
     FP8_MMA,
@@ -82,81 +73,6 @@ from emmy.compiler.structural import digest
 
 class _EmptyDomain(RuntimeError):
     """One projected site has no locally supported choice on this structural branch."""
-
-
-def _sibling_fragment_edges(root: Fold, inventory: ScheduleInventory) -> dict[int, str]:
-    """Map each sibling-step consumer to the one contraction producing its computed edge."""
-    out = {}
-    for node, _axes in walk(root):
-        if not (isinstance(node, Fold) and node.axis is not None) or is_contraction(node) or node.combine is None:
-            continue
-        steps = node.step_stmts()
-        states = set(node.combine.results)
-        for position, consumer in ((i, stmt) for i, stmt in enumerate(steps) if is_contraction(stmt)):
-            accumulated = any(
-                isinstance(stmt, Accum) and stmt.name in states and stmt.value in consumer.defines() for stmt in steps[position + 1 :]
-            )
-            reads = {name for edge in consumer.operands if isinstance(edge, Fold) for name in deep_reads(edge.lower())}
-            if not accumulated or not reads:
-                continue
-            cone = Body(tuple(steps[:position])).backward_cone(reads)
-            producers = tuple(stmt for stmt in cone.members if is_contraction(stmt))
-            if len(producers) == 1:
-                out[id(consumer)] = node_id_spelling(inventory.site(producers[0]))
-    return out
-
-
-def _contraction_facts(tile: TileOp, target, inventory: ScheduleInventory) -> dict[int, _ContractionFacts]:
-    """Derive contraction facts that are independent of every schedule choice."""
-    root = tile.op
-    parents: dict[int, Fold] = {}
-    for node, _axes in walk(root):
-        for child, _child_axes in children(node):
-            parents.setdefault(id(child), node)
-    derived = {id(site.node) for site in sites(root) if site.derived}
-    sibling = _sibling_fragment_edges(root, inventory)
-    tail = projection_tail(tile)
-    fragment_epilogue = _fragment_epilogue_ok(tail, _fold_states(root))
-    facts = {}
-    for node, _axes in walk(root):
-        if not (isinstance(node, Fold) and node.axis is not None and is_contraction(node)):
-            continue
-        site = inventory.site(node)
-        if site in facts:
-            continue
-        packed = (match_packed_b_node(node, tile.inputs), match_packed_pair_node(node, tile.inputs))
-        refusal = _node_refusal(tile, target, node, fragment_epilogue, packed)
-        parent = parents.get(id(node))
-        if (
-            id(node) in derived
-            and node.axis.extent.is_static
-            and node.axis.extent.as_static() == 1
-            and isinstance(parent, Fold)
-            and parent.axis is not None
-        ):
-            assert parent.combine is not None and node.combine is not None
-            seam = ((), (), tuple(parent.combine.results[: -len(node.combine.results)]))
-            k_axis = parent.axis
-        else:
-            seam = cone_seam(node.a, node.axis.name) if isinstance(node.a, Fold) and refusal is None else None
-            k_axis = node.axis
-        producer = None
-        if isinstance(node.a, Fold):
-            nested = tuple(site.node for site in sites(node.a) if is_contraction(site.node) and edge_refs_axis(site.node, k_axis.name))
-            producer = nested[0] if len(nested) == 1 else None
-        need = sibling.get(id(node))
-        need_step = need is not None
-        if need is None and producer is not None:
-            need = node_id_spelling(inventory.site(producer))
-        facts[site] = _ContractionFacts(
-            k_axis=k_axis,
-            seam=seam,
-            producer=producer,
-            need=need,
-            packed=packed,
-            need_step=need_step,
-        )
-    return facts
 
 
 def _inner_free(tile: TileOp):
@@ -193,141 +109,6 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     )
 
 
-def _fold_states(op) -> frozenset[str]:
-    """Return the Fold state names visible to the projection tail."""
-    if not isinstance(op, Fold):
-        return frozenset()
-    if op.axis is not None:
-        return frozenset(op.defines())
-    return frozenset(name for edge in (*op.operands, *op.body) if isinstance(edge, Fold) for name in edge.defines())
-
-
-def _fragment_epilogue_ok(tail: list, states: frozenset[str]) -> bool:
-    """Whether every output is a straight-line projection of a Fold state."""
-    definitions: set[str] = set()
-    for stmt in tail:
-        if isinstance(stmt, Loop):
-            return False
-        if isinstance(stmt, Load) and {name for index in stmt.index for name in index.free_vars()} & definitions:
-            return False
-        definitions.update(stmt.defines())
-    body = Body(tail)
-    return all(body.backward_cone(stmt.values).external_reads & states for stmt in tail if isinstance(stmt, Write))
-
-
-def _channel_dtype(tile: TileOp, node, target):
-    """Return the one tensor-core dtype shared by the contraction's B channels."""
-    dtypes = {edge_dtypes(channel.b, tile.inputs)[0] for channel in node.channels}
-    if len(dtypes) == 1:
-        return next(iter(dtypes))
-    eligible = {dtype for dtype in dtypes if dtype is not None and atoms_for(dtype, ctx=target)}
-    return next(iter(eligible)) if len(eligible) == 1 else None
-
-
-def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: tuple = (None, None)) -> str | None:
-    """Return why static node facts rule out every tensor-core atom."""
-    ring = node.semiring
-    if ring is None or tuple(operator.name for operator in ring) != ("multiply", "add"):
-        return "the mma atom realizes only the (multiply, add) semiring instance"
-    if not tile.inputs:
-        return "no typed inputs expose operand dtypes"
-    if len(tile.place.free) < 2:
-        return "the grid supplies no output-axis pair for a fragment"
-    if not fragment_epilogue:
-        return "the projection epilogue is not a per-fragment straight-line program"
-    if isinstance(node.a, Fold) and node.a.axis is not None:
-        return "a nested scheduling site inhabits the A edge"
-    if len(node.channels) == 1 and isinstance(node.channels[0].b, Fold) and node.channels[0].b.axis is not None:
-        return "a nested scheduling site inhabits the B edge"
-
-    dtype = edge_dtypes(node.a, tile.inputs)[0]
-    if packed[1] is not None:
-        return None
-    if dtype is not None and dtype.logical_elems != 1:
-        return f"a packed {dtype} A pairs with no packed peer; no atom multiplies packed codes against decoded ones"
-    if dtype is not None and dtype.nbytes == 1:
-        if not isinstance(node.a, Load):
-            return "fp8 fragment loads require a materialized A edge"
-        if _channel_dtype(tile, node, target) != dtype:
-            return "fp8 fragment loads require one matching operand dtype"
-        if not atoms_for(dtype, ctx=target):
-            return f"no tensor-core atom takes a {dtype} multiplicand on this target"
-        return None
-
-    atom_dtype = dtype if atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
-    if atom_dtype is None:
-        return "no operand dtype selects a tensor-core atom family"
-    if atom_dtype.nbytes == 1 and atom_dtype != dtype:
-        return "a demoting compute fill cannot produce an fp8 fragment"
-    if not (atoms_for(atom_dtype, ctx=target) or atoms_for(atom_dtype, acc=atom_dtype, ctx=target)):
-        return f"no tensor-core atom takes a {atom_dtype} multiplicand on this target"
-    return None
-
-
-def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None, None)) -> tuple[str, ...]:
-    """Project every tensor-core atom allowed by static node and target facts."""
-    dtype = edge_dtypes(node.a, tile.inputs)[0]
-    a_is_load = isinstance(node.a, Load)
-    a_step = gmem_axis_step(node.a, node.axis.name, tile.inputs) if a_is_load else None
-    shapes = {**tile.inputs, **tile.outputs}
-
-    def bindable(names: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(
-            name for name in names if _atom_refusal(ATOM_REGISTRY[name], dtype, a_step, a_is_load, tail, tile.place.free, shapes) is None
-        )
-
-    if (pair := packed[1]) is not None:
-        if any(operand.bits is None for operand in pair.b):
-            return ()
-        weights = {tile.inputs[operand.bits.input].dtype for operand in pair.b}
-        return atoms_for(next(iter(weights)), ctx=target) if len(weights) == 1 else ()
-    if dtype is not None and dtype.nbytes == 1:
-        return bindable(atoms_for(dtype, ctx=target))
-    atom_dtype = dtype if atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
-    base = bindable(atoms_for(atom_dtype, ctx=target))
-    reduced_acc = bindable(atoms_for(atom_dtype, acc=atom_dtype, ctx=target))
-    return tuple(dict.fromkeys((*base, *reduced_acc)))
-
-
-def _tile_refusals(tile: TileOp, target, inventory: ScheduleInventory) -> dict[tuple[int, str], str]:
-    """Project problem/target reasons for atom choices absent from a node domain."""
-    tail = projection_tail(tile)
-    fragment_epilogue = _fragment_epilogue_ok(tail, _fold_states(tile.op))
-    shapes = {**tile.inputs, **tile.outputs}
-    out = {}
-    for site in inventory.tile_sites:
-        node = inventory.node(site)
-        view = inventory.views[site]
-        if not isinstance(view, Reduction) or view.contraction is None:
-            continue
-        packed = (match_packed_b_node(node, tile.inputs), match_packed_pair_node(node, tile.inputs))
-        node_why = _node_refusal(tile, target, node, fragment_epilogue, packed)
-        dtype = edge_dtypes(node.a, tile.inputs)[0]
-        a_is_load = isinstance(node.a, Load)
-        a_step = gmem_axis_step(node.a, node.axis.name, tile.inputs) if a_is_load else None
-        for atom in ATOM_REGISTRY.values():
-            if not atom.name.startswith("mma_"):
-                continue
-            if target is not None and not atom.available_on(target):
-                cc = target.compute_capability
-                why = f"atom {atom.name} requires target feature {atom.target_feature}, which is unavailable on sm_{cc[0]}{cc[1]}"
-            else:
-                why = node_why
-                if why is None and packed[1] is None:
-                    why = _atom_refusal(atom, dtype, a_step, a_is_load, tail, tile.place.free, shapes)
-            if why is not None:
-                out[(site, atom.name)] = why
-    return out
-
-
-def _warp_atoms(tile: TileOp, target, node, packed: tuple = (None, None)) -> tuple[str, ...]:
-    """Project tensor-core atoms from contraction, dtype, address, and target facts."""
-    tail = projection_tail(tile)
-    if _node_refusal(tile, target, node, _fragment_epilogue_ok(tail, _fold_states(tile.op)), packed) is not None:
-        return ()
-    return _atom_families(tile, target, node, tail, packed)
-
-
 def _contraction_domain(
     tile: TileOp,
     target,
@@ -336,7 +117,7 @@ def _contraction_domain(
 ) -> tuple[ReductionSchedule, ...]:
     """Project one contraction's locally realizable scalar and tensor-core choices."""
     per_cell_reductions = _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
-    allowed_atoms = _warp_atoms(tile, target, node, facts.packed)
+    allowed_atoms = _warp_atoms(tile, target, node, facts)
     wide_warp_tiles = tuple(
         plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
     )
@@ -523,9 +304,6 @@ class _ScheduleLeaf(Fork):
 
     def expand(self) -> list[TileOp]:
         source = self.tile
-        root_choice = self.schedule.nodes[0]
-        if isinstance(root_choice, ProjectionSchedule) and root_choice.tile.is_tiled:
-            source = _pointwise_variant(source, root_choice.tile)
         sched = Sched(source.op, place=source.place.on_grid())
         placed = {}
         resolved = {}
@@ -566,43 +344,6 @@ class _ScheduleLeaf(Fork):
                 workers=WarpSpec(self.schedule.kernel.work.producer) if self.schedule.kernel.work.producer else None,
             )
         ]
-
-
-def _pointwise_variant(tile: TileOp, plan: Tile) -> TileOp:
-    """Apply one pure pointwise register strip selected by a projection TILE choice."""
-    inner = tile.place.free[-1]
-    width = plan.reg_n
-    op = tile.op
-    ssa = {name for stmt in op.body for name in stmt.defines()}
-    loads = []
-    computes = []
-    stores: list[OutputSpec] = []
-    for offset in range(width):
-
-        def rename(name: str, offset: int = offset) -> str:
-            return f"{name}__u{offset}" if name in ssa else name
-
-        sigma = Sigma(
-            {
-                inner.name: BinaryExpr(
-                    "+",
-                    BinaryExpr("*", Var(inner.name), Literal(width, "int")),
-                    Literal(offset, "int"),
-                )
-            }
-        )
-        for stmt in op.body:
-            rewritten = stmt.rewrite(rename, sigma)
-            (loads if isinstance(rewritten, Load) else computes).append(rewritten)
-        stores.extend(replace(spec, write=spec.write.rewrite(rename, sigma)) for spec in tile.output_specs)
-    new_inner = replace(inner, extent=Dim(inner.extent.as_static() // width))
-    free = (*tile.place.free[:-1], new_inner)
-    return replace(
-        tile,
-        op=Fold.projection(body=Body((*loads, *computes))),
-        place=Placement(free=free),
-        output_specs=tuple(stores),
-    )
 
 
 class _SampleRow(dict):
@@ -684,7 +425,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
             dict(knobs),
             ctx,
             assignment,
-            frozendict({**prefix, **codec._encode_accepted(assignment)}),
+            frozendict({**prefix, **codec.encode_accepted(assignment)}),
             problem.contractions,
             pool_id,
         ),

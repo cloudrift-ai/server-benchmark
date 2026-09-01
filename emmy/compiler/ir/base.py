@@ -50,7 +50,7 @@ def _io_fingerprint(op: Op) -> tuple:
     ``b0, b1, …``, so the types ride beside the key). An f16 and an f32 trace of one body key
     apart (different atom eligibility), and so do a ``(128, 128)`` and a ``(4, 32, 128)`` output
     over one iteration space — the buffer's dim spelling decides store addressability
-    (``lowering/_addr.split_addressable``), and a golden measured on the flat kernel must not
+    (:func:`emmy.compiler.ir.address.split_addressable`), and a golden measured on the flat kernel must not
     join a kernel that cannot realize its row."""
 
     def sig(t) -> tuple:

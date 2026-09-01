@@ -56,12 +56,11 @@ def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
     graph.add_node(InputOp(), [], Tensor(name, shape, dtype), node_id=name)
 
 
-def test_cut_and_assignment_passes_share_the_generic_schedule_driver() -> None:
+def test_cut_passes_share_the_generic_schedule_driver() -> None:
     from emmy.compiler.ir.schedule import schedule
 
     assert _CUT.schedule is schedule
     assert _SPLIT.schedule is schedule
-    assert _SCHEDULE.schedule is schedule
 
 
 def test_cut_passes_precede_assignment_enumeration() -> None:

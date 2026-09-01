@@ -50,9 +50,17 @@ they create subtrees, without materializing the full node × edge product. `exte
 that granularity; `extend` derives and composes their support. Kernel picks form the final frontier. The fragment-seam
 relation has no pipeline-side copy.
 
+The schedule package imports no pipeline implementation. Shared Fold-tree traversal, address algebra, and packed
+operand recognition live in `ir/fold_tree.py`, `ir/address.py`, and `ir/packed.py`; `ClassicProblem.from_tile` derives
+its complete facts there rather than calling upward into domain projection. Per-problem and per-domain compatibility
+indexes are derived memo tables, excluded from pickles and rebuilt after transport.
+
 `ClassicScheduleCodec` is the concrete strict wire boundary. It accepts a `ClassicScheduleContext`, validates complete
 assignments through that context, and encodes canonical `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` rows. There is
-no codec base class: a second schedule family should demonstrate any shared codec contract before one is extracted.
+one syntax-only `parse` step for graph reconstruction: materialization is decoded from the typed schedule, construction
+then validates the complete TileOp through the context, and canonical encoding is checked with that validated source.
+There is no codec base class: a second schedule family should demonstrate any shared codec contract before one is
+extracted.
 
 The structural cut phase runs before assignment composition. `030_cut` decides stored-Fold-edge placement and
 `035_split_reduce` then decides the cross-CTA reduction split; fresh pieces re-enter those ordinary passes. Both pass

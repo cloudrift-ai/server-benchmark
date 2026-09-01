@@ -24,7 +24,6 @@ Empty enumeration remains a skip rather than a guessed schedule.
 from __future__ import annotations
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule import schedule as schedule
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import Fork

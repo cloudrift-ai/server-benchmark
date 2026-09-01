@@ -31,6 +31,7 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.atom import AtomKind
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -51,6 +52,7 @@ from emmy.compiler.ir.kernel.ir import (
     RegStore,
     frag_layout,
 )
+from emmy.compiler.ir.packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_body, operand_name, subst_free
 from emmy.compiler.ir.schedule import Side, Stage, Tile
@@ -58,8 +60,6 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat_dtypes, make_cone
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
-from emmy.compiler.pipeline.passes.lowering._packed import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
 from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -635,7 +635,7 @@ def _slab_operands(
     else). ``elems`` are the per-operand element dtypes (``DataType`` or ``None`` = the
     transport-level dtype) — a mixed-dtype scalar contraction (fp32 A × fp16 B) must size each slab
     and fill by its OWN element width. ``pads`` are the per-operand slab row pads in elements
-    (:data:`~emmy.compiler.pipeline.passes.lowering._addr.BYTE_SLAB_PAD` on a
+    (:data:`~emmy.compiler.ir.address.BYTE_SLAB_PAD` on a
     cp.async-staged byte slab; 0 everywhere else)."""
     ops: list[Operand] = []
     for i, (tag, is_row) in enumerate((("a", True), ("b", b_trans))):
@@ -1675,7 +1675,7 @@ class _MmaOps(_AtomOps):
         """Per-operand slab element dtypes — the atom's operand dtype, except a 1-byte
         (fp8-stored) operand, whose slab keeps the STORAGE dtype: the raw bytes stage verbatim
         and the drain converts (W8A16) or repacks (the k32 atoms). Mirrors the resolver's dtype
-        legality (``_staging.resolve_warp_stage``), so a mismatch that staged would already
+        legality (``schedule.staging.resolve_warp_stage``), so a mismatch that staged would already
         have declined there."""
         out = []
         for edge, role in ((self.c.a, "a"), (self.c.b, "b")):

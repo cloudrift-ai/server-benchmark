@@ -353,13 +353,6 @@ MAX_FRAGMENT_CELLS = 32
 # so 32 cells remain legal; Volta's logical 16x16 cell spends eight and is capped at 16 cells.
 MAX_FRAGMENT_REGISTERS = 128
 
-# Hardware register ceilings shared by every NVIDIA target Emmy supports. A schedule whose
-# statically declared fragments alone exceed either limit must spill before accounting for scalar
-# state, addresses, or compiler temporaries. The paired-contraction legality gate uses these as a
-# lower-bound check; it does not try to predict occupancy or profitability.
-MAX_REGISTERS_PER_THREAD = 255
-MAX_REGISTERS_PER_CTA = 64 * 1024
-
 # The scalar register-tile candidate spaces. ``_SCALAR_REGISTER_SPACE`` is the pure register-only
 # grid (one thread owns the output tile); ``_SCALAR_1D_TILE_SPACE`` spreads threads along N;
 # ``_SCALAR_PARALLEL_TILE_SPACE`` crosses two-dimensional thread tiles with per-thread register

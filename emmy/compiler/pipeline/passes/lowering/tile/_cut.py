@@ -19,6 +19,7 @@ from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.fold_tree import walk
 from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -35,7 +36,6 @@ from emmy.compiler.ir.tile.ops import edge_dtypes
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
-from emmy.compiler.pipeline.passes.lowering.tile._tree import walk
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 
@@ -233,7 +233,7 @@ def _stored_folds(member):
 
     A plain statement binds axes, not SSA definitions, so it is not a resolution scope — but it can
     HOLD a stored fold (a ``ProjectionRegion`` keeps its cones), and one reached only that way had
-    no environment at all, which drops its seam. ``_tree.walk`` alternates node-wise and
+    no environment at all, which drops its seam. ``ir.fold_tree.walk`` alternates node-wise and
     statement-wise for the same reason."""
     if isinstance(member, Fold):
         yield member

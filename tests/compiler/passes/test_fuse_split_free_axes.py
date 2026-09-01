@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.address import split_addressable
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -322,14 +323,12 @@ def test_canonical_nest_classifies_as_contraction():
 
 
 def _split_store_ok(index: tuple, shape: tuple, free_names=("m", "n"), atom=(16, 8, 16)) -> bool:
-    """Whether an mma fragment store with output ``atom`` cells can address ``index`` — the
-    scheduler's own gate (``_split_store_refusal``), so the roles mapping under test is the
-    production one."""
-    from emmy.compiler.pipeline.passes.lowering.tile._classic import _split_store_refusal
-
-    free = tuple(Axis(nm, Dim(4)) for nm in free_names)
-    shapes = {"out": Tensor("out", shape)}
-    return _split_store_refusal([Write(output="out", index=index, value="acc")], free, atom, shapes) is None
+    """Whether an mma fragment store can address both free-axis roles of ``index``."""
+    shape = tuple(Dim(extent) for extent in shape)
+    roles = ((free_names[-1], atom[1], True),)
+    if len(free_names) >= 2:
+        roles = (*roles, (free_names[-2], atom[0], False))
+    return all(split_addressable(index, shape, name, extent, trailing) for name, extent, trailing in roles)
 
 
 def _pair(name: str, q: int, op: str):

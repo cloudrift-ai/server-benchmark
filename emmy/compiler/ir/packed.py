@@ -1,8 +1,7 @@
 """The PACKED-PAIR k-block operand reading — the NVFP4 weight's shape, recognized once.
 
-One question, asked by three consumers that must not drift apart: classic domain projection
-(``tile/_classic.py``, off ``_ContractionFacts.packed``), the stage resolver
-(``_staging.resolve_warp_stage``) and the materializer (``kernel/_atom._staged``). Each asks
+One question, asked by three consumers that must not drift apart: classic domain projection,
+the schedule stage resolver, and kernel materialization. Each asks
 :func:`match_packed_b_node` and gets the same answer or ``None``.
 
 It reads a SHAPE, never a checkpoint format: a packed-pair storage dtype (``logical_elems == 2``),
@@ -13,9 +12,9 @@ It is a CONSUMER'S reading of an already-built contraction — ``TileOp`` post-i
 B as a plain projection, and this asks what that projection contains — so it is not one of the
 stages that build the tree, and it does not belong inside one.
 
-It lives in ``lowering/`` for the reason :mod:`._addr` does: its three consumers straddle the
-enumeration and assembly layers, and a reading both need cannot sit inside either without the
-other importing across that boundary.
+It is an IR reading because its consumers straddle schedule semantics and kernel lowering. Keeping
+it below both layers lets them share one recognizer without either importing the other's pipeline
+implementation.
 """
 
 from __future__ import annotations

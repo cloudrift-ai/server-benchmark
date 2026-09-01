@@ -164,14 +164,15 @@ choice. For one immutable schedule restriction `c`, unscheduled Fold program `p`
 candidate set and one result:
 
     D(p, t) = K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)
-    Algorithm 1(c, p, t) = {a ∈ D(p, t) | c.accepts(a) ∧ accepts(p, t, a)}
+    Algorithm 1(c, p, t) = {a ∈ D(p, t) | extend(c + p + t, a) succeeds}
 
 There is no production-specific product and no second notion of membership. The generic visitor carries `c + p + t`
 intact and never unpacks its restriction or imports classic scheduling. The context may reject a prefix only when its
 combined state proves that no completion can satisfy the same relation; it must still enumerate exactly
 Algorithm 1(c, p, t), so traversal order can change only evaluation cost. Every leaf crosses the complete
-compatibility relation once at the strict codec boundary, then carries that accepted typed assignment and canonical
-row through search and materialization. Downstream reads never repeat the compatibility walk. Bounded spaces are
+compatibility relation once in the context traversal; the classic adapter encodes that already-accepted typed
+assignment and carries its canonical row through search and materialization. Downstream reads never repeat the
+compatibility walk. Bounded spaces are
 exhaustively compared with the literal Cartesian reference. That compatibility pruning matters because on
 flash attention the unconstrained product is 8.9e6 against 13,280 compatible rows, and on an EXL3 coded linear 5.3e12
 against 19,407,312.
@@ -259,7 +260,7 @@ A TILED producer produces fragments, so it composes only with a warp consumer ov
 family matches and whose slab chunk the producer's single-unit N tile fills exactly. The paired producer/consumer
 register bound is NOT cross-site — the producer's
 fragment block is a function of the consumer's own stage — so it filters at option construction. Derived sites (the
-synthesized PV) join the one walk in `tile/_tree.py`; a derived unit-marker contraction inherits its enclosing fold's
+synthesized PV) join the one walk in `ir/fold_tree.py`; a derived unit-marker contraction inherits its enclosing fold's
 reduction domain, a prescan fact, never a rewritten tree.
 
 **The producer band is inventory a stage can drive.** `+p<n>` rides `WORK`: an option whose resolved stage is TMA also
@@ -284,13 +285,13 @@ cooperative band claims the kernel's inventory as the `t<coop>` thread inventory
 the private partial assignment reconciles it with every other site. A cooperative / ILP `REDUCE` pin reaches only
 the exact per-cell node site; a tiled plan offers nothing under it, while a serial choice remains valid for every tile.
 
-**The pointwise register strip is a `TILE` value materialized as a term variant.** The pure pointwise ROOT cell is the
-one zero-axis `TILE` site (`path.family_sites`); the `map_tile_moves` ladder offers `f<r>` beside the flat per-cell
-tile wherever `r` divides the static inner free extent (a masked overhang is refused because the slid last cell is no
-longer a provably aligned affine base, which defeats the load/store vectorizers the strip exists to feed — measured,
-see `_strip_refusal`), and a row whose root `TILE` names a width unrolls the cell into `r` grouped loads · computes ·
-writes at materialization — a different term, hence a different structural identity and the variant key
-(`identity_key(with_io=True, with_knobs=True)`).
+**The pointwise register strip is a `TILE` value realized after schedule sites are consumed.** The pure pointwise ROOT
+cell is the one zero-axis `TILE` site (`path.family_sites`); the `map_tile_moves` ladder offers `f<r>` beside the flat
+per-cell tile wherever `r` divides the static inner free extent. A masked overhang is refused because the slid last
+cell is no longer a provably aligned affine base, which defeats the load/store vectorizers the strip exists to feed
+(see `_strip_refusal`). The chosen width keeps the immutable Fold term and its schedule-site identities intact.
+Kernel materialization then unrolls the root cell into `r` grouped loads · computes · writes, so the schedule row—not
+a rewritten scheduling problem—distinguishes the variant.
 
 **`RASTER` leads the walk as its own fork level.** The CTA launch-order codec is kernel-global with nothing for
 the partial assignment to reconcile, so it is decided once per kernel, ahead of the sites: each candidate value is one
@@ -418,7 +419,7 @@ place, and one read from outside the region, whose value has to be stored for th
 
 That is a boundary-placement rule, not a lowering-driven exception. It asks only which side a value's readers are on,
 and it is what lets a contraction see a packed operand's two scale levels — the raw per-block byte and the k-invariant
-per-tensor factor — as separate loads, the shape `lowering/_packed.py` reads and the block-scaled tensor-core cell
+per-tensor factor — as separate loads, the shape `ir/packed.py` reads and the block-scaled tensor-core cell
 requires. Materializing the fused product instead does not merely cost bytes; it erases the block structure from the
 consumer's index, and a reading that cannot prove k-block invariance declines.
 

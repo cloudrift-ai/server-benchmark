@@ -19,13 +19,13 @@ from emmy.compiler.diagnostics.bank_conflicts import lane_bank_distribution
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32, DataType
 from emmy.compiler.graph import Tensor
+from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Load
-from emmy.compiler.pipeline.passes.lowering._addr import BYTE_SLAB_PAD
 from emmy.compiler.pipeline.search.space import stage_moves
 from tests.compiler.helpers import requires_cuda
 

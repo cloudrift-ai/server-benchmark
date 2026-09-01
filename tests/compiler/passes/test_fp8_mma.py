@@ -209,14 +209,11 @@ def _f8_term(cap=(12, 0), *, a_dtype=F8E4M3, b_dtype=F8E4M3, k=512):
 
 def _offered_atoms(tile, ctx, node):
     """The tensor-core atom domain projected from the node and target static facts."""
-    from emmy.compiler.ir.tile.ops import projection_tail
-    from emmy.compiler.pipeline.passes.lowering._packed import match_packed_b_node, match_packed_pair_node
+    from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleContext, _warp_atoms
 
-    tail = projection_tail(tile)
-    packed = (match_packed_b_node(node, tile.inputs), match_packed_pair_node(node, tile.inputs))
-    if sched._node_refusal(tile, ctx, node, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op)), packed) is not None:
-        return ()
-    return sched._atom_families(tile, ctx, node, tail, packed)
+    problem = ClassicProblem.from_tile(tile, ctx)
+    site = ClassicScheduleContext(problem).site(node)
+    return _warp_atoms(tile, ctx, node, problem.contractions[site])
 
 
 def test_k32_domain_is_independent_of_the_precision_restriction(monkeypatch):

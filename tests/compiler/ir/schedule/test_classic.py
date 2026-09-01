@@ -59,6 +59,7 @@ from emmy.compiler.ir.schedule.views import (
 )
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
 from tests.compiler.helpers import classic_cartesian_assignments, enumerate_classic_reference
 
 
@@ -508,6 +509,39 @@ def test_generic_driver_returns_one_independent_choice_domain() -> None:
     assert tuple(assignment.kernel for assignment in assignments) == ("fuse", "cut")
 
 
+def test_generic_fork_adapter_drives_a_schedule_context_lazily() -> None:
+    problem = _problem(_sum())
+    inventory = ClassicScheduleContext(problem)
+    direct = _direct(inventory)
+    context = ClassicScheduleContext(
+        problem,
+        ClassicDomains(
+            kernel=(direct.kernel,),
+            nodes={site: (choice,) for site, choice in direct.nodes.items()},
+            edges={edge: (choice,) for edge, choice in direct.edges.items()},
+        ),
+    )
+    accepted = []
+
+    def leaf(assignment: Schedule) -> DeferredFork:
+        accepted.append(assignment)
+        return DeferredFork(lambda: context.problem.tile_op)
+
+    forks = schedule_forks(
+        context,
+        branch_knobs={},
+        row_delta=lambda before, after: {"position": str(after.position - before.position)},
+        leaf=leaf,
+        pool_id="test",
+        pool_bound=1,
+        pool_descent_bound=1,
+    )
+
+    assert forks and not accepted
+    assert tuple(iter_leaves(forks))
+    assert accepted
+
+
 def test_schedule_is_immutable_without_schedule_family_mutators() -> None:
     context = ClassicScheduleContext(_problem(_sum()))
     original = _direct(context)
@@ -567,7 +601,12 @@ def test_tile_requires_complete_materialization() -> None:
     )
 
     with pytest.raises(ValueError, match="exactly the tiled node sites"):
-        TileOp(op=root, schedule=schedule, materialization=ClassicMaterialization({}, {}))
+        TileOp(
+            op=root,
+            place=Placement(free=(Axis("m", 8), Axis("n", 8))),
+            schedule=schedule,
+            materialization=ClassicMaterialization({}, {}),
+        )
 
 
 def test_tile_graph_round_trip_uses_the_strict_schedule_codec() -> None:

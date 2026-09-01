@@ -82,10 +82,8 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
     The tile layer (``enumeration`` + ``assembly`` + ``split``) runs ABOVE the
     kernel pass layer; a tile pass importing ``lowering.kernel`` is a back-edge in
     the pass DAG — a tile pass depending on a downstream kernel pass's internals.
-    What the two layers genuinely share lives in the ``lowering/`` root modules —
-    ``_addr`` (addressing algebra: ``gmem_axis_step`` / ``gmem_row_stride``, ``BYTE_SLAB_PAD``) and
-    ``_reduction`` (``Reduction``, ``loop_state_head``) — pure ``ir.*`` queries and
-    layout facts imported by both layers.
+    What the two pass layers genuinely share lives below them: addressing and packed-operand
+    readings in ``ir``, and lowering-only reduction helpers in the ``lowering/`` root.
 
     If this fires: move the shared helper into a ``lowering/`` root module and import
     it there from both layers, rather than reaching down into ``lowering/kernel``.
@@ -102,6 +100,18 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
         "lowering/tile/**/*.py must not import from lowering/kernel — back-edge in the pass DAG.\n"
         "Shared structural predicates live in lowering/_predicates.\n" + "\n".join(offenders)
     )
+
+
+def test_schedule_ir_does_not_import_pipeline() -> None:
+    """Schedule semantics sit below the pipeline that projects and traverses their domains."""
+    schedule_dir = _REPO_ROOT / "emmy" / "compiler" / "ir" / "schedule"
+    forbidden = "emmy.compiler.pipeline"
+    offenders: list[str] = []
+    for py in sorted(schedule_dir.rglob("*.py")):
+        for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+            if forbidden in line and "import" in line:
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
+    assert not offenders, "ir/schedule must not depend on its pipeline consumer.\n" + "\n".join(offenders)
 
 
 # ---------------------------------------------------------------------------

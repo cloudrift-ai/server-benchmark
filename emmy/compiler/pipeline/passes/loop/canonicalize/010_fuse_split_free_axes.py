@@ -21,7 +21,7 @@ f``, the recomposition fold in ``Expr.simplify``); a store that indexes the pair
 buffer dims keeps the honest split-store spelling — ``[…, f/Q, f%Q]`` when the buffer's
 row-major flatten folds it back to an affine address, or the permuted ``[…, f/Q, …, f%Q]`` of a
 transposed output, whose address is per-element exact on every scalar tier and whose warp-tier
-addressability is the scheduler's legality question (``lowering/_addr.split_addressable``). Any access where a
+addressability is the scheduler's legality question (``ir.address.split_addressable``). Any access where a
 div/mod residue would otherwise survive — an axis used alone, a predicate over the pair —
 declines the pair, and the nest stands.
 
@@ -37,6 +37,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
+from emmy.compiler.ir.address import split_pair
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
@@ -44,7 +45,6 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import simplify as _simplify_stmt
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.lowering._addr import split_pair
 
 PATTERN = [Pattern("root", LoopOp)]
 

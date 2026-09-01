@@ -133,18 +133,13 @@ def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> N
     from emmy.compiler.ir.tile import ops as tile_ops  # noqa: PLC0415
 
     calls: list[tuple] = []
-    original = _classic.cone_seam
+    original = tile_ops.cone_seam
 
     def spy(cone, k_name):
         calls.append((cone, k_name))
         return original(cone, k_name)
 
-    monkeypatch.setattr(_classic, "cone_seam", spy)
-    monkeypatch.setattr(
-        tile_ops,
-        "cone_seam",
-        lambda *_: (_ for _ in ()).throw(AssertionError("the fill must reuse the prescan's seam")),
-    )
+    monkeypatch.setattr(tile_ops, "cone_seam", spy)
     assert _rows(FIXTURES["fused_norm_linear"]())
     assert calls
     keys = [(id(cone), k_name) for cone, k_name in calls]

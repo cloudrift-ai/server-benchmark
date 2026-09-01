@@ -698,6 +698,48 @@ def test_prior_writes_the_report_as_json(run_cli, tmp_path):
     assert summary["metrics"]["regret1"]["groups"] == 1
 
 
+def test_the_golden_dataset_builds_pools_over_the_columns_its_halves_declare(tmp_path, monkeypatch, caplog):
+    """``--dataset golden`` asks the models it is about to score which columns they read, instead of
+    enumerating every column the featurizer can spell. The spec it builds with is exactly the union of the
+    halves' declarations, and it lands in the header under the same ``features`` key ``emmy fit`` uses.
+
+    In-process rather than through ``run_cli``: the real builder traces and enumerates the whole golden
+    corpus, which is minutes to hours, so the builder is patched the way ``emmy fit``'s own command test
+    patches it. What is under test is which spec reaches it."""
+    import argparse
+    import logging
+
+    from emmy.commands import eval as eval_cmd
+    from emmy.compiler.pipeline.search.data.group import GoldenGroup
+    from emmy.compiler.pipeline.search.prior import OfflinePrior
+
+    seen: dict[str, str] = {}
+
+    def fake_build(spec, **_kwargs):
+        seen["spec"] = spec
+        rows = [{"S_ext_n_symbolic_axis": 0.0, "H_opt": 3.0, "D_threads": float(t)} for t in (128, 256)]
+        return [GoldenGroup.from_dicts(f"{_GPU}/k", "k", "thread", _GPU, "k", 0, rows)], []
+
+    monkeypatch.setattr("emmy.commands.fit.build_golden_groups", fake_build)
+    monkeypatch.setattr(eval_cmd, "_emit_golden_deploy_check", lambda *_args, **_kwargs: None)
+
+    parser = argparse.ArgumentParser()
+    eval_cmd.register_eval_command(parser.add_subparsers())
+    out = tmp_path / "report.json"
+    args = parser.parse_args(["eval", "prior", "--dataset", "golden", "--json", str(out), "--online-file", str(tmp_path / "absent.json")])
+    with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
+        args.func(args)
+
+    # The offline half alone, because the online one is absent and therefore dropped before scoring.
+    declared = ",".join(sorted(OfflinePrior().columns))
+    assert seen["spec"] == declared
+    assert seen["spec"] != "*"
+    assert json.loads(out.read_text())["header"]["features"] == declared
+    # The console keeps the width, not 60 column names: the spec is what the JSON is for.
+    provenance = next(line for line in caplog.messages if "pool_sample=" in line)
+    assert declared not in provenance and f"({len(declared)} chars)" in provenance
+
+
 def test_nodes_dataset_rejected_by_db_only_subcommand(run_cli, tmp_path):
     """Widening the ``--dataset`` vocabulary with ``nodes`` must not leak into the
     db-only subcommands — ``eval variants`` still exits 2 on it."""

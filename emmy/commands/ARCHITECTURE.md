@@ -690,8 +690,13 @@ pools it is given and therefore selects nothing.
 
 Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
 feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
-the metrics header and artifact provenance so two fits are only compared under matching views. **The default view is
-the trainer's own**: `search/data/group.DEFAULT_FEATURES` (`D_*,MMA_tier,MMA_acc_bits`) for `linear`, and
+the metrics header and artifact provenance so two fits are only compared under matching views. The spec is the whole
+rule — the filter keeps what the spec names and nothing else — so the recorded view is exactly what was trained on,
+and a view feeding a model that routes on `S_ext_n_symbolic_axis` names that column. The flag is the fit's alone: a
+fit DEFINES a not-yet-existing model's columns, while `eval prior --dataset golden` consumes models it already holds
+and derives its view from what they declare (`Prior.columns`), recording it under the same `features` header key.
+**The default view is the trainer's own**: `search/data/group.DEFAULT_FEATURES`
+(`D_*,MMA_tier,MMA_acc_bits,S_ext_n_symbolic_axis`) for `linear`, and
 `prior/fit/catboost.TREE_FEATURES` for `catboost` — that set minus every feature that exists only because an
 additive model cannot form it (monotone duplicates, `-|x - target|` folds, threshold flags, the `D_tma_*`
 interaction mirrors), each of which a tree re-derives by splitting on columns the view keeps.

@@ -11,6 +11,9 @@ Five subcommands:
   The summaries are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
   writes the same summaries into its ``metrics.json``, so a fit and an eval state the golden
   screen with one implementation rather than two that agree by coincidence.
+  ``--dataset golden`` builds its candidate pools over the columns those halves DECLARE
+  (``Prior.columns``, the routing stamp included), and records the resulting view under the same
+  ``features`` header key the fit records its ``--features`` under.
 - ``eval golden``    — validate one canonical golden YAML against the pinned serving
   configuration and live GPU, then reproduce its rows and audit the exact serving matrix.
 - ``eval variants``  — per-kernel leaderboard of the tune DB's measured variants
@@ -293,19 +296,45 @@ def _measured_report(args, halves):
 def _golden_report(args, halves):
     """``eval prior --dataset golden`` — the report over the recorded golden corpus.
 
-    Built by ``emmy fit``'s own case builder over the FULL featurization, not the fit's ``D_*`` view. The view
-    is a property of the model being fitted, and this command scores two model classes: the linear half reads
-    only its own weight names, so its ranks are identical either way, while the online half regresses on the
-    ``S_*`` / ``H_*`` columns a narrow view drops and would otherwise be asked about a kernel with no shape."""
+    Built by ``emmy fit``'s own case builder, over the union of the columns the halves about to score DECLARE
+    (:attr:`~...search.prior.base.Prior.columns`) rather than a view named here. A view is a property of a
+    model, and this command holds the models: the linear half reads only its own weight names, and the online
+    half regresses on the ``S_*`` / ``H_*`` columns a fit's ``D_*`` view drops and would otherwise be asked
+    about a kernel with no shape. Both facts are in their artifacts, so neither has to be restated — the
+    command previously enumerated every column the featurizer can spell because it had no way to ask.
+
+    Narrowing is safe for SCORES: an absent column and a column outside a model's own list are the same thing
+    to ``score_rows``, which projects the pool onto its own names either way. Verified over the
+    ``matmul.square.512`` pools on four cards, both weight sets — scores bit-identical against the full
+    featurization.
+
+    It is NOT neutral for pool formation, which a reader comparing two reports has to know. Pool identity is a
+    digest of the packed matrix, so two enumerations separated only by columns no scoring model reads fold into
+    one group under a narrower view — 27 softmax groups under ``"*"``, 26 under the shipped offline half's
+    declaration — and ``groups``, ``positives`` and the merged pool's rank move with it. A merged group is one
+    candidate pool competed over by two goldens, which is what a group means here; the ``features`` header key
+    is what says which view produced the numbers.
+
+    Narrowing keeps the pools ROUTABLE for the same reason: the routing stamp is a column the halves declare,
+    so it lands in the spec like any other name (why that matters:
+    :mod:`~emmy.compiler.pipeline.search.prior.linear_model`).
+
+    Every half in ``halves`` can answer — ``_prior_halves`` has already dropped an unfit one, and a fitted one
+    always has columns — so there is no widen-and-warn path to get wrong."""
     from emmy.commands.fit import build_golden_groups  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries  # noqa: PLC0415
 
+    view = ",".join(sorted({col for _half, prior in halves for col in prior.columns}))
     logger.info("Building golden pools (each golden under its own card's context) ...")
-    groups, skipped = build_golden_groups("*", sample=args.pool_sample, kernel=args.kernel)
+    groups, skipped = build_golden_groups(view, sample=args.pool_sample, kernel=args.kernel)
     header = {
         "dataset": "golden",
         "source": "recorded golden corpus",
         "kernel": args.kernel,
+        # The same key ``emmy fit`` records in its metrics file, holding the same thing — a feature-view spec.
+        # The two commands state the golden screen with one implementation, so they must also say what they
+        # scored in one vocabulary, or a reader comparing the files reads one word two ways.
+        "features": view,
         "pool_sample": args.pool_sample,
         "groups": len(groups),
         "positives": sum(len(g.golden_ids) for g in groups),
@@ -388,6 +417,15 @@ _REPORT_CAPTIONS = {
 }
 
 
+def _elide(value) -> str:
+    """A header value for the console line, shortened with its full length named.
+
+    The count is kept because it is the readable part of a long value: a feature-view spec's WIDTH is what a
+    reader compares between two runs, and the names themselves are in the JSON."""
+    text = str(value)
+    return text if len(text) <= 60 else f"{text[:60]}… ({len(text)} chars)"
+
+
 def _emit_report(report) -> None:
     """Print an :class:`EvalReport` — the provenance header, then one table of summaries.
 
@@ -400,8 +438,10 @@ def _emit_report(report) -> None:
     logger.info("[prior] %s dataset — %s", head.get("dataset", "?"), head.get("source", ""))
     # Every remaining header key, whatever the dataset put there. Printed generically so a builder that starts
     # recording a new provenance field does not also have to teach this about it — a count nobody prints is a
-    # count nobody checks.
-    provenance = ", ".join(f"{k}={head[k]}" for k in head if k not in ("dataset", "source", "dropped") and head[k] is not None)
+    # count nobody checks. Long values are elided HERE rather than shortened at the builder: the JSON is what
+    # two runs are diffed by and must stay exact, and the golden dataset's feature-view spec is ~60 column
+    # names, which would bury every other field on this line.
+    provenance = ", ".join(f"{k}={_elide(head[k])}" for k in head if k not in ("dataset", "source", "dropped") and head[k] is not None)
     if provenance:
         logger.info("  %s", provenance)
     if dropped := head.get("dropped"):

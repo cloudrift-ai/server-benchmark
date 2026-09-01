@@ -518,6 +518,7 @@
  "tests/serving/test_deepseek_native_loader.py::test_multi_token_prediction_head_is_never_read": 1.9,
  "tests/serving/test_deepseek_native_loader.py::test_native_fp8_trunk_weight_loads_scaled": 5.1,
  "tests/serving/test_moe_split.py::test_exl3_laguna_dense_and_sparse_blocks_preserve_float32_residuals": 0.1,
+ "tests/serving/test_moe_split.py::test_moe_expert_shares_one_shape_across_experts": 5.1,
  "tests/serving/test_moe_split.py::test_moe_split_folds_shared_experts_into_post_attn": 5.2,
  "tests/serving/test_moe_split.py::test_serving_trunk_constants_retarget_to_checkpoint_keys": 0.06,
  "tests/serving/test_twins_coded.py::test_laguna_coded_expert_inputs_are_spelled_per_allocation_profile": 0.58,

@@ -61,7 +61,6 @@ def test_transposed_free_extents_stamp_different_spaces() -> None:
     differ by 7x — the enumeration sizes the coop band against ``_inner_free`` and the fragment
     store against the free axes. Their space stamps must preserve that distinction.
     """
-    from emmy.compiler.ir.schedule import schedule
     from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
 
     ctx = Context.from_target((12, 0))
@@ -69,13 +68,12 @@ def test_transposed_free_extents_stamp_different_spaces() -> None:
 
     # The consequence of transposing: the spaces differ.
     def total(tile) -> int:
-        return sum(1 for _ in iter_leaves(classic_forks(tile, "t", tile.knobs, ctx, advance=schedule)))
+        return sum(1 for _ in iter_leaves(classic_forks(tile, "t", tile.knobs, ctx)))
 
     assert total(wide) != total(tall), "transposed M/N must not enumerate the same space"
-    assert (
-        classic_forks(wide, "t", wide.knobs, ctx, advance=schedule)[0].pool_id
-        != classic_forks(tall, "t", tall.knobs, ctx, advance=schedule)[0].pool_id
-    ), "so they must not share a schedule-space stamp"
+    assert classic_forks(wide, "t", wide.knobs, ctx)[0].pool_id != classic_forks(tall, "t", tall.knobs, ctx)[0].pool_id, (
+        "so they must not share a schedule-space stamp"
+    )
 
 
 def test_split_dim_store_does_not_share_an_identity() -> None:
@@ -90,7 +88,6 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     on the flat kernel is never handed to a kernel that cannot realize its row.
     """
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.ir.schedule import schedule
     from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 
@@ -110,14 +107,13 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     assert [a.extent.as_static() for a in flat.place.free] == [a.extent.as_static() for a in split.place.free]
 
     def total(tile) -> int:
-        return sum(1 for _ in iter_leaves(classic_forks(tile, "t", tile.knobs, ctx, advance=schedule)))
+        return sum(1 for _ in iter_leaves(classic_forks(tile, "t", tile.knobs, ctx)))
 
     assert total(flat) != total(split), "a split-pair store must not offer the same tiers"
     assert flat.identity_key(with_io=True) != split.identity_key(with_io=True), "so a golden must not join across them"
-    assert (
-        classic_forks(flat, "t", flat.knobs, ctx, advance=schedule)[0].pool_id
-        != classic_forks(split, "t", split.knobs, ctx, advance=schedule)[0].pool_id
-    ), "and they must not share a schedule-space stamp"
+    assert classic_forks(flat, "t", flat.knobs, ctx)[0].pool_id != classic_forks(split, "t", split.knobs, ctx)[0].pool_id, (
+        "and they must not share a schedule-space stamp"
+    )
 
 
 def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
@@ -128,7 +124,6 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
 
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.schedule import schedule
     from emmy.compiler.ir.sigma import Sigma
     from emmy.compiler.ir.tile.ir import TileOp
     from emmy.compiler.pipeline.passes.lowering.tile._classic import classic_forks
@@ -142,7 +137,7 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     tile = replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
 
     ctx = Context.from_target((12, 0))
-    row = dict(next(iter_leaves(classic_forks(tile, "t", tile.knobs, ctx, advance=schedule))).knobs)
+    row = dict(next(iter_leaves(classic_forks(tile, "t", tile.knobs, ctx))).knobs)
     spelled = next(k for k in row if "@" in k)
     old = spelled.split("@", 1)[1]
     new = old + "x"
@@ -153,6 +148,6 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     twin_op = tile.op.rewrite(lambda n: n, Sigma({old: Var(new)}), ren)
     twin = TileOp(op=twin_op, place=tile.place, output_specs=tile.output_specs)
     twin = replace(twin, knobs=dict(tile.knobs), inputs=dict(tile.inputs), outputs=dict(tile.outputs))
-    twin_row = dict(next(iter_leaves(classic_forks(twin, "t", twin.knobs, ctx, advance=schedule))).knobs)
+    twin_row = dict(next(iter_leaves(classic_forks(twin, "t", twin.knobs, ctx))).knobs)
     assert spelled in twin_row
     assert {key for key in row if "@" in key} == {key for key in twin_row if "@" in key}

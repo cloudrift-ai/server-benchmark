@@ -25,10 +25,9 @@ def _classic(*, work: str, tile: str, reduce: str = "", stage: str = "", raster:
     return {
         "WORK": work,
         "RASTER": raster,
-        "TILE@n0": tile,
-        "REDUCE@n0": reduce,
-        "STAGE@n0.e0": stage,
-        "STAGE@n0.e1": stage,
+        "TILE": tile,
+        "REDUCE": reduce,
+        "STAGE": stage,
     }
 
 
@@ -109,7 +108,7 @@ def test_validated_structural_input_records_the_original_parent_linked_edge() ->
         realized_knobs=None,
         cuda_ops=2,
         cuda_knobs=[
-            {**route, "REDUCE@n0": ""},
+            {**route, "REDUCE": ""},
             _classic(work="", tile=""),
         ],
     )
@@ -152,7 +151,7 @@ def test_best_realized_returns_the_fastest_terminal_with_its_structural_replay_r
         realized_knobs=None,
         cuda_ops=2,
         cuda_knobs=[
-            {**row, "REDUCE@n0": ""},
+            {**row, "REDUCE": ""},
             _classic(work="", tile=""),
         ],
     )
@@ -175,7 +174,7 @@ def test_best_realized_rejects_a_structural_parent_that_names_a_different_child_
         realized_knobs=None,
         cuda_ops=2,
         cuda_knobs=[
-            {**row, "WORK": "w1x2", "REDUCE@n0": ""},
+            {**row, "WORK": "w1x2", "REDUCE": ""},
             _classic(work="", tile=""),
         ],
     )

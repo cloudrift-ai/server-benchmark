@@ -43,7 +43,7 @@ def _reference(tile, target, domains, *, pins=None):
 
 def _schedule_leaves(tile, name, target):
     """Expand the lazy traversal while retaining its typed schedule leaves."""
-    return tuple(iter_leaves(classic_forks(tile, name, {}, target, advance=schedule)))
+    return tuple(iter_leaves(classic_forks(tile, name, {}, target)))
 
 
 def test_production_enumeration_is_the_compatible_independent_product() -> None:

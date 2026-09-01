@@ -85,18 +85,21 @@ class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
 
 def schedule[KernelT, NodeT, EdgeT](
     context: ScheduleContext[KernelT, NodeT, EdgeT],
+    *,
+    recursive: bool = True,
 ) -> Iterator[ScheduleContext[KernelT, NodeT, EdgeT] | Schedule[KernelT, NodeT, EdgeT]]:
-    """Lazily yield the next compatible contexts or complete assignments.
-
-    Each yielded context is fed back to this same function by the consumer's lazy tree. A complete
-    assignment is yielded directly. The driver never inspects a pick or a concrete context.
-    """
+    """Lazily enumerate complete assignments, or one frontier for a generic tree adapter."""
     for pick in context.extensions():
         try:
             child = context.extend(pick)
         except ScheduleRefused:
             continue
-        yield child.assignment if child.assignment.kernel is not None else child
+        if child.assignment.kernel is not None:
+            yield child.assignment
+        elif recursive:
+            yield from schedule(child)
+        else:
+            yield child
 
 
 __all__ = ["Schedule", "ScheduleContext", "ScheduleRefused", "schedule"]

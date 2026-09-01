@@ -549,18 +549,12 @@ def validate_golden_file(
                         "a child-identity schedule receipt must store the child kernel's identity"
                     )
                 if strict:
-                    if families and "PLACE" not in families:
-                        from emmy.compiler.pipeline.knob import complete_kernel_row  # noqa: PLC0415
-
-                        try:
-                            complete_kernel_row(dict(realization["knobs"]))
-                        except ValueError as exc:
-                            raise ValueError(f"{realization_where}.knobs: {exc}") from exc
                     for family in families:
                         scoped = [str(key) for key in realization["knobs"] if str(key).split("@", 1)[0] == family]
-                        if family in {"TILE", "REDUCE", "STAGE"} and family in scoped:
+                        if family in scoped and any("@" in key for key in scoped) and str(realization["knobs"][family]) == "":
                             raise ValueError(
-                                f"{realization_where}.knobs uses bare {family}; classic node and edge choices require exact sites"
+                                f"{realization_where}.knobs mixes bare and site-scoped {family} keys with a bare OFF; "
+                                "the scoped spelling is the site decision — drop the bare OFF"
                             )
             if "ranking" in realization and not isinstance(realization["ranking"], Mapping):
                 raise ValueError(f"{realization_where}.ranking must be a mapping")

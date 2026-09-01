@@ -22,7 +22,8 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | Non
     This restriction is consumed entirely by the cut pass before classic schedule enumeration.
     Every scoped ``PLACE@site=cut`` pin that resolves on this kernel joins ONE composed decision —
     the seams all live on this kernel's tree, so one realization cuts them together and the pieces
-    stay decided. A bare ``PLACE=cut`` consumes its one root-most cut the same way. A scoped pin whose site
+    stay decided. A bare ``PLACE=cut`` chooses the root-most cut, then lets each fresh piece run the
+    cut pass again before scheduling. A scoped pin whose site
     path does not exist on this kernel addresses another kernel of the graph; a kernel none of
     the pins address decides FUSE, so the unpinned fork never returns under a pin-driven compile.
     A pin that resolves to a site no cut realizes is an addressing error and raises. A scoped
@@ -88,7 +89,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, bool] | Non
             return ("PLACE",), "fuse", False
         depth = {id(site.node): site.depth for site in all_sites}
         seam = min(plain, key=lambda s: depth[id(s.node)])
-        return (seam,), value, True
+        return (seam,), value, False
     if missing:
         # A pin-driven compile whose scoped pins all address other kernels decides FUSE here —
         # deterministic, and the unpinned placement fork never returns under a pin.

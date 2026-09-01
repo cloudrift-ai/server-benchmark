@@ -263,7 +263,7 @@ def test_f8_atoms_offer_staged_byte_slabs():
     replaced kept every fp8 arm on the transaction-bound gmem-direct path; the parity/legality
     battery is ``test_fp8_staged``)."""
     from emmy.compiler.ir.schedule import Stage
-    from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
+    from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 
     _tile, _ctx, node = _f8_term()
     tile = Tile.parse(f"{K32}/f4x1/k4", Work.parse("w1x8")).at(Axis("m", Dim(512)), Axis("n", Dim(512)))

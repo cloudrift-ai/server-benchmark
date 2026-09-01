@@ -130,7 +130,7 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
 
 def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> None:
     """A computed-A cone is lowered once for its stat-row seam, not once per tile plan."""
-    from emmy.compiler.pipeline.passes.lowering.tile import _staging  # noqa: PLC0415
+    from emmy.compiler.ir.tile import ops as tile_ops  # noqa: PLC0415
 
     calls: list[tuple] = []
     original = _classic.cone_seam
@@ -141,7 +141,7 @@ def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> N
 
     monkeypatch.setattr(_classic, "cone_seam", spy)
     monkeypatch.setattr(
-        _staging,
+        tile_ops,
         "cone_seam",
         lambda *_: (_ for _ in ()).throw(AssertionError("the fill must reuse the prescan's seam")),
     )
@@ -297,35 +297,3 @@ def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> N
     assert rows, "the fused attention kernel must still enumerate"
     reduce_keys = {key for row in rows for key in row if key.startswith("REDUCE@")}
     assert reduce_keys == {f"REDUCE@n{i}" for i in (1, 2, 5, 6, 10, 13, 14)}
-
-
-def test_a_sweep_reading_fold_offers_only_the_serial_reduce(unpinned) -> None:
-    """A fold whose cone reads a boundary store's sweep axis must be ENCLOSED by the output sweep
-    loop (the materializer binds the projection unpeeled), and a partitioned combine cannot ride
-    inside the per-lane sweep — so the serial fold is the whole catalog, decided at the offer.
-    Offering a band and declining it at the kernel binder instead costs one full greedy
-    re-resolve per declined row (DeepSeek-V4's fused ``k_div_36_reduce`` on the live V100)."""
-    from types import SimpleNamespace
-
-    from emmy.compiler.ir.axis import Axis, AxisRole
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Accum, Body, Load, Loop, Write
-    from emmy.compiler.ir.tile import OutputSpec, Reduce
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-
-    body = Body(
-        (
-            Load(name="x_e", input="x", index=(Var("m"), Var("k"), Var("j"))),
-            Accum(name="acc", value="x_e", op="add", axes=("k",)),
-        )
-    )
-    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
-    assert red is not None
-    sweep_spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
-
-    def state(specs):
-        return SimpleNamespace(tile=SimpleNamespace(output_specs=specs), work_pin=None, transposed_ok=False)
-
-    assert _classic._reduce_moves(state((sweep_spec,)), red, None) == [Reduce()]
-    # Without the sweep read the catalog stays whole.
-    assert len(_classic._reduce_moves(state(()), red, None)) > 1

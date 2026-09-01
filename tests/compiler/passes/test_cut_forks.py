@@ -358,11 +358,15 @@ def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
         _CUT.rewrite(match, node)
 
 
-def test_bare_place_cut_consumes_its_rootmost_decision() -> None:
+def test_bare_place_cut_keeps_recursing_on_fresh_pieces() -> None:
     fragment = _nested_attention_cut({"PLACE": "cut"})
-    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    node = _piece_with_seam(fragment)
+    match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
 
-    assert pieces and all(node.op.placement_decided for node in pieces)
+    assert not node.op.placement_decided
+    with pinned_knobs({"PLACE": "cut"}):
+        fork = _CUT.rewrite(match, node)
+    assert "cut" in fork.knobs.values()
 
 
 def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:

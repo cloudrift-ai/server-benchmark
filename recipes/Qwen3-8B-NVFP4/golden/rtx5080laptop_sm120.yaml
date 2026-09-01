@@ -43361,288 +43361,6 @@ loops:
 configs:
 - program: 0
   target:
-    loop: 0
-  realizations:
-  - name: post-sym@nvfp4.k_reshape_reduce_5b71f8.3cfba47aa43b.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 4226.608037948608
-      reference_us: 4219.6478843688965
-      reference_backend: emmy-greedy
-- program: 0
-  target:
-    loop: 1
-  realizations:
-  - name: post-sym@nvfp4.k_linear_mean_reduce_ffee9f.f611b0fa3d81.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@a1: coop
-      REDUCE@a11: coop
-      REDUCE@a12: coop
-      REDUCE@a2: coop
-      REDUCE@a5: coop
-      REDUCE@a6: coop
-      REDUCE@a8: coop
-      REDUCE@a9: coop
-      WORK: t256
-      TILE: ''
-      STAGE: ''
-      LOOPIFY: '0'
-      RASTER: ''
-    measurements:
-      emmy_us: 555921.0815429688
-      reference_us: 546675.5981445312
-      reference_backend: emmy-greedy
-- program: 0
-  target:
-    loop: 2
-  realizations:
-  - name: post-sym@nvfp4.k_linear_reduce_3bda2e.ba158159caa7.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    measurements:
-      emmy_us: 2101020.263671875
-      reference_us: 88520867.1875
-      reference_backend: emmy-greedy
-  - name: post-sym@nvfp4.k_linear_reduce_3bda2e__place_31986e9066.5379c79a2e69.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop-t
-      STAGE: ''
-      TILE: ''
-      WORK: t256
-    identity: 5379c79a2e699e3132c128e026231f2677b38aa77c139a3f200c0eb52ebb552b
-    measurements:
-      emmy_us: 713939.1479492188
-      reference_us: 88520867.1875
-      reference_backend: emmy-greedy
-  - name: post-sym@nvfp4.k_linear_reduce_3bda2e__place_3dff92b614.4a3aa26c2989.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop-t
-      STAGE: ''
-      TILE: ''
-      WORK: t256
-    identity: 4a3aa26c2989b3a38041955e05f4f5892829742ad31187557a1cf93d510c3b53
-    measurements:
-      emmy_us: 275846.2219238281
-      reference_us: 88520867.1875
-      reference_backend: emmy-greedy
-  - name: post-sym@nvfp4.k_linear_reduce_3bda2e__place_4cd6a1a33f.f9bef942bcb4.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4x12
-      WORK: t16x8
-    identity: f9bef942bcb4f13e25f6d1f705f0fdc3da05b48de14ea09947867abc7ff67d79
-    measurements:
-      emmy_us: 21063.583374023438
-      reference_us: 88520867.1875
-      reference_backend: emmy-greedy
-  - name: post-sym@nvfp4.k_linear_reduce_3bda2e__place_d8738e3b11.59e3710c2d65.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4x12
-      WORK: t16x8
-    identity: 59e3710c2d6588f89c38c21e9f19a40d73e71051850466f2d9982b1f180889ba
-    measurements:
-      emmy_us: 22285.375595092773
-      reference_us: 88520867.1875
-      reference_backend: emmy-greedy
-  - name: post-sym@nvfp4.k_linear_reduce_3bda2e__place_466f29df9b.f3f3bd847441.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4x12
-      WORK: t16x8
-    identity: f3f3bd847441a0edd568947f669c1ce5f0b0c43f79e85ba699df898b27f1b407
-    measurements:
-      emmy_us: 24049.856185913086
-      reference_us: 88520867.1875
-      reference_backend: emmy-greedy
-  - name: post-sym@nvfp4.k_linear_reduce_3bda2e__place_6bded3975d.68051715ad5f.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: f4x12
-      WORK: t16x8
-    identity: 68051715ad5fc831dd91e61ea0a086a36667bc4cfea06352673a9fdb61a5b4f7
-    measurements:
-      emmy_us: 23996.383666992188
-      reference_us: 88520867.1875
-      reference_backend: emmy-greedy
-  - name: post-sym@nvfp4.k_linear_reduce_3bda2e__place_6eb9522a75.fe3e947f71f6.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop-t
-      STAGE: ''
-      TILE: ''
-      WORK: t256
-    identity: fe3e947f71f68831e632ebb30d392a7e6960faee15c733c1807d09c113ce15d0
-    measurements:
-      emmy_us: 258177.88696289062
-      reference_us: 88520867.1875
-      reference_backend: emmy-greedy
-  - name: post-sym@nvfp4.k_linear_reduce_3bda2e__place_f896fbaaa6.08c69c90da9c.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop-t
-      STAGE: ''
-      TILE: ''
-      WORK: t256
-    identity: 08c69c90da9c30136ba0d7bee75c1c6ece4a81c80cf87daee7386a44284bd52e
-    measurements:
-      emmy_us: 718514.3432617188
-      reference_us: 88520867.1875
-      reference_backend: emmy-greedy
-  - name: post-sym@nvfp4.k_linear_reduce_3bda2e.2a8140c68a5c.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
-      WORK: ''
-    identity: 2a8140c68a5c8ddae68d8ec1767c49f4c62841d33634f9e4a168e11a406d7158
-    measurements:
-      emmy_us: 28274.080276489258
-      reference_us: 88520867.1875
-      reference_backend: emmy-greedy
-- program: 0
-  target:
     loop: 3
   realizations:
   - name: post-sym@nvfp4.k_linear_dd36fe.b9981d65af4d.dynamic
@@ -43652,12 +43370,13 @@ configs:
     knobs:
       WORK: t16x8
       TILE: f4x8
-      STAGE: ''
-      RASTER: ''
       REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
     measurements:
-      emmy_us: 52945.40786743164
-      reference_us: 53219.80667114258
+      emmy_us: 53303.489685058594
+      reference_us: 92493.82019042969
       reference_backend: emmy-greedy
 - program: 1
   target:
@@ -43669,15 +43388,16 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      REDUCE@n1: ''
+      REDUCE@n2: ''
+      REDUCE@n3: ''
       WORK: ''
       TILE: ''
-      REDUCE: ''
-      STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 326.58666372299194
-      reference_us: 326.24000310897827
+      emmy_us: 326.91200574239093
+      reference_us: 326.91200574239093
       reference_backend: emmy-greedy
 - program: 1
   target:
@@ -43698,8 +43418,8 @@ configs:
       PLACE@a10: cut
       PLACE@a11: cut
     measurements:
-      emmy_us: 4122.464179992676
-      reference_us: 6010380.37109375
+      emmy_us: 8903.552055358887
+      reference_us: 6009930.6640625
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_mean_reduce_ade8f3__place_5714a99dd6.5c723e6c2205.m1
     bindings:
@@ -43717,14 +43437,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 5c723e6c2205653dc4b9900407f21b33ab6f74fed31db64ec6279c99f301338f
     measurements:
-      emmy_us: 350.0266472498576
-      reference_us: 6010380.37109375
+      emmy_us: 1368.4159517288208
+      reference_us: 6009930.6640625
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_mean_reduce_ade8f3__place_79f364b7f4.627e251dac2d.m1
     bindings:
@@ -43742,14 +43461,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 627e251dac2daef59e714feca1b819424700b668b9eed3a87426cb19ead74469
     measurements:
-      emmy_us: 555.8080077171326
-      reference_us: 6010380.37109375
+      emmy_us: 407.1359932422638
+      reference_us: 6009930.6640625
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_mean_reduce_ade8f3__place_ad9b719d83.8d1ce95f0c16.m1
     bindings:
@@ -43767,14 +43485,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 8d1ce95f0c16e54e88a88fd6cd47ab0e64997706ac147b06415d506c7dc5f9f8
     measurements:
-      emmy_us: 351.25335057576496
-      reference_us: 6010380.37109375
+      emmy_us: 1369.215965270996
+      reference_us: 6009930.6640625
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_mean_reduce_ade8f3__place_c130137161.5a266d6ef513.m1
     bindings:
@@ -43792,14 +43509,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 5a266d6ef513403a9d16fd490590e910167fb83910dc1c28644c764a11e85bac
     measurements:
-      emmy_us: 345.85599104563397
-      reference_us: 6010380.37109375
+      emmy_us: 1366.4640188217163
+      reference_us: 6009930.6640625
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_mean_reduce_ade8f3__place_c9fd166ab1.627e251dac2d.m1
     bindings:
@@ -43817,14 +43533,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 627e251dac2daef59e714feca1b819424700b668b9eed3a87426cb19ead74469
     measurements:
-      emmy_us: 558.9439868927002
-      reference_us: 6010380.37109375
+      emmy_us: 406.8320095539093
+      reference_us: 6009930.6640625
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_mean_reduce_ade8f3__place_cf83a76ce7.5c723e6c2205.m1
     bindings:
@@ -43842,14 +43557,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 5c723e6c2205653dc4b9900407f21b33ab6f74fed31db64ec6279c99f301338f
     measurements:
-      emmy_us: 349.3013381958008
-      reference_us: 6010380.37109375
+      emmy_us: 1371.9359636306763
+      reference_us: 6009930.6640625
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_mean_reduce_ade8f3__place_d0c4a0fad7.375c10ca4849.m1
     bindings:
@@ -43867,14 +43581,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 375c10ca48494054049a9846aa40ab03a5ee87bc545f64aeac905377360ea68c
     measurements:
-      emmy_us: 351.54132048288983
-      reference_us: 6010380.37109375
+      emmy_us: 1374.4959831237793
+      reference_us: 6009930.6640625
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_mean_reduce_ade8f3__place_aeb888da69.e30f05cd66dd.m1
     bindings:
@@ -43893,13 +43606,11 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: ''
-      TILE: ''
       WORK: t128
     identity: e30f05cd66dd338ee4dec44efb9cd3595c6713263b82ac86f63ed6b36a0fc871
     measurements:
-      emmy_us: 1.5023158008890942
-      reference_us: 6010380.37109375
+      emmy_us: 1.5174089767698056
+      reference_us: 6009930.6640625
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_mean_reduce_ade8f3.76a4d1d9c323.m1
     bindings:
@@ -43917,16 +43628,15 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE@a3: coop
-      REDUCE@a6: coop
-      REDUCE@a9: coop
-      STAGE: ''
+      REDUCE@n1: ''
+      REDUCE@n2: ''
+      REDUCE@n3: ''
       TILE: ''
-      WORK: t4
+      WORK: ''
     identity: 76a4d1d9c32308970654ea13368ef56a587379feb2b0b218e2a80dc9a30c797a
     measurements:
-      emmy_us: 1271.4240550994873
-      reference_us: 6010380.37109375
+      emmy_us: 1276.0000228881836
+      reference_us: 6009930.6640625
       reference_backend: emmy-greedy
 - program: 1
   target:
@@ -43947,8 +43657,8 @@ configs:
       PLACE@a9: cut
       PLACE@a10: cut
     measurements:
-      emmy_us: 9715.871810913086
-      reference_us: 19662525.390625
+      emmy_us: 13653.85627746582
+      reference_us: 19660292.96875
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_reduce_4d0b03__place_28a68fbc69.8b6f2dda6aa1.m1
     bindings:
@@ -43966,14 +43676,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 8b6f2dda6aa1651fb3cdedf1b0364b7b0198bd3830db12a3bd612095b393d940
     measurements:
-      emmy_us: 356.1600148677826
-      reference_us: 19662525.390625
+      emmy_us: 1380.0640106201172
+      reference_us: 19660292.96875
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_reduce_4d0b03__place_3350b73069.6339dca51072.m1
     bindings:
@@ -43991,14 +43700,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 6339dca510724c4439160a8a6c1d2644f4f0e3b316d7ad56223964f50b87dafb
     measurements:
-      emmy_us: 349.4826555252075
-      reference_us: 19662525.390625
+      emmy_us: 1380.0959587097168
+      reference_us: 19660292.96875
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_reduce_4d0b03__place_c05f860037.a5d325ddeeb3.m1
     bindings:
@@ -44016,14 +43724,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: a5d325ddeeb3b2f285c97969bc76ed06d6f88aff547dd1a9795410365728cea3
     measurements:
-      emmy_us: 365.26934305826825
-      reference_us: 19662525.390625
+      emmy_us: 1372.9599714279175
+      reference_us: 19660292.96875
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_reduce_4d0b03__place_d9cff5185e.f8275f29c45d.m1
     bindings:
@@ -44041,14 +43748,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: f8275f29c45d925bcec92aff32ea462b004fee84a1a9576d0af782014694dbb1
     measurements:
-      emmy_us: 1429.2800426483154
-      reference_us: 19662525.390625
+      emmy_us: 721.4400172233582
+      reference_us: 19660292.96875
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_reduce_4d0b03__place_66ac1a7347.14ab31aba28d.m1
     bindings:
@@ -44066,14 +43772,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 14ab31aba28d2f3dca94e121c4fcceed3e1157816efea73e1e1b404b9470b829
     measurements:
-      emmy_us: 352.81066099802655
-      reference_us: 19662525.390625
+      emmy_us: 1382.1120262145996
+      reference_us: 19660292.96875
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_reduce_4d0b03__place_724a7718ea.2e13251489c6.m1
     bindings:
@@ -44091,14 +43796,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 2e13251489c6c34234ff7ac769de06e044755be8deca234bd25e4006e818678a
     measurements:
-      emmy_us: 354.2826573053996
-      reference_us: 19662525.390625
+      emmy_us: 1379.647970199585
+      reference_us: 19660292.96875
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_reduce_4d0b03__place_f4af56ee42.6be6261e81dd.m1
     bindings:
@@ -44116,14 +43820,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 6be6261e81dd240e22d00b82254376ed5be8eb68a2a816a3f495d476948c3f7c
     measurements:
-      emmy_us: 1438.9760494232178
-      reference_us: 19662525.390625
+      emmy_us: 723.1040000915527
+      reference_us: 19660292.96875
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_reduce_4d0b03__place_f962f9cb3c.3e39991463fb.m1
     bindings:
@@ -44141,14 +43844,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 3e39991463fbd6742ab8debddd2581ba13d4d0e7aa452586f7540863226a86ae
     measurements:
-      emmy_us: 363.76531918843585
-      reference_us: 19662525.390625
+      emmy_us: 1375.2959966659546
+      reference_us: 19660292.96875
       reference_backend: emmy-greedy
   - name: post1@nvfp4.k_linear_reduce_4d0b03.5607ddca0851.m1
     bindings:
@@ -44166,15 +43868,14 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE@a1: coop
-      REDUCE@a8: coop
-      STAGE: ''
+      REDUCE@n1: ''
+      REDUCE@n2: ''
       TILE: ''
-      WORK: t4
+      WORK: ''
     identity: 5607ddca085140f1a1859e7edb0d2b1eb29054e5b4a445492ebecf05b774e7ae
     measurements:
-      emmy_us: 4745.664119720459
-      reference_us: 19662525.390625
+      emmy_us: 4000.800132751465
+      reference_us: 19660292.96875
       reference_backend: emmy-greedy
 - program: 1
   target:
@@ -44186,14 +43887,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x8
-      TILE: mma_m16n8k64_e2m1_f32/f1x1/k8
-      STAGE: d2/smem-async
-      RASTER: ''
+      WORK: w2x8
+      TILE: mma_m16n8k64_e2m1_f32/f1x2/k4
       REDUCE: ''
+      STAGE: d3/smem-async
+      LOOPIFY: '0'
+      RASTER: ''
     measurements:
-      emmy_us: 41.84400041898092
-      reference_us: 41.96000099182129
+      emmy_us: 44.782546433535494
+      reference_us: 44.782546433535494
       reference_backend: emmy-greedy
 - program: 2
   target:
@@ -44205,509 +43907,16 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      REDUCE@n1: ''
+      REDUCE@n2: ''
+      REDUCE@n3: ''
       WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-      REDUCE: ''
-    measurements:
-      emmy_us: 4203.199863433838
-      reference_us: 4205.215930938721
-      reference_backend: emmy-greedy
-- program: 2
-  target:
-    loop: 9
-  realizations:
-  - name: post256@nvfp4.k_linear_mean_reduce_cd0a29.86fba7c5e356.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-    knobs:
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    measurements:
-      emmy_us: 362428.3142089844
-      reference_us: 366416.3513183594
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_mean_reduce_cd0a29__place_0159e5e911.5203ac64ed8d.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
+      TILE: f4
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k8
-      WORK: w8x2
-    identity: 5203ac64ed8db1d9aada1047952c59e945998b8c3624c3cb9c656a20ad6033b3
     measurements:
-      emmy_us: 51.84853474299113
-      reference_us: 366416.3513183594
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_mean_reduce_cd0a29__place_34c156e6bd.a77423b41a1e.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: a77423b41a1ecb92201b60b600f8f688513de0e9133c9094c8d23e561040bf88
-    measurements:
-      emmy_us: 47345.40939331055
-      reference_us: 366416.3513183594
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_mean_reduce_cd0a29__place_57f8aae8d9.c26503a4ffac.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: c26503a4ffac00258d20f9d0afe5b4dbeed578775e6f8d777cff46367fa502bb
-    measurements:
-      emmy_us: 146673.5076904297
-      reference_us: 366416.3513183594
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_mean_reduce_cd0a29__place_79b14701dd.0976799c54f1.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k4
-      WORK: w16x2
-    identity: 0976799c54f1259b98057e0f87528c21c7d28bc2745f4dc50b72bad1e2338b75
-    measurements:
-      emmy_us: 106.81066910425822
-      reference_us: 366416.3513183594
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_mean_reduce_cd0a29__place_80e2095be2.c26503a4ffac.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: c26503a4ffac00258d20f9d0afe5b4dbeed578775e6f8d777cff46367fa502bb
-    measurements:
-      emmy_us: 138588.28735351562
-      reference_us: 366416.3513183594
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_mean_reduce_cd0a29__place_babc5a116b.0962b9462bb8.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k8
-      WORK: w8x2
-    identity: 0962b9462bb886a75f3ada59bbaa70697ddfc0f381c780a8557ce20a59b3252c
-    measurements:
-      emmy_us: 55.0171434879303
-      reference_us: 366416.3513183594
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_mean_reduce_cd0a29__place_be622c56ef.0976799c54f1.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k4
-      WORK: w16x2
-    identity: 0976799c54f1259b98057e0f87528c21c7d28bc2745f4dc50b72bad1e2338b75
-    measurements:
-      emmy_us: 104.71999645233154
-      reference_us: 366416.3513183594
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_mean_reduce_cd0a29__place_47f7137ec6.4d5dc543aa79.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: 4d5dc543aa79e308117d10bb731187f172bb41ed8f2b69d72d289e7af4eef0d1
-    measurements:
-      emmy_us: 4.611555486917496
-      reference_us: 366416.3513183594
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_mean_reduce_cd0a29.8d14a8ac8bc9.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
-      WORK: ''
-    identity: 8d14a8ac8bc9953885f04970f145136055a023adc94441f50240580ade39e088
-    measurements:
-      emmy_us: 17868.44825744629
-      reference_us: 366416.3513183594
-      reference_backend: emmy-greedy
-- program: 2
-  target:
-    loop: 10
-  realizations:
-  - name: post256@nvfp4.k_linear_reduce_47418a.7caf828fe4cc.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-    knobs:
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    measurements:
-      emmy_us: 1027987.060546875
-      reference_us: 88953453.125
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_reduce_47418a__place_1515d5f8bf.3c69c0f79e33.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k4
-      WORK: w16x2
-    identity: 3c69c0f79e33e985c7bd31867de312da8424c73f2dac70fff613bddbb240299c
-    measurements:
-      emmy_us: 104.54399883747101
-      reference_us: 88953453.125
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_reduce_47418a__place_4679e8b688.0137d148ac04.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k4
-      WORK: w16x2
-    identity: 0137d148ac0497a0fbd107c34d5b78ff6c8d6e359eb66caec86114ee39c6d5b2
-    measurements:
-      emmy_us: 93.40800344944
-      reference_us: 88953453.125
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_reduce_47418a__place_70b09a4dab.8de7dae5ff62.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: 8de7dae5ff62f749095ca5dbfe064762fbddb0ff35df7b6a2642f28920690f05
-    measurements:
-      emmy_us: 339614.4104003906
-      reference_us: 88953453.125
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_reduce_47418a__place_c8796805df.5f99cbba010a.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: 5f99cbba010aee007b5f3202530cdbad1aad8441544fa28e23455772c5cac5a9
-    measurements:
-      emmy_us: 127838.0126953125
-      reference_us: 88953453.125
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_reduce_47418a__place_00c34b131b.c7c93ea6b441.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k4
-      WORK: w16x2
-    identity: c7c93ea6b4414eeaf799b7ed7a4bee808cd27337e7b5a34ec8a492b04b43ef21
-    measurements:
-      emmy_us: 115.58400094509125
-      reference_us: 88953453.125
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_reduce_47418a__place_08eb8b65a1.2107309292b7.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: 2107309292b7c86a6c3af23634901094dd7ccd7da8bcc40b25c07d19577fc478
-    measurements:
-      emmy_us: 135786.97204589844
-      reference_us: 88953453.125
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_reduce_47418a__place_ba6453b037.4d099931ba2f.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: 4d099931ba2fe1c8c057d2707780154f1adef8eb6f70ba3588b547cb9159b6a2
-    measurements:
-      emmy_us: 370706.0241699219
-      reference_us: 88953453.125
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_reduce_47418a__place_c7c7f7a2e8.69cff1c028af.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k4
-      WORK: w16x2
-    identity: 69cff1c028af9c2806749ff220206e12e34a722823f7f7416ac323b39b4a3139
-    measurements:
-      emmy_us: 106.91200196743011
-      reference_us: 88953453.125
-      reference_backend: emmy-greedy
-  - name: post256@nvfp4.k_linear_reduce_47418a.5ace65880a9f.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-      PLACE@a3: cut
-      PLACE@a4: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a7: cut
-      PLACE@a8: cut
-      PLACE@a10: cut
-      PLACE@a11: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE@a2: coop
-      REDUCE@a9: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t4
-    identity: 5ace65880a9f51fa4deb4314df01697604426281cac814041ad85e3a963f8aba
-    measurements:
-      emmy_us: 27332.416534423828
-      reference_us: 88953453.125
+      emmy_us: 6015.80810546875
+      reference_us: 6015.80810546875
       reference_backend: emmy-greedy
 - program: 2
   target:
@@ -44719,14 +43928,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k64_e2m1_f32/f2x4/k4
-      STAGE: d2/smem-async
-      RASTER: gm8
+      WORK: w1x4
+      TILE: mma_m16n8k64_e2m1_f32/f1x8/k4
       REDUCE: ''
+      STAGE: d1/smem-async
+      LOOPIFY: '0'
+      RASTER: ''
     measurements:
-      emmy_us: 161.34933630625406
-      reference_us: 162.3840034008026
+      emmy_us: 305.28000990549725
+      reference_us: 305.28000990549725
       reference_backend: emmy-greedy
 - program: 3
   target:
@@ -44738,261 +43948,16 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      REDUCE@n1: ''
+      REDUCE@n2: ''
+      REDUCE@n3: ''
       WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-      REDUCE: ''
-    measurements:
-      emmy_us: 1195.3279972076416
-      reference_us: 1195.42396068573
-      reference_backend: emmy-greedy
-- program: 3
-  target:
-    loop: 13
-  realizations:
-  - name: post32@nvfp4.k_linear_mean_reduce_0ef5cd.3eef9f7573ab.m32
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-    knobs:
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    measurements:
-      emmy_us: 41410.68649291992
-      reference_us: 55667.55294799805
-      reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_mean_reduce_0ef5cd__place_131e5dc318.7a907940e42e.m32
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
+      TILE: f4
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k8
-      WORK: w4x1
-    identity: 7a907940e42ea9189b0802df15d9c9d0ebca5edf0dadd01d3820efe0e01d031c
     measurements:
-      emmy_us: 47.27799817919731
-      reference_us: 55667.55294799805
-      reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_mean_reduce_0ef5cd__place_1ca0a02a78.08c2e78d7904.m32
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: 08c2e78d7904ab81153eec1e17da4137a7e8b47dcc15343a6c0fd23525f595b7
-    measurements:
-      emmy_us: 16244.415283203125
-      reference_us: 55667.55294799805
-      reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_mean_reduce_0ef5cd__place_2178a2d165.26c01eee11e8.m32
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k8
-      WORK: w2x1
-    identity: 26c01eee11e850a598657e105daeca12089d17c69549518cf478558807474a46
-    measurements:
-      emmy_us: 13.21043484452842
-      reference_us: 55667.55294799805
-      reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_mean_reduce_0ef5cd__place_6e2abeca6c.29f551a91cf6.m32
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: 29f551a91cf6d7b2b49b2c9876e9d34692dbea61e3e134905966db38c995bc89
-    measurements:
-      emmy_us: 5557.6958656311035
-      reference_us: 55667.55294799805
-      reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_mean_reduce_0ef5cd__place_7378803786.7a907940e42e.m32
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k8
-      WORK: w4x1
-    identity: 7a907940e42ea9189b0802df15d9c9d0ebca5edf0dadd01d3820efe0e01d031c
-    measurements:
-      emmy_us: 45.219997564951576
-      reference_us: 55667.55294799805
-      reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_mean_reduce_0ef5cd__place_929d1d099c.2c1bb30f9ed1.m32
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k8
-      WORK: w2x1
-    identity: 2c1bb30f9ed1ea9b8d09f14a5252e35ca9c99dd3d41b225517434ab278307759
-    measurements:
-      emmy_us: 13.184901694176903
-      reference_us: 55667.55294799805
-      reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_mean_reduce_0ef5cd__place_af935db923.08c2e78d7904.m32
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: 08c2e78d7904ab81153eec1e17da4137a7e8b47dcc15343a6c0fd23525f595b7
-    measurements:
-      emmy_us: 15502.528190612793
-      reference_us: 55667.55294799805
-      reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_mean_reduce_0ef5cd__place_4ff6271062.32ea620d0cb8.m32
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
-    identity: 32ea620d0cb82121108d55ec8cd6f06d9d277dd10f7614293f8c571eb3eeb716
-    measurements:
-      emmy_us: 1.9067387591611158
-      reference_us: 55667.55294799805
-      reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_mean_reduce_0ef5cd.f8a776753a7f.m32
-    bindings:
-      num_tokens: 32
-    pins:
-      FAST_MATH: false
-      PLACE@a1: cut
-      PLACE@a2: cut
-      PLACE@a5: cut
-      PLACE@a6: cut
-      PLACE@a8: cut
-      PLACE@a9: cut
-      PLACE@a11: cut
-      PLACE@a12: cut
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: ''
-      WORK: ''
-    identity: f8a776753a7ffc9964d49cbd44f6d157fdedf76afbd8cae73f5a85d0514c2269
-    measurements:
-      emmy_us: 4122.047901153564
-      reference_us: 55667.55294799805
+      emmy_us: 1980.8000326156616
+      reference_us: 1980.8000326156616
       reference_backend: emmy-greedy
 - program: 3
   target:
@@ -45013,8 +43978,8 @@ configs:
       PLACE@a10: cut
       PLACE@a11: cut
     measurements:
-      emmy_us: 122717.11730957031
-      reference_us: 38982433.59375
+      emmy_us: 107582.4966430664
+      reference_us: 83209054.6875
       reference_backend: emmy-greedy
   - name: post32@nvfp4.k_linear_reduce_67950d__place_0fbdc5b1e7.e53b93c24d14.m32
     bindings:
@@ -45033,13 +43998,13 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k8
-      WORK: w4x1
+      STAGE: d2/smem-async
+      TILE: mma_m16n8k64_e2m1_f32/f8x1/k4
+      WORK: w2x2
     identity: e53b93c24d14219d8e3dd70da65bd65f9238e2b052b2e833bfdad4c79dc4edaf
     measurements:
-      emmy_us: 58.36800113320351
-      reference_us: 38982433.59375
+      emmy_us: 1031.6799879074097
+      reference_us: 83209054.6875
       reference_backend: emmy-greedy
   - name: post32@nvfp4.k_linear_reduce_67950d__place_129d0fc725.1722c54a3b68.m32
     bindings:
@@ -45057,16 +44022,15 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 1722c54a3b680272bb93242782a98f77f19b6636799a4487397da576b547d6fc
     measurements:
-      emmy_us: 40949.08905029297
-      reference_us: 38982433.59375
+      emmy_us: 17999.77684020996
+      reference_us: 83209054.6875
       reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_reduce_67950d__place_2ad1e503ba.05ffdd4af95c.m32
+  - name: post32@nvfp4.k_mul_2_static_fp4_scale_bits__place_2ad1e503ba_0.05ffdd4af95c.m32
     bindings:
       num_tokens: 32
     pins:
@@ -45083,13 +44047,13 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k8
-      WORK: w4x1
+      STAGE: d3/smem-async
+      TILE: mma_m16n8k64_e2m1_f32/f1x4/k4
+      WORK: w8x2
     identity: 05ffdd4af95cfd795ffb19b7450ecc97e98be79235b64010e5ec246cdb30f6b0
     measurements:
-      emmy_us: 64.83200192451477
-      reference_us: 38982433.59375
+      emmy_us: 199.23199713230133
+      reference_us: 83209054.6875
       reference_backend: emmy-greedy
   - name: post32@nvfp4.k_linear_reduce_67950d__place_7bd30264fd.062c2a24adce.m32
     bindings:
@@ -45107,14 +44071,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 062c2a24adce7e497579803ff09eeee3bb7fceb866e89cc956cd8a0eb2d819a5
     measurements:
-      emmy_us: 14177.375793457031
-      reference_us: 38982433.59375
+      emmy_us: 11160.160064697266
+      reference_us: 83209054.6875
       reference_backend: emmy-greedy
   - name: post32@nvfp4.k_linear_reduce_67950d__place_06d2f2c968.a265ecb120df.m32
     bindings:
@@ -45132,16 +44095,15 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: a265ecb120df6c7c292e9efd7206ee60442fadc28529b275a5771ef872a34aa0
     measurements:
-      emmy_us: 42744.35043334961
-      reference_us: 38982433.59375
+      emmy_us: 20662.49656677246
+      reference_us: 83209054.6875
       reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_reduce_67950d__place_96ea2694de.eab70bbe938d.m32
+  - name: post32@nvfp4.k_mul_2_static_fp4_scale_bits__place_96ea2694de_0.eab70bbe938d.m32
     bindings:
       num_tokens: 32
     pins:
@@ -45158,15 +44120,15 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k8
-      WORK: w4x1
+      STAGE: d2/smem-async
+      TILE: mma_m16n8k64_e2m1_f32/f1x2/k4
+      WORK: w1x4
     identity: eab70bbe938d426bd03e754d3b92daa67fbe11067e97722e5b482bb56b37b601
     measurements:
-      emmy_us: 66.30399823188782
-      reference_us: 38982433.59375
+      emmy_us: 45.504000037908554
+      reference_us: 83209054.6875
       reference_backend: emmy-greedy
-  - name: post32@nvfp4.k_linear_reduce_67950d__place_b789d81aad.294f2dc35eb2.m32
+  - name: post32@nvfp4.k_mul_2_static_fp4_scale_bits__place_b789d81aad_0.294f2dc35eb2.m32
     bindings:
       num_tokens: 32
     pins:
@@ -45183,13 +44145,13 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k64_e2m1_f32/f1x8/k8
-      WORK: w4x1
+      STAGE: d3/smem-async
+      TILE: mma_m16n8k64_e2m1_f32/f4x4/k4
+      WORK: w2x2
     identity: 294f2dc35eb242ce8084d664a0ebe3d3dce266458a94d4878416a572fb6bdd58
     measurements:
-      emmy_us: 81.7599967122078
-      reference_us: 38982433.59375
+      emmy_us: 316.0319924354553
+      reference_us: 83209054.6875
       reference_backend: emmy-greedy
   - name: post32@nvfp4.k_linear_reduce_67950d__place_dddf8e9d01.7643d76a7aa3.m32
     bindings:
@@ -45207,14 +44169,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 7643d76a7aa378229ff690d40f9e203df5613b75353c50d2290c4c7fc7a66a1c
     measurements:
-      emmy_us: 14477.888107299805
-      reference_us: 38982433.59375
+      emmy_us: 15944.448471069336
+      reference_us: 83209054.6875
       reference_backend: emmy-greedy
   - name: post32@nvfp4.k_linear_reduce_67950d.2a52db6ab904.m32
     bindings:
@@ -45232,15 +44193,14 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE@a2: coop
-      REDUCE@a9: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t4
+      REDUCE@n1: ''
+      REDUCE@n2: ''
+      TILE: f4
+      WORK: ''
     identity: 2a52db6ab904b7734a51907c9bd428a5b5b916bd1be740f07187b6747062d4ca
     measurements:
-      emmy_us: 9184.063911437988
-      reference_us: 38982433.59375
+      emmy_us: 33363.29650878906
+      reference_us: 83209054.6875
       reference_backend: emmy-greedy
 - program: 3
   target:
@@ -45252,33 +44212,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w2x4
-      TILE: mma_m16n8k64_e2m1_f32/f1x2/k8
+      WORK: w1x1
+      TILE: mma_m16n8k64_e2m1_f32/f1x4/k8
       REDUCE: ''
-      STAGE: d1/smem-async
+      STAGE: d3/smem-async
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 54.20042025415521
-      reference_us: 53.64716053009033
-      reference_backend: emmy-greedy
-- program: 4
-  target:
-    loop: 16
-  realizations:
-  - name: pre-sym@nvfp4.k_mean_8dbdee.07adc4a54747.dynamic
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t128
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-      REDUCE@a1: coop
-    measurements:
-      emmy_us: 35.94372601344668
-      reference_us: 36.775724641207994
+      emmy_us: 57.33458785449758
+      reference_us: 57.33458785449758
       reference_backend: emmy-greedy
 - program: 4
   target:
@@ -45289,15 +44231,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      REDUCE@n1: ''
+      REDUCE@n6: ''
+      REDUCE@n7: ''
       WORK: t16x8
       TILE: f4x8
-      REDUCE: ''
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 3115848.7548828125
-      reference_us: 3107800.048828125
+      emmy_us: 2507636.23046875
+      reference_us: 580753455.4481506
       reference_backend: emmy-greedy
 - program: 4
   target:
@@ -45308,15 +44252,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      REDUCE@n1: ''
+      REDUCE@n6: ''
+      REDUCE@n7: ''
       WORK: ''
       TILE: ''
-      REDUCE: ''
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 723295.3491210938
-      reference_us: 710788.0859375
+      emmy_us: 715308.349609375
+      reference_us: 1194970.5810546875
       reference_backend: emmy-greedy
 - program: 4
   target:
@@ -45329,12 +44275,13 @@ configs:
     knobs:
       WORK: t16x16
       TILE: f4x4
-      STAGE: ''
-      RASTER: ''
       REDUCE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
     measurements:
-      emmy_us: 6635.615825653076
-      reference_us: 6653.535842895508
+      emmy_us: 5550.3997802734375
+      reference_us: 6804.255962371826
       reference_backend: emmy-greedy
 - program: 5
   target:
@@ -45346,14 +44293,16 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t512
-      TILE: ''
-      STAGE: ''
+      REDUCE@n1: coop
+      REDUCE@n2: coop/r2
+      REDUCE@n3: coop/r4
+      REDUCE@n4: coop
+      WORK: t128
+      LOOPIFY: '0'
       RASTER: ''
-      REDUCE@a0: coop
     measurements:
-      emmy_us: 4.216510691541306
-      reference_us: 4.222649562207958
+      emmy_us: 7.218686333537971
+      reference_us: 7.218686333537971
       reference_backend: emmy-greedy
 - program: 5
   target:
@@ -45368,8 +44317,8 @@ configs:
       PLACE@a2: cut
       PLACE@a4: cut
     measurements:
-      emmy_us: 696.448028087616
-      reference_us: 2322585.205078125
+      emmy_us: 2742.432117462158
+      reference_us: 6128143.06640625
       reference_backend: emmy-greedy
   - name: pre1@nvfp4.k_linear_mean_reduce_43a1d8__place_14b3371cd2.d4c50c1a340e.m1
     bindings:
@@ -45381,14 +44330,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: d4c50c1a340e5e44e7f7cd6b36d812c2d6a739a705c3ffcc58ad84ca0f4b80b5
     measurements:
-      emmy_us: 345.7599878311157
-      reference_us: 2322585.205078125
+      emmy_us: 1371.4239597320557
+      reference_us: 6128143.06640625
       reference_backend: emmy-greedy
   - name: pre1@nvfp4.k_linear_mean_reduce_43a1d8__place_651d651886.d4c50c1a340e.m1
     bindings:
@@ -45400,14 +44348,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: d4c50c1a340e5e44e7f7cd6b36d812c2d6a739a705c3ffcc58ad84ca0f4b80b5
     measurements:
-      emmy_us: 347.9893207550049
-      reference_us: 2322585.205078125
+      emmy_us: 1373.2800483703613
+      reference_us: 6128143.06640625
       reference_backend: emmy-greedy
   - name: pre1@nvfp4.k_linear_mean_reduce_43a1d8.6d21b10cb423.m1
     bindings:
@@ -45420,13 +44367,11 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: ''
-      TILE: ''
       WORK: t128
     identity: 6d21b10cb4232e150009d505bfb0af53438f9d81fbfe5f9b1058ab6345a512c8
     measurements:
-      emmy_us: 1.4502287260598101
-      reference_us: 2322585.205078125
+      emmy_us: 1.0768665526575802
+      reference_us: 6128143.06640625
       reference_backend: emmy-greedy
 - program: 5
   target:
@@ -45441,8 +44386,8 @@ configs:
       PLACE@a2: cut
       PLACE@a4: cut
     measurements:
-      emmy_us: 694.8480010032654
-      reference_us: 1488946.044921875
+      emmy_us: 2732.383966445923
+      reference_us: 5703396.97265625
       reference_backend: emmy-greedy
   - name: pre1@nvfp4.k_linear_mean_reduce_e06159__place_7996552564.b745f161dfd0.m1
     bindings:
@@ -45454,14 +44399,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: b745f161dfd0ed250909b5070467fa594cd5862bbfc71f4565d11c093996b995
     measurements:
-      emmy_us: 346.4426596959432
-      reference_us: 1488946.044921875
+      emmy_us: 1368.1919574737549
+      reference_us: 5703396.97265625
       reference_backend: emmy-greedy
   - name: pre1@nvfp4.k_linear_mean_reduce_e06159__place_f63e4477dd.b745f161dfd0.m1
     bindings:
@@ -45473,14 +44417,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: b745f161dfd0ed250909b5070467fa594cd5862bbfc71f4565d11c093996b995
     measurements:
-      emmy_us: 346.69868151346844
-      reference_us: 1488946.044921875
+      emmy_us: 1370.751976966858
+      reference_us: 5703396.97265625
       reference_backend: emmy-greedy
   - name: pre1@nvfp4.k_linear_mean_reduce_e06159.2b94190d0b8b.m1
     bindings:
@@ -45493,13 +44436,11 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: ''
-      TILE: ''
       WORK: t128
     identity: 2b94190d0b8b04391f65983f73be5d761a25967a6d40f2cb946dbe0074c24c94
     measurements:
-      emmy_us: 1.3825069895029731
-      reference_us: 1488946.044921875
+      emmy_us: 1.0347452916597064
+      reference_us: 5703396.97265625
       reference_backend: emmy-greedy
 - program: 5
   target:
@@ -45513,12 +44454,13 @@ configs:
     knobs:
       WORK: w1x8
       TILE: mma_m16n8k64_e2m1_f32/f1x1/k8
-      STAGE: d2/smem-async
-      RASTER: ''
       REDUCE: ''
+      STAGE: d2/smem-async
+      LOOPIFY: '0'
+      RASTER: ''
     measurements:
-      emmy_us: 6.719567485757776
-      reference_us: 6.7312431496542855
+      emmy_us: 6.639573176701863
+      reference_us: 24.695999920368195
       reference_backend: emmy-greedy
 - program: 6
   target:
@@ -45530,14 +44472,16 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      REDUCE@n1: coop
+      REDUCE@n2: coop
+      REDUCE@n3: coop/r4
+      REDUCE@n4: coop
       WORK: t128
-      TILE: ''
-      STAGE: ''
+      LOOPIFY: '0'
       RASTER: ''
-      REDUCE@a1: coop
     measurements:
-      emmy_us: 20.81023931503296
-      reference_us: 21.003825509029884
+      emmy_us: 15.344246534200815
+      reference_us: 15.344246534200815
       reference_backend: emmy-greedy
 - program: 6
   target:
@@ -45552,8 +44496,8 @@ configs:
       PLACE@a3: cut
       PLACE@a5: cut
     measurements:
-      emmy_us: 102402.4658203125
-      reference_us: 6545247.0703125
+      emmy_us: 85992.76733398438
+      reference_us: 10584261.71875
       reference_backend: emmy-greedy
   - name: pre256@nvfp4.k_linear_mean_reduce_52b8a1__place_03cab9bdc3.957d518b272c.m256
     bindings:
@@ -45565,14 +44509,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 957d518b272c6a32666792e3d3ee4af05f894ce8d76e0d4dc46d6bc8a928cfb6
     measurements:
-      emmy_us: 53157.85598754883
-      reference_us: 6545247.0703125
+      emmy_us: 42638.36669921875
+      reference_us: 10584261.71875
       reference_backend: emmy-greedy
   - name: pre256@nvfp4.k_linear_mean_reduce_52b8a1__place_fa84f522bd.957d518b272c.m256
     bindings:
@@ -45584,14 +44527,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 957d518b272c6a32666792e3d3ee4af05f894ce8d76e0d4dc46d6bc8a928cfb6
     measurements:
-      emmy_us: 50150.943756103516
-      reference_us: 6545247.0703125
+      emmy_us: 42735.61477661133
+      reference_us: 10584261.71875
       reference_backend: emmy-greedy
   - name: pre256@nvfp4.k_linear_mean_reduce_52b8a1.006c576a94fe.m256
     bindings:
@@ -45604,13 +44546,11 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: ''
-      TILE: ''
       WORK: t128
     identity: 006c576a94fe8d815a21968456cf0dc8faaf7964f2a1ee2a1a0dc366b5ad84e9
     measurements:
-      emmy_us: 15.499428978988103
-      reference_us: 6545247.0703125
+      emmy_us: 13.141999952495098
+      reference_us: 10584261.71875
       reference_backend: emmy-greedy
 - program: 6
   target:
@@ -45625,8 +44565,8 @@ configs:
       PLACE@a3: cut
       PLACE@a5: cut
     measurements:
-      emmy_us: 31933.664321899414
-      reference_us: 2624221.19140625
+      emmy_us: 20676.288604736328
+      reference_us: 13950577.1484375
       reference_backend: emmy-greedy
   - name: pre256@nvfp4.k_linear_mean_reduce_fc1474__place_781a5b6da7.a806376885c8.m256
     bindings:
@@ -45638,14 +44578,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: a806376885c875a98c42f7f1e4fa39a912da3258aad4819f0bae3658f602baab
     measurements:
-      emmy_us: 15941.823959350586
-      reference_us: 2624221.19140625
+      emmy_us: 10338.46378326416
+      reference_us: 13950577.1484375
       reference_backend: emmy-greedy
   - name: pre256@nvfp4.k_linear_mean_reduce_fc1474__place_c3f7f6f116.a806376885c8.m256
     bindings:
@@ -45657,14 +44596,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: a806376885c875a98c42f7f1e4fa39a912da3258aad4819f0bae3658f602baab
     measurements:
-      emmy_us: 15976.672172546387
-      reference_us: 2624221.19140625
+      emmy_us: 10362.848281860352
+      reference_us: 13950577.1484375
       reference_backend: emmy-greedy
   - name: pre256@nvfp4.k_linear_mean_reduce_fc1474.5058be4486bf.m256
     bindings:
@@ -45677,32 +44615,11 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: ''
-      TILE: ''
       WORK: t128
     identity: 5058be4486bfeac6dcc4896557a0d377592852fa194902da06f182d4a6e42dd6
     measurements:
-      emmy_us: 5.081142698015485
-      reference_us: 2624221.19140625
-      reference_backend: emmy-greedy
-- program: 6
-  target:
-    loop: 27
-  realizations:
-  - name: pre256@nvfp4.k_linear_fbf336.e4c32b7d87cd.m256
-    bindings:
-      num_tokens: 256
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k64_e2m1_f32/f2x4/k4
-      STAGE: d2/smem-async
-      RASTER: gm8
-      REDUCE: ''
-    measurements:
-      emmy_us: 30.282667188933402
-      reference_us: 30.328241261568934
+      emmy_us: 3.825655271267069
+      reference_us: 13950577.1484375
       reference_backend: emmy-greedy
 - program: 7
   target:
@@ -45714,14 +44631,16 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t512
-      TILE: ''
-      STAGE: ''
+      REDUCE@n1: coop
+      REDUCE@n2: coop/r2
+      REDUCE@n3: coop
+      REDUCE@n4: coop
+      WORK: t128
+      LOOPIFY: '0'
       RASTER: ''
-      REDUCE@a1: coop
     measurements:
-      emmy_us: 9.491384602510013
-      reference_us: 9.498514447893415
+      emmy_us: 7.716713025588398
+      reference_us: 7.716713025588398
       reference_backend: emmy-greedy
 - program: 7
   target:
@@ -45736,8 +44655,8 @@ configs:
       PLACE@a3: cut
       PLACE@a5: cut
     measurements:
-      emmy_us: 15460.19172668457
-      reference_us: 5804177.24609375
+      emmy_us: 8420.703887939453
+      reference_us: 10588113.28125
       reference_backend: emmy-greedy
   - name: pre32@nvfp4.k_linear_mean_reduce_2e1bd4__place_dc03ebe66c.aee854fb5ca1.m32
     bindings:
@@ -45749,14 +44668,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: aee854fb5ca1917f0d8013d7ab634479e454f7f07c7619a95d257804352ec754
     measurements:
-      emmy_us: 7732.223987579346
-      reference_us: 5804177.24609375
+      emmy_us: 4181.312084197998
+      reference_us: 10588113.28125
       reference_backend: emmy-greedy
   - name: pre32@nvfp4.k_linear_mean_reduce_2e1bd4__place_e1c678120b.aee854fb5ca1.m32
     bindings:
@@ -45768,14 +44686,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: aee854fb5ca1917f0d8013d7ab634479e454f7f07c7619a95d257804352ec754
     measurements:
-      emmy_us: 7751.584053039551
-      reference_us: 5804177.24609375
+      emmy_us: 4189.663887023926
+      reference_us: 10588113.28125
       reference_backend: emmy-greedy
   - name: pre32@nvfp4.k_linear_mean_reduce_2e1bd4.a4946650617b.m32
     bindings:
@@ -45788,13 +44705,11 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: ''
-      TILE: ''
       WORK: t128
     identity: a4946650617bbc431021e21eed40f6eec36a4d111a9f30c3ee69b48703827eb9
     measurements:
-      emmy_us: 3.8304001092910767
-      reference_us: 5804177.24609375
+      emmy_us: 2.158642734537394
+      reference_us: 10588113.28125
       reference_backend: emmy-greedy
 - program: 7
   target:
@@ -45809,8 +44724,8 @@ configs:
       PLACE@a3: cut
       PLACE@a5: cut
     measurements:
-      emmy_us: 2736.5119457244873
-      reference_us: 2520204.833984375
+      emmy_us: 2773.279905319214
+      reference_us: 7145612.3046875
       reference_backend: emmy-greedy
   - name: pre32@nvfp4.k_linear_mean_reduce_576f70__place_5fc0ea029a.208716fac879.m32
     bindings:
@@ -45822,14 +44737,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 208716fac87928b0addb05a4d512006a3f456042cbaa874c0a781b2040016f2b
     measurements:
-      emmy_us: 1356.4480543136597
-      reference_us: 2520204.833984375
+      emmy_us: 1386.4959478378296
+      reference_us: 7145612.3046875
       reference_backend: emmy-greedy
   - name: pre32@nvfp4.k_linear_mean_reduce_576f70__place_f1633833f4.208716fac879.m32
     bindings:
@@ -45841,14 +44755,13 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
-      STAGE: ''
-      TILE: ''
-      WORK: t128
+      REDUCE: ''
+      TILE: f4
+      WORK: ''
     identity: 208716fac87928b0addb05a4d512006a3f456042cbaa874c0a781b2040016f2b
     measurements:
-      emmy_us: 1369.1840171813965
-      reference_us: 2520204.833984375
+      emmy_us: 1388.9919519424438
+      reference_us: 7145612.3046875
       reference_backend: emmy-greedy
   - name: pre32@nvfp4.k_linear_mean_reduce_576f70.3475aabb3803.m32
     bindings:
@@ -45861,13 +44774,11 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
       REDUCE: coop
-      STAGE: ''
-      TILE: ''
       WORK: t128
     identity: 3475aabb3803a152cd6995cc601ca64fc1008690ca246a6bf1db00c91d78a570
     measurements:
-      emmy_us: 1.6846677907200729
-      reference_us: 2520204.833984375
+      emmy_us: 1.2605305837125194
+      reference_us: 7145612.3046875
       reference_backend: emmy-greedy
 - program: 7
   target:
@@ -45886,6 +44797,6 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 7.519515174807924
-      reference_us: 7.32460618019104
+      emmy_us: 6.645546754201253
+      reference_us: 15.55550005286932
       reference_backend: emmy-greedy

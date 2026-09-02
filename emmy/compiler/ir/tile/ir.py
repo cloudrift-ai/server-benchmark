@@ -138,13 +138,28 @@ class ProjectionRegion:
         return [f"{indent}project {self.axis.name} in 0..{self.axis.extent}", *pretty_body(self.body, indent + "    ")]
 
 
+def _reads_sweep(stmt, axis_name: str) -> bool:
+    """Whether ``stmt`` reads ``axis_name`` — asked at the TILE layer, which knows both kinds.
+
+    A reconstituted stream mixes statements with terms, and the two answer differently. A ``Fold``
+    answers from what it DECLARES (:func:`~emmy.compiler.ir.schedule.views.edge_axes`): its lift
+    binds every coordinate it reads, operand edges included, so the declaration is the complete
+    answer. The generic stmt walk is not — ``Fold.nested()`` deliberately excludes operand edges,
+    so ``_member_reads`` on a term sees its lift body and none of its edges, and would place the
+    sweep run after a store whose edge reads the axis. Everything else is an ordinary statement and
+    takes the ordinary walk."""
+    if isinstance(stmt, Fold):
+        return axis_name in edge_axes(stmt, (axis_name,))
+    return axis_name in _member_reads(stmt)
+
+
 def _sweep_start(stmts, axis_name: str) -> int:
     """The first index of the trailing projection run a ``sweep`` store's output ``Loop``
-    wraps — the earliest stmt reading the sweep axis (SSA deps + Expr free vars, deep). The
-    trailing-RUN rule (everything from that stmt on is swept) is deliberately simple; the
-    :func:`extract_output_specs` round-trip gate is what proves it reproduces the captured loop."""
+    wraps — the earliest stmt reading the sweep axis. The trailing-RUN rule (everything from that
+    stmt on is swept) is deliberately simple; the :func:`extract_output_specs` round-trip gate is
+    what proves it reproduces the captured loop."""
     for i, s in enumerate(stmts):
-        if axis_name in _member_reads(s):
+        if _reads_sweep(s, axis_name):
             return i
     return len(stmts)
 

@@ -53,7 +53,13 @@ def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> Closure | None:
     nodes = tuple(stmt for stmt in members if isinstance(stmt, Fold))
     if len({id(source) for source in (*used_edges, *indexed_loads, *nodes)}) != 1:
         return None
-    return Closure(Lambda(params=(fold.axis.name,), body=Body(members), results=(result,)), (*axes, fold.axis.name))
+    # A comparison VIEW, not a stored term: the cone is wrapped only to ask whether two scores are
+    # alpha-equal. It still has to be a well-formed lambda, so it closes over what the members read
+    # — the enclosing axes, and any value the cone takes from its scope — and the Closure's
+    # environment is narrowed to the axes that actually became params, since `axes` may name
+    # coordinates this particular cone never touches.
+    fn = Lambda.closing((fold.axis.name,), Body(members), (result,))
+    return Closure(fn, tuple(axis for axis in (*axes, fold.axis.name) if axis in fn.params))
 
 
 def _same_axis(left: Fold, right: Fold) -> bool:

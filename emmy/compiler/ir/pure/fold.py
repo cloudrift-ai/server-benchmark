@@ -447,7 +447,7 @@ class Fold:
         for stmt in self.combine.body:
             if stmt.name not in view.states:
                 named[stmt.name] = f"{other[0]}__{stmt.name.removeprefix(prefix)}"
-        applied = [stmt.rename(named) for stmt in self.combine.body]
+        applied = list(self.combine.rename(named).body)
         definitions = {stmt.name: stmt for stmt in applied if stmt.name not in view.states}  # temps; a state's rewrite is not a def
 
         def reads(name: str, state: str) -> bool:
@@ -540,17 +540,16 @@ class Fold:
             return tuple(out)
 
         def cone(fold: Fold, name: str) -> tuple:
-            # The closed cone defining ``name`` in the lift — a lambda over what it reads, the VALUE
-            # each of those params binds (``None`` for a coordinate: a reduce's state binds that
-            # term, a projection's result binds its own cone), and its statements.
+            # The closed cone defining ``name`` in the lift, and the VALUE each of its params binds
+            # (``None`` for a coordinate: a reduce's state binds that term, a projection's result
+            # binds its own cone).
             by_param = dict(bindings(fold))
-            members = () if name in fold.lift.params else tuple(fold.lift.body.backward_cone((name,)).members)
-            fn = Lambda.closing((), Body(members), (name,))
+            fn = fold.lift.cone(name)
             values = tuple(
                 None if (edge := by_param.get(param)) is None else edge if edge.axis is not None else cone(edge, param)
                 for param in fn.params
             )
-            return fn, values, members
+            return fn, values
 
         def same(a: tuple, b: tuple) -> bool:
             if a[0].canonical() != b[0].canonical() or len(a[1]) != len(b[1]):
@@ -563,6 +562,7 @@ class Fold:
             return True
 
         bound = bindings(self)
+        by_param = dict(bound)
         g = next(param for param, edge in bound if edge is pivot)
         pivot_params = {param for param, edge in bound if edge is pivot}
         score = cone(pivot, pivot.lift.results[0])
@@ -571,13 +571,12 @@ class Fold:
             found = cone(self, x)
             if not same(found, score):
                 continue
-            members = {id(stmt) for stmt in found[2]}
-            residual = tuple(stmt for stmt in self.lift.body if id(stmt) not in members)
-            reads = {name for stmt in residual for name in stmt.deps()}
-            extras = tuple(p for p in self.lift.params[1:] if p not in (x, g) and p not in found[0].params and p in reads)
-            try:
-                fn = Lambda(params=(x, g, *extras), body=Body(residual), results=self.lift.results)
-            except ValueError:
+            # What remains of the lift with the score cut out, closed over what it still reads —
+            # ``(score, pivot, *extras)`` in role order, the extras operand-bound values.
+            residual = tuple(stmt for stmt in self.lift.body if stmt not in found[0].body)
+            fn = Lambda.closing((x, g), Body(residual), self.lift.results)
+            extras = fn.params[2:]
+            if any(p not in by_param or p in pivot_params for p in extras):
                 continue
             channel = next((c for c in recipe.channels if fn.canonical() == c.pattern.canonical()), None)
             if channel is None:
@@ -596,13 +595,12 @@ class Fold:
             names = {channel.injection.params[0]: pivot.lift.results[0]}
             names.update(zip(channel.injection.params[1:], extras, strict=True))
             names.update((stmt.name, f"{view.states[0]}__{stmt.name}") for stmt in channel.injection.body)
-            injected = tuple(stmt.rename(names) for stmt in channel.injection.body)
-            result = names.get(channel.injection.results[0], channel.injection.results[0])
+            injection = channel.injection.rename(names)
             arity = sum(len(edge.exposes) for edge in pivot.operands)
             lift = Lambda(
                 params=(new, *(name for edge in operands for name in edge.exposes), *pivot.lift.params[1 + arity :]),
-                body=Body((*pivot.lift.body, *injected)),
-                results=(*pivot.lift.results, result),
+                body=Body((*pivot.lift.body, *injection.body)),
+                results=(*pivot.lift.results, *injection.results),
             )
             states = (*pview.states, view.states[0])
             return Fold(axes=pivot.axes, operands=operands, lift=lift, init=(*pivot.init, *self.init), combine=recipe.program(states))
@@ -639,23 +637,16 @@ class Fold:
                 bound += 1
             operands.append(_rewrite_kind(canon, lambda name, local=local: local.get(name, name), Sigma.IDENTITY, lambda axis: axis))
 
-        def renamed(fn: Lambda) -> Lambda:
-            return Lambda(
-                params=tuple(mapping.get(name, name) for name in fn.params),
-                body=Body(tuple(stmt.rename(mapping) for stmt in fn.body)),
-                results=tuple(mapping.get(result, result) for result in fn.results),
-            )
-
         return replace(
             self,
             axes=tuple(replace(axis, name=mapping[axis.name]) for axis in self.axes),
             operands=tuple(operands),
-            lift=renamed(self.lift),
+            lift=self.lift.rename(mapping),
             combine=None if self.combine is None else rename_combine(self.combine, lambda name: mapping.get(name, name)),
             # The observer binds the iteration var and reads the carried state, so it renames in
             # LOCKSTEP: renaming the axis without it leaves the observer reading a name that no
             # longer exists, and a scan would then canonicalize to something that is not a term.
-            observe=None if self.observe is None else renamed(self.observe),
+            observe=None if self.observe is None else self.observe.rename(mapping),
         )
 
     @cached_method

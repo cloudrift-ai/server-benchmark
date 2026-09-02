@@ -134,6 +134,29 @@ def test_lambda_refuses_an_open_body_and_closing_binds_the_residual() -> None:
 # --- α-invariance: canonical renumbering -------------------------------------------------------- #
 
 
+def test_cone_is_one_definition_closed_over_what_it_reads() -> None:
+    """The cone of a result is the sub-lambda defining it — its dependence within the body, the
+    reads it takes from the params as its own params; a param's cone is the identity on it."""
+    fn = Lambda.closing(
+        ("k", "a", "b"),
+        Body((Assign("s", "multiply", ("a", "b")), Assign("d", "subtract", ("s", "k")), Assign("w", "exp", ("d",)))),
+        ("w",),
+    )
+    score = fn.cone("s")
+    assert score.params == ("a", "b") and [stmt.name for stmt in score.body] == ["s"] and score.results == ("s",)
+    assert fn.cone("a") == Lambda(params=("a",), body=Body(()), results=("a",))
+    assert set(fn.cone("w").params) == {"a", "b", "k"} and len(fn.cone("w").body) == 3
+
+
+def test_rename_maps_params_body_and_results_in_lockstep() -> None:
+    fn = Lambda(params=("m", "m__o"), body=Body((Assign("t", "maximum", ("m", "m__o")), Assign("m", "copy", ("t",)))), results=("m",))
+    renamed = fn.rename({"m": "acc", "m__o": "acc__o", "t": "acc__t"})
+    assert renamed.params == ("acc", "acc__o") and renamed.results == ("acc",)
+    assert [(stmt.name, stmt.args) for stmt in renamed.body] == [("acc__t", ("acc", "acc__o")), ("acc", ("acc__t",))]
+    assert fn.rename(lambda name: name) == fn
+    assert fn.alpha_eq(renamed)
+
+
 def test_alpha_equality_under_bound_renaming() -> None:
     a = Lambda(
         params=("k", "x"),

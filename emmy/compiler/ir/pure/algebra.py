@@ -111,11 +111,7 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
             return f"{rename_ssa(name[:-3])}__o"
         return rename_ssa(name)
 
-    return Lambda(
-        params=tuple(rn(p) for p in combine.params),
-        body=Body(tuple(st.rewrite(rn) for st in combine.body)),
-        results=tuple(rn(r) for r in combine.results),
-    )
+    return combine.rename(rn)
 
 
 # --------------------------------------------------------------------------------------------

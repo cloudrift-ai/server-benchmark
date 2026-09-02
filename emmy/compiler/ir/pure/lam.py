@@ -161,6 +161,29 @@ class Lambda:
         """Pickle the stored fields only — memoized reads recompute after transport."""
         return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
 
+    def cone(self, name: str) -> Lambda:
+        """The closed cone of one definition — the statements of the body ``name`` depends on, as a
+        lambda over what they read (a param names itself: an empty body returning it). What a
+        reader asks of one result without the rest of the body: the score a fold's lift computes,
+        the value one component of a projection denotes. Params in :meth:`closing`'s order."""
+        members = () if name in self.params else tuple(self.body.backward_cone((name,)).members)
+        return Lambda.closing((), Body(members), (name,))
+
+    def rename(self, names) -> Lambda:
+        """α-rename params, body and results through one map — a mapping or a callable — the
+        lockstep every consumer of a stored lambda applies: the fold's rewrite handler, the
+        combine's state rename, a recipe instantiated onto a term's names."""
+        lookup = names.get if hasattr(names, "get") else None
+
+        def rn(name: str) -> str:
+            return lookup(name, name) if lookup is not None else names(name)
+
+        return Lambda(
+            params=tuple(rn(p) for p in self.params),
+            body=Body(tuple(s.rewrite(rn) for s in self.body)),
+            results=tuple(rn(r) for r in self.results),
+        )
+
     def canonical(self) -> Lambda:
         """The α-canonical form: params renumber to ``_p0…`` and internal defs to ``_v0…`` in
         walk order; free names (and float results) pass through unchanged. Deterministic, so two
@@ -173,15 +196,7 @@ class Lambda:
                 if d not in mapping:
                     mapping[d] = f"_v{n}"
                     n += 1
-
-        def rn(name: str) -> str:
-            return mapping.get(name, name)
-
-        return Lambda(
-            params=tuple(mapping[p] for p in self.params),
-            body=Body(tuple(s.rewrite(rn) for s in self.body)),
-            results=tuple(rn(r) for r in self.results),
-        )
+        return self.rename(mapping)
 
     def alpha_eq(self, other: Lambda) -> bool:
         """α-invariant equality — canonical forms compared structurally."""

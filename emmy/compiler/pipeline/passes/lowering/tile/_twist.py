@@ -61,8 +61,7 @@ def _varies(fold: Fold, name: str, bound: dict[str, Fold]) -> bool:
     if name in bound:
         return fold.axis.name in bound[name].free_axes
     if name not in fold.lift.params:
-        cone = fold.lift.body.backward_cone((name,))
-        return any(_varies(fold, read, bound) for read in Lambda.closing((), Body(cone.members), (name,)).params)
+        return any(_varies(fold, read, bound) for read in fold.lift.cone(name).params)
     return False
 
 

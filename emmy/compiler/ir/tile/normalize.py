@@ -32,12 +32,7 @@ from emmy.compiler.ir.pure.closure import Closure, canonical_under, equivalent_c
 from emmy.compiler.ir.pure.fold import _operand_result_names, _ordered_projection, operand_name
 from emmy.compiler.ir.schedule.views import edge_axes
 from emmy.compiler.ir.stmt import Assign, Body, Load, refs_axis
-from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.structural import instance_memo
-
-
-def _operand_roles(operand, axes: tuple[str, ...]) -> frozenset[str]:
-    return edge_axes(operand, axes)
 
 
 def _loads_axis_contiguously(operand, axis: str) -> bool:
@@ -182,7 +177,7 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
         left, right = extracted[left_name][0], extracted[right_name][0]
         if not all(fold.axis.name in edge_axes(edge, (fold.axis.name,)) for edge in (left, right)):
             return fold
-        left_roles, right_roles = _operand_roles(left, axes), _operand_roles(right, axes)
+        left_roles, right_roles = edge_axes(left, axes), edge_axes(right, axes)
         left_only, right_only = left_roles - right_roles, right_roles - left_roles
         unused_implicit = implicit_axes - left_roles - right_roles
         broadcast_batch = False
@@ -286,36 +281,6 @@ def _normalize_body(body: Body, axes: tuple[str, ...], implicit_axes: frozenset[
     return Body(out)
 
 
-def _hoist_closed_folds(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
-    """Move closed child Folds from a zero-axis body onto operand edges.
-
-    A non-contraction fold that reads a SWEEP axis is never hoisted: a sweep axis is bound only by
-    the per-cell output ``Loop`` reconstitution wraps around the projection body
-    (``apply_output_specs``), so a body member re-enters that scope while an operand edge lowers
-    at kernel scope, where the axis is an undefined identifier (``head``'s sweep case — the fold
-    must stay the projection's body member; found live on DeepSeek-V4 post16's per-column sum,
-    ``k_div_36``). A CONTRACTION is exempt: ``TileOp.__post_init__`` promotes a sweep its operands
-    read into a real free axis right after normalization, so the hoisted edge stays bound.
-
-    The body-fed refusal that used to sit here is gone with the condition it guarded: a subtree
-    could capture a name the remaining body defines, and hoisting it emitted that capture as an
-    undefined identifier at nvcc (DeepSeek-V4 post4096's two-cut ``…mean_reduce`` piece). A term
-    takes its values through operand edges now, so there is no such capture to strand."""
-    candidates = [
-        stmt
-        for stmt in root.body
-        if isinstance(stmt, Fold)
-        and set(stmt.environment) <= set(axes)  # captures nothing but axes in scope
-        and (is_contraction(stmt) or not edge_axes(stmt, sweep_axes))
-    ]
-    if not candidates:
-        return root
-    candidate_ids = {id(candidate) for candidate in candidates}
-    remaining = Body(stmt for stmt in root.body if id(stmt) not in candidate_ids)
-    hoisted = Fold.projection(operands=(*root.operands, *candidates), body=remaining, results=root.lift.results, axes=axes)
-    return _passthrough(hoisted) or hoisted
-
-
 def _passthrough(node: Fold) -> Fold | None:
     """The single operand an identity projection merely re-exposes, or ``None``.
 
@@ -328,219 +293,6 @@ def _passthrough(node: Fold) -> Fold | None:
     if isinstance(operand, Fold) and tuple(node.lift.results) == _operand_result_names(operand):
         return operand
     return None
-
-
-def _edge_free_names(edge) -> frozenset[str]:
-    """The names an operand edge CAPTURES — :meth:`Fold.deps`, which subtracts what each nesting
-    level binds. A scope-blind union would count a sibling-bound name (the statistic cone reading
-    the eps its source operand provides) as free, and the close rewrites would re-fire forever on
-    an edge that is already closed."""
-    return frozenset()  # a term captures nothing — values arrive through its own operand edges
-
-
-def _carries_iteration(node) -> bool:
-    """Whether a provider chain contains a Fold axis rather than only straight-line code."""
-    if getattr(node, "axis", None) is not None:
-        return True
-    children = (*node.operands, *node.lift.body) if isinstance(node, Fold) else tuple(stmt for body in node.nested() for stmt in body)
-    return any(_carries_iteration(child) for child in children)
-
-
-def _with_source(node: Fold, source) -> Fold:
-    """``node`` with ``source`` APPENDED to its operands and its lift rebound positionally.
-
-    Appended, never prepended: the path codec spells a site by its operand role and index, so
-    inserting ahead of the existing edges renumbers every child path and every stored ``PLACE@``
-    pin addressing them stops resolving. Appending leaves the existing indices alone and gives the
-    drained producer the next one. Evaluation order is not tuple order —
-    :func:`~emmy.compiler.ir.pure.fold.splice_operands` places each edge's body before its first
-    read, providers ahead of dependents — so the producer still lands before the value it feeds.
-
-    A zero-axis node rebuilds through :meth:`Fold.projection` (which re-derives its params); a
-    reducing node keeps its iteration var first and rebinds the rest, so the formation invariant —
-    one lift param per operand result component — holds at either position."""
-    operands = (*node.operands, source)
-    bound = tuple(name for edge in operands for name in _operand_result_names(edge))
-    if node.axis is None:
-        return Fold.projection(operands=operands, body=node.body, results=node.lift.results)
-    return replace(node, operands=operands, lift=replace(node.lift, params=(node.axis.name, *bound)))
-
-
-def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
-    """The shared walk of both closing rewrites: establish the closure invariant on EVERY node.
-
-    A computed zero-axis operand may still carry value captures
-    (:func:`~emmy.compiler.ir.pure.closure.value_captures` — sibling-defined data rather
-    than axes); ``provider(edge, binders)`` returns the source edge that supplies them, or
-    ``None`` to leave the operand open. ``binders`` counts only the iteration domains crossed
-    BELOW ``root`` — a reducing root already evaluates inside its own axis, and a projection root
-    has none — and each caller owns what a provider may take and what happens to the drained
-    chain afterwards.
-
-    The walk does not ask what KIND of node it stands on. The closure invariant is a property of
-    the term — ``ir/pure/closure``: "a normalized term's values arrive through operand edges, and
-    the only names its lift may capture are axes bound by its ancestors" — so a projection's or a
-    twisted reduce's operand edge is closed by the same rule that closes a contraction's. The
-    drained edge carries its PRODUCER, never a reference to the enclosing scope: an operand that
-    named an outer value would be a capture with positional spelling, and the term would still not
-    be evaluable from its own parts. Sharing is restored by :func:`_share_common_cones`, and a
-    value that now has two producers becomes ONE seam at placement — the module-header rule.
-    """
-
-    def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
-        inner = (*binders, node.axis.name) if node.axis is not None else binders
-        operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
-        body = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.body)
-        current = replace(node, operands=operands) if operands != node.operands else node
-        if body != current.body:
-            current = current.with_bodies((body,))
-
-        changed = False
-        closed = []
-        for edge in current.operands:
-            if not isinstance(edge, Fold) or edge.axis is not None:
-                closed.append(edge)
-                continue
-            source = provider(edge, binders)
-            if source is None:
-                closed.append(edge)
-                continue
-            closed.append(_with_source(edge, source))
-            changed = True
-        current = replace(current, operands=tuple(closed)) if changed else current
-
-        # A fold sitting as a BODY MEMBER captures exactly as an operand edge does — attention's
-        # twisted per-key statistic reads the scale and the row maximum its siblings define. It
-        # takes them the same way: as operands carrying their producer, at whichever position it
-        # sits. Its own axis stays the lift's leading binder, so the drain is one move either way.
-        members = []
-        for stmt in current.body:
-            source = provider(stmt, binders) if isinstance(stmt, Fold) else None
-            members.append(stmt if source is None else _with_source(stmt, source))
-        if any(fresh is not prior for fresh, prior in zip(members, current.body, strict=True)):
-            current = current.with_bodies((Body(members),))
-        return current
-
-    rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
-    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in root.body)
-    return rewritten_operands, rewritten_body
-
-
-def _provider_needs(edge, provider_order: tuple[str, ...], provider_names: frozenset[str]) -> tuple[str, ...]:
-    """The provider names an operand edge captures, in provider order."""
-    return tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
-
-
-def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
-    """Move an enclosing projection's dependencies onto captured contraction operands."""
-    assert root.axis is None
-    provider_order = tuple(
-        dict.fromkeys(
-            (
-                *(name for edge in root.operands for name in _operand_result_names(edge)),
-                *(name for stmt in root.body for name in stmt.defines()),
-            )
-        )
-    )
-    provider_names = frozenset(provider_order)
-    edge_by_name = {name: edge for edge in root.operands for name in _operand_result_names(edge)}
-    moved_members: set[int] = set()
-    moved_edges: set[int] = set()
-
-    def provider(edge, binders: tuple[str, ...]):
-        names = _provider_needs(edge, provider_order, provider_names)
-        if not names:
-            return None
-        cone = root.body.backward_cone(names)
-        required = set(cone.external_reads) | set(names)
-        edges = tuple(dict.fromkeys(edge_by_name[name] for name in provider_order if name in required and name in edge_by_name))
-        defined = {name for stmt in cone.members for name in stmt.defines()}
-        defined.update(name for edge in edges for name in _operand_result_names(edge))
-        if not set(names) <= defined:
-            return None
-        # Attaching a provider to a nested operand evaluates it inside every binder crossed by
-        # the move. An iteration-bearing chain therefore stays at its defining scope; straight-
-        # line chains still close normally. The two arms deliberately differ: a whole operand
-        # EDGE that iterates is kept unconditionally — the enclosing projection evaluates it
-        # once, so even the depth-0 move into a contraction operand's per-cell fill multiplies
-        # it, and closure cannot split the edge without changing its value — while an iterating
-        # body MEMBER is blocked only past a new binder (``_close_reduce_body`` states the
-        # mirror convention: a reducing root's own axis is its existing domain). A fold this
-        # rule leaves capturing stays placeable through provider closure at offer time
-        # (``lowering/tile/_cut.py``).
-        if any(_carries_iteration(edge) for edge in edges) or (binders and any(_carries_iteration(stmt) for stmt in cone.members)):
-            return None
-        moved_members.update(id(stmt) for stmt in cone.members)
-        moved_edges.update(id(edge) for edge in edges)
-        hoisted = _hoist_closed_folds(Fold.projection(operands=edges, body=Body(cone.members), results=names, axes=axes), axes, sweep_axes)
-        return _passthrough(hoisted) or hoisted
-
-    rewritten_operands, rewritten_body = _close_tree(root, provider)
-    if not moved_members and not moved_edges:
-        if rewritten_operands == root.operands and rewritten_body == root.body:
-            return root
-        return Fold.projection(operands=rewritten_operands, body=rewritten_body, results=root.lift.results, axes=axes)
-
-    candidates = tuple(stmt for stmt in rewritten_body if id(stmt) in moved_members)
-    moved_defs = {name for stmt in candidates for name in stmt.defines()}
-    outside_reads = set(root.lift.results)
-    outside_reads.update(name for stmt in rewritten_body if id(stmt) not in moved_members for name in _member_reads(stmt))
-    remaining_body = (
-        Body(stmt for stmt in rewritten_body if id(stmt) not in moved_members) if not (moved_defs & outside_reads) else rewritten_body
-    )
-
-    live = set(root.lift.results)
-    live.update(name for stmt in remaining_body for name in _member_reads(stmt))
-    remaining_operands = tuple(
-        edge for edge in rewritten_operands if id(edge) not in moved_edges or live & set(_operand_result_names(edge))
-    )
-    return Fold.projection(operands=remaining_operands, body=remaining_body, results=root.lift.results, axes=axes)
-
-
-def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
-    """Move a reducing fold's body-resident producer chain onto a captured contraction operand.
-
-    :func:`_close_projection` closes contraction operands against a zero-axis root, but a chain
-    that depends on the fold's own iteration axis lives in the reducing fold's lift body, one
-    scope below any projection — attention's per-key statistic and its rsqrt ahead of the score
-    dot's B cone. Moving that chain onto the captured edge closes the cone at the contraction's
-    fold axis plus the enclosing free axes, which is what lets the placement fork offer the
-    operand as a workspace seam. The move is gated on exclusive consumption: every moved
-    definition must die into the closed edges, so the step's work is repackaged rather than
-    duplicated and a chain a sibling member still reads stays put."""
-    if root.axis is None or is_contraction(root) or not root.lift.body:
-        return root
-    body = root.lift.body
-    provider_order = tuple(dict.fromkeys(name for stmt in body for name in stmt.defines()))
-    provider_names = frozenset(provider_order)
-    moved: set[int] = set()
-
-    def provider(edge, binders: tuple[str, ...]) -> Fold | None:
-        names = _provider_needs(edge, provider_order, provider_names)
-        if not names:
-            return None
-        cone = body.backward_cone(names)
-        defined = {name for stmt in cone.members for name in stmt.defines()}
-        if not set(names) <= defined:
-            return None
-        if binders and any(_carries_iteration(member) for member in cone.members):
-            return None
-        moved.update(id(stmt) for stmt in cone.members)
-        return _hoist_closed_folds(Fold.projection(body=Body(cone.members), results=names, axes=axes), axes, sweep_axes)
-
-    rewritten_operands, rewritten_body = _close_tree(root, provider)
-    if not moved:
-        return root
-
-    kept = Body(stmt for stmt in rewritten_body if id(stmt) not in moved)
-    moved_defs = {name for stmt in body if id(stmt) in moved for name in stmt.defines()}
-    outside = {result for result in root.lift.results if isinstance(result, str)}
-    outside.update(name for stmt in kept for name in _member_reads(stmt))
-    if root.observe is not None:
-        outside.update(root.observe.params)  # closed: its reads ARE its params (axis + carried state)
-    if moved_defs & outside:
-        return root  # the chain does not die into the closed edges — moving it would duplicate work
-    return replace(root, operands=rewritten_operands, lift=replace(root.lift, body=kept))
 
 
 def _flat_members(edge) -> tuple | None:
@@ -740,10 +492,9 @@ def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[
         node = node.with_bodies((body,))
     node = _canonical_semiring(node, axes, implicit_axes)
     if node.axis is not None:
-        return _close_reduce_body(node, body_axes, sweep_axes)
+        return node
     node = _hoist_decode_operands(node)
-    node = _close_projection(node, axes, sweep_axes)
-    return _hoist_closed_folds(node, axes, sweep_axes)
+    return node
 
 
 def _share_common_cones(root: Fold) -> Fold:

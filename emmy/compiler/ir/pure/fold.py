@@ -736,7 +736,18 @@ class Fold:
         the loop. A gmem ``Load`` edge always rides the step (its index is the operand slab)."""
         if self.axis is None:
             return ()
-        return tuple(e for e in self._splice_edges() if isinstance(e, Fold) and self.axis.name not in deep_reads(list(e.lower())))
+        # Read off the edge's DECLARATION, not by lowering it and scanning free names: an edge
+        # declares the enclosing coordinates it reads as lift params, less the axis it binds (an
+        # edge reducing over its own ``k`` shadows this one and is not varying with it). The
+        # lowered-body scan this replaces is the same inversion removed from `_operand_roles` —
+        # asking a term to re-derive what it already states — and it re-lowered every edge on
+        # every call. Inlined rather than imported: ``ir/pure`` may not reach the schedule layer
+        # where the general reading lives (``Closure.over_edge`` inlines it for the same reason).
+        return tuple(
+            edge
+            for edge in self._splice_edges()
+            if isinstance(edge, Fold) and self.axis.name not in (set(edge.lift.params) - edge.binds_axes())
+        )
 
     def _step_edges(self) -> tuple:
         hoisted = {id(e) for e in self._hoisted_edges()}

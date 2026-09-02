@@ -534,10 +534,9 @@ def reduce_plan(tile):
     return plan if plan is not None else Reduce()
 
 
-# Kernel identity lives in its own module (``tile/_key.py``) — it is not a compute read — and its
-# ONE public name is the ``Structural`` method, ``Fold.structural_key()`` / ``TileOp.structural_key()``
-# (``identity_key(with_io=True, with_knobs=True)`` / ``Graph.structural_key`` reach it there). The structural dump is NOT re-exported:
-# it has no consumer outside ``_dump`` itself, so a shim here would serve nothing.
+# Kernel identity is the Loop IR a term lowers to (``TileOp.identity_key``); a term has no key of
+# its own. The structural dump is NOT re-exported: it has no consumer outside ``_dump`` itself, so
+# a shim here would serve nothing.
 
 __all__ = [
     "Sched",

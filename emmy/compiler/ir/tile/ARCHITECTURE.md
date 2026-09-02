@@ -193,8 +193,8 @@ Every "are these two kernels the same?" question is answered by ONE function —
 the complete schedule-free Loop-IR body the kernel executes, derived from the term (the free grid
 axes wrapped back as plain loops around `lower_with_output_specs`, so the extents, the store
 program and a cut child's typed seam `Load` are all in the body) — and the private
-`_body_identity` override that digests it. There is no separate term hasher: `Fold.structural_key`
-is the exact-flavor digest of the term's own lowered body (the term is pure algebra; its body is
+`_body_identity` override that digests it. There is no separate term hasher: a term has no key of
+its own, and the `TileOp` keys on the term's lowered body (the term is pure algebra; its body is
 its normal form). The named lattice points are spelled at call sites: the deploy identity
 (`with_io=True` — the durable join key) and the variant key (`with_io=True, with_knobs=True` —
 the search tree and measurement stores). There is no schedule-space key on

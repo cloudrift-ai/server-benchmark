@@ -17,7 +17,7 @@ statements".
 
 The schedule is deliberately absent: an accepted, site-indexed ``Schedule`` lives on the
 ``TileOp`` boundary (``ir/tile/ir.py``), so the term is IMMUTABLE across the whole schedule search
-and kernel identity (:meth:`Fold.structural_key`) is the algebra alone.
+and kernel identity — the Loop IR the term lowers to — is the algebra alone.
 """
 
 from __future__ import annotations
@@ -465,10 +465,6 @@ class Fold:
             # longer exists, and a scan would then canonicalize to something that is not a term.
             observe=None if self.observe is None else renamed(self.observe),
         )
-
-    def alpha_eq(self, other: object) -> bool:
-        """α-invariant equality — canonical forms compared structurally."""
-        return isinstance(other, Fold) and self.canonical() == other.canonical()
 
     def lower(self) -> list[Stmt]:
         """Flatten this term to the Loop IR body the materializer expands.

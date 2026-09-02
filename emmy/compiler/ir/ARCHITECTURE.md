@@ -340,7 +340,7 @@ type to dispatch on and no second place for a fact to live.
 from the stored params, its operands' bodies ahead of the step. Loops carry NO algebra and no
 annotation, so the derived nest depends only on what is stored, which is
 what makes every identity of the term a digest of its lowered body — there is no separate term hasher.
-`Fold.structural_key` is the exact-flavor canonical digest of the nest `lower()` derives (the body is the
+The `TileOp`'s body identity is the canonical digest of the nest `lower()` derives (the body is the
 term's normal form); the variant key (`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body
 identity with the knobs; and the deploy join key (the deploy identity (`identity_key(with_io=True)`), over
 `TileOp.loop_body`) adds the io fingerprint, so term re-spellings and cluster-sibling ops that lower alike share

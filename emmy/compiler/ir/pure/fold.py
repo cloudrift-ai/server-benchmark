@@ -601,7 +601,9 @@ class Fold:
         return isinstance(self.b, Load) and self.axis.name in self.b.index[-1].free_vars()
 
     @classmethod
-    def contraction(cls, *, k_axis: Axis, a, channels: tuple[Channel, ...], product="multiply", fold_op="add") -> Fold:
+    def contraction(
+        cls, *, k_axis: Axis, a, channels: tuple[Channel, ...], product="multiply", fold_op="add", axes: tuple[str, ...] = ()
+    ) -> Fold:
         """A BILINEAR fold over the ``(⊗, ⊕)`` semiring — the matmul cell at the default
         ``(multiply, add)`` instance. Unlike :meth:`projection` this constructor GENERATES
         algebra: unique operands in first-use order from `(b₀, a, b₁…)`, the lift
@@ -641,11 +643,12 @@ class Fold:
         body: list[Stmt] = [Assign(name=f"{prim.acc}__v", op=mul, args=(operand_name(prim.b), a_name))]
         body += [Assign(name=f"{ch.acc}__v", op=mul, args=(a_name, operand_name(ch.b))) for ch in channels[1:]]
         accs = tuple(ch.acc for ch in channels)
-        lift = Lambda(
-            params=(k_axis.name, *(operand_name(e) for e in operands)),
-            body=Body(tuple(body)),
-            results=tuple(f"{acc}__v" for acc in accs),
-        )
+        # ``axes`` is the enclosing scope, supplied by the binder. Declared beside the operand
+        # names so canonicalizing a contraction re-forms its lift WITHOUT resetting the caller's
+        # declaration — this constructor is the one the semiring canonicalization builds through.
+        bound = tuple(operand_name(edge) for edge in operands)
+        scope = tuple(axis for axis in axes if axis != k_axis.name and axis not in bound)
+        lift = Lambda.closing((k_axis.name, *bound, *scope), Body(tuple(body)), tuple(f"{acc}__v" for acc in accs))
         init, combine = M(*([plus] * len(accs)), names=accs)
         return cls(axis=k_axis, operands=operands, lift=lift, init=init, combine=combine)
 

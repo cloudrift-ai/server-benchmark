@@ -247,7 +247,7 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
                     return fold
         a = pairs[0][0]
         channels = tuple(Channel(b=b, acc=acc) for (_, b), acc in zip(pairs, fold.combine.results, strict=True))
-        canonical = Fold.contraction(k_axis=fold.axis, a=a, channels=channels, product=form.product, fold_op=form.plus)
+        canonical = Fold.contraction(k_axis=fold.axis, a=a, channels=channels, product=form.product, fold_op=form.plus, axes=axes)
         return replace(canonical, unroll=fold.unroll)
 
     operands, by_root = _merge_operand_cones(body, extracted)

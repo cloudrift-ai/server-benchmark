@@ -140,7 +140,9 @@ composed-only enumerator or post-product membership rule exists.
 The structural-split boundary proves that the outer pass consumes a pinned GRID stage before constructing `c` for a
 fresh piece. The piece's schedule restriction therefore compares only the remaining schedule stages. Sampled walks
 and composed cross-CTA split pieces exercise the same enumeration, and the duration baseline records their bounded
-test cost.
+test cost. The fresh-piece canonicalization case constructs a cut producer whose logical output axis is still split
+across two clean free axes. It proves finalization fuses that pair before identity stamping, exposes the same
+contraction as the initially canonical Loop program, and converges to its complete Loop body and kernel identity.
 The producer-band boundary projects uniform, `+p1`, and `+p2` kernel choices before reading parameters, proves an exact
 `WORK` parameter leaves that domain unchanged, and checks that only compatible TMA edge assignments survive.
 The shared-constant cone fixture also pins a multi-channel contraction to the scalar tier: every channel remains in one

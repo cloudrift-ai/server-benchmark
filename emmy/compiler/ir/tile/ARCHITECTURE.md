@@ -50,6 +50,14 @@ order-visible, so the schedule offers exactly the serial reduce plan and the cro
 There is no SDPA matching, byte-identity recognition gate, softmax pairing, fused view, or raw-loop fallback at this
 boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a later fork over this complete tree.
 
+A structural cut can change which free-axis accesses remain in one kernel. Before a fresh unmapped piece receives its
+identity stamp, Tile lowering derives that piece's complete schedule-free Loop body and reuses Loop's split-free-axis
+canonicalization, then performs this same total lift. The normalization can therefore fuse a reshape's output-axis
+pair once the cut removes the access that kept the pair distinct. Re-lifting preserves the output index through the
+exact quotient/remainder substitution, and the fresh piece converges with the equivalent initially canonical kernel
+identity before semiring recognition or scheduling. This is the same canonicalization at a new structural boundary,
+not a second scheduler path.
+
 ## Canonicalization
 
 `Lambda.__post_init__` owns context-independent construction normalization through `ir/pure/normalize.py`: every

@@ -569,7 +569,12 @@ that canonical input:
   node-placement choice. A cut workspace retains captured
   axes plus static unit axes: unit extents add no storage, while preserving
   them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
-  unmapped TileOps, so further legal cuts and schedules use the same ordinary passes. An unpinned cut may expose more
+  unmapped TileOps. Before the splice stamps their identities, every structural choice lowers each fresh piece through
+  its schedule-free Loop spelling and reuses the split-free-axis canonicalization. A cut can remove the access that
+  kept a reshape's output-axis pair distinct; re-fusing the now-clean pair makes semiring geometry and the identity
+  match the equivalent initially canonical kernel. This deterministic normalization is neither a placement choice nor
+  a node or edge schedule, and it runs before the fresh pieces re-enter the ordinary cut and schedule passes. An
+  unpinned cut may expose more
   cut choices; any pinned cut consumes its restriction on every piece. If the parent already carries a cross-CTA
   split receipt, every placement piece inherits it, so a later cut cannot make the same split pending again. A piece
   minted by a structural apply stays in the ordinary pass sequence; no schedule-specific visitor discovers or

@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, loaded_buffers
 from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select
@@ -12,6 +13,8 @@ from emmy.compiler.ir.tile.ir import projection_results
 from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
+from emmy.compiler.pipeline.passes.loop.canonicalize._split_free_axes import fuse_split_free_axes
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 
 
 def input_fragment(match: Match, root: Node) -> Graph:
@@ -47,6 +50,26 @@ def tile_piece(body, free, *, output_specs=()) -> TileOp:
     op = body if isinstance(body, Fold) else Fold.projection(body=Body.coerce(body))
     piece = TileOp(op=op, place=Placement(free=tuple(free)), output_specs=tuple(output_specs))
     return replace(piece, knobs=consume_kernel_row(piece.knobs))
+
+
+def canonicalize_fresh_pieces(fragment: Graph) -> Graph:
+    """Re-fuse clean split free axes before fresh Tile pieces receive their identity stamp.
+
+    Structural cuts can remove the access that kept a reshape's output-axis pair distinct. The
+    resulting unscheduled piece re-enters total lift through its one schedule-free Loop spelling,
+    so the same canonicalization used before the original lift can recognize its new geometry.
+    """
+    for node in fragment.nodes.values():
+        tile = node.op
+        if not isinstance(tile, TileOp) or tile.op is None or tile.place.is_mapped or tile.schedule is not None:
+            continue
+        shapes = {name: tensor.shape for name, tensor in {**tile.inputs, **tile.outputs}.items()}
+        body = fuse_split_free_axes(tile.loop_body, shapes)
+        if body is None:
+            continue
+        lifted = lift_loop_op(LoopOp(body=body, inputs=tile.inputs, outputs=tile.outputs), name=tile.name)
+        node.op = replace(tile, op=lifted.op, place=lifted.place, output_specs=lifted.output_specs)
+    return fragment
 
 
 def _peel_region(region: ProjectionRegion) -> tuple[tuple, Body]:
@@ -152,6 +175,7 @@ def realize_projection_regions(match: Match, root: Node, pieces) -> Graph:
 
 __all__ = [
     "add_output_piece",
+    "canonicalize_fresh_pieces",
     "input_fragment",
     "output_root",
     "piece_inputs",

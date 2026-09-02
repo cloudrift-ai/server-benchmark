@@ -21,7 +21,11 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     output_map,
     realize,
 )
-from emmy.compiler.pipeline.passes.lowering.tile._pieces import projection_region_pieces, realize_projection_regions
+from emmy.compiler.pipeline.passes.lowering.tile._pieces import (
+    canonicalize_fresh_pieces,
+    projection_region_pieces,
+    realize_projection_regions,
+)
 from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
 
 PATTERN = [Pattern("root", TileOp)]
@@ -228,6 +232,13 @@ def _placement_forks(match: Match, root: Node, tile: TileOp):
     return options
 
 
+def _canonicalized(choice: DeferredFork) -> DeferredFork:
+    """Normalize every structural choice's fresh pieces before the splice stamps them."""
+    if not choice.structural:
+        return choice
+    return replace(choice, materialize=lambda: canonicalize_fresh_pieces(choice.materialize()))
+
+
 def rewrite(match: Match, root: Node, ctx=None):
     del ctx
     tile: TileOp = root.op
@@ -239,5 +250,5 @@ def rewrite(match: Match, root: Node, ctx=None):
     if choices is None:
         raise RuleSkipped("no pending kernel-set cut")
     choices = choices if isinstance(choices, list) else [choices]
-    options = [assignment.kernel for assignment in schedule(_CutContext(tuple(choices)))]
+    options = [_canonicalized(assignment.kernel) for assignment in schedule(_CutContext(tuple(choices)))]
     return options if len(options) > 1 else options[0]

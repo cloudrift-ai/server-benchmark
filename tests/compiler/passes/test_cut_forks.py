@@ -11,20 +11,23 @@ import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
+from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.carrier import exp_combine_states
-from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda, loaded_buffers
-from emmy.compiler.ir.stmt import Assign, Body, Load, Write
+from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda, is_contraction, loaded_buffers
+from emmy.compiler.ir.schedule.classic_projection import project_classic
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, ProjectionRegion, TileOp
 from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
-from emmy.compiler.pipeline.fork import Fork
+from emmy.compiler.pipeline.fork import DeferredFork, Fork
 from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     CutSite,
     _environments,
@@ -63,6 +66,81 @@ def test_cut_and_assignment_passes_share_the_generic_schedule_driver() -> None:
 
     assert _CUT.schedule is schedule
     assert import_module("emmy.compiler.pipeline.fork").schedule is schedule
+
+
+def _split_reduction_graph(op=None) -> Graph:
+    """The fresh 761/cc22 producer shape: N is spelled by the clean ``(a1, a25)`` pair."""
+    if op is None:
+        composite = BinaryExpr("+", BinaryExpr("*", Var("a1"), Literal(128, "int")), Var("a25"))
+        reduction = Loop(
+            axis=Axis("a26", 1024),
+            body=Body(
+                (
+                    Load(name="weight", input="linear_wt", index=(Var("a26"), composite)),
+                    Load(name="norm", input="norm", index=(Var("a26"),)),
+                    Load(name="value", input="to", index=(Literal(0, "int"), Var("a0"), Var("a26"))),
+                    Load(name="scale", input="scale", index=(Var("a0"),)),
+                    Assign(name="scaled", op="multiply", args=("scale", "value")),
+                    Assign(name="converted", op="copy", args=("scaled",), dtype=F16),
+                    Assign(name="normalized", op="multiply", args=("norm", "converted")),
+                    Assign(name="product", op="multiply", args=("normalized", "weight")),
+                    Accum(name="acc", value="product", op="add"),
+                )
+            ),
+        )
+        cell = Body((reduction, Write(output="out", index=(Var("a0"), Var("a1"), Var("a25")), value="acc")))
+        body = Body(
+            (
+                Loop(
+                    axis=Axis("a0", 512),
+                    body=Body((Loop(axis=Axis("a1", 16), body=Body((Loop(axis=Axis("a25", 128), body=cell),))),)),
+                ),
+            )
+        )
+        op = LoopOp(body=body)
+
+    graph = Graph()
+    for name, shape in (
+        ("linear_wt", (1024, 2048)),
+        ("norm", (1024,)),
+        ("to", (1, 512, 1024)),
+        ("scale", (512,)),
+    ):
+        _input(graph, name, shape)
+    graph.add_node(op, ["linear_wt", "norm", "to", "scale"], Tensor("out", (512, 16, 128), F16), node_id="out")
+    graph.inputs, graph.outputs = ["linear_wt", "norm", "to", "scale"], ["out"]
+    return graph
+
+
+def test_fresh_cut_piece_fuses_newly_clean_split_axes_before_identity_stamp() -> None:
+    """A structural cut can remove the access that kept a reshape's output axes distinct. Its
+    fresh piece must re-enter the one Loop canonicalization before identity is stamped, so the
+    split-axis spelling converges with an initially canonical kernel and exposes the contraction."""
+    original = _split_reduction_graph()
+    raw_tile = Pipeline.build(["lowering/tile"], select=["lift"]).run(original).nodes["out"].op
+    fresh = _split_reduction_graph(replace(raw_tile, name="mul_3__place_761458f514_0", placement_decided=True))
+    before = fresh.nodes["out"].op
+    assert [axis.extent for axis in before.place.free] == [Dim(512), Dim(16), Dim(128)]
+    assert not any(is_contraction(site.node) for site in sites(before.op))
+
+    choice = DeferredFork(lambda: fresh, {"PLACE@root": "cut"}, structural=True)
+    (fragment,) = _CUT._canonicalized(choice).expand()
+    actual = fragment.nodes["out"].op
+    assert actual.name == before.name and actual.placement_decided
+    assert [axis.extent for axis in actual.place.free] == [Dim(512), Dim(2048)]
+    assert any(is_contraction(site.node) for site in sites(actual.op))
+    domains = project_classic(actual, _CTX)
+    assert any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices)
+
+    canonical_loop = Pipeline.build(["loop/canonicalize"]).run(_split_reduction_graph())
+    canonical = Pipeline.build(["lowering/tile"], select=["lift"]).run(canonical_loop).nodes["out"].op
+    assert actual.loop_body == canonical.loop_body
+    assert actual.identity_key() == canonical.identity_key()
+
+    again = fragment.nodes["out"].op
+    (same_fragment,) = _CUT._canonicalized(DeferredFork(lambda: fragment, structural=True)).expand()
+    assert same_fragment is fragment
+    assert fragment.nodes["out"].op is again
 
 
 def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:

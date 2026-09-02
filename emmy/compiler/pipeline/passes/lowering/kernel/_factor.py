@@ -57,12 +57,12 @@ from emmy.compiler.ir.pure.fold import (
     Fold,
     _operand_result_names,
     _unique_edges,
-    cone_seam,
-    edge_free_axes,
     is_contraction,
     operand_body,
 )
+from emmy.compiler.ir.pure.scope import edge_axes
 from emmy.compiler.ir.schedule import Raster
+from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
@@ -330,8 +330,9 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         # wraps operand and projection together. A cooperative / ILP partition (or an output-tiled
         # contraction root) has no such realization — the sweep is distributed across the lanes it
         # would have to re-run on — so the row is declined and the greedy retries the next one.
-        free = edge_free_axes(root)
-        swept = [spec.sweep.name for spec in plain if spec.sweep is not None and spec.sweep.name in free]
+        sweeps = tuple(spec.sweep.name for spec in plain if spec.sweep is not None)
+        free = edge_axes(root, sweeps)
+        swept = [name for name in sweeps if name in free]
         if swept:
             # The schedule at stake is the ITERATING node's, which a chain of zero-axis projections
             # may sit above (``root`` is then a projection, carrying no ``REDUCE`` site of its

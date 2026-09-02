@@ -40,8 +40,9 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_free_axes, is_contraction, operand_body
+from emmy.compiler.ir.pure.fold import Fold, deep_defines, is_contraction, operand_body
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
+from emmy.compiler.ir.pure.scope import edge_axes
 from emmy.compiler.ir.pure.tree import Visit, walk
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
@@ -487,7 +488,7 @@ class TileOp(Op):
             store.sweep.name
             for store in self.output_specs
             if store.sweep is not None
-            and any(any(store.sweep.name in edge_free_axes(edge) for edge in con.operands) for con in contractions)
+            and any(any(store.sweep.name in edge_axes(edge, (store.sweep.name,)) for edge in con.operands) for con in contractions)
         }
         if not promoted:
             self._validate_schedule()

@@ -26,9 +26,10 @@ from dataclasses import replace
 
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.pure.fold import Fold, cone_seam, operand_name
+from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, match_packed_b_node, match_packed_pair_node
+from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.stmt import Load
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank

@@ -7,7 +7,7 @@ derived role, reduce ``Axis``, and operand edges — comes directly from the tre
 facts off a synthesized nest is the inversion this module exists to prevent; :meth:`Fold.lower`
 is for callers that consume a body.
 
-This module holds the structural reads over a node tree — the cone seam (:func:`~emmy.compiler.ir.pure.fold.cone_seam`), the
+This module holds the structural reads over a node tree — the cone seam (:func:`~emmy.compiler.ir.schedule.views.cone_seam`), the
 iteration-space names (:func:`axis_names`) — plus the typed schedule accessor (:class:`Sched`). Lowering itself
 has ONE spelling and it lives on the node: :meth:`Fold.lower` (a fold flattens through
 :attr:`Fold.loop`, a wrapping projection appends its operand nests). Stored trees are already
@@ -23,11 +23,9 @@ from emmy.compiler.ir.pure.fold import (
     Fold,
     _operand_result_names,
     deep_reads,
-    edge_free_axes,
     is_contraction,
-    refs_axis,
-    stmt_axis_names,
 )
+from emmy.compiler.ir.pure.scope import edge_axes, refs_axis, stmt_axis_names
 from emmy.compiler.ir.schedule import PlacedTile, Reduce
 from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
@@ -159,7 +157,7 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     # seam is a dependency question, not only an index question. Without this, attention's
     # ``exp(s − m)`` chain — which names the score rather than the KV axis — hoists into the
     # row-invariant prologue, where the per-cell score it reads is not yet defined.
-    varying = {nm for n in nodes if k_name in edge_free_axes(n) for nm in _operand_result_names(n)}
+    varying = {nm for n in nodes if k_name in edge_axes(n, (k_name,)) for nm in _operand_result_names(n)}
     pro: list = []
     rest = list(cell)
     while rest and not refs_axis(rest[0], k_name) and not (set(rest[0].deps()) & varying):
@@ -348,7 +346,7 @@ class Sched:
             if mn is None or not is_contraction(node):
                 return mn
             first, second = mn
-            free = edge_free_axes(node.a)
+            free = edge_axes(node.a, (first.name, second.name))
             return (second, first) if second.name in free and first.name not in free else mn
 
         if site.depth == 1 or all(getattr(candidate.node, "axis", None) is None for candidate in ancestors):

@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 from frozendict import frozendict
 
-from emmy.compiler.ir.pure.fold import Fold, cone_seam, deep_reads, edge_free_axes, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_reads, is_contraction, operand_body, splice_operands
+from emmy.compiler.ir.pure.scope import edge_axes
 from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.ir.stmt import Accum, Body
 
@@ -133,7 +134,9 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
             k_axis = node.axis
         producer = None
         if isinstance(node.a, Fold):
-            nested = tuple(visit.node for visit in walk(node.a) if is_contraction(visit.node) and k_axis.name in edge_free_axes(visit.node))
+            nested = tuple(
+                visit.node for visit in walk(node.a) if is_contraction(visit.node) and k_axis.name in edge_axes(visit.node, (k_axis.name,))
+            )
             producer = nested[0] if len(nested) == 1 else None
         need = sibling.get(id(node))
         facts[site] = ContractionFacts(
@@ -164,3 +167,36 @@ __all__ = [
     "contraction_facts",
     "node_view",
 ]
+
+
+# ``cone_seam`` lives HERE, not on the term. "Is this edge row-invariant or does it vary with the
+# contraction axis?" is a question about a term's relationship to an enclosing iteration space,
+# which the term does not know — it knows the axis it reduces over and nothing more. It sat in
+# ``ir/pure/fold`` only because the schedule layer needed it and ``ir/tile/ops`` could not be
+# imported from here; the schedule layer is where it belonged all along.
+def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
+    """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
+    scanning stmts: the cone is ``Fold.projection(body=<the per-cell normalize>, operands=(<the row-invariant
+    prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
+    own zero-axis ``Fold`` over the stat ``Fold``) plus any row-invariant cone prefix, placed there
+    when the cone was built (:func:`make_cone` splits at the K seam once, structurally).
+
+    The split is the K SEAM, on the edges as on the stmts: an edge that never indexes the
+    contraction axis ``k_name`` is row-invariant and belongs to the prologue; a k-VARYING producer
+    edge (the attention score contraction the cone's ``exp(s − m)`` reads) is per-cell and splices
+    into the cell ahead of its first use, like any operand edge. Every fused norm→linear cone
+    carries the single row-invariant edge, so its seam reads exactly as it always did.
+
+    ``stats`` are the prologue results the cell reads — the values bridged through the stat smem
+    rows. Internal definitions are excluded: the prologue and cell may independently use the same
+    local SSA name. A prologue whose results go unread is dropped (nothing to bridge). The ONE seam
+    both sides read: the scheduler sizes the stat rows into the sync stage's smem budget, the
+    materializer fills them (``sync_stat_fill``)."""
+    if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
+        return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
+    varying = [k_name in edge_axes(e, (k_name,)) for e in cone.operands]
+    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in operand_body(e))
+    cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
+    pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in _operand_result_names(edge)}
+    stats = tuple(sorted(pro_results & deep_reads(list(cell))))
+    return (pro, cell, stats) if stats else ((), cell, ())

@@ -18,7 +18,8 @@ from dataclasses import dataclass
 
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
-from emmy.compiler.ir.pure.fold import Fold, edge_free_axes
+from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.scope import edge_axes
 from emmy.compiler.ir.schedule import (
     PlacedTile,
     Raster,
@@ -121,7 +122,7 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     """
     if node.observed:
         return (Reduce(),)
-    if not edge_free_axes(node).isdisjoint(spec.sweep.name for spec in tile.output_specs if spec.sweep is not None):
+    if edge_axes(node, tuple(spec.sweep.name for spec in tile.output_specs if spec.sweep is not None)):
         return (Reduce(),)
     if isinstance(tile.op, Fold) and tile.op.axis is None and not tile.op.operands:
         if _chain_member_serial(tile, node):

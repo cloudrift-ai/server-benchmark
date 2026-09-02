@@ -924,7 +924,7 @@ def _sync_operands(
     A computed A cone with a
     row-invariant prologue (the fused
     norm→linear per-row statistic — its reduce ``Loop`` + scalar sweep) arrives already split at the
-    K seam (``fold.cone_seam`` reads the cone NODE's boundary; the scheduler sizes the stat rows off
+    K seam (``views.cone_seam`` reads the cone NODE's boundary; the scheduler sizes the stat rows off
     the same read): the prologue runs ONCE per tile row (:func:`sync_stat_fill`, returned as the transport
     prologue) and the per-cell fill reads the bridged values back from the stat smem rows. The
     schedule's eligibility guarantees exact cover on N; a masked / symbolic **M**
@@ -1604,7 +1604,7 @@ class _AtomOps:
     # the zero-axis ``Fold`` wrapper, and the store sink is where it lands.
     epilogue: Body = field(default_factory=Body)
     # The computed-A cone's ``(prologue, cell, stats)`` K seam, read off the NODE BOUNDARY
-    # (``fold.cone_seam``). ``None`` for a
+    # (``views.cone_seam``). ``None`` for a
     # plain gmem-``Load`` A — its whole body is the per-cell fill.
     seam: tuple | None = None
     # The register-fragment NAMESPACE. Empty for the kernel's own contraction; a nested producer

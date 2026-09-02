@@ -34,13 +34,10 @@ from emmy.compiler.ir.pure.fold import (
     Fold,
     deep_defines,
     deep_reads,
-    edge_free_axes,
     is_contraction,
     operand_body,
     operand_name,
-    refs_axis,
     splice_operands,
-    stmt_axis_names,
 )
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
@@ -54,7 +51,6 @@ __all__ = [
     "component_ops",
     "deep_defines",
     "deep_reads",
-    "edge_free_axes",
     "degenerate",
     "eval_lambda",
     "exp_combine_states",
@@ -65,8 +61,6 @@ __all__ = [
     "normalize_lambda_body",
     "operand_body",
     "operand_name",
-    "refs_axis",
     "splice_operands",
-    "stmt_axis_names",
     "rename_combine",
 ]

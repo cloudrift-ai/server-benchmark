@@ -876,21 +876,6 @@ class Fold:
         so a nested fold's ``k`` shadows an enclosing one of the same name."""
         return frozenset() if self.axis is None else frozenset({self.axis.name})
 
-    @cached_property
-    def free_axes(self) -> frozenset[str]:
-        """The names this term's LOWERING reads from an enclosing scope — the K-SEAM fact, derived
-        once for every axis instead of walked once per axis.
-
-        SCOPED: a nested fold that RE-BINDS a name shadows it, and indices under it name that inner
-        axis, not the enclosing one. Axis names collide across a tree by design, while schedule
-        identity comes from the containing node site, so an unscoped scan would read a row-invariant
-        statistic as k-varying.
-
-        Free VALUE names ride along with the axis names. Every caller asks about an axis, and
-        splitting the two needs the iteration-space reading (``ops.axis_names``) that sits above
-        this layer; a membership test is exact for the question actually asked."""
-        return _free_names(self.lower())
-
 
 def is_contraction(x) -> bool:
     """The BILINEAR reading of ``x`` — the predicate that replaced ``isinstance(_, Contraction)``
@@ -956,20 +941,6 @@ def loaded_buffers(node) -> set[str]:
     return out
 
 
-def stmt_axis_names(stmts) -> set[str]:
-    """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
-    sitting in the body needs no special case — it is a ``Stmt``, so its children are reached through
-    the same ``nested()`` walk as any block stmt's."""
-    out: set[str] = set()
-    for s in stmts:
-        ax = getattr(s, "axis", None)
-        if ax is not None and hasattr(ax, "name"):
-            out.add(ax.name)
-        for b in s.nested():
-            out |= stmt_axis_names(b)
-    return out
-
-
 def _ordered_projection(members, results: tuple[str, ...], axes: tuple[str, ...] = ()) -> Fold:
     """Factor an ordered pure cone without moving a Fold ahead of an earlier scalar producer.
 
@@ -1017,34 +988,6 @@ def operand_body(op) -> tuple[Stmt, ...]:
     return (op,) if isinstance(op, Load) else tuple(op.lower())
 
 
-def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
-    """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
-    scanning stmts: the cone is ``Fold.projection(body=<the per-cell normalize>, operands=(<the row-invariant
-    prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
-    own zero-axis ``Fold`` over the stat ``Fold``) plus any row-invariant cone prefix, placed there
-    when the cone was built (:func:`make_cone` splits at the K seam once, structurally).
-
-    The split is the K SEAM, on the edges as on the stmts: an edge that never indexes the
-    contraction axis ``k_name`` is row-invariant and belongs to the prologue; a k-VARYING producer
-    edge (the attention score contraction the cone's ``exp(s − m)`` reads) is per-cell and splices
-    into the cell ahead of its first use, like any operand edge. Every fused norm→linear cone
-    carries the single row-invariant edge, so its seam reads exactly as it always did.
-
-    ``stats`` are the prologue results the cell reads — the values bridged through the stat smem
-    rows. Internal definitions are excluded: the prologue and cell may independently use the same
-    local SSA name. A prologue whose results go unread is dropped (nothing to bridge). The ONE seam
-    both sides read: the scheduler sizes the stat rows into the sync stage's smem budget, the
-    materializer fills them (``sync_stat_fill``)."""
-    if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
-        return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
-    varying = [k_name in edge_free_axes(e) for e in cone.operands]
-    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in operand_body(e))
-    cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
-    pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in _operand_result_names(edge)}
-    stats = tuple(sorted(pro_results & deep_reads(list(cell))))
-    return (pro, cell, stats) if stats else ((), cell, ())
-
-
 def operand_name(op) -> str:
     """An operand edge's bound SSA name — the inline node's ``out``, or the ``Load``'s def. Free
     for the same reason as :func:`operand_body`."""
@@ -1072,41 +1015,13 @@ def _operand_result_names(op) -> tuple[str, ...]:
     return (operand_name(op),)
 
 
-def refs_axis(s: Stmt, name: str) -> bool:
-    """``s`` references axis ``name`` in any carried expr (deep) — ``Stmt.exprs``: a ``Load`` /
-    ``Write`` index, a ``Select``'s branch predicates. Both spellings are coordinate reads, so both
-    make the stmt vary with the axis; a mask ``Select`` read as invariant would be hoisted out of
-    the per-cell body it predicates."""
-    if any(name in e.free_vars() for e in s.exprs()):
-        return True
-    return any(refs_axis(child, name) for b in s.nested() for child in b)
-
-
-def _free_names(stmts) -> frozenset[str]:
-    """Every name ``stmts`` read from an enclosing scope, each stmt less the axis it binds."""
-    out: set[str] = set()
-    for stmt in stmts:
-        names = {name for expr in stmt.exprs() for name in expr.free_vars()}
-        for body in stmt.nested():
-            names |= _free_names(body)
-        out |= names - stmt.binds_axes()
-    return frozenset(out)
-
-
-def edge_free_axes(edge) -> frozenset[str]:
-    """One operand EDGE's :attr:`Fold.free_axes`. A node's own operands hang off ``operands``, not
-    ``nested()``, so the question is asked of its LOWERING. A ``Load`` edge is its own index
-    exprs — nothing to walk, so nothing to cache."""
-    return edge.free_axes if isinstance(edge, Fold) else _free_names(operand_body(edge))
-
-
 def subst_free(stmt: Stmt, sigma: Sigma) -> Stmt:
     """:func:`~emmy.compiler.ir.stmt.passes.rewrite`'s σ-substitution made **hygienic**, the way
     ``rename_free`` makes the SSA rename hygienic: the substitution stops at a nested scope whose
     binder re-binds a substituted name.
 
     ``rewrite``'s σ descends into every nested body. But axis names collide across a tree by
-    design (see :func:`edge_free_axes`), so an occurrence under a ``Loop`` / reducing ``Fold``
+    design (see :func:`~emmy.compiler.ir.pure.scope.edge_axes`), so an occurrence under a ``Loop`` / reducing ``Fold``
     that re-binds a substituted name is a DIFFERENT variable: substituting it rewires the inner
     reduction onto the outer coordinate (the k-norm inside attention's K operand cone re-binds
     the contraction axis; a blind σ made its 128-element reduce read one slab element 128 times).
@@ -1202,14 +1117,11 @@ __all__ = [
     "Channel",
     "deep_defines",
     "deep_reads",
-    "edge_free_axes",
     "Fold",
     "is_contraction",
     "loaded_buffers",
     "operand_body",
     "operand_name",
-    "refs_axis",
     "splice_operands",
-    "stmt_axis_names",
     "subst_free",
 ]

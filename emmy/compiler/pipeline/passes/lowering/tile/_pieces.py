@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.pure.fold import Fold, loaded_buffers
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, loaded_buffers
 from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Select
 from emmy.compiler.ir.tile import OutputSpec, ProjectionRegion, TileOp
@@ -67,19 +67,20 @@ def _peel_region(region: ProjectionRegion) -> tuple[tuple, Body]:
 
 
 def projection_region_pieces(tile: TileOp) -> tuple[tuple[Body, tuple, tuple[OutputSpec, ...]], ...]:
-    """Closed pieces for a root prefix followed by independent output regions.
+    """Closed pieces for a root prefix followed by one or more output regions.
 
     One TileOp has one root-global placement. This offer therefore separates sibling regions so
-    each can lift its own leading axes into an ordinary placement. It declines unless the body is
-    exactly a pure prefix followed by regions, every output has one owner, and every capture
-    closes over that prefix.
+    each can lift its own leading axes into an ordinary placement. A single region can remain after
+    earlier cuts; it uses the same offer because lifting its axes still trades shared-prefix reuse
+    for parallel placement. It declines unless the body is exactly a pure prefix followed by
+    regions, every output has one owner, and every capture closes over the prefix and root operands.
     """
     root = tile.op
-    if not isinstance(root, Fold) or root.axis is not None or root.operands:
+    if not isinstance(root, Fold) or root.axis is not None:
         return ()
     first = next((index for index, member in enumerate(root.body) if isinstance(member, ProjectionRegion)), len(root.body))
     prefix, regions = root.body[:first], root.body[first:]
-    if len(regions) < 2 or any(not isinstance(member, ProjectionRegion) for member in regions):
+    if not regions or any(not isinstance(member, ProjectionRegion) for member in regions):
         return ()
 
     grouped = [[] for _ in regions]
@@ -98,16 +99,19 @@ def projection_region_pieces(tile: TileOp) -> tuple[tuple[Body, tuple, tuple[Out
         return ()
 
     outer_axes = {axis.name for axis in tile.place.free}
+    operand_names = {name for edge in root.operands for name in _operand_result_names(edge)}
     pieces = []
     for region, stores in zip(regions, grouped, strict=True):
         provider = prefix.backward_cone(region.deps())
-        if provider.external_reads - outer_axes:
+        needed_operands = provider.external_reads - outer_axes
+        if needed_operands - operand_names:
             return ()
+        operands = tuple(edge for edge in root.operands if set(_operand_result_names(edge)) & needed_operands)
         axes, body = _peel_region(region)
         free = (*tile.place.free, *axes)
         if len({axis.name for axis in free}) != len(free):
             return ()
-        pieces.append((Body((*provider.members, *body)), free, tuple(stores)))
+        pieces.append((Body((*operands, *provider.members, *body)), free, tuple(stores)))
     return tuple(pieces)
 
 
@@ -135,7 +139,7 @@ def add_output_piece(match: Match, fragment: Graph, root: Node, piece: TileOp, i
 
 
 def realize_projection_regions(match: Match, root: Node, pieces) -> Graph:
-    """Replace one sibling-region root with fresh output-owning TileOps."""
+    """Replace one output-region root with fresh output-owning TileOps."""
     tile: TileOp = root.op
     fragment = input_fragment(match, root)
     receipt = tile.split_consumed or carries_partition(tile.op)

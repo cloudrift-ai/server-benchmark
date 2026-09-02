@@ -575,14 +575,16 @@ that canonical input:
   minted by a structural apply stays in the ordinary pass sequence; no schedule-specific visitor discovers or
   realizes another placement decision.
 
-  The root output-region arm exists only when a zero-axis root is exactly a pure prefix followed by at least two
+  The root output-region arm exists only when a zero-axis root is exactly a pure prefix followed by one or more
   `ProjectionRegion`s whose recursive results uniquely partition the output specifications and whose captures close
-  over the prefix. `PLACE@root=cut` separates all sibling regions in one structural choice and lifts each region's
-  leading axes into that fresh piece's root-global placement. Because that choice changes the kernel set, it is
-  consumed before graph-scoped child `PLACE@site` pins are resolved against the fresh pieces; a coincident path in
-  the unsplit parent cannot capture a child's pin. Bare `PLACE` retains its stored-edge primary semantics. Fresh
-  pieces re-enter this same fixpoint, so nested sibling regions need no second enumerator. This changes only which
-  kernels exist; node schedules and edge transports remain independent classic domains.
+  over the prefix and root operands. `PLACE@root=cut` separates sibling regions in one structural choice and lifts
+  each region's leading axes into that fresh piece's root-global placement. When earlier cuts leave one region, the
+  same choice weighs shared-prefix reuse under the serial projection against duplicating that prefix across the fully
+  parallel placement. Because the choice replaces the kernel set, it is consumed before graph-scoped child
+  `PLACE@site` pins are resolved against the fresh pieces; a coincident path in the unsplit parent cannot capture a
+  child's pin. Bare `PLACE` retains its stored-edge primary semantics. Fresh pieces re-enter this same fixpoint, so
+  nested sibling regions need no second enumerator. Node schedules and edge transports remain independent classic
+  domains.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
   changes which kernels exist, so `030_cut` offers it after stored-edge placement and before any assignment

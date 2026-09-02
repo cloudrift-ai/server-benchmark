@@ -185,6 +185,42 @@ def _projection_region_graph() -> Graph:
     return graph
 
 
+def _single_projection_region_graph() -> Graph:
+    """A cut consumer with one output region behind a prefix and materialized operand."""
+    batch, row, column = Axis("a0", 2), Axis("a1", 4), Axis("a25", 8)
+    inner = ProjectionRegion(
+        axis=column,
+        lift=Lambda(
+            params=("a25", "a0", "a1", "scale"),
+            body=Body(
+                (
+                    Load(name="value", input="x", index=(Var("a0"), Var("a1"), Var("a25"))),
+                    Assign(name="result", op="multiply", args=("value", "scale")),
+                )
+            ),
+            results=("result",),
+        ),
+    )
+    region = ProjectionRegion(
+        axis=row,
+        lift=Lambda(params=("a1", "a0", "scale"), body=Body((inner,)), results=()),
+    )
+    tile = TileOp(
+        op=Fold.projection(
+            operands=(Load(name="stat", input="stat_workspace", index=(Var("a0"),)),),
+            body=Body((Assign(name="scale", op="reciprocal", args=("stat",)), region)),
+        ),
+        place=Placement(free=(batch,)),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("a0"), Var("a1"), Var("a25")), value="result")),),
+    )
+    graph = Graph()
+    _input(graph, "stat_workspace", (2,), dtype="f32")
+    _input(graph, "x", (2, 4, 8), dtype="f32")
+    graph.add_node(tile, ["stat_workspace", "x"], Tensor("out", (2, 4, 8), F32), node_id="out")
+    graph.inputs, graph.outputs = ["stat_workspace", "x"], ["out"]
+    return graph
+
+
 def _shared_provider_region_graph() -> Graph:
     """Two output regions, one reading a scalar provider from the shared prefix."""
     m, n, p = Axis("m", 4), Axis("n", 4), Axis("p", 4)
@@ -624,6 +660,39 @@ def test_root_projection_region_cut_lifts_each_piece_placement() -> None:
         {"out0__split"},
         {"out1__split"},
     ]
+
+
+def test_root_projection_region_cut_lifts_a_single_remaining_region() -> None:
+    """A prior cut may leave one region whose axes still need a root placement choice."""
+    graph = _single_projection_region_graph()
+    offered = _offered(graph)
+    assert {"PLACE": "fuse"} in offered
+    assert {"PLACE@root": "cut"} in offered
+
+    graph = _single_projection_region_graph()
+    root = graph.nodes["out"]
+    match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({"PLACE@root": "fuse"}):
+        fused = _CUT.rewrite(match, root).expand()[0]
+    assert isinstance(fused, TileOp)
+    assert [axis.name for axis in fused.place.free] == ["a0"]
+    assert any(isinstance(member, ProjectionRegion) for member in fused.op.body.iter())
+
+    graph = _single_projection_region_graph()
+    root = graph.nodes["out"]
+    match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({"PLACE@root": "cut"}):
+        choice = _CUT.rewrite(match, root)
+    choice = choice[0] if isinstance(choice, list) else choice
+    fragment = choice.expand()[0]
+    pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+
+    assert len(pieces) == 1
+    piece = pieces[0]
+    assert [axis.name for axis in piece.place.free] == ["a0", "a1", "a25"]
+    assert not any(isinstance(member, ProjectionRegion) for member in piece.op.body.iter())
+    assert loaded_buffers(piece.op) == {"stat_workspace", "x"}
+    assert fragment.outputs == ["out__split"]
 
 
 def test_root_projection_region_pin_lowers_two_independently_scheduled_kernels() -> None:

@@ -287,11 +287,13 @@ consumes the typed assignment, so neither layer defines schedule membership.
 
 The single `lowering/tile/030_cut` pass reaches a fixpoint over kernel-set alternatives before scheduling: placement
 first, then cross-CTA reduction splitting. `PLACE` uses the tree-path codec to address a stored non-root Fold edge.
-The explicit `PLACE@root` site applies only when a zero-axis root contains a pure prefix followed by independent
-output-owning `ProjectionRegion`s. Its cut sibling partitions all sibling regions in one structural choice, closes
-each region over the prefix, and lifts that region's leading axes into a fresh root-global placement. Bare `PLACE`
-still resolves only among stored Fold edges. Every fresh region piece re-enters the ordinary placement fixpoint, so
-nested sibling regions use the same rule rather than a separate traversal.
+The explicit `PLACE@root` site applies only when a zero-axis root contains a pure prefix followed by one or more
+independent output-owning `ProjectionRegion`s. Its cut sibling partitions sibling regions in one structural choice,
+closes each region over the prefix and root operands, and lifts that region's leading axes into a fresh root-global
+placement. A single region can remain after earlier cuts; the same choice then weighs reusing its prefix under a
+serial projection against duplicating that prefix across the fully parallel placement. Bare `PLACE` still resolves
+only among stored Fold edges. Every fresh region piece re-enters the ordinary placement fixpoint, so nested sibling
+regions use the same rule rather than a separate traversal.
 
 The fused sibling preserves the maximal Fold tree; each semantically closed Fold-edge cut sibling writes the child
 Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with ordinary `Load`

@@ -664,14 +664,15 @@ class Fold:
         never a free name. The body is pure; synthesized Loop IR must pass through total lift
         before it can enter a projection. Results default to the body's last definition unless
         the caller explicitly names the values passed through to a consumer."""
-        b = Body.coerce(body) if body is not None else Body()
-        if any(isinstance(stmt, Fold) for stmt in b):
+        members = tuple(body) if body is not None else ()
+        if any(isinstance(stmt, Fold) for stmt in members):
             # A term handed in as a BODY member is an operand edge that has not been spelled as
             # one yet. Separating here — rather than leaving it for a later rewrite — is what
             # keeps a lambda body free of nested terms: a Fold tree composes through operands,
             # and two composition mechanisms are one too many.
-            names = tuple(results) if results is not None else (_map_results(b) or ())
-            return _ordered_projection((*operands, *b), names, axes)
+            names = tuple(results) if results is not None else (_map_results(members) or ())
+            return _ordered_projection((*operands, *members), names, axes)
+        b = Body(members)
         operands = _unique_edges(tuple(operands))
         params = tuple(n for s in operands for n in _operand_result_names(s))
         if results is None:
@@ -952,7 +953,10 @@ def _ordered_projection(members, results: tuple[str, ...], axes: tuple[str, ...]
     It lives beside :meth:`Fold.projection`, the constructor that needs it: separating terms out
     of a body is a FORMATION rule, not something a later pass repairs.
     """
-    members = Body(members)
+    # A PLAIN TUPLE, never a Body: the incoming sequence is exactly the mixed stmt/term stream a
+    # body may not hold (``Body.__new__`` refuses a non-``Stmt``), and separating it is this
+    # function's whole job. Only the term-free remainder becomes a Body, at the end.
+    members = tuple(members)
     scalar_seen = False
     split = None
     for index, stmt in enumerate(members):

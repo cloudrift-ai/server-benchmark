@@ -30,8 +30,13 @@ def _stamp_axes(loop: Loop) -> Loop:
     return replace(loop, body=Body(body))
 
 
-def lift_body(body, axes: tuple[str, ...] = ()) -> Body:
-    """Replace every reduction in one statement tree with a ``Fold``, in place.
+def lift_body(body, axes: tuple[str, ...] = ()) -> tuple:
+    """Replace every reduction in one statement tree with a ``Fold``.
+
+    Returns a PLAIN TUPLE, not a ``Body``. The result is a mixed stmt/term stream — a body may not
+    hold a term (``Body.__new__`` refuses a non-``Stmt``), because a Fold tree composes through
+    ``operands`` and a term in a statement sequence is a second, competing mechanism. The stream is
+    separated where it is consumed, by :meth:`Fold.projection`, which is the formation boundary.
 
     ``axes`` names the iteration variables the ENCLOSING loops bind, threaded down from
     :func:`_peel`. A term cannot tell an axis from a value — both are a bare ``Var`` — but the
@@ -42,7 +47,7 @@ def lift_body(body, axes: tuple[str, ...] = ()) -> Body:
         if not isinstance(stmt, Loop):
             nested = stmt.nested()
             if nested:
-                stmt = stmt.with_bodies(tuple(lift_body(child, axes) for child in nested))
+                stmt = stmt.with_bodies(tuple(Body(lift_body(child, axes)) for child in nested))
             out.append(stmt)
             continue
         if stmt.is_reduce:
@@ -52,8 +57,16 @@ def lift_body(body, axes: tuple[str, ...] = ()) -> Body:
             out.append(fold)
             out.extend(trailing)
             continue
-        out.append(replace(stmt, body=lift_body(stmt.body, (*axes, stmt.axis.name))))
-    return Body(tuple(out))
+        lifted = lift_body(stmt.body, (*axes, stmt.axis.name))
+        if any(isinstance(member, Fold) for member in lifted):
+            # A reduce under a SURVIVING parallel loop is not representable: the term would have to
+            # sit in that loop's statement body. It was already a failure — ``_raw_loops`` rejects
+            # any loop the total lift did not consume — so leave the loop intact and let that
+            # report it, rather than failing here as a body type error.
+            out.append(stmt)
+            continue
+        out.append(replace(stmt, body=Body(lifted)))
+    return tuple(out)
 
 
 def fold_from_loop(loop: Loop) -> Fold:
@@ -80,7 +93,9 @@ def scan_from_loop(loop: Loop, axes: tuple[str, ...] = ()) -> tuple[Fold, tuple[
         raise ValueError(f"reduce loop {loop.axis.name!r} is not in canonical Loop IR")
     writes = tuple(stmt for stmt in body if isinstance(stmt, Write))
     write_ids = {id(stmt) for stmt in writes}
-    step = Body(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
+    # A plain tuple: the step is still the mixed stmt/term stream, separated into `edges` and
+    # `plain` just below. Only the term-free half becomes a ``Body``.
+    step = tuple(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
     names = tuple(stmt.name for stmt in accums)
     # FORM the lift closed: the step reads the enclosing grid / sweep axes this loop sits under
     # (a matmul cell's ``a0`` / ``a1``), and a term carries no free names, so they are bound here —
@@ -131,9 +146,12 @@ def _peel(body: Body) -> tuple[list, list[Stmt]]:
 
 
 def _raw_loops(body) -> list[Loop]:
-    """Return every Loop that survived total reduction lifting."""
+    """Return every Loop that survived total reduction lifting.
+
+    Iterates the sequence directly: it is handed the mixed stmt/term stream the lift produces,
+    which is not a ``Body`` and must not be coerced into one."""
     out = []
-    for stmt in Body.coerce(body):
+    for stmt in tuple(body):
         if isinstance(stmt, Loop):
             out.append(stmt)
         for nested in stmt.nested():
@@ -153,7 +171,9 @@ def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
         axes = ", ".join(inner.axis.name for inner in raw)
         raise ValueError(f"total lift left raw inner loops: {axes}")
     return TileOp(
-        op=Fold.projection(body=Body(body), axes=tuple(axis.name for axis in free)),
+        # ``body`` is the mixed stmt/term stream; ``Fold.projection`` is the boundary that
+        # separates it, so it is handed over unwrapped rather than coerced into a ``Body`` first.
+        op=Fold.projection(body=body, axes=tuple(axis.name for axis in free)),
         name=name,
         place=Placement(free=tuple(free)),
         inputs=dict(op.inputs),

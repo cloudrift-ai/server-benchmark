@@ -100,15 +100,15 @@ class _ScheduledContraction:
 
     @property
     def a(self):
-        return self.child.a
+        return self.child.operands[0]
 
     @property
     def b(self):
-        return self.channels[0].b
+        return self.child.operands[1]
 
     @property
     def acc(self) -> str:
-        return self.channels[0].acc
+        return self.child.out
 
     @property
     def semiring(self):
@@ -135,9 +135,9 @@ def scheduled_fold_contraction(fold: Fold, sched):
         stage = sched.get("STAGE", child) if tile is not None else None
         if tile is None or not tile.is_warp or stage is None or stage.transport != "smem" or not consumers:
             continue
-        if len(child.channels) != len(consumers):
+        if len(child.operands) - 1 != len(consumers):
             return None
-        channels = tuple(Channel(channel.b, consumer.name) for channel, consumer in zip(child.channels, consumers, strict=True))
+        channels = tuple(zip(child.operands[1:], (consumer.name for consumer in consumers), strict=True))
         return _ScheduledContraction(child=child, axis=fold.axis, channels=channels), child, tile, stage
     return None
 
@@ -969,7 +969,7 @@ def _sync_operands(
     # the ldmatrix drain reads each slab back through its own mode. Unswizzled these slabs drain
     # 4-way (64 B A rows) / 8-way (128 B B rows) bank-conflicted — the measured megakernel residual
     # (294.9 M ld conflicts / 82.5 M LSU inst on the gemma-shape fused edge, 5090).
-    channels = channels or ((c.operands[1], c.acc),)
+    channels = channels or ((c.operands[1], c.out),)
     drain: list = []
     sync_ops: list[SyncOperand] = []
     async_ops: list[Operand] = []
@@ -1562,7 +1562,7 @@ def _scalar_drain(
     body: list[Stmt] = []
     for i, j in cells:
         sfx = f"__c{i}_{j}"
-        bn, an, vn, cn = f"{b_name}{sfx}", f"{a_name}{sfx}", f"{c.acc}__v{sfx}", f"{c.acc}{sfx}"
+        bn, an, vn, cn = f"{b_name}{sfx}", f"{a_name}{sfx}", f"{c.out}__v{sfx}", f"{c.out}{sfx}"
         m_local = BinaryExpr("-", offset[0].base(i), row_base)
         n_local = BinaryExpr("-", offset[1].base(j), col_base)
         k_row = Var(ki) if off_b is None else BinaryExpr("+", off_b, Var(ki))
@@ -1630,7 +1630,8 @@ class _AtomOps:
     def channels(self) -> tuple:
         """The ``(b, acc)`` pairs this emission folds — the node's product channels (one A
         fragment, N mma chains, one C fragment per channel at arity N)."""
-        return tuple((ch.b, ch.acc) for ch in self.c.channels)
+        # Each streamed operand paired with the accumulator it feeds — a channel WAS this zip.
+        return tuple(zip(self.c.operands[1:], self.c.combine.results, strict=True))
 
     @property
     def cone(self) -> tuple:
@@ -1999,7 +2000,7 @@ class _ScalarOps(_AtomOps):
         c = self.c
         if self.stage is None:
             return []
-        return [Init(name=f"{c.acc}__c{i}_{j}", identity=_ADD.identity, dtype=F32) for i, j in cells]
+        return [Init(name=f"{c.out}__c{i}_{j}", identity=_ADD.identity, dtype=F32) for i, j in cells]
 
     def gmem_leaves(self, offset, mn):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a
@@ -2050,11 +2051,11 @@ class _ScalarOps(_AtomOps):
                 *(copy_cell(a_body, cell, a_sfx, prot) if a_cell else ()),
                 *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
             ]
-            v = f"{c.acc}__v__c{i}_{j}"
+            v = f"{c.out}__v__c{i}_{j}"
             return [
                 *reads,
                 Assign(name=v, op=_MUL, args=(f"{b_name}{b_sfx}", f"{a_name}{a_sfx}")),
-                Accum(name=f"{c.acc}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
+                Accum(name=f"{c.out}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
             ]
 
         def wrap(body):
@@ -2121,7 +2122,7 @@ def _row_value(value: Value, op: ElementwiseImpl, names: tuple[tuple[str, str], 
 def _carrier_values(fold: Fold, ops: _AtomOps, cells) -> tuple[list[Stmt], dict[str, Value]]:
     """Declare a Fold carrier at the residence selected by its scheduled child edges."""
     lay = frag_layout(ops.tile.atom.atom_m, ops.tile.atom.atom_n)
-    fragment_states = {channel.acc: index for index, channel in enumerate(ops.c.channels)}
+    fragment_states = {acc: index for index, acc in enumerate(ops.c.combine.results)}
     values: dict[str, Value] = {}
     decls = list(ops.state(cells))
     for name, identity in zip(fold.combine.results, fold.init, strict=True):
@@ -2473,7 +2474,7 @@ def fold_store_tail(tail: tuple, fold: Fold, c: _ScheduledContraction) -> tuple:
     """
     states = set(fold.combine.results)
     return tuple(
-        replace(stmt, values=tuple(value if value in states else c.acc for value in stmt.values)) if isinstance(stmt, Write) else stmt
+        replace(stmt, values=tuple(value if value in states else c.out for value in stmt.values)) if isinstance(stmt, Write) else stmt
         for stmt in tail
         if not stmt.pure
     )

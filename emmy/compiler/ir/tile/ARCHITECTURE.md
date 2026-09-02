@@ -133,9 +133,8 @@ stream, so an output loop reaches the boundary holding its writes alone. A write
 the enclosing scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) needs no term: nothing is
 evaluated over `j`, and its sweep spec alone binds the axis.
 
-A sweep axis is never bound at kernel scope: the term opens it itself (`Fold.lower` with the sweep left unbound,
-the default `lower_with_output_specs` binding), and the sweep store lands inside that loop, at the scope binding its
-index (`apply_output_specs`). A non-contraction fold that reads a sweep axis (attention's `Σ_k P·V` per output column,
+A sweep axis is never bound at kernel scope: the term opens it itself (`Fold.lower` with the sweep left unbound), and
+the sweep store follows the term defining its value inside that loop. A non-contraction fold that reads a sweep axis (attention's `Σ_k P·V` per output column,
 DeepSeek-V4 post16's per-column sum) is still an operand edge of the projection: its slabs declare the sweep axis, so
 the placement rule puts its loop inside the sweep loop, while a sibling evaluated over the grid axes alone stays ahead
 of it. A projection stream spelled without the term (the materializer's tail) has no such loop, and reconstitution
@@ -193,11 +192,11 @@ Every "are these two kernels the same?" question is answered by ONE function —
 (`ir/base.py`), a lattice over the canonical Loop-IR body with one flag per additional fact
 (`structural` cluster-collapse, `with_io`, `with_knobs`). `TileOp`'s contribution is `loop_body` —
 the complete schedule-free Loop-IR body the kernel executes, derived from the term: the closed
-program `lower_with_output_specs` spells with nothing bound, where the term binds every free
-coordinate with its own loops in the order the tree declares them, so the extents, the store
-program and a cut child's typed seam `Load` are all in the body and the source nest's spelling of
-its parallel loops (`place.free`) never reaches it — and the private `_body_identity` override that
-digests it. There is no separate term hasher: a term has no key of
+program `Fold.lower` spells with nothing bound and the boundary stores handed in, where the term
+binds every free coordinate with its own loops and places each store after the term defining its
+value, so the extents, the store program and a cut child's typed seam `Load` are all in the body
+and the source nest's spelling of its parallel loops (`place.free`) never reaches it — and the
+private `_body_identity` override that digests it. There is no separate term hasher: a term has no key of
 its own, and the `TileOp` keys on the term's lowered body (the term is pure algebra; its body is
 its normal form). The named lattice points are spelled at call sites: the deploy identity
 (`with_io=True` — the durable join key) and the variant key (`with_io=True, with_knobs=True` —

@@ -43,12 +43,7 @@ from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
-from emmy.compiler.ir.tile import (
-    OutputSpec,
-    Placement,
-    TileOp,
-    lower_with_output_specs,
-)
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ir import apply_output_specs
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_tail
 from emmy.compiler.pipeline import Match
@@ -349,8 +344,8 @@ def _frag(match: Match, root: Node) -> Graph:
 def _piece_inputs(root: Node, body, *first: str) -> list[str]:
     """Return fragment buffers followed by external inputs actually read by a piece."""
     if isinstance(body, TileOp):
-        body = lower_with_output_specs(body.op, body.output_specs)
-    elif isinstance(body, Fold):
+        body = body.op
+    if isinstance(body, Fold):
         body = body.lower()
     reads = {load.input for load in Body.coerce(body).loads}
     return [*first, *(inp for inp in root.inputs if inp in reads)]

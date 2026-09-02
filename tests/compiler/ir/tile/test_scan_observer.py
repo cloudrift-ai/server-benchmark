@@ -20,7 +20,7 @@ from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.algebra import ExpFamily
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, extract_output_specs, lower_with_output_specs, observed_result_names
+from emmy.compiler.ir.tile import OutputSpec, extract_output_specs, observed_result_names
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, lift_loop_op, scan_from_loop
 
 
@@ -146,7 +146,7 @@ def test_streamed_store_reconstitutes_inside_the_reduce_loop() -> None:
     assert [type(s).__name__ for s in body] == ["Fold"] and len(specs) == 1
     assert observed_result_names(fold) == frozenset({"acc__obs"})
 
-    lowered = lower_with_output_specs(fold, specs)
+    lowered = fold.lower(fold.free_axes, tuple(specs))
     (loop,) = [s for s in lowered if isinstance(s, Loop)]
     inner = list(loop.body)
     assert isinstance(inner[-1], Write) and inner[-1].values == ("acc__obs",), "the store rides each iteration, last"
@@ -158,7 +158,7 @@ def test_observer_free_reconstitution_is_untouched() -> None:
     membership, not loop-defines, is what streams a store."""
     fold = _sum_fold()
     spec = OutputSpec(write=Write(output="out", index=(Var("m"),), value="acc"))
-    lowered = lower_with_output_specs(fold, (spec,))
+    lowered = fold.lower(fold.free_axes, (spec,))
     assert isinstance(lowered[-1], Write), "the post-fold store stays the kernel tail"
     (loop,) = [s for s in lowered if isinstance(s, Loop)]
     assert not any(isinstance(s, Write) for s in loop.body)

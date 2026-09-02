@@ -217,7 +217,6 @@ def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_unde
     rather than a peeled free axis."""
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.stmt import Write
-    from emmy.compiler.ir.tile import lower_with_output_specs
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 
     add = ElementwiseImpl("add")
@@ -247,6 +246,6 @@ def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_unde
     (spec,) = tile.output_specs
     assert spec.sweep is not None and spec.sweep.name in swept.free_axes
     assert any(edge.axis is not None and spec.sweep.name not in edge.free_axes for edge in swept.operands)
-    outer, loop = lower_with_output_specs(tile.op, tile.output_specs)
+    outer, loop = tile.op.lower(frozenset(axis.name for axis in tile.place.free), tile.output_specs)
     assert isinstance(outer, Loop) and isinstance(loop, Loop) and loop.axis.name == spec.sweep.name
     assert [type(stmt).__name__ for stmt in loop.body] == ["Loop", "Write"]

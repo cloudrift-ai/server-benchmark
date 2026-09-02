@@ -13,9 +13,8 @@ from __future__ import annotations
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold, Lambda, M
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, apply_output_specs, extract_output_specs, lower_with_output_specs
+from emmy.compiler.ir.tile import OutputSpec, apply_output_specs, extract_output_specs
 
 
 def _ax(name: str, n: int = 64) -> Axis:
@@ -202,60 +201,3 @@ def test_sweep_write_of_a_captured_accumulator_extracts() -> None:
     assert [type(stmt).__name__ for stmt in pure] == ["Load", "Assign"], "the first sweep's pure prefix rejoins the stream"
     assert [store.sweep.name for store in stores] == ["a1", "a2"]
     assert apply_output_specs(pure, stores) == Body((first, second))
-
-
-# --- a store lands at the scope binding its index ----------------------------------------------- #
-
-
-def _slab(name: str, buffer: str, *index: str, scope: tuple[Axis, ...]) -> Fold:
-    return Fold.slab(Load(name=name, input=buffer, index=tuple(Var(v) for v in index)), scope)
-
-
-def _sum(operands: tuple[Fold, ...], body: tuple, acc: str, k: Axis) -> Fold:
-    bound = tuple(name for edge in operands for name in edge.exposes)
-    init, combine = M("add", names=(acc,))
-    lift = Lambda.closing((k.name, *bound), Body(body), (f"{acc}__v",))
-    return Fold(axes=(k,), operands=operands, lift=lift, init=init, combine=combine)
-
-
-def test_a_store_lands_at_the_scope_binding_its_index() -> None:
-    """The closed program binds ``m`` and ``n`` with the term's own loops, so the store of the
-    ``[m, n]`` cell rides the ``n`` loop after the reduce; at kernel scope, where the grid binds
-    both, the same store is the kernel tail."""
-    m, n, k = _ax("m", 8), _ax("n", 4), _ax("k", 16)
-    scope = (m, n, k)
-    body = (Assign(name="acc__v", op="multiply", args=("l", "r")),)
-    mm = _sum((_slab("l", "x", "m", "k", scope=scope), _slab("r", "w", "k", "n", scope=scope)), body, "acc", k)
-    write = Write(output="out", index=(Var("m"), Var("n")), value="acc")
-    (m_loop,) = lower_with_output_specs(mm, (OutputSpec(write=write),), frozenset())
-    (n_loop,) = m_loop.body
-    assert m_loop.axis is m and n_loop.axis is n
-    assert [type(stmt).__name__ for stmt in n_loop.body] == ["Loop", "Write"] and n_loop.body[-1] is write
-    assert lower_with_output_specs(mm, (OutputSpec(write=write),)) == Body((*mm.lower(), write))
-
-
-def test_a_sweep_store_rides_the_loop_the_term_opened() -> None:
-    """At kernel scope the term opens its output sweep itself, and the sweep store lands inside
-    that loop rather than wrapping a second one around it; the row total, evaluated over ``m``
-    alone, stays ahead of the sweep."""
-    m, n, k = _ax("m", 8), _ax("n", 4), _ax("k", 16)
-    scope = (m, n, k)
-    total = _sum((_slab("y", "y", "m", "k", scope=scope),), (Assign(name="tot__v", op="copy", args=("y",)),), "tot", k)
-    body = (Assign(name="d", op="subtract", args=("x", "tot")), Assign(name="acc__v", op="exp", args=("d",)))
-    swept = _sum((_slab("x", "x", "m", "n", "k", scope=scope), total), body, "acc", k)
-    write = Write(output="out", index=(Var("m"), Var("n")), value="acc")
-    ahead, sweep = lower_with_output_specs(swept, (OutputSpec(write=write, sweep=n),))
-    assert ahead.axis is k and sweep.axis is n
-    assert [type(stmt).__name__ for stmt in sweep.body] == ["Loop", "Write"]
-    assert sweep.body.axis_names == {"k"}, "the sweep loop the term opened is the one the store rides"
-
-
-def test_a_store_lands_in_the_sibling_loop_binding_its_axis() -> None:
-    """Two sweeps no term shares are sibling loops; a store descends the one whose axis its index
-    reads, wherever it sits in the stream, rather than the trailing loop."""
-    q, kv = _ax("q", 4), _ax("kv", 2)
-    q_loop = Loop(axis=q, body=Body((Assign(name="qv", op="copy", args=("acc",)),)))
-    kv_loop = Loop(axis=kv, body=Body((Assign(name="kvv", op="copy", args=("acc",)),)))
-    write = Write(output="q_out", index=(Var("m"), Var("q")), value="qv")
-    rebuilt = apply_output_specs([q_loop, kv_loop], (OutputSpec(write=write, sweep=q),))
-    assert rebuilt == Body((Loop(axis=q, body=Body((*q_loop.body, write))), kv_loop))

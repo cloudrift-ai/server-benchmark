@@ -23,7 +23,6 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ReduceOp
-from emmy.compiler.ir.tile import lower_with_output_specs
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
 
@@ -34,6 +33,11 @@ def deep_defines(node) -> tuple[str, ...]:
         inner = (name for stmt in node.lift.body for name in deep_defines(stmt))
         return (*inner, *node.exposes, *(name for edge in node.operands for name in deep_defines(edge)))
     return (*node.defines(), *(name for body in node.nested() for stmt in body for name in deep_defines(stmt)))
+
+
+def _grid(tile) -> frozenset[str]:
+    """The kernel-scope binding: the grid binds the free axes, the term opens its output sweeps."""
+    return frozenset(axis.name for axis in tile.place.free)
 
 
 def _tile(body: Body):
@@ -167,7 +171,7 @@ def test_singleton_reduce_over_an_enclosing_value_lifts_as_a_projection() -> Non
     assert tuple(axis.extent for axis in tile.place.free) == (Dim(4),)
     assert isinstance(tile.op, Fold) and tile.op.axis is None
     assert not any(isinstance(member, Fold) and member.axis is not None for member in tile.op.body)
-    assert lower_with_output_specs(tile.op, tile.output_specs)[-1].value in deep_defines(tile.op)
+    assert tile.op.lower(_grid(tile), tile.output_specs)[-1].value in deep_defines(tile.op)
     np.testing.assert_array_equal(result, values)
 
 
@@ -222,7 +226,7 @@ def test_sibling_q_and_kv_regions_total_lift_with_separate_outputs() -> None:
     assert all(spec.sweep is None for spec in tile.output_specs) and len(tile.output_specs) == 3
     # The closed program opens the two sweeps as SIBLING loops under the row: no term is evaluated
     # over both, so neither nests in the other.
-    (m_loop,) = lower_with_output_specs(tile.op, tile.output_specs, frozenset())
+    (m_loop,) = tile.loop_body
     assert {loop.axis.extent for loop in m_loop.body} == {Dim(2), Dim(4)} and len(m_loop.body) == 2, "sibling sweeps, not a chain"
     assert {write.output for loop in m_loop.body for write in loop.body.writes} == {"q_out", "k_out", "v_out"}
     seam_scopes = {frozenset(axis.extent for axis in seam.axes) for seam in cuttable_seams(tile)}
@@ -265,7 +269,7 @@ def test_an_output_sweeps_epilogue_lifts_to_a_term_declaring_the_sweep_axis() ->
     assert Dim(4) in {axis.extent for axis in epilogue.axes} and [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
     (spec,) = tile.output_specs
     assert spec.write.values == epilogue.exposes and spec.sweep is None
-    assert [type(stmt).__name__ for stmt in lower_with_output_specs(tile.op, tile.output_specs)] == ["Loop", "Load", "Assign", "Write"]
+    assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs)] == ["Loop", "Load", "Assign", "Write"]
 
 
 # ===================================================================
@@ -347,5 +351,4 @@ def test_multi_pass_cell_defines_every_name_before_it_is_read() -> None:
             defined |= set(deep_defines(stmt)) if isinstance(stmt, Fold) else set(stmt.defines())
 
     for tile in tiles:
-        # The kernel-scope spelling: the grid binds the free axes, the term opens its output sweeps.
-        check(list(lower_with_output_specs(tile.op, tile.output_specs)), {axis.name for axis in tile.place.free})
+        check(list(tile.op.lower(_grid(tile), tile.output_specs)), {axis.name for axis in tile.place.free})

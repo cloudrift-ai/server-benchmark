@@ -11,7 +11,8 @@ Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Stmt`. A composed step —
 ahead of its ``Σ_j P·V``, split-K's sliced contraction — is reached through ``operands``, and its
 POSITION in the emitted nest is produced by the derivation (:meth:`Fold.lower` places every term
 at the shallowest scope binding its free coordinates, operands ahead of their readers), not by
-sitting in a statement list. The term becomes statements in exactly one place, :meth:`Fold.lower`.
+sitting in a statement list. The term becomes statements in exactly one place, :meth:`Fold.lower`,
+which also places the kernel's boundary stores, each after the term defining its value.
 See ``ir/ARCHITECTURE.md``, "Pure terms vs statements".
 
 The schedule is deliberately absent: an accepted, site-indexed ``Schedule`` lives on the
@@ -29,7 +30,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.algebra import component_ops, rename_combine
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
@@ -450,8 +451,9 @@ class Fold:
         )
 
     @cached_method
-    def lower(self, bound: frozenset[str] | None = None) -> Body:
-        """Flatten this term to the Loop IR nest the materializer expands.
+    def lower(self, bound: frozenset[str] | None = None, stores: tuple[OutputSpec, ...] = ()) -> Body:
+        """Flatten this term to the Loop IR nest the materializer expands, the kernel's boundary
+        ``stores`` placed in it.
 
         ``bound`` names the coordinates the CALLER binds — the kernel grid, an enclosing loop's
         scope; ``None`` binds every free coordinate (the open body a term spells inside an
@@ -466,13 +468,20 @@ class Fold:
         ahead of that loop; one that reads no coordinate a deeper loop binds lands ahead of every
         such loop, past the term that reads it.
 
+        A boundary store follows the term that DEFINES the value it writes, at that term's scope:
+        a projection's result after its step, a reduce's carried state after its loop, an observed
+        per-step value inside the loop after the observer. A store alone evaluated over a
+        coordinate no term declares (a broadcast, ``o[j] = acc``) opens that coordinate under its
+        term, the spec's ``sweep`` naming the axis. Nothing is walked for the place a store goes:
+        the term defining its value was just placed.
+
         The free loops form a TREE, not a chain. A term's operands sit on ITS path — the shallowest
         prefix of its own loops that binds them — so what a term reads is always in scope; only a
         wrapper with no step of its own leaves its operands free to take their own paths, which is
         how two output sweeps no term shares become sibling loops. Operands are placed before
-        the statements that read them, a reduce term's step
-        follows its operands inside the loop that binds its axis, and a SHARED term — one object
-        reached through several operand positions — defines its names once per scope.
+        the statements that read them, a reduce term's step follows its operands inside the loop
+        that binds its axis, and a SHARED term — one object reached through several operand
+        positions — defines its names once per scope.
 
         The ONE lowering spelling — every consumer of a term's statements calls this. Memoized on
         the term per binding.
@@ -492,16 +501,21 @@ class Fold:
             for name in term.free_axes:
                 readers[name] = readers.get(name, 0) + 1
             pending.extend(reversed(term.operands))
+        for spec in stores:
+            if spec.sweep is not None:
+                coordinates.setdefault(spec.sweep.name, spec.sweep)
         declared = list(coordinates)
+        read = self.free_axes | {name for spec in stores for expr in spec.write.index for name in expr.free_vars()}
         opened = sorted(
-            (name for name in coordinates if name in self.free_axes and name not in bound),
-            key=lambda name: (-readers[name], declared.index(name)),
+            (name for name in coordinates if name in read and name not in bound),
+            key=lambda name: (-readers.get(name, 0), declared.index(name)),
         )
         nest: dict[tuple[str, ...], list[Stmt]] = {(): []}
+        unplaced = list(stores)
 
         def path_of(free: frozenset[str], path: tuple[str, ...] | None) -> tuple[str, ...]:
             # The free loops a term sits under: the shallowest prefix of its reader's path binding
-            # its coordinates, or — unconstrained — those coordinates in declaration order.
+            # its coordinates, or — unconstrained — those coordinates in the opened order.
             needed = {name for name in opened if name in free}
             if path is None:
                 return tuple(name for name in opened if name in needed)
@@ -511,6 +525,27 @@ class Fold:
             for depth in range(len(path) + 1):
                 nest.setdefault(path[:depth], [])
             return nest[path]
+
+        def attach(term: Fold, kind: str, target: list[Stmt], node: tuple[str, ...], scope: frozenset[str]) -> None:
+            # The stores over what ``term`` defines as ``kind`` — its step's results, its carried
+            # state, or its observer's per-step values — land right after it, in ``target``.
+            for spec in list(unplaced):
+                values = set(spec.write.values)
+                if term.combine is None:
+                    owned = kind == "step" and values <= {name for stmt in term.lift.body for name in stmt.defines()}
+                elif kind == "state":
+                    owned = values <= set(term.combine.results)
+                else:
+                    owned = term.observe is not None and values <= set(term.observe.results)
+                if not owned:
+                    continue
+                unplaced.remove(spec)
+                extra = {name for expr in spec.write.index for name in expr.free_vars()} - scope
+                if not extra:
+                    target.append(spec.write)
+                    continue
+                assert extra <= set(opened), f"a store reads coordinates {sorted(extra - set(opened))} no term declares and no sweep names"
+                sink((*node, *(name for name in opened if name in extra))).append(spec.write)
 
         def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None) -> None:
             # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
@@ -526,13 +561,18 @@ class Fold:
                 for edge in term.operands:
                     place(edge, loops, node if step else path)
                 if step:
-                    (stmts if stmts is not None else sink(node)).extend(step)
+                    target = stmts if stmts is not None else sink(node)
+                    target.extend(step)
+                    attach(term, "step", target, node, scope)
                 return
             inner: list[Stmt] = []
             for edge in term.operands:
                 place(edge, [*loops, (term.axis.name, scope | {term.axis.name}, inner)], node)
             inner.extend(term.step())
-            (stmts if stmts is not None else sink(node)).append(Loop(axis=term.axis, body=Body(tuple(dict.fromkeys(inner)))))
+            attach(term, "observed", inner, node, scope | {term.axis.name})
+            target = stmts if stmts is not None else sink(node)
+            target.append(Loop(axis=term.axis, body=Body(tuple(dict.fromkeys(inner)))))
+            attach(term, "state", target, node, scope)
 
         def assemble(path: tuple[str, ...]) -> Body:
             body = list(nest[path])
@@ -542,6 +582,7 @@ class Fold:
             return Body(tuple(dict.fromkeys(body)))
 
         place(self, [], None)
+        assert not unplaced, f"stores over {[spec.write.values for spec in unplaced]} write values no term defines"
         return assemble(())
 
 

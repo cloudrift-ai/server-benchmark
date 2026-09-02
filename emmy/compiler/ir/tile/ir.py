@@ -50,27 +50,10 @@ from emmy.compiler.ir.schedule.views import (
     NodeId,
     contraction_facts,
 )
-from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Loop, OutputSpec, Stmt, Write
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.path import sites
-
-
-@dataclass(frozen=True)
-class OutputSpec:
-    """One output write specification at the kernel boundary — the effect the stored term no
-    longer carries. ``write`` is the store verbatim (target buffer, index template, stored value
-    names, the atomic flag — holding the ``Write`` whole keeps every field lossless), and it is
-    NOT part of the term: ``TileOp.output_specs`` owns the tuple, and consumers reconstitute the
-    effectful stmt stream via :func:`apply_output_specs`. ``sweep`` names the output loop the store
-    rides — a coordinate the kernel grid does not bind: the term opens it (:meth:`Fold.lower`) and
-    the store lands inside; a stream spelled without the term wraps the trailing stmts reading it
-    (:func:`_sweep_start`). Conversion sites go through :func:`extract_output_specs`, whose
-    reconstitution round-trip gate is what keeps kernel sources byte-identical to the
-    stored-``Write`` era."""
-
-    write: Write
-    sweep: Axis | None = None
 
 
 def _sweep_start(stmts, axis_name: str) -> int:
@@ -82,32 +65,6 @@ def _sweep_start(stmts, axis_name: str) -> int:
         if axis_name in free_names(s):
             return i
     return len(stmts)
-
-
-def _attach(stmts: list, writes: tuple[Write, ...], sweep: Axis | None) -> list:
-    """Place one run of boundary stores at the scope binding their index coordinates.
-
-    A store lands at the innermost scope that binds every coordinate its index reads. Among the
-    free loops the term opened (``Fold.lower`` with a coordinate left unbound — siblings, when two
-    sweeps share no term) the one whose own axis the index reads is descended, else one binding
-    such a coordinate deeper; the sweep loop the stores ask for is among them when the term opened
-    it. Where no loop binds the sweep axis (a projection stream spelled at kernel scope, where the
-    grid binds the free axes), the trailing run reading the axis is wrapped into one per-cell
-    output ``Loop`` (:func:`_sweep_start`), the writes last."""
-    coordinates = {name for write in writes for expr in write.index for name in expr.free_vars()}
-    binding = [
-        i for i, s in enumerate(stmts) if isinstance(s, Loop) and not s.is_reduce and coordinates & (s.binds_axes() | s.body.axis_names)
-    ]
-    own = [i for i in binding if stmts[i].axis.name in coordinates]
-    if own or binding:
-        index = (own or binding)[0]
-        loop = stmts[index]
-        inner = _attach(list(loop.body), writes, None if sweep is not None and sweep.name == loop.axis.name else sweep)
-        return [*stmts[:index], loop.with_bodies((Body(tuple(inner)),)), *stmts[index + 1 :]]
-    if sweep is not None:
-        start = _sweep_start(stmts, sweep.name)
-        return [*stmts[:start], Loop(axis=sweep, body=Body((*stmts[start:], *writes)))]
-    return [*stmts, *writes]
 
 
 def observed_result_names(op) -> frozenset[str]:
@@ -148,29 +105,31 @@ def _splice_streamed(stmts: list, write: Write) -> bool:
 
 
 def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> Body:
-    """Reassemble the EFFECTFUL stmt stream from a pure body + the kernel-boundary output
-    specifications — the ONE reconstitution rule the scheduler's tail gates, the materializer's
-    zero-axis ``Fold`` peel, ``030_cut`` and the term's own ``lower_with_output_specs`` share, so
-    the lowered kernels stay byte-identical to the stored-``Write`` era. A store lands at the scope
-    binding its index coordinates (:func:`_attach`); consecutive ``sweep`` stores on one axis ride
-    one per-cell output ``Loop`` there, the term's own where it opened the axis."""
+    """Reassemble the EFFECTFUL stmt stream from a pure statement STREAM + the kernel-boundary
+    output specifications — the materializer's spelling, where the grid binds every free axis
+    and nothing is a term: a store appends as the kernel tail, consecutive ``sweep`` stores on one
+    axis wrap the trailing run of stmts reading that axis (:func:`_sweep_start`) into one per-cell
+    output ``Loop``, and a store over OBSERVED values streams into its reduce loop when that loop
+    is present. The ONE reconstitution rule the scheduler's tail gates, the materializer's
+    zero-axis ``Fold`` peel and ``030_cut`` share, so the lowered kernels stay byte-identical to
+    the stored-``Write`` era. A TERM places its stores itself (:meth:`Fold.lower`)."""
     out = list(stmts)
     stores = list(specs)
     index = 0
     while index < len(stores):
         st = stores[index]
         if st.sweep is None:
-            # A store over OBSERVED values streams into its reduce loop when the loop is present
-            # (a lowered kernel body); at term level — the fold not yet a ``Loop`` — it keeps its
-            # post-node position, which is also where extraction's round-trip gate expects it.
+            # At term level — the fold not yet a ``Loop`` — an observed store keeps its post-node
+            # position, which is also where extraction's round-trip gate expects it.
             if not (observed and set(st.write.values) <= observed and _splice_streamed(out, st.write)):
-                out = _attach(out, (st.write,), None)
+                out.append(st.write)
             index += 1
             continue
         end = index + 1
         while end < len(stores) and stores[end].sweep == st.sweep:
             end += 1
-        out = _attach(out, tuple(store.write for store in stores[index:end]), st.sweep)
+        start = _sweep_start(out, st.sweep.name)
+        out = [*out[:start], Loop(axis=st.sweep, body=Body((*out[start:], *(store.write for store in stores[index:end]))))]
         index = end
     return Body(tuple(out))
 
@@ -227,18 +186,6 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
         if split == 0 or not _dense_axis_suffix(index[split:], n_name):
             return None
     return Axis("_um", Dim(1))
-
-
-def lower_with_output_specs(op, specs, bound: frozenset[str] | None = None) -> Body:
-    """Lower one pure Tile term and attach every output specification at its owning scope.
-
-    ``bound`` is what the caller binds (:meth:`Fold.lower`). The default is the kernel-scope
-    spelling: the grid binds every free coordinate but the output sweeps, which the term opens.
-    ``frozenset()`` is the closed program — every coordinate bound by the term's own loops."""
-    specs = tuple(specs)
-    if bound is None:
-        bound = op.free_axes - {spec.sweep.name for spec in specs if spec.sweep is not None}
-    return apply_output_specs(op.lower(bound), specs, observed=observed_result_names(op))
 
 
 def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...]] | None:
@@ -516,19 +463,20 @@ class TileOp(Op):
     @cached_property
     def loop_body(self) -> Body | None:
         """The complete schedule-free Loop-IR body this kernel executes, derived from the term
-        — what the identity lattice digests. The closed program: the term binds every free
-        coordinate with its own loops (:func:`lower_with_output_specs` with nothing bound, the ONE
-        lowering spelling), so the extents, the store program (index spelling, ``atomicAdd``,
-        width, output sweeps) and a cut child's typed seam ``Load`` are all in the body.
-        Schedule-free by construction: ``lower`` never reads the classic assignment, and
-        ``place`` stays out entirely — which coordinates the grid binds, and in what order the
-        source nest spelled them, is execution choice, not identity. A bare reduction carries no
-        ``Write`` — its grid-cell store is materializer glue derived from ``place.grid``, so the
-        empty store stream is itself derivable. Cached: the term and the kernel-boundary fields
-        are immutable across the schedule search. ``None`` for a placeholder."""
+        — what the identity lattice digests. The closed program: ``Fold.lower`` with nothing bound
+        and the boundary stores handed in, so the term binds every free coordinate with its own
+        loops and places each store after the term defining its value — the extents, the store
+        program (index spelling, ``atomicAdd``, width, output sweeps) and a cut child's typed seam
+        ``Load`` are all in the body. Schedule-free by construction: ``lower`` never reads the
+        classic assignment, and ``place`` stays out entirely — which coordinates the grid binds,
+        and in what order the source nest spelled them, is execution choice, not identity. A bare
+        reduction carries no ``Write`` — its grid-cell store is materializer glue derived from
+        ``place.grid``, so the empty store stream is itself derivable. Cached: the term and the
+        kernel-boundary fields are immutable across the schedule search. ``None`` for a
+        placeholder."""
         if self.op is None:
             return None
-        return lower_with_output_specs(self.op, self.output_specs, frozenset())
+        return self.op.lower(frozenset(), self.output_specs)
 
     def _body_identity(self, *, structural: bool = True) -> str | None:
         """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s
@@ -544,6 +492,5 @@ __all__ = [
     "TileOp",
     "apply_output_specs",
     "extract_output_specs",
-    "lower_with_output_specs",
     "observed_result_names",
 ]

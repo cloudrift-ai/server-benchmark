@@ -332,9 +332,9 @@ type to dispatch on and no second place for a fact to live.
   only boundary output writes consume (`Fold.observed`, a structural probe like `composed`). Observation makes the
   stream order-visible, so an observed fold schedules as the serial fold only.
 
-`Fold.lower(bound)` flattens the term to the loop nest: a plain loop for every free coordinate the caller left
-unbound, in the order the tree declares them, the reduce loop of each term innermost, and every term placed at the
-shallowest scope binding its free coordinates. Loops carry NO algebra and no annotation, so the derived nest depends
+`Fold.lower(bound, stores)` flattens the term to the loop nest: a plain loop for every free coordinate the caller
+left unbound, outermost the one the most terms share, the reduce loop of each term innermost, every term placed at
+the shallowest scope binding its free coordinates, and each boundary store right after the term defining its value. Loops carry NO algebra and no annotation, so the derived nest depends
 only on what is stored, which is what makes every identity of the term a digest of its lowered body — there is no
 separate term hasher.
 The `TileOp`'s body identity is the canonical digest of the nest `lower()` derives (the body is the

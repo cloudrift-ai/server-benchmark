@@ -14,7 +14,6 @@ from emmy.compiler.ir.tile.ir import (
     TileOp,
     apply_output_specs,
     extract_output_specs,
-    lower_with_output_specs,
     observed_result_names,
 )
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
@@ -29,7 +28,6 @@ __all__ = [
     "OutputSpec",
     "TileOp",
     "apply_output_specs",
-    "lower_with_output_specs",
     "observed_result_names",
     "normalize_fold_tree",
     "extract_output_specs",

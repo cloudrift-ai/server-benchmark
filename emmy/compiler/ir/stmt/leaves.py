@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from functools import cached_property
 
 from emmy.compiler.dtype import F32, DataType
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, _float_lit
 from emmy.compiler.ir.stmt.base import (
@@ -1043,3 +1044,18 @@ class ZeroPrologue(Stmt):
             f"{p1}for (int _zi = threadIdx.x; _zi < {self.words}; _zi += blockDim.x) _zp_{self.dst}[_zi] = 0;",
             f"{pad}}}",
         ]
+
+
+@dataclass(frozen=True)
+class OutputSpec:
+    """One output write at the kernel boundary — the effect the stored term does not carry.
+    ``write`` is the store verbatim (target buffer, index template, stored value names, the atomic
+    flag — holding the ``Write`` whole keeps every field lossless); ``TileOp.output_specs`` owns
+    the tuple. The term places its stores itself (``Fold.lower``), each after the term defining
+    its value; a stream spelled without the term reconstitutes them (``apply_output_specs``).
+    ``sweep`` names the output loop the store rode in the source: the axis a store alone is
+    evaluated over when no term declares it (a broadcast, ``o[j] = acc``), and the loop a stream
+    wraps around the trailing stmts reading it."""
+
+    write: Write
+    sweep: Axis | None = None

@@ -8,8 +8,9 @@ same comparison hoists an operand ahead of its reader's reduce loop, ahead of an
 past the very term that reads it.
 
 These pin the binding contract (``None`` binds every free coordinate — the open body; ``frozenset()``
-binds none — the closed program), the loop order (the tree's declaration order, not the caller's),
-the placement rule at each of its three depths, and the memo per binding.
+binds none — the closed program), the loop order (the tree's, not the caller's), the placement rule
+at each of its three depths, where a boundary store lands (after the term defining its value), and
+the memo per binding.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda, M
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, OutputSpec, Write
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
 SCOPE = (M_AXIS, N_AXIS, K_AXIS)
@@ -146,6 +147,68 @@ def test_sweeps_no_term_shares_are_sibling_loops_and_a_reader_makes_them_a_chain
     (q_loop,) = m_loop.body
     assert q_loop.axis.name == "q" and [type(stmt).__name__ for stmt in q_loop.body] == ["Loop", "Loop"]
     assert q_loop.body[-1].axis.name == "n" and [type(stmt).__name__ for stmt in q_loop.body[-1].body] == ["Loop", "Assign"]
+
+
+# --- boundary stores ----------------------------------------------------------------------------- #
+
+
+def test_a_store_follows_the_term_defining_its_value_at_that_terms_scope() -> None:
+    """Closed, the ``[m, n]`` store rides the ``n`` loop after the reduce; at kernel scope, where
+    the grid binds both, it is the kernel tail."""
+    mm = _matmul(_slab("l", "x", "m", "k"), _slab("r", "w", "k", "n"))
+    store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"))
+    (m_loop,) = mm.lower(frozenset(), (store,))
+    (n_loop,) = m_loop.body
+    assert [type(stmt).__name__ for stmt in n_loop.body] == ["Loop", "Write"] and n_loop.body[-1] is store.write
+    assert mm.lower(mm.free_axes, (store,)) == Body((*mm.lower(), store.write))
+
+
+def test_a_sweep_store_rides_the_loop_the_term_opened() -> None:
+    """At kernel scope the term opens its output sweep itself and the store follows the swept sum
+    inside it; the row total, evaluated over ``m`` alone, stays ahead."""
+    total, swept = _normalized_sum()
+    store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=N_AXIS)
+    ahead, sweep = swept.lower(frozenset({"m"}), (store,))
+    assert ahead == total.lower()[0] and sweep.axis is N_AXIS
+    assert [type(stmt).__name__ for stmt in sweep.body] == ["Loop", "Write"]
+
+
+def test_a_store_lands_in_the_sibling_loop_of_its_term() -> None:
+    q = Axis("q", Dim(2))
+    scope = (M_AXIS, N_AXIS, q, K_AXIS)
+    a = Fold.slab(Load(name="a", input="x", index=(Var("m"), Var("q"), Var("k"))), scope)
+    b = Fold.slab(Load(name="b", input="y", index=(Var("m"), Var("n"), Var("k"))), scope)
+    over_q = _reduce((a,), (Assign(name="sq__v", op="copy", args=("a",)),), "sq")
+    over_n = _reduce((b,), (Assign(name="sn__v", op="copy", args=("b",)),), "sn")
+    forest = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), Body(), ("sq", "sn")))
+    stores = (
+        OutputSpec(write=Write(output="oq", index=(Var("m"), Var("q")), value="sq")),
+        OutputSpec(write=Write(output="on", index=(Var("m"), Var("n")), value="sn")),
+    )
+    (m_loop,) = forest.lower(frozenset(), stores)
+    by_axis = {loop.axis.name: loop for loop in m_loop.body}
+    assert tuple(by_axis["q"].body)[-1] is stores[0].write and tuple(by_axis["n"].body)[-1] is stores[1].write
+
+
+def test_a_broadcast_store_opens_the_sweep_axis_its_spec_names() -> None:
+    """``o[m, j] = tot`` with nothing computed over ``j``: the store alone is evaluated over it, so
+    the term opens a ``j`` loop under the total, from the spec's axis."""
+    j = Axis("j", Dim(3))
+    total = _reduce((_slab("y", "y", "m", "k"),), (Assign(name="tot__v", op="copy", args=("y",)),), "tot")
+    store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="tot"), sweep=j)
+    (m_loop,) = total.lower(frozenset(), (store,))
+    reduce_loop, j_loop = m_loop.body
+    assert reduce_loop.axis is K_AXIS and j_loop.axis is j and tuple(j_loop.body) == (store.write,)
+
+
+def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
+    init, combine = M("add", names=("acc",))
+    observe = Lambda(params=("k", "acc"), body=Body((Assign(name="acc__obs", op="copy", args=("acc",)),)), results=("acc__obs",))
+    lift = Lambda.closing(("k", "y"), Body((Assign(name="acc__v", op="copy", args=("y",)),)), ("acc__v",))
+    scan = Fold(axes=(K_AXIS,), operands=(_slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine, observe=observe)
+    store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("k")), value="acc__obs"))
+    (loop,) = scan.lower(scan.free_axes, (store,))
+    assert [type(stmt).__name__ for stmt in loop.body] == ["Load", "Assign", "Accum", "Assign", "Write"]
 
 
 # --- the memo ------------------------------------------------------------------------------------ #

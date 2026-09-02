@@ -16,6 +16,8 @@ ahead of a lowering walk."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -85,8 +87,8 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
         return result
 
     env = dict(scope or {})
-    for operand in edge.operands:
-        env.update(zip(operand.exposes, edge_dtypes(operand, inputs, cache, env), strict=True))
+    for param, operand, index in edge.bindings:
+        env[param] = edge_dtypes(operand, inputs, cache, env)[index]
     for stmt in edge.lift.body:
         if isinstance(stmt, Load):
             tensor = inputs.get(stmt.input) if inputs else None
@@ -437,12 +439,16 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold,
     ownership rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh
     pieces. Refusals raise :class:`UnbindableProjection`.
     """
+    # Rendered: the tail and the stores in the operands' spelling, the form every consumer emits.
+    lift = op.applied
+    spelled = dict(zip(op.lift.params, lift.params, strict=True))
+    output_specs = tuple(replace(spec, write=spec.write.rewrite(lambda name: spelled.get(name, name))) for spec in output_specs)
     regions = op.operands
     by_name = {name: region for region in regions for name in region.exposes}
     members: dict[int, set] = {id(region): set() for region in regions}
     grouped: dict[int, list] = {id(region): [] for region in regions}
     for spec in output_specs:
-        cone = op.lift.body.backward_cone(tuple(spec.write.values))
+        cone = lift.body.backward_cone(tuple(spec.write.values))
         used = {id(by_name[name]) for name in (*cone.external_reads, *spec.write.values) if name in by_name}
         if len(used) != 1:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
@@ -451,7 +457,7 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold,
         grouped[owner].append(spec)
 
     claimed: set = set().union(*members.values()) if members else set()
-    if claimed != set(op.lift.body) or any(not grouped[id(region)] for region in regions):
+    if claimed != set(lift.body) or any(not grouped[id(region)] for region in regions):
         raise UnbindableProjection("an output-tiled root forest must cover the complete projection")
     if any(members[id(left)] & members[id(right)] for i, left in enumerate(regions) for right in regions[i + 1 :]):
         raise UnbindableProjection("output-tiled root projections may not share tail statements")
@@ -460,7 +466,7 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold,
         root = projection_root(region)
         if root is None:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
-        out.append((root, region, Body(stmt for stmt in op.lift.body if stmt in members[id(region)]), tuple(grouped[id(region)])))
+        out.append((root, region, Body(stmt for stmt in lift.body if stmt in members[id(region)]), tuple(grouped[id(region)])))
     return tuple(out)
 
 

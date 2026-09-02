@@ -167,7 +167,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
             return _bind_roots(op, ctx, output_specs)
         root = tiled[0] if tiled else op.operands[0]
         siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower()]
-        proj = list(dict.fromkeys([*siblings, *op.lift.body]))
+        proj = list(dict.fromkeys([*siblings, *op.step()]))
         # A STREAMED store (values = an observer's results) rides the recursion down to the leaf
         # so the scalar arm can splice it into the observed fold's reduce loop — applying it here
         # would land it in the projection tail, after a loop that is not yet emitted.

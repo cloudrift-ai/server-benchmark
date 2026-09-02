@@ -310,7 +310,11 @@ stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)
 - a pure `lift` `Lambda` `λ(k, v₁…vₙ) → S` — the element's SINGLETON state (ι is spelled in the lift;
   softmax's is `(x, 1)`);
 - the monoid's flat `(init, combine)` fields — ONE program, whose results ARE the fold's accumulator names;
-- a symmetric tuple of `operands` — the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params.
+- a symmetric tuple of `operands` — the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params. The
+  params are the term's OWN names (`Fold.bindings` pairs each with its edge and component); nothing above an edge
+  reads how the edge spells its results until the term is rendered — `Fold.applied` is the lift with the binding
+  applied, and `step` / `lower` / the projection-region reader emit that form, so a lowered body reads producer
+  names throughout while a rewrite that swaps an operand touches no name at all.
 
 **`Map` and `Contraction` are DERIVED READINGS, not stored kinds.** Each is a constructor returning a
 `Fold` plus a PREDICATE answering the reading: `axis is None` for the projection, `is_contraction(x)` for the

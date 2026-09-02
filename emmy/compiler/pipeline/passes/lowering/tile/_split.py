@@ -501,7 +501,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     out = root.output
     cell = _cell_index(stores, free)
     # The epilogue the atomic arm would apply per partition: the region's projection and its stores.
-    projection = (*(region.lift.body if region.axis is None else ()), *body, *(store.write for store in stores))
+    projection = (*(region.step() if region.axis is None else ()), *body, *(store.write for store in stores))
     frag = _frag(match, root)
 
     if finalize == "atomic":

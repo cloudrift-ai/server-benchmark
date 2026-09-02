@@ -187,7 +187,7 @@ def test_a_store_follows_the_term_defining_its_value_at_that_terms_scope() -> No
     store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"))
     (m_loop,) = mm.lower(frozenset(), (store,))
     (n_loop,) = m_loop.body
-    assert [type(stmt).__name__ for stmt in n_loop.body] == ["Loop", "Write"] and n_loop.body[-1] is store.write
+    assert [type(stmt).__name__ for stmt in n_loop.body] == ["Loop", "Write"] and n_loop.body[-1] == store.write
     assert mm.lower(mm.free_axes, (store,)) == Body((*mm.lower(), store.write))
 
 
@@ -215,7 +215,7 @@ def test_a_store_lands_in_the_sibling_loop_of_its_term() -> None:
     )
     (m_loop,) = forest.lower(frozenset(), stores)
     by_axis = {loop.axis.name: loop for loop in m_loop.body}
-    assert tuple(by_axis["q"].body)[-1] is stores[0].write and tuple(by_axis["n"].body)[-1] is stores[1].write
+    assert tuple(by_axis["q"].body)[-1] == stores[0].write and tuple(by_axis["n"].body)[-1] == stores[1].write
 
 
 def test_a_broadcast_store_opens_the_sweep_axis_its_spec_names() -> None:
@@ -318,3 +318,27 @@ def test_lowering_is_memoized_per_binding() -> None:
     assert mm.lower() is mm.lower()
     assert mm.lower(frozenset()) is mm.lower(frozenset())
     assert mm.lower() is not mm.lower(frozenset())
+
+
+# --- the binding: positional, the consumer's names; rendering spells the operands ---------------- #
+
+
+def test_a_consumer_names_what_it_binds_and_rendering_spells_the_operand() -> None:
+    """A term's lift params are its own names, bound in order to its operands' result components;
+    only the rendered statements (``step`` / ``lower``) read the operands' spelling, and a store
+    over a passed-through operand value renders with it. Two spellings of one binding are one
+    term: equal canonical forms, equal lowered bodies."""
+    y = _slab("y", "y", "m", "k")
+    lift = Lambda.closing(("k", "value"), Body((Assign(name="acc__v", op="copy", args=("value",)),)), ("acc__v",))
+    fold = Fold(axes=(K_AXIS,), operands=(y,), lift=lift, init=(0.0,), combine=Lambda.componentwise(("add",), ("acc",)))
+    assert fold.bindings == (("value", y, 0),) and fold.applied.params == ("k", "y")
+    (loop,) = fold.lower()
+    assert [stmt.args for stmt in loop.body if isinstance(stmt, Assign)] == [("y",)]
+    spelled = replace(fold, lift=lift.rename({"value": "y"}))
+    assert fold.canonical() == spelled.canonical() and fold.lower() == spelled.lower()
+    # A projection passing the state through exposes the state's own name, and its store follows.
+    passthrough = Fold(operands=(fold,), lift=Lambda(params=("total",), body=Body(()), results=("total",)))
+    assert passthrough.exposes == ("acc",)
+    store = OutputSpec(write=Write(output="o", index=(Var("m"),), value="total"))
+    (m_loop,) = passthrough.lower(frozenset(), (store,))
+    assert m_loop.body[-1] == Write(output="o", index=(Var("m"),), value="acc")

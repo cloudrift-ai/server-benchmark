@@ -36,21 +36,26 @@ def _terms(root: Fold):
         pending.extend(reversed(term.operands))
 
 
-def _replace(term: Fold, mapping: dict[int, Fold]) -> Fold:
-    """The tree with every operand in ``mapping`` (by identity) replaced. A reader rebinds its
-    lift's params to the new operands' exposed names — the names themselves are unchanged, a
-    fused fold keeps its accumulators' — and an operand reached twice binds once."""
-    operands: list[Fold] = []
-    for edge in term.operands:
-        edge = _replace(mapping.get(id(edge), edge), mapping)
-        if all(edge is not held for held in operands):
-            operands.append(edge)
+def _replace(term: Fold, mapping: dict[int, tuple[Fold, int]]) -> Fold:
+    """The tree with every operand in ``mapping`` (by identity) replaced by ``(edge, offset)`` — the
+    replacement and where the old edge's components sit among its results. Binding is positional,
+    so a reader keeps its own param names and only their order follows the new operands; an
+    operand reached twice binds once, and a component no old edge covered binds a fresh name."""
+    order: list[Fold] = []
+    slots: dict[int, list[str | None]] = {}
+    for param, edge, index in term.bindings:
+        new, offset = mapping.get(id(edge), (edge, 0))
+        if id(new) not in slots:
+            order.append(new)
+            slots[id(new)] = [None] * len(new.exposes)
+        slots[id(new)][offset + index] = param
+    operands = tuple(_replace(edge, mapping) for edge in order)
     if len(operands) == len(term.operands) and all(a is b for a, b in zip(operands, term.operands, strict=True)):
         return term
     lead = term.lift.params[:1] if term.axis is not None else ()
-    arity = sum(len(edge.exposes) for edge in term.operands)
-    params = (*lead, *(name for edge in operands for name in edge.exposes), *term.lift.params[len(lead) + arity :])
-    return replace(term, operands=tuple(operands), lift=replace(term.lift, params=params))
+    bound = [param or f"_unread{index}" for index, param in enumerate(param for edge in order for param in slots[id(edge)])]
+    params = (*lead, *bound, *term.lift.params[len(lead) + len(term.bindings) :])
+    return replace(term, operands=operands, lift=replace(term.lift, params=params))
 
 
 def _varies(fold: Fold, name: str, bound: dict[str, Fold]) -> bool:
@@ -105,7 +110,7 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     if flattened is None:
         return None
     leaves, spine = flattened
-    bound = {name: edge for edge in fold.operands for name in edge.exposes}
+    bound = {param: edge for param, edge, _ in fold.bindings}
     divisors = {stmt.args[1] for stmt in spine if stmt.op.name == "divide"}
     invariant = [leaf for leaf in leaves if not _varies(fold, leaf, bound)]
     varying = [leaf for leaf in leaves if leaf not in invariant]
@@ -121,9 +126,14 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     state = view.states[0]
     inner_state = f"{state}__sum"
     reads = {name for stmt in (*kept, *product) for name in stmt.deps()} | {value}
-    operands = tuple(edge for edge in fold.operands if set(edge.exposes) & reads)
+    kept_edges = {id(edge) for param, edge, _ in fold.bindings if param in reads}
+    operands = tuple(edge for edge in fold.operands if id(edge) in kept_edges)
     lift = Lambda(
-        params=(fold.axis.name, *(name for edge in operands for name in edge.exposes), *fold.lift.params[1 + len(bound) :]),
+        params=(
+            fold.axis.name,
+            *(param for param, edge, _ in fold.bindings if id(edge) in kept_edges),
+            *fold.lift.params[1 + len(bound) :],
+        ),
         body=Body((*kept, *product)),
         results=(value,),
     )
@@ -135,10 +145,8 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
         epilogue.append(Assign(name=name, op="divide" if leaf in divisors else "multiply", args=(current, leaf)))
         current = name
     edges = (inner, *dict.fromkeys(bound[leaf] for leaf in invariant))
-    projection = Fold(
-        operands=edges,
-        lift=Lambda.closing(tuple(name for edge in edges for name in edge.exposes), Body(epilogue), (state,)),
-    )
+    params = (inner_state, *(param for edge in edges[1:] for param, held, _ in fold.bindings if held is edge))
+    projection = Fold(operands=edges, lift=Lambda.closing(params, Body(epilogue), (state,)))
     return inner, projection
 
 
@@ -152,14 +160,16 @@ def _click(root: Fold) -> dict[int, Fold] | None:
         for recipe in RECIPES:
             fused = term.twist(recipe)
             if fused is not None:
-                return {id(term): fused, id(_pivot_of(term, fused)): fused}
+                pivot = _pivot_of(term, fused)
+                return {id(term): (fused, len(pivot.exposes)), id(pivot): (fused, 0)}
             hoisted = _hoist_invariant(term)
             if hoisted is None:
                 continue
             inner, epilogue = hoisted
             fused = inner.twist(recipe)
             if fused is not None:
-                return {id(term): _replace(epilogue, {id(inner): fused}), id(_pivot_of(inner, fused)): fused}
+                pivot = _pivot_of(inner, fused)
+                return {id(term): (_replace(epilogue, {id(inner): (fused, len(pivot.exposes))}), 0), id(pivot): (fused, 0)}
     return None
 
 
@@ -188,7 +198,7 @@ def rewrite_twisted(root):
     if not isinstance(root, Fold):
         return root
     while (mapping := _click(root)) is not None:
-        root = _replace(mapping.get(id(root), root), mapping)
+        root = _replace(mapping.get(id(root), (root, 0))[0], mapping)
     _report(root)
     return root
 

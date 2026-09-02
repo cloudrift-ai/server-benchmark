@@ -157,10 +157,11 @@ class Fold:
     # split parentage uses, read by the realizer and the mask machinery alike.
     #
     # ---- the λ-foldMap spelling — the fold's storage: a PURE ``lift`` ``λ(k, v₁…vₙ) → S``
-    # (params: the iteration var first, then one per operand edge, bound POSITIONALLY) plus the
-    # TRUE monoid's flat ``(init, combine)`` pair whose combine carries the REAL accumulator
-    # names (its results). The serial step, the ``Accum`` forms and the ``carrier`` annotation
-    # are DERIVED (:attr:`step` / ``__post_init__``). ------------------------------------------- #
+    # (params: the iteration var first, then one per operand result component, bound POSITIONALLY —
+    # the names are this term's own, :attr:`bindings` pairs them with the edges, and :attr:`applied`
+    # spells them as the operands' results for every renderer) plus the TRUE monoid's flat
+    # ``(init, combine)`` pair whose combine carries the REAL accumulator names (its results). The
+    # serial step and the ``Accum`` forms are DERIVED (:attr:`step` / ``__post_init__``). --------- #
     lift: Lambda = field(kw_only=True)  # CLOSED by ``Lambda.__post_init__``; formed by :meth:`Lambda.closing`
     init: tuple[float, ...] = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
     combine: Lambda | None = field(kw_only=True, default=None)  # S × S → S — THE ⊕; None at zero axes
@@ -222,7 +223,7 @@ class Fold:
         # reduction axis last, which lets a fragment load stride its rows contiguously. Binding is
         # positional, so the lift's params move with the operands; the body reads by name.
         if len(self.operands) >= 2 and all(isinstance(stmt, Assign) and len(stmt.args) == 2 for stmt in lam.body):
-            by_name = {name: edge for edge in self.operands for name in edge.exposes}
+            by_name = {param: edge for param, edge, _ in self.bindings}
             arguments = [product.args for product in lam.body]
             if len(arguments) > 1:
                 shared = [by_name[name] for name in arguments[0] if name in by_name and all(name in args for args in arguments[1:])]
@@ -236,9 +237,10 @@ class Fold:
                 a_edge = k_last[0] if len(pair) == 2 and k_last else None
             if a_edge is not None and self.operands[0] is not a_edge:
                 reordered = (a_edge, *(edge for edge in self.operands if edge is not a_edge))
-                bound = tuple(name for edge in reordered for name in edge.exposes)
+                bound = tuple(param for edge in reordered for param, held, _ in self.bindings if held is edge)
                 object.__setattr__(self, "operands", reordered)
                 object.__setattr__(self, "lift", replace(lam, params=(lam.params[0], *bound, *lam.params[1 + arity :])))
+                del self.__dict__["bindings"]  # read before the reorder; the memo is stale
         if self.observe is not None:
             assert tuple(self.observe.params) == (self.axis.name, *self.combine.results), (
                 f"observer params {self.observe.params} must bind the iteration var then the carried state "
@@ -263,20 +265,41 @@ class Fold:
             f"the lift reads coordinates {sorted(coordinates)} but the term declares axes {sorted(declared)}"
         )
 
-    @property
+    @cached_property
     def exposes(self) -> tuple[str, ...]:
-        """The result names this term binds into its consumer — one per produced component.
-
-        Asked of the TERM, not recovered by a free function branching on what the edge happens to
-        be: a zero-axis term exposes its named lift results, a reducing one its carried state, and
-        an observed one its observer's fresh names beside it. The arity is what the positional
-        binding law is about; the names are what the consumer's lift still spells, and they go once
-        the binding is positional in fact as well as in intent.
+        """The result names this term DEFINES for its consumer — one per produced component, in the
+        spelling its rendered statements define: a reducing term its carried state (an observed one
+        its observer's fresh names beside it), a zero-axis term its lift results, a result that
+        merely passes an operand through spelled as that operand's own result. The arity is what
+        the positional binding law is about; a consumer names what it binds itself
+        (:attr:`bindings`), and never reads these names before the term is rendered.
         """
         if self.combine is None:
-            return self.lift.results
+            return self.applied.results
         state = self.combine.results
         return state if self.observe is None else (*state, *self.observe.results)
+
+    @cached_property
+    def bindings(self) -> tuple[tuple[str, Fold, int], ...]:
+        """The positional binding of the lift to the operands — for every operand-bound param in
+        order, ``(param, edge, component)``: the lift's params past the iteration var bind the
+        operands' result components in order. The names are this term's own; how an operand spells
+        its results is nobody else's business until the term is rendered (:attr:`applied`).
+        """
+        params = self.lift.params[1 if self.combine is not None else 0 :]
+        out: list[tuple[str, Fold, int]] = []
+        for edge in self.operands:
+            out.extend((params[len(out)], edge, index) for index in range(len(edge.exposes)))
+        return tuple(out)
+
+    @cached_property
+    def applied(self) -> Lambda:
+        """The lift APPLIED to the operands: the same lambda with every operand-bound param spelled
+        as the operand result it binds — the one reading a renderer of this term's statements takes
+        (:meth:`step`, :attr:`exposes`, :meth:`lower`), so a lowered body reads producer names
+        throughout and the binding is resolved exactly once.
+        """
+        return self.lift.rename({param: edge.exposes[index] for param, edge, index in self.bindings})
 
     @cached_property
     def free_axes(self) -> frozenset[str]:
@@ -332,9 +355,9 @@ class Fold:
             return None
         if {id(stmt) for stmt in products} != {id(stmt) for stmt in self.lift.body}:
             return None
-        by_name = {name: edge for edge in self.operands for name in edge.exposes}
+        by_name = {param: edge for param, edge, _ in self.bindings}
         a_edge = self.operands[0]
-        a_names = set(a_edge.exposes)
+        a_names = {param for param, edge, _ in self.bindings if edge is a_edge}
         streamed = []
         for stmt in products:
             other = set(stmt.args) - a_names
@@ -374,7 +397,7 @@ class Fold:
             axis=self.axis,
             states=states,
             other=self.combine.params[len(states) :],
-            terms=self.lift.results,
+            terms=self.applied.results,
             ops=self.combine.components(),
         )
 
@@ -483,13 +506,14 @@ class Fold:
         Deterministic from the stored parameters, so kernel identity depends on no classified view.
         Memoized on the term.
         """
+        lift = self.applied
         if self.combine is None:
-            return self.lift.body
+            return lift.body
         if self.composed is not None:
             return Body()
-        merged = [replace(stmt, axes=(self.axis.name,)) if isinstance(stmt, Accum) else stmt for stmt in self.merge(self.lift.results)]
+        merged = [replace(stmt, axes=(self.axis.name,)) if isinstance(stmt, Accum) else stmt for stmt in self.merge(lift.results)]
         observed = self.observe.body if self.observe is not None else ()
-        return Body((*self.lift.body, *merged, *observed))
+        return Body((*lift.body, *merged, *observed))
 
     def twist(self, recipe) -> Fold | None:
         """This reduce fused onto the reduce it reads, by ``recipe`` — one fold carrying both
@@ -530,19 +554,11 @@ class Fold:
     def _twist(self, pivot: Fold, recipe) -> Fold | None:
         view, pview = self.as_reduction(), pivot.as_reduction()
 
-        def bindings(fold: Fold) -> tuple[tuple[str, Fold], ...]:
-            # Each lift param past the axis with the operand it binds, positionally.
-            out, position = [], 1
-            for edge in fold.operands:
-                out.extend((param, edge) for param in fold.lift.params[position : position + len(edge.exposes)])
-                position += len(edge.exposes)
-            return tuple(out)
-
         def cone(fold: Fold, name: str) -> tuple:
             # The closed cone defining ``name`` in the lift, and the VALUE each of its params binds
             # (``None`` for a coordinate: a reduce's state binds that term, a projection's result
             # binds its own cone).
-            by_param = dict(bindings(fold))
+            by_param = {param: edge for param, edge, _ in fold.bindings}
             fn = fold.lift.cone(name)
             values = tuple(
                 None if (edge := by_param.get(param)) is None else edge if edge.axis is not None else cone(edge, param)
@@ -560,7 +576,7 @@ class Fold:
                     return False
             return True
 
-        bound = bindings(self)
+        bound = tuple((param, edge) for param, edge, _ in self.bindings)
         by_param = dict(bound)
         g = next(param for param, edge in bound if edge is pivot)
         pivot_params = {param for param, edge in bound if edge is pivot}
@@ -583,6 +599,7 @@ class Fold:
             # Instantiate: every operand an extra binds joins, its axis spelled as the pivot's.
             old, new = self.axis.name, pivot.axis.name
             extra_edges = tuple(dict.fromkeys(edge for p, edge in bound if p in extras))
+            extra_params = tuple(p for edge in extra_edges for p, e in bound if e is edge)
             if old != new:
                 extra_edges = tuple(
                     _rewrite_kind(
@@ -597,7 +614,7 @@ class Fold:
             injection = channel.injection.rename(names)
             arity = sum(len(edge.exposes) for edge in pivot.operands)
             lift = Lambda(
-                params=(new, *(name for edge in operands for name in edge.exposes), *pivot.lift.params[1 + arity :]),
+                params=(new, *pivot.lift.params[1 : 1 + arity], *extra_params, *pivot.lift.params[1 + arity :]),
                 body=Body((*pivot.lift.body, *injection.body)),
                 results=(*pivot.lift.results, *injection.results),
             )
@@ -619,23 +636,16 @@ class Fold:
         names pass through, so equal canonical forms mean equal value under the SAME environment.
         """
         mapping = {axis.name: f"_a{index}" for index, axis in enumerate(self.axes)}
-        mapping.update((name, f"_r{index}") for index, name in enumerate(self.exposes))
+        own = self.lift.results if self.combine is None else self.exposes
+        mapping.update((name, f"_r{index}") for index, name in enumerate(own))
+        for index, (param, _, _) in enumerate(self.bindings):
+            mapping.setdefault(param, f"_e{index}")
         counter = 0
         for stmt in self.lift.body.iter():
             for name in stmt.defines():
                 if name not in mapping:
                     mapping[name] = f"_v{counter}"
                     counter += 1
-        operands = []
-        bound = 0
-        for edge in self.operands:
-            canon = edge.canonical()
-            local = {}
-            for name, spelled in zip(edge.exposes, canon.exposes, strict=True):
-                local[spelled] = mapping[name] = f"_e{bound}"
-                bound += 1
-            operands.append(_rewrite_kind(canon, lambda name, local=local: local.get(name, name), Sigma.IDENTITY, lambda axis: axis))
-
         combine = None
         if self.combine is not None:
             # The combine's own names — its second operand, its temps — are nobody else's: they
@@ -647,7 +657,7 @@ class Fold:
         return replace(
             self,
             axes=tuple(replace(axis, name=mapping[axis.name]) for axis in self.axes),
-            operands=tuple(operands),
+            operands=tuple(edge.canonical() for edge in self.operands),
             lift=self.lift.rename(mapping),
             combine=combine,
             # The observer binds the iteration var and reads the carried state, so it renames in
@@ -694,6 +704,9 @@ class Fold:
         """
         if bound is None:
             bound = self.free_axes
+        # The stores are spelled in this term's own vocabulary; they render with the lift.
+        spelled = dict(zip(self.lift.params, self.applied.params, strict=True))
+        stores = tuple(replace(spec, write=spec.write.rewrite(lambda name: spelled.get(name, name))) for spec in stores)
         coordinates: dict[str, Axis] = {}
         readers: dict[str, int] = {}
         origin: dict[str, tuple[int, str]] = {}  # a value's defining term and what it is there

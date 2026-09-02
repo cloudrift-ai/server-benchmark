@@ -101,7 +101,8 @@ def storage_frontier(node: Fold) -> Frontier | None:
     (each side takes the operand bodies it reads), keeping both pieces free of nested edges."""
     if not isinstance(node, Fold) or node.axis is not None or len(node.lift.results) != 1:
         return None
-    body = node.lift.body
+    lift = node.applied  # the operands' spelling: what the spliced sides read
+    body = lift.body
     if any(not isinstance(stmt, (Load, Assign)) for stmt in body):
         return None
     computed = {name for stmt in body if isinstance(stmt, Assign) for name in stmt.defines()}
@@ -125,7 +126,7 @@ def storage_frontier(node: Fold) -> Frontier | None:
         crossing = Body((stmt,)).ssa_uses & prefix_defs
         if crossing and (stmt is not decode or crossing != {frontier}):
             return None  # a residue stmt reads past the frontier — the waypoint does not separate
-    if node.lift.results[0] in prefix_defs:
+    if lift.results[0] in prefix_defs:
         return None
     result = get_dtype(decode.op.decodes)
 

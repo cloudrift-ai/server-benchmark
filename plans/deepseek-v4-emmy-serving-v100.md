@@ -179,12 +179,18 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    disqualifications, and no online prior was written. The monotone serial-work prior feature remains the
    cold-start answer. NOTE: the host's tune DB now carries those 9 rows, so any unpinned compile there elects the
    partitioned route — intended, now that #700 makes it build.
-3. **NEW — make the elected route's work small enough to serve.** Even the elected 2³⁰ route runs past the 60 s
-   bench watchdog per launch: the dominant cost is re-evaluating the mHC statistics subtree ~16,384× inside the
-   shared-expert contraction — a recomputation blowup that partitioning distributes but does not remove. This is a
-   hoisting/placement-pricing gap (the compiler must materialize or hoist the statistics once, or the cut must
-   price the recomputation out), and it is now the critical path: gates below stay blocked until a `post4096`
-   route launches in seconds, not minutes.
+3. **Make the elected route's work small enough to serve — compiler side LANDED on
+   `feature/mhc-statistics-hoist`, host re-run owed.** Even the elected 2³⁰ route ran past the 60 s bench watchdog
+   per launch: the dominant cost was re-evaluating the mHC statistics subtree 16,384× (4096 carrier positions × 4
+   streams) inside the consumer piece's sum-of-squares reduce. Characterized GPU-free: the materializing seam
+   (`PLACE@a8`, the gate's fn-projection) was OFFERED and priced away — the offline cold-start proxy gave the
+   fused 2³⁰-trip nest 4.29e-37 µs against the cut arm's 1.02e-17, with zero weights on any structural feature.
+   The fix is pricing, per `plans/mhc-statistics-hoist.md`: the nest-aware `S_ext_serial_cell_work` stamp, the
+   coverage-adjusted `D_serial_cell_work` feature, and a serial-work calibration floor on the offline deploy
+   score (plus disqualification signatures surviving featurizer vocabulary growth — the stamp alone had silenced
+   the host DB's 9 `bench_fail` rows). Replayed on the pinned twins + host-DB copy, the greedy now elects a
+   29-kernel route whose worst piece is 2¹⁸ per-thread trips (was 2³⁰; the original fused monster was 2³⁸).
+   Still owed on the host: `emmy run --bench` for the measured per-launch time, then gate (c).
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
 compiles end to end (post-#700) but the first `post4096` prefill forward would take minutes-plus per launch.

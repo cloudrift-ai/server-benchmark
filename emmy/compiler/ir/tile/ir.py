@@ -83,12 +83,17 @@ class OutputSpec:
 
 
 @dataclass(frozen=True)
-class ProjectionRegion:
+class ProjectionRegion(Stmt):
     """A pure output projection repeated over one local free axis.
 
     A maximally fused kernel may have several sibling output loops with different extents.  Their
     computation remains in pure lambdas while :class:`OutputSpec` owns the writes.  The region is
     therefore structural map material, not a reduction and not an effectful Loop IR fallback.
+
+    A ``Stmt``, and declared as one: it is a scoped region IN a body — the output sweep the
+    reconstitution wraps around a projection — not a term composed through operand edges. The
+    distinction matters since ``Body`` refuses a non-``Stmt``: a region belongs in a body, a
+    ``Fold`` does not.
     """
 
     axis: Axis

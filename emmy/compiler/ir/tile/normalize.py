@@ -20,9 +20,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 
 from emmy.compiler.ir.expr import affine_form
-from emmy.compiler.ir.pure import (
-    Fold,
-)
+from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import refs_axis
@@ -212,7 +210,8 @@ def _with_source(node: Fold, source) -> Fold:
     operands = (*node.operands, source)
     bound = tuple(name for edge in operands for name in edge.exposes)
     if node.axis is None:
-        return Fold.projection(operands=operands, body=node.lift.body, results=node.lift.results)
+        bound = tuple(name for edge in operands for name in edge.exposes)
+    return Fold(operands=operands, lift=Lambda.closing(bound, Body.coerce(node.lift.body), node.lift.results))
     return replace(node, operands=operands, lift=replace(node.lift, params=(node.axis.name, *bound)))
 
 
@@ -310,7 +309,7 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
         if binders and any(_carries_iteration(member) for member in cone.members):
             return None
         moved.update(id(stmt) for stmt in cone.members)
-        return Fold.projection(body=Body(cone.members), results=names, axes=axes)
+        return Fold(lift=Lambda.closing((), Body(cone.members), names))
 
     rewritten_operands, rewritten_body = _close_tree(root, provider)
     if not moved:

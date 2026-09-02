@@ -75,7 +75,10 @@ def _separate(members: tuple, needed: frozenset[str]) -> tuple[tuple, Body]:
         bridge = tuple(name for member in prefix for name in _defines_of(member) if name in wanted)
         if bridge:
             operands, stmts = _separate(prefix, frozenset(bridge))
-            source = Fold.projection(operands=operands, body=stmts, results=bridge)
+            source = Fold(
+                operands=operands,
+                lift=Lambda.closing(tuple(name for edge in operands for name in edge.exposes), Body.coerce(stmts), bridge),
+            )
             return _separate((source, *suffix), needed)
     operands = tuple(member for member in members if isinstance(member, Fold))
     return operands, Body(member for member in members if not isinstance(member, Fold))

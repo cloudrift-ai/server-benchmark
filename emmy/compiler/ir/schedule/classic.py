@@ -330,7 +330,7 @@ def _paired_budget_refusal(node: Fold, producer: Fold | None, placed: PlacedTile
     if atom.operand_dtype("c").nbytes == 2:
         c_regs += atom.atom_m * atom.atom_n // 32
     depth = max(1, stage.reg_depth)
-    channels = (len(node.operands) - 1)
+    channels = len(node.operands) - 1
     consumer_c = channels * placed.reg_m * placed.reg_n * c_regs
     consumer = placed.reg_m * depth * a_regs + channels * (placed.reg_n * depth * b_regs + placed.reg_m * placed.reg_n * c_regs)
     producer_n = stage.bk_elems // atom.atom_n

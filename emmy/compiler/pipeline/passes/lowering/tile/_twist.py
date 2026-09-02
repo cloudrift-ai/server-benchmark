@@ -309,7 +309,14 @@ def _normalized_exp(edge: Fold, axis: str, axes: tuple[str, ...]) -> _Normalized
     captures = tuple(name for stmt in provider_cone.members for name in stmt.defines() if name in free)
     if set(captures) != free:
         return _decline("normalized exponential", f"the statistic captures {sorted(free - set(captures))}, which no operand edge provides")
-    provider = Fold.projection(body=Body(provider_cone.members), results=captures) if captures else None
+    provider = (
+        Fold(
+            operands=(),
+            lift=Lambda.closing(tuple(name for edge in () for name in edge.exposes), Body.coerce(Body(provider_cone.members)), captures),
+        )
+        if captures
+        else None
+    )
 
     expression = _assign_cone(defs, probability, frozenset({score_name, maximum, denominator}))
     consumed = {id(statistic), *expression, *(id(stmt) for stmt in current[1]), *(id(stmt) for stmt in provider_cone.members)}
@@ -352,7 +359,10 @@ def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
         Assign(name=channel.acc, op=EXP_FAMILY.product, args=(state, view.inverse))
         for channel, state in zip(fold.channels, sums, strict=True)
     )
-    return Fold.projection(operands=(merged,), body=Body(epilogue), results=tuple(fold.defines()))
+    return Fold(
+        operands=(merged,),
+        lift=Lambda.closing(tuple(name for edge in (merged,) for name in edge.exposes), Body.coerce(Body(epilogue)), fold.exposes),
+    )
 
 
 def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
@@ -367,7 +377,10 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
         new_operands, new_body = _merge_siblings(node.operands, node.lift.body, axes)
         if new_operands == node.operands and new_body == node.lift.body:
             return node
-        return Fold.projection(operands=new_operands, body=new_body, results=node.lift.results)
+        return Fold(
+            operands=new_operands,
+            lift=Lambda.closing(tuple(name for edge in new_operands for name in edge.exposes), Body.coerce(new_body), node.lift.results),
+        )
 
     if node.as_contraction() is not None and isinstance(node.a, Fold) and node.a.axis is None:
         view = _normalized_exp(node.a, node.axis.name, axes)

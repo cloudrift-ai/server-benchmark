@@ -57,6 +57,7 @@ from emmy.compiler.ir.pure.algebra import component_ops
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
+from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
@@ -273,7 +274,10 @@ def _cell_provider_closure(edge, siblings: tuple) -> tuple[object, frozenset[int
     if not required:
         return edge, frozenset()
     selected = tuple(_provider_slice(provider, required[id(provider)]) for provider in siblings if id(provider) in required)
-    return Fold.projection(operands=(*selected, edge), results=edge.exposes), frozenset(required)
+    return Fold(
+        operands=(*selected, edge),
+        lift=Lambda.closing(tuple(name for edge in (*selected, edge) for name in edge.exposes), Body(), edge.exposes),
+    ), frozenset(required)
 
 
 def _provider_slice(provider, required: set[str]):
@@ -284,7 +288,10 @@ def _provider_slice(provider, required: set[str]):
     ordered = tuple(result for result in results if result in required)
     cone = provider.body.backward_cone(ordered)
     operands = tuple(edge for edge in provider.operands if set(edge.exposes) & cone.external_reads)
-    return Fold.projection(operands=operands, body=Body(cone.members), results=ordered)
+    return Fold(
+        operands=operands,
+        lift=Lambda.closing(tuple(name for edge in operands for name in edge.exposes), Body.coerce(Body(cone.members)), ordered),
+    )
 
 
 def _close_cell_providers(contraction: Fold, siblings: tuple) -> tuple[Fold, frozenset[int]]:

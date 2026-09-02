@@ -22,6 +22,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
+from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
@@ -606,7 +607,10 @@ def realize(
         front = seam.frontier
         if front is not None:
             names = (front.name,)
-            produced = Fold.projection(body=Body(front.producer), results=names)
+            produced = Fold(
+                operands=(),
+                lift=Lambda.closing(tuple(name for edge in () for name in edge.exposes), Body.coerce(Body(front.producer)), names),
+            )
         else:
             names = child.exposes
             produced = child
@@ -627,7 +631,10 @@ def realize(
                 if not supplied:
                     raise ValueError(f"seam {seam.spelling!r} requires {name!r}, which its producer seam does not bind")
                 prefix.extend(supplied)
-            produced = Fold.projection(body=Body((*prefix, produced)), results=names)
+            produced = Fold(
+                operands=(),
+                lift=Lambda.closing(tuple(name for edge in () for name in edge.exposes), Body.coerce(Body((*prefix, produced))), names),
+            )
         axes = _workspace_axes(seam, produced)
         index = tuple(Var(axis.name) for axis in axes)
         token = digest(tile.identity_key(structural=False) or "", seam.spelling)[:10]
@@ -636,7 +643,14 @@ def realize(
         loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))
         if front is not None:
             raw = replace(loads[0], dtype=front.dtype)
-            loads = (Fold.projection(body=Body((raw, *front.residue)), results=child.lift.results),)
+            loads = (
+                Fold(
+                    operands=(),
+                    lift=Lambda.closing(
+                        tuple(name for edge in () for name in edge.exposes), Body.coerce(Body((raw, *front.residue))), child.lift.results
+                    ),
+                ),
+            )
         replacements = {id(child): loads}
         workspace_loads[id(child)] = loads
         for sibling, pairs in seam.siblings:

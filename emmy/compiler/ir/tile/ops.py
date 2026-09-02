@@ -28,7 +28,7 @@ from emmy.compiler.ir.schedule.classic import (
     classic_node_key,
     classic_stage_key,
 )
-from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select, refs_axis, stmt_axis_names
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, refs_axis, stmt_axis_names
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
@@ -507,6 +507,27 @@ def head(op):
     while isinstance(node, Fold) and node.axis is None and node.operands:
         node = node.operands[0]
     return node if isinstance(node, Fold) and node.axis is not None else None
+
+
+def cone_stat(cone) -> Fold | None:
+    """The per-row STATISTIC fold of a computed-A cone — the reduce its prologue (the cone's first
+    operand, the row-invariant edge) materializes first: the fold whose carried state the first
+    reduce ``Loop`` of the prologue's lowering folds. ``None`` for a cone without one — the
+    caller's serial fallback."""
+    prologue = cone.operands[0] if isinstance(cone, Fold) and cone.axis is None and cone.operands else None
+    if prologue is None:
+        return None
+    first = next((stmt for stmt in prologue.lower() if isinstance(stmt, Loop) and stmt.is_reduce), None)
+    if first is None:
+        return None
+    carried = {stmt.name for stmt in first.body if isinstance(stmt, Accum)}
+    pending = [prologue]
+    while pending:
+        term = pending.pop()
+        if term.axis is not None and set(term.combine.results) <= carried:
+            return term
+        pending.extend(reversed(term.operands))
+    return None
 
 
 def carries_partition(op) -> bool:

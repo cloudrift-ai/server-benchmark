@@ -9,17 +9,20 @@ past the very term that reads it.
 
 These pin the binding contract (``None`` binds every free coordinate — the open body; ``frozenset()``
 binds none — the closed program), the loop order (the tree's, not the caller's), the placement rule
-at each of its three depths, where a boundary store lands (after the term defining its value), and
-the memo per binding.
+at each of its three depths, where a boundary store lands (after the term defining its value), the
+memo per binding, and ``Fold.merge`` — the stored combine applied at a second state, of which the
+serial step is the instance at the injected singleton.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold, Lambda, M
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, OutputSpec, Write
+from emmy.compiler.ir.pure import Fold, Lambda, M, exp_combine_states
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, OutputSpec, Write
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
 SCOPE = (M_AXIS, N_AXIS, K_AXIS)
@@ -209,6 +212,73 @@ def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
     store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("k")), value="acc__obs"))
     (loop,) = scan.lower(scan.free_axes, (store,))
     assert [type(stmt).__name__ for stmt in loop.body] == ["Load", "Assign", "Accum", "Assign", "Write"]
+
+
+# --- the merge: the combine applied at a second state -------------------------------------------- #
+
+
+def _twisted() -> Fold:
+    """The exp-family ``(m, l)`` carrier: a generated twisted combine over a ``(score, 1)`` singleton."""
+    names, other = ("m", "l"), ("m__o", "l__o")
+    combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+    body = Body((Assign(name="s", op="copy", args=("y",)), Const(name="one", value=1.0)))
+    lift = Lambda.closing(("k", "y"), body, ("s", "one"))
+    return Fold(axes=(K_AXIS,), operands=(_slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), combine=combine)
+
+
+def test_a_componentwise_merge_is_one_accum_per_state() -> None:
+    """Each state component is reassigned by an ``Accum`` — the form that folds in place AND whose
+    ``op.identity`` the ONE identity placement seeds with. A planar ⊕ needs no temps."""
+    init, combine = M("add", "maximum", names=("acc0", "acc1"))
+    body = Body((Assign(name="a0", op="copy", args=("y",)), Assign(name="a1", op="negative", args=("y",))))
+    lift = Lambda.closing(("k", "y"), body, ("a0", "a1"))
+    fold = Fold(axes=(K_AXIS,), operands=(_slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine)
+    stmts = fold.merge(("acc0__p", "acc1__p"))
+    assert [(s.name, s.op.name, s.value) for s in stmts] == [("acc0", "add", "acc0__p"), ("acc1", "maximum", "acc1__p")]
+    assert [s.op.identity for s in stmts] == [0.0, -1e30], "the seed the identity placement will emit"
+    assert fold.as_reduction().ops is not None and not fold.as_reduction().twisted
+
+
+def test_a_twisted_merge_is_rescale_temps_then_base_accums() -> None:
+    """A twisted combine renders as its ψ-rescale ``Assign`` temps followed by one ``Accum`` per
+    component — the pivot a plain ``maximum`` fold, the accumulator channel ``base``-redirected
+    onto its rescaled old state."""
+    fold = _twisted()
+    assert fold.as_reduction().twisted
+    stmts = fold.merge(("m__p", "l__p"))
+    assert all(isinstance(s, (Assign, Accum)) for s in stmts)
+    accums = [s for s in stmts if isinstance(s, Accum)]
+    assert {a.name for a in accums} == {"m", "l"}
+    pivot = next(a for a in accums if a.name == "m")
+    assert pivot.op.name == "maximum" and pivot.base is None
+    channel = next(a for a in accums if a.name == "l")
+    assert channel.op.name == "add" and channel.base is not None, "the ψ rescale redirects the left operand"
+
+
+def test_merge_temps_are_keyed_on_the_partial_being_merged() -> None:
+    """Two merges of DIFFERENT partials into the same state must not share temp names — a REG-tree
+    fold emits one per copy back to back, and colliding temps would cross-wire them."""
+    fold = _twisted()
+    temps_a = {s.name for s in fold.merge(("m__r1", "l__r1")) if isinstance(s, Assign)}
+    temps_b = {s.name for s in fold.merge(("m__r2", "l__r2")) if isinstance(s, Assign)}
+    assert temps_a and not (temps_a & temps_b)
+
+
+def test_merge_reads_are_ordinary_stmt_deps() -> None:
+    """The merge's reads reach read counters / liveness / rename through the per-stmt ``deps()``,
+    with no special channel: the partial is read, the program's own temps are not."""
+    stmts = _twisted().merge(("m__p", "l__p"))
+    reads = {r for s in stmts for r in s.deps()} - {s.name for s in stmts}
+    assert reads == {"m__p", "l__p"}
+
+
+def test_the_step_is_the_merge_at_the_injected_singleton() -> None:
+    """One derivation: the serial step applies the same program at the lift's results, its
+    ``Accum`` forms folding over the reduce axis, after the lift body."""
+    fold = _twisted()
+    step, merged = fold.step(), fold.merge(fold.lift.results)
+    assert tuple(step[: len(fold.lift.body)]) == tuple(fold.lift.body)
+    assert tuple(step[len(fold.lift.body) :]) == tuple(replace(s, axes=("k",)) if isinstance(s, Accum) else s for s in merged)
 
 
 # --- the memo ------------------------------------------------------------------------------------ #

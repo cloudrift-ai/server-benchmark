@@ -244,7 +244,7 @@ def sync_stat_fill(
     cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
     row per WARP** (``for r = warp; r < rows; r += n_warps``); the warp's 32 lanes stride the row's
     stat reduce ``Loop`` (coalesced — consecutive lanes read consecutive elements) and close the
-    fold with the stat fold's shuffle butterfly (``stat`` — its :class:`Reduction`; :func:`emit_combine` at warp width — the state
+    fold with the stat fold's shuffle butterfly (``stat`` — the stat fold; :func:`emit_combine` at warp width — the state
     broadcasts to every lane), each lane then runs the scalar epilogue redundantly and lane 0
     writes each bridged ``stats`` value into its length-``rows`` smem row (``slab_of(name)``); one
     CTA barrier publishes them to the A compute-fill. A ``row_body`` with no foldable reduce

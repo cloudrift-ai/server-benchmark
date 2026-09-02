@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold, Lambda, component_ops
+from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.carrier import EXP_FAMILY, exp_combine_states
 from emmy.compiler.ir.pure.closure import Closure
@@ -69,7 +69,7 @@ def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> Closure | None:
 
 
 def _same_axis(left: Fold, right: Fold) -> bool:
-    return left.axis.extent == right.axis.extent and left.axis.window == right.axis.window and left.unroll == right.unroll
+    return left.axis.extent == right.axis.extent and left.axis.window == right.axis.window
 
 
 def _exp_score(defs: dict[str, object], name: str, pivots: frozenset[str]) -> str | None:
@@ -89,7 +89,7 @@ def _exp_score(defs: dict[str, object], name: str, pivots: frozenset[str]) -> st
 def _maximum(fold: Fold, axes: tuple[str, ...]) -> tuple[str, Closure] | None:
     if fold.axis is None:
         return None
-    ops = component_ops(fold.combine)
+    ops = fold.as_reduction().ops
     if ops is None or len(ops) != 1 or ops[0].reduce_canon != EXP_FAMILY.pivot:
         return None
     result = fold.lift.results[0]
@@ -103,7 +103,7 @@ def _maximum(fold: Fold, axes: tuple[str, ...]) -> tuple[str, Closure] | None:
 def _denominator(fold: Fold, pivots: frozenset[str], score: Closure, axes: tuple[str, ...]) -> bool:
     if fold.axis is None:
         return False
-    ops = component_ops(fold.combine)
+    ops = fold.as_reduction().ops
     if ops is None or len(ops) != 1 or ops[0].reduce_canon != EXP_FAMILY.plus:
         return False
     result = fold.lift.results[0]
@@ -274,7 +274,7 @@ def _normalized_exp(edge: Fold, axis: str, axes: tuple[str, ...]) -> _Normalized
         for stmt in members
         if isinstance(stmt, Fold)
         and stmt.axis is not None
-        and component_ops(stmt.combine) is None
+        and stmt.as_reduction().ops is None
         and len(stmt.init) == 2
         and stmt.lift.results[1:] == (1.0,)
     ]

@@ -7,7 +7,7 @@ from emmy.compiler.ir.kernel.ir import Smem, pack_smem, swizzle_fn, swizzle_xor
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
+from emmy.compiler.ir.tile.ops import cone_stat
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     _SWIZZLE_SLAB_ALIGN,
     CtaTile,
@@ -57,12 +57,12 @@ def test_cone_stat_follows_the_first_top_level_reduce_in_lowering_order() -> Non
     )
     body_prologue = Fold.projection(body=Body((first,)))
     body_cone = Fold.projection(body=Body((Assign(name="cell", op="copy", args=(first.out,)),)), operands=(body_prologue,))
-    assert Reduction.of_cone_stat(body_cone).fold is first
+    assert cone_stat(body_cone) is first
 
     operand_stat = _sum_fold("operand", "operand_acc")
     operand_prologue = Fold.projection(body=Body((Assign(name="scale", op="copy", args=(operand_stat.out,)),)), operands=(operand_stat,))
     operand_cone = Fold.projection(body=Body((Assign(name="cell", op="copy", args=("scale",)),)), operands=(operand_prologue,))
-    assert Reduction.of_cone_stat(operand_cone).fold is operand_stat
+    assert cone_stat(operand_cone) is operand_stat
 
 
 def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:

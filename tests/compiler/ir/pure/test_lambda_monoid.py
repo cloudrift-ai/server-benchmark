@@ -435,24 +435,3 @@ def test_declared_commutativity_holds_on_random_states() -> None:
         for _ in range(25):
             a, b = (tuple(rng.normal(size=n) * 3.0) for _ in range(2))
             np.testing.assert_allclose(eval_lambda(combine, (*a, *b)), eval_lambda(combine, (*b, *a)), rtol=1e-12, atol=1e-12)
-
-
-def test_family_merge_matches_the_retired_merge_arms() -> None:
-    """``merge_stmts`` now dispatches through the claiming family; the realized programs must be
-    byte-identical to the two retired inline arms."""
-    from emmy.compiler.ir.pure.algebra import family_of, merge_stmts
-    from emmy.compiler.ir.pure.carrier import exp_combine_states as _exp
-
-    _, add2 = M("add", "add", names=("p", "q"))
-    other = ("p__r1", "q__r1")
-    got = merge_stmts(add2, other)
-    assert all(isinstance(s, Accum) and s.op.name == "add" for s in got)
-    assert tuple((s.name, s.value) for s in got) == (("p", "p__r1"), ("q", "q__r1"))
-
-    from emmy.compiler.ir.pure.algebra import ExpFamily
-
-    names = ("m", "l", "o0")
-    lse = ExpFamily().program(names)
-    partial = tuple(f"{n}__p" for n in names)
-    assert merge_stmts(lse, partial) == _exp(names, partial, key=partial[0], accum=True)
-    assert family_of(lse).program(names) == lse

@@ -59,8 +59,7 @@ from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.passes import rename_free
-from emmy.compiler.ir.tile.ops import cone_stat_dtypes, make_cone
-from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
+from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes, make_cone
 from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -899,7 +898,7 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
             row_axis=row_axis,
             row_body=row_body,
             cta=cta,
-            stat=Reduction.of_cone_stat(c.operands[0]),
+            stat=cone_stat(c.operands[0]),
             dtypes={nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(pro, stats, inputs).items()},
         )
     return SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzle), False, prologue

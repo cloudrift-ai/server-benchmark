@@ -36,7 +36,6 @@ from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.algebra import component_ops
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
@@ -118,7 +117,7 @@ def atomic_finalize(node: Fold, tail, outputs) -> str | None:
             f"atomic REDUCE folds ONE additive state component; this carrier has {len(states)} "
             f"({', '.join(states)}) — use the deferred f32 workspace finalize (REDUCE=g<n>k)"
         )
-    ops = component_ops(node.combine)
+    ops = node.as_reduction().ops
     if ops is None or ops[0].name != "add":
         plus = "a twisted combine" if ops is None else f"⊕ = {ops[0].name}"
         return f"atomic REDUCE emits atomicAdd, which folds only an ADDITIVE carrier; this one has {plus} — use REDUCE=g<n>k"

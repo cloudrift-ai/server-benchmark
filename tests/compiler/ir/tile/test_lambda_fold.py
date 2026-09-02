@@ -10,7 +10,7 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Lambda, component_ops, degenerate, merge_stmts
+from emmy.compiler.ir.pure import Lambda, component_ops, degenerate
 from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.sigma import Sigma
@@ -117,7 +117,7 @@ def test_twisted_identity_lift_merges_complete_states() -> None:
         combine=algebra.combine,
     )
     step = fold.step_stmts()
-    expected = merge_stmts(algebra.combine, ("m_p", "l_p"), dtype=None)
+    expected = algebra.merge(("m_p", "l_p"))
     assert [(stmt.name, stmt.value) for stmt in step if isinstance(stmt, Accum)] == [
         (stmt.name, stmt.value) for stmt in expected if isinstance(stmt, Accum)
     ]

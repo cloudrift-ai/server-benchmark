@@ -87,6 +87,30 @@ class ContractionView:
 
 
 @dataclass(frozen=True)
+class ReductionView:
+    """A Fold's reading as a MONOID fold — the algebra its combine spells, read off the lambda.
+
+    ``states`` are the carried state's names (the combine's results), ``other`` the names the
+    combine binds its second operand to, ``terms`` the injection singleton (the lift's results,
+    one per component). ``ops`` is the componentwise op vector when the combine has that shape —
+    every result ``sᵢ = ⊕ᵢ(sᵢ, sᵢ′)`` independently, a PLANAR fold (sum, max, mean) — and ``None``
+    for a TWISTED one (online softmax's rescaling program): the one discrimination every partition
+    legality question asks. No family name: the program itself is the reading, and
+    :meth:`Fold.merge` applies it.
+    """
+
+    axis: Axis
+    states: tuple[str, ...]
+    other: tuple[str, ...]
+    terms: tuple[str, ...]
+    ops: tuple[ElementwiseImpl, ...] | None
+
+    @property
+    def twisted(self) -> bool:
+        return self.ops is None
+
+
+@dataclass(frozen=True)
 class Fold:
     """A scheduled reduce — the typed successor of the bare annotated reduce
     ``Loop`` (``ir/pure/algebra``). It splits the reduce's **algebra** (the loop-carried
@@ -269,7 +293,7 @@ class Fold:
         """
         if self.axis is None or self.combine is None or len(self.operands) < 2:
             return None
-        pluses = component_ops(self.combine)
+        pluses = self.as_reduction().ops
         if not pluses or len(set(pluses)) != 1:
             return None
         plus = pluses[0]
@@ -313,6 +337,21 @@ class Fold:
             product=product,
             plus=plus,
             b_trans=b_trans,
+        )
+
+    @cached_method
+    def as_reduction(self) -> ReductionView | None:
+        """The :class:`ReductionView` of this term — its combine read as a monoid fold — or
+        ``None`` for a term without one (a slab, a projection). Memoized on the term."""
+        if self.combine is None:
+            return None
+        states = self.combine.results
+        return ReductionView(
+            axis=self.axis,
+            states=states,
+            other=self.combine.params[len(states) :],
+            terms=self.lift.results,
+            ops=component_ops(self.combine),
         )
 
     @cached_method
@@ -365,12 +404,54 @@ class Fold:
         return cls(axes=declared, lift=Lambda(params=tuple(axis.name for axis in declared), body=Body((load,)), results=load.names))
 
     @cached_method
+    def merge(self, other: tuple[str, ...]) -> Body:
+        """The combine APPLIED at ``(state, other)`` — a second, fully reduced state named
+        ``other`` (a register copy ``acc__r1``, a tree neighbour's partial, a workspace slice
+        ``acc__p``) — as loop-IR statements: the combine's temps, then one in-place ``Accum`` per
+        state component, the form whose seed is the ⊕'s identity (what the identity placement
+        emits). A temp a state's new value is built from (a twisted combine's ψ-rescale) becomes
+        that ``Accum``'s ``base``. The temps are renamed onto ``other``'s spelling, so two merges
+        into one state never collide.
+
+        The ONE derivation of the stored ⊕ as statements; :meth:`step` is its instance at the
+        injected singleton. Memoized on the term per ``other``.
+        """
+        view = self.as_reduction()
+        prefix = f"{view.other[0]}__"
+        named = dict(zip(view.other, other, strict=True))
+        for stmt in self.combine.body:
+            if stmt.name not in view.states:
+                named[stmt.name] = f"{other[0]}__{stmt.name.removeprefix(prefix)}"
+        applied = [stmt.rename(named) for stmt in self.combine.body]
+        definitions = {stmt.name: stmt for stmt in applied if stmt.name not in view.states}  # temps; a state's rewrite is not a def
+
+        def reads(name: str, state: str) -> bool:
+            stmt = definitions.get(name)
+            return name == state or (stmt is not None and any(reads(arg, state) for arg in stmt.args))
+
+        out: list[Stmt] = []
+        for stmt in applied:
+            if stmt.name not in view.states:
+                out.append(stmt)
+                continue
+            state, args = stmt.name, stmt.args
+            if stmt.op.name == "copy" and (pivot := definitions.get(args[0])) is not None and state in pivot.args:
+                # The pivot's final write copies its own ``maximum`` temp: accumulate that maximum.
+                stmt, args = pivot, pivot.args
+            if state in args:
+                value = next(arg for arg in args if arg != state) if args != (state, state) else state
+                out.append(Accum(name=state, value=value, op=stmt.op))
+            else:
+                base, value = args if reads(args[0], state) else (args[1], args[0])
+                out.append(Accum(name=state, value=value, op=stmt.op, base=base))
+        return Body(tuple(out))
+
+    @cached_method
     def step(self) -> Body:
         """The per-step statements this fold DERIVES from its stored parameters: the lift body,
-        then the combine APPLIED at the injected singleton — its second-operand params bound to
-        the lift's results — with each result-defining assign spelled as the in-place ``Accum`` over the carried
-        state, the loop-IR form whose seed is the ⊕'s identity. An observer's pure tap runs last,
-        so a streamed store reads the post-combine (inclusive-prefix) state.
+        then the combine applied at the injected singleton (:meth:`merge` at the lift's results,
+        each ``Accum`` folding over the reduce axis), then an observer's pure tap, so a streamed
+        store reads the post-combine (inclusive-prefix) state.
 
         A reduce that COMPOSES a sliced contraction (split-K) has no step of its own: the inner
         contraction already updates the shared accumulators, so the reassociation is the
@@ -382,33 +463,9 @@ class Fold:
             return self.lift.body
         if self.composed is not None:
             return Body()
-        states = self.combine.results
-        named = dict(zip(self.combine.params[len(states) :], self.lift.results, strict=True))
-        out: list[Stmt] = [*self.lift.body]
-        applied = [stmt.rename(named) for stmt in self.combine.body]
-        definitions = {stmt.name: stmt for stmt in applied if stmt.name not in states}  # temps; a state's rewrite is not a def
-
-        def reads(name: str, state: str) -> bool:
-            stmt = definitions.get(name)
-            return name == state or (stmt is not None and any(reads(arg, state) for arg in stmt.args))
-
-        for stmt in applied:
-            if stmt.name not in states:
-                out.append(stmt)
-                continue
-            state, args = stmt.name, stmt.args
-            if stmt.op.name == "copy" and (pivot := definitions.get(args[0])) is not None and state in pivot.args:
-                # The pivot's final write copies its own ``maximum`` temp: accumulate that maximum.
-                stmt, args = pivot, pivot.args
-            if state in args:
-                value = next(arg for arg in args if arg != state) if args != (state, state) else state
-                out.append(Accum(name=state, value=value, op=stmt.op, axes=(self.axis.name,)))
-            else:
-                base, value = args if reads(args[0], state) else (args[1], args[0])
-                out.append(Accum(name=state, value=value, op=stmt.op, base=base, axes=(self.axis.name,)))
-        if self.observe is not None:
-            out.extend(self.observe.body)
-        return Body(tuple(out))
+        merged = [replace(stmt, axes=(self.axis.name,)) if isinstance(stmt, Accum) else stmt for stmt in self.merge(self.lift.results)]
+        observed = self.observe.body if self.observe is not None else ()
+        return Body((*self.lift.body, *merged, *observed))
 
     @cached_method
     def canonical(self) -> Fold:
@@ -626,5 +683,6 @@ def _(s: Fold, rename, sigma, axis_fn):
 
 
 __all__ = [
+    "ReductionView",
     "Fold",
 ]

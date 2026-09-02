@@ -30,11 +30,11 @@ generators all live on the term side.
 
 **A pure class is never a `Stmt` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
-spliced in as one. `algebra.merge_stmts(combine, other)` is the shape of that: the cross-partition
-state⊕state combine IS the fold's stored `combine` applied with its second operand naming the
-partial being merged, and it becomes `Assign` rescale temps plus one `Accum` per state component
-wherever the lowering needs statements (the REG-tree merge, the cooperative tail, the cross-CTA
-finalize loop). There is no `StateMerge` type: the term is the `Lambda` the fold already stores,
+spliced in as one. `Fold.merge(other)` is the shape of that: the cross-partition state⊕state
+combine IS the fold's stored `combine` applied with its second operand naming the partial being
+merged, and it becomes `Assign` rescale temps plus one `Accum` per state component wherever the
+lowering needs statements (the REG-tree merge, the cooperative tail, the cross-CTA finalize loop);
+the serial step is the same derivation at the injected singleton. There is no `StateMerge` type: the term is the `Lambda` the fold already stores,
 and a rendering function is not a kind.
 
 The invariant is what stops facts from acquiring a second home. A term that renders itself needs
@@ -170,8 +170,8 @@ kernel it produced went on to read.
   `KernelOp` whose body is a `Tile` (the thread-grid decode) over the
   lowered op tree. A cooperative `Reduce` lowers the reduce as a
   `StridedLoop` (lane-strided fold) + the derived algebra-generic
-  cross-thread combine (`_factor.emit_combine`, reading the fold node
-  through the lowering-side `Reduction` view → `WarpShuffle` /
+  cross-thread combine (`_factor.emit_combine`, reading the fold node's
+  stored combine → `WarpShuffle` /
   `Smem`+`Sync`+`TreeHalve`, multi-component for a twisted fold) +
   the projection (a full-row output sweep distributed across the coop
   lanes, a scalar output guarded to lane 0); the `Tile` gains the coop
@@ -358,20 +358,19 @@ semiring and operand roles prove it; the mma atom tier reads the resulting Fold 
 `component_ops`/`degenerate` (the DEGENERATE-vs-TWISTED shape test on a stored combine — `None` ⇒
 the exp family; no family annotation), `rename_combine` (the SSA-rename lockstep, applied by the
 `Fold` rewrite handler — a twisted program regenerates over the renamed state), and the
-denotational foldMap spec oracle, and `merge_stmts` — the state⊕state combine's one statement
-realization, a function over the stored combine rather than a second term kind. Fold lowering uses
-that realization when an identity lift receives complete states, including a cross-CTA finalize.
-The kernel materializer reads the same algebra through
-`pipeline/passes/lowering/_reduction.Reduction` (`names`, `state_b`, `combine_states`, and
-`merge_stmts`) for cross-thread partitions. A *degenerate* fold is a plain
-`sum`/`max`/`mean` reduce; a *twisted* one is online-softmax; a contraction's algebra is
-the degenerate algebra of its additive fold.
+denotational foldMap spec oracle. The state⊕state combine's one statement realization is the term's
+own `Fold.merge(other)`, of which `Fold.step` is the instance at the injected singleton; the kernel
+materializer reads the algebra through `Fold.as_reduction()` (the `ReductionView`: states, the
+second operand's names, the terms, the componentwise op vector or `None` for a twisted combine) and
+`merge` for cross-thread partitions. A *degenerate* fold is a plain `sum`/`max`/`mean` reduce; a
+*twisted* one is online-softmax; a contraction's algebra is the degenerate algebra of its additive
+fold.
 
 The neutral element IS stored, as `Fold.init` — a monoid is `(S, ⊕, e)`, and a term that kept only
 `combine` would be storing a semigroup while calling it a monoid. What is NOT stored is any
 emitter's use of it: a degenerate fold dissolves into its `Accum`s and takes each fold's seed from
-its `op.identity`, and a twisted fold's streaming merge regenerates its own (`_reduction` reads the
-generated merge's `Accum`s, never the stored `init`'s `−inf`). So `init` is algebra the term owes
+its `op.identity`, and a twisted fold's merge derives its own (`Fold.merge` spells the combine as
+`Accum`s, never reading the stored `init`'s `−inf`). So `init` is algebra the term owes
 its own definition, not a value the lowering path consults — which is why removing it would change every
 `structural_key` and, with it, every variant key (`identity_key(with_io=True, with_knobs=True)`) used by tune DB
 measurement replay and the cubin cache, in exchange for a field nothing reads.

@@ -17,7 +17,7 @@ is consumed. This module holds only what the STORED TERM itself needs:
   associativity property tests run against.
 
 The exp/LSE-family program GENERATORS live in :mod:`~emmy.compiler.ir.pure.carrier`; the
-kernel-level partition helpers live in ``pipeline/passes/lowering/_reduction``. The old
+statement forms of a stored combine are the term's own (``Fold.merge`` / ``Fold.step``). The old
 ``Monoid`` / ``Semiring`` node wrappers, the ψ-conjugation apparatus (``Carrier`` / ``Twist`` /
 ``State``) and the loop-annotation ``Algebra`` bundle are all retired: the node's stored combine
 is the single spelling of ⊕.
@@ -37,13 +37,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from emmy.compiler.dtype import F32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Const
+from emmy.compiler.ir.stmt.leaves import Assign, Const
 
 # --------------------------------------------------------------------------------------------
 # The TRUE monoid — ``(init, combine)``, ONE program, stored FLAT on the ``Fold`` node.
@@ -140,9 +138,6 @@ class Componentwise:
         """The canonical ``S × S → S`` combine for these state names — :func:`M`'s program."""
         return M(*self.ops, names=names)[1]
 
-    def merge(self, names: tuple[str, ...], other: tuple[str, ...], *, dtype=F32) -> tuple[Stmt, ...]:
-        return tuple(Accum(name=n, value=o, op=op, dtype=dtype) for n, op, o in zip(names, self.ops, other, strict=True))
-
 
 @dataclass(frozen=True)
 class ExpFamily:
@@ -163,9 +158,6 @@ class ExpFamily:
     def program(self, names: tuple[str, ...]) -> Lambda:
         other = tuple(f"{n}__o" for n in names)
         return Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
-
-    def merge(self, names: tuple[str, ...], other: tuple[str, ...], *, dtype=F32) -> tuple[Stmt, ...]:
-        return exp_combine_states(names, other, key=other[0], accum=True, dtype=dtype)
 
 
 #: The registered twisted entries, tried in order after the componentwise fast path.
@@ -211,36 +203,6 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
         body=Body(tuple(st.rewrite(rn) for st in combine.body)),
         results=tuple(rn(r) for r in combine.results),
     )
-
-
-# --------------------------------------------------------------------------------------------
-# The one STATEMENT realization of a stored combine — a pure term never occupies a statement
-# position, it renders into one (``ir/ARCHITECTURE.md``, "Pure terms vs statements").
-# --------------------------------------------------------------------------------------------
-
-
-def merge_stmts(combine: Lambda, other: tuple[str, ...], *, dtype=F32) -> tuple[Stmt, ...]:
-    """The cross-partition state⊕state combine, realized as loop-IR statements: ``combine``
-    applied at ``S × S → S`` with its second operand naming ``other`` — a second FULLY-REDUCED
-    state (a REG copy ``<n>__r1``, a tree neighbour's partial, a workspace slice ``<n>__p``).
-    Emitted wherever a partitioned reduce has to fold its partials together: the REG-tree merge,
-    the cooperative tail, the cross-CTA finalize loop.
-
-    Both families land on the same shape — ``Assign`` rescale temps followed by one ``Accum`` per
-    state component. The ``Accum`` is doing two jobs: it renders the in-place reassignment
-    ``s = ⊕(base, value)``, and it carries the neutral element, so the seed comes from the ONE
-    identity placement (``Loop.render``) and never has to travel beside the combine. A DEGENERATE
-    ⊕ needs no temps at all — one self-``Accum`` per component. A TWISTED one is REGENERATED in
-    ``Accum`` form keyed on ``other[0]``: its temps are namespaced on the second operand's
-    spelling, so two merges of different partials into one state cannot collide. Regenerating
-    rather than patching is the same rule :func:`rename_combine` follows — a generated program is
-    the deterministic function of its state names. ``dtype=None`` produces canonical Loop IR;
-    kernel-level consumers keep the default f32 accumulator stamp."""
-    names = combine.results
-    family = family_of(combine)
-    if family is None:
-        raise ValueError("merge_stmts: no registered monoid family claims this combine")
-    return family.merge(names, other, dtype=dtype)
 
 
 # --------------------------------------------------------------------------------------------
@@ -316,7 +278,6 @@ __all__ = [
     "eval_lambda",
     "family_of",
     "foldmap_eval",
-    "merge_stmts",
     "product_spine",
     "rename_combine",
 ]

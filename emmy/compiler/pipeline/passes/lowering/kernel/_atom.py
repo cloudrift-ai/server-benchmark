@@ -108,7 +108,7 @@ class _ScheduledContraction:
 
     @property
     def acc(self) -> str:
-        return self.child.out
+        return self.child.exposes[0]
 
     @property
     def semiring(self):
@@ -132,7 +132,7 @@ def scheduled_fold_contraction(fold: Fold, sched):
     steps = tuple(fold.lift.body)
     for child in (stmt for stmt in steps if isinstance(stmt, Fold) and stmt.as_contraction() is not None):
         tile = sched.tile_of(child)
-        consumers = tuple(stmt for stmt in steps if isinstance(stmt, Accum) and stmt.name in states and stmt.value == child.out)
+        consumers = tuple(stmt for stmt in steps if isinstance(stmt, Accum) and stmt.name in states and stmt.value == child.exposes[0])
         stage = sched.get("STAGE", child) if tile is not None else None
         if tile is None or not tile.is_warp or stage is None or stage.transport != "smem" or not consumers:
             continue
@@ -972,7 +972,7 @@ def _sync_operands(
     # the ldmatrix drain reads each slab back through its own mode. Unswizzled these slabs drain
     # 4-way (64 B A rows) / 8-way (128 B B rows) bank-conflicted — the measured megakernel residual
     # (294.9 M ld conflicts / 82.5 M LSU inst on the gemma-shape fused edge, 5090).
-    channels = channels or ((c.operands[1], c.out),)
+    channels = channels or ((c.operands[1], c.exposes[0]),)
     drain: list = []
     sync_ops: list[SyncOperand] = []
     async_ops: list[Operand] = []
@@ -1565,7 +1565,7 @@ def _scalar_drain(
     body: list[Stmt] = []
     for i, j in cells:
         sfx = f"__c{i}_{j}"
-        bn, an, vn, cn = f"{b_name}{sfx}", f"{a_name}{sfx}", f"{c.out}__v{sfx}", f"{c.out}{sfx}"
+        bn, an, vn, cn = f"{b_name}{sfx}", f"{a_name}{sfx}", f"{c.exposes[0]}__v{sfx}", f"{c.exposes[0]}{sfx}"
         m_local = BinaryExpr("-", offset[0].base(i), row_base)
         n_local = BinaryExpr("-", offset[1].base(j), col_base)
         k_row = Var(ki) if off_b is None else BinaryExpr("+", off_b, Var(ki))
@@ -2010,7 +2010,7 @@ class _ScalarOps(_AtomOps):
         c = self.c
         if self.stage is None:
             return []
-        return [Init(name=f"{c.out}__c{i}_{j}", identity=_ADD.identity, dtype=F32) for i, j in cells]
+        return [Init(name=f"{c.exposes[0]}__c{i}_{j}", identity=_ADD.identity, dtype=F32) for i, j in cells]
 
     def gmem_leaves(self, offset, mn):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a
@@ -2061,11 +2061,11 @@ class _ScalarOps(_AtomOps):
                 *(copy_cell(a_body, cell, a_sfx, prot) if a_cell else ()),
                 *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
             ]
-            v = f"{c.out}__v__c{i}_{j}"
+            v = f"{c.exposes[0]}__v__c{i}_{j}"
             return [
                 *reads,
                 Assign(name=v, op=_MUL, args=(f"{b_name}{b_sfx}", f"{a_name}{a_sfx}")),
-                Accum(name=f"{c.out}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
+                Accum(name=f"{c.exposes[0]}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
             ]
 
         def wrap(body):
@@ -2484,7 +2484,9 @@ def fold_store_tail(tail: tuple, fold: Fold, c: _ScheduledContraction) -> tuple:
     """
     states = set(fold.combine.results)
     return tuple(
-        replace(stmt, values=tuple(value if value in states else c.out for value in stmt.values)) if isinstance(stmt, Write) else stmt
+        replace(stmt, values=tuple(value if value in states else c.exposes[0] for value in stmt.values))
+        if isinstance(stmt, Write)
+        else stmt
         for stmt in tail
         if not stmt.pure
     )

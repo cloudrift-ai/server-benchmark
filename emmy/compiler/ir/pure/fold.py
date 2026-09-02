@@ -367,17 +367,6 @@ class Fold:
             lift=Lambda(params=tuple(axis.name for axis in declared), body=Body((load,)), results=tuple(load.names)),
         )
 
-    @property
-    def out(self) -> str:
-        """The bound output name — the carried state's primary component (the combine's first
-        result; a bare reduce's grid ``Write`` is glue). At zero axes there is no carried state,
-        so it is the projection's primary result (what a projection's ``out`` read)."""
-        if self.axis is None:
-            r = self.lift.results
-            assert r and isinstance(r[0], str), f"zero-axis Fold has no named result: {r!r}"
-            return r[0]
-        return self.combine.results[0]
-
     @cached_property
     def step(self) -> Body:
         """The per-step statements this fold DERIVES from its stored parameters: the lift body,

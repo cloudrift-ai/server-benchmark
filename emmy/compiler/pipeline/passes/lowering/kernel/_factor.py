@@ -152,13 +152,13 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
         rides = dict.fromkeys(s for edge in op.operands if op.axis.name in edge.free_axes for s in _emit(edge, ctx).body)
         stmts = _emit_body(Body((*rides, *op.step)), ctx)
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll)
-        return Frag(body=[*hoisted, loop], out=Handle(op.out))
+        return Frag(body=[*hoisted, loop], out=Handle(op.exposes[0]))
     raise TypeError(f"_emit: expected a Fold node, got {type(op).__name__}")
 
 
 def _map_wire(op: Fold) -> Handle:
-    """The :class:`Handle` a parent wires to for a zero-axis ``Fold`` node — mirrors ``Fold.out``'s cases but
-    stays robust where ``Fold.out`` would raise. An empty body surfaces the operand's wire; a
+    """The :class:`Handle` a parent wires to for a zero-axis ``Fold`` node — the primary exposed name's cases,
+    robust where a term exposes nothing. An empty body surfaces the operand's wire; a
     ``Write``-terminated body is a ROOT sink (stored to gmem, never wired) so surfaces the written
     value at ``gmem`` residence; a body ending in an annotated reduce / contraction ``Loop`` surfaces
     its carried state's head (:func:`loop_state_head` — the acc / carried value, NOT the loop's
@@ -183,7 +183,7 @@ def _emit_wire(op) -> Handle:
         return Handle(op.names[-1])
     if isinstance(op, Fold) and op.axis is None:
         return _map_wire(op)
-    return Handle(op.out)  # Fold.out — the carrier state, or a contraction's primary acc; always safe
+    return Handle(op.exposes[0])  # the carrier state's primary component, or a contraction's primary acc; always safe
 
 
 def _emit_body(body, ctx: Ctx, output_specs: tuple = ()) -> list[Stmt]:
@@ -351,7 +351,7 @@ def _bind_roots(op: Fold, ctx: Ctx, output_specs: tuple) -> Tile:
     tiles = []
     for index, (root, body, owned_specs) in enumerate(regions):
         tail = tuple(apply_output_specs(body, owned_specs))
-        tiles.append(_bind(root, ctx, tail, root.out, frag_ns=f"_r{index}"))
+        tiles.append(_bind(root, ctx, tail, root.exposes[0], frag_ns=f"_r{index}"))
     return _merge_root_tiles(tuple(tiles))
 
 
@@ -371,7 +371,7 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     its finalized value as the SSA name ``value`` (the carrier state / accumulator, or a projection's
     last def) that must be written to the output buffer at the grid cell. A body that already carries
     a ``Write`` needs no glue (``value`` is left unread). The caller resolves ``value`` off the node
-    (``Fold.out`` / the recursion's produced ``Handle``) so this helper stays node-agnostic."""
+    (the root's primary exposed name / the recursion's produced ``Handle``) so this helper stays node-agnostic."""
     if has_write(stmts):
         return stmts
     index = tuple(Var(ax.name) for ax in grid)
@@ -419,7 +419,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
     if tile is not None and tile.axes is not None and len(grid) >= 2:
         epi = list(tail)
         if not has_write(epi):
-            epi = with_store(epi, ctx.output, grid, c.out)
+            epi = with_store(epi, ctx.output, grid, c.exposes[0])
         # The cone's K seam, read straight off the inline operand node (``None`` for a gmem-``Load``
         # A — its whole body is the per-cell fill).
         seam = cone_seam(c.operands[0], c.axis.name) if value_child is None and c.operands[0].as_slab() is None else None

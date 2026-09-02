@@ -44,7 +44,6 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.ir import apply_output_specs
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
@@ -502,7 +501,8 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     n_comp = len(states)
     out = root.output
     cell = _cell_index(stores, free)
-    projection = tuple(apply_output_specs([*(region.lift.body if region.axis is None else ()), *body], stores))
+    # The epilogue the atomic arm would apply per partition: the region's projection and its stores.
+    projection = (*(region.lift.body if region.axis is None else ()), *body, *(store.write for store in stores))
     frag = _frag(match, root)
 
     if finalize == "atomic":

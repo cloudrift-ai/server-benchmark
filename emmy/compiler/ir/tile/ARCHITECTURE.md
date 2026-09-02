@@ -134,11 +134,12 @@ the enclosing scope unchanged (`o[j] = acc`, broadcasting an already-reduced acc
 evaluated over `j`, and its sweep spec alone binds the axis.
 
 A sweep axis is never bound at kernel scope: the term opens it itself (`Fold.lower` with the sweep left unbound), and
-the sweep store follows the term defining its value inside that loop. A non-contraction fold that reads a sweep axis (attention's `Σ_k P·V` per output column,
-DeepSeek-V4 post16's per-column sum) is still an operand edge of the projection: its slabs declare the sweep axis, so
-the placement rule puts its loop inside the sweep loop, while a sibling evaluated over the grid axes alone stays ahead
-of it. A projection stream spelled without the term (the materializer's tail) has no such loop, and reconstitution
-wraps the trailing run reading the axis into one. A contraction is exempt because post-init promotes a sweep its
+the sweep store follows the term defining its value inside that loop. A non-contraction fold that reads a sweep axis
+(attention's `Σ_k P·V` per output column, DeepSeek-V4 post16's per-column sum) is still an operand edge of the
+projection: its slabs declare the sweep axis, so the placement rule puts its loop inside the sweep loop, while a
+sibling evaluated over the grid axes alone stays ahead of it. A projection stream spelled without the term (the
+materializer's tail) has no such loop, and reconstitution wraps the trailing run reading the axis into one. A
+contraction is exempt because post-init promotes a sweep its
 operands read into a real free axis right after normalization.
 
 A fold FED by the body — one whose subtree captures a name a plain body member defines — is likewise never hoisted,
@@ -146,11 +147,7 @@ no matter what kind: a projection evaluates its operands before its scalar body,
 that does not exist yet. The `closed` gate reads only the fold's own lift and cannot see a nested capture; the
 composed placement cut builds exactly this shape (the consumer piece's workspace loads and rsqrt chain feed the
 retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
-nvcc). The classic reduce domain mirrors the fact for depth: a fold reached deeper than a chain-form root's direct body
-members still offers only the serial fold, since the body recursion emits it serially per cell regardless of
-partition. A DIRECT member is not so limited — the retained reduce above is one — and offers the full non-transposed
-reduce catalog instead (absent a swept or streamed boundary store, neither of which the chain arm's lane-distributed
-close can realize), bound through the chain arm ahead of the strided loop.
+nvcc).
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
 specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or

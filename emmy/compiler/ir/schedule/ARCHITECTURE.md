@@ -74,14 +74,9 @@ neither defines nor filters those domains. `ir/schedule` may import other IR mod
 pipeline layer. The pipeline retains only knob/pin reads, pool identity, sampling, and the generic lazy-Fork adapter.
 
 A reduction domain is projected from node and kernel facts alone, so the shapes the kernel factorizer cannot bind are
-decided once, at the offer, and never dropped from a priced row later. Under a chain-form root — a zero-axis `Fold`
-with no operand edge, the shape every composed-cut and split piece binds through — a DIRECT body member carries the
-cooperative and ILP catalog minus the transposed band, while a node nested deeper, or any node of a kernel whose
-boundary store carries an output sweep or streams into a sibling observed member, carries the serial fold only. The
-contraction per-cell tier reads that same projection, so a contraction inherits every one of those readings rather
-than restating them — a stated decision rather than live behavior, since the normalize hoist absorbs a contraction's
-body feed and moves it onto an operand edge, which ends the chain form, so no tree built today reaches that arm
-carrying one.
+decided once, at the offer, and never dropped from a priced row later. An observed node, or one whose reduce reads a
+boundary store's output sweep, carries the serial fold only. The contraction per-cell tier reads that same
+projection, so a contraction inherits those readings rather than restating them.
 
 A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and
 cannot manufacture a value the projection withheld. A value scoped to a site that does not offer it empties that

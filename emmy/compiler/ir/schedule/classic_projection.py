@@ -57,7 +57,6 @@ from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ir import observed_result_names
 from emmy.compiler.ir.tile.ops import Sched, edge_dtypes, projection_tail, scheduled
 
 
@@ -79,29 +78,6 @@ def _transposed_reduction_ok(tile: TileOp) -> bool:
     return _inner_free(tile) is not None and not any(isinstance(stmt, Loop) for stmt in tail) and not has_contraction_tail(tail)
 
 
-def _chain_member_serial(tile: TileOp, node) -> bool:
-    """Whether a node under a chain-form root realizes the serial fold only.
-
-    A chain-form root is a zero-axis :class:`Fold` with no operand edge — a body-FED or
-    sweep-reading member the normalize hoist keeps in place, and the shape every composed-cut and
-    split piece binds through. A DIRECT body member binds through the kernel factorizer's chain
-    arm, which emits its sibling providers ahead of one shared strided loop, so it carries a
-    partition. Three facts keep the serial fold instead: a node nested DEEPER than the body (the
-    body recursion emits it serially per cell), a boundary store carrying an output sweep (the wrap
-    would re-run a partitioned member per swept cell), and a boundary store that streams into a
-    sibling observed member's reduce loop (the trailing splice cannot reach a loop already sitting
-    in an earlier segment). Both store facts are read over the WHOLE kernel, not the node —
-    a different question from the per-node sweep-reading check above, and the exact gate the
-    factorizer's chain arm applies before it gathers members.
-    """
-    root = tile.op
-    if any(spec.sweep is not None for spec in tile.output_specs):
-        return True
-    if any(set(spec.write.values) <= observed_result_names(root) for spec in tile.output_specs):
-        return True
-    return not any(node is stmt for stmt in root.lift.body)
-
-
 def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     """Project one plain reduction's legal choices from node and kernel facts only.
 
@@ -110,26 +86,13 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     instead of manufacturing a pin-only choice outside Algorithm 1.
 
     Shared by the contraction per-cell tier through :func:`_contraction_domain`'s delegation, and
-    deliberately so: a contraction is a monoid with a ⊗ lift, so a contraction that is a direct
-    chain member inherits the same member catalog, the same nested / swept / streamed serial-only
-    exclusions, and the same transposed exclusion, with no carve-out of its own. That inheritance
-    is a stated decision, not live behavior: ``normalize_fold_tree``'s hoist absorbs whatever body
-    value fed a contraction and moves it onto an operand edge, and a root with an operand edge is
-    no longer chain-form — so no tree the compiler builds today reaches this arm carrying one. It
-    is written once here so a normalizer that later keeps one in place inherits the reading rather
-    than acquiring a different one by omission.
+    deliberately so: a contraction is a monoid with a ⊗ lift, so it inherits the same swept /
+    streamed serial-only exclusions and the same transposed exclusion, with no carve-out of its own.
     """
     if node.observe is not None:
         return (Reduce(),)
     if {spec.sweep.name for spec in tile.output_specs if spec.sweep is not None} & node.free_axes:
         return (Reduce(),)
-    if isinstance(tile.op, Fold) and tile.op.axis is None and not tile.op.operands:
-        if _chain_member_serial(tile, node):
-            return (Reduce(),)
-        # A transposed band's σ-substitution and guarded close assume the fold is the kernel ROOT,
-        # so the chain arm cannot realize one; offering it here would mint one kernel from two
-        # knob spellings.
-        return (Reduce(), *(choice for choice in coop_reduce_moves() if not choice.coop_transposed))
     transposed_ok = _transposed_reduction_ok(tile)
     return (
         Reduce(),

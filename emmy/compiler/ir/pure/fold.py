@@ -490,6 +490,7 @@ class Fold:
             bound = self.free_axes
         coordinates: dict[str, Axis] = {}
         readers: dict[str, int] = {}
+        origin: dict[str, tuple[int, str]] = {}  # a value's defining term and what it is there
         seen: set[int] = set()
         pending = [self]
         while pending:
@@ -500,7 +501,20 @@ class Fold:
             coordinates.update((axis.name, axis) for axis in term.axes if axis is not term.axis and axis.name not in coordinates)
             for name in term.free_axes:
                 readers[name] = readers.get(name, 0) + 1
+            if term.combine is None:
+                origin.update((name, (id(term), "step")) for stmt in term.lift.body for name in stmt.defines())
+            else:
+                origin.update((name, (id(term), "state")) for name in term.combine.results)
+                if term.observe is not None:
+                    origin.update((name, (id(term), "observed")) for name in term.observe.results)
             pending.extend(reversed(term.operands))
+        owned: dict[tuple[int, str], list[OutputSpec]] = {}
+        for spec in stores:
+            key = origin.get(spec.write.values[0])
+            assert key is not None and all(origin.get(name) == key for name in spec.write.values), (
+                f"a store over {spec.write.values} writes values no one term defines"
+            )
+            owned.setdefault(key, []).append(spec)
         for spec in stores:
             if spec.sweep is not None:
                 coordinates.setdefault(spec.sweep.name, spec.sweep)
@@ -511,7 +525,6 @@ class Fold:
             key=lambda name: (-readers.get(name, 0), declared.index(name)),
         )
         nest: dict[tuple[str, ...], list[Stmt]] = {(): []}
-        unplaced = list(stores)
 
         def path_of(free: frozenset[str], path: tuple[str, ...] | None) -> tuple[str, ...]:
             # The free loops a term sits under: the shallowest prefix of its reader's path binding
@@ -529,17 +542,7 @@ class Fold:
         def attach(term: Fold, kind: str, target: list[Stmt], node: tuple[str, ...], scope: frozenset[str]) -> None:
             # The stores over what ``term`` defines as ``kind`` — its step's results, its carried
             # state, or its observer's per-step values — land right after it, in ``target``.
-            for spec in list(unplaced):
-                values = set(spec.write.values)
-                if term.combine is None:
-                    owned = kind == "step" and values <= {name for stmt in term.lift.body for name in stmt.defines()}
-                elif kind == "state":
-                    owned = values <= set(term.combine.results)
-                else:
-                    owned = term.observe is not None and values <= set(term.observe.results)
-                if not owned:
-                    continue
-                unplaced.remove(spec)
+            for spec in owned.get((id(term), kind), ()):
                 extra = {name for expr in spec.write.index for name in expr.free_vars()} - scope
                 if not extra:
                     target.append(spec.write)
@@ -582,7 +585,6 @@ class Fold:
             return Body(tuple(dict.fromkeys(body)))
 
         place(self, [], None)
-        assert not unplaced, f"stores over {[spec.write.values for spec in unplaced]} write values no term defines"
         return assemble(())
 
 

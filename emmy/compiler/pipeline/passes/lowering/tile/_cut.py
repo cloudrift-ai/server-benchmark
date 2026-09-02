@@ -640,7 +640,11 @@ def realize(
         token = digest(tile.identity_key(structural=False) or "", seam.spelling)[:10]
         buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
 
-        loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))
+        # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
+        # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
+        loads = tuple(
+            Fold.slab(Load(name=name, input=buffer, index=index), axes) for name, buffer in zip(names, buffers, strict=True)
+        )
         if front is not None:
             raw = replace(loads[0], dtype=front.dtype)
             loads = (

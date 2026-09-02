@@ -327,6 +327,37 @@ def test_knob_features_typed_knobs(monkeypatch):
     assert feats["MASK_frac"] == 2 / 3
 
 
+def test_knob_features_serial_cell_work_divides_by_reduce_coverage():
+    """``D_serial_cell_work``: log2 of the stamped worst per-cell serial trips after the row's
+    reduce-partition coverage — the trips a thread actually serializes. cta (``g<n>``) and coop
+    lanes divide; the register/ILP fold (``r<n>``) does NOT (the same thread walks every trip);
+    a serial row divides by 1; no stamp → no key (an absent feature, not a fabricated zero)."""
+    import math
+
+    work = float(2**20)
+    serial = knob_features({"S_ext_serial_cell_work": work})
+    assert serial["D_serial_cell_work"] == pytest.approx(math.log2(1 + work))
+    coop = knob_features({"S_ext_serial_cell_work": work, "WORK": "t128", "REDUCE": "coop"})
+    assert coop["D_serial_cell_work"] == pytest.approx(math.log2(1 + work / 128))
+    cta = knob_features({"S_ext_serial_cell_work": work, "WORK": "t64", "REDUCE": "g4k"})
+    assert cta["D_serial_cell_work"] == pytest.approx(math.log2(1 + work / 4))
+    reg = knob_features({"S_ext_serial_cell_work": work, "WORK": "t16x16", "REDUCE": "r4"})
+    assert reg["D_serial_cell_work"] == pytest.approx(math.log2(1 + work))
+    assert "D_serial_cell_work" not in knob_features({"S_n_load": 3.0})
+
+
+def test_serial_floor_is_the_covered_trips_at_the_per_trip_bound():
+    """``serial_floor_us``: a physical lower bound on one kernel-launch — the row's per-thread
+    serial trips (stamp ÷ reduce-partition coverage) at the per-trip bound; zero with no stamp."""
+    from emmy.compiler.pipeline.search.features import SERIAL_TRIP_FLOOR_US, serial_floor_us
+
+    work = float(2**20)
+    assert serial_floor_us({"S_ext_serial_cell_work": work}) == pytest.approx(work * SERIAL_TRIP_FLOOR_US)
+    coop = serial_floor_us({"S_ext_serial_cell_work": work, "WORK": "t128", "REDUCE": "coop"})
+    assert coop == pytest.approx(work / 128 * SERIAL_TRIP_FLOOR_US)
+    assert serial_floor_us({}) == 0.0
+
+
 def test_knob_features_stage_codec():
     """The ``STAGE`` codec (``d<depth>/copy|reg|cp|tma[/p<reg_depth>]``) featurizes to the
     ``D_stage_*`` family; an absent / gmem-direct stage contributes nothing."""

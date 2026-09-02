@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
+from emmy.compiler.ir.pure.algebra import component_ops
 from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
 from emmy.compiler.ir.schedule import Raster, ResolvedStage, Schedule, Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import (
@@ -31,7 +32,7 @@ def _sum_loop() -> Loop:
     reproduces)."""
     acc = Accum(name="acc", value="x_e", op="add", axes=("k",))
     body = Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), acc))
-    return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR)
+    return Loop(axis=Axis("k", 1024), body=body)
 
 
 def test_from_loop_reconstructs_the_loop_exactly() -> None:
@@ -116,7 +117,6 @@ def test_twisted_role_derives_from_the_combine_and_propagates() -> None:
     loop = Loop(
         axis=Axis("k", 1024),
         body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), *exp_merge(("m_i", "l_i"), ("x_e", 1.0), key="m_i"))),
-        role=AxisRole.TWISTED,
     )
     red = Fold(
         axis=loop.axis,
@@ -124,9 +124,10 @@ def test_twisted_role_derives_from_the_combine_and_propagates() -> None:
         init=(-1e30, 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
-    assert red.role is AxisRole.TWISTED
+    assert red.axis is not None and component_ops(red.combine) is None
     assert red.loop == loop  # the derivation reproduces the input annotation exactly
-    assert Fold.projection(body=Body(()), operands=(red,)).operands[0].role is AxisRole.TWISTED
+    edge = Fold.projection(body=Body(()), operands=(red,)).operands[0]
+    assert edge.axis is not None and component_ops(edge.combine) is None
 
 
 def _contraction() -> Fold:
@@ -143,7 +144,7 @@ def _contraction() -> Fold:
 def test_contraction_synthesizes_the_mul_add_loop() -> None:
     c = _contraction()
     loop = c.loop
-    assert loop.role is AxisRole.CONTRACTION
+    assert loop.is_reduce
     assert loop.axis == c.axis
     # The derived contraction loop: B, A loads + the ⊗ lift + the additive fold.
     assert isinstance(loop.body[-1], Accum) and loop.body[-1].name == "acc"
@@ -152,7 +153,7 @@ def test_contraction_synthesizes_the_mul_add_loop() -> None:
 
 def test_contraction_dispatches_through_ops() -> None:
     c = _contraction()
-    assert c.role is AxisRole.CONTRACTION
+    assert c.as_contraction() is not None
     assert c.lower() == [c.loop]  # bare: just the synthesized loop (the grid Write is materialize glue)
     assert c.out == "acc"
 
@@ -168,7 +169,7 @@ def test_a_projection_rides_the_zero_axis_wrapper_not_the_node() -> None:
     assert c.lower() == [c.loop]
     assert node.lower() == [c.loop, *proj]
     assert apply_output_specs(node.lower(), (OutputSpec(write=write),)) == [c.loop, *proj, write]
-    assert node.operands[0].role is AxisRole.CONTRACTION
+    assert node.operands[0].as_contraction() is not None
 
 
 # --- split-K: Fold ⊃ bilinear fold (E1) --------------------------------------------------- #
@@ -211,7 +212,7 @@ def test_splitk_reduction_over_contraction_is_no_double_reduce() -> None:
     # The outer fold is an ordinary additive reduce — it tiles nothing and has no operand pair, so
     # it derives PLANAR like any other. The reassociation it carries is a STRUCTURAL probe
     # (``Fold.composed``, the recognized split-K composition), never a role.
-    assert red.role is AxisRole.PLANAR
+    assert red.axis is not None
     assert red.composed is inner
     t = _with_reduce(_tile(red), red, Reduce.of(cta=2, finalize="atomic"))
     assert reduce_plan(t).cta == 2
@@ -245,7 +246,7 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
         init=(float("-inf"), 0.0, 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
-    assert red.role is AxisRole.TWISTED
+    assert red.axis is not None and component_ops(red.combine) is None
 
     (kv_loop,) = red.lower()
     assert kv_loop.axis.name == "kv"
@@ -256,7 +257,7 @@ def test_reduce_partial_flattens_a_nested_pv_contraction() -> None:
     o_fold = next(s for s in body if isinstance(s, Accum) and s.name == "O_i")
     # QK (the hoisted edge) first, then the pre-PV probability, then the flattened PV loop, then the state fold.
     assert body.index(qk_loop) < body.index(prob) < body.index(pv_loop) < body.index(o_fold)
-    assert pv_loop.role is AxisRole.CONTRACTION and isinstance(pv_loop.body[-1], Accum) and pv_loop.body[-1].name == "O_i__pv"
+    assert pv_loop.is_reduce and isinstance(pv_loop.body[-1], Accum) and pv_loop.body[-1].name == "O_i__pv"
 
 
 # --- computed (register-resident) A operand: the tensor-core-flash PV crux ---------------------- #
@@ -287,7 +288,7 @@ def test_contraction_computed_a_lowers_into_the_k_loop() -> None:
     register-resident P produced per K-step, then multiplied by V and folded. Same builder a gmem-A
     contraction uses; the operand is just a body, not a leaf load."""
     loop = _pv_contraction().loop
-    assert loop.role is AxisRole.CONTRACTION and loop.axis.name == "j"
+    assert loop.is_reduce and loop.axis.name == "j"
     body = list(loop.body)
     exp_i = next(i for i, s in enumerate(body) if isinstance(s, Assign) and s.op.name == "exp")
     mul_i = next(i for i, s in enumerate(body) if isinstance(s, Assign) and s.op.name == "multiply")
@@ -348,7 +349,7 @@ def test_a_composed_step_keeps_its_position_when_flattened() -> None:
     before, after = Assign(name="m", op="copy", args=("s",)), Assign(name="o", op="copy", args=("p",))
     flat = _flatten_nodes((before, _pv_contraction(), after))
     assert flat[0] is before and flat[-1] is after
-    assert any(isinstance(s, Loop) and s.role is AxisRole.CONTRACTION for s in flat[1:-1])
+    assert any(isinstance(s, Loop) and s.is_reduce for s in flat[1:-1])
 
 
 # --- the B operand edge: same type as A, asymmetric only in the schedule ------------------------- #
@@ -396,7 +397,7 @@ def test_computed_b_lowers_into_the_k_loop() -> None:
     multiply, exactly as a computed A's is — the same derived loop, no B-specific
     path: ``for k: w_e = W[k, n]; wn = exp(w_e); a_e = A[m, k]; o__v = wn·a_e; o += o__v``."""
     loop = _computed_b_contraction().loop
-    assert loop.role is AxisRole.CONTRACTION and loop.axis.name == "k"
+    assert loop.is_reduce and loop.axis.name == "k"
     body = list(loop.body)
     exp_i = next(i for i, s in enumerate(body) if isinstance(s, Assign) and s.op.name == "exp")
     mul_i = next(i for i, s in enumerate(body) if isinstance(s, Assign) and s.op.name == "multiply")
@@ -621,7 +622,7 @@ def _sweep_reading_reduce_tile(plan=None, chain: bool = False) -> TileOp:
             Accum(name="acc", value="x_e", op="add", axes=("k",)),
         )
     )
-    red = fold_from_loop(Loop(axis=Axis("k", 4), body=body, role=AxisRole.PLANAR))
+    red = fold_from_loop(Loop(axis=Axis("k", 4), body=body))
     assert red is not None
     if chain:
         inner = Fold.projection(body=Body((Assign(name="mid", op="copy", args=("acc",)),)), operands=(red,), results=("mid",))

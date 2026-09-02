@@ -15,7 +15,7 @@ the step into an ``Accum`` per carried component.
 from __future__ import annotations
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda, M
@@ -76,7 +76,7 @@ def test_a_slab_lowers_to_exactly_its_load() -> None:
 def test_a_slab_does_not_reduce() -> None:
     """``axes`` is an index space; ``combine`` is what makes an axis a REDUCTION."""
     slab = _slab("l", "x", (Var("m"), Var("k")))
-    assert slab.axes and slab.axis is None and slab.role is AxisRole.FREE
+    assert slab.axes and slab.axis is None and slab.axis is None
 
 
 def test_a_computed_cone_is_not_a_slab() -> None:
@@ -106,7 +106,7 @@ def test_a_scale_is_not_a_contraction() -> None:
     scale = _slab("s", "s", (Var("m"),))
     node = _reduce((a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",))
     assert node.as_contraction() is None
-    assert node.role is AxisRole.PLANAR
+    assert node.axis is not None
 
 
 def test_a_pointwise_term_has_no_view() -> None:

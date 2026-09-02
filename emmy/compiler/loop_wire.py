@@ -17,7 +17,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import DataType
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph
-from emmy.compiler.ir.axis import Axis, AxisRole, Window
+from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, FuncCallExpr, Literal, TernaryExpr, Var
@@ -83,8 +83,6 @@ def _value_to_wire(value: Any) -> Any:
         return {"dtype": value.name}
     if isinstance(value, ElementwiseImpl):
         return {"elementwise": value.name}
-    if isinstance(value, AxisRole):
-        return {"axis_role": value.value}
     if isinstance(value, Body):
         return {"body": [_value_to_wire(item) for item in value]}
     if isinstance(value, tuple):
@@ -122,8 +120,6 @@ def _value_from_wire(value: Any) -> Any:
         return get_dtype(value["dtype"])
     if set(value) == {"elementwise"}:
         return ElementwiseImpl(str(value["elementwise"]))
-    if set(value) == {"axis_role"}:
-        return AxisRole(value["axis_role"])
     if set(value) == {"body"}:
         payload = value["body"]
         if not isinstance(payload, list):
@@ -155,6 +151,9 @@ def _value_from_wire(value: Any) -> Any:
         if not isinstance(payload, dict):
             raise ValueError(f"Loop IR {class_name} fields must be a mapping")
         expected = {field.name for field in fields(cls)}
+        # A loop's ``role`` was an annotation a stored wire may still carry; a loop folds iff its
+        # body carries an ``Accum``, so the field is dropped rather than refused.
+        payload = {name: item for name, item in payload.items() if not (name == "role" and cls in (Loop, StridedLoop))}
         unknown = set(payload) - expected
         if unknown:
             raise ValueError(f"Loop IR {class_name} has unknown fields: {', '.join(sorted(unknown))}")

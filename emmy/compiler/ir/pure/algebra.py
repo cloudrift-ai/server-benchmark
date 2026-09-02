@@ -25,7 +25,7 @@ is the single spelling of ⊕.
 The FAMILY REGISTRY (:func:`family_of`, :class:`Componentwise`, :class:`ExpFamily`) is the one
 dispatch over that spelling. A family claims a stored combine iff its generator would have
 emitted exactly that program — membership is program equality, never an annotation — and the
-claiming family answers every family-shaped question (the twist read behind ``AxisRole.TWISTED``,
+claiming family answers every family-shaped question (the twist read the kernel tiers make,
 the cross-partition merge realization, the rename regeneration, the per-family legality
 properties). Associativity is proven at family-AUTHORING time by transport of structure (a
 bijection ψ on the carrier makes the conjugated combine associative for free) and pinned by the
@@ -175,7 +175,7 @@ _TWISTED_FAMILIES = (ExpFamily(),)
 def family_of(combine: Lambda):
     """The registered family claiming ``combine`` — :class:`Componentwise` over its op vector,
     a twisted entry whose generated program equals the stored one, or ``None`` (no registered
-    family; formation rejects). The ONE family read behind ``AxisRole.TWISTED``, the merge
+    family; formation rejects). The ONE family read behind the merge
     realization, the rename regeneration and the observer/partition legality gates."""
     ops = component_ops(combine)
     if ops is not None:

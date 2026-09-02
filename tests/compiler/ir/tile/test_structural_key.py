@@ -10,7 +10,7 @@ same-term / different-knobs fork variants never collide."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold
@@ -29,7 +29,7 @@ def _bare(*, buf: str = "x", acc: str = "acc0", load: str = "in0", v: str = "v1"
             Accum(name=acc, value=v, op="add", axes=("k",)),
         )
     )
-    fold = fold_from_loop(Loop(axis=Axis("k", extent), body=body, role=AxisRole.PLANAR))
+    fold = fold_from_loop(Loop(axis=Axis("k", extent), body=body))
     assert fold is not None
     return fold
 

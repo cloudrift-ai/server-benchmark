@@ -5,7 +5,7 @@ from importlib import import_module
 
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole, Window
+from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Channel, Fold
 from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work, schedule
@@ -86,7 +86,6 @@ def test_complete_c_proves_its_singleton_without_changing_domains() -> None:
                     Accum(name="acc", value="xv", op="add", axes=("k",)),
                 )
             ),
-            role=AxisRole.PLANAR,
         )
     )
     assert root is not None
@@ -118,7 +117,6 @@ def test_reduction_enumeration_filters_the_independent_product_by_compatibility(
                     Accum(name="acc", value="xv", op="add", axes=("k",)),
                 )
             ),
-            role=AxisRole.PLANAR,
         )
     )
     assert root is not None
@@ -184,7 +182,6 @@ def test_overwide_reduction_is_in_the_domain_before_c_restricts_it(monkeypatch) 
                     Accum(name="acc", value="xv", op="add", axes=("k",)),
                 )
             ),
-            role=AxisRole.PLANAR,
         )
     )
     assert root is not None
@@ -441,7 +438,6 @@ def test_schedule_restriction_drops_the_structural_split_stage_from_c() -> None:
                     Accum(name="acc", value="xv", op="add", axes=("k",)),
                 )
             ),
-            role=AxisRole.PLANAR,
         )
     )
     assert root is not None and root.axis is not None

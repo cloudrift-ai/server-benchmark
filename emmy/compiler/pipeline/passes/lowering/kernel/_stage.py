@@ -257,7 +257,7 @@ def sync_stat_fill(
     per = dtypes or {}
     decls: list[Stmt] = [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=per.get(nm, dtype)) for nm in stats]
     writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats)
-    rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.role.is_reduce), None)
+    rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.is_reduce), None)
     if rl_i is None or stat is None or cta.n_threads % 32 or cta.n_threads < 32:
         body = (*row_body, *writes)
         loop = StridedLoop(axis=row_axis, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body(body), unroll=False)

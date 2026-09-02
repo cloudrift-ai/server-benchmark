@@ -4,7 +4,7 @@ close is lane-distributed (DeepSeek-V4 post4096's composed-cut pieces)."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.kernel.ir import Smem, TreeHalve, WarpShuffle
 from emmy.compiler.ir.pure import Fold
@@ -58,7 +58,7 @@ def _reduce(axis: str, extent: int, acc: str, factor: str, src: str) -> Fold:
             Accum(name=acc, value=f"{src}_scaled", op="add", axes=(axis,)),
         )
     )
-    red = fold_from_loop(Loop(axis=Axis(axis, extent), body=body, role=AxisRole.PLANAR))
+    red = fold_from_loop(Loop(axis=Axis(axis, extent), body=body))
     assert red is not None
     return red
 

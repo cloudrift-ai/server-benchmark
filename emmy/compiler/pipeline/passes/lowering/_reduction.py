@@ -97,7 +97,7 @@ class Reduction:
         pro = cone.operands[0] if (isinstance(cone, Fold) and cone.axis is None) and cone.operands else None
         if not isinstance(pro, Fold):
             return None
-        first = next((stmt for stmt in pro.lower() if isinstance(stmt, Loop) and stmt.role.is_reduce), None)
+        first = next((stmt for stmt in pro.lower() if isinstance(stmt, Loop) and stmt.is_reduce), None)
         if first is None:
             return None
 

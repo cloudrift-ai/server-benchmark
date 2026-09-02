@@ -25,7 +25,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction
@@ -101,7 +101,7 @@ def _dequant_loop(*, scale_index=None, scale_op="multiply", decode="from_f8e4m3"
         Assign(name="v", op="multiply", args=("a", lift_b)),
         Accum(name="acc", value="v", op=ElementwiseImpl("add")),
     ]
-    return Loop(axis=k, body=Body(tuple(stmts)), role=AxisRole.CONTRACTION)
+    return Loop(axis=k, body=Body(tuple(stmts)))
 
 
 def test_decode_scale_cone_binds_via_mul_hoist():
@@ -180,7 +180,6 @@ def test_bare_decode_binds_raw_load_without_epilogue():
     """No k-invariant factor at all: B still binds as the raw f8 load, nothing hoists."""
     loop = Loop(
         axis=Axis("k", Dim(64)),
-        role=AxisRole.CONTRACTION,
         body=Body(
             (
                 Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3),

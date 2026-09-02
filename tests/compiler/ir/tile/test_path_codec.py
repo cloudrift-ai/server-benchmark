@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
@@ -32,7 +32,7 @@ def _planar_fold(k_name: str = "k", *, acc: str = "s0", val: str = "v1", load: s
             accum,
         )
     )
-    loop = Loop(axis=Axis(k_name, 512), body=body, role=AxisRole.PLANAR)
+    loop = Loop(axis=Axis(k_name, 512), body=body)
     fold = fold_from_loop(loop)
     assert fold.lift is not None
     return fold

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Reduce
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
@@ -39,7 +39,7 @@ def test_an_external_ssa_read_is_shared_by_every_ilp_copy() -> None:
             Accum(name="acc", value="scaled", op="add", axes=("k",)),
         )
     )
-    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
+    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body))
     assert red is not None
     sched = SimpleNamespace(get=lambda *_: None)
     ctx = Ctx(grid=(Axis("m", 4),), inputs={}, output="o", sched=sched)

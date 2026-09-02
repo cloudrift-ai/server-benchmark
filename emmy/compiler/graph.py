@@ -316,7 +316,7 @@ def _stmt_eval_scope() -> dict:
 
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import DataType
-    from emmy.compiler.ir.axis import Axis, AxisRole, Window
+    from emmy.compiler.ir.axis import Axis, Window
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import (
         BinaryExpr,
@@ -366,7 +366,6 @@ def _stmt_eval_scope() -> dict:
         "Loop": Loop,
         "StridedLoop": StridedLoop,
         "Cond": Cond,
-        "AxisRole": AxisRole,
         # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
         # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
         "Window": Window,

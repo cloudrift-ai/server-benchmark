@@ -14,7 +14,7 @@ from sys import float_info
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
@@ -139,8 +139,7 @@ def test_extent_products_saturate_without_building_unbounded_integers():
                 body=(
                     Loop(
                         axis=Axis("middle", 10**200),
-                        body=(Loop(axis=Axis("inner", 10**200), body=(), role=AxisRole.PLANAR),),
-                        role=AxisRole.PLANAR,
+                        body=(Loop(axis=Axis("inner", 10**200), body=()),),
                     ),
                 ),
             ),

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field, replace
 from functools import cached_property
 
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.algebra import component_ops, rename_combine
@@ -497,9 +497,7 @@ class Fold:
         step = [*(stmt for edge in rides for stmt in edge.lower()), *self.step]
         if axis is None:
             return list(dict.fromkeys([*prologue, *step]))
-        # The loop is stamped as one that FOLDS — the one bit Loop IR reads off the annotation —
-        # since a composed reduce's own step is empty and its carriers sit in the inner loop.
-        return [*dict.fromkeys(prologue), Loop(axis=axis, body=Body(tuple(dict.fromkeys(step))), unroll=self.unroll, role=AxisRole.PLANAR)]
+        return [*dict.fromkeys(prologue), Loop(axis=axis, body=Body(tuple(dict.fromkeys(step))), unroll=self.unroll)]
 
     # ---- the STRUCTURAL protocol — children, defs, reads, bound axes. Spelled with the stmt
     # vocabulary's names on purpose: one canonicalizer and one deep walk then serve a term and its

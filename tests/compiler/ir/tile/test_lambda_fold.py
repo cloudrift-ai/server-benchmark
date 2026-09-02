@@ -7,7 +7,7 @@ canonical rewriting of lift and monoid state in lockstep."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda, component_ops, degenerate, merge_stmts
@@ -29,7 +29,7 @@ def _dissolved_loop(*, axes_stamped: bool = True) -> Loop:
             acc,
         )
     )
-    return Loop(axis=Axis("k", 512), body=body, role=AxisRole.PLANAR)
+    return Loop(axis=Axis("k", 512), body=body)
 
 
 def test_from_loop_stores_the_canonical_shape_lambda_spelled() -> None:
@@ -44,7 +44,7 @@ def test_from_loop_stores_the_canonical_shape_lambda_spelled() -> None:
     # The gate's promise: the derived loop IS the captured loop — carrier annotation included.
     assert fold.loop == loop
     assert fold.out == "acc0"
-    assert fold.role is AxisRole.PLANAR  # loads inline, no operand edges — the demoted shape
+    assert fold.axis is not None  # loads inline, no operand edges — the demoted shape
 
 
 def test_from_loop_stamps_an_unstamped_accumulator() -> None:
@@ -71,7 +71,7 @@ def _softmax_loop() -> Loop:
     from emmy.compiler.ir.pure.carrier import exp_merge
 
     body = Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))), *exp_merge(("m_i", "l_i"), ("x0", 1.0), key="m_i")))
-    return Loop(axis=Axis("k", 2048), body=body, role=AxisRole.TWISTED)
+    return Loop(axis=Axis("k", 2048), body=body)
 
 
 def _softmax_fold() -> Fold:
@@ -96,7 +96,7 @@ def test_twisted_fold_stores_the_true_monoid() -> None:
     assert fold.combine.results == ("m_i", "l_i")  # recognition's names thread through
     # The derived serial step (combine at the singleton) reproduces the dissolved merge exactly.
     assert fold.loop == loop
-    assert fold.role is AxisRole.TWISTED
+    assert fold.axis is not None and component_ops(fold.combine) is None
     assert component_ops(fold.combine) is None  # twisted — derived structurally, never stored
 
 
@@ -154,7 +154,7 @@ def _demoted_edge_loop() -> Loop:
             Accum(name="acc", value="p", op="add", axes=("k",)),
         )
     )
-    return Loop(axis=Axis("k", 1024), body=body, role=AxisRole.PLANAR)
+    return Loop(axis=Axis("k", 1024), body=body)
 
 
 def test_demoted_edge_algebra_reads_off_the_stored_params() -> None:
@@ -166,7 +166,7 @@ def test_demoted_edge_algebra_reads_off_the_stored_params() -> None:
     ``Accum(name=combine.results[i], value=lift.results[i], op=⊕ᵢ)`` per component into the lift
     body, so every field the tier reads has a stored home."""
     fold = fold_from_loop(_demoted_edge_loop())
-    assert fold is not None and fold.role is AxisRole.PLANAR
+    assert fold is not None and fold.axis is not None
 
     derived = list(fold.step_stmts())
     accums = [s for s in derived if isinstance(s, Accum)]

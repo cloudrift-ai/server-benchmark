@@ -14,11 +14,12 @@ import pytest
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold
+from emmy.compiler.ir.pure.algebra import component_ops
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import split_invariant_factors
@@ -42,7 +43,7 @@ def _twisted(code: str) -> Fold:
     graph = Pipeline.build(LOOP_PASSES).run(graph)
     graph = Pipeline.build(["lowering/tile"], select=["lift", "twisted"]).run(graph)
     tile = next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp))
-    matches = [fold for fold in _folds(tile.op) if fold.role is AxisRole.TWISTED]
+    matches = [fold for fold in _folds(tile.op) if (fold.axis is not None and component_ops(fold.combine) is None)]
     assert len(matches) == 1
     return matches[0]
 
@@ -64,7 +65,7 @@ def test_sdpa_rewrites_to_twisted_expectation() -> None:
 
     assert len(fold.init) == 3
     assert sum(isinstance(edge, Load) for edge in fold.operands) == 1
-    assert sum(isinstance(stmt, Fold) and stmt.role is AxisRole.CONTRACTION for stmt in fold.step_stmts()) == 2
+    assert sum(isinstance(stmt, Fold) and stmt.as_contraction() is not None for stmt in fold.step_stmts()) == 2
 
 
 def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
@@ -77,7 +78,7 @@ def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
 
     assert len(fold.init) == 3
     assert any(isinstance(stmt, Select) for stmt in fold.lift.body)
-    assert sum(isinstance(stmt, Fold) and stmt.role is AxisRole.CONTRACTION for stmt in fold.step_stmts()) == 2
+    assert sum(isinstance(stmt, Fold) and stmt.as_contraction() is not None for stmt in fold.step_stmts()) == 2
 
 
 @pytest.mark.parametrize("causal", [False, True])
@@ -155,7 +156,7 @@ def test_rewrite_pairs_only_the_online_softmax_pair(kind: str, should_pair: bool
     exp-family pair rewrites the program into a different program."""
     second = _sum_exp_shifted() if should_pair else _plain_sum()
     root = _rewrite(_row_max(), second)
-    twisted = [fold for fold in _folds(root) if fold.role is AxisRole.TWISTED]
+    twisted = [fold for fold in _folds(root) if (fold.axis is not None and component_ops(fold.combine) is None)]
     assert bool(twisted) == should_pair
     if should_pair:
         (pair,) = twisted
@@ -200,7 +201,7 @@ def test_twisted_folds_derived_loop_is_well_formed() -> None:
     even a plain contraction's re-lifts to a different structural key). Asserting the old closure
     would pin a retired guarantee, so what is pinned is what materialization actually consumes."""
     root = _rewrite(_row_max(), _sum_exp_shifted())
-    (pair,) = [fold for fold in _folds(root) if fold.role is AxisRole.TWISTED]
+    (pair,) = [fold for fold in _folds(root) if (fold.axis is not None and component_ops(fold.combine) is None)]
     loop = pair.loop
     defined = {loop.axis.name, "a0", *pair.defines(), *pair.combine.results}  # axes and carried state
     for stmt in loop.body:

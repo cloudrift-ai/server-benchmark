@@ -15,7 +15,7 @@ import numpy as np
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
@@ -54,7 +54,7 @@ def test_matmul_cell_lifts_and_canonicalizes_as_contraction() -> None:
     assert [axis.extent for axis in tile.place.free] == [Dim(32), Dim(64)]
     node = tile.op
     assert isinstance(node, Fold) and node.axis is not None
-    assert node.role is AxisRole.CONTRACTION
+    assert node.as_contraction() is not None
     assert isinstance(node.a, Load) and node.a.input == "x"
     assert isinstance(node.b, Load) and node.b.input == "w"
     assert len(tile.output_specs) == 1 and tile.output_specs[0].sweep is None
@@ -95,7 +95,7 @@ def test_non_distributing_lift_stays_planar() -> None:
     cell = (Loop(axis=k, body=inner), Write(output="out", index=(Var("m"), Var("n")), value="acc"))
     tile = _tile(Body((Loop(axis=m, body=Body((Loop(axis=n, body=Body(cell)),))),)))
     node = tile.op
-    assert isinstance(node, Fold) and node.axis is not None and node.role is AxisRole.PLANAR
+    assert isinstance(node, Fold) and node.axis is not None and node.axis is not None
     assert node.as_contraction() is None
 
 

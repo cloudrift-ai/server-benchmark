@@ -1,6 +1,6 @@
 """Generic sync compute-fill lowering invariants."""
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.kernel.ir import Smem, pack_smem, swizzle_fn, swizzle_xor
@@ -72,7 +72,6 @@ def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:
         reduce_axis = Axis("r", 4)
         loop = Loop(
             axis=reduce_axis,
-            role=AxisRole.PLANAR,
             body=Body(
                 (
                     Load(name="value", input="x", index=(col, Var(reduce_axis.name))),

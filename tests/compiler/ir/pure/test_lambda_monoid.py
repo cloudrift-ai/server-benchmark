@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda, M
 from emmy.compiler.ir.pure.algebra import component_ops, degenerate, eval_lambda, foldmap_eval
@@ -238,7 +238,7 @@ def _id_fold(op: str, value_stmts, acc: str, axis: Axis, value_name: str) -> Fol
     loop (the λ spelling is the ONE spelling since step 7; the byte-identity gate settles at
     construction, so the derived ``loop`` reproduces this exact body)."""
     accum = Accum(name=acc, value=value_name, op=op, axes=(axis.name,))
-    loop = Loop(axis=axis, body=Body((*value_stmts, accum)), role=AxisRole.PLANAR)
+    loop = Loop(axis=axis, body=Body((*value_stmts, accum)))
     fold = fold_from_loop(loop)
     assert fold is not None
     return fold

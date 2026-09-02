@@ -6,7 +6,7 @@ import pytest
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
@@ -47,7 +47,7 @@ def test_tile_post_init_canonicalizes_contraction() -> None:
         place=Placement(free=(Axis("m", 8), Axis("n", 16))),
     )
 
-    assert isinstance(tile.op, Fold) and tile.op.role is AxisRole.CONTRACTION
+    assert isinstance(tile.op, Fold) and tile.op.as_contraction() is not None
     assert tile.op.a.input == "x"
     assert tile.op.b.input == "w"
     assert TileOp(op=tile.op, place=tile.place).op == tile.op
@@ -70,7 +70,7 @@ def test_tile_post_init_canonicalizes_broadcast_batched_contraction() -> None:
         place=Placement(free=(Axis("batch", 4), Axis("m", 8), Axis("n", 16))),
     )
 
-    assert tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.as_contraction() is not None
     assert tile.op.a.input == "w"
     assert tile.op.b.input == "x"
 
@@ -94,7 +94,7 @@ def test_tile_post_init_recovers_an_elided_unit_contraction_row() -> None:
     )
 
     assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
-    assert tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.as_contraction() is not None
 
 
 @pytest.mark.parametrize(
@@ -230,7 +230,7 @@ def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row(
 
     assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
     assert tile.output_specs[0].sweep is None
-    assert any(site.node.role is AxisRole.CONTRACTION for site in sites(tile.op))
+    assert any(site.node.as_contraction() is not None for site in sites(tile.op))
     assert TileOp(op=tile.op, place=tile.place, output_specs=tile.output_specs).op is tile.op
 
 
@@ -269,7 +269,7 @@ def test_matvec_recovers_an_implicit_unit_row_through_an_output_reshape() -> Non
     )
 
     assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
-    assert isinstance(tile.op, Fold) and tile.op.role is AxisRole.CONTRACTION
+    assert isinstance(tile.op, Fold) and tile.op.as_contraction() is not None
 
 
 def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
@@ -344,7 +344,7 @@ def test_key_swept_statistic_closes_the_computed_b_operand() -> None:
 
     sweep = tile.op if tile.op.axis is not None else tile.op.operands[0]
     (score,) = (edge for edge in sweep.operands if is_contraction(edge))
-    assert score.role is AxisRole.CONTRACTION
+    assert score.as_contraction() is not None
     b = score.b
     assert isinstance(b, Fold) and frozenset(b.environment) <= {"m", "t", "d"}
     assert any(site.node.axis is not None for site in sites(b) if isinstance(site.node, Fold))
@@ -538,7 +538,7 @@ def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
     )
 
     contraction = tile.op.operands[0]
-    assert contraction.role is AxisRole.CONTRACTION
+    assert contraction.as_contraction() is not None
     assert len(contraction.channels) == 2
     assert contraction.a.input == "x"
 
@@ -567,7 +567,7 @@ def test_contraction_coalesces_overlapping_equivalent_shared_operands() -> None:
 
     tile = TileOp(op=planar, place=Placement(free=(Axis("m", 8), Axis("n", 16))))
 
-    assert tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.as_contraction() is not None
     assert len(tile.op.channels) == 2
     assert tile.op.a.out == "scaled0"
     assert sum(isinstance(stmt, Assign) and stmt.name.startswith("scaled") for stmt in tile.op.a.body) == 1
@@ -594,7 +594,7 @@ def test_contraction_orients_a_shared_commutative_argument_first() -> None:
 
     tile = TileOp(op=planar, place=Placement(free=(Axis("m", 8), Axis("n", 16))))
 
-    assert tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.as_contraction() is not None
     view = tile.op.as_contraction()
     assert (view.product.name, view.plus.name) == ("multiply", "add")
     assert tile.op.a.input == "w"
@@ -622,7 +622,7 @@ def test_contraction_computes_an_equivalent_channel_once() -> None:
 
     tile = TileOp(op=planar, place=Placement(free=(Axis("m", 8), Axis("n", 16))))
 
-    assert tile.op.role is AxisRole.CONTRACTION and len(tile.op.channels) == 2
+    assert tile.op.as_contraction() is not None and len(tile.op.channels) == 2
     assert len(tile.op.operands) == 2 and tile.op.channels[0].b is tile.op.channels[1].b
     assert sum(isinstance(stmt, Load) and stmt.input == "w" for stmt in tile.op.loop.body) == 1
 
@@ -710,7 +710,7 @@ def _computed_matmul(*, computed_a: bool, computed_b: bool) -> TileOp:
 def test_contraction_factors_a_computed_operand_cone() -> None:
     tile = _computed_matmul(computed_a=True, computed_b=False)
 
-    assert tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.as_contraction() is not None
     assert isinstance(tile.op.a, Fold) and tile.op.a.axis is None and tile.op.a.out == "computed_left"
     assert isinstance(tile.op.b, Load) and tile.op.b.input == "w"
 
@@ -718,7 +718,7 @@ def test_contraction_factors_a_computed_operand_cone() -> None:
 def test_contraction_factors_b_computed_operand_cone() -> None:
     tile = _computed_matmul(computed_a=False, computed_b=True)
 
-    assert tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.as_contraction() is not None
     assert isinstance(tile.op.a, Load) and tile.op.a.input == "x"
     assert isinstance(tile.op.b, Fold) and tile.op.b.axis is None and tile.op.b.out == "computed_right"
 
@@ -726,7 +726,7 @@ def test_contraction_factors_b_computed_operand_cone() -> None:
 def test_contraction_factors_both_computed_operand_cones_idempotently() -> None:
     tile = _computed_matmul(computed_a=True, computed_b=True)
 
-    assert tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.as_contraction() is not None
     assert isinstance(tile.op.a, Fold) and isinstance(tile.op.b, Fold)
     assert TileOp(op=tile.op, place=tile.place).op is tile.op
 
@@ -777,7 +777,7 @@ def test_contraction_preserves_computed_operand_statement_order() -> None:
 
     tile = TileOp(op=outer, place=Placement(free=(Axis("m", 8), Axis("n", 16))))
 
-    assert tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.as_contraction() is not None
     computed = tile.op.a
     lowered = computed.lower()
     assert isinstance(lowered[0], Loop) and lowered[0].axis.name == "j"
@@ -858,8 +858,8 @@ def test_total_lift_produces_canonical_contraction() -> None:
 
     tile = _lift(body)
 
-    assert tile.op.role is AxisRole.CONTRACTION
-    assert tile.op.loop.role is AxisRole.CONTRACTION
+    assert tile.op.as_contraction() is not None
+    assert tile.op.loop.is_reduce
 
 
 def _fed_chain_root(feed: bool) -> Fold:

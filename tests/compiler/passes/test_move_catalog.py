@@ -216,7 +216,7 @@ def _computed_b_term():
     """A contraction ``sum_k a[m, k] · b_k`` whose B edge is COMPUTED — an inline ``Fold`` over its
     own axis. The parent fill realizes the computed edge, so only the contraction is a schedule
     site."""
-    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.pure.fold import Channel, Fold
     from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
@@ -228,7 +228,6 @@ def _computed_b_term():
         Loop(
             axis=Axis("j", 256),
             body=Body((Load(name="w_e", input="w", index=(Var("m"), Var("j"))), Accum(name="bacc", value="w_e", op="add", axes=("j",)))),
-            role=AxisRole.PLANAR,
         )
     )
     node = Fold.contraction(
@@ -278,7 +277,7 @@ def _rows_of(tile, ctx=None) -> list[dict]:
 
 def test_work_pin_never_widens_a_site_catalog(monkeypatch):
     """A matching pin narrows to one inventory; an unmatched pin offers no schedule row."""
-    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
     from emmy.compiler.ir.tile import Placement, TileOp
@@ -289,7 +288,6 @@ def test_work_pin_never_widens_a_site_catalog(monkeypatch):
         Loop(
             axis=Axis("kv", 256),
             body=Body((Load(name="v_e", input="v", index=(Var("m"), Var("kv"))), Accum(name="acc", value="v_e", op="add", axes=("kv",)))),
-            role=AxisRole.PLANAR,
         )
     )
     tile = TileOp(op=fold, place=Placement(free=(Axis("m", 64),)))
@@ -370,7 +368,7 @@ def test_f32_computed_a_contraction_offers_a_tiled_scalar_row():
 
 def _reduce_term():
     """A bare 4096-wide row reduce over a 64-cell grid, as an unmapped ``TileOp``."""
-    from emmy.compiler.ir.axis import Axis, AxisRole
+    from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
     from emmy.compiler.ir.tile import Placement, TileOp
@@ -380,7 +378,6 @@ def _reduce_term():
         Loop(
             axis=Axis("k", 4096),
             body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), Accum(name="acc", value="x_e", op="add", axes=("k",)))),
-            role=AxisRole.PLANAR,
         )
     )
     return TileOp(op=fold, place=Placement(free=(Axis("m", 64),)))

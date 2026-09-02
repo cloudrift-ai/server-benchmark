@@ -48,7 +48,7 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.axis import Axis, AxisRole, Window
+from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
@@ -151,7 +151,7 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
         hoisted = list(dict.fromkeys(s for edge in op.operands if op.axis.name not in edge.index_space for s in _emit(edge, ctx).body))
         rides = dict.fromkeys(s for edge in op.operands if op.axis.name in edge.index_space for s in _emit(edge, ctx).body)
         stmts = _emit_body(Body((*rides, *op.step)), ctx)
-        loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=AxisRole.PLANAR)
+        loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll)
         return Frag(body=[*hoisted, loop], out=Handle(op.out))
     raise TypeError(f"_emit: expected a Fold node, got {type(op).__name__}")
 
@@ -170,7 +170,7 @@ def _map_wire(op: Fold) -> Handle:
     last = op.lift.body[-1]
     if isinstance(last, Write):
         return Handle(last.values[-1], residence="gmem")
-    if isinstance(last, (Loop, StridedLoop)) and last.role.is_reduce:
+    if isinstance(last, (Loop, StridedLoop)) and last.is_reduce:
         return Handle(loop_state_head(last))
     defs = last.defines()
     return Handle(defs[-1] if defs else "")

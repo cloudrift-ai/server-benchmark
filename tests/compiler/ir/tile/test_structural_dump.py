@@ -17,7 +17,7 @@ them — never from the term; (e) a λ that is not closed says what it captures.
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Channel, Fold
@@ -46,7 +46,7 @@ def _stat_fold() -> Fold:
             Accum(name="acc0", value="v1", op="add", axes=("k",)),
         )
     )
-    return fold_from_loop(Loop(axis=Axis("k", 512), body=body, role=AxisRole.PLANAR))
+    return fold_from_loop(Loop(axis=Axis("k", 512), body=body))
 
 
 def _cone() -> Fold:

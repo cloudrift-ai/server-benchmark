@@ -158,8 +158,8 @@ kernel it produced went on to read.
   `TileOp` holding the structural-IR root `op` directly (`tile/ir` — one `Fold` kind), structural
   placement, one accepted site-indexed `Schedule`, and separate `ClassicMaterialization`
   facts. A kernel's structure is read from each node's derived classification, not a Python kernel
-  type. `010_lift` lifts the `Fold` tree (the loop nest reconstructed on demand, each reduce `Loop`
-  carrying its `AxisRole` — the ONLY loop annotation; the algebra is the term's own
+  type. `010_lift` lifts the `Fold` tree (the loop nest reconstructed on demand; a `Loop` carries no
+  annotation, it folds iff its body carries an `Accum`; the algebra is the term's own
   `lift` / `(init, combine)`) with an UNMAPPED `Placement`;
   The tile schedule maps the free axes onto the grid and decides the reduce `Reduce` via the single
   `REDUCE` codec knob (`g<n>` cta / `coop` (its width in `WORK`) / `r<n>` reg; the
@@ -302,9 +302,9 @@ carrier-agnostic checks) test exactly that `isinstance(s, (Accum, Mma))`
 tuple — there is no shared base class; the carriers are plain `Stmt`s
 that happen to share the reduce-surface methods. `Accum` / `Mma` expose
 `associative` / `commutative` / `has_identity` traits (`Accum` forwards to its scalar
-`op`; `Mma` reports the additive-fold constants). A reduce `Loop` also carries its
-scheduling `AxisRole` (`loop.role`) — its ONLY annotation, derived when a Fold lowers; the loop holds NO algebra
-payload (the fold's ⊕ lives on the `Fold` node's stored `combine`). Commutativity
+`op`; `Mma` reports the additive-fold constants). A reduce `Loop` carries no annotation — it
+folds iff its body carries an `Accum` — and NO algebra payload (the fold's ⊕ lives on the `Fold` node's
+stored `combine`). Commutativity
 is unused — split/reorder legality is a future cooperative-tier concern, recorded
 structurally when it returns.
 
@@ -337,8 +337,8 @@ type to dispatch on and no second place for a fact to live.
   stream order-visible, so an observed fold schedules as the serial fold only.
 
 `Fold.lower()` flattens the term to the loop nest: `Fold.loop` reconstructs the annotated reduce `Loop`
-from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO
-algebra — a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
+from the stored params, its operands' bodies ahead of the step. Loops carry NO algebra and no
+annotation, so the derived nest depends only on what is stored, which is
 what makes every identity of the term a digest of its lowered body — there is no separate term hasher.
 `Fold.structural_key` is the exact-flavor canonical digest of the nest `lower()` derives (the body is the
 term's normal form); the variant key (`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body

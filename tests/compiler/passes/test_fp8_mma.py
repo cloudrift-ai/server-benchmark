@@ -25,7 +25,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32, decode_f8, encode_f8
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atom_for, atoms_for
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
@@ -91,7 +91,7 @@ def _w8a8_loop(*, a_scale=True, b_scale=True):
         Assign(name="v", op="multiply", args=(a_val, b_val)),
         Accum(name="acc", value="v", op=ElementwiseImpl("add")),
     ]
-    return Loop(axis=k, body=Body(tuple(stmts)), role=AxisRole.CONTRACTION)
+    return Loop(axis=k, body=Body(tuple(stmts)))
 
 
 def test_a_side_decode_scale_binds_raw_with_hoist():

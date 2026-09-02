@@ -16,7 +16,7 @@ gather to the wrong row.
 from __future__ import annotations
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
@@ -72,7 +72,6 @@ def test_fold_combine_tracks_accum_rename() -> None:
 
     loop = Loop(
         axis=Axis(name="k0", extent=Dim(8)),
-        role=AxisRole.PLANAR,
         body=Body(
             (
                 Load(name="v9", input="a", index=(Var("k0"),)),

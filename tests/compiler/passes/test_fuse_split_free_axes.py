@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
@@ -191,7 +191,7 @@ def test_packed_split_nest_classifies_as_contraction():
     tier becomes reachable, which is what the split had locked out."""
     tile = _lift(_run(_packed_split_graph()))
     assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
-    assert tile.op.axis is not None and tile.op.role is AxisRole.CONTRACTION
+    assert tile.op.axis is not None and tile.op.as_contraction() is not None
 
 
 def test_axis_addressed_alone_declines():
@@ -280,7 +280,7 @@ def test_transposed_canonical_nest_orders_free_by_the_remainder_dim():
     tile = _lift(op)
     assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
     node = tile.op
-    assert node.axis is not None and node.role is AxisRole.CONTRACTION
+    assert node.axis is not None and node.as_contraction() is not None
     assert isinstance(node.b, Load) and node.b.input == "w"
 
 
@@ -314,7 +314,7 @@ def test_canonical_nest_classifies_as_contraction():
     tile = _lift(LoopOp(body=body))
     assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
     node = tile.op
-    assert node.axis is not None and node.role is AxisRole.CONTRACTION
+    assert node.axis is not None and node.as_contraction() is not None
     assert isinstance(node.b, Load) and node.b.input == "w"
 
 

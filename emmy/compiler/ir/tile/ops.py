@@ -481,7 +481,7 @@ def head(op):
 
     The ONE accessor for "which node is this kernel about", replacing the hand-spelled
     ``op.operands[0] if op.axis is None and op.operands else op`` ternary at every reader. Every
-    node-level fact the scheduler dispatches on — the :class:`~emmy.compiler.ir.axis.AxisRole`, the
+    node-level fact the scheduler dispatches on — the views, the
     reduce ``Axis``, the operand edges — is a STORED param on what this returns."""
     node = op
     if isinstance(op, Fold) and op.axis is None:

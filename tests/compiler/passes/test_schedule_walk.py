@@ -18,7 +18,7 @@ import pytest
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
@@ -340,7 +340,7 @@ def _chain_member(acc: str, axis: str, extent: int, src: str, factor: str):
             Accum(name=acc, value=f"{src}_scaled", op="add", axes=(axis,)),
         )
     )
-    red = fold_from_loop(Loop(axis=Axis(axis, extent), body=body, role=AxisRole.PLANAR))
+    red = fold_from_loop(Loop(axis=Axis(axis, extent), body=body))
     assert red is not None
     return red
 
@@ -391,9 +391,9 @@ def test_a_fold_nested_under_a_chain_member_offers_only_the_serial_reduce(unpinn
             Accum(name="acc_inner", value="x_e", op="add", axes=("k",)),
         )
     )
-    inner_loop = Loop(axis=Axis("k", 128), body=inner_body, role=AxisRole.PLANAR)
+    inner_loop = Loop(axis=Axis("k", 128), body=inner_body)
     outer_body = Body((inner_loop, Accum(name="acc_outer", value="acc_inner", op="add", axes=("m",))))
-    outer = fold_from_loop(Loop(axis=Axis("m", 4), body=outer_body, role=AxisRole.PLANAR))
+    outer = fold_from_loop(Loop(axis=Axis("m", 4), body=outer_body))
     inner = next(member for member in outer.lift.body if isinstance(member, Fold))
 
     root = _chain_root(outer, results=("acc_outer",))
@@ -422,7 +422,7 @@ def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
             Write(output="running", index=(Var("m"), Var("j")), value="scan_acc"),
         )
     )
-    scan, _trailing = scan_from_loop(Loop(axis=Axis("j", 4), body=scan_body, role=AxisRole.PLANAR))
+    scan, _trailing = scan_from_loop(Loop(axis=Axis("j", 4), body=scan_body))
     assert scan.observe is not None
     red = _chain_member("acc", "k", 128, "x", "v25")
     spec = OutputSpec(write=Write(output="running", index=(Var("m"), Var("j")), value=scan.observe.results[0]), sweep=None)
@@ -505,9 +505,9 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
             Accum(name="acc_inner", value="x_scaled", op="add", axes=("k",)),
         )
     )
-    inner_loop = Loop(axis=Axis("k", 128), body=inner_body, role=AxisRole.PLANAR)
+    inner_loop = Loop(axis=Axis("k", 128), body=inner_body)
     outer_body = Body((inner_loop, Accum(name="acc_outer", value="acc_inner", op="add", axes=("j",))))
-    outer = fold_from_loop(Loop(axis=Axis("j", 4), body=outer_body, role=AxisRole.PLANAR))
+    outer = fold_from_loop(Loop(axis=Axis("j", 4), body=outer_body))
     root = _chain_root(outer, results=("acc_outer",))
     tile = TileOp(op=root, place=Placement(free=(Axis("m", 4),)), name="k_chain_probe", knobs={})
     assert tile.op.axis is None and not tile.op.operands, "construction must preserve the chain form"

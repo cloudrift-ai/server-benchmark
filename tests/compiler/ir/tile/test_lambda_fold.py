@@ -36,7 +36,9 @@ def test_from_loop_stores_the_canonical_shape_lambda_spelled() -> None:
     loop = _dissolved_loop()
     fold = fold_from_loop(loop)
     assert fold is not None and fold.lift is not None
-    assert fold.lift.params == ("k",)  # the iteration var; loads stay inline in the lift
+    # The iteration var, then the residual the body reads: loads stay inline in the lift, so the
+    # enclosing row coordinate they index by binds as a trailing param — a term has no free names.
+    assert fold.lift.params == ("k", "m")
     assert fold.lift.results == ("v1",)
     assert degenerate(fold.combine) and fold.combine.results == ("acc0",)
     # The gate's promise: the derived loop IS the captured loop — carrier annotation included.
@@ -77,11 +79,7 @@ def _softmax_fold() -> Fold:
     other = tuple(f"{name}__o" for name in names)
     return Fold(
         axis=Axis("k", 2048),
-        lift=Lambda(
-            params=("k",),
-            body=Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))),)),
-            results=("x0", 1.0),
-        ),
+        lift=Lambda.closing(("k",), Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))),)), ("x0", 1.0)),
         init=(ElementwiseImpl("maximum").identity, 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )

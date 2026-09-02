@@ -82,7 +82,9 @@ def test_fold_dump_shows_every_stored_param() -> None:
     text = "\n".join(pretty(_stat_fold()))
     assert text.splitlines()[0] == "Fold[k in 0..512] planar"
     assert "├─ init: (0)" in text
-    assert "├─ lift: λ(k) -> (v1)" in text
+    # Every param, the residual included: the body reads the enclosing row coordinate, so the
+    # lift binds it after the iteration var and the signature says so.
+    assert "├─ lift: λ(k, m) -> (v1)" in text
     assert "└─ combine: λ(acc0, acc0__o) -> (acc0)" in text
     # The lift's own body nests two under its signature — the stored program, read as the
     # binder's body rather than as a sibling of the branch labels.
@@ -209,15 +211,17 @@ def _capturing_cone() -> Fold:
     )
 
 
-def test_a_lambda_that_captures_an_enclosing_value_shows_its_capture_set() -> None:
-    """Without this the λ prints as though it were closed — and being closed is exactly what
-    decides whether a subtree can become an operand edge. ``m`` / ``k`` here are iteration space
-    (placement + the contraction's own axis); only ``m_run`` is a captured VALUE."""
+def test_a_lambda_binds_an_enclosing_value_as_a_trailing_param() -> None:
+    """Being closed is exactly what decides whether a subtree can become an operand edge, so a λ
+    that reads an enclosing value BINDS it — the dump shows it in the signature rather than in a
+    separate capture annexe. ``m`` / ``k`` are iteration space (placement + the contraction's own
+    axis) and ``m_run`` is a value, and binding everything is what removes that distinction
+    instead of deciding it: all three arrive as params, in the order ``Lambda.closing`` appends."""
     node = _product(a=_capturing_cone())
     tile = TileOp(op=node, name="k_flashish", place=Placement(free=(Axis("m", 128),), grid=(Axis("m", 128),), mapped=True))
     text = tile.pretty_body()
-    assert "[captures m_run]" in text
-    assert "captures k" not in text and "captures m," not in text
+    assert "│  └─ lift: λ(k, m, m_run) -> (p)" in text
+    assert "captures" not in text
 
 
 def test_iteration_vars_are_not_captures() -> None:

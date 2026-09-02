@@ -176,9 +176,16 @@ def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
 
 
 def test_contraction_deps_include_inline_operand_captures() -> None:
+    """A term declares its own environment and nothing more, so the enclosing node's capture set
+    is read off what it LOWERS TO — the walk the cut predicate above uses. An inline operand's
+    capture has to surface there, or a cut would separate it from the value it reads."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _external_reads
+
     node = _node(_capturing_cone(), ("acc_g", "Wg"))
 
-    assert "m_run" in node.deps()
+    assert node.environment == ()  # declared locally: the contraction binds only its own edges
+    assert "m_run" in node.a.environment  # the capturing edge declares it
+    assert "m_run" in _external_reads(node)  # and it reaches the enclosing node's reads
 
 
 def test_cut_closure_does_not_confuse_a_sibling_loop_axis_for_scope() -> None:

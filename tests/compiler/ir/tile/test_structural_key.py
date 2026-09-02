@@ -55,7 +55,7 @@ def _wrapped(inner: Fold, *, buf: str, load: str = "in3", v: str = "v5") -> Fold
             Assign(name=v, op="multiply", args=(load, bound)),
         )
     )
-    return Fold(axis=None, operands=(inner,), lift=Lambda(params=(bound,), body=body, results=(v,)))
+    return Fold(axis=None, operands=(inner,), lift=Lambda.closing((bound,), body, (v,)))
 
 
 # ---- α-invariance ------------------------------------------------------------------------------ #
@@ -78,8 +78,8 @@ def test_independent_stmt_interleaving_never_moves_the_key() -> None:
     load = Load(name="in0", input="x", index=(Var("a0"), Var("a1")))
     add = Assign(name="v1", op="add", args=("in0", "in0"))
     mul = Assign(name="v2", op="multiply", args=("in0", "in0"))
-    one = Fold(axis=None, lift=Lambda(params=(), body=Body((load, add, mul)), results=("v1", "v2")))
-    two = Fold(axis=None, lift=Lambda(params=(), body=Body((load, mul, add)), results=("v1", "v2")))
+    one = Fold(axis=None, lift=Lambda.closing((), Body((load, add, mul)), ("v1", "v2")))
+    two = Fold(axis=None, lift=Lambda.closing((), Body((load, mul, add)), ("v1", "v2")))
     assert one.structural_key() == two.structural_key()
 
 
@@ -87,11 +87,7 @@ def test_projection_region_keys_ignore_ssa_and_buffer_spelling() -> None:
     def term(*, value: str, buffer: str, extent: int = 4) -> Fold:
         region = ProjectionRegion(
             axis=Axis("q", extent),
-            lift=Lambda(
-                params=("q",),
-                body=Body((Load(name=value, input=buffer, index=(Var("m"), Var("q"))),)),
-                results=(value,),
-            ),
+            lift=Lambda.closing(("q",), Body((Load(name=value, input=buffer, index=(Var("m"), Var("q"))),)), (value,)),
         )
         return Fold.projection(body=Body((region,)), results=())
 
@@ -109,11 +105,7 @@ def test_twisted_state_renames_never_move_the_key() -> None:
         other = tuple(f"{name}__o" for name in names)
         return Fold(
             axis=Axis("k", 2048),
-            lift=Lambda(
-                params=("k",),
-                body=Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))),)),
-                results=("x0", 1.0),
-            ),
+            lift=Lambda.closing(("k",), Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))),)), ("x0", 1.0)),
             init=(-1e30, 0.0),
             combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
         )

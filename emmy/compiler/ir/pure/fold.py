@@ -1000,9 +1000,14 @@ def _ordered_projection(members, results: tuple[str, ...], axes: tuple[str, ...]
         for stmt in suffix:
             needed.update(_member_reads(stmt))
         bridge = tuple(name for stmt in prefix for name in stmt.defines() if name in needed)
-        assert bridge, "a separated pure prefix must feed its suffix"
-        source = _ordered_projection(prefix, bridge, axes)
-        return _ordered_projection((source, *suffix), results, axes)
+        # A prefix that feeds nothing needs no nesting: it is DEAD with respect to the suffix, so
+        # there is no ordering to preserve and the plain separation below is correct — the terms
+        # become operands and the dead stmts stay body members for a later pass to judge. Asserting
+        # a bridge here rejected that shape; the ordering rule only has something to say when the
+        # prefix actually provides.
+        if bridge:
+            source = _ordered_projection(prefix, bridge, axes)
+            return _ordered_projection((source, *suffix), results, axes)
 
     operands = _unique_edges(tuple(stmt for stmt in members if isinstance(stmt, Fold)))
     body = Body(stmt for stmt in members if not isinstance(stmt, Fold))

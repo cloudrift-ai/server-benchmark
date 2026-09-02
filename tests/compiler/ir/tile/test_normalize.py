@@ -38,12 +38,12 @@ def _planar_matmul() -> Fold:
         )
     )
     init, combine = M(ElementwiseImpl("add"), names=("acc",))
-    return Fold(axis=axis, lift=Lambda(params=("k",), body=body, results=("product",)), init=init, combine=combine)
+    return Fold(axis=axis, lift=Lambda.closing(("k",), body, ("product",)), init=init, combine=combine)
 
 
 def test_tile_post_init_canonicalizes_contraction() -> None:
     tile = TileOp(
-        op=Fold.projection(body=Body((_planar_matmul(),))),
+        op=Fold.projection(operands=(_planar_matmul(),)),
         place=Placement(free=(Axis("m", 8), Axis("n", 16))),
     )
 
@@ -63,7 +63,7 @@ def test_tile_post_init_canonicalizes_broadcast_batched_contraction() -> None:
         )
     )
     init, combine = M(ElementwiseImpl("add"), names=("acc",))
-    planar = Fold(axis=axis, lift=Lambda(params=("k",), body=body, results=("product",)), init=init, combine=combine)
+    planar = Fold(axis=axis, lift=Lambda.closing(("k",), body, ("product",)), init=init, combine=combine)
 
     tile = TileOp(
         op=planar,
@@ -85,7 +85,7 @@ def test_tile_post_init_recovers_an_elided_unit_contraction_row() -> None:
         )
     )
     init, combine = M(ElementwiseImpl("add"), names=("acc",))
-    planar = Fold(axis=axis, lift=Lambda(params=("k",), body=body, results=("product",)), init=init, combine=combine)
+    planar = Fold(axis=axis, lift=Lambda.closing(("k",), body, ("product",)), init=init, combine=combine)
 
     tile = TileOp(
         op=planar,
@@ -115,7 +115,7 @@ def test_tile_post_init_does_not_infer_a_unit_row_from_a_non_dense_boundary(inde
         )
     )
     init, combine = M(ElementwiseImpl("add"), names=("acc",))
-    planar = Fold(axis=axis, lift=Lambda(params=("k",), body=body, results=("product",)), init=init, combine=combine)
+    planar = Fold(axis=axis, lift=Lambda.closing(("k",), body, ("product",)), init=init, combine=combine)
 
     tile = TileOp(
         op=planar,
@@ -159,11 +159,7 @@ def test_nested_contraction_promotes_a_shared_store_sweep() -> None:
     init, combine = M(ElementwiseImpl("add"), names=("stat",))
     stat = Fold(
         axis=stat_axis,
-        lift=Lambda(
-            params=("r",),
-            body=Body((Load(name="sample", input="s", index=(Var("m"), Var("r"))),)),
-            results=("sample",),
-        ),
+        lift=Lambda.closing(("r",), Body((Load(name="sample", input="s", index=(Var("m"), Var("r"))),)), ("sample",)),
         init=init,
         combine=combine,
     )
@@ -199,16 +195,16 @@ def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row(
     linear_init, linear_combine = M(ElementwiseImpl("add"), names=("acc",))
     linear = Fold(
         axis=k,
-        lift=Lambda(
-            params=("k",),
-            body=Body(
+        lift=Lambda.closing(
+            ("k",),
+            Body(
                 (
                     Load(name="left", input="x", index=(Literal(0, "int"), Var("k"))),
                     Load(name="right", input="w", index=(Var("k"), Var("n"))),
                     Assign(name="product", op="multiply", args=("left", "right")),
                 )
             ),
-            results=("product",),
+            ("product",),
         ),
         init=linear_init,
         combine=linear_combine,
@@ -244,16 +240,16 @@ def test_matvec_recovers_an_implicit_unit_row_through_an_output_reshape() -> Non
     init, combine = M(ElementwiseImpl("add"), names=("acc",))
     product = Fold(
         axis=k,
-        lift=Lambda(
-            params=("k",),
-            body=Body(
+        lift=Lambda.closing(
+            ("k",),
+            Body(
                 (
                     Load(name="left", input="x", index=(Var("k"),)),
                     Load(name="right", input="w", index=(Var("k"), Var("n"))),
                     Assign(name="product", op="multiply", args=("left", "right")),
                 )
             ),
-            results=("product",),
+            ("product",),
         ),
         init=init,
         combine=combine,
@@ -302,15 +298,15 @@ def _key_swept_score(shared_reader: bool = False) -> TileOp:
     stat_init, stat_combine = M(ElementwiseImpl("add"), names=("ss",))
     stat = Fold(
         axis=d,
-        lift=Lambda(
-            params=("d",),
-            body=Body(
+        lift=Lambda.closing(
+            ("d",),
+            Body(
                 (
                     Load(name="ksq", input="k", index=(Var("t"), Var("d"))),
                     Assign(name="sq", op="multiply", args=("ksq", "ksq")),
                 )
             ),
-            results=("sq",),
+            ("sq",),
         ),
         init=stat_init,
         combine=stat_combine,
@@ -330,15 +326,16 @@ def _key_swept_score(shared_reader: bool = False) -> TileOp:
     sweep_init, sweep_combine = M(ElementwiseImpl("maximum"), names=("mx",))
     sweep = Fold(
         axis=t,
-        lift=Lambda(
-            params=("t",),
-            body=Body((stat, Assign(name="inv", op="rsqrt", args=("ss",)), score, *((result,) if shared_reader else ()))),
-            results=("mixed",) if shared_reader else ("acc",),
+        operands=(stat, score),
+        lift=Lambda.closing(
+            ("t", "ss", "acc"),
+            Body((Assign(name="inv", op="rsqrt", args=("ss",)), *((result,) if shared_reader else ()))),
+            ("mixed",) if shared_reader else ("acc",),
         ),
         init=sweep_init,
         combine=sweep_combine,
     )
-    return TileOp(op=Fold.projection(body=Body((sweep,))), place=Placement(free=(Axis("m", 4),)))
+    return TileOp(op=Fold.projection(operands=(sweep,)), place=Placement(free=(Axis("m", 4),)))
 
 
 def test_key_swept_statistic_closes_the_computed_b_operand() -> None:
@@ -346,10 +343,10 @@ def test_key_swept_statistic_closes_the_computed_b_operand() -> None:
     tile = _key_swept_score()
 
     sweep = tile.op if tile.op.axis is not None else tile.op.operands[0]
-    (score,) = (stmt for stmt in sweep.lift.body if isinstance(stmt, Fold))
+    (score,) = (edge for edge in sweep.operands if is_contraction(edge))
     assert score.role is AxisRole.CONTRACTION
     b = score.b
-    assert isinstance(b, Fold) and frozenset(b.deps()) <= {"m", "t", "d"}
+    assert isinstance(b, Fold) and frozenset(b.environment) <= {"m", "t", "d"}
     assert any(site.node.axis is not None for site in sites(b) if isinstance(site.node, Fold))
     assert TileOp(op=tile.op, place=tile.place).op is tile.op
     # A synthetic TileOp carries no graph output tensors, so the workspace dtype rule cannot
@@ -363,8 +360,8 @@ def test_key_swept_statistic_stays_when_a_sibling_reads_it() -> None:
 
     sweep = tile.op if tile.op.axis is not None else tile.op.operands[0]
     assert any(isinstance(stmt, Assign) and stmt.name == "inv" for stmt in sweep.lift.body)
-    (score,) = (stmt for stmt in sweep.lift.body if isinstance(stmt, Fold) and is_contraction(stmt))
-    assert "inv" in score.b.deps()
+    (score,) = (edge for edge in sweep.operands if is_contraction(edge))
+    assert "inv" in score.b.environment
     assert id(score.b) not in {id(seam.node) for seam in cuttable_seams(tile)}
 
 
@@ -422,15 +419,15 @@ def _statistic_under_two_binders() -> TileOp:
     stat_init, stat_combine = M(ElementwiseImpl("add"), names=("ss",))
     stat = Fold(
         axis=r,
-        lift=Lambda(
-            params=("r",),
-            body=Body(
+        lift=Lambda.closing(
+            ("r",),
+            Body(
                 (
                     Load(name="xr", input="x", index=(Var("m"), Var("r"))),
                     Assign(name="sq", op="multiply", args=("xr", "xr")),
                 )
             ),
-            results=("sq",),
+            ("sq",),
         ),
         init=stat_init,
         combine=stat_combine,
@@ -453,11 +450,16 @@ def _statistic_under_two_binders() -> TileOp:
     sweep_init, sweep_combine = M(ElementwiseImpl("maximum"), names=("mx",))
     sweep = Fold(
         axis=t,
-        lift=Lambda(params=("t",), body=Body((score,)), results=("acc",)),
+        operands=(score,),
+        lift=Lambda.closing(("t", "acc"), Body(), ("acc",)),
         init=sweep_init,
         combine=sweep_combine,
     )
-    return TileOp(op=Fold.projection(body=Body((stat, inv, sweep))), place=Placement(free=(Axis("m", 4),)))
+    # The statistic and its rsqrt are the sweep's SOURCE — a projection evaluates its operands
+    # before its body, so the chain the sweep's cone captures rides its own edge rather than a
+    # sibling body position.
+    source = Fold.projection(operands=(stat,), body=Body((inv,)), results=("inv",))
+    return TileOp(op=Fold.projection(operands=(source, sweep), results=("mx",)), place=Placement(free=(Axis("m", 4),)))
 
 
 def _loop_scopes(stmts, enclosing: tuple[str, ...] = ()) -> list[tuple[str, tuple[str, ...]]]:
@@ -481,26 +483,33 @@ def test_a_statistic_is_not_sunk_beneath_new_binders() -> None:
     assert scopes == [()], scopes
 
 
-def test_a_fold_reading_a_sweep_axis_stays_a_body_member() -> None:
-    """A per-column reduce whose streamed load reads the boundary store's sweep axis must stay a
-    projection BODY member: reconstitution re-wraps body stmts inside the sweep ``Loop``, but an
-    operand edge lowers at kernel scope, where the sweep axis is unbound (found live: DeepSeek-V4
-    post16's ``k_div_36`` column sum rendered its sweep column as an undefined identifier at nvcc)."""
+def test_a_fold_reading_a_sweep_axis_declares_it_on_the_operand_edge() -> None:
+    """A per-column reduce whose streamed load reads the boundary store's sweep axis is an operand
+    EDGE like any other term, and it DECLARES that axis.
+
+    Body position used to carry this: a body member is re-wrapped inside the sweep ``Loop`` by
+    reconstitution while an edge lowers at kernel scope, so a sweep-reading fold had to stay in the
+    body or its column rendered as an undefined identifier (found live: DeepSeek-V4 post16's
+    ``k_div_36``). A term cannot be a body member — a Fold tree composes through ``operands`` — so
+    the fact is carried explicitly instead: the sweep axis is a lift param, which is what lets the
+    evaluation domain be recovered from the term rather than inferred from where it sits."""
     k = Axis("k", Dim(4))
     j = Axis("j", Dim(4))
     body = Body((Load(name="xin", input="x", index=(Var("m"), Var("k"), Var("j"))),))
     init, combine = M(ElementwiseImpl("add"), names=("acc",))
-    fold = Fold(axis=k, lift=Lambda(params=("k",), body=body, results=("xin",)), init=init, combine=combine)
+    fold = Fold(axis=k, lift=Lambda.closing(("k",), body, ("xin",)), init=init, combine=combine)
     epilogue = Assign(name="v", op="relu", args=("acc",))
 
     tile = TileOp(
-        op=Fold.projection(body=Body((fold, epilogue))),
+        op=Fold.projection(operands=(fold,), body=Body((epilogue,)), results=("v",)),
         place=Placement(free=(Axis("m", 8),)),
         output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("j")), value="v"), sweep=j),),
     )
 
-    assert not tile.op.operands
-    assert any(isinstance(stmt, Fold) for stmt in tile.op.body)
+    assert not any(isinstance(stmt, Fold) for stmt in tile.op.body)
+    (edge,) = tile.op.operands
+    assert j.name in edge.lift.params, edge.lift.params
+    assert j.name in edge.deps(), edge.deps()
 
 
 def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
@@ -518,13 +527,13 @@ def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
     init, combine = M(ElementwiseImpl("add"), ElementwiseImpl("add"), names=("acc0", "acc1"))
     planar = Fold(
         axis=axis,
-        lift=Lambda(params=("k",), body=body, results=("product0", "product1")),
+        lift=Lambda.closing(("k",), body, ("product0", "product1")),
         init=init,
         combine=combine,
     )
 
     tile = TileOp(
-        op=Fold.projection(body=Body((planar,))),
+        op=Fold.projection(operands=(planar,)),
         place=Placement(free=(Axis("m", 8), Axis("n", 16))),
     )
 
@@ -551,7 +560,7 @@ def test_contraction_coalesces_overlapping_equivalent_shared_operands() -> None:
     init, combine = M(ElementwiseImpl("add"), ElementwiseImpl("add"), names=("acc0", "acc1"))
     planar = Fold(
         axis=axis,
-        lift=Lambda(params=("k",), body=body, results=("product0", "product1")),
+        lift=Lambda.closing(("k",), body, ("product0", "product1")),
         init=init,
         combine=combine,
     )
@@ -578,7 +587,7 @@ def test_contraction_orients_a_shared_commutative_argument_first() -> None:
     init, combine = M(ElementwiseImpl("add"), ElementwiseImpl("add"), names=("acc0", "acc1"))
     planar = Fold(
         axis=axis,
-        lift=Lambda(params=("k",), body=body, results=("product0", "product1")),
+        lift=Lambda.closing(("k",), body, ("product0", "product1")),
         init=init,
         combine=combine,
     )
@@ -605,7 +614,7 @@ def test_contraction_computes_an_equivalent_channel_once() -> None:
     init, combine = M(ElementwiseImpl("add"), ElementwiseImpl("add"), names=("acc0", "acc1"))
     planar = Fold(
         axis=axis,
-        lift=Lambda(params=("k",), body=body, results=("product0", "product1")),
+        lift=Lambda.closing(("k",), body, ("product0", "product1")),
         init=init,
         combine=combine,
     )
@@ -648,7 +657,7 @@ def test_semiring_merges_overlapping_operand_cones_into_one_multi_result_edge() 
     init, combine = M(ElementwiseImpl("add"), ElementwiseImpl("add"), names=("acc0", "acc1"))
     planar = Fold(
         axis=axis,
-        lift=Lambda(params=("k",), body=body, results=("product0", "product1")),
+        lift=Lambda.closing(("k",), body, ("product0", "product1")),
         init=init,
         combine=combine,
     )
@@ -686,9 +695,9 @@ def _computed_matmul(*, computed_a: bool, computed_b: bool) -> TileOp:
         right = "computed_right"
     body.append(Assign(name="product", op="multiply", args=(left, right)))
     init, combine = M(ElementwiseImpl("add"), names=("acc",))
-    planar = Fold(axis=axis, lift=Lambda(params=("k",), body=Body(body), results=("product",)), init=init, combine=combine)
+    planar = Fold(axis=axis, lift=Lambda.closing(("k",), Body(body), ("product",)), init=init, combine=combine)
     return TileOp(
-        op=Fold.projection(body=Body((planar,))),
+        op=Fold.projection(operands=(planar,)),
         place=Placement(free=(Axis("m", 8), Axis("n", 16))),
     )
 
@@ -722,26 +731,22 @@ def test_contraction_preserves_computed_operand_statement_order() -> None:
     max_init, max_combine = M(ElementwiseImpl("maximum"), names=("row_max",))
     row_max = Fold(
         axis=j,
-        lift=Lambda(
-            params=("j",),
-            body=Body((Load(name="score", input="s", index=(Var("m"), Var("j"))),)),
-            results=("score",),
-        ),
+        lift=Lambda.closing(("j",), Body((Load(name="score", input="s", index=(Var("m"), Var("j"))),)), ("score",)),
         init=max_init,
         combine=max_combine,
     )
     sum_init, sum_combine = M(ElementwiseImpl("add"), names=("value",))
     value = Fold(
         axis=j,
-        lift=Lambda(
-            params=("j",),
-            body=Body(
+        lift=Lambda.closing(
+            ("j",),
+            Body(
                 (
                     Load(name="v", input="v", index=(Var("j"), Var("k"))),
                     Assign(name="weighted", op="multiply", args=("inv", "v")),
                 )
             ),
-            results=("weighted",),
+            ("weighted",),
         ),
         init=sum_init,
         combine=sum_combine,
@@ -749,18 +754,17 @@ def test_contraction_preserves_computed_operand_statement_order() -> None:
     outer_init, outer_combine = M(ElementwiseImpl("add"), names=("out",))
     outer = Fold(
         axis=k,
-        lift=Lambda(
-            params=("k",),
-            body=Body(
+        operands=(row_max, value),
+        lift=Lambda.closing(
+            ("k", "row_max", "value"),
+            Body(
                 (
-                    row_max,
                     Assign(name="inv", op="reciprocal", args=("row_max",)),
-                    value,
                     Load(name="weight", input="w", index=(Var("k"), Var("n"))),
                     Assign(name="product", op="multiply", args=("value", "weight")),
                 )
             ),
-            results=("product",),
+            ("product",),
         ),
         init=outer_init,
         combine=outer_combine,
@@ -790,7 +794,7 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
             )
         )
         init, combine = M(ElementwiseImpl("add"), names=("acc",))
-        return Fold(axis=Axis("k", Dim(8)), lift=Lambda(params=("k",), body=body, results=(product,)), init=init, combine=combine)
+        return Fold(axis=Axis("k", Dim(8)), lift=Lambda.closing(("k",), body, (product,)), init=init, combine=combine)
 
     def consumer(inner: Fold, out: str) -> Fold:
         return Fold.projection(operands=(inner,), body=Body((Assign(name=out, op="exp", args=("acc",)),)), results=(out,))
@@ -812,20 +816,19 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
 
 
 def test_equivalent_clusters_include_captured_axes() -> None:
-    first = Lambda(
-        params=("k",),
-        body=Body((Load(name="x", input="q", index=(Var("row"), Var("k"))),)),
-        results=("x",),
-    )
-    second = Lambda(
-        params=("depth",),
-        body=Body((Load(name="value", input="q", index=(Var("query"), Var("depth"))),)),
-        results=("value",),
-    )
+    # A lambda binds every name it reads, so the enclosing row coordinate is a trailing param;
+    # ``axes`` then names WHICH of those params are the environment, not a permission to capture.
+    first = Lambda.closing(("k",), Body((Load(name="x", input="q", index=(Var("row"), Var("k"))),)), ("x",))
+    second = Lambda.closing(("depth",), Body((Load(name="value", input="q", index=(Var("query"), Var("depth"))),)), ("value",))
+    assert first.params == ("k", "row") and second.params == ("depth", "query")
 
-    assert Closure(first, ("row", "k")) == Closure(second, ("unused", "query", "depth"))  # equality is alpha-invariant
-    assert equivalent_clusters((Closure(first, ("row", "k")), Closure(second, ("unused", "query", "depth")))) == ((0, 1),)
+    assert Closure(first, ("row", "k")) == Closure(second, ("query", "depth"))  # equality is alpha-invariant
+    assert equivalent_clusters((Closure(first, ("row", "k")), Closure(second, ("query", "depth")))) == ((0, 1),)
     assert Closure(first, ("row", "k")) != Closure(first, ("k", "row"))  # capture order is the positional identity
+    # An axis the lambda does not bind is not an unused environment slot any more — it is a name
+    # nothing supplies, and the closure refuses it rather than carrying it into the canonical form.
+    with pytest.raises(ValueError, match="not params of the lambda"):
+        Closure(second, ("unused", "query", "depth"))
 
 
 def test_total_lift_produces_canonical_contraction() -> None:
@@ -873,23 +876,33 @@ def _fed_chain_root(feed: bool) -> Fold:
         combine=combine,
     )
     chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
-    return Fold.projection(body=Body((*chain, fold)), results=("acc",))
+    # A mixed stmt/term sequence, handed to the former unwrapped: a ``Body`` may not hold a term,
+    # and separating this is precisely what ``Fold.projection`` is for.
+    return Fold.projection(body=(*chain, fold), results=("acc",))
 
 
-def test_a_body_fed_fold_is_never_hoisted_onto_an_operand_edge() -> None:
-    """A projection evaluates its operands before its scalar body, so a member fold whose SUBTREE
-    captures a body-defined name must stay a member — ``Closure(...).closed`` reads only the
-    fold's own lift and cannot see the nested capture. Hoisting it emitted every capture as an
-    undefined identifier at nvcc (DeepSeek-V4 post4096's two-cut consumer piece)."""
+def test_a_body_fed_fold_takes_its_provider_as_a_sibling_operand() -> None:
+    """A fold whose subtree reads a name the scalar chain defines becomes an operand edge, and the
+    chain becomes a PROVIDER operand ordered ahead of it.
+
+    Body membership used to carry this: a projection evaluates its operands before its scalar body,
+    so hoisting a fed fold emitted its capture as an undefined identifier (DeepSeek-V4 post4096's
+    two-cut consumer piece). A term cannot be a body member, so the ordering is carried structurally
+    instead — ``_ordered_projection`` splits at the scalar and makes the prefix a source projection,
+    and ``splice_operands`` places a provider before the edge that reads it."""
     out = normalize_fold_tree(_fed_chain_root(feed=True))
 
-    assert not out.operands, "the fed fold must stay a body member"
-    assert any(isinstance(s, Fold) for s in out.lift.body)
+    assert not any(isinstance(stmt, Fold) for stmt in out.lift.body), "a term is never a body member"
+    lowered = [type(stmt).__name__ for stmt in out.lower()]
+    assert "Loop" in lowered, lowered
+    rendered = "\n".join(line for stmt in out.lower() for line in stmt.pretty())
+    assert rendered.index("v25") < rendered.index("acc"), "the provider is emitted before its consumer"
 
 
-def test_an_unfed_closed_fold_still_hoists() -> None:
-    """The guard narrows by the capture alone: the same shape with the cone reading only its own
-    operand keeps the hoist (and the dead chain stays in the body for later passes to judge)."""
+def test_an_unfed_fold_is_an_operand_edge_too() -> None:
+    """The same shape with the cone reading only its own operand: also an edge. Position no longer
+    varies with the capture, because position no longer encodes anything."""
     out = normalize_fold_tree(_fed_chain_root(feed=False))
 
-    assert any(isinstance(e, Fold) and e.axis is not None for e in out.operands), "an unfed closed fold hoists"
+    assert any(isinstance(edge, Fold) and edge.axis is not None for edge in out.operands)
+    assert not any(isinstance(stmt, Fold) for stmt in out.lift.body)

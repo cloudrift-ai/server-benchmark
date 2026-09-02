@@ -70,7 +70,10 @@ def test_lambda_accepts_pure_stmts_and_defines_results() -> None:
         results=("x2",),
     )
     assert lam.results == ("x2",)
-    assert lam.free_names() == frozenset()
+    # CLOSED: every name the body reads is a param or one of its own defs, so there is no
+    # residual for the former to append and the two spellings coincide.
+    assert lam.defined == frozenset({"k", "x", "x2"})
+    assert Lambda.closing(("k", "x"), lam.body, lam.results) == lam
 
 
 def test_lambda_post_init_canonicalizes_body_order() -> None:
@@ -78,8 +81,8 @@ def test_lambda_post_init_canonicalizes_body_order() -> None:
     right = Load(name="right", input="w", index=(Var("n"), Var("k")))
     product = Assign(name="product", op="multiply", args=("left", "right"))
 
-    first = Lambda(params=("k",), body=Body((left, right, product)), results=("product",))
-    second = Lambda(params=("k",), body=Body((right, left, product)), results=("product",))
+    first = Lambda.closing(("k",), Body((left, right, product)), ("product",))
+    second = Lambda.closing(("k",), Body((right, left, product)), ("product",))
 
     assert first == second
 
@@ -113,13 +116,19 @@ def test_lambda_allows_param_results_and_literal_results() -> None:
     assert eval_lambda(lam, (0, 3.5)) == (3.5, 1.0)
 
 
-def test_lambda_free_names_are_the_contextual_read() -> None:
-    lam = Lambda(
-        params=("x",),
-        body=Body((Assign(name="y", op="add", args=("x", "outer")),)),
-        results=("y",),
-    )
-    assert lam.free_names() == frozenset({"outer"})
+def test_lambda_refuses_an_open_body_and_closing_binds_the_residual() -> None:
+    """A term carries no free names. What the retired ``free_names`` reported as a contextual read
+    is now a FORMATION ERROR, and :meth:`Lambda.closing` is the former that turns it into a
+    trailing param — trailing, never interleaved, so the operand prefix keeps its positions."""
+    body = Body((Assign(name="y", op="add", args=("x", "outer")),))
+
+    with pytest.raises(ValueError, match=r"reads \['outer'\]"):
+        Lambda(params=("x",), body=body, results=("y",))
+
+    lam = Lambda.closing(("x",), body, ("y",))
+    assert lam.params == ("x", "outer")
+    assert lam.defined == frozenset({"x", "outer", "y"})
+    assert lam.results == ("y",)
 
 
 # --- α-invariance: canonical renumbering -------------------------------------------------------- #
@@ -141,12 +150,16 @@ def test_alpha_equality_under_bound_renaming() -> None:
     assert hash(a.canonical()) == hash(b.canonical())
 
 
-def test_alpha_inequality_on_structure_and_free_names() -> None:
+def test_alpha_inequality_on_structure_and_residual_arity() -> None:
     sq = Lambda(params=("x",), body=Body((Assign(name="t", op="multiply", args=("x", "x")),)), results=("t",))
     dbl = Lambda(params=("x",), body=Body((Assign(name="t", op="add", args=("x", "x")),)), results=("t",))
-    free = Lambda(params=("x",), body=Body((Assign(name="t", op="multiply", args=("x", "w")),)), results=("t",))
+    closed = Lambda.closing(("x",), Body((Assign(name="t", op="multiply", args=("x", "w")),)), ("t",))
+    renamed = Lambda.closing(("x",), Body((Assign(name="t", op="multiply", args=("x", "z")),)), ("t",))
     assert not sq.alpha_eq(dbl)
-    assert not sq.alpha_eq(free)  # a FREE name must match exactly — never renumbered
+    # The residual read is BOUND, so it changes the arity — ``x·w`` is a two-param function.
+    assert closed.params == ("x", "w") and not sq.alpha_eq(closed)
+    # And being bound, it renumbers like any other param: its spelling no longer has to match.
+    assert closed.alpha_eq(renamed)
     assert sq.canonical().canonical() == sq.canonical()  # idempotent
 
 

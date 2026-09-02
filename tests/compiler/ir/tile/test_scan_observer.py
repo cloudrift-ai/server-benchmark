@@ -68,7 +68,10 @@ def test_observer_formation_gates() -> None:
     with pytest.raises(AssertionError, match="zero-axis"):
         Fold(lift=Lambda(params=(), body=Body(()), results=()), observe=scan.observe)
     with pytest.raises(AssertionError, match="positionally"):
-        dataclasses.replace(fold, observe=Lambda(params=("k",), body=Body((Assign(name="t", op="copy", args=("acc",)),)), results=("t",)))
+        # A closed λ over the same names, bound in the wrong ORDER: the observer's contract is
+        # positional — the iteration var first, then the carried state.
+        body = Body((Assign(name="t", op="copy", args=("acc",)),))
+        dataclasses.replace(fold, observe=Lambda.closing(("acc", "k"), body, ("t",)))
     with pytest.raises(AssertionError, match="FRESH"):
         # Observing the state under its own name is ill-formed — the boundary distinguishes a
         # streamed store from a post-fold store by the name.
@@ -100,7 +103,10 @@ def test_scan_keys_apart_from_sum_and_alpha_invariantly() -> None:
 
 def test_rewrite_threads_the_observer() -> None:
     scan = _observed(_sum_fold())
-    renamed = scan.rewrite(lambda name: f"{name}_r")
+    # An SSA rename map carries SSA defines only — the iteration var and the enclosing row
+    # coordinate are axis names, and they rename through ``axis_fn`` / σ, never through this.
+    ssa = {"acc", "acc__obs", "x0"}
+    renamed = scan.rewrite(lambda name: f"{name}_r" if name in ssa else name)
     assert renamed.observe is not None
     assert renamed.observe.params == ("k", "acc_r")
     assert renamed.observe.results == ("acc__obs_r",)

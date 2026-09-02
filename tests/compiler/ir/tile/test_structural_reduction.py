@@ -120,11 +120,7 @@ def test_twisted_role_derives_from_the_combine_and_propagates() -> None:
     )
     red = Fold(
         axis=loop.axis,
-        lift=Lambda(
-            params=("k",),
-            body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))),)),
-            results=("x_e", 1.0),
-        ),
+        lift=Lambda.closing(("k",), Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))),)), ("x_e", 1.0)),
         init=(-1e30, 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
@@ -348,7 +344,7 @@ def test_a_composed_step_keeps_its_position_when_flattened() -> None:
     from emmy.compiler.ir.pure.fold import _flatten_nodes
 
     before, after = Assign(name="m", op="copy", args=("s",)), Assign(name="o", op="copy", args=("p",))
-    flat = _flatten_nodes(Body((before, _pv_contraction(), after)))
+    flat = _flatten_nodes((before, _pv_contraction(), after))
     assert flat[0] is before and flat[-1] is after
     assert any(isinstance(s, Loop) and s.role is AxisRole.CONTRACTION for s in flat[1:-1])
 
@@ -432,15 +428,15 @@ def test_output_tiled_contraction_keeps_a_sibling_provider_for_its_computed_b(mo
     m, n, k, r = Axis("m", 16), Axis("n", 32), Axis("k", 16), Axis("r", 16)
     statistic = Fold(
         axis=r,
-        lift=Lambda(
-            params=("r",),
-            body=Body(
+        lift=Lambda.closing(
+            ("r",),
+            Body(
                 (
                     Load(name="stat_in", input="W", index=(Var("n"), Var("r"))),
                     Assign(name="square", op="multiply", args=("stat_in", "stat_in")),
                 )
             ),
-            results=("square",),
+            ("square",),
         ),
         init=(0.0,),
         combine=Lambda(

@@ -223,13 +223,13 @@ def test_tile_axis_orientation_is_read_once_per_site(monkeypatch) -> None:
 
     root, product, _ = _norm_linear_tree()
     calls = []
-    original = tile_ops.edge_free_axes
+    original = tile_ops.edge_axes
 
-    def spy(edge):
+    def spy(edge, axes):
         calls.append(edge)
-        return original(edge)
+        return original(edge, axes)
 
-    monkeypatch.setattr(tile_ops, "edge_free_axes", spy)
+    monkeypatch.setattr(tile_ops, "edge_axes", spy)
     axes = (Axis("m", 128), Axis("n", 256))
     sched = tile_ops.Sched(TileOp(op=root), place=Placement(free=axes, grid=axes))
     assert sched._mn_for(product) == axes

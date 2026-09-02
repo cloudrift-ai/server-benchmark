@@ -428,17 +428,16 @@ def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
 
     inner = Fold(
         axis=Axis("k", 4),
-        lift=Lambda(
-            params=("k",),
-            body=Body((Load(name="value", input="x", index=(Var("m"), Var("k"))),)),
-            results=("value",),
-        ),
+        lift=Lambda.closing(("k",), Body((Load(name="value", input="x", index=(Var("m"), Var("k"))),)), ("value",)),
         init=(0.0,),
         combine=addition("inner_acc"),
     )
+    # The nested term rides an OPERAND EDGE — a Fold tree composes through operands, so the
+    # enclosing lift binds the inner reduce's result positionally instead of holding the term.
     outer = Fold(
         axis=Axis("m", 4),
-        lift=Lambda(params=("m",), body=Body((inner,)), results=(inner.out,)),
+        operands=(inner,),
+        lift=Lambda.closing(("m", inner.out), Body(), (inner.out,)),
         init=(0.0,),
         combine=addition("outer_acc"),
     )
@@ -450,7 +449,7 @@ def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
 
     graph.rename_node("x", "renamed_x")
 
-    nested = graph.nodes["out"].op.op.lift.body[0]
+    (nested,) = graph.nodes["out"].op.op.operands
     assert isinstance(nested, Fold)
     assert nested.lift.body.loads[0].input == "renamed_x"
 

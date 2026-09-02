@@ -50,8 +50,12 @@ class ContractionView:
     """
 
     axis: Axis
-    left: str
-    right: str
+    left: str | None
+    """The free axis A carries — the output role it strides. ``None`` where A brings none."""
+    right: str | None
+    """The free axis the streamed operand carries. ``None`` for a MATVEC, whose B is a vector over
+    the reduction alone: a contraction does not stop being one for want of a second output axis;
+    whether the pair can be ORIENTED as (m, n) is the placement's question, not recognition's."""
     product: ElementwiseImpl | None = None
     """The ⊗ this contraction multiplies its operand pair with."""
     plus: ElementwiseImpl | None = None
@@ -254,14 +258,14 @@ class Fold:
         if self.axis.name not in a_space & b_space:
             return None
         left_only, right_only = a_space - b_space, b_space - a_space
-        if len(left_only) != 1 or len(right_only) != 1:
-            return None
+        if len(left_only) > 1 or len(right_only) > 1:
+            return None  # more than one free axis a side is not an orientable output role
         b_trans = b_edge.is_slab and self.axis.name in b_edge.lift.body[0].index[-1].free_vars()
         product, plus = ring
         return ContractionView(
             axis=self.axis,
-            left=next(iter(left_only)),
-            right=next(iter(right_only)),
+            left=next(iter(left_only), None),
+            right=next(iter(right_only), None),
             product=product,
             plus=plus,
             b_trans=b_trans,

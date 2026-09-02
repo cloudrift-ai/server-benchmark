@@ -329,27 +329,47 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
 def _a_leads(node: Fold) -> Fold:
     """Put the contraction's A operand first — ``operands[0]`` IS A, by canonical form.
 
-    A reads ``[…, k]``: its reduction axis is the LAST coordinate it indexes, which is what lets a
-    fragment load stride A's rows contiguously. B has no such constraint — stored ``[k, n]`` or
-    transposed ``[n, k]``, both are legal and the atom reads the layout off the edge. So when the
-    stored order puts a k-first operand first and a k-last one second, the two are swapped here
-    rather than every consumer growing a "which one is A" reading. Binding is positional, so the
-    lift's params swap with them; the body reads by name and is untouched.
+    A is the operand every product multiplies: with several channels (the fused gate⊗up edge) it
+    is the argument their products SHARE, and that names it outright. With a single product both
+    arguments are trivially shared, so the layout rule decides: A reads ``[…, k]``, its reduction
+    axis last, which is what lets a fragment load stride A's rows contiguously. B carries no such
+    constraint — stored ``[k, n]`` or transposed ``[n, k]``, both legal, the atom reads it off the
+    edge.
+
+    Binding is positional, so the lift's params move with the operands; the body reads by name and
+    is untouched.
     """
-    if node.as_contraction() is None or len(node.operands) != 2:
+    ring = node._semiring
+    if ring is None or len(node.operands) < 2:
         return node
-    first, second = node.operands
+    by_name = {name: edge for edge in node.operands for name in edge.exposes}
+    argument_sets = [set(product.args) for product in node.lift.body]
+    shared = set.intersection(*argument_sets)
 
-    def k_last(edge: Fold) -> bool:
-        # Only a slab has a gmem index to read a layout off; a computed cone answers False, which
-        # leaves it where it is.
-        return edge.is_slab and node.axis.name in edge.lift.body[0].index[-1].free_vars()
+    if len(argument_sets) > 1:
+        candidates = [by_name[name] for name in shared if name in by_name]
+        if len(candidates) != 1:
+            return node
+        a_edge = candidates[0]
+    else:
+        pair = [by_name[name] for name in argument_sets[0] if name in by_name]
+        if len(pair) != 2:
+            return node
 
-    if k_last(first) or not k_last(second):
+        def k_last(edge: Fold) -> bool:
+            # Only a slab has a gmem index to read a layout off; a computed cone answers False.
+            return edge.is_slab and node.axis.name in edge.loads[0].index[-1].free_vars()
+
+        a_edge = next((edge for edge in pair if k_last(edge)), None)
+        if a_edge is None:
+            return node
+
+    if node.operands[0] is a_edge:
         return node
+    reordered = (a_edge, *(edge for edge in node.operands if edge is not a_edge))
     lead = (node.axis.name,) if node.axis is not None else ()
-    params = (*lead, *second.exposes, *first.exposes)
-    return replace(node, operands=(second, first), lift=replace(node.lift, params=params))
+    params = (*lead, *(name for edge in reordered for name in edge.exposes))
+    return replace(node, operands=reordered, lift=replace(node.lift, params=params))
 
 
 def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str], sweep_axes: frozenset[str]) -> Fold:

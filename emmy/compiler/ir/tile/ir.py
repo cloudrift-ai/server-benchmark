@@ -40,7 +40,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.fold import Fold, _placed
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.pure.tree import Visit, walk
 from emmy.compiler.ir.schedule import Placement, WarpSpec
@@ -331,7 +331,10 @@ def lower_with_output_specs(op, specs) -> list[Stmt]:
         return out
 
     if isinstance(op, Fold) and op.axis is None:
-        body = [*(stmt for edge in op.operands for stmt in edge.lower()), *lower_body(op.lift.body)]
+        # Each edge where its dependencies allow — an operand may READ a body-defined name, so
+        # all-operands-first emits it ahead of the value it consumes.
+        edges, statements = op.derived_step
+        body = _placed(edges, lower_body(statements), lambda edge: edge.lower())
         root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= _projection_results(op.lift.body))
         return apply_output_specs(body, root_specs, observed=observed_result_names(op))
     return apply_output_specs(op.lower(), specs, observed=observed_result_names(op))

@@ -122,6 +122,45 @@ def _composes_state(inner, names: tuple[str, ...], ops) -> bool:
     )
 
 
+def _placed(edges: tuple, statements, emit) -> list:
+    """``statements`` with each edge's own statements inserted where its dependencies allow.
+
+    An operand edge is not only a PROVIDER: it may READ a name the body defines — the row
+    statistic a weight cone divides by, the reciprocal an attention epilogue scales with — so
+    emitting every operand up front puts the edge ahead of the value it consumes. An edge lands as
+    soon as everything it takes from the body is defined; one that takes nothing leads, as any
+    prologue does.
+
+    ``emit`` turns one edge into statements: ``Fold.lower`` for Loop IR, the kernel emitter's
+    ``_emit`` for kernel IR.
+    """
+    statements = list(statements)
+    body_defines = {name for stmt in statements for name in stmt.defines()}
+    pending = [
+        (edge, {name for name in edge.lift.params if name not in {n for inner in edge.operands for n in inner.exposes}} & body_defines)
+        for edge in edges
+    ]
+    out: list = []
+    defined: set[str] = set()
+
+    def release() -> None:
+        while True:
+            ready = [entry for entry in pending if entry[1] <= defined]
+            if not ready:
+                return
+            for entry in ready:
+                out.extend(emit(entry[0]))
+                defined.update(entry[0].exposes)
+                pending.remove(entry)
+
+    release()
+    for stmt in statements:
+        out.append(stmt)
+        defined.update(stmt.defines())
+        release()
+    return out
+
+
 @dataclass(frozen=True)
 class ContractionView:
     """A Fold's BILINEAR reading, as geometry: the axis its operands share and the free axis each
@@ -670,7 +709,7 @@ class Fold:
         rides = [edge for edge in edges if axis is not None and axis.name in edge.index_space]
         ridden = {id(edge) for edge in rides}
         prologue = [stmt for edge in edges if id(edge) not in ridden for stmt in edge.lower()]
-        step = [stmt for edge in rides for stmt in edge.lower()] + list(statements)
+        step = _placed(tuple(rides), statements, lambda edge: edge.lower())
         if axis is None:
             return [*prologue, *step]
         return [*prologue, Loop(axis=axis, body=Body(step), unroll=self.unroll, role=self.role)]

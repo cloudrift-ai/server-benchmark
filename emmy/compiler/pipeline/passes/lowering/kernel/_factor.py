@@ -53,9 +53,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.pure.fold import (
-    Fold,
-)
+from emmy.compiler.ir.pure.fold import Fold, _placed
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.schedule.views import cone_seam
@@ -142,10 +140,12 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
     if isinstance(op, Fold) and op.axis is None:
         # EVERY operand edge, in order — the same prefix ``Fold.lower`` builds. A cone carries one
         # edge per computed input, including nested reductions and contractions.
-        prefix = [s for e in op.operands for s in _emit(e, ctx).body]
-        # A body member that is itself a node emits in place, per cell.
-        body = [s for m in op.lift.body for s in (_emit(m, ctx).body if isinstance(m, Fold) else [m])]
-        return Frag(body=[*prefix, *_emit_body(Body(tuple(body)), ctx, output_specs)], out=_map_wire(op))
+        # Each edge where its dependencies allow — an operand may READ a body-defined name (the
+        # reciprocal an attention epilogue scales with), so all-operands-first emits it ahead of
+        # the value it consumes.
+        edges, statements = op.derived_step
+        body = _placed(edges, statements, lambda edge: _emit(edge, ctx).body)
+        return Frag(body=_emit_body(Body(tuple(body)), ctx, output_specs), out=_map_wire(op))
     if isinstance(op, Fold):
         # Every fold WITH an axis, at any role — the per-cell scalar contraction (no TILE slice)
         # included, since a contraction is this same node under the bilinear reading. Loop-
@@ -153,12 +153,10 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
         # use.
         # The same hoist ``Fold.lower`` applies: an operand whose declared index space does not
         # contain the fold's axis is loop-invariant and emits once, ahead of the loop.
-        hoisted = [s for e in op.derived_step[0] if op.axis.name not in e.index_space for s in _emit(e, ctx).body]
-        # The step: the operands that ride it, the lift body, then one ``Accum`` per carried
-        # component — the combine specialized at the singleton, which is what makes the loop a
-        # FOLD rather than a loop that computes and discards. Same construction as ``Fold.lower``.
         edges, statements = op.derived_step
-        step = tuple(stmt for e in edges if op.axis.name in e.index_space for stmt in e.lower()) + tuple(statements)
+        hoisted = [s for edge in edges if op.axis.name not in edge.index_space for s in _emit(edge, ctx).body]
+        rides = tuple(edge for edge in edges if op.axis.name in edge.index_space)
+        step = _placed(rides, statements, lambda edge: _emit(edge, ctx).body)
         stmts = _emit_body(Body(step), ctx)
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
         return Frag(body=[*hoisted, loop], out=Handle(op.out))

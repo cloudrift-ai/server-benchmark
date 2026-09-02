@@ -1,6 +1,7 @@
 """Common GPU registry — the project-wide single source of truth for *physical*
 GPU facts: PCI device IDs, the canonical name, and hardware specs (compute
-capability, SM count, shared-memory sizes, register file, VRAM).
+capability, SM count, shared-memory sizes, register file, VRAM, and the nominal
+throughput / bandwidth / cache ceilings a roofline estimate needs).
 
 By convention the **PCIe product name** (what ``cudaDeviceProp.name`` /
 ``nvidia-smi --query-gpu=name`` report, e.g. ``"NVIDIA GeForce RTX 5090"``) is
@@ -92,6 +93,21 @@ class GpuSpec:
     # ``None`` = unknown (the gate degrades to off).
     peak_fp32_tflops: float | None = None
     peak_fp16_tflops: float | None = None
+    # The memory side of the same roofline: ``mem_bw_gbps`` is the nominal DRAM bandwidth
+    # (memory clock x bus width, GB/s) and ``l2_bytes`` the L2 cache size. Both are per-SKU, not
+    # cc-derived — a 5090 and a 5080 Laptop share cc 12.0 and differ sharply — so they are fields
+    # rather than entries in the cc-keyed tables above. Neither reaches ``device_features`` (the
+    # exact ``H_*`` set is asserted in ``tests/test_gpu.py``).
+    #
+    # NOMINAL, and that is the point. ``serving/roofline.py`` deliberately self-calibrates
+    # instead ("no per-card peak table to maintain") because it runs at boot with the card in
+    # hand; measured bandwidth is the better number THERE. It is the wrong number here: an
+    # offline estimate spans cards nobody has, and mixing a measured value for one card with
+    # nominal ones for the rest would make a cross-card comparison fit which cards were measured.
+    # One table, one convention, every card comparable. Do not "improve" an entry with a probed
+    # or measured figure.
+    mem_bw_gbps: float | None = None
+    l2_bytes: int | None = None
     aliases: tuple[str, ...] = field(default=())  # alternate reported names
 
     @property
@@ -135,9 +151,11 @@ class GpuSpec:
         }
 
 
-# Specs marked "measured" are exact values probed off the live card (recorded in
-# the golden-sweep priors). The rest carry the canonical name / PCI ids / cc /
-# VRAM (public nominal SKU specs) so detection + name resolution work; their
+# Entries marked "measured" are the golden-sweep cards, whose ``sm_count`` / ``smem_per_sm`` /
+# ``vram_mib`` are exact values probed off the live card (recorded in the golden-sweep priors).
+# ``peak_*``, ``mem_bw_gbps`` and ``l2_bytes`` are vendor nominal in EVERY entry, measured or
+# not — see the field comments for why that is deliberate. The rest carry the canonical name /
+# PCI ids / cc / VRAM (public nominal SKU specs) so detection + name resolution work; their
 # ``sm_count`` is the documented nominal count where known.
 KNOWN_GPUS: tuple[GpuSpec, ...] = (
     # --- measured (golden-sweep cards) ------------------------------------
@@ -151,6 +169,8 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         vram_mib=24564,
         peak_fp32_tflops=82.6,
         peak_fp16_tflops=330.3,
+        mem_bw_gbps=1008.0,  # GDDR6X 21 Gbps x 384-bit
+        l2_bytes=72 * _MIB,
     ),  # measured
     GpuSpec(
         name="NVIDIA GeForce RTX 4080",
@@ -160,6 +180,10 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         sm_count=76,
         smem_per_sm=102400,
         vram_mib=15946,
+        peak_fp32_tflops=48.7,
+        peak_fp16_tflops=194.9,
+        mem_bw_gbps=716.8,  # GDDR6X 22.4 Gbps x 256-bit
+        l2_bytes=64 * _MIB,
     ),  # measured
     GpuSpec(
         name="NVIDIA GeForce RTX 5090",
@@ -171,6 +195,8 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         vram_mib=32607,
         peak_fp32_tflops=104.8,
         peak_fp16_tflops=419.0,
+        mem_bw_gbps=1792.0,  # GDDR7 28 Gbps x 512-bit
+        l2_bytes=96 * _MIB,
     ),  # measured
     GpuSpec(
         name="NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
@@ -182,6 +208,8 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         vram_mib=97887,
         peak_fp32_tflops=126.0,
         peak_fp16_tflops=504.0,
+        mem_bw_gbps=1792.0,  # GDDR7 28 Gbps x 512-bit (Max-Q caps power, not memory)
+        l2_bytes=128 * _MIB,
     ),  # measured
     # A LAPTOP part on the same cc 12.0 architecture, and a much smaller one: 60 SMs against the
     # desktop 5090's 170, in a chassis whose clocks fall under sustained load. Timings measured
@@ -295,6 +323,14 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         sm_count=80,
         smem_per_sm=98304,
         vram_mib=32768,
+        # NVIDIA prints 15.7 / 125.0 for both SXM2 and SXM3; the SXM3's higher boost puts its true
+        # peak nearer 16.4 / 131. Under-recording is the safe direction here — the plausibility
+        # gate DELETES rows above the peak, so a low ceiling only makes it more eager, and it is
+        # held off the edge by ``2*free*reduce_max`` under-counting work in the same comparison.
+        peak_fp32_tflops=15.7,
+        peak_fp16_tflops=125.0,
+        mem_bw_gbps=900.0,  # 4096-bit HBM2 @ 1.76 Gbps
+        l2_bytes=6 * _MIB,
         aliases=("Tesla V100-SXM3-32GB",),
     ),
     # --- AMD (no CUDA compute capability) --------------------------------

@@ -34,6 +34,24 @@ def test_device_features_shape():
     assert set(feats) == {"sm_count", "smem_per_sm", "smem_per_block", "regs_per_block", "warp_size", "total_mem"}
     assert feats["sm_count"] == 170.0
     assert feats["total_mem"] == gpu.by_name("NVIDIA GeForce RTX 5090").vram_bytes  # distinguishes same-die SKUs
+    # The H_* set is exactly these ten. ``mem_bw_gbps`` / ``l2_bytes`` are deliberately absent:
+    # bandwidth is not a ``cudaDeviceProp`` field, so routing the pair through the feature path
+    # would break this module's promise that a card featurizes the same probed or memorized.
+    # Asserted as an exact set, so a leak under any spelling fails here.
+    from emmy.compiler.context import Context
+
+    assert set(Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090").features()) == {
+        "H_cc",
+        "H_tc_gen",
+        "H_smem_optin",
+        "H_opt",
+        "H_sm_count",
+        "H_smem_per_sm",
+        "H_smem_per_block",
+        "H_regs_per_block",
+        "H_warp_size",
+        "H_total_mem",
+    }
     # AMD card has no CUDA specs → empty feature dict (degrades like a GPU-less host).
     assert gpu.by_name("AMD Instinct MI350X").device_features() == {}
 
@@ -88,6 +106,44 @@ def test_registry_names_and_aliases_are_unique():
         for label in (g.name, *g.aliases):
             assert label not in seen, f"{label!r} claimed by both {seen[label]!r} and {g.name!r}"
             seen[label] = g.name
+
+
+def test_roofline_facts_travel_together():
+    """A card records all four roofline facts or none — never a partial set.
+
+    The halves are read by different consumers — ``peak_tflops`` by the node store's
+    plausibility gate, ``mem_bw_gbps`` / ``l2_bytes`` by the kernel cost estimate — and a missing
+    value degrades each to "no opinion" silently, so a half-recorded card reads as healthy while
+    half its cost model is off. This forbids the partial, not the empty: a card recording nothing
+    is a card nobody has needed yet, which is fine.
+
+    The cost is that adding peaks to switch the plausibility gate on for some future card also
+    means sourcing its bandwidth and L2. That is deliberate — the alternative is discovering the
+    asymmetry from a cost estimate that quietly abstained.
+    """
+    for g in gpu.KNOWN_GPUS:
+        recorded = [f for f in ("peak_fp32_tflops", "peak_fp16_tflops", "mem_bw_gbps", "l2_bytes") if getattr(g, f) is not None]
+        assert len(recorded) in (0, 4), f"{g.name}: partial roofline, has only {recorded}"
+
+
+def test_golden_corpus_cards_are_fully_recorded():
+    """The five cards the golden corpus is measured on today, each carrying a complete roofline.
+
+    Named rather than derived from ``GOLDEN_RECORDS``: ``emmy.gpu`` is a leaf module, the corpus
+    sits far above it, and loading it costs seconds. So this is a spot-check of five cards
+    someone already thought about, NOT a ratchet — a sixth corpus card would not fail here. The
+    coverage assertion over the corpus's own ``gpu_name`` set belongs with the dataset builder,
+    where that import is already paid."""
+    for name in (
+        "NVIDIA GeForce RTX 5090",
+        "NVIDIA GeForce RTX 4090",
+        "NVIDIA Tesla V100 SXM3 32GB",
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "NVIDIA GeForce RTX 4080",
+    ):
+        g = gpu.by_name(name)
+        assert g is not None, name
+        assert g.peak_tflops("fp32") and g.peak_tflops("fp16") and g.mem_bw_gbps and g.l2_bytes, name
 
 
 def test_hardware_id_distinguishes_same_die_skus(monkeypatch):

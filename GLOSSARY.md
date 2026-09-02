@@ -171,6 +171,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Carrier** — The temporary state maintained by a reduction and the rule for combining partial states. A sum's
   carrier can be one accumulated number; stable softmax needs several related values.
 - **Tensor core** — Specialized GPU hardware for performing small matrix operations efficiently.
+- **Memory bandwidth** — How fast a GPU can move data between its main memory and the chip, in bytes per second. It
+  is a fixed property of a card, and for many kernels it — not arithmetic speed — is what limits how fast they can
+  run.
+- **Roofline** — A lower bound on how long a kernel can possibly take, from two limits it cannot beat: the time to
+  perform its arithmetic at the card's peak rate, and the time to move its data at the card's memory bandwidth. The
+  bound is the larger of the two, because a kernel must do both. Comparing a measured time against this bound says
+  how much of the hardware a kernel actually uses, in a way that is comparable across different kernels and
+  different cards — where a raw duration is not.
 - **nvcc / NVRTC** — Two NVIDIA CUDA compilers. nvcc compiles ahead of execution; NVRTC compiles CUDA source at
   runtime.
 - **CUDA graph capture** — Recording a sequence of GPU launches so the sequence can be replayed with less CPU

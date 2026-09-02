@@ -30,107 +30,53 @@ def _stamp_axes(loop: Loop) -> Loop:
     return replace(loop, body=Body(body))
 
 
-def _term_reads(term) -> frozenset[str]:
-    """What one operand edge needs supplied — asked of the edge, never of a statement protocol.
-
-    A term is closed in VALUES, so its lift body contributes only what its own params do not bind;
-    its coordinates and its captures live on the edges below it, which carry their own arguments.
-    Walked here rather than answered by the term, because the walk is the INSPECTOR's business:
-    the thing being inspected is a Fold tree, and a tree is walked through ``operands``.
-    """
-    if not isinstance(term, Fold):
-        return Body((term,)).ssa_uses | {name for expr in term.exprs() for name in expr.free_vars()}
-    out = set(term.lift.body.ssa_uses) - set(term.lift.params)
-    for edge in term.operands:
-        out |= _term_reads(edge)
-    return frozenset(out - ({term.axis.name} if term.axis is not None else set()))
-
-
-def _separate(members: tuple, needed: frozenset[str]) -> tuple[tuple, Body]:
-    """Split ONE level's ordered members into ``(operand terms, statements)``.
-
-    A projection evaluates every operand before its statements, so ``term; scalar; term`` cannot
-    flatten: the later term reads the scalar and as an edge would splice ahead of its own provider.
-    The prefix closes into a SOURCE term instead, which becomes the first operand — the ordering
-    rule applied while the level is being built, not repaired afterwards by a pass that had to
-    take a mixed sequence to work on.
-
-    ``needed`` is what the ENCLOSING level still reads, so a prefix that feeds nothing is left flat
-    rather than nested around a value nobody consumes.
-    """
-    scalar_seen = False
-    split = None
-    for index, member in enumerate(members):
-        if isinstance(member, Fold):
-            if scalar_seen:
-                split = index
-                break
-        else:
-            scalar_seen = True
-    if split is not None:
-        prefix, suffix = members[:split], members[split:]
-        wanted = set(needed)
-        for member in suffix:
-            wanted |= _term_reads(member)
-        bridge = tuple(name for member in prefix for name in _defines_of(member) if name in wanted)
-        if bridge:
-            operands, stmts = _separate(prefix, frozenset(bridge))
-            source = Fold(
-                operands=operands,
-                lift=Lambda.closing(tuple(name for edge in operands for name in edge.exposes), Body.coerce(stmts), bridge),
-            )
-            return _separate((source, *suffix), needed)
-    operands = tuple(member for member in members if isinstance(member, Fold))
-    return operands, Body(member for member in members if not isinstance(member, Fold))
-
-
-def _defines_of(member) -> tuple[str, ...]:
-    """The names one level member binds — a term's lift results, a statement's own defs."""
-    return member.lift.results if isinstance(member, Fold) else member.defines()
-
-
-def lift_body(body, axes: tuple = (), needed: frozenset[str] = frozenset()) -> tuple[tuple, Body]:
+def lift_body(body, axes: tuple = ()) -> tuple[tuple, Body]:
     """Lift one statement tree into ``(operand terms, statements)`` — SEPARATED, bottom up.
 
     A reduction becomes an operand EDGE of the level it sat in; it is never substituted into the
     statement sequence where its ``Loop`` stood. So no mixed stmt/term stream exists at any point
     and none crosses a function boundary: a ``Body`` holds statements because that is all it was
     ever given, rather than because a later boundary sorted a sequence that should not have been
-    built. Separation IS the construction.
+    built. Separation IS the construction, and the order between a term and the statements it
+    reads is not lost with it: an operand lands where its dependencies allow when the level lowers
+    (``_placed``), so ``term; scalar; term`` needs no repair.
+
+    A reduce under an output SWEEP is a term evaluated over the sweep coordinate — attention's
+    ``Σ_k P·V`` per output column. It joins the enclosing level's operands with its slabs declaring
+    the sweep axis; the sweep keeps its pure cell and its stores, and reconstitution
+    (``apply_output_specs``) wraps the term's loop back under it.
 
     ``axes`` names the iteration variables the ENCLOSING loops bind, threaded down from
     :func:`_peel`. A term cannot tell an axis from a value — both are a bare ``Var`` — but the
     binder can, because it bound them; so the classification arrives from above rather than being
     inferred by walking a lowered body for names that look axis-shaped.
     """
-    members: list = []
+    edges: list = []
+    stmts: list = []
     for stmt in Body.coerce(body):
-        if not isinstance(stmt, Loop):
-            nested = stmt.nested()
-            if nested:
-                lifted = tuple(lift_body(child, axes) for child in nested)
-                if any(edges for edges, _ in lifted):
-                    # A reduce under a surviving wrapper is not representable: the term would have
-                    # to sit in that wrapper's statement body. Leave it intact and let the raw-loop
-                    # check report it, rather than failing here as a body type error.
-                    members.append(stmt)
-                    continue
-                stmt = stmt.with_bodies(tuple(stmts for _, stmts in lifted))
-            members.append(stmt)
-            continue
-        if stmt.is_reduce:
+        if isinstance(stmt, Loop) and stmt.is_reduce:
             fold, trailing = scan_from_loop(stmt, axes)
             seeds = set(fold.combine.results)
-            members = [m for m in members if not (isinstance(m, Init) and m.name in seeds)]
-            members.append(fold)
-            members.extend(trailing)
+            stmts = [m for m in stmts if not (isinstance(m, Init) and m.name in seeds)]
+            edges.append(fold)
+            stmts.extend(trailing)
             continue
-        edges, stmts = lift_body(stmt.body, (*axes, stmt.axis))
-        if edges:
-            members.append(stmt)
+        if isinstance(stmt, Loop):
+            inner, cell = lift_body(stmt.body, (*axes, stmt.axis))
+            edges.extend(inner)
+            stmts.append(replace(stmt, body=cell))
             continue
-        members.append(replace(stmt, body=stmts))
-    return _separate(tuple(members), needed)
+        nested = stmt.nested()
+        if nested:
+            lifted = tuple(lift_body(child, axes) for child in nested)
+            if any(inner for inner, _ in lifted):
+                # A reduce under a conditional is not a value the level can evaluate outright.
+                # Leave it intact and let the raw-loop check report it.
+                stmts.append(stmt)
+                continue
+            stmt = stmt.with_bodies(tuple(cell for _, cell in lifted))
+        stmts.append(stmt)
+    return tuple(edges), Body(stmts)
 
 
 def fold_from_loop(loop: Loop) -> Fold:
@@ -149,7 +95,8 @@ def scan_from_loop(loop: Loop, axes: tuple = ()) -> tuple[Fold, tuple[Write, ...
     names are the fold's extra ``defines``), where boundary extraction claims them as ordinary
     ``OutputSpec``\\ s and reconstitution splices them back into the loop."""
     loop = _stamp_axes(loop)
-    edges, body = lift_body(loop.body)
+    scope = (*axes, loop.axis)
+    edges, body = lift_body(loop.body, scope)
     accums = tuple(stmt for stmt in body if isinstance(stmt, Accum))
     if not accums:
         raise ValueError(f"reduce loop {loop.axis.name!r} has no Accum")
@@ -166,7 +113,6 @@ def scan_from_loop(loop: Loop, axes: tuple = ()) -> tuple[Fold, tuple[Write, ...
     # operand edges, so the lift body is the product alone and there is no non-canonical spelling
     # for a later pass to rewrite. The factoring pass that used to hoist these cones existed only
     # because the representation admitted the unfactored form.
-    scope = (*axes, loop.axis)
     slabs = tuple(Fold.slab(stmt, scope) for stmt in step if isinstance(stmt, Load))
     plain = Body(stmt for stmt in step if not isinstance(stmt, Load))
     edges = (*edges, *slabs)

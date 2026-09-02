@@ -137,9 +137,7 @@ def _subtree(node, ctx: _Ctx):
 
 def _edge(edge, ctx: _Ctx, result: str | None = None) -> tuple[str, object]:
     """One operand edge and the lift params it binds — a ``Load`` is a leaf spelled inline, a
-    computed edge recurses into the node stored on it. The binding is explicit because the
-    bilinear view prints edges in A/B role order, which can differ from the lift's positional
-    parameter order."""
+    computed edge recurses into the node stored on it."""
     names = edge.exposes
     head = f"operand[{', '.join(names)}]" + (f" -> {result}" if result is not None else "")
     if edge.is_slab:
@@ -156,17 +154,9 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     items: list[tuple[str, object]] = []
     if not isinstance(node, Fold):
         return items
-    con = node._contraction
-    if con is not None:
-        # The bilinear reading presents A before its B channels even though its stored operand
-        # order is ``(b₀, a, b₁…)``. Each edge's bracket names the positional lift param, so
-        # the presentation order cannot be mistaken for the binding order.
-        a, chans = con
-        items.append(_edge(a, ctx))
-        one = len(chans) == 1
-        items += [_edge(ch.b, ctx, None if one else ch.acc) for ch in chans]
-    else:
-        items += [_edge(e, ctx) for e in node.operands]
+    # Stored operand order IS the presentation: a contraction's A is ``operands[0]`` by canonical
+    # form, and each edge's bracket names the positional lift param it binds.
+    items += [_edge(e, ctx) for e in node.operands]
     if node.axis is not None:
         init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
         items.append((f"init: ({init})", lambda cont: []))

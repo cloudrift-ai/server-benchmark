@@ -73,7 +73,7 @@ Closing runs at both scope kinds. A zero-axis root moves its body dependencies o
 a REDUCING fold does the same for a chain that depends on its own iteration axis and so lives in its lift body —
 attention's per-key statistic and rsqrt ahead of the score dot's computed B cone. The reduce-body move is gated on
 exclusive consumption (every moved definition dies into the closed edges), so the step's work is repackaged, never
-duplicated. Both rules measure an edge's captures with `Fold.deps` — scope-aware, so a name a sibling operand binds
+duplicated. Both rules measure an edge's captures with `Fold.captures` — scope-aware, so a name a sibling operand binds
 inside the edge is not a capture and an already-closed edge never re-fires the rewrite. A cone closed at its axes is
 what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
 vector) becomes materializable once per key instead of recomputed per query row.
@@ -151,10 +151,11 @@ scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) has 
 the fusion lift-preflight turns that into "leave the region unfused".
 
 A sweep axis is bound only by the per-cell output `Loop` reconstitution wraps around the projection body — never at
-kernel scope. Canonicalization therefore keeps a non-contraction fold that reads a sweep axis a projection BODY
-member: hoisting it onto an operand edge would lower it outside the sweep loop, rendering the axis as an undefined
-identifier (DeepSeek-V4 post16's per-column sum was the live case). A contraction is exempt because post-init
-promotes a sweep its operands read into a real free axis right after normalization.
+kernel scope. A non-contraction fold that reads a sweep axis (attention's `Σ_k P·V` per output column, DeepSeek-V4
+post16's per-column sum) is still an operand edge of the projection: its slabs declare the sweep axis, and because
+reconstitution sweeps everything from the first statement reading that axis onward, its lowered loop lands back inside
+the output loop rather than ahead of it. A contraction is exempt because post-init promotes a sweep its operands read
+into a real free axis right after normalization.
 
 A fold FED by the body — one whose subtree captures a name a plain body member defines — is likewise never hoisted,
 no matter what kind: a projection evaluates its operands before its scalar body, so the capture would read a value

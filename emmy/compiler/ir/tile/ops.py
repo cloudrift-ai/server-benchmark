@@ -454,12 +454,12 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body,
     rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh pieces.
     Refusals raise :class:`UnbindableProjection`.
     """
-    roots = tuple(edge for edge in op.operands if isinstance(edge, Fold))
-    by_name = {name: root for root in roots for name in root.defines()}
+    roots = op.operands
+    by_name = {name: root for root in roots for name in root.exposes}
     members: dict[int, set] = {id(root): set() for root in roots}
     grouped: dict[int, list] = {id(root): [] for root in roots}
     for spec in output_specs:
-        cone = op.body.backward_cone((spec.write.value,))
+        cone = op.lift.body.backward_cone((spec.write.value,))
         used = {id(by_name[name]) for name in cone.external_reads if name in by_name}
         if len(used) != 1:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
@@ -468,11 +468,11 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body,
         grouped[owner].append(spec)
 
     claimed: set = set().union(*members.values()) if members else set()
-    if claimed != set(op.body) or any(not grouped[id(root)] for root in roots):
+    if claimed != set(op.lift.body) or any(not grouped[id(root)] for root in roots):
         raise UnbindableProjection("an output-tiled root forest must cover the complete projection")
     if any(members[id(left)] & members[id(right)] for i, left in enumerate(roots) for right in roots[i + 1 :]):
         raise UnbindableProjection("output-tiled root projections may not share tail statements")
-    return tuple((root, Body(stmt for stmt in op.body if stmt in members[id(root)]), tuple(grouped[id(root)])) for root in roots)
+    return tuple((root, Body(stmt for stmt in op.lift.body if stmt in members[id(root)]), tuple(grouped[id(root)])) for root in roots)
 
 
 def head(op):

@@ -203,8 +203,72 @@ def test_iteration_variables_are_not_captures() -> None:
 
 
 def test_the_closure_predicate_reads_the_declaration() -> None:
-    """``_external_reads`` is :attr:`Fold.index_space` — asked of the term, not derived by lowering
-    it and scanning the result."""
+    """``_external_reads`` is :attr:`Fold.index_space` with :attr:`Fold.captures` — asked of the
+    term, not derived by lowering it and scanning the result."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _external_reads
 
     assert _external_reads(_matmul()) == {"m", "n", "k"}
+
+
+def test_a_value_capture_is_declared() -> None:
+    """A name the lift reads that no operand binds is a trailing param, and the term declares it:
+    the reciprocal an attention epilogue scales its weights with."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _external_reads
+
+    a = _slab("l", "x", (Var("m"), Var("k")))
+    scaled = _reduce((a,), (Assign(name="acc__v", op="multiply", args=("l", "inv")),), ("acc",))
+    assert scaled.lift.params == ("k", "l", "inv")
+    assert scaled.captures == {"inv"}
+    assert _matmul().captures == frozenset()
+    assert _external_reads(scaled) == {"m", "k", "inv"}
+
+
+def test_an_operand_lands_where_its_dependencies_allow() -> None:
+    """A statement that reads an operand's result waits for it; an operand that reads that
+    statement follows it — softmax's ``1/sum`` between the sum and the weighted sum."""
+    x = _slab("l", "x", (Var("m"), Var("k")))
+    total = _reduce((x,), (Assign(name="acc__v", op="copy", args=("l",)),), ("acc",))
+    weighted = _reduce((x,), (Assign(name="out__v", op="multiply", args=("l", "inv")),), ("out",))
+    stmts = _projection((total, weighted), (Assign(name="inv", op="reciprocal", args=("acc",)),), ("inv",)).lower()
+    kinds = [(type(stmt).__name__, getattr(stmt, "name", None)) for stmt in stmts]
+    assert kinds == [("Loop", None), ("Assign", "inv"), ("Loop", None)]
+    assert [stmt.name for stmt in stmts[0].body if isinstance(stmt, Accum)] == ["acc"]
+    assert [stmt.name for stmt in stmts[2].body if isinstance(stmt, Accum)] == ["out"]
+
+
+def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_under_it() -> None:
+    """Attention's ``Σ_k P·V`` per output column: the fold joins the projection's operands with its
+    slabs declaring the sweep axis, the sweep keeps its store, and reconstitution wraps the fold's
+    loop back inside the output loop. A sibling reduce ahead of the sweep keeps the sweep a sweep
+    rather than a peeled free axis."""
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import Write
+    from emmy.compiler.ir.tile import lower_with_output_specs
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+
+    add = ElementwiseImpl("add")
+    total = Loop(
+        axis=K_AXIS,
+        body=Body((Load(name="y0", input="y", index=(Var("m"), Var("k"))), Accum(name="tot", value="y0", op=add, axes=("k",)))),
+    )
+    weighted = Loop(
+        axis=K_AXIS,
+        body=Body(
+            (
+                Load(name="x0", input="x", index=(Var("m"), Var("n"), Var("k"))),
+                Assign(name="w", op="multiply", args=("x0", "tot")),
+                Accum(name="acc", value="w", op=add, axes=("k",)),
+            )
+        ),
+    )
+    sweep = Loop(axis=N_AXIS, body=Body((weighted, Write(output="out", index=(Var("m"), Var("n")), value="acc"))))
+    tile = lift_loop_op(LoopOp(body=(Loop(axis=M_AXIS, body=Body((total, sweep))),)), name="k_sweep")
+
+    # Canonical renumbering renames the axes; the sweep coordinate is one the fold's slab declares.
+    first, second = tile.op.operands
+    (spec,) = tile.output_specs
+    assert spec.sweep is not None and spec.sweep.name in second.index_space
+    assert spec.sweep.name not in first.index_space
+    outer, loop = lower_with_output_specs(tile.op, tile.output_specs)
+    assert isinstance(outer, Loop) and isinstance(loop, Loop) and loop.axis.name == spec.sweep.name
+    assert [type(stmt).__name__ for stmt in loop.body] == ["Loop", "Write"]

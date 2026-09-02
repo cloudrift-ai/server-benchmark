@@ -491,7 +491,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     assert node is not None, "the split offer fires on node-form kernels only"
     root, projection, projection_pieces = _split_projection(tile, root, node)
     free = tuple(tile.place.free)
-    if node.as_contraction is not None:
+    if node.as_contraction() is not None:
         split, partial_fold = _sliced_contraction(node, cta)
     else:
         _enforce(splitk_width(node.axis, cta))

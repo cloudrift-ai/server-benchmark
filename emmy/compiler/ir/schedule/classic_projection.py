@@ -176,7 +176,7 @@ def _channel_dtype(tile: TileOp, node, target):
 
 def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: tuple = (None, None)) -> str | None:
     """Return why static node facts rule out every tensor-core atom."""
-    view = node.as_contraction
+    view = node.as_contraction()
     if view is None or (view.product.name, view.plus.name) != ("multiply", "add"):
         return "the mma atom realizes only the (multiply, add) semiring instance"
     if not tile.inputs:
@@ -197,7 +197,7 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
     if dtype is not None and dtype.logical_elems != 1:
         return f"a packed {dtype} A pairs with no packed peer; no atom multiplies packed codes against decoded ones"
     if dtype is not None and dtype.nbytes == 1:
-        if not a_edge.is_slab:
+        if a_edge.as_slab() is None:
             return "fp8 fragment loads require a materialized A edge"
         if _channel_dtype(tile, node, target) != dtype:
             return "fp8 fragment loads require one matching operand dtype"
@@ -255,7 +255,7 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
     """Project every tensor-core atom allowed by static node and target facts."""
     a_edge = node.operands[0]
     dtype = edge_dtypes(a_edge, tile.inputs)[0]
-    a_is_load = a_edge.is_slab
+    a_is_load = a_edge.as_slab() is not None
     a_step = gmem_axis_step(a_edge.loads[0], node.axis.name, tile.inputs) if a_is_load else None
     shapes = {**tile.inputs, **tile.outputs}
 
@@ -338,7 +338,7 @@ def _options(state: _ProjectionState, node) -> tuple:
 
     choices = (
         _contraction_domain(state.tile, state.target, node, state.tile.contractions[site])
-        if view.as_contraction is not None
+        if view.as_contraction() is not None
         else tuple(ReductionSchedule(Tile(), reduction) for reduction in _reduction_domain(state.tile, node))
     )
     valid_choices = []
@@ -363,7 +363,7 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
     """Project the independent edge catalog; context composition decides compatibility."""
     node = state.tile.sites[site].node
     view = state.tile.views[site]
-    if view.as_contraction is None:
+    if view.as_contraction() is None:
         return (EdgeSchedule(Stage.direct()),)
     supported = {}
     direct = EdgeSchedule(Stage.direct())
@@ -413,7 +413,7 @@ def project_classic(tile: TileOp, target) -> ClassicDomains:
         )
     raster_values = (
         raster_moves()
-        if any(view.as_contraction is not None for view in tile.views) and all(axis.extent.is_static for axis in tile.place.free)
+        if any(view.as_contraction() is not None for view in tile.views) and all(axis.extent.is_static for axis in tile.place.free)
         else [""]
     )
     kernel_work_domain = {

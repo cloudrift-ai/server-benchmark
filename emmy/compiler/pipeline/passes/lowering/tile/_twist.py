@@ -347,7 +347,7 @@ def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
         statistic,
         operands=operands,
         lift=lift,
-        init=(*statistic.init, *((fold.as_contraction.plus.identity,) * len(sums))),
+        init=(*statistic.init, *((fold.as_contraction().plus.identity,) * len(sums))),
         combine=combine,
     )
     epilogue = [Assign(name=view.inverse, op=EXP_FAMILY.inverse, args=(statistic.combine.results[1],))]
@@ -379,10 +379,10 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
 
     # A computed A cone — the term's own reading: operands[0] is A by canonical form, and a
     # cone is an operand that is not a gmem read.
-    if node.as_contraction is not None and not node.operands[0].is_slab:
+    if node.as_contraction() is not None and node.operands[0].as_slab() is None:
         view = _normalized_exp(node.operands[0], node.axis.name, axes)
         if view is not None and _same_axis(view.statistic, node):
-            ring = node.as_contraction
+            ring = node.as_contraction()
             if ring is not None and ring.product.name == "multiply" and ring.plus.reduce_canon == "add":
                 return _extend_statistic(node, view)
 

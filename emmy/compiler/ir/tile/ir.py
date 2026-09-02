@@ -496,14 +496,14 @@ class TileOp(Op):
             candidate_axes = tuple(dict.fromkeys(axis.name for axis in candidate_scope))
             candidate_sweeps = frozenset(name for name in candidate_axes if name not in {axis.name for axis in candidate_free})
             candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,), sweep_axes=candidate_sweeps)
-            if any(site.node.as_contraction is not None for site in sites(candidate)):
+            if any(site.node.as_contraction() is not None for site in sites(candidate)):
                 normalized = candidate
                 object.__setattr__(self, "place", replace(self.place, free=candidate_free))
         if self.schedule is not None and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
-        contractions = tuple(site.node for site in sites(normalized) if site.node.as_contraction is not None)
+        contractions = tuple(site.node for site in sites(normalized) if site.node.as_contraction() is not None)
         promoted = {
             store.sweep.name
             for store in self.output_specs
@@ -622,7 +622,7 @@ class TileOp(Op):
     def contracts(self, site: NodeId) -> bool:
         """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want."""
         view = self.views[site]
-        return view.as_contraction is not None
+        return view.as_contraction() is not None
 
     @cached_property
     def family_sites(self) -> frozendict[str, tuple[NodeId, ...]]:
@@ -649,7 +649,7 @@ class TileOp(Op):
 
     @cached_property
     def _packed_readings(self) -> frozendict:
-        return packed_readings(tuple(site.node for site in self.sites if site.node.as_contraction is not None), self.inputs)
+        return packed_readings(tuple(site.node for site in self.sites if site.node.as_contraction() is not None), self.inputs)
 
     def packed_reading(self, node) -> tuple:
         """One node's ``(B copy, pair)`` packed-operand readings.

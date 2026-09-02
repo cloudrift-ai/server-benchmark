@@ -209,11 +209,11 @@ def _target_memo(tile_op, target, slot: str) -> dict:
 def _computed_edge(node: Fold) -> bool:
     """Whether any operand is a computed cone rather than a gmem read.
 
-    ``is_slab``, not ``axis is None``: a slab ITERATES (its coordinates are its own axes) and
+    ``as_slab``, not ``axis is None``: a slab ITERATES (its coordinates are its own axes) and
     simply does not reduce, so the old test — written when a materialized edge was a bare ``Load``
     and only a cone was a Fold — now calls every operand computed.
     """
-    return any(not edge.is_slab for edge in node.operands)
+    return any(edge.as_slab() is None for edge in node.operands)
 
 
 def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
@@ -446,7 +446,7 @@ class ClassicMaterialization:
         expected_tiles = {
             site
             for site, assignment in schedule.nodes.items()
-            if assignment.tile.is_tiled and source_tile.views[site].as_contraction is not None
+            if assignment.tile.is_tiled and source_tile.views[site].as_contraction() is not None
         }
         if set(self.tiles) != expected_tiles:
             raise ValueError("classic materialization must contain exactly the tiled node sites")
@@ -913,7 +913,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return None
         stage = next(iter(edges.values())).stage if edges else Stage.direct()
         resolved_stage = None
-        if view.as_contraction is None or not node.tile.is_tiled:
+        if view.as_contraction() is None or not node.tile.is_tiled:
             if not stage.is_direct:
                 cache[key] = None
                 return None
@@ -958,7 +958,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 if isinstance(geometry, PlacedTile)
                 else ()
             ),
-            raster_eligible=node.tile.is_tiled and view.as_contraction is not None,
+            raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
             producer_eligible=not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
         )
         cache[key] = support
@@ -998,7 +998,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             node,
             edges,
             work=work,
-            raster_eligible=node.tile.is_tiled and view.as_contraction is not None,
+            raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
         )
 
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:

@@ -246,7 +246,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
     the node's SCHEDULE (which axes are tiled), never a kernel kind. Nested scheduled contractions
     and their enclosing carrier factorize through this same walk."""
     if (isinstance(op, Fold) and op.axis is None) and op.operands:
-        tiled = [edge for edge in op.operands if edge.as_contraction is not None and ctx.sched.tile_of(edge) is not None]
+        tiled = [edge for edge in op.operands if edge.as_contraction() is not None and ctx.sched.tile_of(edge) is not None]
         if len(tiled) > 1:
             return _bind_roots(op, ctx, output_specs)
         root = tiled[0] if tiled else op.operands[0]
@@ -283,7 +283,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
                 node = node.operands[0]
             plan = ctx.sched.get("REDUCE", node) if isinstance(node, Fold) and node.axis is not None else None
             if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (
-                node.as_contraction is not None and ctx.sched.tile_of(node) is not None
+                node.as_contraction() is not None and ctx.sched.tile_of(node) is not None
             ):
                 raise UnbindableProjection(
                     f"the bound reduce's cone reads output sweep axis {swept[0]!r} — a cooperative / ILP "
@@ -414,7 +414,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         tail = fold_store_tail(tail, op, c)
     else:
         c, value_child, projection = op, None, ()
-        tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction is not None else None
+        tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction() is not None else None
         stage = ctx.sched.get("STAGE", op) if tile is not None else None
     if tile is not None and tile.axes is not None and len(grid) >= 2:
         epi = list(tail)
@@ -422,7 +422,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             epi = with_store(epi, ctx.output, grid, c.out)
         # The cone's K seam, read straight off the inline operand node (``None`` for a gmem-``Load``
         # A — its whole body is the per-cell fill).
-        seam = cone_seam(c.operands[0], c.axis.name) if value_child is None and not c.operands[0].is_slab else None
+        seam = cone_seam(c.operands[0], c.axis.name) if value_child is None and c.operands[0].as_slab() is None else None
         # The leading (batch / ksplit) grid axes ride untiled below the ``(m, n)`` cell — the GRID's
         # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
         # per-cell rename's shared coordinates) from here, where the kernel grid is in hand.

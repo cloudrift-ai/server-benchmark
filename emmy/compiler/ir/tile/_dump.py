@@ -140,7 +140,7 @@ def _edge(edge, ctx: _Ctx, result: str | None = None) -> tuple[str, object]:
     computed edge recurses into the node stored on it."""
     names = edge.exposes
     head = f"operand[{', '.join(names)}]" + (f" -> {result}" if result is not None else "")
-    if edge.is_slab:
+    if edge.as_slab() is not None:
         load = edge.loads[0]
         load = load.pretty()[0].strip().removeprefix(f"{load.name} = ")
         return f"{head}: {load}   ‹materialized›", lambda cont: []

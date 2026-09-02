@@ -75,7 +75,7 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
     key = id(edge)
     if key in cache:
         return cache[key]
-    if edge.is_slab:
+    if edge.as_slab() is not None:
         load = edge.loads[0]
         tensor = inputs.get(load.input) if inputs else None
         result = (tensor.dtype if tensor is not None else None,) * len(load.names)
@@ -340,7 +340,7 @@ class Sched:
             # The first operand's own free axis leads — ``ContractionView.left``, which IS that
             # reading. Which of the pair is physically M stays the placement's answer; this only
             # puts the shared operand's axis first.
-            view = node.as_contraction
+            view = node.as_contraction()
             if mn is None or view is None:
                 return mn
             first, second = mn

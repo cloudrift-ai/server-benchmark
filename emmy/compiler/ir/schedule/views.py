@@ -41,7 +41,7 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
     facts = {}
     for site in range(len(owner.sites)):
         view = owner.views[site]
-        if view.as_contraction is None:
+        if view.as_contraction() is None:
             continue
         record = owner.sites[site]
         node, parent = record.node, record.parent
@@ -58,7 +58,7 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
             seam = ((), (), tuple(parent.combine.results[: -len(node.combine.results)]))
             k_axis = parent.axis
         else:
-            computed = tuple(edge for edge in node.operands if not edge.is_slab)
+            computed = tuple(edge for edge in node.operands if edge.as_slab() is None)
             seam = cone_seam(computed[0], node.axis.name) if computed else None
             k_axis = node.axis
         # The nested contraction this one consumes — sought over the operand edges, which is where
@@ -67,9 +67,9 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
         nested = tuple(
             visit.node
             for edge in node.operands
-            if not edge.is_slab
+            if edge.as_slab() is None
             for visit in walk(edge)
-            if visit.node.as_contraction is not None and k_axis.name in visit.node.index_space
+            if visit.node.as_contraction() is not None and k_axis.name in visit.node.index_space
         )
         producer = nested[0] if len(nested) == 1 else None
         facts[site] = ContractionFacts(

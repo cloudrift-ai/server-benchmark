@@ -4,7 +4,7 @@ A ``Fold``'s operands are ``Fold``s, without exception: a gmem read is a :meth:`
 wrapped ``Load`` whose index coordinates are its own :attr:`Fold.axes`. That one invariant is what
 lets every per-edge question be an attribute rather than a helper branching on what the edge
 happens to be — its coordinates (:attr:`Fold.index_space`), the names it binds
-(:attr:`Fold.exposes`), whether it is a leaf (:attr:`Fold.is_slab`), and whether the term above it
+(:attr:`Fold.exposes`), whether it is a leaf (:meth:`Fold.as_slab`), and whether the term above it
 is bilinear (:meth:`Fold.as_contraction`).
 
 These pin the readings and the ONE lowering spelling built on them: operands lower before the body,
@@ -64,7 +64,7 @@ def test_a_slab_declares_the_coordinates_it_indexes() -> None:
     assert tuple(axis.name for axis in slab.axes) == ("m", "k")
     assert slab.index_space == {"m", "k"}
     assert slab.exposes == ("l",)
-    assert slab.is_slab
+    assert slab.as_slab() is not None
 
 
 def test_a_slab_lowers_to_exactly_its_load() -> None:
@@ -85,7 +85,7 @@ def test_a_computed_cone_is_not_a_slab() -> None:
         (Assign(name="xhat", op="multiply", args=("e", "s")),),
         ("xhat",),
     )
-    assert not cone.is_slab
+    assert cone.as_slab() is None
     assert cone.exposes == ("xhat",)
     assert cone.index_space == {"m", "k"}  # the union of its operands' declarations
 
@@ -95,7 +95,7 @@ def test_a_computed_cone_is_not_a_slab() -> None:
 
 def test_as_contraction_reads_the_shared_and_free_axes() -> None:
     """``a[m,k] × b[k,n]``: the shared axis is the reduction, the difference is the output."""
-    view = _matmul().as_contraction
+    view = _matmul().as_contraction()
     assert view is not None
     assert view.axis is K_AXIS and {view.left, view.right} == {"m", "n"}
 
@@ -105,13 +105,13 @@ def test_a_scale_is_not_a_contraction() -> None:
     a = _slab("l", "x", (Var("m"), Var("k")))
     scale = _slab("s", "s", (Var("m"),))
     node = _reduce((a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",))
-    assert node.as_contraction is None
+    assert node.as_contraction() is None
     assert node.role is AxisRole.PLANAR
 
 
 def test_a_pointwise_term_has_no_view() -> None:
     """No axis to share, so nothing to read."""
-    assert _projection((_slab("l", "x", (Var("m"),)),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).as_contraction is None
+    assert _projection((_slab("l", "x", (Var("m"),)),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).as_contraction() is None
 
 
 # --- lowering ------------------------------------------------------------------------------------ #

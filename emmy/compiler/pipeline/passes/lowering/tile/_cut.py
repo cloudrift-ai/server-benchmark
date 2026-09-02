@@ -230,9 +230,9 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     store_dtype_consumers = {
         id(edge): site.node
         for site in all_sites
-        if site.node.as_contraction is not None
+        if site.node.as_contraction() is not None
         for edge in site.node.operands
-        if isinstance(edge, Fold) and not edge.is_slab
+        if isinstance(edge, Fold) and edge.as_slab() is None
     }
     outer = (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None))
     occurrence_axes: dict[int, list[tuple]] = {}
@@ -246,7 +246,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     for site in family_sites("PLACE", all_sites):
         node = site.node
         scopes = occurrence_axes.get(id(node), ())
-        if not isinstance(node, Fold) or node.is_slab or id(node) in seen or not scopes:
+        if not isinstance(node, Fold) or node.as_slab() is not None or id(node) in seen or not scopes:
             continue
         if not all(_closed_at(node, scope) for scope in scopes):
             continue

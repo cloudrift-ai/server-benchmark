@@ -206,7 +206,7 @@ def _a_leads(node: Fold) -> Fold:
 
         def k_last(edge: Fold) -> bool:
             # Only a slab has a gmem index to read a layout off; a computed cone answers False.
-            return edge.is_slab and node.axis.name in edge.loads[0].index[-1].free_vars()
+            return edge.as_slab() is not None and node.axis.name in edge.loads[0].index[-1].free_vars()
 
         a_edge = next((edge for edge in pair if k_last(edge)), None)
         if a_edge is None:
@@ -217,7 +217,7 @@ def _a_leads(node: Fold) -> Fold:
     reordered = (a_edge, *(edge for edge in node.operands if edge is not a_edge))
     params = (node.axis.name, *(name for edge in reordered for name in edge.exposes))
     candidate = replace(node, operands=reordered, lift=replace(node.lift, params=params))
-    return candidate if candidate.as_contraction is not None else node
+    return candidate if candidate.as_contraction() is not None else node
 
 
 def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str], sweep_axes: frozenset[str]) -> Fold:

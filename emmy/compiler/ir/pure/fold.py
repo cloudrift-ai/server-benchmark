@@ -41,6 +41,20 @@ from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 
 
 @dataclass(frozen=True)
+class SlabView:
+    """A Fold's reading as one gmem read — a leaf that DECLARES the coordinates it indexes.
+
+    ``load`` is the read itself, ``axes`` the coordinates it binds (the term's own). No operands,
+    no monoid, a body of one ``Load``: what ``isinstance(edge, Load)`` used to ask, back when a
+    statement could sit in ``operands``. Placement never offers one as a seam — there is nothing
+    to materialize that the load does not already do.
+    """
+
+    load: Load
+    axes: tuple[Axis, ...]
+
+
+@dataclass(frozen=True)
 class ContractionView:
     """A Fold's BILINEAR reading, as geometry: the axis its operands share and the free axis each
     one contributes.
@@ -224,7 +238,17 @@ class Fold:
             space |= edge.index_space
         return frozenset(space)
 
+    def as_slab(self) -> SlabView | None:
+        """The :class:`SlabView` of this term — its one gmem read and the coordinates it declares —
+        or ``None`` for a computed cone. Memoized (:attr:`_slab`)."""
+        return self._slab
+
     @cached_property
+    def _slab(self) -> SlabView | None:
+        if self.operands or self.combine is not None or len(self.lift.body) != 1 or not isinstance(self.lift.body[0], Load):
+            return None
+        return SlabView(load=self.lift.body[0], axes=self.axes)
+
     def as_contraction(self) -> ContractionView | None:
         """The :class:`ContractionView` of this term, or ``None`` when it is not bilinear.
 
@@ -241,9 +265,14 @@ class Fold:
         so the fold's axis must be AMONG the shared axes rather than all of them.
 
         Every product reads ``operands[0]`` — A by canonical form — which is what makes the fused
-        multi-channel edge one contraction over one shared A rather than several. Memoized: the
-        term is immutable and every role, schedule and emission read asks this.
+        multi-channel edge one contraction over one shared A rather than several. Memoized
+        (:attr:`_contraction`): the term is immutable and every role, schedule and emission read
+        asks this.
         """
+        return self._contraction
+
+    @cached_property
+    def _contraction(self) -> ContractionView | None:
         if self.axis is None or self.combine is None or len(self.operands) < 2:
             return None
         pluses = component_ops(self.combine)
@@ -281,7 +310,8 @@ class Fold:
         left_only, right_only = a_space - b_space, b_space - a_space
         if len(left_only) > 1 or len(right_only) > 1:
             return None  # more than one free axis a side is not an orientable output role
-        b_trans = b_edge.is_slab and self.axis.name in b_edge.lift.body[0].index[-1].free_vars()
+        slab = b_edge.as_slab()
+        b_trans = slab is not None and self.axis.name in slab.load.index[-1].free_vars()
         return ContractionView(
             axis=self.axis,
             left=next(iter(left_only), None),
@@ -290,17 +320,6 @@ class Fold:
             plus=plus,
             b_trans=b_trans,
         )
-
-    @property
-    def is_slab(self) -> bool:
-        """Whether this term is a wrapped ``Load`` — a gmem read that declares its coordinates.
-
-        A leaf, not a computed cone: no operands, no monoid, a body of one ``Load``. This is what
-        ``isinstance(edge, Load)`` used to ask, back when a statement could sit in ``operands``.
-        Placement never offers one as a seam: there is nothing to materialize that the load does
-        not already do.
-        """
-        return not self.operands and self.combine is None and len(self.lift.body) == 1 and isinstance(self.lift.body[0], Load)
 
     @property
     def loads(self) -> tuple[Load, ...]:
@@ -348,7 +367,7 @@ class Fold:
             return AxisRole.FREE
         if not degenerate(self.combine):
             return AxisRole.TWISTED
-        if self.as_contraction is not None:
+        if self.as_contraction() is not None:
             return AxisRole.CONTRACTION  # the bilinear cell itself — the node kind that was
         return AxisRole.PLANAR
 
@@ -362,7 +381,7 @@ class Fold:
         if len(self.lift.body) or len(self.operands) != 1:
             return None
         inner = self.operands[0]
-        return inner if inner.as_contraction is not None else None
+        return inner if inner.as_contraction() is not None else None
 
     # ---- the DERIVED READINGS. ``Map`` and ``Contraction`` are no longer stored kinds (the
     # collapse); every field they carried reads back off the one stored term here, so their old

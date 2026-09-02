@@ -112,7 +112,7 @@ class _ScheduledContraction:
 
     @property
     def semiring(self):
-        view = self.child.as_contraction
+        view = self.child.as_contraction()
         return None if view is None else (view.product, view.plus)
 
     @property
@@ -130,7 +130,7 @@ def scheduled_fold_contraction(fold: Fold, sched):
 
     states = set(fold.combine.results) if fold.combine is not None else set()
     steps = tuple(fold.lift.body)
-    for child in (stmt for stmt in steps if isinstance(stmt, Fold) and stmt.as_contraction is not None):
+    for child in (stmt for stmt in steps if isinstance(stmt, Fold) and stmt.as_contraction() is not None):
         tile = sched.tile_of(child)
         consumers = tuple(stmt for stmt in steps if isinstance(stmt, Accum) and stmt.name in states and stmt.value == child.out)
         stage = sched.get("STAGE", child) if tile is not None else None
@@ -733,7 +733,7 @@ def _child_stream_operand(*, c: Fold, child: Fold, atom, m_name: str, cols: int)
     indexes the invariant tile (the slab is CTA-shared across it), and a symbolic stream extent (whose
     last chunk overhangs, and only the gmem-direct read carries that guard)."""
     b = child.operands[1]
-    if not (isinstance(b, Load) and child.as_contraction.b_trans and child.axis.extent.is_static and c.axis.extent.is_static):
+    if not (isinstance(b, Load) and child.as_contraction().b_trans and child.axis.extent.is_static and c.axis.extent.is_static):
         return None
     k_ext = child.axis.extent.as_static()
     if (k_ext * atom.operand_dtype("b").nbytes) % 16 or Body.coerce(()).depends_on(b, m_name):
@@ -858,7 +858,7 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
     Returns ``(operand, copied, prologue)``."""
     pro, cell, stats = seam
     m_name, k_name = mn[0].axis.name, c.axis.name
-    if c.operands[0].is_slab:
+    if c.operands[0].as_slab() is not None:
         shape = (mn[0].tile, bk_elems)
         op = Operand(
             tag="a",
@@ -995,15 +995,17 @@ def _sync_operands(
         # A transposed B stages N-major (``tile_n × bk`` — its own gmem orientation, K stride-1 in
         # gmem and smem alike), so its cp.async chunks are contiguous exactly like the canonical
         # K-major slab's (row-base alignment holds: B's row stride K is a multiple of ``bk_elems``).
-        shape = (mn[1].tile, bk_elems) if c.as_contraction.b_trans else (bk_elems, mn[1].tile)
+        shape = (mn[1].tile, bk_elems) if c.as_contraction().b_trans else (bk_elems, mn[1].tile)
         op = Operand(
             tag=tag,
             buf=bl.input,
             shape=shape,
             coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, sibling=mn[0]),
-            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, tile_is_row=c.as_contraction.b_trans, sibling=mn[0]),
+            index=_slab_index(
+                bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, tile_is_row=c.as_contraction().b_trans, sibling=mn[0]
+            ),
             swizzle=swizzles[1],
-            trans=c.as_contraction.b_trans,
+            trans=c.as_contraction().b_trans,
         )
         async_ops.append(op)
         drain.append(op)
@@ -1384,7 +1386,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             base=_tile_base(mn),
             swizzles=ops.slab_swizzles(mn, elem.nbytes),
             elems=elems,
-            b_trans=c.as_contraction.b_trans,
+            b_trans=c.as_contraction().b_trans,
             pads=pads,
         )
         common = dict(
@@ -1681,7 +1683,7 @@ class _MmaOps(_AtomOps):
         out = []
         for edge, role in ((self.c.operands[0], "a"), (self.c.operands[1], "b")):
             dt = self.tile.atom.operand_dtype(role)
-            t = self.inputs.get(edge.loads[0].input) if self.inputs and edge.is_slab else None
+            t = self.inputs.get(edge.loads[0].input) if self.inputs and edge.as_slab() is not None else None
             out.append(t.dtype if t is not None and t.dtype.nbytes == 1 else dt)
         return tuple(out)
 
@@ -1738,7 +1740,7 @@ class _MmaOps(_AtomOps):
         b16-indexed); the cp.async byte slab's bank spread is the row pad instead."""
         if self.tile.atom.fragment_layout == "m8n8k4":
             return ("NONE", "NONE")
-        b_inner = self.stage.bk_elems if self.c.as_contraction.b_trans else mn[1].tile
+        b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile
         # A TMA slab keeps the hardware spelling (the copy engine fixes its permutation, and the
         # descriptor splits its box down to the atom); every other transport writes the slab in
         # software, so its XOR reads the row index at the slab's OWN stride.
@@ -1817,14 +1819,16 @@ class _MmaOps(_AtomOps):
         c = self.c
         atom, (m, n) = self.tile.atom, mn
         k_axis = c.axis
-        assert c.operands[0].is_slab, "mma matmul arm: a register-resident (computed) A operand has no gmem-direct fragment loader here"
+        assert c.operands[0].as_slab() is not None, (
+            "mma matmul arm: a register-resident (computed) A operand has no gmem-direct fragment loader here"
+        )
         assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the smem compute fill"
         # A materialized edge answers with its own ``Load`` — the shape this code reads an index
         # and a buffer off; a computed cone stays the term, as it was when an edge could be either.
         a_edge, b_edge = c.operands[0], c.operands[1]
-        a_load = a_edge.loads[0] if a_edge.is_slab else a_edge
-        b_load = b_edge.loads[0] if b_edge.is_slab else b_edge
-        b_trans = c.as_contraction.b_trans
+        a_load = a_edge.loads[0] if a_edge.as_slab() is not None else a_edge
+        b_load = b_edge.loads[0] if b_edge.as_slab() is not None else b_edge
+        b_trans = c.as_contraction().b_trans
         # The loop's final step overhangs K whenever ``atom_k`` does not tile it — a SYMBOLIC K
         # (unknown at compile time) or a static K with a remainder. Both mask the same way: the
         # loaders zero-fill the fragment halves past ``k_zero``'s bound, so the summed reduction
@@ -2097,7 +2101,7 @@ def _atom_ops(
     fill then evaluates the load per slab cell and the typed slab store performs the conversion
     (the scheduler resolved the fill for exactly this edge; the tree itself is never rewritten)."""
     a_edge = c.operands[0] if c.operands else None
-    a_load = a_edge.lift.body[0] if a_edge is not None and a_edge.is_slab else None
+    a_load = a_edge.lift.body[0] if a_edge is not None and a_edge.as_slab() is not None else None
     if (
         stage is not None
         and stage.transport == "smem"
@@ -2189,7 +2193,7 @@ def _fold_staged(
         (
             stmt
             for stmt in steps
-            if isinstance(stmt, Fold) and stmt.as_contraction is not None and stmt is not value_child and sched.tile_of(stmt) is not None
+            if isinstance(stmt, Fold) and stmt.as_contraction() is not None and stmt is not value_child and sched.tile_of(stmt) is not None
         ),
         None,
     )
@@ -2213,15 +2217,15 @@ def _fold_staged(
 
     b = c.operands[1]
     assert isinstance(b, Load), "a fragment Fold child currently requires a materialized streamed operand"
-    b_shape = (n.tile, bk) if c.as_contraction.b_trans else (bk, n.tile)
+    b_shape = (n.tile, bk) if c.as_contraction().b_trans else (bk, n.tile)
     b_op = Operand(
         tag="b",
         buf=b.input,
         shape=b_shape,
         coords=_box_origin(b.index, tile=n, tile_base=col_base, k_axis=c.axis, sibling=m),
-        index=_slab_index(b.index, tile=n, tile_base=col_base, k_axis=c.axis, tile_is_row=c.as_contraction.b_trans, sibling=m),
+        index=_slab_index(b.index, tile=n, tile_base=col_base, k_axis=c.axis, tile_is_row=c.as_contraction().b_trans, sibling=m),
         swizzle=swizzles[1],
-        trans=c.as_contraction.b_trans,
+        trans=c.as_contraction().b_trans,
     )
 
     k0 = Var("_ks")

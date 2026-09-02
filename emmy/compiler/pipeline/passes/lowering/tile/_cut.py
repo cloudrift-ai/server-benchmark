@@ -519,12 +519,11 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
 def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = ()) -> list[str]:
     """A piece's graph inputs: its workspaces, then every buffer of ``root``'s the piece reads.
 
-    The read set is the STORED tree's (:func:`loaded_buffers`), not the lowered body's, because the
-    kernel this node becomes is materialized from that tree. A Fold a region keeps as a term hides
-    its operand edges from a lowered-body walk, so declaring the lowered view named fewer inputs
-    than the kernel went on to read; the workspace producers then had no consumer edge, were pruned
-    as orphans, and the launch asked for a buffer nothing had allocated."""
-    reads = loaded_buffers(fold)
+    The read set is :attr:`Fold.loads` — the STORED tree's, walked through the operand edges a
+    body cannot reach. A walk that stopped at the stored body named fewer inputs than the kernel
+    went on to read; the workspace producers then had no consumer edge, were pruned as orphans,
+    and the launch asked for a buffer nothing had allocated."""
+    reads = {load.input for load in fold.loads}
     return [*first, *(name for name in root.inputs if name in reads)]
 
 
@@ -569,7 +568,7 @@ def _producer_order(pieces) -> list:
     ordered = []
     available: set[str] = set()
     while remaining:
-        ready = [piece for piece in remaining if loaded_buffers(piece[1]) & workspaces <= available]
+        ready = [piece for piece in remaining if {load.input for load in piece[1].loads} & workspaces <= available]
         assert ready, "strict Fold containment makes the cut-workspace dependency graph acyclic"
         ordered.extend(ready)
         available.update(buffer for *_, buffers in ready for buffer in buffers)
@@ -684,7 +683,7 @@ def realize(
         producer = replace(producer, knobs=consume_kernel_row(producer.knobs))
         shape = tuple(axis.extent for axis in axes)
         workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
-        reads = loaded_buffers(produced)
+        reads = {load.input for load in produced.loads}
         fragment.add_node(
             op=producer,
             inputs=_piece_inputs(root, produced, tuple(buffer for buffer in all_buffers if buffer in reads)),

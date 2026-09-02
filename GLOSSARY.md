@@ -174,11 +174,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Memory bandwidth** — How fast a GPU can move data between its main memory and the chip, in bytes per second. It
   is a fixed property of a card, and for many kernels it — not arithmetic speed — is what limits how fast they can
   run.
-- **Roofline** — A lower bound on how long a kernel can possibly take, from two limits it cannot beat: the time to
+- **Roofline** — An estimate of how long a kernel can possibly take, from two limits it cannot beat: the time to
   perform its arithmetic at the card's peak rate, and the time to move its data at the card's memory bandwidth. The
-  bound is the larger of the two, because a kernel must do both. Comparing a measured time against this bound says
-  how much of the hardware a kernel actually uses, in a way that is comparable across different kernels and
-  different cards — where a raw duration is not.
+  estimate is the larger of the two, because a kernel must do both. Comparing a measured time against it says how
+  much of the hardware a kernel actually uses, in a way that is comparable across different kernels and different
+  cards — where a raw duration is not. Intended as a lower bound, and in practice a scale rather than a strict one:
+  it assumes data comes from main memory when a small working set is served from cache instead, and assumes every
+  input is read in full when an indexing operation reads only part. Real kernels beat it often enough that a
+  measurement coming in under the estimate is ordinary, not a sign of a bad measurement.
 - **nvcc / NVRTC** — Two NVIDIA CUDA compilers. nvcc compiles ahead of execution; NVRTC compiles CUDA source at
   runtime.
 - **CUDA graph capture** — Recording a sequence of GPU launches so the sequence can be replayed with less CPU

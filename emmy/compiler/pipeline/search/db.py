@@ -200,56 +200,31 @@ class NodeRow:
 
 
 def implausible_value_reason(row: NodeRow) -> str | None:
-    """THE physical-plausibility predicate for a node row's ``value_us`` — the reason it
-    cannot be a real measurement, or ``None`` when it's plausible/ungateable. Shared by
+    """THE physical-plausibility predicate for a node row's ``value_us``. Shared by
     :meth:`SearchDB.record_nodes`'s write-time gate and the one-time
     :meth:`SearchDB.purge_implausible` repair (``scripts/purge_node_store.py``).
 
-    The bound is the arithmetic-intensity floor the golden A/B integrity gate uses: the
-    throughput a latency implies from the row's stamped shape must stay below the card's
-    recorded peak. ``2·free·reduce_max`` FLOPs is the true work ONLY when the reduce axes
-    are **disjoint** from the output — the iteration space is then exactly
-    ``free_prod × reduce`` (a contraction, or a pure output-shrinking reduce) — which the
-    stamps certify as ``S_loop_depth == n_free + n_reduce + n_symbolic`` (every loop of
-    the nest is either a counted free/symbolic output axis or a counted reduce axis). A
-    norm/softmax kernel fails that equality — its reduced axis is part of the full-size
-    output, so ``free_prod`` already contains it and the product overcounts by the reduce
-    extent (a cooperative norm legitimately runs ~100x its serial sibling, so a latency
-    floor there would flag honest rows); a fused multi-node kernel (attention) fails it
-    too. Both stay ungated rather than falsely flagged — the identity was verified
-    against every stamp combination in the 2026-07 sweep stores. ``reduce_max``, not
-    ``reduce_prod``, keeps the bound a lower estimate of work even off the exact case. A
-    symbolic axis is excluded from the stamped products and benched at the dynamic hint,
-    so it re-enters as one hint factor. Ungateable rows also pass on: non-``ok`` status
-    (a fail sentinel is not a measurement), no stamped shape, unknown card or unrecorded
-    peak, and rows outside the current featurizer vocabulary (their stamps aren't trusted
-    enough to judge)."""
-    if row.status != "ok" or row.value_us <= 0 or row.feat_ver != FEATURIZER_VERSION:
-        return None
-    f = row.features
-    free = float(f.get("S_ext_free_prod") or 0.0)
-    red = float(f.get("S_ext_reduce_max") or 0.0)
-    if free <= 0 or red <= 0:
-        return None
-    # Work = free x red only when every loop multiplies the iteration space (disjoint axes).
-    depth = float(f.get("S_loop_depth") or 0.0)
-    n_sym = float(f.get("S_ext_n_symbolic_axis") or 0.0)
-    n_axes = float(f.get("S_ext_n_free_axis") or 0.0) + float(f.get("S_ext_n_reduce_axis") or 0.0) + n_sym
-    if depth <= 0 or depth != n_axes:
-        return None
+    The bound is the arithmetic-intensity floor: the throughput a latency implies from the row's
+    stamped shape must stay below the card's recorded peak. Work comes from
+    :func:`~.data.shape.stamped_flops`, which owns the formula and its disjointness certificate
+    and ABSTAINS where they do not hold (norm, softmax, fused attention) — those stay ungated
+    rather than falsely flagged, since a cooperative norm legitimately runs ~100x its serial
+    sibling. Ungateable rows also pass on: a non-``ok`` status (a fail sentinel is not a
+    measurement), a row outside the current featurizer vocabulary (its stamps aren't trusted
+    enough to judge), no stamped shape, an unknown card, and an unrecorded peak."""
     from emmy import gpu  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.data.shape import stamped_flops, stamped_peak_dtype  # noqa: PLC0415
 
-    spec = gpu.by_name(row.gpu) if row.gpu else None
-    if spec is None:
+    if row.status != "ok" or row.feat_ver != FEATURIZER_VERSION or row.value_us <= 0:
         return None
-    half = any(k.startswith("S_dtype_") and "f16" in k and v for k, v in f.items())  # f16 / bf16
-    peak = spec.peak_tflops("fp16" if half else "fp32")
+    flops = stamped_flops(row.features)
+    if flops is None:
+        return None
+    spec = gpu.by_name(row.gpu) if row.gpu else None
+    peak = spec.peak_tflops(stamped_peak_dtype(row.features)) if spec else None
     if not peak:
         return None
-    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
-
-    hint = DEFAULT_SEQ_HINT if n_sym > 0 else 1
-    implied = 2.0 * free * red * hint / row.value_us / 1e6  # FLOP / µs -> TFLOP/s
+    implied = flops / row.value_us / 1e6  # FLOP / µs -> TFLOP/s
     if implied > peak:
         return f"implies {implied:.0f} TFLOP/s > {peak:.0f} device peak"
     return None

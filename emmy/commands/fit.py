@@ -113,17 +113,9 @@ def register_fit_command(subparsers) -> None:
 
 
 def _shape_group(g) -> str:
-    """The golden's cross-validation fold group: its ``ShapeKey`` with the two fields normalized away that
-    separate goldens sharing a candidate pool.
-
-    ``is_dyn`` because a ``.dynM`` golden *enumerates its static counterpart's pool* (see
-    :func:`build_golden_groups`) — split them across folds and the fold model is scored on rows it trained on.
-    ``is_warp`` because the fp16/fp32 twins of one geometry are the same physical shape; their pools are
-    disjoint, so this one is conservatism rather than necessity, and it costs 21 groups out of 435.
-
-    ``kind`` and the extents stay: ``flash`` / ``softmax`` / ``rms_norm`` / ``fused`` are different kernels, not
-    variants of one shape. The result is a string so it lands in the metrics file as-is."""
-    return str(replace(g.shape_key, is_dyn=False, is_warp=False))
+    """The golden's cross-validation fold group — see :attr:`ShapeKey.fold_key`, which owns the
+    normalization and the reasons for it."""
+    return g.shape_key.fold_key
 
 
 @dataclass

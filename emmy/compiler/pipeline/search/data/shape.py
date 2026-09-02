@@ -19,8 +19,9 @@ They live here because they are readings of the stamped row, not of any one cons
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from emmy.compiler.dim import DEFAULT_SEQ_HINT
 from emmy.compiler.pipeline.search.features import is_dynamic_row
 
 
@@ -192,6 +193,22 @@ class ShapeKey:
             return replace(self, is_warp=golden.is_warp) == golden
         return self == golden
 
+    @property
+    def fold_key(self) -> str:
+        """This key with the two fields normalized away that separate kernels sharing a candidate
+        pool — the grouping a cross-validation split must hold out together.
+
+        ``is_dyn`` because a ``.dynM`` golden *enumerates its static counterpart's pool*: split
+        them across folds and the fold model is scored on rows it trained on. ``is_warp`` because
+        the fp16/fp32 twins of one geometry are the same physical shape; their pools are disjoint,
+        so this half is conservatism rather than necessity.
+
+        ``kind`` and the extents stay: ``flash`` / ``softmax`` / ``rms_norm`` / ``fused`` are
+        different kernels, not variants of one shape. Card-blind by construction, since a key
+        carries no card — which is what makes it the right axis when the same kernel is measured
+        on several. A string so it lands in a metrics file as-is."""
+        return str(replace(self, is_dyn=False, is_warp=False))
+
     def s_features_arith(self) -> dict[str, float]:
         """The extent ``S_*`` features derivable without compiling. For a matmul
         the reduce axis is a single contraction, so
@@ -232,3 +249,49 @@ def op_label(s: dict) -> str:
     kind = "matmul" if is_matmul(s) else ("reduce" if (s.get("S_reduce_add", 0) or s.get("S_reduce_max", 0)) else "pointwise")
     free, red = int(s.get("S_ext_free_max", 0)), int(s.get("S_ext_reduce_max", 0))
     return f"{kind:9} free={free}" + (f" red={red}" if red else "")
+
+
+def stamped_peak_dtype(s: dict) -> str:
+    """Which of a card's two throughput ceilings a kernel with this histogram runs against —
+    ``"fp16"`` when any operand loads at half precision, else ``"fp32"``.
+
+    Reads the ``S_dtype_*`` operand multiset, NOT ``S_n_mma``, for the reason
+    :meth:`ShapeKey.from_s_features` documents at length: the stamp pass runs at fusion end,
+    before the tile tier emits ``Mma`` statements, so ``S_n_mma`` is 0.0 on every stamped row."""
+    return "fp16" if any(k.startswith("S_dtype_") and "f16" in k and v for k, v in s.items()) else "fp32"
+
+
+def stamped_flops(s: dict) -> float | None:
+    """The kernel's floating-point work from its stamped histogram, or ``None`` when the stamps
+    do not certify a formula for it.
+
+    ``2·free_prod·reduce_max`` is the true work ONLY when the reduce axes are **disjoint** from
+    the output — the iteration space is then exactly ``free_prod × reduce`` (a contraction, or a
+    pure output-shrinking reduce) — which the stamps certify as
+    ``S_loop_depth == n_free + n_reduce + n_symbolic``: every loop of the nest is either a counted
+    free/symbolic output axis or a counted reduce axis. A norm or softmax fails that equality, its
+    reduced axis being part of the full-size output so that ``free_prod`` already contains it and
+    the product overcounts by the reduce extent; a fused multi-node kernel (attention) fails it
+    too. Both ABSTAIN here rather than return a wrong number — a caller wanting a bound for those
+    must reach it another way, which for a roofline is the traffic term. ``reduce_max``, not
+    ``reduce_prod``, keeps the result a lower estimate of work even off the exact case.
+
+    **The symbolic-axis factor is the whole reason this has one home.** A symbolic axis is
+    excluded from the stamped extent products (see :meth:`ShapeKey.from_matmul`) and benched at
+    the dynamic hint, so **each one** re-enters here as its own ``DEFAULT_SEQ_HINT`` factor.
+    Omitting the factor under-counts a one-symbolic-axis row 512-fold; applying only one factor to
+    a two-axis row under-counts it by the same amount again, which is what dynamic attention
+    (``attention.hd*.dynM.qk``, 11 records at two symbolic axes and 12 at four) would otherwise
+    hit. ``commands/run.py`` records the mirror mistake, where a second spelling applied the hint
+    to a shape that already carried it and over-counted every reduce-tier replay 512-fold. One
+    spelling, so the two cannot drift."""
+    free = float(s.get("S_ext_free_prod") or 0.0)
+    red = float(s.get("S_ext_reduce_max") or 0.0)
+    if free <= 0 or red <= 0:
+        return None
+    depth = float(s.get("S_loop_depth") or 0.0)
+    n_sym = float(s.get("S_ext_n_symbolic_axis") or 0.0)
+    n_axes = float(s.get("S_ext_n_free_axis") or 0.0) + float(s.get("S_ext_n_reduce_axis") or 0.0) + n_sym
+    if depth <= 0 or depth != n_axes:
+        return None
+    return 2.0 * free * red * DEFAULT_SEQ_HINT ** int(n_sym)

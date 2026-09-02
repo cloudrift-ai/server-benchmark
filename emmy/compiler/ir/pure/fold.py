@@ -38,6 +38,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
 # (the cone, flash's ``P``) canonicalizes like any other subtree.
 from emmy.compiler.ir.stmt.passes import _rewrite_kind
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
+from emmy.utils import cached_method
 
 
 @dataclass(frozen=True)
@@ -244,6 +245,7 @@ class Fold:
             space |= edge.free_axes
         return frozenset(space - ({self.axis.name} if self.axis is not None else set()))
 
+    @cached_method
     def as_contraction(self) -> ContractionView | None:
         """The :class:`ContractionView` of this term, or ``None`` when it is not bilinear.
 
@@ -260,14 +262,10 @@ class Fold:
         so the fold's axis must be AMONG the shared axes rather than all of them.
 
         Every product reads ``operands[0]`` — A by canonical form — which is what makes the fused
-        multi-channel edge one contraction over one shared A rather than several. Memoized
-        (:attr:`_contraction`): the term is immutable and every role, schedule and emission read
+        multi-channel edge one contraction over one shared A rather than several. Memoized on the
+        term: it is immutable and every role, schedule and emission read
         asks this.
         """
-        return self._contraction
-
-    @cached_property
-    def _contraction(self) -> ContractionView | None:
         if self.axis is None or self.combine is None or len(self.operands) < 2:
             return None
         pluses = component_ops(self.combine)
@@ -316,13 +314,10 @@ class Fold:
             b_trans=b_trans,
         )
 
+    @cached_method
     def as_slab(self) -> SlabView | None:
         """The :class:`SlabView` of this term — its one gmem read and the coordinates it declares —
-        or ``None`` for a computed cone. Memoized (:attr:`_slab`)."""
-        return self._slab
-
-    @cached_property
-    def _slab(self) -> SlabView | None:
+        or ``None`` for a computed cone. Memoized on the term."""
         if self.operands or self.combine is not None or len(self.lift.body) != 1 or not isinstance(self.lift.body[0], Load):
             return None
         return SlabView(load=self.lift.body[0], axes=self.axes)
@@ -369,6 +364,7 @@ class Fold:
         declared = tuple(axis for axis in axes if axis.name in read)
         return cls(axes=declared, lift=Lambda(params=tuple(axis.name for axis in declared), body=Body((load,)), results=load.names))
 
+    @cached_method
     def step(self) -> Body:
         """The per-step statements this fold DERIVES from its stored parameters: the lift body,
         then the combine APPLIED at the injected singleton — its second-operand params bound to
@@ -380,12 +376,8 @@ class Fold:
         contraction already updates the shared accumulators, so the reassociation is the
         embedding itself. Without a combine the term is a map and the step is the lift body.
         Deterministic from the stored parameters, so kernel identity depends on no classified view.
-        Memoized (:attr:`_step`).
+        Memoized on the term.
         """
-        return self._step
-
-    @cached_property
-    def _step(self) -> Body:
         if self.combine is None:
             return self.lift.body
         if self.composed is not None:
@@ -418,6 +410,7 @@ class Fold:
             out.extend(self.observe.body)
         return Body(tuple(out))
 
+    @cached_method
     def canonical(self) -> Fold:
         """The α-canonical form of this TERM — a ``Fold``, the same kind that went in.
 
@@ -431,10 +424,6 @@ class Fold:
         FREE names pass through, so equal canonical forms mean equal value under the SAME
         environment.
         """
-        return self._canonical
-
-    @cached_property
-    def _canonical(self) -> Fold:
         mapping = {axis.name: f"_a{index}" for index, axis in enumerate(self.axes)}
         counter = 0
         for stmt in self.lift.body.iter():
@@ -461,6 +450,7 @@ class Fold:
             observe=None if self.observe is None else renamed(self.observe),
         )
 
+    @cached_method
     def lower(self) -> Body:
         """Flatten this term to the Loop IR body the materializer expands.
 
@@ -476,13 +466,9 @@ class Fold:
         A SHARED term — one object reached through several operand positions — defines its names
         once per scope: the same object lowers to the same statements, and a repeat is dropped.
 
-        The ONE lowering spelling — every consumer of a term's statements calls this. Memoized
-        (:attr:`_lowered`).
+        The ONE lowering spelling — every consumer of a term's statements calls this. Memoized on
+        the term.
         """
-        return self._lowered
-
-    @cached_property
-    def _lowered(self) -> Body:
         axis = self.axis
         rides = [edge for edge in self.operands if axis is not None and axis.name in edge.free_axes]
         ridden = {id(edge) for edge in rides}

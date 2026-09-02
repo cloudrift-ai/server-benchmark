@@ -25,9 +25,9 @@ already coincide (``tile/normalize._share_common_cones``).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import cached_property
 
 from emmy.compiler.ir.pure.lam import Lambda
+from emmy.utils import cached_method
 
 
 @dataclass(frozen=True, eq=False)
@@ -55,6 +55,7 @@ class Closure:
         if stray_axes:
             raise ValueError(f"Closure axes {stray_axes} are not params of the lambda they scope")
 
+    @cached_method
     def canonical(self) -> Lambda:
         """The alpha-canonical form, the enclosing iteration axes included — a ``Lambda``.
 
@@ -63,10 +64,6 @@ class Closure:
         Every axis is a param (:meth:`__post_init__`), so which params are the enclosing axes is
         itself part of the form: one lambda scoped by different axes has different canonical forms.
         """
-        return self._canonical
-
-    @cached_property
-    def _canonical(self) -> Lambda:
         # A change of NAMES, not of kind: the result denotes the same function and satisfies every
         # invariant ``Lambda`` states, so ``Lambda.__post_init__`` re-checks it on the way out.
         return self.fn.canonical()

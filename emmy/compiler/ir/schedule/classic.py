@@ -207,7 +207,13 @@ def _target_memo(tile_op, target, slot: str) -> dict:
 
 
 def _computed_edge(node: Fold) -> bool:
-    return any(isinstance(edge, Fold) and edge.axis is None for edge in (node.operands[0], *node.operands[1:]))
+    """Whether any operand is a computed cone rather than a gmem read.
+
+    ``is_slab``, not ``axis is None``: a slab ITERATES (its coordinates are its own axes) and
+    simply does not reduce, so the old test — written when a materialized edge was a bare ``Load``
+    and only a cone was a Fold — now calls every operand computed.
+    """
+    return any(not edge.is_slab for edge in node.operands)
 
 
 def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:

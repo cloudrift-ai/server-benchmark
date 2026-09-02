@@ -62,10 +62,9 @@ def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> Closure | None:
     # coordinates this particular cone never touches.
     if len(members) == 1 and isinstance(members[0], Fold):
         # The cone IS an operand edge. A term can neither sit in a ``Body`` nor be scoped as a
-        # lambda — ``Closure`` is for lambdas — so it answers as itself. Structural equality only,
-        # which merges strictly less than an alpha-quotient: it leaves copies distinct, never
-        # merges distinct values. Both kinds compare, which is all this reading is for.
-        return members[0]
+        # lambda — ``Closure`` is for lambdas — so it answers with its own alpha-quotient. Both
+        # kinds compare, which is all this reading is for.
+        return members[0].canonical()
     fn = Lambda.closing((fold.axis.name,), Body(members), (result,))
     return Closure(fn, tuple(axis for axis in (*axes, fold.axis.name) if axis in fn.params))
 

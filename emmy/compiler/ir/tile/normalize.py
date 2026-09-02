@@ -431,12 +431,12 @@ def _share_common_cones(root: Fold) -> Fold:
             current = replace(current, operands=operands)
         if any(piece is not stmt for piece, stmt in zip(body, node.lift.body, strict=True)):
             current = replace(current, lift=replace(current.lift, body=Body(body)))
-        # The TERM is the key: a dict lookup and the equality test are one operation, so there is
-        # no prefilter bucket and no pairwise rescan. Structural equality only — an α-quotient
-        # would need a canonical form, and a canonical form is not available while an edge's
-        # result names are still the spelling its consumer binds. This merges strictly less, which
-        # is the safe direction: it leaves copies distinct, it never merges distinct values.
-        prior = canon.setdefault(current, current)
+        # The canonical form IS the key: a dict lookup and an alpha-equality test are the same
+        # operation, so there is no prefilter bucket and no pairwise rescan. Keyed on the term
+        # ALONE — a Fold binds nothing. It is a value, reached as the root or as an operand edge,
+        # and an edge binds POSITIONALLY to its consumer's lift params, so which names it happens
+        # to expose is the binder's business and never a reason to keep two equal values apart.
+        prior = canon.setdefault(current.canonical(), current)
         seen[id(node)] = prior
         return prior
 

@@ -88,6 +88,15 @@ def _split_expect(merge: list[Stmt], state: str, term: str, value: Fold) -> tupl
     return out, edge
 
 
+def _renamed(fn: Lambda, mapping: dict, rename) -> Lambda:
+    """One lambda with ``mapping`` applied to its binders, body and results."""
+    return Lambda(
+        params=tuple(rename(name) for name in fn.params),
+        body=Body(tuple(stmt.rename(mapping) for stmt in fn.body)),
+        results=tuple(rename(result) if isinstance(result, str) else result for result in fn.results),
+    )
+
+
 @dataclass(frozen=True)
 class ContractionView:
     """A Fold's BILINEAR reading, as geometry: the axis its operands share and the free axis each
@@ -523,6 +532,49 @@ class Fold:
             for state, term in zip(self.combine.results[1:], self.lift.results[1:], strict=True)
             if isinstance(term, str) and term in by_name
         )
+
+    def canonical(self) -> Fold:
+        """The α-canonical form of this TERM — a ``Fold``, the same kind that went in.
+
+        The whole term, not its lift: a Fold's value also depends on its axis extent, its monoid
+        and its operand edges, none of which live in ``lift``. Renames only what the term PRIVATELY
+        binds — its axes and its lift's internal defs. The operand interface names are shared with
+        the edges that produce them, and renaming one side without the other is how a lambda ends
+        up not defining its own result; leaving them alone under-merges, which is the safe
+        direction for a sharing or comparison key.
+
+        FREE names pass through, so equal canonical forms mean equal value under the SAME
+        environment.
+        """
+        return self._canonical
+
+    @cached_property
+    def _canonical(self) -> Fold:
+        mapping = {axis.name: f"_a{index}" for index, axis in enumerate(self.axes)}
+        counter = 0
+        for stmt in self.lift.body.iter():
+            for name in stmt.defines():
+                if name not in mapping:
+                    mapping[name] = f"_v{counter}"
+                    counter += 1
+
+        def rename(name: str) -> str:
+            return mapping.get(name, name)
+
+        return replace(
+            self,
+            axes=tuple(replace(axis, name=mapping[axis.name]) for axis in self.axes),
+            operands=tuple(edge.canonical() for edge in self.operands),
+            lift=_renamed(self.lift, mapping, rename),
+            # The observer binds the iteration var and reads the carried state, so it renames in
+            # LOCKSTEP: renaming the axis without it leaves the observer reading a name that no
+            # longer exists, and a scan would then canonicalize to something that is not a term.
+            observe=None if self.observe is None else _renamed(self.observe, mapping, rename),
+        )
+
+    def alpha_eq(self, other) -> bool:
+        """α-invariant equality — canonical forms compared structurally."""
+        return isinstance(other, Fold) and self.canonical() == other.canonical()
 
     def lower(self) -> list[Stmt]:
         """Flatten this term to the Loop IR body the materializer expands.

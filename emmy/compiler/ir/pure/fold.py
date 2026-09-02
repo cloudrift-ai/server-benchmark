@@ -153,7 +153,7 @@ class Fold:
     def __post_init__(self) -> None:
         if not isinstance(self.init, tuple):
             object.__setattr__(self, "init", tuple(self.init))
-        # EVERY OPERAND IS A TERM. A gmem read is a :meth:`slab`, so the tree is homogeneous and a
+        # EVERY OPERAND IS A TERM. A gmem read is a term over one ``Load``, so the tree is homogeneous and a
         # per-edge question is an attribute rather than a helper dispatching on what an edge
         # happens to be. Stated here because a statement in ``operands`` does not announce itself:
         # an ``isinstance(edge, Load)`` against a type that can no longer appear reads as False,
@@ -161,7 +161,7 @@ class Fold:
         # that can say no — this caught the cut's workspace reads, which were bare ``Load``s.
         stray = [type(edge).__name__ for edge in self.operands if not isinstance(edge, Fold)]
         if stray:
-            raise TypeError(f"Fold operands must be terms, got {stray}; a gmem read is a Fold.slab")
+            raise TypeError(f"Fold operands must be terms, got {stray}; a gmem read is a term over one Load")
         if self.axis is None:
             # The ZERO-AXIS node: no iteration and no monoid, so the only formation fact is the
             # positional binding — one lift param per operand RESULT COMPONENT, no leading
@@ -170,6 +170,7 @@ class Fold:
             assert self.observe is None, "a zero-axis Fold carries no per-step state to observe"
             arity = sum(len(edge.exposes) for edge in self.operands)
             assert len(self.lift.params) >= arity, f"lift binds {len(self.lift.params)} params for {arity} operand result components"
+            self._declares(self.lift.params[arity:])
             return
         # Formation validates the positional binding and the S × S → S arity; the ``carrier``
         # annotation is a DERIVED read (:attr:`carrier`), never a second stored spelling.
@@ -187,6 +188,7 @@ class Fold:
         arity = sum(len(edge.exposes) for edge in self.operands)
         assert len(lam.params) >= 1 + arity, f"lift binds {len(lam.params) - 1} params after the axis for {arity} operand result components"
         assert len(lam.results) == n, "one lift result per monoid component"
+        self._declares((self.axis.name, *lam.params[1 + arity :]))
         if self.observe is not None:
             assert tuple(self.observe.params) == (self.axis.name, *self.combine.results), (
                 f"observer params {self.observe.params} must bind the iteration var then the carried state "
@@ -198,6 +200,18 @@ class Fold:
                 "(the boundary distinguishes a streamed store from a post-fold store by the name)"
             )
             assert not any(isinstance(stmt, Fold) for stmt in self.observe.body), "an observer body holds plain stmts, never a nested node"
+
+    def _declares(self, coordinates: tuple[str, ...]) -> None:
+        # A TERM DECLARES THE COORDINATES IT READS. The lift's params past the operand binding —
+        # what ``Lambda.closing`` left unbound — are exactly the names of this term's ``axes``: a
+        # slab's declared coordinates, a reduce's iteration var beside any coordinate its step
+        # reads outright, a projection's grid axes. One spelling, so :attr:`free_axes` is a
+        # declaration and never a walk, and a coordinate that reaches a lift with no axis to bind
+        # it fails here rather than as an undefined name at nvcc.
+        declared = {axis.name for axis in self.axes}
+        assert set(coordinates) == declared, (
+            f"the lift reads coordinates {sorted(coordinates)} but the term declares axes {sorted(declared)}"
+        )
 
     @property
     def exposes(self) -> tuple[str, ...]:
@@ -342,30 +356,18 @@ class Fold:
     # accessors keep their exact meanings and their consumers keep their exact spellings. ------- #
     @classmethod
     def slab(cls, load: Load, axes: tuple[Axis, ...]) -> Fold:
-        """Wrap one ``Load`` as a term that DECLARES the coordinates it reads.
+        """One gmem read as a term that DECLARES the coordinates it indexes.
 
         A ``Load`` is a statement, and a statement sitting in a term tree is the one leaf whose
         coordinates are still free names — the last place a coordinate escapes its binder. Wrapped,
-        the leaf binds them: :attr:`axes` is its index space, taken from the enclosing ``axes`` it
-        actually indexes, in their binding order. Every edge in the tree then answers ``axes`` as a
-        FIELD, and a consumer's reduction axis is the intersection of its operands' — no walk.
-
-        The coordinates are the lift's PARAM PREFIX, one per declared axis and in the same order,
-        because a leaf cannot tell an axis from a value — a gather index ``weight[(int)in0, a]``
-        genuinely reads ``in0`` — and only the binder can. Declaring them as axes is what the old
-        untyped trailing residue could not do: the term binds them, applies them by iterating, and
-        every reader gets the answer from :attr:`axes` instead of inferring it. No ``combine``: a
-        slab iterates, it does not reduce.
+        the leaf binds them: ``axes`` are the enclosing axes the load actually reads, in binding
+        order, and the lift's params are those same names — the formation rule every term states.
+        A coordinate no enclosing axis supplies fails formation: the lambda reads a name it does
+        not bind. No ``combine``: a slab iterates, it does not reduce.
         """
-        coordinates = {name for expr in load.exprs() for name in expr.free_vars()}
-        declared = tuple(axis for axis in axes if axis.name in coordinates)
-        missing = coordinates - {axis.name for axis in declared}
-        if missing:
-            raise ValueError(f"Load indexes {sorted(missing)}, which the enclosing binder does not supply as an axis")
-        return cls(
-            axes=declared,
-            lift=Lambda(params=tuple(axis.name for axis in declared), body=Body((load,)), results=tuple(load.names)),
-        )
+        read = {name for expr in load.exprs() for name in expr.free_vars()}
+        declared = tuple(axis for axis in axes if axis.name in read)
+        return cls(axes=declared, lift=Lambda(params=tuple(axis.name for axis in declared), body=Body((load,)), results=load.names))
 
     @cached_property
     def step(self) -> Body:
@@ -462,7 +464,7 @@ class Fold:
 
         * every operand is a TERM, so it lowers by the same method — the tree is homogeneous and
           there is nothing to dispatch on; operands lower before the statements that read them;
-        * an operand whose :attr:`index_space` does not contain this fold's axis does not vary
+        * an operand whose :attr:`free_axes` does not contain this fold's axis does not vary
           with the step, so it lowers ONCE ahead of the loop. That is the whole of the hoist: a
           declaration compared against an axis, not a body walked for free names;
         * the :attr:`step` follows, and the loop binds the axis.

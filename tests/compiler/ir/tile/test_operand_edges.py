@@ -3,7 +3,7 @@
 A ``Fold``'s operands are ``Fold``s, without exception: a gmem read is a :meth:`Fold.slab`, a
 wrapped ``Load`` whose index coordinates are its own :attr:`Fold.axes`. That one invariant is what
 lets every per-edge question be an attribute rather than a helper branching on what the edge
-happens to be — its coordinates (:attr:`Fold.index_space`), the names it binds
+happens to be — its coordinates (:attr:`Fold.free_axes`), the names it binds
 (:attr:`Fold.exposes`), whether it is a leaf (:meth:`Fold.as_slab`), and whether the term above it
 is bilinear (:meth:`Fold.as_contraction`).
 
@@ -203,7 +203,7 @@ def test_iteration_variables_are_not_captures() -> None:
 
 
 def test_the_closure_predicate_reads_the_declaration() -> None:
-    """``_external_reads`` is :attr:`Fold.index_space` — asked of the term, not derived by lowering
+    """``_external_reads`` is :attr:`Fold.free_axes` — asked of the term, not derived by lowering
     it and scanning the result."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _external_reads
 

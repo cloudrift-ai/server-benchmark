@@ -146,7 +146,7 @@ def _external_reads(node: Fold) -> frozenset[str]:
 
     Was: lower the term and walk the result for free names. That asked a term to re-derive what it
     already states, re-lowered on every call, and returned a superset (names the term binds
-    internally, which every caller here discards). :attr:`Fold.index_space` is the declaration —
+    internally, which every caller here discards). :attr:`Fold.free_axes` is the declaration —
     the term's own axes unioned with its operands', asked of the term rather than derived here. A
     term is closed: its values arrive through its operand edges, so its coordinates are all it
     takes from outside."""

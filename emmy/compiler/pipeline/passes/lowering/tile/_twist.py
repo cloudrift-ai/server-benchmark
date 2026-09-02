@@ -46,7 +46,11 @@ def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> Closure | None:
     if not members or any(not isinstance(stmt, (Fold, Load, Assign, Select)) for stmt in members):
         return None
 
-    used_edges = tuple(edge for name, edge in bindings.items() if any(name in Body((stmt,)).ssa_uses for stmt in members))
+    used_edges = tuple(
+        edge
+        for name, edge in bindings.items()
+        if any(name in (stmt.lift.body.ssa_uses if isinstance(stmt, Fold) else Body((stmt,)).ssa_uses) for stmt in members)
+    )
     indexed_loads = tuple(stmt for stmt in members if isinstance(stmt, Load) and any(expr.free_vars() for expr in stmt.index))
     nodes = tuple(stmt for stmt in members if isinstance(stmt, Fold))
     if len({id(source) for source in (*used_edges, *indexed_loads, *nodes)}) != 1:
@@ -188,7 +192,14 @@ def _projection_members(node: Fold) -> Body:
     members = list(node.lift.body)
     for edge in reversed(node.operands):
         names = set(edge.exposes)
-        position = next((i for i, stmt in enumerate(members) if names & Body((stmt,)).ssa_uses), len(members))
+        position = next(
+            (
+                i
+                for i, stmt in enumerate(members)
+                if names & (stmt.lift.body.ssa_uses if isinstance(stmt, Fold) else Body((stmt,)).ssa_uses)
+            ),
+            len(members),
+        )
         expanded = _projection_members(edge) if isinstance(edge, Fold) and edge.axis is None else Body((edge,))
         members[position:position] = expanded
     out = []
@@ -234,7 +245,7 @@ def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) ->
     members = []
     for stmt in cone.members:
         direct = refs_axis(stmt, axis) or (isinstance(stmt, (Fold, Load)) and axis in (frozenset((axis,)) & stmt.index_space))
-        if direct or varying & Body((stmt,)).ssa_uses:
+        if direct or varying & (stmt.lift.body.ssa_uses if isinstance(stmt, Fold) else Body((stmt,)).ssa_uses):
             members.append(stmt)
             varying.update(stmt.defines())
     if not members:
@@ -382,8 +393,10 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
             lift=Lambda.closing(tuple(name for edge in new_operands for name in edge.exposes), Body.coerce(new_body), node.lift.results),
         )
 
-    if node.as_contraction() is not None and isinstance(node.a, Fold) and node.a.axis is None:
-        view = _normalized_exp(node.a, node.axis.name, axes)
+    # A computed A cone — the term's own reading: operands[0] is A by canonical form, and a
+    # cone is an operand that is not a gmem read.
+    if node.as_contraction() is not None and not node.operands[0].is_slab:
+        view = _normalized_exp(node.operands[0], node.axis.name, axes)
         if view is not None and _same_axis(view.statistic, node):
             ring = node.as_contraction()
             if ring is not None and ring.product.name == "multiply" and ring.plus.reduce_canon == "add":

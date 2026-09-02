@@ -53,7 +53,6 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.pure.algebra import component_ops
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -154,17 +153,12 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
         # use.
         # The same hoist ``Fold.lower`` applies: an operand whose declared index space does not
         # contain the fold's axis is loop-invariant and emits once, ahead of the loop.
-        hoisted = [s for e in op.operands if op.axis.name not in e.index_space for s in _emit(e, ctx).body]
+        hoisted = [s for e in op.derived_step[0] if op.axis.name not in e.index_space for s in _emit(e, ctx).body]
         # The step: the operands that ride it, the lift body, then one ``Accum`` per carried
         # component — the combine specialized at the singleton, which is what makes the loop a
         # FOLD rather than a loop that computes and discards. Same construction as ``Fold.lower``.
-        step = tuple(stmt for e in op.operands if op.axis.name in e.index_space for stmt in e.lower()) + tuple(op.lift.body)
-        component = component_ops(op.combine) if op.combine is not None else None
-        if component is not None:
-            step += tuple(
-                Accum(name=state, value=value, op=plus, axes=(op.axis.name,))
-                for state, value, plus in zip(op.combine.results, op.lift.results, component, strict=True)
-            )
+        edges, statements = op.derived_step
+        step = tuple(stmt for e in edges if op.axis.name in e.index_space for stmt in e.lower()) + tuple(statements)
         stmts = _emit_body(Body(step), ctx)
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
         return Frag(body=[*hoisted, loop], out=Handle(op.out))

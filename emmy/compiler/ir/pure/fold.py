@@ -24,10 +24,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 
+from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.algebra import component_ops, family_of, rename_combine
+from emmy.compiler.ir.pure.algebra import M, component_ops, family_of, rename_combine
+from emmy.compiler.ir.pure.carrier import exp_merge
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
 
@@ -37,6 +39,53 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
 # (the cone, flash's ``P``) canonicalizes like any other subtree.
 from emmy.compiler.ir.stmt.passes import _rewrite_kind
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
+
+
+def _expect_contraction(state: str, weight: str, value: Fold) -> Fold:
+    """The synthesized expectation contraction of a twisted fold's derived step — flash's
+    ``Oblk = Σ_j P·V``.
+
+    A is the register-resident softmax weight ``P``, wrapped in the smallest term that yields a
+    value: an operand edge is a TERM, so pointing at an already-computed register means a one-stmt
+    cone. Its ``copy`` is the reference, and the rename is load-bearing — ``weight`` is a positional
+    temp of the generated twist program while ``{state}__p`` is derived from the accumulator name
+    and is stable. B is the fold's own expectation operand edge.
+    """
+    mul, plus = ElementwiseImpl("multiply"), ElementwiseImpl("add")
+    cone = Fold(lift=Lambda.closing((), Body((Assign(name=f"{state}__p", op="copy", args=(weight,)),)), (f"{state}__p",)))
+    axis = Axis(name="pj", extent=Dim(1))  # block=1: a singleton intra-block reduce
+    operands = (cone, value)
+    bound = tuple(name for edge in operands for name in edge.exposes)
+    body = Body((Assign(name=f"{state}__pv__v", op=mul, args=(f"{state}__p", value.exposes[-1])),))
+    init, combine = M(plus, names=(f"{state}__pv",))
+    return Fold(
+        axes=(axis,),
+        operands=operands,
+        lift=Lambda.closing((axis.name, *bound), body, (f"{state}__pv__v",)),
+        init=init,
+        combine=combine,
+    )
+
+
+def _split_expect(merge: list[Stmt], state: str, term: str, value: Fold) -> tuple[list[Stmt], Fold]:
+    """Split the generated streaming ``merge`` around the synthesized expectation contraction.
+
+    The fused ``v·P`` product becomes the contraction's output and the state fold consumes it
+    (``O = O·α + Oblk``; the ``O·α`` base is untouched). The contraction is returned as an OPERAND
+    EDGE rather than spliced into the statements: a term composes through operands, so the step is
+    a pair — what it reads, and what it does.
+    """
+    accum = next(stmt for stmt in merge if isinstance(stmt, Accum) and stmt.name == state)
+    defines = {stmt.name: stmt for stmt in merge if isinstance(stmt, Assign)}
+    product = defines[accum.value]  # the fused ``v·P``
+    weight = next(arg for arg in product.args if arg != term)  # the register-resident softmax P
+    edge = _expect_contraction(state, weight, value)
+    out: list[Stmt] = []
+    for stmt in merge:
+        if stmt is product:
+            continue  # the inline v·P is dropped — the synthesized contraction computes it
+        out.append(replace(accum, value=f"{state}__pv") if stmt is accum else stmt)
+    return out, edge
 
 
 @dataclass(frozen=True)
@@ -424,6 +473,57 @@ class Fold:
             return r[0]
         return self.combine.results[0]
 
+    @cached_property
+    def derived_step(self) -> tuple[tuple, Body]:
+        """The per-step evaluation this fold DERIVES — ``(operand edges, statements)``, separated.
+
+        Three carriers, one shape. Without a combine the step IS the lift body. A componentwise
+        monoid specializes the combine at the singleton, appending one ``Accum`` per carried
+        component. A TWISTED (exp-family) carrier generates its streaming merge, and each
+        materialized expectation channel becomes a synthesized contraction — flash's
+        ``Oblk = Σ_j P·V`` — which joins the OPERANDS rather than the statements.
+
+        That is the whole of the redesign: the old derived step inserted those nodes into the stmt
+        stream, because lowering spliced operand bodies out of that stream. A term composes through
+        operands, so the step says what it reads and what it does, and neither half holds the other.
+        """
+        if self.combine is None:
+            return self.operands, self.lift.body
+        family = self.family
+        if family.twisted:
+            states, terms = tuple(self.combine.results), tuple(self.lift.results)
+            merge = list(exp_merge(states, terms, key=states[0]))
+            edges = list(self.operands)
+            for state, term, value in self._expectation_bindings:
+                if value.is_slab:
+                    merge, edge = _split_expect(merge, state, term, value)
+                    edges.append(edge)
+            return tuple(edges), Body((*self.lift.body, *merge))
+        ops = component_ops(self.combine)
+        assert ops is not None, "a componentwise family carries per-component ops"
+        accums = tuple(
+            Accum(name=state, value=value, op=plus, axes=(self.axis.name,))
+            for state, value, plus in zip(self.combine.results, self.lift.results, ops, strict=True)
+        )
+        return self.operands, Body((*self.lift.body, *accums))
+
+    @cached_property
+    def _expectation_bindings(self) -> tuple[tuple[str, str, Fold], ...]:
+        """The twisted carrier's ``(state, injected term, operand edge)`` expectation channels.
+
+        Every named non-pivot lift result bound to an operand becomes a synthesized expectation
+        contraction once that edge is a materialized slab; a computed edge is the same future
+        contraction operand before placement cuts it.
+        """
+        if self.axis is None or self.combine is None or not self.family.twisted:
+            return ()
+        by_name = {name: edge for edge in self.operands for name in edge.exposes}
+        return tuple(
+            (state, term, by_name[term])
+            for state, term in zip(self.combine.results[1:], self.lift.results[1:], strict=True)
+            if isinstance(term, str) and term in by_name
+        )
+
     def lower(self) -> list[Stmt]:
         """Flatten this term to the Loop IR body the materializer expands.
 
@@ -440,18 +540,13 @@ class Fold:
         The ONE lowering spelling — every consumer of a term's statements calls this.
         """
         axis = self.axis
-        rides = [edge for edge in self.operands if axis is not None and axis.name in edge.index_space]
+        edges, statements = self.derived_step
+        rides = [edge for edge in edges if axis is not None and axis.name in edge.index_space]
         ridden = {id(edge) for edge in rides}
-        prologue = [stmt for edge in self.operands if id(edge) not in ridden for stmt in edge.lower()]
-        step = [stmt for edge in rides for stmt in edge.lower()] + list(self.lift.body)
-        if self.combine is None:
+        prologue = [stmt for edge in edges if id(edge) not in ridden for stmt in edge.lower()]
+        step = [stmt for edge in rides for stmt in edge.lower()] + list(statements)
+        if axis is None:
             return [*prologue, *step]
-        ops = component_ops(self.combine)
-        assert ops is not None, "a lowerable fold carries a componentwise combine"
-        step += [
-            Accum(name=state, value=value, op=op, axes=(axis.name,))
-            for state, value, op in zip(self.combine.results, self.lift.results, ops, strict=True)
-        ]
         return [*prologue, Loop(axis=axis, body=Body(step), unroll=self.unroll, role=self.role)]
 
     # ---- the STRUCTURAL protocol — children, defs, reads, bound axes. Spelled with the stmt

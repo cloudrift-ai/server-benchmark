@@ -11,6 +11,8 @@ of use (``Fold.merge`` / ``Fold.lower``), never spliced in as one.
   stores) plus its derived readings and its render-to-statements (``merge`` / ``step`` / ``lower``).
 - :mod:`.algebra` — the TRUE monoid ``(init, combine)``: the free constructor ``M``, the
   DEGENERATE/TWISTED shape test, the rename lockstep and the denotational foldMap spec oracle.
+- :mod:`.twist` — the twist RECIPES (a twisted monoid as data: the pivot's ⊕, the channel patterns,
+  the fused ⊕ program) that ``Fold.twist`` fuses a two-pass reduce pair into.
 - :mod:`.carrier` — the exp/LSE-family combine GENERATORS (twisted monoid via ψ-conjugation) and
   the stability certificate.
 - :mod:`.normalize` — construction and alpha-equivalence normalization for pure Lambdas.

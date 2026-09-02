@@ -64,40 +64,6 @@ def _term(t: str | float) -> _T:
 _OP = {"exp": "exp", "neg": "negative", "maximum": "maximum", "add": "add", "multiply": "multiply", "subtract": "subtract"}
 
 
-@dataclass(frozen=True)
-class Family:
-    """The exp/LSE family's OP VOCABULARY — the ψ, its pivot, and the base semiring.
-
-    The generator below emits this spelling and the Tile-IR recognizer
-    (``lowering/tile/020_twisted``) reads it back. Sharing the table is the point: a recognizer
-    with its own copy of ``"exp"`` / ``"subtract"`` / ``"reciprocal"`` drifts from the generator
-    the day either is respelled, and the failure is silent — the rewrite simply declines and the
-    kernel demotes to the planar fold.
-
-    The family is genuinely exp-specific (see the module docstring: generation is family-agnostic,
-    the stabilizer is not), so this is a NAMED SCOPE rather than an op-name list standing in for a
-    trait. What it must not be is a scope spelled twice.
-    """
-
-    #: ψ and its inverse's ingredients — ``exp(score − pivot)`` is the stable weight.
-    psi: str = "exp"
-    #: the pivot's fold combine — the ``max`` of ``(max, Σ)``.
-    pivot: str = "maximum"
-    #: how the weight's exponent is formed against the pivot.
-    shift: str = "subtract"
-    #: the multiplicative inverse the projection applies (``· 1/denominator``).
-    inverse: str = "reciprocal"
-    #: the base monoid the twisted carrier conjugates, as ``(⊗, ⊕)``.
-    product: str = "multiply"
-    plus: str = "add"
-    #: the transparent alias a carried value may be read through.
-    alias: str = "copy"
-
-
-#: The one exp/LSE vocabulary. Recognition and generation both read it.
-EXP_FAMILY = Family()
-
-
 def _flatten_mul(t: _T) -> list[_T]:
     if t.op == "multiply":
         return _flatten_mul(t.a[0]) + _flatten_mul(t.a[1])

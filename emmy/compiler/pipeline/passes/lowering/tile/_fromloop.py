@@ -82,7 +82,8 @@ def _supply(names: set[str], levels: tuple[_Level, ...]) -> tuple[Fold, ...]:
                 extra.append(term)
         if not pending:
             break
-    assert not pending, f"a term reads {sorted(pending)}, which no enclosing level defines"
+    if pending:
+        raise ValueError(f"a term reads {sorted(pending)}, which no enclosing level defines")
     return tuple(extra)
 
 

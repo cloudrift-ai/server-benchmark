@@ -17,8 +17,8 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.algebra import ExpFamily
 from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.twist import SOFTMAX
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, extract_output_specs, observed_result_names
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, lift_loop_op, scan_from_loop
@@ -80,7 +80,7 @@ def test_observer_formation_gates() -> None:
 
 def test_exp_family_declines_an_observer() -> None:
     names = ("m_i", "l_i")
-    combine = ExpFamily().program(names)
+    combine = SOFTMAX.program(names)
     lift = Lambda(params=("k",), body=Body((Load(name="s0", input="s", index=(Var("k"),)),)), results=("s0", 1.0))
     fold = Fold(axis=Axis("k", 8), lift=lift, init=(float("-inf"), 0.0), combine=combine)
     observe = Lambda(params=("k", *names), body=Body((Assign(name="m__obs", op="copy", args=("m_i",)),)), results=("m__obs",))

@@ -24,9 +24,9 @@ A **statement** (`ir/stmt/`) occupies a position in an instruction stream: it ha
 scope, and — for a carrier — a seed the enclosing scope has to declare. A **pure term**
 (`ir/pure/`) denotes a value: it binds names, carries an algebra, substitutes and compares up to
 α-renaming, and has no position at all. `Lambda`, the `Fold` term, the monoid vocabulary (`M` / `component_ops` /
-`rename_combine` / the foldMap spec oracle), the monoid-family registry (`family_of` — every stored combine is
-claimed by a registered family, componentwise or twisted, by generator-output equality) and the exp-family combine
-generators all live on the term side.
+`rename_combine` / the foldMap spec oracle), the twist recipes (`ir/pure/twist.py` — a twisted monoid as data,
+which `Fold.twist` fuses a reduce and the reduce it reads into) and the exp-family combine generators all live on
+the term side.
 
 **A pure class is never a `Stmt` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
@@ -34,7 +34,8 @@ spliced in as one. `Fold.merge(other)` is the shape of that: the cross-partition
 combine IS the fold's stored `combine` applied with its second operand naming the partial being
 merged, and it becomes `Assign` rescale temps plus one `Accum` per state component wherever the
 lowering needs statements (the REG-tree merge, the cooperative tail, the cross-CTA finalize loop);
-the serial step is the same derivation at the injected singleton. There is no `StateMerge` type: the term is the `Lambda` the fold already stores,
+the serial step is the same derivation at the injected singleton. There is no `StateMerge` type: the term is the
+`Lambda` the fold already stores,
 and a rendering function is not a kind.
 
 The invariant is what stops facts from acquiring a second home. A term that renders itself needs
@@ -375,19 +376,21 @@ its own definition, not a value the lowering path consults — which is why remo
 `structural_key` and, with it, every variant key (`identity_key(with_io=True, with_knobs=True)`) used by tune DB
 measurement replay and the cubin cache, in exchange for a field nothing reads.
 
-**The twisted combine — generated, not hand-authored.** Transport of structure: a monoid `(·, e)`
+**The twisted combine — a recipe, never hand-authored on a term.** Transport of structure: a monoid `(·, e)`
 conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`. Generation
-(`ir/pure/carrier.py` — `exp_combine_states` / `exp_merge` over `(names, terms)`) builds the naive
-`ψ∘base∘(ψ⁻¹×ψ⁻¹)` combine — associativity inherited from the base monoid for free — then a
-per-family stabilizer rewrites it to the numerically-stable form (distribute the ψ-rescale, fuse
-exponentials, fold identities, DCE/CSE) and a structural certificate asserts every surviving
-`exp` has a `≤ 0` argument. Recognition calls the generators directly (`exp_merge` for the dissolved streaming body,
-`exp_combine_states` for the stored combine) — a twisted `Fold`'s combine IS the generator's
-program (the formation invariant `Fold.__post_init__` asserts), and the component ROLES are shape-derived off
-the terms: component 0 the pivot (score), a literal-`1.0` term a denominator, a value term an
-expectation (the online-softmax pairing builds an expectation channel per joined value fold — a fused
-softmax·V region carries `(m, d, o…)`). **Example** — the
-online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf, 0)`, merge
+(`ir/pure/carrier.py` — `exp_combine_states` over `(names, other)`) builds the naive `ψ∘base∘(ψ⁻¹×ψ⁻¹)` combine —
+associativity inherited from the base monoid for free — then a per-family stabilizer rewrites it to the
+numerically-stable form and a structural certificate asserts every surviving `exp` has a `≤ 0` argument. A
+**recipe** (`ir/pure/twist.py`) states the twisted monoid as data: the pivot's ⊕, one pattern per channel (the
+per-element map a dependent reduce's lift must spell, over ROLES — `exp(s − g)` for a denominator, `exp(s − g)·v` for
+an expectation), what each channel injects at the singleton (`1`, `v`), and the fused ⊕ builder. `Fold.twist(recipe)`
+fuses a reduce onto the reduce it reads, found among its operands: the pivot's state is the lift param bound to it,
+the score is the sub-cone of the lift alpha-equal to the pivot's own per-element map (operand for operand, through a
+projection's
+components), and what remains, in role order, must equal a channel's pattern by canonical form. A click gives the
+role-to-name map and the recipe instantiates itself by renaming; no recipe names a term's variables. Online softmax
+and flash attention are one recipe: the expectation channel joins by the same call, the pivot then being the fused
+fold. **Example** — the online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf, 0)`, merge
 `m_new=max(m,s); d=d·exp(m−m_new)+exp(s−m_new); m=m_new`.
 
 **The λ-foldMap primitives** (`ir/pure/lam.py` / `ir/pure/algebra.py`) — the finished algebra vocabulary the tile IR
@@ -669,10 +672,10 @@ the corresponding nested Loop IR.
 The total-lift invariant is that no raw inner `Loop` survives. A bilinear term orients itself at formation, its
 shared argument in the contraction's canonical A slot; `TileOp.__post_init__` then applies the tree-wide
 canonicalization — an identity projection dissolves into its operand, and same-value cones become one shared object. Scoped lambda equivalence is an analysis over the
-canonical Folds. A separate pre-scheduling rewrite joins equivalent maximum and exp-weighted sibling Folds into the
-general `(maximum, denominator, expectations…)` twisted carrier, including when contraction canonicalization has
-nested the statistics inside a computed probability edge; softmax and masked or unmasked SDPA are arity variants, not
-separate matchers. Placement and cross-CTA split are structural phases before site construction. Classic scheduling
+canonical Folds. A separate pre-scheduling rewrite fuses every reduce that reads a reduce into the twisted carrier a
+recipe recognizes — `(maximum, denominator, expectations…)` for the exp family — hoisting the factors constant along
+the axis (attention's `1/l`) out of the fold first; softmax and masked or unmasked SDPA are arity variants of one
+recipe, not separate matchers. Placement and cross-CTA split are structural phases before site construction. Classic scheduling
 classifies the resulting Fold tree, assigns each node once and every consumer operand edge independently, then stores
 one complete typed assignment on `TileOp.schedule`. Unsupported shapes remain unmapped; scheduling never annotates or
 rewrites the Fold tree.

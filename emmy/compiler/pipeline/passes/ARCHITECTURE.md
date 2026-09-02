@@ -515,11 +515,11 @@ classify a shape, extract a contraction, pair softmax statistics, hoist a nested
 loop. Nested reductions are ordinary `Fold` statements in the parent lambda, so source order and SSA scope survive
 without a placement or value-cut analysis.
 
-`020_twisted` is a separate algebraic rewrite over the canonical tree. It clusters equivalent score lambdas and joins
-a maximum with additive exp-weighted components into the one `(maximum, denominator, expectations…)` twisted monoid.
-It reads both equivalent canonical spellings: sibling planar folds, and the contraction composition produced when
-canonicalization factors a normalized exponential into a computed operand. Softmax, SDPA, and causal SDPA differ only
-in carrier arity and score/value lambdas; there is no operation-family matcher. `040_schedule` enumerates the complete
+`020_twisted` is a separate algebraic rewrite over the canonical tree. It fuses every reduce that reads a reduce
+into the twisted monoid a recipe recognizes (`Fold.twist` — the pivot's state is the operand binding, the score the
+sub-cone alpha-equal to the pivot's own map, the rest a channel's pattern by canonical form), hoisting factors
+constant along the axis out of the fold first. Softmax, SDPA, and causal SDPA differ only in carrier arity and
+score/value lambdas; there is no operation-family matcher. `040_schedule` enumerates the complete
 rewritten tree. Direct contraction children and independent roots use the same physical-axis compatibility join, even
 when roots reverse their algebraic M/N readings. A derived contraction uses the enclosing Fold domain through the same
 parent/child interface. Materialization binds accepted choices to placed geometry and resolved transport facts;

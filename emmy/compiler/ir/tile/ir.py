@@ -457,7 +457,14 @@ class TileOp(Op):
         placeholder."""
         if self.op is None:
             return None
-        return self.op.lower(frozenset(), self.output_specs)
+        # A grid axis only the stores read — a pointwise cell indexed by its coordinate, nothing
+        # evaluated over it — is the kernel's to bind: the term opens every coordinate it declares
+        # and those loops wrap outside, in grid order.
+        glue = tuple(axis for axis in self.place.free if axis.name not in self.op.free_axes)
+        body = self.op.lower(frozenset(axis.name for axis in glue), self.output_specs)
+        for axis in reversed(glue):
+            body = Body((Loop(axis=axis, body=body),))
+        return body
 
     def _body_identity(self, *, structural: bool = True) -> str | None:
         """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s

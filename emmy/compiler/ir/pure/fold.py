@@ -30,6 +30,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.algebra import component_ops, rename_combine
 from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
@@ -223,13 +224,16 @@ class Fold:
         # positional, so the lift's params move with the operands; the body reads by name.
         if len(self.operands) >= 2 and all(isinstance(stmt, Assign) and len(stmt.args) == 2 for stmt in lam.body):
             by_name = {name: edge for edge in self.operands for name in edge.exposes}
-            arguments = [set(product.args) for product in lam.body]
+            arguments = [product.args for product in lam.body]
             if len(arguments) > 1:
-                shared = [by_name[name] for name in set.intersection(*arguments) if name in by_name]
+                shared = [by_name[name] for name in arguments[0] if name in by_name and all(name in args for args in arguments[1:])]
                 a_edge = shared[0] if len(shared) == 1 else None
             else:
                 pair = [by_name[name] for name in arguments[0] if name in by_name]
                 k_last = [e for e in pair if e.as_slab() is not None and self.axis.name in e.as_slab().load.index[-1].free_vars()]
+                # Both k-last (a matmul): A is the one reading the earlier free coordinate — the
+                # row, under the lift's declaration order — so alpha-equal terms orient alike.
+                k_last.sort(key=lambda e: min((n for n in e.free_axes if n != self.axis.name), default=""))
                 a_edge = k_last[0] if len(pair) == 2 and k_last else None
             if a_edge is not None and self.operands[0] is not a_edge:
                 reordered = (a_edge, *(edge for edge in self.operands if edge is not a_edge))
@@ -488,27 +492,152 @@ class Fold:
         observed = self.observe.body if self.observe is not None else ()
         return Body((*self.lift.body, *merged, *observed))
 
+    def twist(self, recipe) -> Fold | None:
+        """This reduce fused onto the reduce it reads, by ``recipe`` — one fold carrying both
+        states under the recipe's twisted ⊕ — or ``None`` when no channel of the recipe clicks.
+        The ONE generic algorithm over the declarative recipes (:mod:`~emmy.compiler.ir.pure.twist`).
+        The pivot is found among this term's operands: a reduce folding the recipe's pivot ⊕, or a
+        fold this recipe already fused (whose channel 0 is the pivot). The pivot's state is the
+        lift param bound to it, positionally; the score is the sub-cone of the lift alpha-equal to
+        the pivot's own per-element map, operand for operand (a projection's component by its own
+        cone); and what remains of the lift with that cone cut out, its params in role order, must
+        equal a channel's pattern by canonical form. A click gives the role-to-name map, and the
+        fused fold is the recipe instantiated by renaming: the pivot's operands plus what the
+        extras bind, the pivot's lift with the channel's injection appended, the states
+        concatenated, the recipe's ⊕ program over them. The same recipe fuses online softmax and
+        flash attention alike; the caller rewrites the tree's operands onto the result.
+        """
+        view = self.as_reduction()
+        if view is None or self.observe is not None or view.ops is None or len(view.states) != 1:
+            return None
+        if view.ops[0].reduce_canon != recipe.plus:
+            return None
+        for pivot in self.operands:
+            pview = pivot.as_reduction()
+            if pview is None or pivot.observe is not None:
+                continue
+            if pview.ops is not None:
+                if len(pview.states) != 1 or pview.ops[0].reduce_canon != recipe.pivot:
+                    continue
+            elif pivot.combine != recipe.program(pview.states):
+                continue
+            if self.axis.extent != pivot.axis.extent or self.axis.window != pivot.axis.window:
+                continue
+            fused = self._twist(pivot, recipe)
+            if fused is not None:
+                return fused
+        return None
+
+    def _twist(self, pivot: Fold, recipe) -> Fold | None:
+        view, pview = self.as_reduction(), pivot.as_reduction()
+
+        def bindings(fold: Fold) -> tuple[tuple[str, Fold], ...]:
+            # Each lift param past the axis with the operand it binds, positionally.
+            out, position = [], 1
+            for edge in fold.operands:
+                out.extend((param, edge) for param in fold.lift.params[position : position + len(edge.exposes)])
+                position += len(edge.exposes)
+            return tuple(out)
+
+        def cone(fold: Fold, name: str) -> tuple:
+            # The closed cone defining ``name`` in the lift — a lambda over what it reads, the VALUE
+            # each of those params binds (``None`` for a coordinate: a reduce's state binds that
+            # term, a projection's result binds its own cone), and its statements.
+            by_param = dict(bindings(fold))
+            members = () if name in fold.lift.params else tuple(fold.lift.body.backward_cone((name,)).members)
+            fn = Lambda.closing((), Body(members), (name,))
+            values = tuple(
+                None if (edge := by_param.get(param)) is None else edge if edge.axis is not None else cone(edge, param)
+                for param in fn.params
+            )
+            return fn, values, members
+
+        def same(a: tuple, b: tuple) -> bool:
+            if a[0].canonical() != b[0].canonical() or len(a[1]) != len(b[1]):
+                return False
+            for x, y in zip(a[1], b[1], strict=True):
+                if (x is None) != (y is None) or isinstance(x, tuple) != isinstance(y, tuple):
+                    return False
+                if x is not None and (not same(x, y) if isinstance(x, tuple) else x.canonical() != y.canonical()):
+                    return False
+            return True
+
+        bound = bindings(self)
+        g = next(param for param, edge in bound if edge is pivot)
+        pivot_params = {param for param, edge in bound if edge is pivot}
+        score = cone(pivot, pivot.lift.results[0])
+        candidates = [p for p in self.lift.params[1:] if p not in pivot_params] + [n for s in self.lift.body for n in s.defines()]
+        for x in candidates:
+            found = cone(self, x)
+            if not same(found, score):
+                continue
+            members = {id(stmt) for stmt in found[2]}
+            residual = tuple(stmt for stmt in self.lift.body if id(stmt) not in members)
+            reads = {name for stmt in residual for name in stmt.deps()}
+            extras = tuple(p for p in self.lift.params[1:] if p not in (x, g) and p not in found[0].params and p in reads)
+            try:
+                fn = Lambda(params=(x, g, *extras), body=Body(residual), results=self.lift.results)
+            except ValueError:
+                continue
+            channel = next((c for c in recipe.channels if fn.canonical() == c.pattern.canonical()), None)
+            if channel is None:
+                continue
+            # Instantiate: every operand an extra binds joins, its axis spelled as the pivot's.
+            old, new = self.axis.name, pivot.axis.name
+            extra_edges = tuple(dict.fromkeys(edge for p, edge in bound if p in extras))
+            if old != new:
+                extra_edges = tuple(
+                    _rewrite_kind(
+                        edge, lambda n: n, Sigma({old: Var(new)}), lambda a, old=old, new=new: replace(a, name=new) if a.name == old else a
+                    )
+                    for edge in extra_edges
+                )
+            operands = (*pivot.operands, *extra_edges)
+            names = {channel.injection.params[0]: pivot.lift.results[0]}
+            names.update(zip(channel.injection.params[1:], extras, strict=True))
+            names.update((stmt.name, f"{view.states[0]}__{stmt.name}") for stmt in channel.injection.body)
+            injected = tuple(stmt.rename(names) for stmt in channel.injection.body)
+            result = names.get(channel.injection.results[0], channel.injection.results[0])
+            arity = sum(len(edge.exposes) for edge in pivot.operands)
+            lift = Lambda(
+                params=(new, *(name for edge in operands for name in edge.exposes), *pivot.lift.params[1 + arity :]),
+                body=Body((*pivot.lift.body, *injected)),
+                results=(*pivot.lift.results, result),
+            )
+            states = (*pview.states, view.states[0])
+            return Fold(axes=pivot.axes, operands=operands, lift=lift, init=(*pivot.init, *self.init), combine=recipe.program(states))
+        return None
+
     @cached_method
     def canonical(self) -> Fold:
         """The α-canonical form of this TERM — a ``Fold``, the same kind that went in.
 
         The whole term, not its lift: a Fold's value also depends on its axis extent, its monoid
-        and its operand edges, none of which live in ``lift``. Renames only what the term PRIVATELY
-        binds — its axes and its lift's internal defs. The operand interface names are shared with
-        the edges that produce them, and renaming one side without the other is how a lambda ends
-        up not defining its own result; leaving them alone under-merges, which is the safe
-        direction for a sharing or comparison key.
-
-        FREE names pass through, so equal canonical forms mean equal value under the SAME
-        environment.
+        and its operand edges, none of which live in ``lift``. Every bound name renames
+        positionally — the axes (``_a``), the lift's internal defs (``_v``), what the term exposes
+        (``_r``: a projection's results, a reduce's carried state and observed values) and what it
+        binds from each operand (``_e``), each operand canonicalized first and its own ``_r``
+        interface re-spelled onto the binding — so two terms equal up to the choice of every
+        bound name have EQUAL canonical forms, whatever their accumulators were called. FREE
+        names pass through, so equal canonical forms mean equal value under the SAME environment.
         """
         mapping = {axis.name: f"_a{index}" for index, axis in enumerate(self.axes)}
+        mapping.update((name, f"_r{index}") for index, name in enumerate(self.exposes))
         counter = 0
         for stmt in self.lift.body.iter():
             for name in stmt.defines():
                 if name not in mapping:
                     mapping[name] = f"_v{counter}"
                     counter += 1
+        operands = []
+        bound = 0
+        for edge in self.operands:
+            canon = edge.canonical()
+            local = {}
+            for name, spelled in zip(edge.exposes, canon.exposes, strict=True):
+                local[spelled] = mapping[name] = f"_e{bound}"
+                bound += 1
+            operands.append(_rewrite_kind(canon, lambda name, local=local: local.get(name, name), Sigma.IDENTITY, lambda axis: axis))
 
         def renamed(fn: Lambda) -> Lambda:
             return Lambda(
@@ -520,8 +649,9 @@ class Fold:
         return replace(
             self,
             axes=tuple(replace(axis, name=mapping[axis.name]) for axis in self.axes),
-            operands=tuple(edge.canonical() for edge in self.operands),
+            operands=tuple(operands),
             lift=renamed(self.lift),
+            combine=None if self.combine is None else rename_combine(self.combine, lambda name: mapping.get(name, name)),
             # The observer binds the iteration var and reads the carried state, so it renames in
             # LOCKSTEP: renaming the axis without it leaves the observer reading a name that no
             # longer exists, and a scan would then canonicalize to something that is not a term.
@@ -673,7 +803,12 @@ def _(s: Fold, rename, sigma, axis_fn):
     # dispatches back through the registry; the fold renames its lift / monoid in lockstep
     # (params track the operand names positionally, the combine's results ARE the accumulator
     # names). At zero axes there is no iteration var to rename and no monoid to thread.
-    operands = tuple(_rewrite(edge, rename, sigma, axis_fn) for edge in s.operands)
+    # σ is applied hygienically to the term's own binder: the reduce axis this term binds is a
+    # different variable from any σ key spelled alike, so its mapping is dropped for the subtree.
+    # Operand edges are terms, so they rewrite through this same registry, never the statement entry.
+    if s.axis is not None and sigma is not None and s.axis.name in sigma.mapping:
+        sigma = Sigma({name: value for name, value in sigma.mapping.items() if name != s.axis.name})
+    operands = tuple(_rewrite_kind(edge, rename, sigma, axis_fn) for edge in s.operands)
     axes = tuple(axis_fn(axis) for axis in s.axes)
     axis = axis_fn(s.axis) if s.combine is not None else None  # the iteration var — a slab has none
     lead = (axis.name,) if axis is not None else ()

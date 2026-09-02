@@ -173,10 +173,11 @@ creates one zero-axis root `Fold` over the lifted cell.
 ## Algebraic rewrite
 
 `pipeline/passes/lowering/tile/020_twisted.py` runs after construction canonicalization and before scheduling. It
-clusters sibling Folds by scoped lambda equivalence and rewrites a maximum plus additive exp-weighted components into
-one exp-family twisted carrier `(maximum, denominator, expectations…)`. Pure softmax is the arity-two case; SDPA adds
-expectation components, and a causal mask is simply part of the shared score lambda. The pass has no operation-family
-matcher. Ordinary `copy` aliases of the carried maximum are followed before the exp-weighted components are compared.
+tries every twist recipe (`ir/pure/twist.py`) on every reduce that reads a reduce as an operand — the shape the lift
+gives a two-pass softmax — and rewrites the tree's operands onto each fold `Fold.twist` returns, to a fixpoint. Pure
+softmax is the arity-two case; SDPA adds expectation components, which join by the same call once the `1/l` factor
+constant along the axis has hoisted out of the fold, and a causal mask is simply part of the shared score cone. The
+pass has no operation-family matcher: a recipe clicks by canonical form, or it does not.
 
 The rewrite consumes the canonical Fold tree. It reuses the registered monoid generator, invariant-factor splitting,
 and scoped score equivalence both for sibling maximum/additive folds and for the equivalent canonical composition in

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field, replace
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F32
+from emmy.compiler.dtype import F32, U32
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.atom import AtomKind
 from emmy.compiler.ir.axis import Axis
@@ -930,7 +930,7 @@ def _sync_operands(
     A computed A cone with a
     row-invariant prologue (the fused
     norm→linear per-row statistic — its reduce ``Loop`` + scalar sweep) arrives already split at the
-    K seam (``ops.cone_seam`` reads the cone NODE's boundary; the scheduler sizes the stat rows off
+    K seam (``fold.cone_seam`` reads the cone NODE's boundary; the scheduler sizes the stat rows off
     the same read): the prologue runs ONCE per tile row (:func:`sync_stat_fill`, returned as the transport
     prologue) and the per-cell fill reads the bridged values back from the stat smem rows. The
     schedule's eligibility guarantees exact cover on N; a masked / symbolic **M**
@@ -1610,7 +1610,7 @@ class _AtomOps:
     # the zero-axis ``Fold`` wrapper, and the store sink is where it lands.
     epilogue: Body = field(default_factory=Body)
     # The computed-A cone's ``(prologue, cell, stats)`` K seam, read off the NODE BOUNDARY
-    # (``ops.cone_seam``). ``None`` for a
+    # (``fold.cone_seam``). ``None`` for a
     # plain gmem-``Load`` A — its whole body is the per-cell fill.
     seam: tuple | None = None
     # The register-fragment NAMESPACE. Empty for the kernel's own contraction; a nested producer
@@ -1803,6 +1803,21 @@ class _MmaOps(_AtomOps):
             for i in range(m.reg)
             for j in range(n.reg)
         ]
+        if block_scaled_atom(atom):
+            # The block-scaled cell's two scale operands are per-lane registers like the
+            # multiplicands, so they are declared here and ASSIGNED per K step. Slotted with the
+            # data fragments they ride beside: the register ring re-enters slot ``s`` every
+            # ``depth`` steps, and a load that declared its own destination redeclared it there.
+            # Named exactly as :func:`mma_leaves` spells them — A shares one name across channels,
+            # B carries the per-channel fold suffix.
+            decls += [
+                RegFragment(name=nm, role="sf", shape=atom.ptx_shape, dtype=U32, nregs=1) for nm in frags(lambda i: f"_sfa{i}", m.reg)
+            ]
+            for f in range(n_folds):
+                decls += [
+                    RegFragment(name=nm, role="sf", shape=atom.ptx_shape, dtype=U32, nregs=1)
+                    for nm in frags(lambda i, ff=f: _fold_frag(f"_sfb{i}", ff), n.reg)
+                ]
         if _f16acc(atom):
             # The f32 shadow accumulators — they keep the ``_c{i}_{j}`` names the store reads;
             # the packed f16 mma targets above are the ``_ch{i}_{j}`` family FragmentPromote folds.

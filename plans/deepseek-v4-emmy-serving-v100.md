@@ -159,15 +159,22 @@ on its own — 52 kernels, worst 2³⁷ (was 2⁵⁵), placement terminating in 
 trips is hours per launch (the 2³⁰ two-cut variant ran 2.6 h without completing before being killed). Two named
 gaps stand between here and a boot that serves, both follow-ups to #692:
 
-1. **Partition the monster** — the selected route is serial (`block_threads=1`). The reduce tier must emit a
-   sibling-provider chain (the piece's workspace-rsqrt captures) ahead of a cooperative/ILP loop; today such folds
-   legally offer only the serial fold. This is where actual serving latency comes from.
-2. **Let evidence elect the deeper route** — a tune pass over the new ballot so composed arms carry measured
-   latencies (today the 2³⁷-vs-2³⁰ choice is prior-guessed), or the monotone serial-work prior feature.
+1. **Partition the monster — LANDED.** A chain-form root's DIRECT body members (the piece's workspace-rsqrt
+   captures feeding the retained reduce, exactly the monster's shape) now offer and realize cooperative/ILP
+   partitions: the reduce tier binds a provider chain ahead of a strided cooperative/ILP fold sharing one lane
+   axis, closing lane-distributed. A fold nested deeper, and any member of a sweep- or streamed-store-carrying
+   kernel, still keep the serial fold — an offer-side decision, not a remaining capability gap. Realization is
+   corpus-ratcheted (a cooperative reduce row on a composed-cut chain-form piece). Still owed on the V100 host: an
+   unpinned `post4096` compile with this ballot available, to see whether the greedy actually elects a partitioned
+   row for the monster kernel, or still elects serial (see gap 2).
+2. **Let evidence elect the deeper route** — a tune pass over the ballot, now including the monster's own
+   cooperative/ILP rows, so composed arms and partitioned members alike carry measured latencies (today the
+   2³⁷-vs-2³⁰ cut choice, and any partitioned row's win margin, is prior-guessed) — or the monotone serial-work
+   prior feature. This is the critical path still blocking serving latency.
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot compiles
-but stalls in the first `post4096` prefill forward. Stage 4 cannot warm or bake until the partitioned route exists
-(gap 1 above), and the golden re-record should follow it, not precede it.
+but stalls in the first `post4096` prefill forward. Stage 4 cannot warm or bake until gap 2 lands and gate (c) is
+re-run on the host, and the golden re-record should follow it, not precede it.
 
 ## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
 

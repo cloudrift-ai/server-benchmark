@@ -161,8 +161,11 @@ no matter what kind: a projection evaluates its operands before its scalar body,
 that does not exist yet. The `closed` gate reads only the fold's own lift and cannot see a nested capture; the
 composed placement cut builds exactly this shape (the consumer piece's workspace loads and rsqrt chain feed the
 retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
-nvcc). The schedule walk mirrors the fact: every fold under such a chain-form root offers only the serial fold,
-since the materializer binds the projection body whole.
+nvcc). The classic reduce domain mirrors the fact for depth: a fold reached deeper than a chain-form root's direct body
+members still offers only the serial fold, since the body recursion emits it serially per cell regardless of
+partition. A DIRECT member is not so limited — the retained reduce above is one — and offers the full non-transposed
+reduce catalog instead (absent a swept or streamed boundary store, neither of which the chain arm's lane-distributed
+close can realize), bound through the chain arm ahead of the strided loop.
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
 specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or
@@ -248,11 +251,14 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
 
 `ir/schedule/classic.py` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
 
-- `ClassicProblem` contains the unscheduled Fold root, source TileOp facts, and target. `ClassicScheduleContext` assigns
-  one stable integer id per Fold identity and one distinct `(consumer id, operand position)` tuple per edge, including
-  multiple uses of one producer.
+- `ClassicScheduleContext` composes the unscheduled `TileOp` and its target. The `TileOp` itself is the site index:
+  one stable integer id per Fold identity, one distinct `(consumer id, operand position)` tuple per edge (including
+  multiple uses of one producer), each site's view, and each contraction's `ContractionFacts`.
 - Reusable schedule views classify one Fold without target input. A contraction records consumer-relative operand
-  positions; it does not mint alternate nodes or edge identities. `TileOp` caches both stable inventories.
+  positions; it does not mint alternate nodes or edge identities. The derivations memoize on the Fold ROOT, so every
+  `TileOp` over one term shares them; the `TileOp` properties are accessors, not a second cache.
+- `path.sites` is a reading of that same walk, adding only what the codec needs: the per-site ordinal among sites
+  sharing a `(segments, axis)`. It owns spelling, resolution and ambiguity — not traversal.
 - `KernelSchedule`, `ProjectionSchedule` / `ReductionSchedule`, and `EdgeSchedule` contain choices only. They do not
   cache paths, classifications, shapes, placed geometry, resolved shared-memory sizes, or codec spellings.
 - `ClassicScheduleContext` derives local support after selecting a node and its incident edges. `extend` composes it

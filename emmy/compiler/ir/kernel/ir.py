@@ -1413,7 +1413,7 @@ class RegFragment(Stmt):
     byte-identical."""
 
     name: str
-    role: str  # "a" / "b" / "c"
+    role: str  # "a" / "b" / "c" / "sf"
     shape: tuple[int, int, int]
     dtype: DataType
     count: int = 1  # >1 arrays the fragment family: ``<ty> name[count][n_regs]`` (loopify only)
@@ -1437,6 +1437,12 @@ class RegFragment(Stmt):
     def render(self, ctx: RenderCtx) -> list[str]:
         n_regs = self._nregs()
         ctx.ssa_dtypes[self.name] = self.dtype.name
+        if self.role == "sf":
+            # A block scale is ONE register the instruction takes by value, not an array — but it
+            # is declared here like every other fragment so :class:`BlockScaleLoad` ASSIGNS it.
+            # The register ring re-enters slot ``s`` every ``depth`` steps, so a load that declared
+            # its own destination redeclared it in the same C scope.
+            return [f"{_pad(ctx.indent)}unsigned {self.name};"]
         dims = f"[{self.count}][{n_regs}]" if self.count > 1 else f"[{n_regs}]"
         if self.role == "c" and self.dtype.nbytes != 2:
             # Brace-init zeros the whole (arrayed) accumulator; ``= {0.0f, ...}`` stays the flat form.
@@ -1565,7 +1571,9 @@ class BlockScaleLoad(Stmt):
         # slab changing type — a byte-typed slab would lose that the bytes ARE e4m3 to every other
         # reader of ``ctx.buffer_dtypes``.
         src = f"reinterpret_cast<const unsigned char*>(&{self.src_buffer}[{flat}])"
-        return [f"{_pad(ctx.indent)}unsigned {self.frag} = emmy_mma_load_sf{self.role}_f4({src}, {self.ldm});"]
+        # ASSIGNS — the fragment is declared once by its ``RegFragment`` (role ``sf``). Declaring
+        # it here redeclared it every time the register ring re-entered the slot.
+        return [f"{_pad(ctx.indent)}{self.frag} = emmy_mma_load_sf{self.role}_f4({src}, {self.ldm});"]
 
 
 @dataclass(frozen=True)

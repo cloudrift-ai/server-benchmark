@@ -26,7 +26,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.pure.fold import Fold, operand_name
+from emmy.compiler.ir.pure.fold import Fold, cone_seam, operand_name
 from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, match_packed_b_node, match_packed_pair_node
 from emmy.compiler.ir.stmt import Load
@@ -498,7 +498,7 @@ def resolve_fill_stage(
     byte-copy / cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it
     has no gmem-direct ``""`` sibling and a ``STAGE`` pin can only choose its DEPTH. ``None`` when
     the slabs exceed ``budget``: one A slab, one B slab per channel, and one fp32 row per bridged
-    statistic (``ops.cone_seam``'s ``stats`` — the same node boundary the materializer fills
+    statistic (:func:`~emmy.compiler.ir.pure.fold.cone_seam`'s ``stats`` — the same node boundary the materializer fills
     through).
 
     ``want_depth >= 2`` is the asymmetric B-only prefetch ring: only the B cp.async slabs ring
@@ -509,8 +509,6 @@ def resolve_fill_stage(
     ``k_axis`` overrides the stored contraction axis when the contraction is a derived singleton
     marker whose enclosing Fold owns the actual K sweep. ``why`` collects the decline reason when
     the tier refuses, so a PINNED caller reports the gate it actually hit."""
-    from emmy.compiler.ir.tile.ops import cone_seam  # noqa: PLC0415
-
     atom = tile.atom
     k_axis = k_axis or c.axis
     if atom.operand_dtype("a").nbytes < 2:

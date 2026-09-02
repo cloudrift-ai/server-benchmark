@@ -69,11 +69,12 @@ schedule, materialization, output specifications, and knobs belong to `TileOp`, 
 
 The [schedule package](schedule/ARCHITECTURE.md) separates schedule-wide interfaces and reusable choices from concrete
 implementations. `schedule/classic.py` owns the semantic model for the ordinary grid/CTA/warp/thread/register schedule.
-A `ClassicProblem` captures the unscheduled `Fold` tree, source TileOp facts, and target used by compatibility.
-`ClassicSites` assigns one stable integer node id to each Fold identity and one `(consumer, operand)` edge site to every
+The problem compatibility composes against is the unscheduled `TileOp` itself, paired with a target.
+The `TileOp` assigns one stable integer node id to each Fold identity and one `(consumer, operand)` edge site to every
 consumer operand position, so a shared producer is scheduled once while each use receives an independent transport
-choice. It also derives each node site's projection or reduction view from the Fold; target facts cannot affect whether
-a site is a projection, reduction, or contraction-capable reduction. `ClassicScheduleContext` composes compatibility
+choice. It also derives each node site's projection or reduction view, and each contraction's schedule-independent
+`ContractionFacts`, from the Fold alone; target facts cannot affect whether a site is a projection, reduction, or
+contraction-capable reduction, nor what its K axis, cone seam, producer, or fragment need are. `ClassicScheduleContext` composes compatibility
 over those sites and the separately projected node and edge domains.
 
 `Schedule` is the immutable, generic assignment of kernel, node, and edge choices. Direct work, flat raster, untiled
@@ -104,8 +105,7 @@ Fold program `p`, and target `t`, Algorithm 1 is exactly:
 
 The one `ClassicScheduleContext` is the immutable `c + p + t` prefix. It owns restriction and compatibility state and
 composes each node and its incident edges, followed by the kernel factor, through `extend`. The generic enumerator
-never unpacks `c` or imports classic scheduling. The context's complete `ClassicProblem` retains derived physical-axis
-and fragment-seam facts outside the choice values. Domain membership uses immutable indexes; local support is derived
+never unpacks `c` or imports classic scheduling. The context retains derived physical-axis and fragment-seam facts outside the choice values. Domain membership uses immutable indexes; local support is derived
 only after the context has selected one node and its incident edge values, so a precise restriction does not construct
 the rest of the relation. Production may prune only prefixes whose `c + p + t` state proves they have no completion.
 The literal reference enumerator remains the oracle. Bounded-product checks and traversal-order tests require every

@@ -1,14 +1,8 @@
 """The PACKED-PAIR k-block operand reading — the NVFP4 weight's shape, recognized once.
 
-<<<<<<<< HEAD:emmy/compiler/ir/packed.py
-One question, asked by three consumers that must not drift apart: classic domain projection,
-the schedule stage resolver, and kernel materialization. Each asks
-========
-One question, asked by three consumers that must not drift apart: classic domain projection
-(``classic_projection.py``, off ``_ContractionFacts.packed``), the stage resolver
-(``_staging.resolve_warp_stage``) and the materializer (``kernel/_atom._staged``). Each asks
->>>>>>>> dabcc893 (Refactor classic schedule enumeration):emmy/compiler/ir/schedule/packing.py
-:func:`match_packed_b_node` and gets the same answer or ``None``.
+One question, asked by three consumers that must not drift apart: classic domain projection, the
+schedule stage resolver, and kernel materialization. Each asks :func:`packed_readings` and gets
+the same answer or ``None``.
 
 It reads a SHAPE, never a checkpoint format: a packed-pair storage dtype (``logical_elems == 2``),
 a data-dependent gather into a pair-value table, and a scale factor whose every ``k`` reference is
@@ -18,19 +12,15 @@ It is a CONSUMER'S reading of an already-built contraction — ``TileOp`` post-i
 B as a plain projection, and this asks what that projection contains — so it is not one of the
 stages that build the tree, and it does not belong inside one.
 
-<<<<<<<< HEAD:emmy/compiler/ir/packed.py
-It is an IR reading because its consumers straddle schedule semantics and kernel lowering. Keeping
-it below both layers lets them share one recognizer without either importing the other's pipeline
-implementation.
-========
 It lives with the classic schedule model because projection and staging must share this reading;
 kernel materialization consumes the same result without redefining the operand shape.
->>>>>>>> dabcc893 (Refactor classic schedule enumeration):emmy/compiler/ir/schedule/packing.py
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold, operand_body
 from emmy.compiler.ir.stmt import Assign, Load
@@ -322,6 +312,16 @@ def match_packed_pair_node(node, inputs) -> BlockScaledPair | None:
     return BlockScaledPair(a=sides[0][1], b=tuple(split for _, split in sides[1:]), block=sides[0][0].block)
 
 
+def packed_readings(nodes, inputs) -> frozendict:
+    """Each node's ``(B copy, pair)`` packed readings, by object identity.
+
+    Both are a function of the node and the kernel's typed inputs, so this is
+    :meth:`~emmy.compiler.ir.tile.TileOp.packed_reading` — read there, never re-matched at a
+    call site and never carried through a schedule choice.
+    """
+    return frozendict({id(node): (match_packed_b_node(node, inputs), match_packed_pair_node(node, inputs)) for node in nodes})
+
+
 __all__ = [
     "BlockScaledOperand",
     "block_scaled_atom",
@@ -330,4 +330,5 @@ __all__ = [
     "match_packed_b_node",
     "match_packed_kblock_b",
     "match_packed_pair_node",
+    "packed_readings",
 ]

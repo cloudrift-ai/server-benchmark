@@ -369,8 +369,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
                 store_dtype_consumers[id(edge)] = site.node
     outer = (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None))
     occurrence_axes: dict[int, list[tuple]] = {}
-    for node, available in islice(walk(tile.op, outer), 1, None):
-        occurrence_axes.setdefault(id(node), []).append(available)
+    for visit in islice(walk(tile.op, outer), 1, None):
+        occurrence_axes.setdefault(id(visit.node), []).append(visit.axes)
     environments: dict[int, list[tuple[Fold, ...]]] = {}
     dtype_table: dict[int, tuple] = {}
     if isinstance(tile.op, Fold):

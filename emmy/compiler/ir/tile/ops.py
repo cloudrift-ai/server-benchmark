@@ -7,7 +7,7 @@ derived role, reduce ``Axis``, and operand edges — comes directly from the tre
 facts off a synthesized nest is the inversion this module exists to prevent; :meth:`Fold.lower`
 is for callers that consume a body.
 
-This module holds the structural reads over a node tree — the cone seam (:func:`cone_seam`), the
+This module holds the structural reads over a node tree — the cone seam (:func:`~emmy.compiler.ir.pure.fold.cone_seam`), the
 iteration-space names (:func:`axis_names`) — plus the typed schedule accessor (:class:`Sched`). Lowering itself
 has ONE spelling and it lives on the node: :meth:`Fold.lower` (a fold flattens through
 :attr:`Fold.loop`, a wrapping projection appends its operand nests). Stored trees are already
@@ -23,14 +23,12 @@ from emmy.compiler.ir.pure.fold import (
     Fold,
     _operand_result_names,
     deep_reads,
-    edge_refs_axis,
+    edge_free_axes,
     is_contraction,
-    operand_body,
     refs_axis,
-    splice_operands,
     stmt_axis_names,
 )
-from emmy.compiler.ir.schedule import ClassicSites, PlacedTile, Reduce
+from emmy.compiler.ir.schedule import PlacedTile, Reduce
 from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
     classic_node_key,
@@ -40,34 +38,6 @@ from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
-
-
-def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
-    """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
-    scanning stmts: the cone is ``Fold.projection(body=<the per-cell normalize>, operands=(<the row-invariant
-    prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
-    own zero-axis ``Fold`` over the stat ``Fold``) plus any row-invariant cone prefix, placed there
-    when the cone was built (:func:`make_cone` splits at the K seam once, structurally).
-
-    The split is the K SEAM, on the edges as on the stmts: an edge that never indexes the
-    contraction axis ``k_name`` is row-invariant and belongs to the prologue; a k-VARYING producer
-    edge (the attention score contraction the cone's ``exp(s − m)`` reads) is per-cell and splices
-    into the cell ahead of its first use, like any operand edge. Every fused norm→linear cone
-    carries the single row-invariant edge, so its seam reads exactly as it always did.
-
-    ``stats`` are the prologue results the cell reads — the values bridged through the stat smem
-    rows. Internal definitions are excluded: the prologue and cell may independently use the same
-    local SSA name. A prologue whose results go unread is dropped (nothing to bridge). The ONE seam
-    both sides read: the scheduler sizes the stat rows into the sync stage's smem budget, the
-    materializer fills them (``sync_stat_fill``)."""
-    if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
-        return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
-    varying = [edge_refs_axis(e, k_name) for e in cone.operands]
-    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in operand_body(e))
-    cell = splice_operands(tuple(e for e, k in zip(cone.operands, varying, strict=True) if k), tuple(cone.body))
-    pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in _operand_result_names(edge)}
-    stats = tuple(sorted(pro_results & deep_reads(list(cell))))
-    return (pro, cell, stats) if stats else ((), cell, ())
 
 
 def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, object]:
@@ -189,7 +159,7 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     # seam is a dependency question, not only an index question. Without this, attention's
     # ``exp(s − m)`` chain — which names the score rather than the KV axis — hoists into the
     # row-invariant prologue, where the per-cell score it reads is not yet defined.
-    varying = {nm for n in nodes if edge_refs_axis(n, k_name) for nm in _operand_result_names(n)}
+    varying = {nm for n in nodes if k_name in edge_free_axes(n) for nm in _operand_result_names(n)}
     pro: list = []
     rest = list(cell)
     while rest and not refs_axis(rest[0], k_name) and not (set(rest[0].deps()) & varying):
@@ -242,11 +212,13 @@ class Sched:
     outside that node's classified schedule sum, fails loudly.
     """
 
-    def __init__(self, root, place=None, schedule=None, materialization=None) -> None:
-        self.root = root
+    def __init__(self, tile, place=None, schedule=None, materialization=None) -> None:
+        if not isinstance(getattr(tile, "op", None), Fold):
+            raise TypeError("a schedule view reads a TileOp — it is the term's site index")
+        self.tile = tile
+        self.root = tile.op
         self.schedule = schedule
         self.materialization = materialization
-        self.sites = ClassicSites(root)
         #: The kernel's free→grid :class:`~emmy.compiler.ir.schedule.Placement`. A ``TILE`` slice
         #: is geometry over an ``(m, n)`` output pair, and WHICH pair is a function of the site's
         #: position in the tree — so the binding belongs here, on the scheduling structure, and
@@ -283,28 +255,25 @@ class Sched:
     def key(self, family: str, node) -> str | None:
         """The canonical node-family key, or ``None`` when the family does not apply."""
         try:
-            site = self.sites.site(node)
+            site = self.tile.node_id(node)
         except KeyError as error:
             raise UnknownSiteError(str(error)) from None
-        if family == "TILE":
-            family_sites = self.sites.tile_sites
-        elif family == "REDUCE":
-            family_sites = self.sites.reduction_sites
-        elif family == "STAGE":
-            edges = self.sites.stage_edges
-            family_sites = tuple(dict.fromkeys(edge[0] for edge in edges))
+        if family == "STAGE":
+            family_sites = tuple(dict.fromkeys(edge[0] for edge in self.tile.stage_edges))
+        elif family in self.tile.family_sites:
+            family_sites = self.tile.family_sites[family]
         else:
             raise ValueError(f"unknown classic schedule family {family!r}")
         if site not in family_sites:
             return None
         if family == "STAGE":
-            return classic_stage_key(self.sites, next(edge for edge in self.sites.stage_edges if edge[0] == site))
-        return classic_node_key(self.sites, family, site)
+            return classic_stage_key(self.tile, next(edge for edge in self.tile.stage_edges if edge[0] == site))
+        return classic_node_key(self.tile, family, site)
 
     def get(self, family: str, node):
         if self.schedule is None:
             return None
-        site = self.sites.site(node)
+        site = self.tile.node_id(node)
         assignment = self.schedule.nodes[site]
         if family == "TILE":
             return assignment.tile if assignment.tile.is_tiled else None
@@ -331,7 +300,7 @@ class Sched:
         possible where there used to be three hand-written ``.at(...)`` calls."""
         if self.schedule is None or self.materialization is None:
             return None
-        return self.materialization.tiles.get(self.sites.site(node))
+        return self.materialization.tiles.get(self.tile.node_id(node))
 
     def placed(self, node, plan):
         """``plan`` bound to the ``(m, n)`` output axes a ``TILE`` slice at ``node``'s site tiles —
@@ -379,9 +348,8 @@ class Sched:
             if mn is None or not is_contraction(node):
                 return mn
             first, second = mn
-            first_refs = edge_refs_axis(node.a, first.name)
-            second_refs = edge_refs_axis(node.a, second.name)
-            return (second, first) if second_refs and not first_refs else mn
+            free = edge_free_axes(node.a)
+            return (second, first) if second.name in free and first.name not in free else mn
 
         if site.depth == 1 or all(getattr(candidate.node, "axis", None) is None for candidate in ancestors):
             return orient(self.place.root_mn)
@@ -399,7 +367,7 @@ class Sched:
 def sched_of(tile) -> Sched:
     """Return the typed schedule view of a ``TileOp``."""
     return Sched(
-        tile.op,
+        tile,
         place=tile.place,
         schedule=tile.schedule,
         materialization=tile.materialization,
@@ -584,7 +552,6 @@ __all__ = [
     "Sched",
     "axis_names",
     "carries_partition",
-    "cone_seam",
     "cone_stat_dtypes",
     "edge_dtypes",
     "head",

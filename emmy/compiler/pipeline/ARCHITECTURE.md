@@ -1703,7 +1703,7 @@ identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token)
 
 ### Classic schedule keys
 
-Structural choices finish before `ClassicProblem` constructs its immutable site index. Each shared Fold object gets
+Structural choices finish before the `TileOp` indexes its Fold root. Each shared Fold object gets
 one preorder integer id; every consumer operand position gets a distinct `(consumer id, operand position)` tuple, even
 when two edges reach the same producer. The strict codec spells kernel choices as bare `WORK` / `RASTER`. `TILE`,
 `REDUCE`, and `STAGE` are also

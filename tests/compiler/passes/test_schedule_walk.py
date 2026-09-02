@@ -9,21 +9,39 @@ split choices remain separate from classic schedule choices.
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import replace as dc_replace
+from types import SimpleNamespace
 
 import pytest
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
+from emmy.compiler.ir.pure import Fold
+from emmy.compiler.ir.pure.fold import Channel, is_contraction
+from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.schedule import classic_projection as _classic
+from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
+from emmy.compiler.ir.schedule.views import ContractionFacts
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp
+from emmy.compiler.ir.tile.ops import Sched
+from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, scan_from_loop
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import PoolSample
 
 _CC = (12, 0)
+
+#: The scheduling rule, reached through ``importlib`` because its module name starts with a digit.
+_SCHEDULE_RULE = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule")
 
 #: The knob pins the enumeration reads off the environment. A host with one set would enumerate a
 #: narrowed pool and fail the offer assertions here for a reason that has nothing to do with the
@@ -130,25 +148,30 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
 
 def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> None:
     """A computed-A cone is lowered once for its stat-row seam, not once per tile plan."""
-    from emmy.compiler.ir.tile import ops as tile_ops  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import staging, views  # noqa: PLC0415
 
     calls: list[tuple] = []
-    original = _classic.cone_seam
+    original = views.cone_seam
 
     def spy(cone, k_name):
         calls.append((cone, k_name))
         return original(cone, k_name)
 
-    monkeypatch.setattr(_classic, "cone_seam", spy)
+    monkeypatch.setattr(views, "cone_seam", spy)
     monkeypatch.setattr(
-        tile_ops,
+        staging,
         "cone_seam",
         lambda *_: (_ for _ in ()).throw(AssertionError("the fill must reuse the prescan's seam")),
     )
-    assert _rows(FIXTURES["fused_norm_linear"]())
+    rows = _rows(FIXTURES["fused_norm_linear"]())
+    assert rows
     assert calls
-    keys = [(id(cone), k_name) for cone, k_name in calls]
-    assert len(keys) == len(set(keys))
+    # ONE distinct seam, read once per TileOp that composes over the term -- the unscheduled tile
+    # plus each materialized candidate re-validating itself -- and never once per candidate PLAN,
+    # which is the cost this guards. The facts are cached on the kernel, so the bound is the number
+    # of kernels, not the size of the search.
+    assert len({(id(cone), k_name) for cone, k_name in calls}) == 1
+    assert len(calls) < len(rows)
 
 
 @pytest.mark.parametrize("case, tile_sites, reduce_sites", (("fused_norm_linear", 1, 2), ("flash_pair", 2, 3)))
@@ -293,30 +316,215 @@ def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> N
     rows = _rows(graph)
     assert rows, "the fused attention kernel must still enumerate"
     reduce_keys = {key for row in rows for key in row if key.startswith("REDUCE@")}
-    assert reduce_keys == {f"REDUCE@n{i}" for i in (1, 2, 5, 6, 10, 13, 14)}
+    # n11, not n10: the score contraction's A and B are BOTH norm cones here, and the one walk
+    # visits a contraction's edges by ROLE (a, then each channel's b) rather than in stored order,
+    # which puts the channels first — so the two cone subtrees, and the reduce sites inside them,
+    # number the other way round.
+    assert reduce_keys == {f"REDUCE@n{i}" for i in (1, 2, 5, 6, 11, 13, 14)}
 
 
-def test_a_fold_under_a_chain_form_root_offers_only_the_serial_reduce(unpinned) -> None:
-    from types import SimpleNamespace
+# --- the chain-form root's reduce domain -------------------------------------------------------- #
+#
+# A chain-form root is a zero-axis Fold with no operand edge. Its DIRECT body members bind through
+# the kernel factorizer's chain arm and carry a partition; everything else under it stays serial.
+# These project the domain directly — the projection is a pure function of the tree and the output
+# specs, so a hand-built root states the contract without a graph to route it through.
 
-    from emmy.compiler.ir.axis import Axis, AxisRole
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.pure import Fold
-    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-    from emmy.compiler.ir.tile import Reduce
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
+def _chain_member(acc: str, axis: str, extent: int, src: str, factor: str):
+    """One reduce fold that captures ``factor`` from the provider chain emitted ahead of it."""
     body = Body(
         (
-            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
-            Assign(name="scaled", op="multiply", args=("x_e", "v25")),
-            Accum(name="acc", value="scaled", op="add", axes=("k",)),
+            Load(name=f"{src}_e", input=src, index=(Var("m"), Var(axis))),
+            Assign(name=f"{src}_scaled", op="multiply", args=(f"{src}_e", factor)),
+            Accum(name=acc, value=f"{src}_scaled", op="add", axes=(axis,)),
         )
     )
-    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
+    red = fold_from_loop(Loop(axis=Axis(axis, extent), body=body, role=AxisRole.PLANAR))
     assert red is not None
-    chain = (Load(name="ws", input="cutbuf", index=()), Assign(name="v25", op="rsqrt", args=("ws",)))
-    root = Fold.projection(body=Body((*chain, red)), results=("acc",))
-    tile = SimpleNamespace(output_specs=(), op=root)
+    return red
 
-    assert _classic._reduction_domain(tile, red) == (Reduce(),)
+
+def _provider_chain():
+    return (Load(name="ws", input="cutbuf", index=(Var("m"),)), Assign(name="v25", op="rsqrt", args=("ws",)))
+
+
+def _chain_root(*members, results=("acc",)):
+    root = Fold.projection(body=Body((*_provider_chain(), *members)), results=results)
+    assert root.axis is None and not root.operands, "the fed members must stay in the body for this shape"
+    return root
+
+
+def _tile_stub(root, output_specs=()):
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    return SimpleNamespace(output_specs=output_specs, op=root)
+
+
+def _member_catalog() -> tuple:
+    return (Reduce(), *(choice for choice in coop_reduce_moves() if not choice.coop_transposed))
+
+
+def test_a_direct_chain_member_offers_the_non_transposed_catalog(unpinned) -> None:
+    """A DIRECT body member of a chain-form root binds through the factorizer's chain arm — its
+    sibling providers emit ahead of one shared strided loop — so it offers the whole cooperative /
+    ILP catalog, priced at the offer rather than dropped at the binder."""
+    red = _chain_member("acc", "k", 128, "x", "v25")
+    assert _classic._reduction_domain(_tile_stub(_chain_root(red)), red) == _member_catalog()
+
+
+def test_a_transposed_band_is_not_in_a_direct_chain_members_domain(unpinned) -> None:
+    """The ``coop-t`` band's σ-substitution and guarded close assume the fold is the kernel ROOT,
+    so no chain member may carry one — offering it would mint one kernel from two knob spellings."""
+    red = _chain_member("acc", "k", 128, "x", "v25")
+    domain = _classic._reduction_domain(_tile_stub(_chain_root(red)), red)
+    assert domain, "the member still offers the serial fold and the plain bands"
+    assert not any(choice.coop_transposed for choice in domain)
+
+
+def test_a_fold_nested_under_a_chain_member_offers_only_the_serial_reduce(unpinned) -> None:
+    """A fold nested UNDER a direct member — not itself a member of the root's own body — binds
+    through that member's schedule-blind body recursion, so no partition can ride under it."""
+    inner_body = Body(
+        (
+            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
+            Accum(name="acc_inner", value="x_e", op="add", axes=("k",)),
+        )
+    )
+    inner_loop = Loop(axis=Axis("k", 128), body=inner_body, role=AxisRole.PLANAR)
+    outer_body = Body((inner_loop, Accum(name="acc_outer", value="acc_inner", op="add", axes=("m",))))
+    outer = fold_from_loop(Loop(axis=Axis("m", 4), body=outer_body, role=AxisRole.PLANAR))
+    inner = next(member for member in outer.lift.body if isinstance(member, Fold))
+
+    root = _chain_root(outer, results=("acc_outer",))
+    assert _classic._reduction_domain(_tile_stub(root), outer) == _member_catalog()
+    assert _classic._reduction_domain(_tile_stub(root), inner) == (Reduce(),)
+
+
+def test_a_sweep_carrying_store_keeps_chain_members_serial(unpinned) -> None:
+    """A boundary store carrying an output sweep keeps every direct member serial — even one the
+    sweep axis never enters — because the sweep loop encloses the whole kernel tail and a
+    partitioned member's lane-distributed close cannot re-run per swept cell. A KERNEL-level fact,
+    unlike the per-node sweep-reading gate above it."""
+    red = _chain_member("acc", "k", 128, "x", "v25")
+    spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
+    assert _classic._reduction_domain(_tile_stub(_chain_root(red), (spec,)), red) == (Reduce(),)
+
+
+def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
+    """A boundary store that streams into a SIBLING observed member's reduce loop keeps every
+    OTHER direct member serial too: the trailing splice cannot reach a loop that already sits in an
+    earlier segment. Also kernel-level, and the exact gate the factorizer's chain arm applies."""
+    scan_body = Body(
+        (
+            Load(name="y_e", input="y", index=(Var("m"), Var("j"))),
+            Accum(name="scan_acc", value="y_e", op="add", axes=("j",)),
+            Write(output="running", index=(Var("m"), Var("j")), value="scan_acc"),
+        )
+    )
+    scan, _trailing = scan_from_loop(Loop(axis=Axis("j", 4), body=scan_body, role=AxisRole.PLANAR))
+    assert scan.observe is not None
+    red = _chain_member("acc", "k", 128, "x", "v25")
+    spec = OutputSpec(write=Write(output="running", index=(Var("m"), Var("j")), value=scan.observe.results[0]), sweep=None)
+    assert _classic._reduction_domain(_tile_stub(_chain_root(scan, red), (spec,)), red) == (Reduce(),)
+
+
+def _per_cell_reductions(root, output_specs=()) -> set:
+    """The reduce values ``_contraction_domain`` offers on the PER-CELL tier of ``root``'s
+    contraction — asked through the contraction projection itself, not through
+    ``_reduction_domain``, so that deleting the delegation between them fails this.
+
+    The stub carries no typed inputs, so ``_warp_atoms`` refuses every tensor-core atom and the
+    catalog is the scalar tiles alone; a tiled plan contracts K serially per register cell and is
+    excluded here by ``is_tiled``.
+    """
+    con = next(stmt for stmt in root.body if is_contraction(stmt))
+    tile = SimpleNamespace(
+        output_specs=output_specs,
+        op=root,
+        inputs={},
+        place=SimpleNamespace(free=()),
+        packed_reading=lambda _node: (None, None),
+    )
+    domain = _classic._contraction_domain(tile, None, con, ContractionFacts(k_axis=con.axis))
+    return {choice.reduce for choice in domain if not choice.tile.is_tiled}
+
+
+def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None:
+    """The contraction per-cell tier reads the SAME projection, so a contraction that is a direct
+    chain member inherits the member catalog, the transposed exclusion, and the swept / streamed
+    serial-only gates with no carve-out of its own. A contraction is a monoid with a ⊗ lift;
+    nothing about the chain arm reads its algebra.
+
+    Asked through ``_contraction_domain``, which is the only thing that makes this a test OF the
+    delegation: routed through ``_reduction_domain`` directly it would stay green with the
+    delegation deleted.
+
+    Note the shape is projected directly here. ``normalize_fold_tree``'s hoist currently moves any
+    contraction off a projection body onto an operand edge — absorbing whatever body value fed it —
+    and a root with an operand edge is no longer chain-form, so no lowered tree reaches this arm
+    with a contraction today. The delegation is still stated once, here, so a normalizer that later
+    keeps one in place does not silently acquire a different reduce domain."""
+    cone = Fold.projection(
+        body=Body(
+            (
+                Load(name="a_e", input="A", index=(Var("m"), Var("k"))),
+                Assign(name="a_scaled", op="multiply", args=("a_e", "v25")),
+            )
+        )
+    )
+    con = Fold.contraction(
+        k_axis=Axis("k", 128),
+        a=cone,
+        channels=(Channel(b=Load(name="b_e", input="B", index=(Var("k"),)), acc="acc"),),
+    )
+    root = _chain_root(con)
+    assert _per_cell_reductions(root) == set(_member_catalog())
+
+    swept = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
+    assert _per_cell_reductions(root, (swept,)) == {Reduce()}
+
+
+def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(unpinned) -> None:
+    """The refusal direction, through the real pin path. A ``REDUCE`` value scoped to a site whose
+    projected domain does not hold it empties that site's restriction, and the kernel enumerates NO
+    row at all — the pin is never quietly satisfied by the serial fold it did not name. That, not
+    a per-site exception, is what replaced the old walk's refusal: #691 made a pin a restriction on
+    the projected domain, so a partition a chain member cannot carry simply has nothing to select.
+
+    Only a SCOPED pin refuses. A graph-wide bare ``REDUCE: coop`` is applicable at a site only when
+    ``coop`` is already in that site's projected values, so on a serial-only member it is silently
+    inapplicable — the same adaptation that lets one ambient pin sweep a whole model.
+
+    The positive direction rides along: the DIRECT member's own site does enumerate under the same
+    pin, so a green assertion here cannot come from the kernel being unschedulable outright."""
+    inner_body = Body(
+        (
+            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
+            Assign(name="x_scaled", op="multiply", args=("x_e", "v25")),
+            Accum(name="acc_inner", value="x_scaled", op="add", axes=("k",)),
+        )
+    )
+    inner_loop = Loop(axis=Axis("k", 128), body=inner_body, role=AxisRole.PLANAR)
+    outer_body = Body((inner_loop, Accum(name="acc_outer", value="acc_inner", op="add", axes=("j",))))
+    outer = fold_from_loop(Loop(axis=Axis("j", 4), body=outer_body, role=AxisRole.PLANAR))
+    root = _chain_root(outer, results=("acc_outer",))
+    tile = TileOp(op=root, place=Placement(free=(Axis("m", 4),)), name="k_chain_probe", knobs={})
+    assert tile.op.axis is None and not tile.op.operands, "construction must preserve the chain form"
+
+    member = next(stmt for stmt in tile.op.body if isinstance(stmt, Fold))
+    nested = next(stmt for stmt in member.lift.body if isinstance(stmt, Fold))
+    sched = Sched(tile, place=tile.place.on_grid())
+    member_key, nested_key = sched.key("REDUCE", member), sched.key("REDUCE", nested)
+    ctx = Context.from_target(_CC)
+
+    def rows(pins: dict) -> list[dict]:
+        with pinned_knobs(pins):
+            return [dict(leaf.knobs) for leaf in iter_leaves(_SCHEDULE_RULE.classic_forks(tile, tile.name, {}, ctx))]
+
+    unpinned_rows = rows({})
+    assert {str(row[member_key]) for row in unpinned_rows} == {choice.spell() for choice in _member_catalog()}
+    assert {str(row[nested_key]) for row in unpinned_rows} == {""}, "the nested fold is serial-only"
+
+    assert rows({nested_key: "coop"}) == [], "a partition scoped to a serial-only site must enumerate nothing"
+    assert rows({member_key: "coop"}), "the direct member's own site still enumerates under the same value"

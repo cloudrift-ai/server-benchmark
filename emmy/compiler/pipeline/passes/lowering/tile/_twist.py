@@ -11,7 +11,7 @@ from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.carrier import EXP_FAMILY, exp_combine_states
 from emmy.compiler.ir.pure.closure import Closure
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Load, Select, refs_axis
+from emmy.compiler.ir.stmt import Assign, Body, Const, Load, Select, refs_axis
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +93,6 @@ def _maximum(fold: Fold, axes: tuple[str, ...]) -> tuple[str, Closure] | None:
     if ops is None or len(ops) != 1 or ops[0].reduce_canon != EXP_FAMILY.pivot:
         return None
     result = fold.lift.results[0]
-    if not isinstance(result, str):
-        return None
     score = _score(fold, result, axes)
     cone = fold.lift.body.backward_cone((result,))
     if score is None or {id(stmt) for stmt in cone.members} != {id(stmt) for stmt in fold.lift.body}:
@@ -109,8 +107,6 @@ def _denominator(fold: Fold, pivots: frozenset[str], score: Closure, axes: tuple
     if ops is None or len(ops) != 1 or ops[0].reduce_canon != EXP_FAMILY.plus:
         return False
     result = fold.lift.results[0]
-    if not isinstance(result, str):
-        return False
     candidate = _exp_score(fold.lift.body.definitions, result, pivots)
     candidate_score = _score(fold, candidate, axes) if candidate is not None else None
     cone = fold.lift.body.backward_cone((result,))
@@ -124,7 +120,9 @@ def _denominator(fold: Fold, pivots: frozenset[str], score: Closure, axes: tuple
 def _twisted_pair(maximum: Fold, denominator: Fold) -> Fold:
     states = (maximum.combine.results[0], denominator.combine.results[0])
     other = tuple(f"{name}__o" for name in states)
-    lift = replace(maximum.lift, results=(maximum.lift.results[0], 1.0))
+    # The injected singleton is ``(score, 1)``: the denominator counts one weight per element.
+    one = Const(name=f"{states[1]}__one", value=1.0)
+    lift = replace(maximum.lift, body=Body((*maximum.lift.body, one)), results=(maximum.lift.results[0], one.name))
     combine = Lambda(params=states + other, body=Body(exp_combine_states(states, other)), results=states)
     return replace(maximum, lift=lift, init=(maximum.init[0], denominator.init[0]), combine=combine)
 
@@ -331,7 +329,7 @@ def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
     statistic = view.statistic
     # A is ``operands[0]`` by canonical form; every other edge is one channel's streamed value,
     # and the combine's results are those channels' accumulators, in the same order.
-    accumulators = tuple(fold.combine.results)
+    accumulators = fold.combine.results
     values = tuple(_rewrite_axis(edge, fold.axis.name, statistic.axis.name) for edge in fold.operands[1:])
     operands = (*statistic.operands, *values)
     sums = tuple(f"{acc}__sum" for acc in accumulators)

@@ -43,7 +43,7 @@ from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Const
 
 # --------------------------------------------------------------------------------------------
 # The TRUE monoid — ``(init, combine)``, ONE program, stored FLAT on the ``Fold`` node.
@@ -180,7 +180,7 @@ def family_of(combine: Lambda):
     ops = component_ops(combine)
     if ops is not None:
         return Componentwise(ops)
-    names = tuple(r for r in combine.results if isinstance(r, str))
+    names = combine.results
     for family in _TWISTED_FAMILIES:
         if combine == family.program(names):
             return family
@@ -204,12 +204,12 @@ def rename_combine(combine: Lambda, rename_ssa) -> Lambda:
 
     family = family_of(combine)
     if family is not None and family.twisted:
-        old = tuple(r for r in combine.results if isinstance(r, str))
+        old = combine.results
         return family.program(tuple(rename_ssa(n) for n in old))
     return Lambda(
         params=tuple(rn(p) for p in combine.params),
         body=Body(tuple(st.rewrite(rn) for st in combine.body)),
-        results=tuple(rn(r) if isinstance(r, str) else r for r in combine.results),
+        results=tuple(rn(r) for r in combine.results),
     )
 
 
@@ -236,7 +236,7 @@ def merge_stmts(combine: Lambda, other: tuple[str, ...], *, dtype=F32) -> tuple[
     rather than patching is the same rule :func:`rename_combine` follows — a generated program is
     the deterministic function of its state names. ``dtype=None`` produces canonical Loop IR;
     kernel-level consumers keep the default f32 accumulator stamp."""
-    names = tuple(r for r in combine.results if isinstance(r, str))
+    names = combine.results
     family = family_of(combine)
     if family is None:
         raise ValueError("merge_stmts: no registered monoid family claims this combine")
@@ -251,14 +251,17 @@ def merge_stmts(combine: Lambda, other: tuple[str, ...], *, dtype=F32) -> tuple[
 
 def eval_lambda(lam: Lambda, args: tuple) -> tuple:
     """Evaluate a pure ``Lambda`` denotationally on numeric ``args`` (positional binding).
-    Covers the ANF ``Assign`` chain — the stored combine/lift vocabulary; an arg spelling that
-    is not a bound name evaluates as a float literal (the ``str(term)`` convention), and a
-    ``float`` result passes through (ι's literal components — softmax's ``(x, 1)``)."""
+    Covers the ANF ``Assign`` chain and a ``Const`` def — the stored combine/lift vocabulary
+    (ι's constant component, softmax's ``(x, 1)``, is a def); an arg spelling that is not a
+    bound name evaluates as a float literal (the ``str(term)`` convention)."""
     env = dict(zip(lam.params, args, strict=True))
     for s in lam.body:
+        if isinstance(s, Const):
+            env[s.name] = s.value
+            continue
         assert isinstance(s, Assign), f"spec evaluator covers the ANF Assign chain, got {type(s).__name__}"
         env[s.name] = s.op(*(env[a] if a in env else float(a) for a in s.args))
-    return tuple(env[r] if isinstance(r, str) else r for r in lam.results)
+    return tuple(env[r] for r in lam.results)
 
 
 def foldmap_eval(init: tuple, combine: Lambda, lift: Lambda, elements) -> tuple:

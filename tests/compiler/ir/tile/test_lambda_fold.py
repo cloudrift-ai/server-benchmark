@@ -14,7 +14,7 @@ from emmy.compiler.ir.pure import Lambda, component_ops, degenerate, merge_stmts
 from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
@@ -79,7 +79,9 @@ def _softmax_fold() -> Fold:
     other = tuple(f"{name}__o" for name in names)
     return Fold(
         axis=Axis("k", 2048),
-        lift=Lambda.closing(("k",), Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))),)), ("x0", 1.0)),
+        lift=Lambda.closing(
+            ("k",), Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))), Const(name="one", value=1.0))), ("x0", "one")
+        ),
         init=(ElementwiseImpl("maximum").identity, 0.0),
         combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
     )
@@ -88,7 +90,7 @@ def _softmax_fold() -> Fold:
 def test_twisted_fold_stores_the_true_monoid() -> None:
     loop = _softmax_loop()
     fold = _softmax_fold()
-    assert fold.lift.results == ("x0", 1.0)  # ι spelled in the lift — the singleton state
+    assert fold.lift.results == ("x0", "one")  # ι spelled in the lift — the singleton state, its 1 a def
     # The pivot seeds the max op's finite IDENTITY (−1e30), never −inf: an all-masked carrier
     # slice (a coop strided lane, a split-KV chunk) would rescale ``subtract(−inf, −inf)`` — NaN.
     assert fold.init == (ElementwiseImpl("maximum").identity, 0.0)
@@ -126,7 +128,7 @@ def test_twisted_rewrite_regenerates_the_combine_over_renamed_state() -> None:
     ren = {"m_i": "m2", "l_i": "l2", "x0": "s0"}
     out = rewrite(fold, lambda n: ren.get(n, n), Sigma.IDENTITY, lambda a: a)
     assert out.combine.results == ("m2", "l2")
-    assert out.lift.results == ("s0", 1.0)
+    assert out.lift.results == ("s0", "one")
     # The regenerated combine still passes the formation verification (the fold constructed).
     assert component_ops(out.combine) is None
 

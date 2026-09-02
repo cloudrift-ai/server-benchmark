@@ -46,7 +46,7 @@ class Reduction:
     @property
     def names(self) -> tuple[str, ...]:
         """The carried state's SSA names — the stored combine's results."""
-        return tuple(self.fold.combine.results)
+        return self.fold.combine.results
 
     @property
     def state_b(self) -> tuple[str, ...]:
@@ -56,9 +56,8 @@ class Reduction:
 
     @property
     def terms(self) -> tuple:
-        """The per-element injection singleton — the lift's results (a folded SSA name, or a
-        float literal: softmax's denominator ``1.0``)."""
-        return tuple(self.fold.lift.results)
+        """The per-element injection singleton — the lift's results, one name per component."""
+        return self.fold.lift.results
 
     @cached_property
     def ops(self):

@@ -704,6 +704,37 @@ class Init(Stmt):
         return [f"{_pad(ctx.indent)}{ctx.type_name(self.dtype)} {self.name} = {ctx.identity_literal(self.identity, self.dtype)};"]
 
 
+@dataclass(frozen=True)
+class Const(Stmt):
+    """A pure constant binding: ``<dtype> <name> = <value>;`` — one scalar literal as an SSA name.
+
+    The twisted carrier's injection needs it: online softmax folds each element as ``(score, 1)``,
+    and the denominator's ``1`` must be a def the lift can return, since a lambda's results are
+    names. Pure, so it is legal inside a stored ``Lambda`` body. ``dtype`` is stamped at kernel
+    lowering like an ``Assign``'s — f32 when nothing narrows it.
+    """
+
+    pure = True
+
+    name: str
+    value: float
+    dtype: DataType | None = None
+
+    def deps(self) -> tuple[str, ...]:
+        return ()
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}{self.name} = {self.value:g}"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        dtype = self.dtype or F32
+        ctx.ssa_dtypes[self.name] = dtype.name
+        return [f"{_pad(ctx.indent)}{ctx.type_name(dtype)} {self.name} = {ctx.identity_literal(self.value, dtype)};"]
+
+
 # Map ``ElementwiseImpl`` op names to compound-assignment operator symbols
 # used by ``Write.pretty()`` for reduce-writes (split-K partial accumulation).
 _REDUCE_OP_SYMBOL = {"add": "+", "sub": "-", "mul": "*", "div": "/"}

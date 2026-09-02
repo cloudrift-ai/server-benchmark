@@ -63,7 +63,7 @@ def _passthrough(node: Fold) -> Fold | None:
     if node.axis is not None or node.lift.body or len(node.operands) != 1:
         return None
     (operand,) = node.operands
-    if isinstance(operand, Fold) and tuple(node.lift.results) == operand.exposes:
+    if isinstance(operand, Fold) and node.lift.results == operand.exposes:
         return operand
     return None
 

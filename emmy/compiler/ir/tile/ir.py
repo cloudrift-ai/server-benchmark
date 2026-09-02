@@ -103,7 +103,7 @@ class ProjectionRegion(Stmt):
     @property
     def results(self) -> tuple[str, ...]:
         """Values observed by this region's output specifications."""
-        return tuple(result for result in self.lift.results if isinstance(result, str))
+        return self.lift.results
 
     def defines(self) -> tuple[str, ...]:
         """A projection loop does not expose its per-iteration values to the enclosing scope."""
@@ -724,6 +724,6 @@ def _(region: ProjectionRegion, rename, sigma, axis_fn):
     lift = Lambda(
         params=(axis.name, *(rename(param) for param in region.lift.params[1:])),
         body=Body(_rewrite(stmt, rename, sigma, axis_fn) for stmt in region.body),
-        results=tuple(rename(result) if isinstance(result, str) else result for result in region.lift.results),
+        results=tuple(rename(result) for result in region.lift.results),
     )
     return replace(region, axis=axis, lift=lift)

@@ -26,7 +26,7 @@ from emmy.compiler.ir.pure import Lambda, M
 from emmy.compiler.ir.pure.algebra import component_ops, degenerate, eval_lambda, foldmap_eval
 from emmy.compiler.ir.pure.carrier import exp_combine_states
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Init, Load, Loop, Write
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 # --- the mini loop-IR interpreter (the agreement test's right-hand side) ------------------------- #
@@ -109,10 +109,10 @@ def test_lambda_rejects_undefined_results() -> None:
         Lambda(params=("x",), body=Body(()), results=("y",))
 
 
-def test_lambda_allows_param_results_and_literal_results() -> None:
-    """ι is spelled in the lift: softmax's singleton is ``(x, 1)`` — the literal component has
-    no def to name and passes through evaluation verbatim."""
-    lam = Lambda(params=("k", "x"), body=Body(()), results=("x", 1.0))
+def test_lambda_allows_param_results_and_constant_results() -> None:
+    """ι is spelled in the lift: softmax's singleton is ``(x, 1)`` — the constant component is a
+    ``Const`` def, a name like any other result."""
+    lam = Lambda(params=("k", "x"), body=Body((Const(name="one", value=1.0),)), results=("x", "one"))
     assert eval_lambda(lam, (0, 3.5)) == (3.5, 1.0)
 
 
@@ -180,7 +180,7 @@ def test_fold_arity_mismatch_rejected() -> None:
     from emmy.compiler.ir.pure.fold import Fold as _Fold
 
     lam = Lambda(params=("a", "b"), body=Body((Assign(name="c", op="add", args=("a", "b")),)), results=("c",))
-    lift = Lambda(params=("k",), body=Body(()), results=(1.0, 1.0))
+    lift = Lambda(params=("k",), body=Body((Const(name="one", value=1.0), Const(name="two", value=1.0))), results=("one", "two"))
     with pytest.raises(ValueError, match="S × S → S"):
         _Fold(axis=_Axis("k", 4), lift=lift, init=(0.0, 0.0), combine=lam)
 
@@ -316,14 +316,14 @@ def test_agreement_online_softmax() -> None:
         axis=axis,
         lift=Lambda(
             params=("k",),
-            body=Body((Load(name="x0", input="x", index=(Var("k"),)),)),
-            results=("x0", 1.0),
+            body=Body((Load(name="x0", input="x", index=(Var("k"),)), Const(name="one", value=1.0))),
+            results=("x0", "one"),
         ),
         init=init,
         combine=combine,
     )
     env = _run_loop(fold.loop, {"m_i": float("-inf"), "l_i": 0.0}, {"x": x})
-    lift = Lambda(params=("k", "x0"), body=Body(()), results=("x0", 1.0))
+    lift = Lambda(params=("k", "x0"), body=Body((Const(name="one", value=1.0),)), results=("x0", "one"))
     spec = foldmap_eval(*_lse_monoid(0), lift, [(k, x[k]) for k in range(20)])
     np.testing.assert_allclose((env["m_i"], env["l_i"]), spec, rtol=1e-12)
     # And both equal the direct LSE reference.
@@ -348,15 +348,16 @@ def test_agreement_flash_arity3() -> None:
                 (
                     Load(name="s0", input="s", index=(Var("j"),)),
                     Load(name="v0", input="v", index=(Var("j"),)),
+                    Const(name="one", value=1.0),
                 )
             ),
-            results=("s0", 1.0, "v0"),
+            results=("s0", "one", "v0"),
         ),
         init=init,
         combine=combine,
     )
     env = _run_loop(fold.loop, {"m_i": float("-inf"), "l_i": 0.0, "O_i": 0.0}, {"s": s, "v": v})
-    lift = Lambda(params=("j", "s0", "v0"), body=Body(()), results=("s0", 1.0, "v0"))
+    lift = Lambda(params=("j", "s0", "v0"), body=Body((Const(name="one", value=1.0),)), results=("s0", "one", "v0"))
     spec = foldmap_eval(*_lse_monoid(1), lift, [(j, s[j], v[j]) for j in range(10)])
     np.testing.assert_allclose((env["m_i"], env["l_i"], env["O_i"]), spec, rtol=1e-10)
     m = s.max()
@@ -411,7 +412,8 @@ def test_fold_formation_rejects_a_family_less_combine() -> None:
         ),
         results=("a2", "b2"),
     )
-    lift = Lambda(params=("k",), body=Body((Load(name="x0", input="x", index=(Var("k"),)),)), results=("x0", 1.0))
+    body = Body((Load(name="x0", input="x", index=(Var("k"),)), Const(name="one", value=1.0)))
+    lift = Lambda(params=("k",), body=body, results=("x0", "one"))
     with pytest.raises(AssertionError, match="no registered monoid family"):
         Fold(axis=Axis("k", 4), lift=lift, init=(0.0, 0.0), combine=foreign)
 

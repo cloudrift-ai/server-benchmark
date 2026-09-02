@@ -119,7 +119,7 @@ def atomic_finalize(node: Fold, tail, outputs) -> str | None:
     possible divergence is OVER-refusal at the offer (a sibling region's non-distributive stmt
     refusing an atomic the owned region could carry) — safe, since a withheld atomic row leaves
     the deferred finalize, never a crash past an offer the realizer cannot honor."""
-    states = tuple(node.combine.results)
+    states = node.combine.results
     if len(states) != 1:
         return (
             f"atomic REDUCE folds ONE additive state component; this carrier has {len(states)} "
@@ -497,7 +497,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         _enforce(splitk_width(node.axis, cta))
         split = Axis(name=_SPLIT, extent=Dim(cta))
         partial_fold = _slice_fold(node, node.axis.extent.as_static() // cta)
-    states = tuple(partial_fold.combine.results)
+    states = partial_fold.combine.results
     n_comp = len(states)
     out = root.output
     cell = _cell_index(projection, free)

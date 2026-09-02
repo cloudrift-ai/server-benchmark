@@ -16,7 +16,6 @@ ahead of a lowering walk."""
 
 from __future__ import annotations
 
-from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.fold import (
@@ -106,7 +105,7 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
         else:
             env.update((name, None) for name in stmt.defines())
 
-    lifted = tuple(env.get(result) if isinstance(result, str) else F32 for result in edge.lift.results)
+    lifted = tuple(env.get(result) for result in edge.lift.results)
     if edge.axis is None:
         result = lifted
     else:

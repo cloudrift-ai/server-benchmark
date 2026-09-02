@@ -41,7 +41,7 @@ class Lambda:
 
     params: tuple[str, ...]
     body: Body
-    results: tuple[str | float, ...]
+    results: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.params, tuple):
@@ -57,7 +57,7 @@ class Lambda:
         defined = set(self.params)
         for s in self.body:
             defined |= _exposed_defines(s)
-        missing = [r for r in self.results if isinstance(r, str) and r not in defined]
+        missing = [r for r in self.results if r not in defined]
         if missing:
             raise ValueError(f"Lambda results {missing} are not defined by the body or params")
         # CLOSED IN VALUES. A lambda is a function, so every VALUE its body reads is a param or one
@@ -100,7 +100,7 @@ class Lambda:
         # accumulator), and that result has no def to name, so it binds as a param like any read.
         # Coordinates are deliberately absent — see the closedness gate in ``__post_init__``.
         residual = set(body.ssa_uses)
-        residual |= {result for result in results if isinstance(result, str)}
+        residual |= set(results)
         return cls(params=(*params, *sorted(residual - bound)), body=body, results=tuple(results))
 
     @property
@@ -134,7 +134,7 @@ class Lambda:
         return Lambda(
             params=tuple(mapping[p] for p in self.params),
             body=Body(tuple(s.rewrite(rn) for s in self.body)),
-            results=tuple(rn(r) if isinstance(r, str) else r for r in self.results),
+            results=tuple(rn(r) for r in self.results),
         )
 
     def alpha_eq(self, other: Lambda) -> bool:
@@ -142,6 +142,6 @@ class Lambda:
         return isinstance(other, Lambda) and self.canonical() == other.canonical()
 
     def pretty(self, indent: str = "") -> list[str]:
-        rs = ", ".join(r if isinstance(r, str) else repr(r) for r in self.results)
+        rs = ", ".join(self.results)
         head = f"{indent}λ({', '.join(self.params)}) -> ({rs})"
         return [head, *pretty_body(self.body, indent + "    ")]

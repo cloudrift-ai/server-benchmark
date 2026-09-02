@@ -83,7 +83,7 @@ def _lam_sig(lam, ctx: _Ctx | None = None) -> str:
     A non-empty CAPTURE set is spelled between the params and the results — without it a λ that
     reads an enclosing value would print as though it were closed, which is the one property the
     reader most needs (an unclosed subtree can never become an operand edge)."""
-    rs = ", ".join(r if isinstance(r, str) else format(r, "g") for r in lam.results)
+    rs = ", ".join(lam.results)
     cap = ctx.captures(lam) if ctx is not None else ()
     free = f" [captures {', '.join(cap)}]" if cap else ""
     return f"λ({', '.join(lam.params)}){free} -> ({rs})"

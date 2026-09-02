@@ -58,6 +58,7 @@ from emmy.compiler.ir.stmt.body import Body, refs_axis, stmt_axis_names
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
+    Const,
     Init,
     Load,
     Mma,
@@ -91,6 +92,7 @@ __all__ = [
     "Assign",
     "Body",
     "Cond",
+    "Const",
     "Init",
     "Load",
     "Loop",

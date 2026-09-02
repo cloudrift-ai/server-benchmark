@@ -23,6 +23,7 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
+    Const,
     Init,
     Load,
     Mma,
@@ -187,6 +188,11 @@ def _(s: Init, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # ``identity`` is a constant scalar — only the name moves. Renamed in lockstep with
     # the fold's ``Accum`` (registered above) so the seed stays paired.
     return Init(name=rename(s.name), identity=s.identity, dtype=s.dtype)
+
+
+@_rewrite_kind.register
+def _(s: Const, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    return Const(name=rename(s.name), value=s.value, dtype=s.dtype)
 
 
 @_rewrite_kind.register

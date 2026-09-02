@@ -25,13 +25,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 
-from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.algebra import component_ops, rename_combine
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Stmt
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
@@ -194,7 +193,7 @@ class Fold:
                 f"{(self.axis.name, *self.combine.results)} positionally"
             )
             defined = {name for stmt in self.observe.body for name in stmt.defines()}
-            assert all(isinstance(r, str) and r in defined for r in self.observe.results), (
+            assert all(r in defined for r in self.observe.results), (
                 "observer results must be FRESH names its body defines — never the carried state itself "
                 "(the boundary distinguishes a streamed store from a post-fold store by the name)"
             )
@@ -211,9 +210,9 @@ class Fold:
         the binding is positional in fact as well as in intent.
         """
         if self.combine is None:
-            return tuple(result for result in self.lift.results if isinstance(result, str))
-        state = tuple(self.combine.results)
-        return state if self.observe is None else (*state, *(result for result in self.observe.results if isinstance(result, str)))
+            return self.lift.results
+        state = self.combine.results
+        return state if self.observe is None else (*state, *self.observe.results)
 
     @cached_property
     def index_space(self) -> frozenset[str]:
@@ -272,7 +271,7 @@ class Fold:
         if not (plus.associative and plus.commutative and plus.has_identity) or self.init != (plus.identity,) * len(pluses):
             return None
         defs = self.lift.body.definitions
-        products = [defs.get(result) if isinstance(result, str) else None for result in self.lift.results]
+        products = [defs.get(result) for result in self.lift.results]
         if len(products) != len(pluses) or any(not isinstance(stmt, Assign) or len(stmt.args) != 2 for stmt in products):
             return None
         product = products[0].op
@@ -380,8 +379,7 @@ class Fold:
     def step(self) -> Body:
         """The per-step statements this fold DERIVES from its stored parameters: the lift body,
         then the combine APPLIED at the injected singleton — its second-operand params bound to
-        the lift's results, a literal injection (softmax's ``1.0`` denominator) initialized as a
-        name — with each result-defining assign spelled as the in-place ``Accum`` over the carried
+        the lift's results — with each result-defining assign spelled as the in-place ``Accum`` over the carried
         state, the loop-IR form whose seed is the ⊕'s identity. An observer's pure tap runs last,
         so a streamed store reads the post-combine (inclusive-prefix) state.
 
@@ -394,13 +392,9 @@ class Fold:
             return self.lift.body
         if self.composed is not None:
             return Body()
-        states = tuple(self.combine.results)
-        injected = dict(zip(self.combine.params[len(states) :], self.lift.results, strict=True))
-        named = {other: term for other, term in injected.items() if isinstance(term, str)}
-        out: list[Stmt] = [
-            *self.lift.body,
-            *(Init(name=other, identity=float(term), dtype=F32) for other, term in injected.items() if other not in named),
-        ]
+        states = self.combine.results
+        named = dict(zip(self.combine.params[len(states) :], self.lift.results, strict=True))
+        out: list[Stmt] = [*self.lift.body]
         applied = [stmt.rename(named) for stmt in self.combine.body]
         definitions = {stmt.name: stmt for stmt in applied if stmt.name not in states}  # temps; a state's rewrite is not a def
 
@@ -455,7 +449,7 @@ class Fold:
             return Lambda(
                 params=tuple(mapping.get(name, name) for name in fn.params),
                 body=Body(tuple(stmt.rename(mapping) for stmt in fn.body)),
-                results=tuple(mapping.get(result, result) if isinstance(result, str) else result for result in fn.results),
+                results=tuple(mapping.get(result, result) for result in fn.results),
             )
 
         return replace(
@@ -550,7 +544,7 @@ def _(s: Fold, rename, sigma, axis_fn):
     lift = Lambda(
         params=(*lead, *(_param(p) for p in s.lift.params[len(lead) :])),
         body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
-        results=tuple(rename(r) if isinstance(r, str) else r for r in s.lift.results),
+        results=tuple(rename(r) for r in s.lift.results),
     )
     combine = rename_combine(s.combine, rename) if s.combine is not None else None
     observe = None
@@ -560,7 +554,7 @@ def _(s: Fold, rename, sigma, axis_fn):
         observe = Lambda(
             params=(axis.name, *(rename(p) for p in s.observe.params[1:])),
             body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.observe.body)),
-            results=tuple(rename(r) if isinstance(r, str) else r for r in s.observe.results),
+            results=tuple(rename(r) for r in s.observe.results),
         )
     return replace(s, axes=axes, operands=operands, lift=lift, combine=combine, observe=observe)
 

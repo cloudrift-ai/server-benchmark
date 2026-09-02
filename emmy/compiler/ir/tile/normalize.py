@@ -28,7 +28,7 @@ from emmy.compiler.ir.pure import (
     is_contraction,
 )
 from emmy.compiler.ir.pure.algebra import product_spine
-from emmy.compiler.ir.pure.closure import Closure, canonical_under, equivalent_clusters
+from emmy.compiler.ir.pure.closure import edge_key, equivalent_clusters, term_key
 from emmy.compiler.ir.pure.fold import _operand_result_names, _ordered_projection, operand_name
 from emmy.compiler.ir.schedule.views import edge_axes
 from emmy.compiler.ir.stmt import Assign, Body, Load, refs_axis
@@ -144,7 +144,7 @@ def _orient_shared(pairs: list[tuple], product, axes: tuple[str, ...]) -> list[t
         return pairs
 
     candidates = tuple(edge for pair in pairs for edge in pair)
-    clusters = equivalent_clusters(Closure.over_edge(edge, axes) for edge in candidates)
+    clusters = equivalent_clusters(edge_key(edge, axes) for edge in candidates)
     complete = [cluster for cluster in clusters if {index // 2 for index in cluster} == set(range(len(pairs)))]
     if not complete:
         return pairs
@@ -224,7 +224,7 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
     if not body.defs_die_at(members, roots=roots, allowed=form.products):
         return fold
 
-    a_clusters = equivalent_clusters(Closure.over_edge(candidate, all_axes) for candidate, _ in pairs)
+    a_clusters = equivalent_clusters(edge_key(candidate, all_axes) for candidate, _ in pairs)
     member_sets = {name: {id(stmt) for stmt in cone_members} for name, (_, cone_members) in extracted.items()}
     names = tuple(member_sets)
     shared_names = {operand_name(candidate) for candidate, _ in pairs}
@@ -522,7 +522,7 @@ def _share_common_cones(root: Fold) -> Fold:
         # The whole-term alpha-quotient under an empty environment: free names (the captures) and
         # the bucket-pinned interface names make canonical equality mean equal VALUE.
         if id(fold) not in unify_keys:
-            unify_keys[id(fold)] = canonical_under(Lambda(params=(), body=Body((fold,)), results=fold.defines()), ())
+            unify_keys[id(fold)] = term_key(fold)
         return unify_keys[id(fold)]
 
     def member(stmt):

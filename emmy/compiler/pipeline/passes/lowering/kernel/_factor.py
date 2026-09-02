@@ -61,7 +61,7 @@ from emmy.compiler.ir.pure.fold import (
     operand_body,
 )
 from emmy.compiler.ir.schedule import Raster
-from emmy.compiler.ir.schedule.views import cone_seam, edge_axes
+from emmy.compiler.ir.schedule.views import cone_seam, edge_axes, term_environment
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
@@ -244,8 +244,8 @@ def factorize(tile, root, store=None) -> Tile:
 
 def _cell_provider_closure(edge, siblings: tuple) -> tuple[object, frozenset[int]]:
     """Close one computed contraction operand over sibling providers that its result cone reads."""
-    body = Body(operand_body(edge))
-    needed = set(body.backward_cone(_operand_result_names(edge)).external_reads)
+    # Seeded from what the edge DECLARES it needs, not from lowering it and walking the result.
+    needed = set(term_environment(edge))
     required: dict[int, set[str]] = {}
     while True:
         added = False

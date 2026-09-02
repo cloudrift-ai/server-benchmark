@@ -91,7 +91,10 @@ def _sibling_fragment_edges(owner) -> dict[int, NodeId]:
             accumulated = any(
                 isinstance(stmt, Accum) and stmt.name in states and stmt.value in consumer.defines() for stmt in steps[position + 1 :]
             )
-            reads = {name for edge in consumer.operands if isinstance(edge, Fold) for name in deep_reads(edge.lower())}
+            # Declared, not re-derived: an edge states what it needs. The lowered walk this
+            # replaces also returned names the edge binds internally, which the cone below
+            # discards anyway — so this is the same seed, narrower.
+            reads = {name for edge in consumer.operands if isinstance(edge, Fold) for name in term_environment(edge)}
             if not accumulated or not reads:
                 continue
             cone = Body(tuple(steps[:position])).backward_cone(reads)
@@ -156,6 +159,7 @@ def _operand_position(node: Fold, wanted) -> int:
 
 
 __all__ = [
+    "term_environment",
     "Contraction",
     "ContractionFacts",
     "EdgeSite",
@@ -166,6 +170,18 @@ __all__ = [
     "contraction_facts",
     "node_view",
 ]
+
+
+def term_environment(node) -> frozenset[str]:
+    """Everything ``node`` needs supplied from outside, read off DECLARATIONS.
+
+    The term already rolls this up (:meth:`~emmy.compiler.ir.pure.fold.Fold.deps` — its own
+    environment plus its edges', recursively); this is the schedule layer's name for it, and the
+    declared successor of "lower the term and walk the result for free names".
+    """
+    if isinstance(node, Fold):
+        return frozenset(node.deps())
+    return frozenset(name for expr in node.exprs() for name in expr.free_vars())
 
 
 def edge_axes(edge, axes) -> frozenset[str]:

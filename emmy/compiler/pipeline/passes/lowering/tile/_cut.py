@@ -30,6 +30,7 @@ from emmy.compiler.ir.pure.fold import (
     loaded_buffers,
 )
 from emmy.compiler.ir.pure.tree import walk
+from emmy.compiler.ir.schedule.views import term_environment
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
@@ -148,9 +149,13 @@ def storage_frontier(node: Fold) -> Frontier | None:
 
 
 def _external_reads(node: Fold) -> frozenset[str]:
-    """Every lowered statement's scope-aware SSA and axis captures."""
-    lowered = Body(node.lower())
-    return lowered.forward_cone(lowered).external_reads
+    """Everything ``node`` needs supplied from outside — read off its DECLARATIONS.
+
+    Was: lower the term and walk the result for free names. That asked a term to re-derive what it
+    already states, re-lowered on every call, and returned a superset (names the term binds
+    internally, which every caller here discards). :func:`term_environment` recurses the operand
+    edges, because a term's own environment does not re-declare what its edges need in turn."""
+    return term_environment(node)
 
 
 def _closed_at(node: Fold, axes: tuple) -> bool:

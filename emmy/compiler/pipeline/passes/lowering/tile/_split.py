@@ -37,10 +37,10 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.algebra import component_ops
-from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
-from emmy.compiler.ir.schedule.views import edge_axes
+from emmy.compiler.ir.schedule.views import edge_axes, term_environment
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
@@ -53,7 +53,6 @@ from emmy.compiler.ir.tile import (
 )
 from emmy.compiler.ir.tile.ir import apply_output_specs
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_tail
-from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row
@@ -460,11 +459,12 @@ def _captured_prologue(partial_fold: Fold, pre: tuple, split: Axis, free: tuple)
     wrapper (:func:`~emmy.compiler.ir.tile.ops.head`), so a prologue stmt evaluated once per cell
     (a scalar scale load) can define a name the fold's lift reads; slicing the fold alone would
     leave that capture dangling in the partial."""
-    lowered = tuple(partial_fold.lower())
-    defined = set().union(*(deep_defines(stmt) for stmt in lowered)) if lowered else set()
+    # Read off the DECLARATION rather than lowering the partial and scanning it for free names:
+    # a term states what it needs, and `term_environment` recurses its operand edges. The axis
+    # subtraction stays — a coordinate is supplied by the enclosing loop, not by the prologue —
+    # but the axes a nested term BINDS are already excluded by the reading itself.
     axes = {split.name, *(a.name for a in free)}
-    axes.update(site.node.axis.name for site in sites(partial_fold) if isinstance(site.node, Fold) and site.node.axis is not None)
-    captures = deep_reads(list(lowered)) - defined - axes
+    captures = term_environment(partial_fold) - axes
     if not captures:
         return ()
     return Body(pre).backward_cone(captures).members

@@ -857,15 +857,31 @@ class Fold:
         return digest(body, observed)
 
     def deps(self) -> tuple[str, ...]:
-        """No SSA name is read from an enclosing scope — a term's VALUES arrive through operand
-        edges bound positionally to lift params.
+        """What this term needs SUPPLIED — its own :attr:`environment` plus its operand edges',
+        recursively, less the axes it binds.
 
-        Spelled, not inherited: a ``Fold`` is not a :class:`~emmy.compiler.ir.stmt.base.Stmt`
-        (see the module docstring) — it duck-types the protocol — so there is no base ``deps`` to
-        fall back on, and deleting this method removes the attribute rather than defaulting it.
-        The walks call it on whatever they reach (``stmt.body._member_reads``).
+        A DECLARATION read, not a context question: it reads stored params and edge indices, never
+        a lowered body, and never asks what the enclosing scope happens to hold. A term states what
+        it must be applied to; that is its own business, and the enclosing binder needs it — the
+        generic walks reach a term this way (``stmt/body._member_reads``), and an operand edge is
+        NOT a child (:meth:`nested` yields the lift body only), so without the roll-up a capture
+        living on an edge is invisible to every caller that walks statements.
+
+        Returning a bare ``()`` here was wrong and silently so: `_ordered_projection` could not see
+        that a term's edge read a name its prefix defined, and a legitimate shape tripped its
+        "separated pure prefix must feed its suffix" assertion.
         """
-        return ()
+        return self._deps
+
+    @cached_property
+    def _deps(self) -> tuple[str, ...]:
+        out = set(self.environment)
+        for edge in self.operands:
+            if isinstance(edge, Fold):
+                out |= set(edge.deps())
+            else:
+                out |= {name for expr in edge.exprs() for name in expr.free_vars()}
+        return tuple(sorted(out - set(self.binds_axes())))
 
     # The above is the whole story. A term is closed: its VALUES arrive through operand edges bound positionally
     # to lift params, so there is no SSA name it reads from an enclosing scope — the base

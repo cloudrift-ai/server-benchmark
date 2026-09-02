@@ -351,7 +351,7 @@ def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
         unroll=statistic.unroll,
         operands=operands,
         lift=lift,
-        init=(*statistic.init, *((fold.semiring[1].identity,) * len(sums))),
+        init=(*statistic.init, *((fold.as_contraction().plus.identity,) * len(sums))),
         combine=combine,
     )
     epilogue = [Assign(name=view.inverse, op=EXP_FAMILY.inverse, args=(statistic.combine.results[1],))]
@@ -385,8 +385,8 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
     if node.as_contraction() is not None and isinstance(node.a, Fold) and node.a.axis is None:
         view = _normalized_exp(node.a, node.axis.name, axes)
         if view is not None and _same_axis(view.statistic, node):
-            product, plus = node.semiring
-            if product.name == "multiply" and plus.reduce_canon == "add":
+            ring = node.as_contraction()
+            if ring is not None and ring.product.name == "multiply" and ring.plus.reduce_canon == "add":
                 return _extend_statistic(node, view)
 
     _, new_body = _merge_siblings((), node.lift.body, body_axes)

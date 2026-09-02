@@ -25,6 +25,7 @@ from dataclasses import dataclass, field, replace
 from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.algebra import component_ops, family_of, rename_combine
 from emmy.compiler.ir.pure.lam import Lambda
@@ -51,6 +52,12 @@ class ContractionView:
     axis: Axis
     left: str
     right: str
+    product: ElementwiseImpl | None = None
+    """The ⊗ this contraction multiplies its operand pair with."""
+    plus: ElementwiseImpl | None = None
+    """The commutative-monoid ⊕ the products fold through. Together with :attr:`product` this is
+    the semiring INSTANCE — the mma tier gates on ``(multiply, add)``, and a new instance reads
+    back here without change."""
     b_trans: bool = False
     """Whether the streamed operand is stored N-major — its reduction axis LAST, ``B[n, k]``,
     against the canonical ``B[k, n]``. A gmem LAYOUT fact, so it is meaningful only for a
@@ -226,7 +233,8 @@ class Fold:
         Every product reads ``operands[0]`` — A by canonical form — which is what makes the fused
         multi-channel edge one contraction over one shared A rather than several.
         """
-        if self.axis is None or len(self.operands) < 2 or self.semiring is None:
+        ring = self._semiring
+        if self.axis is None or len(self.operands) < 2 or ring is None:
             return None
         by_name = {name: edge for edge in self.operands for name in edge.exposes}
         a_edge = self.operands[0]
@@ -249,8 +257,14 @@ class Fold:
         if len(left_only) != 1 or len(right_only) != 1:
             return None
         b_trans = b_edge.is_slab and self.axis.name in b_edge.lift.body[0].index[-1].free_vars()
+        product, plus = ring
         return ContractionView(
-            axis=self.axis, left=next(iter(left_only)), right=next(iter(right_only)), b_trans=b_trans
+            axis=self.axis,
+            left=next(iter(left_only)),
+            right=next(iter(right_only)),
+            product=product,
+            plus=plus,
+            b_trans=b_trans,
         )
 
     @property
@@ -324,7 +338,7 @@ class Fold:
         return family_of(self.combine) if self.combine is not None else None
 
     @cached_property
-    def semiring(self) -> tuple | None:
+    def _semiring(self) -> tuple | None:
         """The componentwise ``(⊗, ⊕)`` instance carried by this Fold, independent of operand sharing.
 
         A semiring Fold has one distributive binary product per lift result and one shared

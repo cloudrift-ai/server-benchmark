@@ -176,8 +176,8 @@ def _channel_dtype(tile: TileOp, node, target):
 
 def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: tuple = (None, None)) -> str | None:
     """Return why static node facts rule out every tensor-core atom."""
-    ring = node.semiring
-    if ring is None or tuple(operator.name for operator in ring) != ("multiply", "add"):
+    view = node.as_contraction()
+    if view is None or (view.product.name, view.plus.name) != ("multiply", "add"):
         return "the mma atom realizes only the (multiply, add) semiring instance"
     if not tile.inputs:
         return "no typed inputs expose operand dtypes"

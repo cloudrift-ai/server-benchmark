@@ -112,7 +112,8 @@ class _ScheduledContraction:
 
     @property
     def semiring(self):
-        return self.child.semiring
+        view = self.child.as_contraction()
+        return None if view is None else (view.product, view.plus)
 
     @property
     def b_trans(self) -> bool:

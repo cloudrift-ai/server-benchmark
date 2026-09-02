@@ -327,9 +327,36 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
     return replace(root, operands=rewritten_operands, lift=replace(root.lift, body=kept))
 
 
+def _a_leads(node: Fold) -> Fold:
+    """Put the contraction's A operand first — ``operands[0]`` IS A, by canonical form.
+
+    A reads ``[…, k]``: its reduction axis is the LAST coordinate it indexes, which is what lets a
+    fragment load stride A's rows contiguously. B has no such constraint — stored ``[k, n]`` or
+    transposed ``[n, k]``, both are legal and the atom reads the layout off the edge. So when the
+    stored order puts a k-first operand first and a k-last one second, the two are swapped here
+    rather than every consumer growing a "which one is A" reading. Binding is positional, so the
+    lift's params swap with them; the body reads by name and is untouched.
+    """
+    if node.as_contraction() is None or len(node.operands) != 2:
+        return node
+    first, second = node.operands
+
+    def k_last(edge: Fold) -> bool:
+        # Only a slab has a gmem index to read a layout off; a computed cone answers False, which
+        # leaves it where it is.
+        return edge.is_slab and node.axis.name in edge.lift.body[0].index[-1].free_vars()
+
+    if k_last(first) or not k_last(second):
+        return node
+    lead = (node.axis.name,) if node.axis is not None else ()
+    params = (*lead, *second.exposes, *first.exposes)
+    return replace(node, operands=(second, first), lift=replace(node.lift, params=params))
+
+
 def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str], sweep_axes: frozenset[str]) -> Fold:
     operands = tuple(_normalize_fold(edge, axes, implicit_axes, sweep_axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
     node = replace(fold, operands=operands) if operands != fold.operands else fold
+    node = _a_leads(node)
     if node.axis is None and (collapsed := _passthrough(node)) is not None:
         return collapsed
     body_axes = (*axes, node.axis.name) if node.axis is not None else axes

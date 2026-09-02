@@ -9,11 +9,61 @@ spliced in as one).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.stmt.base import pretty_body
 from emmy.compiler.ir.stmt.body import Body, _exposed_defines
+from emmy.compiler.ir.stmt.leaves import Assign, Load
+
+
+def _canonical_body_order(body: Body) -> Body:
+    """Return a deterministic dependency-respecting order for a pure ANF body."""
+    stmts = tuple(body)
+    if len(stmts) <= 1:
+        return body
+
+    def token(stmt) -> tuple:
+        op = getattr(stmt, "op", None)
+        return (
+            type(stmt).__name__,
+            getattr(op, "name", "") if op is not None else "",
+            stmt.input if isinstance(stmt, Load) else "",
+            len(getattr(stmt, "args", ()) or ()),
+        )
+
+    def reads(stmt) -> set[str]:
+        out = set(stmt.deps())
+        for nested in stmt.nested():
+            for child in nested:
+                out |= reads(child)
+        return out
+
+    definitions = [
+        set(stmt.defines()) | {name for nested in stmt.nested() for child in nested for name in child.defines()} for stmt in stmts
+    ]
+    dependencies = [reads(stmt) for stmt in stmts]
+    placed = []
+    remaining = list(range(len(stmts)))
+    while remaining:
+        remaining_definitions = {name for index in remaining for name in definitions[index]}
+        ready = [index for index in remaining if not dependencies[index] & (remaining_definitions - definitions[index])]
+        if not ready:
+            return body
+        selected = min(ready, key=lambda index: (token(stmts[index]), index))
+        placed.append(stmts[selected])
+        remaining.remove(selected)
+    return Body(placed)
+
+
+def _normalize_body(body: Body) -> Body:
+    """The construction canonicalization of a pure body — an idempotent transform, applied by
+    :meth:`Lambda.__post_init__`: a dependency-safe statement order and sorted commutative arguments,
+    the context-independent storage invariants a term's structural identity reads directly."""
+    ordered = _canonical_body_order(body)
+    return Body(
+        replace(stmt, args=tuple(sorted(stmt.args))) if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1 else stmt
+        for stmt in ordered
+    )
 
 
 @dataclass(frozen=True)
@@ -42,7 +92,7 @@ class Lambda:
     def __post_init__(self) -> None:
         if not isinstance(self.params, tuple):
             object.__setattr__(self, "params", tuple(self.params))
-        body = normalize_lambda_body(Body.coerce(self.body))
+        body = _normalize_body(Body.coerce(self.body))
         if not isinstance(self.body, Body) or body != self.body:
             object.__setattr__(self, "body", body)
         if not isinstance(self.results, tuple):
@@ -87,7 +137,7 @@ class Lambda:
 
         Callers form; :meth:`__post_init__` refuses. They stay separate because a constructor that
         repaired its own input would enforce nothing."""
-        body = normalize_lambda_body(Body.coerce(body))
+        body = _normalize_body(Body.coerce(body))
         bound = set(params)
         for stmt in body:
             bound |= _exposed_defines(stmt)

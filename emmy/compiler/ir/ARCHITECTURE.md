@@ -401,7 +401,7 @@ isinstance whitelist), with results-defined checked there too and α-invariance 
 arrive through operand edges, and only the enclosing iteration axes are read from outside — so `Fold.canonical`
 (and `Lambda.canonical` for a lambda) is the one cross-scope equivalence the Tile canonical forms and the lowering
 passes (cone sharing, twisted-pair recognition, seam value clustering) all consult.
-`Lambda.__post_init__` invokes `ir/pure/normalize.py` to install a
+`Lambda.__post_init__` installs a
 dependency-safe body order and commutative argument order, so these context-independent storage invariants do not
 belong to `Fold`, `TileOp`, or the structural-key path. Contraction operand roles live on Fold edges, so sorting a
 commutative product's arguments does not change them. Formation is strict: a kernel's writes ride

@@ -53,7 +53,7 @@ boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a 
 
 ## Canonicalization
 
-`Lambda.__post_init__` owns context-independent construction normalization through `ir/pure/normalize.py`: every
+`Lambda.__post_init__` owns context-independent construction normalization: every
 pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
 Structural identity therefore reads the stored order directly. Contraction canonicalization first orders product
 arguments by geometry, then places the one argument shared by every product in the Fold's shared operand slot.

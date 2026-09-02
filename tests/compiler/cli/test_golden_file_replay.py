@@ -248,17 +248,18 @@ def test_working_shared_placement_pins_select_the_exact_compile_target(run_cli, 
         "tile",
     )
 
-    # The shared PLACE regime selects the routed target: the pinned cut fires and splits the
-    # compile into the placed producer plus its consumer. Kernel names carry volatile identity
-    # digests, so assert the kernel set's shape, not the spelled names.
+    # The shared PLACE regime selects the routed target: the cut fires and splits the compile
+    # into the placed producer plus its partial/final consumers. Kernel names carry volatile
+    # identity digests, so assert the kernel set's shape, not the spelled names.
     #
-    # Two kernels, not three. The placed producer's own reduction fork (``035_split_reduce``) is
-    # NOT pinned by this golden — greedy decides it, and it may only change the kernel set on a
-    # trustworthy prior. Every test runs on the per-test empty checkpoint, so the reduction stays
-    # in one kernel and only the PIN's effect is visible here, which is what this test is about.
+    # Three kernels: the pinned cut, plus the placed producer's own reduction split, which this
+    # golden does not pin. Greedy decides that one by pricing, and on the per-test empty
+    # checkpoint both sides of that comparison are the same untrustworthy prior's predictions —
+    # one proxy read against itself, which the kernel-set rule allows (only a MIXED comparison,
+    # a predicted Σ against a measured one, is withdrawn).
     assert rc == 0, stderr
     headers = [line for line in stdout.splitlines() if line.startswith("=== ")]
-    assert len(headers) == 2, stdout
+    assert len(headers) == 3, stdout
     assert sum("__place_" in line for line in headers) == 1, stdout
 
 

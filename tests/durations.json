@@ -627,6 +627,7 @@
  "tests/compiler/realization/test_realization.py::test_realization[fused/norm-linear-f16-warp-masked-m.yaml-realized]": 52.77,
  "tests/compiler/realization/test_realization.py::test_realization[fused/norm-weight-linear-f16-computed-b.yaml-offered]": 5.45,
  "tests/compiler/realization/test_realization.py::test_realization[fused/norm-weight-linear-f16-computed-b.yaml-realized]": 54.1,
+ "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-place-cut.yaml-realized]": 5.6,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-cut-splitk-unit-row.yaml-offered]": 5.33,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-cut-splitk-unit-row.yaml-realized]": 15.9,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/f16-matvec-reshaped-output-tma.yaml-offered]": 5.38,

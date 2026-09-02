@@ -733,10 +733,24 @@ def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
     )
 
 
+@pytest.fixture
+def deployable_flags(monkeypatch):
+    """The deployable nvcc regime, which the verified tier is scoped to.
+
+    ``greedy_decide`` consults the tier only where ``H_opt`` is the deployable level: a recorded µs
+    is a deployable-regime measurement and must not arbitrate a compile pinned to another
+    optimization level. That gate is one tier-wide rule — it withholds recorded SCHEDULE rows just
+    as it withholds routing rows — so a test of either lane has to state the regime it deploys in
+    rather than inherit the suite's (``make test`` runs the correctness lane at ``-Xcicc -O1``).
+    Same spelling the golden replay lane's tests and the realization harness use."""
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
+
+
 def _deploy_kernels(records: list) -> list[str]:
     """Resolve the sdpa program through the deploy policy with ``records`` as the card's corpus,
     and return the resolved kernel set. ``prior=None`` pins the non-recorded forks to emission
-    order, so the recorded evidence is the only thing that can move the answer."""
+    order, so the recorded evidence is the only thing that can move the answer. Callers hold
+    :func:`deployable_flags`, without which the verified tier declines to answer at all."""
     from emmy.compiler.pipeline.search.golden import records_override
     from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
 
@@ -747,7 +761,7 @@ def _deploy_kernels(records: list) -> list[str]:
     return sorted(node.id for node in terminal.nodes.values() if isinstance(node.op, TileOp))
 
 
-def test_a_recorded_routing_row_deploys_its_multi_seam_cut() -> None:
+def test_a_recorded_routing_row_deploys_its_multi_seam_cut(deployable_flags) -> None:
     """The sdpa kernel offers its seams ONE at a time, so no arm of the placement fork spells a
     two-seam route. The recorded row is applied the way the ``--golden`` replay lane applies
     placement pins — published as pins, the rule re-asked — so the cut machinery composes both
@@ -760,7 +774,7 @@ def test_a_recorded_routing_row_deploys_its_multi_seam_cut() -> None:
     assert sum(1 for name in routed if "__place_" in name) >= 2, f"both recorded seams must be cut: {routed}"
 
 
-def test_a_routing_row_naming_a_stale_seam_decides_nothing(caplog) -> None:
+def test_a_routing_row_naming_a_stale_seam_decides_nothing(caplog, deployable_flags) -> None:
     """Fail-closed. The cut machinery reads a pin that addresses no site on this kernel as naming
     ANOTHER kernel of the graph and drops it, which would silently deploy a shorter route than the
     one measured. The tier checks the composed decision back against the row, so a stale spelling
@@ -778,7 +792,7 @@ def test_a_routing_row_naming_a_stale_seam_decides_nothing(caplog) -> None:
     assert "drift" in caplog.text
 
 
-def test_a_recorded_schedule_row_never_routes() -> None:
+def test_a_recorded_schedule_row_never_routes(deployable_flags) -> None:
     """The lanes do not cross: a schedule row carries no ``PLACE`` key, so it is not a route and
     the placement fork stays with pricing even though the row joins the same kernel identity."""
     schedule_row = _routing_record({"WORK": "w4x1", "TILE": ""}, name="sdpa.schedule")

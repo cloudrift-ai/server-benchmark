@@ -117,7 +117,17 @@ class Body(tuple[Stmt, ...]):
     """
 
     def __new__(cls, stmts: Iterable[Stmt] = ()) -> Body:
-        return super().__new__(cls, tuple(stmts))
+        members = tuple(stmts)
+        # A body holds STATEMENTS. A pure term is not one — ``Fold`` duck-types the statement
+        # protocol so the shared walks can reach it, but it is not a ``Stmt`` and does not belong
+        # in a statement sequence: a Fold tree composes through ``operands``, and a term sitting in
+        # a body is a second, competing composition mechanism. Checked by TYPE rather than by
+        # naming the kinds that are excluded, so the rule holds for anything else that duck-types
+        # its way in later.
+        stray = [type(member).__name__ for member in members if not isinstance(member, Stmt)]
+        if stray:
+            raise TypeError(f"Body holds non-statement member(s) {stray}; a term composes through operand edges")
+        return super().__new__(cls, members)
 
     def __getitem__(self, key):
         r = super().__getitem__(key)

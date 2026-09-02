@@ -54,17 +54,6 @@ class Lambda:
         impure = [type(s).__name__ for s in self.body if not s.pure]
         if impure:
             raise ValueError(f"Lambda body must be pure — impure stmt kind(s): {impure}")
-        # NO NESTED TERM. A Fold tree composes through ``operands`` — that IS the tree — so a Fold
-        # sitting in a lambda body is a second, competing composition mechanism, and having two is
-        # what lets tree position carry meaning that belongs on an edge. ``Fold.projection``
-        # separates a body handed to it (:func:`~emmy.compiler.ir.pure.fold._ordered_projection`),
-        # so a caller never has to; this refuses whatever slipped past.
-        nested = [stmt for stmt in self.body if type(stmt).__name__ == "Fold"]
-        if nested:
-            raise ValueError(
-                f"Lambda body holds {len(nested)} nested Fold(s). A term composes through operand edges — "
-                f"build it with Fold.projection, which separates them."
-            )
         defined = set(self.params)
         for s in self.body:
             defined |= _exposed_defines(s)

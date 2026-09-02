@@ -75,7 +75,13 @@ class _SemiringForm:
 
 def _semiring_form(fold: Fold) -> _SemiringForm | None:
     """Recognize the componentwise semiring law without imposing an operand-sharing shape."""
-    if fold.axis is None or fold.operands or is_contraction(fold) or fold.combine is None:
+    # Pre-existing operands are FINE and are now the normal case: a term composes through
+    # ``operands``, so a fused contraction reaches recognition with its computed cones already on
+    # edges. Refusing them here meant `_semiring_form` could only ever fire on a fold whose lift
+    # body held plain loads — i.e. never for a computed-operand contraction — and the node fell
+    # through to PLANAR. What the recognition still needs is a product per component; the operands
+    # already bound simply widen the argument set it may draw from.
+    if fold.axis is None or is_contraction(fold) or fold.combine is None:
         return None
     pluses = component_ops(fold.combine)
     if not pluses or len(set(pluses)) != 1:
@@ -83,10 +89,9 @@ def _semiring_form(fold: Fold) -> _SemiringForm | None:
     plus = pluses[0]
     if not (plus.associative and plus.commutative and plus.has_identity):
         return None
-    # Params beyond the axis are the ENVIRONMENT (:attr:`Fold.environment`) — the enclosing axes
-    # the lift binds now that a term carries no free names. ``fold.operands`` is empty here, so
-    # there is nothing else they could be; requiring a bare ``(axis,)`` would refuse every
-    # unfactored contraction that reads an enclosing coordinate, which is all of them.
+    # Params beyond the axis are the operand bindings followed by the ENVIRONMENT — the enclosing
+    # axes the lift declares now that a term carries no free names. Requiring a bare ``(axis,)``
+    # would refuse every contraction that reads an enclosing coordinate, which is all of them.
     if fold.init != (plus.identity,) * len(pluses) or fold.lift.params[:1] != (fold.axis.name,):
         return None
 

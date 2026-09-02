@@ -666,7 +666,11 @@ def test_semiring_merges_overlapping_operand_cones_into_one_multi_result_edge() 
 
     shared = next(edge for edge in tile.op.operands if isinstance(edge, Fold) and edge.lift.results == ("left", "scaled"))
     assert tuple(shared.lift.results) == ("left", "scaled")
-    assert tuple(tile.op.lift.params) == ("k", "right0", "left", "scaled", "right1")
+    # The operand correspondence is the param PREFIX; the tail is the declared environment (the
+    # enclosing axes the binder supplied), which is why this checks a prefix rather than equality.
+    bound = ("k", "right0", "left", "scaled", "right1")
+    assert tuple(tile.op.lift.params[: len(bound)]) == bound
+    assert set(tile.op.lift.params[len(bound) :]) <= {"m", "n"}, tile.op.lift.params
     assert sum(isinstance(stmt, Load) and stmt.input == "x" for stmt in tile.op.loop.body) == 1
 
 

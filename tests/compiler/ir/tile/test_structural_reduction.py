@@ -334,7 +334,9 @@ def test_a_generic_walk_reaches_a_composed_nodes_children() -> None:
     inner = Assign(name="g", op="copy", args=("x",))
     group = Fold.projection(body=Body((inner,)))
     assert group.nested() == (Body((inner,)),)
-    assert "g" in deep_defines(Loop(axis=Axis("k", 8), body=Body((group,))))
+    # Reached DIRECTLY. A term is not a statement and cannot sit in a body, so the walk meets one
+    # as a term; ``nested()`` is what lets the shared walker descend rather than stop at it.
+    assert "g" in deep_defines(group)
 
 
 def test_a_composed_step_keeps_its_position_when_flattened() -> None:

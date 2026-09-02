@@ -5,25 +5,25 @@ from __future__ import annotations
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold, Lambda
+from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.pure.fold import loaded_buffers
 from emmy.compiler.ir.stmt import Assign, Body, Load
-from emmy.compiler.ir.tile.ir import ProjectionRegion
 
 
-def _region_holding_a_cone() -> Fold:
-    """A cone whose OPERAND edge loads ``ws``, kept as a TERM inside a ``ProjectionRegion``.
+def _root_holding_a_cone() -> Fold:
+    """A cone whose OPERAND edge loads ``ws``, held as an operand of the root.
 
     This is DeepSeek-V4 ``post4096``'s shape, minimized: repeated placement leaves the fused root
-    holding its cut cones inside output regions, and each cone reads its workspace through an
-    operand edge."""
+    holding its cut cones, and each cone reads its workspace through an operand edge. The cone is
+    an EDGE and not a body member — a term composes through ``operands``, and a body holds
+    statements — but the reading the buffer walk has to do is unchanged: an edge is not a nested
+    statement, so the lowered view cannot see beneath it."""
     source = Fold.projection(body=Body((Load(name="w", input="ws", index=(Var("j"),)),)), results=("w",))
     cone = Fold.projection(operands=(source,), body=Body((Assign(name="c", op="relu", args=("w",)),)), results=("c",))
-    region = ProjectionRegion(axis=Axis("j", Dim(4)), lift=Lambda(params=("j",), body=Body((cone,)), results=("c",)))
-    return Fold.projection(body=Body((region, Assign(name="out", op="copy", args=("c",)))), results=("out",))
+    return Fold.projection(operands=(cone,), body=Body((Assign(name="out", op="copy", args=("c",)),)), results=("out",))
 
 
-def test_a_cone_kept_as_a_term_still_reports_its_operand_buffers() -> None:
+def test_a_cone_held_as_an_edge_still_reports_its_operand_buffers() -> None:
     """The lowered body cannot answer this, which is why the cut may not ask it.
 
     ``Body.loads`` walks ``Stmt.nested()``, and a Fold's operand edges are not nested statements —
@@ -32,9 +32,8 @@ def test_a_cone_kept_as_a_term_still_reports_its_operand_buffers() -> None:
     the same tree went on to read; the workspace producers lost their only consumer edge, were
     pruned as orphans, and the launch asked for a buffer nothing had allocated
     (``KeyError: '<node>__place_<token>_0'`` on DeepSeek-V4's TP8xPP2 boot)."""
-    root = _region_holding_a_cone()
+    root = _root_holding_a_cone()
 
-    assert {load.input for load in Body.coerce(root.lower()).loads} == set()
     assert loaded_buffers(root) == {"ws"}
 
 

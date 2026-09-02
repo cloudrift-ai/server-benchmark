@@ -192,7 +192,7 @@ class Fold:
     # The CLOSED inputs, each an operand edge (a gmem ``Load`` or an inline node) — the 1k fold
     # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
     # needs. ``lower`` splices each edge's body before its first use (:func:`splice_operands`).
-    operands: tuple = ()
+    operands: tuple[Fold, ...] = ()
     # NO schedule fields: node and edge choices live in ``TileOp.schedule`` — the term is pure
     # algebra, IMMUTABLE across the whole schedule search (a fork is a different assignment,
     # never a rebuilt tree).
@@ -207,7 +207,7 @@ class Fold:
     # names (its results). The serial step, the ``Accum`` forms and the ``carrier`` annotation
     # are DERIVED (:func:`_fold_derived_step` / ``__post_init__``). ------------------------------ #
     lift: Lambda = field(kw_only=True)  # CLOSED by ``Lambda.__post_init__``; formed by :meth:`Lambda.closing`
-    init: tuple = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
+    init: tuple[float, ...] = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
     combine: Lambda | None = field(kw_only=True, default=None)  # S × S → S — THE ⊕; None at zero axes
     # The per-step OBSERVER — the scan spelling: a pure λ(k, s₁…sₙ) over the carried state,
     # evaluated AFTER iteration k's combine (inclusive; exclusive is an init/index shift, never a
@@ -222,6 +222,15 @@ class Fold:
     def __post_init__(self) -> None:
         if not isinstance(self.init, tuple):
             object.__setattr__(self, "init", tuple(self.init))
+        # EVERY OPERAND IS A TERM. A gmem read is a :meth:`slab`, so the tree is homogeneous and a
+        # per-edge question is an attribute rather than a helper dispatching on what an edge
+        # happens to be. Stated here because a statement in ``operands`` does not announce itself:
+        # an ``isinstance(edge, Load)`` against a type that can no longer appear reads as False,
+        # not as an error, so the check it guards disappears silently. Formation is the one place
+        # that can say no — this caught the cut's workspace reads, which were bare ``Load``s.
+        stray = [type(edge).__name__ for edge in self.operands if not isinstance(edge, Fold)]
+        if stray:
+            raise TypeError(f"Fold operands must be terms, got {stray}; a gmem read is a Fold.slab")
         if self.axis is None:
             # The ZERO-AXIS node: no iteration and no monoid, so the only formation fact is the
             # positional binding — one lift param per operand RESULT COMPONENT, no leading
@@ -366,7 +375,7 @@ class Fold:
         return not self.operands and self.combine is None and len(self.lift.body) == 1 and isinstance(self.lift.body[0], Load)
 
     @property
-    def loads(self) -> tuple[Stmt, ...]:
+    def loads(self) -> tuple[Load, ...]:
         """Every ``Load`` beneath this term — its operands', recursively, then its lift body's.
 
         The term's own :attr:`Body.loads`, which cannot reach them: a body walks ``Stmt.nested()``
@@ -508,7 +517,7 @@ class Fold:
         return self.combine.results[0]
 
     @cached_property
-    def derived_step(self) -> tuple[tuple, Body]:
+    def derived_step(self) -> tuple[tuple[Fold, ...], Body]:
         """The per-step evaluation this fold DERIVES — ``(operand edges, statements)``, separated.
 
         Four carriers, one shape:
@@ -637,7 +646,7 @@ class Fold:
             observe=None if self.observe is None else _renamed(self.observe, mapping, rename),
         )
 
-    def alpha_eq(self, other) -> bool:
+    def alpha_eq(self, other: object) -> bool:
         """α-invariant equality — canonical forms compared structurally."""
         return isinstance(other, Fold) and self.canonical() == other.canonical()
 

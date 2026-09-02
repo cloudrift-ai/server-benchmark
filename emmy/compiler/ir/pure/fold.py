@@ -9,11 +9,10 @@ params; nothing else is stored.
 
 Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Stmt`. A composed step — flash's ``Σ Q·K``
 ahead of its ``Σ_j P·V``, split-K's sliced contraction — is reached through ``operands``, and its
-POSITION in the emitted step stream is produced by the derivation (:meth:`Fold.step`
-heads the inline-node edges; :func:`splice_operands` places each edge's body before the first read
-of its bound name), not by sitting in a statement list. The term becomes statements in exactly one
-place, :meth:`Fold.lower` / :attr:`Fold.loop`. See ``ir/ARCHITECTURE.md``, "Pure terms vs
-statements".
+POSITION in the emitted nest is produced by the derivation (:meth:`Fold.lower` places every term
+at the shallowest scope binding its free coordinates, operands ahead of their readers), not by
+sitting in a statement list. The term becomes statements in exactly one place, :meth:`Fold.lower`.
+See ``ir/ARCHITECTURE.md``, "Pure terms vs statements".
 
 The schedule is deliberately absent: an accepted, site-indexed ``Schedule`` lives on the
 ``TileOp`` boundary (``ir/tile/ir.py``), so the term is IMMUTABLE across the whole schedule search
@@ -120,10 +119,9 @@ class Fold:
     # its ``lift`` the per-cell projection. The BILINEAR reading is a READING of this one
     # stored kind (the derived accessors below), never separate storage.
     axes: tuple[Axis, ...] = ()
-    unroll: bool = False
-    # The CLOSED inputs, each an operand edge (a gmem ``Load`` or an inline node) — the 1k fold
+    # The CLOSED inputs, each an operand edge (a slab or an inline node) — the 1k fold
     # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
-    # needs. ``lower`` splices each edge's body before its first use (:func:`splice_operands`).
+    # needs. ``lower`` places each edge at the shallowest scope binding its coordinates, ahead of its reader.
     operands: tuple[Fold, ...] = ()
     # NO schedule fields: node and edge choices live in ``TileOp.schedule`` — the term is pure
     # algebra, IMMUTABLE across the whole schedule search (a fork is a different assignment,
@@ -452,32 +450,99 @@ class Fold:
         )
 
     @cached_method
-    def lower(self) -> Body:
-        """Flatten this term to the Loop IR body the materializer expands.
+    def lower(self, bound: frozenset[str] | None = None) -> Body:
+        """Flatten this term to the Loop IR nest the materializer expands.
 
-        Three parts, read straight off the representation:
+        ``bound`` names the coordinates the CALLER binds — the kernel grid, an enclosing loop's
+        scope; ``None`` binds every free coordinate (the open body a term spells inside an
+        enclosing scope) and ``frozenset()`` the closed program. One rule then places every term
+        of the tree, read straight off the representation: a term is materialized at the
+        SHALLOWEST scope on its path that binds all of its :attr:`free_axes`. The scopes are the
+        plain loops this term opens for the free coordinates left unbound — outermost the
+        coordinate the most terms are evaluated over, so what siblings share is hoisted above
+        them, ties in declaration order — and the reduce loop of each term on the way down. That
+        is the whole of the hoist: a declaration compared against the scopes above, not a body
+        walked for free names. An operand that does not index its reader's reduce axis lands
+        ahead of that loop; one that reads no coordinate a deeper loop binds lands ahead of every
+        such loop, past the term that reads it.
 
-        * every operand is a TERM, so it lowers by the same method — the tree is homogeneous and
-          there is nothing to dispatch on; operands lower before the statements that read them;
-        * an operand whose :attr:`free_axes` does not contain this fold's axis does not vary
-          with the step, so it lowers ONCE ahead of the loop. That is the whole of the hoist: a
-          declaration compared against an axis, not a body walked for free names;
-        * the :attr:`step` follows, and the loop binds the axis.
-
-        A SHARED term — one object reached through several operand positions — defines its names
-        once per scope: the same object lowers to the same statements, and a repeat is dropped.
+        The free loops form a TREE, not a chain. A term's operands sit on ITS path — the shallowest
+        prefix of its own loops that binds them — so what a term reads is always in scope; only a
+        wrapper with no step of its own leaves its operands free to take their own paths, which is
+        how two output sweeps no term shares become sibling loops. Operands are placed before
+        the statements that read them, a reduce term's step
+        follows its operands inside the loop that binds its axis, and a SHARED term — one object
+        reached through several operand positions — defines its names once per scope.
 
         The ONE lowering spelling — every consumer of a term's statements calls this. Memoized on
-        the term.
+        the term per binding.
         """
-        axis = self.axis
-        rides = [edge for edge in self.operands if axis is not None and axis.name in edge.free_axes]
-        ridden = {id(edge) for edge in rides}
-        prologue = [stmt for edge in self.operands if id(edge) not in ridden for stmt in edge.lower()]
-        step = [*(stmt for edge in rides for stmt in edge.lower()), *self.step()]
-        if axis is None:
-            return Body(tuple(dict.fromkeys([*prologue, *step])))
-        return Body((*dict.fromkeys(prologue), Loop(axis=axis, body=Body(tuple(dict.fromkeys(step))), unroll=self.unroll)))
+        if bound is None:
+            bound = self.free_axes
+        coordinates: dict[str, Axis] = {}
+        readers: dict[str, int] = {}
+        seen: set[int] = set()
+        pending = [self]
+        while pending:
+            term = pending.pop()
+            if id(term) in seen:
+                continue
+            seen.add(id(term))
+            coordinates.update((axis.name, axis) for axis in term.axes if axis is not term.axis and axis.name not in coordinates)
+            for name in term.free_axes:
+                readers[name] = readers.get(name, 0) + 1
+            pending.extend(reversed(term.operands))
+        declared = list(coordinates)
+        opened = sorted(
+            (name for name in coordinates if name in self.free_axes and name not in bound),
+            key=lambda name: (-readers[name], declared.index(name)),
+        )
+        nest: dict[tuple[str, ...], list[Stmt]] = {(): []}
+
+        def path_of(free: frozenset[str], path: tuple[str, ...] | None) -> tuple[str, ...]:
+            # The free loops a term sits under: the shallowest prefix of its reader's path binding
+            # its coordinates, or — unconstrained — those coordinates in declaration order.
+            needed = {name for name in opened if name in free}
+            if path is None:
+                return tuple(name for name in opened if name in needed)
+            return next(path[:depth] for depth in range(len(path) + 1) if needed <= set(path[:depth]))
+
+        def sink(path: tuple[str, ...]) -> list[Stmt]:
+            for depth in range(len(path) + 1):
+                nest.setdefault(path[:depth], [])
+            return nest[path]
+
+        def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None) -> None:
+            # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
+            if any(axis in term.free_axes for axis, _, _ in loops):
+                depth = next(depth for depth, (_, scope, _) in enumerate(loops) if term.free_axes <= scope)
+                _, scope, stmts = loops[depth]
+                loops, node = loops[: depth + 1], path
+            else:
+                node = path_of(term.free_axes, path)
+                scope, stmts, loops = frozenset(bound) | set(node), None, []
+            if term.axis is None:
+                step = term.step()
+                for edge in term.operands:
+                    place(edge, loops, node if step else path)
+                if step:
+                    (stmts if stmts is not None else sink(node)).extend(step)
+                return
+            inner: list[Stmt] = []
+            for edge in term.operands:
+                place(edge, [*loops, (term.axis.name, scope | {term.axis.name}, inner)], node)
+            inner.extend(term.step())
+            (stmts if stmts is not None else sink(node)).append(Loop(axis=term.axis, body=Body(tuple(dict.fromkeys(inner)))))
+
+        def assemble(path: tuple[str, ...]) -> Body:
+            body = list(nest[path])
+            for name in opened[opened.index(path[-1]) + 1 :] if path else opened:
+                if (*path, name) in nest:
+                    body.append(Loop(axis=coordinates[name], body=assemble((*path, name))))
+            return Body(tuple(dict.fromkeys(body)))
+
+        place(self, [], None)
+        return assemble(())
 
 
 @_rewrite_kind.register

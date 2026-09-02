@@ -115,10 +115,12 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     levels as operands when it is FORMED (:func:`_close`), so the level lowers its operands first
     and its statements after, with nothing left to order by dependency.
 
-    A reduce under an output SWEEP is a term evaluated over the sweep coordinate — attention's
-    ``Σ_k P·V`` per output column. It joins the enclosing level's operands with its slabs declaring
-    the sweep axis; the sweep keeps its pure cell and its stores, and reconstitution
-    (``apply_output_specs``) wraps the term's loop back under it.
+    An output SWEEP lifts to terms evaluated over the sweep coordinate: a reduce under it —
+    attention's ``Σ_k P·V`` per output column — joins the enclosing level's operands with its slabs
+    declaring the sweep axis, and the sweep's own per-cell projection joins beside it as a
+    zero-axis term declaring that axis. The sweep keeps its stores alone; the boundary extracts
+    them as sweep specs, and ``Fold.lower`` opens the sweep loop around exactly the terms evaluated
+    over it.
 
     ``axes`` names the iteration variables the ENCLOSING loops bind, threaded down from
     :func:`_peel`; ``levels`` are the enclosing levels under construction, the providers a term
@@ -139,9 +141,23 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
             level.stmts.extend(trailing)
             continue
         if isinstance(stmt, Loop):
+            # An OUTPUT SWEEP. Its reductions are terms of this level (hoisted just above); its
+            # per-cell projection — the pure statements its stores read — is one more, a zero-axis
+            # term evaluated over the sweep coordinate it declares, closed over the level like any
+            # other. The loop keeps only its stores, which the boundary extracts as sweep specs.
             inner, cell = lift_body(stmt.body, (*axes, stmt.axis), inner_levels)
             edges.extend(inner)
             level.exposed.update((name, fold) for fold in inner for name in fold.exposes)
+            writes = tuple(member for member in cell if isinstance(member, Write))
+            pure = Body(tuple(member for member in cell if not isinstance(member, Write)))
+            defined = {name for member in pure for name in member.defines()}
+            results = tuple(dict.fromkeys(value for write in writes for value in write.values if value in defined))
+            if results:
+                operands, lift, sweep_axes = _close((), (), pure, results, (*axes, stmt.axis), inner_levels)
+                term = Fold(axes=sweep_axes, operands=operands, lift=lift)
+                edges.append(term)
+                level.exposed.update((name, term) for name in term.exposes)
+                cell = Body(writes)
             level.stmts.append(replace(stmt, body=cell))
             continue
         nested = stmt.nested()
@@ -190,8 +206,8 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     writes = tuple(stmt for stmt in body if isinstance(stmt, Write))
     write_ids = {id(stmt) for stmt in writes}
     # Already separated by :func:`lift_body` — ``edges`` are the step's nested reductions, ``plain``
-    # its statements. ``splice_operands`` places each edge before its first read, so the split
-    # preserves evaluation order without the step ever having been a mixed sequence.
+    # its statements. ``Fold.lower`` places each edge ahead of its reader, so the split preserves
+    # evaluation order without the step ever having been a mixed sequence.
     step = tuple(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
     # Every ``Load`` in the step becomes a SLAB — a term declaring the coordinates it indexes.
     # This is what makes a semiring fold canonical BY CONSTRUCTION: its product arguments arrive as
@@ -209,7 +225,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     fold_axes = (*coordinates, loop.axis)
     init, combine = M(*(stmt.op for stmt in accums), names=names)
     if not writes:
-        return Fold(axes=fold_axes, unroll=loop.unroll, operands=edges, lift=lift, init=init, combine=combine), ()
+        return Fold(axes=fold_axes, operands=edges, lift=lift, init=init, combine=combine), ()
     stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))
     if any(value not in names for value in stored):
         raise ValueError(f"reduce loop {loop.axis.name!r}: a per-step store may only observe the carried state {names}")
@@ -218,7 +234,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
         body=Body(tuple(Assign(name=f"{value}__obs", op="copy", args=(value,)) for value in stored)),
         results=tuple(f"{value}__obs" for value in stored),
     )
-    fold = Fold(axes=fold_axes, unroll=loop.unroll, operands=edges, lift=lift, init=init, combine=combine, observe=observe)
+    fold = Fold(axes=fold_axes, operands=edges, lift=lift, init=init, combine=combine, observe=observe)
     renamed = tuple(replace(stmt, values=tuple(f"{value}__obs" for value in stmt.values)) for stmt in writes)
     return fold, renamed
 
@@ -281,7 +297,11 @@ def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
     # The root term, constructed DIRECTLY: ``lift_body`` already handed back its operands and its
     # statements apart, so there is nothing for a former to separate, dedup or name. The lift binds
     # one param per operand result component, positionally, and declares the grid axes it reads.
-    edges, lift, axes = _close((), edges, Body(body), _root_results(Body(body)), tuple(free), ())
+    # It exposes what the kernel stores — its body's last definition, or with no body of its own
+    # the operand values the boundary writes — so a wrapper over one operand is the identity
+    # projection normalization dissolves, rather than a permanent layer over every bare kernel.
+    results = _root_results(Body(body)) or tuple(dict.fromkeys(value for spec in output_specs for value in spec.write.values))
+    edges, lift, axes = _close((), edges, Body(body), results, tuple(free), ())
     return TileOp(
         op=Fold(axes=axes, operands=edges, lift=lift),
         name=name,

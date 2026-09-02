@@ -61,7 +61,7 @@ subtree per ancestor. `__getstate__` strips them: every memo recomputes after tr
 id-keyed cache carried across processes could collide with a fresh object's id. A memo holds only
 values derivable from the term — never decisions, never mutable policy.
 
-**Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term and pure projection regions; the typed classic
+**Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term; the typed classic
 schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in
 `ir/pure/fold.py` and is not a `Stmt`.
 
@@ -114,15 +114,11 @@ traversal order to produce the same complete set; the lowering implementation mu
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not
 need to be a statement to get there. The tree already carries it: a composed node is an entry in
-`operands`, and its position is produced by the derivation — `_twisted_derived_step` PLACES each
-inline-node edge before the first stmt that reads its bound name (lift body or merge), and
-`splice_operands` applies the same first-use rule to every other edge. A sibling edge that provides a
-value to another operand inherits that consumer's insertion point and precedes it; otherwise the
-provider could land after its only use when the projection body reads only the consumer. Placement,
-not prepending, is what lets a step whose pure prologue precedes its producer (a loop-invariant scale
-`Load` ahead of attention's score contraction) re-derive to the program it was read from. `Fold.loop`
-passes that mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the only place terms become
-statements is `Fold.lower()`.
+`operands`, and its position is produced by the derivation — `Fold.lower` places every term of the
+tree at the shallowest scope binding its free coordinates, operands ahead of the term that reads
+them. A loop-invariant scale `Load` ahead of attention's score contraction is that rule at work, not
+a special case: it reads no coordinate the reduce loop binds, so it lands ahead of the loop even
+though the cone that reads it rides inside. The only place terms become statements is `Fold.lower()`.
 
 `Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
 children, `rewrite()` for α-renaming, and `defines()` for its result names.
@@ -133,9 +129,9 @@ in Loop IR until total lift; there is no impure `Lambda` construction path.
 **`nested()` is the STATEMENT protocol, and it deliberately does not reach a Fold's operand edges**
 — it yields the lift body, and nothing at all for a contraction, whose algebra is meant to read as
 edges rather than body deps. Every walk built on it (`Body.iter`, and so `Body.loads` /
-`Body.writes`) therefore answers for a fully flattened stream only. A lowered body is not always
-one: a term survives lowering wherever a region kept it (`ProjectionRegion` holds its cones as
-terms), and a walk over `Fold.lower()` then silently under-reports everything beneath such an edge.
+`Body.writes`) therefore answers for a fully flattened stream only. The STORED tree is not one:
+its operand edges are terms, and a statement walk over a lift body alone silently under-reports
+everything beneath them.
 Ask `loaded_buffers` instead whenever the answer must cover what a consumer of the STORED tree will
 reach — the kernel materializer walks that tree, so anything deciding a node's graph inputs has to
 see what it sees. Asking the lowered view there is what let a cut declare fewer inputs than the
@@ -336,10 +332,11 @@ type to dispatch on and no second place for a fact to live.
   only boundary output writes consume (`Fold.observed`, a structural probe like `composed`). Observation makes the
   stream order-visible, so an observed fold schedules as the serial fold only.
 
-`Fold.lower()` flattens the term to the loop nest: `Fold.loop` reconstructs the annotated reduce `Loop`
-from the stored params, its operands' bodies ahead of the step. Loops carry NO algebra and no
-annotation, so the derived nest depends only on what is stored, which is
-what makes every identity of the term a digest of its lowered body — there is no separate term hasher.
+`Fold.lower(bound)` flattens the term to the loop nest: a plain loop for every free coordinate the caller left
+unbound, in the order the tree declares them, the reduce loop of each term innermost, and every term placed at the
+shallowest scope binding its free coordinates. Loops carry NO algebra and no annotation, so the derived nest depends
+only on what is stored, which is what makes every identity of the term a digest of its lowered body — there is no
+separate term hasher.
 The `TileOp`'s body identity is the canonical digest of the nest `lower()` derives (the body is the
 term's normal form); the variant key (`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body
 identity with the knobs; and the deploy join key (the deploy identity (`identity_key(with_io=True)`), over
@@ -398,7 +395,7 @@ online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf,
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
 binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated in
 `__post_init__` via the **`Stmt.pure` trait** (declared on the `Stmt` interface, conservative `False` default;
-`Load`/`Assign`/`Select` and the structural `Fold` and `ProjectionRegion` nodes opt in; `Accum`/`Write`/`Init`/`Loop`
+`Load`/`Assign`/`Select` and the structural `Fold` node opt in; `Accum`/`Write`/`Init`/`Loop`
 never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
 (`Lambda.canonical` — free names never renumbered). The scope-aware half lives in `ir/pure/closure.py`: a `Closure`
@@ -662,8 +659,9 @@ remains authoritative when another hint claims a future suffix.
 
 Tile IR stores the complete inner loop nest as one tree of `Fold` terms. The Loop IR boundary peels the outer parallel
 axes, converts every reduction from its explicit `Accum` statements, and leaves each nested reduction in the same
-position inside its parent lambda. A root zero-axis Fold holds the per-cell statement sequence. Pure sibling output
-loops become `ProjectionRegion` terms, and their writes live in `TileOp.output_specs`.
+position inside its parent lambda. A root zero-axis Fold holds the per-cell statement sequence. An output loop's
+per-cell projection becomes a zero-axis term declaring the sweep axis — a sibling operand of the root — and its writes
+live in `TileOp.output_specs` as sweep specs.
 
 A nonzero-axis Fold exposes its combine result names through `Fold.defines()`, so later sibling statements and outer
 folds may consume its result without hoisting it to an operand edge. `Fold.loop` mechanically lowers the tree back to

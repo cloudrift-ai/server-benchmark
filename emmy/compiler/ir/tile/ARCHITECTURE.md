@@ -6,8 +6,9 @@ canonicalizes the complete Fold tree before the separate algebraic rewrite and s
 
 The invariant is simple: **a lifted Tile IR kernel contains no raw inner `Loop`**. A reduction nested in another
 reduction occupies the same statement position in the parent fold's `lift.body`, so source order and SSA scope are
-preserved. A non-reduction loop whose local values feed writes becomes a pure `ProjectionRegion`; each write becomes
-an `OutputSpec` owned by the `TileOp`. Any other surviving loop is a formation error.
+preserved. A non-reduction loop is an output sweep: its per-cell projection becomes a zero-axis term declaring the
+sweep axis, and each of its writes a sweep `OutputSpec` owned by the `TileOp`. Any other surviving loop is a formation
+error.
 
 ## Fold storage
 
@@ -125,20 +126,21 @@ as a supported slow path.
 Canonicalization runs entirely in `TileOp.__post_init__`, including the legacy output-sweep-to-free-axis adjustment
 whenever a contraction operand reads the sweep axis. The contraction may be the root compute node or a later site in
 the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute output loop.
-Multiple output specifications owned by one projection region reconstitute one loop. The extraction round-trip gate
-compares the reconstruction against the stream **as reconstitution will spell it**: a `ProjectionRegion` stores its
-body in a `Lambda`, whose construction canonicalizes statement order and commutative arguments, so a raw stream that
-normalization reorders is still representable — the gate normalizes both sides the same way. A stream already in
-canonical form is gated on byte-identity exactly as before. A write whose stored value is captured from the enclosing
-scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) has no body def to name, and is declined:
-the fusion lift-preflight turns that into "leave the region unfused".
+Consecutive output specifications over one sweep axis reconstitute one loop, sibling sweeps sibling loops. The
+extraction round-trip gate is byte-identity: a stream is representable only when reconstitution reproduces it exactly.
+The lift guarantees that by forming each sweep's per-cell projection as a term of its level before extraction sees the
+stream, so an output loop reaches the boundary holding its writes alone. A write whose stored value is captured from
+the enclosing scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) needs no term: nothing is
+evaluated over `j`, and its sweep spec alone binds the axis.
 
-A sweep axis is bound only by the per-cell output `Loop` reconstitution wraps around the projection body — never at
-kernel scope. A non-contraction fold that reads a sweep axis (attention's `Σ_k P·V` per output column, DeepSeek-V4
-post16's per-column sum) is still an operand edge of the projection: its slabs declare the sweep axis, and because
-reconstitution sweeps everything from the first statement reading that axis onward, its lowered loop lands back inside
-the output loop rather than ahead of it. A contraction is exempt because post-init promotes a sweep its operands read
-into a real free axis right after normalization.
+A sweep axis is never bound at kernel scope: the term opens it itself (`Fold.lower` with the sweep left unbound,
+the default `lower_with_output_specs` binding), and the sweep store lands inside that loop, at the scope binding its
+index (`apply_output_specs`). A non-contraction fold that reads a sweep axis (attention's `Σ_k P·V` per output column,
+DeepSeek-V4 post16's per-column sum) is still an operand edge of the projection: its slabs declare the sweep axis, so
+the placement rule puts its loop inside the sweep loop, while a sibling evaluated over the grid axes alone stays ahead
+of it. A projection stream spelled without the term (the materializer's tail) has no such loop, and reconstitution
+wraps the trailing run reading the axis into one. A contraction is exempt because post-init promotes a sweep its
+operands read into a real free axis right after normalization.
 
 A fold FED by the body — one whose subtree captures a name a plain body member defines — is likewise never hoisted,
 no matter what kind: a projection evaluates its operands before its scalar body, so the capture would read a value
@@ -190,10 +192,12 @@ operand; the generic twisted Fold derivation then exposes the corresponding cont
 Every "are these two kernels the same?" question is answered by ONE function — `Op.identity_key`
 (`ir/base.py`), a lattice over the canonical Loop-IR body with one flag per additional fact
 (`structural` cluster-collapse, `with_io`, `with_knobs`). `TileOp`'s contribution is `loop_body` —
-the complete schedule-free Loop-IR body the kernel executes, derived from the term (the free grid
-axes wrapped back as plain loops around `lower_with_output_specs`, so the extents, the store
-program and a cut child's typed seam `Load` are all in the body) — and the private
-`_body_identity` override that digests it. There is no separate term hasher: a term has no key of
+the complete schedule-free Loop-IR body the kernel executes, derived from the term: the closed
+program `lower_with_output_specs` spells with nothing bound, where the term binds every free
+coordinate with its own loops in the order the tree declares them, so the extents, the store
+program and a cut child's typed seam `Load` are all in the body and the source nest's spelling of
+its parallel loops (`place.free`) never reaches it — and the private `_body_identity` override that
+digests it. There is no separate term hasher: a term has no key of
 its own, and the `TileOp` keys on the term's lowered body (the term is pure algebra; its body is
 its normal form). The named lattice points are spelled at call sites: the deploy identity
 (`with_io=True` — the durable join key) and the variant key (`with_io=True, with_knobs=True` —

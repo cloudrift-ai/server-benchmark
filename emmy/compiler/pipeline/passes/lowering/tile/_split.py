@@ -47,7 +47,6 @@ from emmy.compiler.ir.tile import (
     OutputSpec,
     Placement,
     TileOp,
-    extract_output_specs,
     lower_with_output_specs,
 )
 from emmy.compiler.ir.tile.ir import apply_output_specs
@@ -332,21 +331,10 @@ def _sliced_contraction(node: Fold, w: int) -> tuple[Axis, Fold]:
 # ---- the piece / fragment builders ------------------------------------------------------------ #
 
 
-def _boundary(stmts) -> tuple[tuple, tuple]:
-    """Split a projection into a pure body and output specifications."""
-    split = extract_output_specs(tuple(stmts))
-    if split is None:
-        return tuple(stmts), ()
-    return split
-
-
-def _cell_index(stmts, free) -> tuple:
+def _cell_index(stores: tuple, free) -> tuple:
     """The output-cell index the original kernel writes (the projection ``Write``'s index,
     or — for a bare carrier whose grid-cell store is glue — the free-axis vars)."""
-    for s in stmts:
-        if isinstance(s, Write):
-            return s.index
-    return tuple(Var(ax.name) for ax in free)
+    return stores[0].write.index if stores else tuple(Var(ax.name) for ax in free)
 
 
 def _frag(match: Match, root: Node) -> Graph:
@@ -409,9 +397,8 @@ def _wrap(body: Body, operands: tuple, axes: tuple) -> Fold:
     return Fold(axes=tuple(axis for axis in axes if axis.name in lift.params[len(bound) :]), operands=operands, lift=lift)
 
 
-def _piece(body, free, *, output_specs: tuple = ()) -> TileOp:
+def _piece(op: Fold, free, *, output_specs: tuple = ()) -> TileOp:
     """One fresh unscheduled Tile kernel preserving its Fold algebra verbatim."""
-    op = body if isinstance(body, Fold) else _wrap(Body.coerce(body), (), tuple(free))
     piece = TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs)
     # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
     # identity. Built fresh here, so this states the contract rather than doing work — and the rule
@@ -439,6 +426,16 @@ def _project(fold: Fold, body, axes: tuple) -> Fold:
     return _wrap(body, (fold,), axes) if body else fold
 
 
+def _rebind(term: Fold, node: Fold, replacement: Fold) -> Fold:
+    """``term`` over ``replacement`` wherever it read ``node`` — a split piece keeps the projection
+    whole and swaps the fold it is about. The replacement exposes the node's own state names, so
+    every positional binding above it is unchanged."""
+    if term is node:
+        return replacement
+    operands = tuple(_rebind(edge, node, replacement) for edge in term.operands)
+    return term if operands == term.operands else replace(term, operands=operands)
+
+
 def _output_root(root: Node, outputs: set[str]) -> Node:
     """A graph-node view containing only the output ports owned by one projection Fold."""
     by_name = dict(zip(root.buffer_names(), root.outputs, strict=True))
@@ -450,24 +447,24 @@ def _output_root(root: Node, outputs: set[str]) -> Node:
 
 
 def _split_projection(tile: TileOp, root: Node, selected: Fold):
-    """Separate an independent MIMO projection into output-owning Fold pieces."""
+    """The region the split node owns — ``(graph node, region term, tail stmts, stores)`` — and the
+    other regions as pieces. A kernel with one root keeps its whole term as the region; an
+    independent MIMO projection partitions by producing root (:func:`projection_regions`)."""
     op = tile.op
     if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
-        return root, tuple(projection_tail(tile)), ()
-
+        return root, op, (), tuple(tile.output_specs), ()
     pieces = []
     chosen = None
-    for fold, body, stores in projection_regions(op, tile.output_specs):
+    for fold, region, body, stores in projection_regions(op, tile.output_specs):
         node = _output_root(root, {store.write.output for store in stores})
-        entry = (node, fold, body, stores)
+        entry = (node, region, body, stores)
         if fold is selected:
             chosen = entry
         else:
             pieces.append(entry)
     if chosen is None:
         raise ValueError("the split Fold does not own an independent projection region")
-    node, _, body, stores = chosen
-    return node, tuple(apply_output_specs(body, stores)), tuple(pieces)
+    return (*chosen, tuple(pieces))
 
 
 def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple) -> Graph:
@@ -476,8 +473,8 @@ def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple
     one pinned split means one split — so it carries the consumed-split receipt
     (``split_consumed``): a ``REDUCE`` pin's ``g`` half strips on it instead of splitting the
     sibling region again (or raising)."""
-    for root, fold, body, stores in pieces:
-        tile = replace(_piece(_project(fold, body, tuple(free)), free, output_specs=stores), split_consumed=True)
+    for root, region, body, stores in pieces:
+        tile = replace(_piece(_project(region, body, tuple(free)), free, output_specs=stores), split_consumed=True)
         _add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
     return frag
 
@@ -498,7 +495,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # its output specifications reconstituted, and retarget its root ``Write`` below.
     node = head(tile.op)
     assert node is not None, "the split offer fires on node-form kernels only"
-    root, projection, projection_pieces = _split_projection(tile, root, node)
+    root, region, body, stores, projection_pieces = _split_projection(tile, root, node)
     free = tuple(tile.place.free)
     if node.as_contraction() is not None:
         split, partial_fold = _sliced_contraction(node, cta)
@@ -509,7 +506,8 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     states = partial_fold.combine.results
     n_comp = len(states)
     out = root.output
-    cell = _cell_index(projection, free)
+    cell = _cell_index(stores, free)
+    projection = tuple(apply_output_specs([*(region.lift.body if region.axis is None else ()), *body], stores))
     frag = _frag(match, root)
 
     if finalize == "atomic":
@@ -520,12 +518,11 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         # same predicate the offer and the pin applied, re-asked here over the SELECTED region's
         # projection (the offer read the whole tail, a conservative superset — see its docstring).
         _enforce(atomic_finalize(partial_fold, projection, tile.outputs))
-        if projection:
-            atomic_proj = tuple(replace(s, atomic=True) if isinstance(s, Write) else s for s in projection)
+        if stores:
+            p_stores = tuple(replace(store, write=replace(store.write, atomic=True)) for store in stores)
         else:
-            atomic_proj = (Write(output=out.name, index=cell, values=states, atomic=True),)
-        p_body, p_stores = _boundary(atomic_proj)
-        piece = _piece(_project(partial_fold, p_body, (split, *free)), (split, *free), output_specs=p_stores)
+            p_stores = (OutputSpec(write=Write(output=out.name, index=cell, values=states, atomic=True)),)
+        piece = _piece(_project(_rebind(region, node, partial_fold), body, (split, *free)), (split, *free), output_specs=p_stores)
         result = _one(match, frag, root, piece)
         return _add_projection_pieces(match, result, projection_pieces, free)
 
@@ -563,17 +560,17 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     other = tuple(f"{nm}__p" for nm in states)
     loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i)) for i in range(n_comp))
     fin_fold = _state_fold(fin_axis, partial_fold, loads, free)
-    fin_proj, fin_stores = _boundary(projection)
-    if not fin_stores and not Body(tuple(fin_proj)).writes:
-        # The projected value is the LAST defining stmt's name — the epilogue tail may end with
-        # non-defining stmts, so scan backward instead of indexing [-1].
-        out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), states[0])
+    fin_stores = stores
+    if not fin_stores:
+        # A bare carrier's grid-cell store is materializer glue; the finalize spells it over the
+        # value the region exposes, or the carrier's primary state.
+        out_val = region.exposes[0] if region.exposes else states[0]
         fin_stores = (OutputSpec(write=Write(output=out.name, index=cell, value=out_val)),)
     # The finalize is stamped AFTER the workspace joins the fragment: it reads that buffer, and a
     # kernel's structural features fold in its operands' dtypes, which only resolve once the
     # buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
-    fin_tile = _piece(_project(fin_fold, fin_proj, tuple(free)), free, output_specs=fin_stores)
+    fin_tile = _piece(_project(_rebind(region, node, fin_fold), body, tuple(free)), free, output_specs=fin_stores)
     result = _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
     return _add_projection_pieces(match, result, projection_pieces, free)
 

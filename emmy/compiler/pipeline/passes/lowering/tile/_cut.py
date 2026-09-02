@@ -266,7 +266,9 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         if dtypes is None:
             continue
         seen.add(id(node))
-        axes = tuple({axis.name: axis for scope in scopes for axis in scope}.values())
+        # A seam is evaluated over the coordinates its term READS, not the whole ambient scope: an
+        # output sweep the grid carries for a sibling's sake is not one of this workspace's axes.
+        axes = tuple(axis for axis in {axis.name: axis for scope in scopes for axis in scope}.values() if axis.name in node.free_axes)
         out.append(
             CutSite(
                 node=node,

@@ -109,7 +109,8 @@ loop under the one name; anything else tiles nothing and folds serially one thre
 output cell (the degenerate `_emit(op)` + `with_store`) — there is **no** separate "scalar tier" branch, and no
 per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
 (`out_val`, the root node's produced `Handle`) are threaded down the recursion, so `with_store` is node-agnostic. The
-kernel-boundary `TileOp.output_specs` are reconstituted at their owning projection region or the zero-axis Fold peel
+kernel-boundary `TileOp.output_specs` are reconstituted at the zero-axis Fold peel — an output-tiled root's region
+being its epilogue term over it —
 (a STREAMED store — one whose values are an observed fold's observer results — rides the recursion down to the leaf
 instead and splices into the reduce loop after the observer stmts), so everything below the peel — the sinks,
 cooperative loop distribution, and split realizers — consumes the identical statement stream that entered total

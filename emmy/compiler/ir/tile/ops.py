@@ -445,21 +445,34 @@ class UnbindableProjection(ValueError):
     ``ValueError``."""
 
 
-def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tuple], ...]:
-    """Partition an independent projection's pure body and output specifications by producing Fold.
+def projection_root(edge: Fold) -> Fold | None:
+    """The reducing term a root projection's operand is ABOUT: the operand itself, or the one
+    reducing operand of a zero-axis projection over it — an output sweep's epilogue, evaluated
+    over the sweep coordinate. ``None`` when the projection reads several reduces or none."""
+    if edge.axis is not None:
+        return edge
+    reducing = [operand for operand in edge.operands if operand.axis is not None]
+    return reducing[0] if len(reducing) == 1 else None
 
-    Each output specification must read exactly one root, the roots' backward cones must be disjoint,
-    and together those cones must cover the projection body. This is the structural ownership
-    rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh pieces.
-    Refusals raise :class:`UnbindableProjection`.
+
+def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold, Body, tuple], ...]:
+    """Partition an independent projection by producing root — ``(root, region, tail, stores)`` per
+    operand of ``op``: the reducing root (:func:`projection_root`), the operand term that carries
+    it (the root itself, or its epilogue projection), the root-body statements only that operand's
+    outputs read, and those output specifications.
+
+    Each output specification must read exactly one region, the regions' backward cones over the
+    root body must be disjoint, and together those cones must cover it. This is the structural
+    ownership rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh
+    pieces. Refusals raise :class:`UnbindableProjection`.
     """
-    roots = op.operands
-    by_name = {name: root for root in roots for name in root.exposes}
-    members: dict[int, set] = {id(root): set() for root in roots}
-    grouped: dict[int, list] = {id(root): [] for root in roots}
+    regions = op.operands
+    by_name = {name: region for region in regions for name in region.exposes}
+    members: dict[int, set] = {id(region): set() for region in regions}
+    grouped: dict[int, list] = {id(region): [] for region in regions}
     for spec in output_specs:
-        cone = op.lift.body.backward_cone((spec.write.value,))
-        used = {id(by_name[name]) for name in cone.external_reads if name in by_name}
+        cone = op.lift.body.backward_cone(tuple(spec.write.values))
+        used = {id(by_name[name]) for name in (*cone.external_reads, *spec.write.values) if name in by_name}
         if len(used) != 1:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
         owner = used.pop()
@@ -467,11 +480,17 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body,
         grouped[owner].append(spec)
 
     claimed: set = set().union(*members.values()) if members else set()
-    if claimed != set(op.lift.body) or any(not grouped[id(root)] for root in roots):
+    if claimed != set(op.lift.body) or any(not grouped[id(region)] for region in regions):
         raise UnbindableProjection("an output-tiled root forest must cover the complete projection")
-    if any(members[id(left)] & members[id(right)] for i, left in enumerate(roots) for right in roots[i + 1 :]):
+    if any(members[id(left)] & members[id(right)] for i, left in enumerate(regions) for right in regions[i + 1 :]):
         raise UnbindableProjection("output-tiled root projections may not share tail statements")
-    return tuple((root, Body(stmt for stmt in op.lift.body if stmt in members[id(root)]), tuple(grouped[id(root)])) for root in roots)
+    out = []
+    for region in regions:
+        root = projection_root(region)
+        if root is None:
+            raise UnbindableProjection("an output-tiled root must own each output specification independently")
+        out.append((root, region, Body(stmt for stmt in op.lift.body if stmt in members[id(region)]), tuple(grouped[id(region)])))
+    return tuple(out)
 
 
 def head(op):
@@ -483,11 +502,10 @@ def head(op):
     node-level fact the scheduler dispatches on — the views, the
     reduce ``Axis``, the operand edges — is a STORED param on what this returns."""
     node = op
-    if isinstance(op, Fold) and op.axis is None:
-        # A term composes through operands, so a projection's node is its first edge. The chain
-        # form's sweep case used to keep that fold as a BODY member; a ``Body`` refuses a term now,
-        # so there is nothing to scan for.
-        node = op.operands[0] if op.operands else op
+    # A term composes through operands, so a projection's node is its first edge — through every
+    # zero-axis wrapper on the way (an output sweep's projection over its reduce).
+    while isinstance(node, Fold) and node.axis is None and node.operands:
+        node = node.operands[0]
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 

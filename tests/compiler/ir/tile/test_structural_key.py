@@ -15,7 +15,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.tile.ir import ProjectionRegion, TileOp
+from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.structural import Structural
 
@@ -81,19 +81,6 @@ def test_independent_stmt_interleaving_never_moves_the_key() -> None:
     one = Fold(axis=None, lift=Lambda.closing((), Body((load, add, mul)), ("v1", "v2")))
     two = Fold(axis=None, lift=Lambda.closing((), Body((load, mul, add)), ("v1", "v2")))
     assert one.structural_key() == two.structural_key()
-
-
-def test_projection_region_keys_ignore_ssa_and_buffer_spelling() -> None:
-    def term(*, value: str, buffer: str, extent: int = 4) -> Fold:
-        region = ProjectionRegion(
-            axis=Axis("q", extent),
-            lift=Lambda.closing(("q",), Body((Load(name=value, input=buffer, index=(Var("m"), Var("q"))),)), (value,)),
-        )
-        return Fold.projection(body=Body((region,)), results=())
-
-    base = term(value="v0", buffer="x")
-    assert base.structural_key() == term(value="renamed", buffer="other").structural_key()
-    assert base.structural_key() != term(value="v0", buffer="x", extent=8).structural_key()
 
 
 def test_twisted_state_renames_never_move_the_key() -> None:

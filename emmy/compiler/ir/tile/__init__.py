@@ -11,7 +11,6 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import FoldMove, Level, Placement, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import (
     OutputSpec,
-    ProjectionRegion,
     TileOp,
     apply_output_specs,
     extract_output_specs,
@@ -28,7 +27,6 @@ __all__ = [
     "Reduce",
     "ReduceStage",
     "OutputSpec",
-    "ProjectionRegion",
     "TileOp",
     "apply_output_specs",
     "lower_with_output_specs",

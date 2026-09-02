@@ -10,7 +10,6 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import ProjectionRegion
 from emmy.compiler.ir.tile.ops import axis_names, sched_of
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +104,7 @@ def _head(node, ctx: _Ctx) -> str:
         text = "Fold  free" + ("" if node.operands else "  ‹pointwise›")
     else:
         kind = "contraction" if node.as_contraction() is not None else "reduce"
-        text = f"Fold[{_axis_span(node.axis)}] {kind}" + (" unroll" if node.unroll else "")
+        text = f"Fold[{_axis_span(node.axis)}] {kind}"
     return text + ctx.note(node)
 
 
@@ -121,10 +120,6 @@ def _stmts(stmts, ctx: _Ctx):
             if isinstance(s, Fold):
                 out.append(f"{cont}  {_head(s, ctx)}")
                 out.extend(_branch(_items(s, ctx), cont + "  "))
-            elif isinstance(s, ProjectionRegion):
-                out.append(f"{cont}  project[{_axis_span(s.axis)}]{' unroll' if s.unroll else ''}")
-                out.append(f"{cont}    {_lam_sig(s.lift, ctx)}")
-                out.extend(_stmts(s.body, ctx)(cont + "    "))
             else:
                 out.extend(pretty_body(Body((s,)), cont + "  "))
         return out

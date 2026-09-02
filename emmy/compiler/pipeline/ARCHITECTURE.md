@@ -1501,8 +1501,9 @@ comparing two fits is running the same eval against two files and diffing the re
 `lowering/tile/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer parallel
 axes and mechanically lifts every inner reduction as a nested `Fold`; `TileOp` construction then canonicalizes the
 complete tree, including maximal pure operand-cone factoring for semiring contractions, canonical shared-argument
-orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. Pure projection regions remain
-in the term, while their writes live as `OutputSpec`s at the `TileOp` boundary.
+orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. An output loop's per-cell
+projection is a zero-axis term declaring its sweep axis, while its writes live as `OutputSpec`s at the `TileOp`
+boundary.
 
 `020_twisted` rewrites the exp-family composition over that canonical tree. The single `030_cut` pass reaches a
 fixpoint over two ordered domains: it offers the maximal tree and every semantically closed stored child-Fold seam

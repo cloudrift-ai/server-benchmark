@@ -241,8 +241,9 @@ def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_unde
 
     # Canonical renumbering renames the axes; the sweep coordinate is one the fold's slab declares.
     # The sibling total is what the swept fold reads, so it arrives as that fold's operand — the
-    # same object — and the projection keeps only the swept fold; the total lowers once, ahead.
-    (swept,) = tile.op.operands
+    # same object — and the root wrapper, exposing exactly the swept fold, dissolves into it; the
+    # total lowers once, ahead.
+    swept = tile.op
     (spec,) = tile.output_specs
     assert spec.sweep is not None and spec.sweep.name in swept.free_axes
     assert any(edge.axis is not None and spec.sweep.name not in edge.free_axes for edge in swept.operands)

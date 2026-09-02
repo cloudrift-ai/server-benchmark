@@ -143,7 +143,7 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
         # edge per computed input, including nested reductions and contractions.
         prefix = [s for e in _unique_edges(op.operands) for s in _emit(e, ctx).body]
         # A body member that is itself a node emits in place, per cell.
-        body = [s for m in op.body for s in (_emit(m, ctx).body if isinstance(m, Fold) else [m])]
+        body = [s for m in op.lift.body for s in (_emit(m, ctx).body if isinstance(m, Fold) else [m])]
         return Frag(body=[*prefix, *_emit_body(Body(tuple(body)), ctx, output_specs)], out=_map_wire(op))
     if isinstance(op, Fold):
         # Every fold WITH an axis, at any role — the per-cell scalar contraction (no TILE slice)
@@ -171,9 +171,9 @@ def _map_wire(op: Fold) -> Handle:
     empty ``defines``);
     otherwise the last defining stmt (a pointwise lift / projection), or ``""`` for a sink whose store
     rides inside a projection sweep ``Loop`` (a don't-care — nothing consumes it)."""
-    if len(op.body) == 0:
+    if len(op.lift.body) == 0:
         return _emit_wire(op.operands[0]) if op.operands else Handle("")
-    last = op.body[-1]
+    last = op.lift.body[-1]
     if isinstance(last, Write):
         return Handle(last.values[-1], residence="gmem")
     if isinstance(last, (Loop, StridedLoop)) and last.role.is_reduce:
@@ -305,15 +305,15 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         root = tiled[0] if tiled else op.operands[0]
         other = tuple(edge for edge in op.operands if edge is not root)
         closed_root, consumed = _close_cell_providers(root, other) if tiled else (None, frozenset())
-        projection_reads = op.body.backward_cone(op.exposes).external_reads
+        projection_reads = op.lift.body.backward_cone(op.exposes).external_reads
         siblings = []
         for edge in other:
             if id(edge) not in consumed:
                 siblings.extend(_emit(edge, ctx).body)
             elif required := set(edge.exposes) & projection_reads:
                 siblings.extend(_emit(_provider_slice(edge, required), ctx).body)
-        proj = [*siblings, *_emit_body(op.body, ctx, output_specs)]
-        region_results = _projection_results(op.body)
+        proj = [*siblings, *_emit_body(op.lift.body, ctx, output_specs)]
+        region_results = _projection_results(op.lift.body)
         root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= region_results)
         # A STREAMED store (values = an observer's results) rides the recursion down to the leaf
         # so the scalar arm can splice it into the observed fold's reduce loop — applying it here
@@ -544,7 +544,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             # it under a chain root; excluded here too, a stamped one falls to the serial arm.
             parts = tuple(
                 (member, p)
-                for member in op.body
+                for member in op.lift.body
                 if isinstance(member, Fold)
                 and member.axis is not None
                 and (p := ctx.sched.get("REDUCE", member)) is not None
@@ -557,7 +557,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             bt = lane.extent.as_static() if lane is not None else None
         elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
             body = [*_emit(op, ctx, output_specs).body, *tail]
-            root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= _projection_results(op.body))
+            root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= _projection_results(op.lift.body))
             if root_specs:
                 # ``observed`` streams a scan store into its reduce loop; every other spec keeps
                 # its kernel-tail reconstitution.
@@ -1035,7 +1035,7 @@ def _tile_chain_members(
     lane = Axis(name=f"{head.axis.name}_co", extent=coop) if coop > 1 else None
     fold: list[Stmt] = []
     segment: list = []
-    for member in op.body:
+    for member in op.lift.body:
         plan = plans.get(id(member))
         if plan is None:
             segment.append(member)
@@ -1047,7 +1047,7 @@ def _tile_chain_members(
         *hoisted, rloop = _emit(member, ctx).body
         fold.extend(hoisted)
         fold.extend(_strided_fold(member, rloop, plan, ctx, lane if plan.coop > 1 else None))
-    region_results = _projection_results(op.body)
+    region_results = _projection_results(op.lift.body)
     trailing = [
         *_emit_body(Body(tuple(segment)), ctx, output_specs),
         *(spec.write for spec in output_specs if not set(spec.write.values) <= region_results),

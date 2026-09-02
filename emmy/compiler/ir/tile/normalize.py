@@ -212,7 +212,7 @@ def _with_source(node: Fold, source) -> Fold:
     operands = (*node.operands, source)
     bound = tuple(name for edge in operands for name in edge.exposes)
     if node.axis is None:
-        return Fold.projection(operands=operands, body=node.body, results=node.lift.results)
+        return Fold.projection(operands=operands, body=node.lift.body, results=node.lift.results)
     return replace(node, operands=operands, lift=replace(node.lift, params=(node.axis.name, *bound)))
 
 
@@ -240,9 +240,9 @@ def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
     def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
         inner = (*binders, node.axis.name) if node.axis is not None else binders
         operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
-        body = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.body)
+        body = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.lift.body)
         current = replace(node, operands=operands) if operands != node.operands else node
-        if body != current.body:
+        if body != current.lift.body:
             current = replace(current, lift=replace(current.lift, body=Body(body)))
 
         changed = False
@@ -264,15 +264,15 @@ def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
         # takes them the same way: as operands carrying their producer, at whichever position it
         # sits. Its own axis stays the lift's leading binder, so the drain is one move either way.
         members = []
-        for stmt in current.body:
+        for stmt in current.lift.body:
             source = provider(stmt, binders) if isinstance(stmt, Fold) else None
             members.append(stmt if source is None else _with_source(stmt, source))
-        if any(fresh is not prior for fresh, prior in zip(members, current.body, strict=True)):
+        if any(fresh is not prior for fresh, prior in zip(members, current.lift.body, strict=True)):
             current = replace(current, lift=replace(current.lift, body=Body(members)))
         return current
 
     rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
-    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in root.body)
+    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in root.lift.body)
     return rewritten_operands, rewritten_body
 
 

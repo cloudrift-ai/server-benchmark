@@ -121,13 +121,13 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     both sides read: the scheduler sizes the stat rows into the sync stage's smem budget, the
     materializer fills them (``sync_stat_fill``)."""
     if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
-        return (), tuple(cone.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
+        return (), tuple(cone.lift.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
     # Split by DECLARATION: an edge whose index space holds the reduction axis varies with it and
     # rides the cell; the rest are row-invariant and lower once into the prologue. Same reading as
     # ``Fold.lower``'s hoist, asked of the same property.
     varying = [k_name in edge.index_space for edge in cone.operands]
     pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower())
-    cell = tuple(stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower()) + tuple(cone.body)
+    cell = tuple(stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower()) + tuple(cone.lift.body)
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in edge.exposes}
     stats = tuple(sorted(pro_results & Body(cell).ssa_uses))
     return (pro, cell, stats) if stats else ((), cell, ())

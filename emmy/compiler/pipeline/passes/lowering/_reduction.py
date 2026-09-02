@@ -108,7 +108,7 @@ class Reduction:
                 yield node
             for operand in node.operands:
                 yield from folds(operand)
-            for stmt in node.body:
+            for stmt in node.lift.body:
                 yield from folds(stmt)
 
         fold = next((candidate for candidate in folds(pro) if candidate.loop == first), None)

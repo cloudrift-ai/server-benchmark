@@ -99,7 +99,7 @@ def _chain_member_serial(tile: TileOp, node) -> bool:
         return True
     if any(set(spec.write.values) <= observed_result_names(root) for spec in tile.output_specs):
         return True
-    return not any(node is stmt for stmt in root.body)
+    return not any(node is stmt for stmt in root.lift.body)
 
 
 def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:

@@ -411,7 +411,7 @@ def axis_names(root) -> set[str]:
         if not isinstance(node, Fold):
             continue
         if node.axis is None:
-            out |= stmt_axis_names(node.body)
+            out |= stmt_axis_names(node.lift.body)
         else:
             out.add(node.axis.name)
             out |= stmt_axis_names(tuple(node.lift.body))
@@ -425,7 +425,7 @@ def projection_tail(tile) -> list[Stmt]:
     ``coop-t`` band's no-sweep-``Loop`` condition keeps excluding rms/softmax rows after their
     sweep moved to an ``OutputSpec`` decoration."""
     op = tile.op
-    body = list(op.body) if isinstance(op, Fold) and op.axis is None else []
+    body = list(op.lift.body) if isinstance(op, Fold) and op.axis is None else []
     return apply_output_specs(body, tile.output_specs)
 
 
@@ -510,7 +510,7 @@ def carries_partition(op) -> bool:
         ax = getattr(node, "axis", None)
         if ax is not None and ax.window is not None and ax.window.partition:
             return True
-        bodies = [node.body, *([node.lift.body] if getattr(node, "lift", None) is not None else [])]
+        bodies = [node.lift.body, *([node.lift.body] if getattr(node, "lift", None) is not None else [])]
         if any(lp.axis.window is not None and lp.axis.window.partition for b in bodies for lp in loops(b)):
             return True
     return False

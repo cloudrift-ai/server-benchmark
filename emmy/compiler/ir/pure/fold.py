@@ -335,11 +335,6 @@ class Fold:
     # ---- the DERIVED READINGS. ``Map`` and ``Contraction`` are no longer stored kinds (the
     # collapse); every field they carried reads back off the one stored term here, so their old
     # accessors keep their exact meanings and their consumers keep their exact spellings. ------- #
-    @property
-    def body(self) -> Body:
-        """The projection body — ``lift.body`` (the stmts live on the lambda)."""
-        return self.lift.body
-
     @classmethod
     def slab(cls, load: Load, axes: tuple[Axis, ...]) -> Fold:
         """Wrap one ``Load`` as a term that DECLARES the coordinates it reads.

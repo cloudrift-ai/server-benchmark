@@ -331,8 +331,8 @@ def lower_with_output_specs(op, specs) -> list[Stmt]:
         return out
 
     if isinstance(op, Fold) and op.axis is None:
-        body = [*(stmt for edge in op.operands for stmt in edge.lower()), *lower_body(op.body)]
-        root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= _projection_results(op.body))
+        body = [*(stmt for edge in op.operands for stmt in edge.lower()), *lower_body(op.lift.body)]
+        root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= _projection_results(op.lift.body))
         return apply_output_specs(body, root_specs, observed=observed_result_names(op))
     return apply_output_specs(op.lower(), specs, observed=observed_result_names(op))
 

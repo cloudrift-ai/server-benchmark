@@ -42,7 +42,7 @@ def _bindings(fold: Fold) -> dict[str, object]:
 def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> Closure | None:
     """A fold's one-source pure score cone, scoped by its streaming axis."""
     bindings = _bindings(fold)
-    members = (bindings[result],) if result in bindings else fold.body.backward_cone((result,)).members
+    members = (bindings[result],) if result in bindings else fold.lift.body.backward_cone((result,)).members
     if not members or any(not isinstance(stmt, (Fold, Load, Assign, Select)) for stmt in members):
         return None
 
@@ -88,8 +88,8 @@ def _maximum(fold: Fold, axes: tuple[str, ...]) -> tuple[str, Closure] | None:
     if not isinstance(result, str):
         return None
     score = _score(fold, result, axes)
-    cone = fold.body.backward_cone((result,))
-    if score is None or {id(stmt) for stmt in cone.members} != {id(stmt) for stmt in fold.body}:
+    cone = fold.lift.body.backward_cone((result,))
+    if score is None or {id(stmt) for stmt in cone.members} != {id(stmt) for stmt in fold.lift.body}:
         return None
     return fold.combine.results[0], score
 
@@ -103,11 +103,11 @@ def _denominator(fold: Fold, pivots: frozenset[str], score: Closure, axes: tuple
     result = fold.lift.results[0]
     if not isinstance(result, str):
         return False
-    candidate = _exp_score(fold.body.definitions, result, pivots)
+    candidate = _exp_score(fold.lift.body.definitions, result, pivots)
     candidate_score = _score(fold, candidate, axes) if candidate is not None else None
-    cone = fold.body.backward_cone((result,))
+    cone = fold.lift.body.backward_cone((result,))
     return (
-        candidate_score is not None and score == candidate_score and {id(stmt) for stmt in cone.members} == {id(stmt) for stmt in fold.body}
+        candidate_score is not None and score == candidate_score and {id(stmt) for stmt in cone.members} == {id(stmt) for stmt in fold.lift.body}
     )
 
 
@@ -183,7 +183,7 @@ def _report_unpaired(items: list, axes: tuple[str, ...]) -> None:
 def _projection_members(node: Fold) -> Body:
     """Remove zero-axis grouping without lowering any iterating Fold."""
     assert node.axis is None
-    members = list(node.body)
+    members = list(node.lift.body)
     for edge in reversed(node.operands):
         names = set(edge.exposes)
         position = next((i for i, stmt in enumerate(members) if names & Body((stmt,)).ssa_uses), len(members))
@@ -333,7 +333,7 @@ def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
     other = tuple(f"{name}__o" for name in states)
     lift = Lambda(
         params=(statistic.axis.name, *(name for edge in operands for name in edge.exposes)),
-        body=statistic.body,
+        body=statistic.lift.body,
         results=(*statistic.lift.results, *(value.exposes[-1] for value in values)),
     )
     combine = Lambda(params=states + other, body=Body(exp_combine_states(states, other)), results=states)
@@ -356,14 +356,14 @@ def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
 def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
     operands = tuple(_rewrite_fold(edge, axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
     body_axes = (*axes, fold.axis.name) if fold.axis is not None else axes
-    body = Body(_rewrite_fold(stmt, body_axes) if isinstance(stmt, Fold) else stmt for stmt in fold.body)
+    body = Body(_rewrite_fold(stmt, body_axes) if isinstance(stmt, Fold) else stmt for stmt in fold.lift.body)
     node = replace(fold, operands=operands) if operands != fold.operands else fold
-    if body != node.body:
+    if body != node.lift.body:
         node = replace(node, lift=replace(node.lift, body=Body(body)))
 
     if node.axis is None:
-        new_operands, new_body = _merge_siblings(node.operands, node.body, axes)
-        if new_operands == node.operands and new_body == node.body:
+        new_operands, new_body = _merge_siblings(node.operands, node.lift.body, axes)
+        if new_operands == node.operands and new_body == node.lift.body:
             return node
         return Fold.projection(operands=new_operands, body=new_body, results=node.lift.results)
 
@@ -374,7 +374,7 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
             if product.name == "multiply" and plus.reduce_canon == "add":
                 return _extend_statistic(node, view)
 
-    _, new_body = _merge_siblings((), node.body, body_axes)
+    _, new_body = _merge_siblings((), node.lift.body, body_axes)
     return replace(node, lift=replace(node.lift, body=Body(new_body))) if new_body != node.lift.body else node
 
 

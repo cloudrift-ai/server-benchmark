@@ -859,14 +859,14 @@ def _tile_reduce_axis_transposed(
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, k_ways, axis, masked, protected, stream_identity))
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
-    strided = strided.rewrite(ident, subst)
+    strided = strided.substitute(subst)
 
     merge: list[Stmt] = [st for r in range(1, reg) for st in alg.merge_stmts(tuple(f"{n}__r{r}" for n in alg.names))]
     if k_co is not None:
         merge += emit_combine(alg, t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
 
     tail_stmts = with_store(list(tail), ctx.output, grid, out_val)
-    tail_stmts = [s.rewrite(ident, store_subst) for s in tail_stmts]
+    tail_stmts = [s.substitute(store_subst) for s in tail_stmts]
     if overhang:
         tail_stmts = [Cond(cond=BinaryExpr("<", cell, out_ext), body=tuple(tail_stmts))]
     if k_co is not None:

@@ -116,7 +116,7 @@ def _fuse_pair(outer: Loop, inner: Loop, shapes: dict, between: tuple[Loop, ...]
     f = Var(q.name)
     lit = Literal(small, "int")
     sigma = Sigma({p.name: BinaryExpr("//", f, lit), q.name: BinaryExpr("%", f, lit)})
-    body = Body(tuple(s.rewrite(lambda n: n, sigma) for s in inner.body))
+    body = Body(tuple(s.substitute(sigma) for s in inner.body))
     fused = Loop(axis=Axis(q.name, big * small), body=body, unroll=outer.unroll or inner.unroll, role=AxisRole.FREE, seed=inner.seed)
     fused = _simplify_stmt(fused, SimplifyCtx.empty())
     if not _folds_clean(fused, q.name, shapes):

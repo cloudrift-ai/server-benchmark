@@ -1174,7 +1174,7 @@ def _block_scaled_operands(
             k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(2, "int")))
             t = BinaryExpr("+", base, row)
             sigma = Sigma({side.axis.name: clamp_last(t, side.ext) if side.mask else t, k_axis.name: k, **_sibling_sigma(sibling)})
-            return [st.rewrite(lambda nm: nm, sigma) for st in cone], codes
+            return [st.substitute(sigma) for st in cone], codes
 
         return SyncOperand(tag=tag, shape=(side.tile, bk_elems // 2), value=value, scale=scale)
 

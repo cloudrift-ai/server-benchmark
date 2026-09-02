@@ -712,10 +712,11 @@ __all__ = [
 ]
 
 
+from emmy.compiler.ir.stmt.passes import _rewrite_kind
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(region: ProjectionRegion, rename, sigma, axis_fn):
     axis = axis_fn(region.axis)
     lift = Lambda(

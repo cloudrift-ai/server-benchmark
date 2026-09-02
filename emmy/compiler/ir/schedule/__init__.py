@@ -1,5 +1,7 @@
 """Schedule interfaces and reusable choices."""
 
+from emmy.compiler.ir.pure.fold import ContractionView
+
 from .base import Schedule, ScheduleContext, ScheduleRefused, schedule
 from .choices import (
     AtomKind,
@@ -20,8 +22,6 @@ from .choices import (
     derive_workers,
     resolve_site_tile,
 )
-from emmy.compiler.ir.pure.fold import ContractionView
-
 from .views import ContractionFacts, EdgeSite, NodeId
 
 __all__ = [

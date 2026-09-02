@@ -34,6 +34,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
 # INLINE node operand dispatches back through the same registry, so a stored computed operand
 # (the cone, flash's ``P``) canonicalizes like any other subtree.
+from emmy.compiler.ir.stmt.passes import _rewrite_kind
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 
 
@@ -430,7 +431,7 @@ class Channel:
 # (the cone, flash's ``P``) canonicalizes like any other subtree.
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: Fold, rename, sigma, axis_fn):
     # ONE handler for the one stored kind (the collapse retired the Map / Contraction arms —
     # singledispatch keys on the stored type, and there is now only one). Every operand edge

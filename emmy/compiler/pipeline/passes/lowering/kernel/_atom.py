@@ -878,18 +878,18 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
 
     def a_value(k0, row, col):
         k = BinaryExpr("+", k0, col)
-        # σ is hygienic (:func:`subst_free`): a cone statistic re-binding the contraction axis
+        # σ is hygienic (:meth:`Stmt.substitute`): a cone statistic re-binding the contraction axis
         # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
         stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
-        stmts += [subst_free(s, sigma) for s in cell]
+        stmts += [s.substitute(sigma) for s in cell]
         return _k_masked(stmts, c.a.exposes[-1], k, k_ext)
 
     prologue: list[Stmt] = []
     if stats:
         row_axis = Axis(name="_sr", extent=mn[0].tile)
         sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
-        row_body = [subst_free(s, sigma) for s in pro]
+        row_body = [s.substitute(sigma) for s in pro]
         prologue = sync_stat_fill(
             stats=stats,
             slab_of=_stat_slab,
@@ -985,7 +985,7 @@ def _sync_operands(
             def b_value(k0, row, col, *, body=b_body, edge=bl):
                 k = BinaryExpr("+", k0, row)
                 sigma = Sigma({k_name: k_coord(k), n_name: n_coord(col)})
-                return _k_masked([subst_free(s, sigma) for s in body], edge.exposes[-1], k, k_ext)
+                return _k_masked([s.substitute(sigma) for s in body], edge.exposes[-1], k, k_ext)
 
             op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value, swizzle=swizzles[1])
             sync_ops.append(op)
@@ -1092,7 +1092,7 @@ def _packed_operands(
         # cone re-binds these names today, but the safe spelling costs nothing and the cone is
         # whatever the speller wrote.
         sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k})
-        return [subst_free(s, sigma) for s in factor_cone], packed.factor
+        return [s.substitute(sigma) for s in factor_cone], packed.factor
 
     scale_op = SyncOperand(tag="bs", shape=(n.tile, bk_elems // block), value=scale_value)
 
@@ -1256,9 +1256,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     # The BLOCK-SCALED pair, keyed on the ATOM: both operands packed under a 16-bit atom is still
     # the single-sided shape, whose drain decodes each into 16-bit fragments. cp.async only; the
     # four-descriptor TMA box copy is not built.
-    native = stage.transport == "smem-async" and block_scaled_atom(tile.atom)
-    bs_pair = match_packed_pair_node(c, ops.inputs) if native else None
-    copy_transport = stage.transport in ("smem-async", "smem-tma")
+    stage.transport == "smem-async" and block_scaled_atom(tile.atom)
+    bs_pair = None  # the two-sided packed recognizer is deleted; see the packing module
     packed = None
     if bs_pair is not None:
         operands, copies, fills = _block_scaled_operands(

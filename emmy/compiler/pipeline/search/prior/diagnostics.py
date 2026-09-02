@@ -136,11 +136,11 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
     goldens dir doesn't make a name's per-card entries collide on the GPU-blind
     ``ShapeKey`` (e.g. RTX 5090 / RTX PRO 6000 both ``(12, 0)``)."""
     from emmy.compiler.pipeline.search.golden import (
-    # noqa: PLC0415,
-    fast_math_knobs,
-    goldens_for_live_gpu,
-    precision_trading_pins,
-)
+        # noqa: PLC0415,
+        fast_math_knobs,
+        goldens_for_live_gpu,
+        precision_trading_pins,
+    )
 
     GOLDEN_RECORDS = goldens_for_live_gpu()
 

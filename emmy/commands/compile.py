@@ -192,12 +192,12 @@ def resolve_golden_arg(args) -> None:
         logger.error("--dynamic is incompatible with --golden (a dynamic golden's spec is part of its config)")
         sys.exit(2)
     from emmy.compiler.pipeline.search.golden import (
-    GOLDEN_RECORDS,
-    goldens_for_live_gpu,
-    load_golden_file,
-    load_golden_records,
-    shared_placement_pins,
-)
+        GOLDEN_RECORDS,
+        goldens_for_live_gpu,
+        load_golden_file,
+        load_golden_records,
+        shared_placement_pins,
+    )
 
     # Canonical replay scopes to the live card as before. An explicit working file is
     # intentionally literal: no repository union and no live-card filtering, because its
@@ -678,12 +678,12 @@ def _trace_model(
 
     from emmy.compiler.loader.safetensors import split_revision
     from emmy.compiler.trace.huggingface import (
-    load_architecture_trace_twin,
-    load_quantized_layer_twin,
-    load_quantized_trace_twin,
-    load_quantized_twin,
-    quantized_checkpoint_dir,
-)
+        load_architecture_trace_twin,
+        load_quantized_layer_twin,
+        load_quantized_trace_twin,
+        load_quantized_twin,
+        quantized_checkpoint_dir,
+    )
     from emmy.compiler.trace.torch import trace_module
 
     logger.info("Pulling %s...", model_id)
@@ -728,12 +728,12 @@ def _trace_model(
         # Each speller is a no-op on the other family's checkpoints.
         if quant_dir is not None:
             from emmy.compiler.loader.quant import (
-    # noqa: PLC0415,
-    spell_dynamic_fp8_activations,
-    spell_quantized_constants,
-    spell_static_fp4_activations,
-    spell_trellis_constants,
-)
+                # noqa: PLC0415,
+                spell_dynamic_fp8_activations,
+                spell_quantized_constants,
+                spell_static_fp4_activations,
+                spell_trellis_constants,
+            )
             from emmy.compiler.trace.huggingface import retarget_constants_to_model  # noqa: PLC0415
 
             if wrapper is not None:

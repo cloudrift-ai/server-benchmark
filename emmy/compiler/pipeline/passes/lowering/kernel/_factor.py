@@ -141,7 +141,7 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
     if isinstance(op, Fold) and op.axis is None:
         # EVERY operand edge, in order — the same prefix ``Fold.lower`` builds. A cone carries one
         # edge per computed input, including nested reductions and contractions.
-        prefix = [s for e in _unique_edges(op.operands) for s in _emit(e, ctx).body]
+        prefix = [s for e in op.operands for s in _emit(e, ctx).body]
         # A body member that is itself a node emits in place, per cell.
         body = [s for m in op.lift.body for s in (_emit(m, ctx).body if isinstance(m, Fold) else [m])]
         return Frag(body=[*prefix, *_emit_body(Body(tuple(body)), ctx, output_specs)], out=_map_wire(op))
@@ -331,7 +331,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         # contraction root) has no such realization — the sweep is distributed across the lanes it
         # would have to re-run on — so the row is declined and the greedy retries the next one.
         sweeps = tuple(spec.sweep.name for spec in plain if spec.sweep is not None)
-        free = (frozenset(sweeps) & root.index_space)
+        free = frozenset(sweeps) & root.index_space
         swept = [name for name in sweeps if name in free]
         if swept:
             # The schedule at stake is the ITERATING node's, which a chain of zero-axis projections
@@ -343,7 +343,9 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
             while isinstance(node, Fold) and node.axis is None and node.operands:
                 node = node.operands[0]
             plan = ctx.sched.get("REDUCE", node) if isinstance(node, Fold) and node.axis is not None else None
-            if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (node.as_contraction() is not None and ctx.sched.tile_of(node) is not None):
+            if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (
+                node.as_contraction() is not None and ctx.sched.tile_of(node) is not None
+            ):
                 raise UnbindableProjection(
                     f"the bound reduce's cone reads output sweep axis {swept[0]!r} — a cooperative / ILP "
                     f"partition cannot re-run the reduce per swept cell"
@@ -845,7 +847,6 @@ def _tile_reduce_axis_transposed(
     overhang = not (out_ax.extent.is_static and out_ax.extent.as_static() % lanes_n == 0)
     subst = Sigma({out_ax.name: clamp_last(cell, out_ext) if overhang else cell})  # the sweep's reads
     store_subst = Sigma({out_ax.name: cell})  # the guarded projection: in range by the guard, so no clamp
-    ident = lambda n: n  # noqa: E731
 
     nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
     defined = {nm for s in rloop.body.iter() for nm in s.defines()}

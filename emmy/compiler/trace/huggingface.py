@@ -1367,13 +1367,13 @@ def _is_quantized_dir(p) -> bool:
     """Whether the checkpoint at ``p`` declares a quantization scheme the loaders ingest
     (FP8 scale-paired bits, NVFP4 packed trios, MXFP4 blocks, AWQ GEMM int4, or EXL3 siblings)."""
     from emmy.compiler.loader.quant import (
-    # noqa: PLC0415,
-    _awq_quant_config,
-    _exl3_quant_config,
-    _fp4_quant_config,
-    _fp8_quant_config,
-    _mxfp4_quant_config,
-)
+        # noqa: PLC0415,
+        _awq_quant_config,
+        _exl3_quant_config,
+        _fp4_quant_config,
+        _fp8_quant_config,
+        _mxfp4_quant_config,
+    )
 
     return any(
         config(p) is not None
@@ -1832,22 +1832,22 @@ def load_quantized_split(
 
     from emmy.compiler.loader.exl3 import decode_trellis, fold_hadamard  # noqa: PLC0415
     from emmy.compiler.loader.quant import (
-    # noqa: PLC0415,
-    _EXL3_SIBLING_LEAVES,
-    _awq_quant_config,
-    _exl3_codebook,
-    _exl3_quant_config,
-    _fp4_quant_config,
-    _fp8_quant_config,
-    _is_skipped,
-    _mxfp4_quant_config,
-    _skip_patterns,
-    dequantize,
-    dequantize_awq4,
-    dequantize_nvfp4,
-    native_mxfp4_experts,
-    scale_is_reciprocal,
-)
+        # noqa: PLC0415,
+        _EXL3_SIBLING_LEAVES,
+        _awq_quant_config,
+        _exl3_codebook,
+        _exl3_quant_config,
+        _fp4_quant_config,
+        _fp8_quant_config,
+        _is_skipped,
+        _mxfp4_quant_config,
+        _skip_patterns,
+        dequantize,
+        dequantize_awq4,
+        dequantize_nvfp4,
+        native_mxfp4_experts,
+        scale_is_reciprocal,
+    )
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
     model_dir = Path(model_dir)

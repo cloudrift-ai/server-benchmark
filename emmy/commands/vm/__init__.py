@@ -4,11 +4,11 @@
 def register_vm_command(subparsers):
     """Register the 'vm' command with create/delete action subparsers."""
     from emmy.commands.vm.cloudrift import (
-    register_create_target as register_cloudrift_create,
-)
+        register_create_target as register_cloudrift_create,
+    )
     from emmy.commands.vm.cloudrift import (
-    register_delete_target as register_cloudrift_delete,
-)
+        register_delete_target as register_cloudrift_delete,
+    )
     from emmy.commands.vm.gcp import register_create_target, register_delete_target
     from emmy.commands.vm.gpu import register_create_target as register_gpu_create
     from emmy.commands.vm.lease import register_audit_target as register_lease_audit

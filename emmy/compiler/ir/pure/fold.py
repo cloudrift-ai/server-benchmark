@@ -414,6 +414,7 @@ class Fold:
         :attr:`composed`, not a role) the schedule gates and the boundary read."""
         return self.observe is not None
 
+
 @dataclass(frozen=True)
 class Channel:
     """One product channel of a contraction — the streamed K×N operand edge ``b`` plus the

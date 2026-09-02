@@ -2652,7 +2652,7 @@ __all__ = [
 # / ``CpAsyncWait``) are stateless and return themselves.
 
 
-from emmy.compiler.ir.stmt.passes import _rewrite_kind
+from emmy.compiler.ir.stmt.passes import _rewrite_kind  # noqa: E402
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 
 

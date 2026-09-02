@@ -107,7 +107,9 @@ def _denominator(fold: Fold, pivots: frozenset[str], score: Closure, axes: tuple
     candidate_score = _score(fold, candidate, axes) if candidate is not None else None
     cone = fold.lift.body.backward_cone((result,))
     return (
-        candidate_score is not None and score == candidate_score and {id(stmt) for stmt in cone.members} == {id(stmt) for stmt in fold.lift.body}
+        candidate_score is not None
+        and score == candidate_score
+        and {id(stmt) for stmt in cone.members} == {id(stmt) for stmt in fold.lift.body}
     )
 
 

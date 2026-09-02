@@ -446,11 +446,11 @@ def handle_eval_golden(args) -> None:
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, consultation_counts, gap_keys, summarize  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import (
-    # noqa: PLC0415,
-    GoldenFileValidation,
-    load_golden_file,
-    load_golden_records,
-)
+        # noqa: PLC0415,
+        GoldenFileValidation,
+        load_golden_file,
+        load_golden_records,
+    )
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from emmy.serving.release import load_serving_config, model_matches  # noqa: PLC0415
     from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415

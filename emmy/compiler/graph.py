@@ -319,29 +319,29 @@ def _stmt_eval_scope() -> dict:
     from emmy.compiler.ir.axis import Axis, AxisRole, Window
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import (
-    BinaryExpr,
-    Builtin,
-    CastExpr,
-    FuncCallExpr,
-    Literal,
-    TernaryExpr,
-    Var,
-)
+        BinaryExpr,
+        Builtin,
+        CastExpr,
+        FuncCallExpr,
+        Literal,
+        TernaryExpr,
+        Var,
+    )
     from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
     from emmy.compiler.ir.stmt import (
-    Accum,
-    Assign,
-    Cond,
-    Init,
-    Load,
-    Loop,
-    Pack,
-    Select,
-    SelectBranch,
-    StridedLoop,
-    Unpack,
-    Write,
-)
+        Accum,
+        Assign,
+        Cond,
+        Init,
+        Load,
+        Loop,
+        Pack,
+        Select,
+        SelectBranch,
+        StridedLoop,
+        Unpack,
+        Write,
+    )
     from emmy.compiler.ir.tensor.ir import IndexSource
 
     _STMT_EVAL_SCOPE = {
@@ -435,12 +435,12 @@ def _serialize_op_fields(op: Op) -> dict:
     if not isinstance(op, TileOp) or op.schedule is None:
         return fields
     from emmy.compiler.ir.schedule.classic import (
-    # noqa: PLC0415,
-    ClassicScheduleCodec,
-    ClassicScheduleContext,
-    edge_site_spelling,
-    node_id_spelling,
-)
+        # noqa: PLC0415,
+        ClassicScheduleCodec,
+        ClassicScheduleContext,
+        edge_site_spelling,
+        node_id_spelling,
+    )
 
     codec = ClassicScheduleCodec(ClassicScheduleContext(op))
     fields["schedule"] = codec._encode(op.schedule)
@@ -474,13 +474,13 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
         return op_cls(**fields) if fields else op_cls()
     from emmy.compiler.ir.schedule import PlacedTile, ResolvedStage  # noqa: PLC0415
     from emmy.compiler.ir.schedule.classic import (
-    # noqa: PLC0415,
-    ClassicMaterialization,
-    ClassicScheduleCodec,
-    ClassicScheduleContext,
-    parse_edge_site,
-    parse_node_id,
-)
+        # noqa: PLC0415,
+        ClassicMaterialization,
+        ClassicScheduleCodec,
+        ClassicScheduleContext,
+        parse_edge_site,
+        parse_node_id,
+    )
 
     source = op_cls(**fields)
     codec = ClassicScheduleCodec(ClassicScheduleContext(source))

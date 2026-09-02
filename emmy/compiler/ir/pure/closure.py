@@ -33,7 +33,6 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Fold, operand_name
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.pure.scope import edge_axes
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.body import _member_reads
@@ -136,7 +135,16 @@ class Closure:
         The wrapping lambda binds exactly the referenced axes, so :attr:`axes` doubles as the
         edge's positional capture correspondence (what the seam clustering pairs siblings by).
         """
-        params = tuple(axis for axis in axes if axis in edge_axes(operand, axes))
+        # Which of ``axes`` the edge references, read off what it DECLARES: a term's lift params
+        # less the axis it binds, a leaf ``Load``'s own index. Inlined rather than imported — this
+        # is the scoped view constructing itself, and ``ir/pure`` must not reach into the schedule
+        # layer where the general reading lives.
+        declared = (
+            (set(operand.lift.params) - operand.binds_axes())
+            if isinstance(operand, Fold)
+            else {name for expr in operand.exprs() for name in expr.free_vars()}
+        )
+        params = tuple(axis for axis in axes if axis in declared)
         return cls(Lambda(params=params, body=Body((operand,)), results=(operand_name(operand),)), params)
 
     def canonical(self) -> Lambda:

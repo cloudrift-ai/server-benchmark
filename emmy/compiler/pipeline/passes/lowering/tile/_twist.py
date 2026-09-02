@@ -11,9 +11,9 @@ from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.carrier import EXP_FAMILY, exp_combine_states
 from emmy.compiler.ir.pure.closure import Closure
 from emmy.compiler.ir.pure.fold import _operand_result_names, operand_name
-from emmy.compiler.ir.pure.scope import edge_axes, refs_axis
+from emmy.compiler.ir.schedule.views import edge_axes
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Load, Select
+from emmy.compiler.ir.stmt import Assign, Body, Load, Select, refs_axis
 from emmy.compiler.ir.stmt.body import _member_reads
 
 logger = logging.getLogger(__name__)

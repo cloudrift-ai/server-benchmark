@@ -60,9 +60,8 @@ from emmy.compiler.ir.pure.fold import (
     is_contraction,
     operand_body,
 )
-from emmy.compiler.ir.pure.scope import edge_axes
 from emmy.compiler.ir.schedule import Raster
-from emmy.compiler.ir.schedule.views import cone_seam
+from emmy.compiler.ir.schedule.views import cone_seam, edge_axes
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage

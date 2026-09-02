@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.pure.scope import edge_axes
 from emmy.compiler.ir.schedule import (
     PlacedTile,
     Raster,
@@ -54,7 +53,7 @@ from emmy.compiler.ir.schedule.classic import (
     edge_site_spelling,
     node_id_spelling,
 )
-from emmy.compiler.ir.schedule.views import ContractionFacts, Projection, Reduction
+from emmy.compiler.ir.schedule.views import ContractionFacts, Projection, Reduction, edge_axes
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp

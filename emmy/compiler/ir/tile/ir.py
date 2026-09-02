@@ -42,7 +42,6 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, is_contraction, operand_body
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
-from emmy.compiler.ir.pure.scope import edge_axes
 from emmy.compiler.ir.pure.tree import Visit, walk
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
@@ -55,6 +54,7 @@ from emmy.compiler.ir.schedule.views import (
     Projection,
     Reduction,
     contraction_facts,
+    edge_axes,
     node_view,
 )
 from emmy.compiler.ir.sigma import Sigma

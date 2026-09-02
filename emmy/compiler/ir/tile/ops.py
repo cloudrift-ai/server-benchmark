@@ -25,14 +25,14 @@ from emmy.compiler.ir.pure.fold import (
     deep_reads,
     is_contraction,
 )
-from emmy.compiler.ir.pure.scope import edge_axes, refs_axis, stmt_axis_names
 from emmy.compiler.ir.schedule import PlacedTile, Reduce
 from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
     classic_node_key,
     classic_stage_key,
 )
-from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
+from emmy.compiler.ir.schedule.views import edge_axes
+from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select, refs_axis, stmt_axis_names
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites

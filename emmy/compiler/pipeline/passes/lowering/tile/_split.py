@@ -38,9 +38,9 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.algebra import component_ops
 from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, is_contraction
-from emmy.compiler.ir.pure.scope import edge_axes
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
+from emmy.compiler.ir.schedule.views import edge_axes
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes

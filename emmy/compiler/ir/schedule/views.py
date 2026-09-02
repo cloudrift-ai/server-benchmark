@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold, _operand_result_names, deep_reads, is_contraction, operand_body, splice_operands
-from emmy.compiler.ir.pure.scope import edge_axes
 from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.ir.stmt import Accum, Body
 
@@ -167,6 +166,25 @@ __all__ = [
     "contraction_facts",
     "node_view",
 ]
+
+
+def edge_axes(edge, axes) -> frozenset[str]:
+    """Which of ``axes`` this operand edge references — answered from the DECLARATION.
+
+    The caller already holds the axis set, because the binder handed it down. It therefore has no
+    business asking the term to re-derive it by walking a lowered body for names that look
+    axis-shaped: a term declares the enclosing coordinates it reads as lift params
+    (``Lambda.closing``'s scope), so the answer is an intersection.
+
+    Two edge kinds, one rule. A nested term answers from its params, less the axis it BINDS —
+    an edge reducing over its own ``k`` shadows an enclosing one of the same name and does not
+    vary with it. A ``Load`` is a leaf with no params, so it answers from its own index exprs;
+    that is reading the edge's own data, not interrogating it about its surroundings.
+    """
+    wanted = frozenset(axes)
+    if isinstance(edge, Fold):
+        return wanted & (set(edge.lift.params) - edge.binds_axes())
+    return wanted & {name for expr in edge.exprs() for name in expr.free_vars()}
 
 
 # ``cone_seam`` lives HERE, not on the term. "Is this edge row-invariant or does it vary with the

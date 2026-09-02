@@ -30,8 +30,8 @@ from emmy.compiler.ir.pure import (
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.closure import Closure, canonical_under, equivalent_clusters
 from emmy.compiler.ir.pure.fold import _operand_result_names, _ordered_projection, operand_name
-from emmy.compiler.ir.pure.scope import edge_axes, refs_axis
-from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.ir.schedule.views import edge_axes
+from emmy.compiler.ir.stmt import Assign, Body, Load, refs_axis
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.structural import instance_memo
 

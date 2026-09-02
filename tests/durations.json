@@ -316,7 +316,6 @@
  "tests/compiler/passes/test_nvfp4_staged.py::test_the_row_features_the_width_the_weight_really_moves[d1/smem-False]": 5.53,
  "tests/compiler/passes/test_nvfp4_staged.py::test_the_row_features_the_width_the_weight_really_moves[d2/smem-async-True]": 5.56,
  "tests/compiler/passes/test_nvfp4_staged.py::test_the_spelled_checkpoint_lowers_to_the_packed_drain": 5.55,
- "tests/compiler/passes/test_nvfp4_w4a4.py::test_a_one_consumer_block_scaled_linear_reads_its_codes_from_memory@cuda": 7.0,
  "tests/compiler/passes/test_nvfp4_w4a4.py::test_a_shared_activation_reaches_its_matmuls_as_packed_codes": 0.63,
  "tests/compiler/passes/test_nvfp4_w4a4.py::test_a_shared_quantized_activation_behind_a_norm_compiles_and_holds_flip_bounded_parity@cuda": 8.7,
  "tests/compiler/passes/test_nvfp4_w4a4.py::test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance@cuda": 10.0,

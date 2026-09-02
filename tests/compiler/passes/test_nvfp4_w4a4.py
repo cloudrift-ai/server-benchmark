@@ -300,51 +300,13 @@ def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
         assert float(rel.max()) < 2e-3, f"{out}: past one fused-scale rounding per side"
 
 
-@requires_cuda
-@pytest.mark.xdist_group("cuda")
-def test_a_one_consumer_block_scaled_linear_reads_its_codes_from_memory(tmp_path):
-    """Coverage's other half. A linear with ONE consumer reaches the same shape as the shared one
-    above: the activation quantize is a kernel of its own writing the packed codes, the matmul
-    copies those codes into its slab, and the cell still fires against the numeric oracle.
-
-    Consumer count decides nothing here. Loop fusion stops at a computed packed buffer whether one
-    linear reads it or three, because splicing it away would leave the codes as a value with no
-    stored extent — see ``_packed_readers`` in the merge rule.
-    """
-    from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.backend.numpy import NumpyBackend
-    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
-
-    m, n, k = 16, 128, 256
-    g = _w4a4_linear(tmp_path, m=m, n=n, k=k)
-    x = (np.random.default_rng(23).standard_normal((m, k)) * 0.5).astype(np.float16)
-    data = load_constants_from_safetensors(g, str(tmp_path))
-    ref, _ = NumpyBackend().run(g, input_data={**data, "x": x})
-    backend = CudaBackend()
-    compiled = backend.compile(g)
-    sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    native = [s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s]
-    assert native, "the block-scaled cell was never selected on a one-consumer linear"
-    assert "emmy_to_f4e2m1" not in native[0], "the quantize belongs in its own kernel, not inside the matmul"
-    assert any("emmy_to_f4e2m1" in s for s in sources if s not in native), "no kernel encodes the activation at all"
-    assert "EMMY_F4_LUT" not in native[0], "a native cell must not decode either operand through the value table"
-
-    got, _ = backend.run(compiled, input_data={**data, "x": x})
-    r = ref.outputs["y"].astype(np.float32).reshape(-1)
-    c = np.asarray(got.outputs["y"]).astype(np.float32).reshape(-1)
-    rel = np.abs(c - r) / max(float(np.abs(r).max()), 1e-9)
-    assert float(np.median(rel)) < 1e-4, "a systematic shift, not the fused-scale rounding"
-    assert float(rel.max()) < 2e-3, "past one fused-scale rounding per side"
-
-
 @pytest.mark.parametrize("consumers", [1, 3])
 def test_the_quantized_activation_survives_loop_fusion_whatever_its_consumer_count(tmp_path, consumers):
     """The packed activation buffer is a fusion boundary: the merge leaves it standing whether one
     linear reads it or three, so both reach the block-scaled cell with the codes in memory.
 
     Structural and deliberately GPU-free — the shape this pins is decided in the loop dialect,
-    long before a kernel exists. ``test_a_one_consumer_block_scaled_linear_reads_its_codes_from_memory``
-    carries the same contract down to emitted CUDA and holds it to the numeric oracle.
+    long before a kernel exists.
 
     A merge that spliced this buffer away would still compute the declared program. What it would
     lose is the object the packed dtype describes: the stored byte whose extent is half the

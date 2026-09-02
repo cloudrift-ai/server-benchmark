@@ -646,7 +646,11 @@ class Fold:
         # ``axes`` is the enclosing scope, supplied by the binder. Declared beside the operand
         # names so canonicalizing a contraction re-forms its lift WITHOUT resetting the caller's
         # declaration — this constructor is the one the semiring canonicalization builds through.
-        bound = tuple(operand_name(edge) for edge in operands)
+        # EVERY result component, not one name per edge: a merged multi-result edge (the semiring
+        # canonicalization coalesces overlapping cones into one) binds each of its results, and the
+        # formation invariant checks against exactly that. Binding only the primary name left the
+        # extra component unbound and tripped the positional check.
+        bound = tuple(name for edge in operands for name in _operand_result_names(edge))
         scope = tuple(axis for axis in axes if axis != k_axis.name and axis not in bound)
         lift = Lambda.closing((k_axis.name, *bound, *scope), Body(tuple(body)), tuple(f"{acc}__v" for acc in accs))
         init, combine = M(*([plus] * len(accs)), names=accs)

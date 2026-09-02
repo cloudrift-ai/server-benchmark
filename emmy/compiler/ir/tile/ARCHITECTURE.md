@@ -69,29 +69,12 @@ cone into a zero-axis Fold edge. Alpha-equivalent product arguments coalesce to 
 source cones overlap; other overlapping cones become one multi-result operand edge so shared computation remains
 single. A semiring without one shared product argument remains a general planar Fold.
 
-Closing runs at both scope kinds. A zero-axis root moves its body dependencies onto captured contraction operands;
-a REDUCING fold does the same for a chain that depends on its own iteration axis and so lives in its lift body —
-attention's per-key statistic and rsqrt ahead of the score dot's computed B cone. The reduce-body move is gated on
-exclusive consumption (every moved definition dies into the closed edges), so the step's work is repackaged, never
-duplicated. Both rules measure an edge's captures with `Fold.captures` — scope-aware, so a name a sibling operand binds
-inside the edge is not a capture and an already-closed edge never re-fires the rewrite. A cone closed at its axes is
-what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
-vector) becomes materializable once per key instead of recomputed per query row.
-
-An iteration never crosses into a new evaluation domain. Attaching an iteration-bearing provider to a contraction
-operand would evaluate it once per step of every intervening binder; normalization therefore leaves that provider at
-its defining scope. Straight-line chains still close normally, and a reducing root's own axis counts as its existing
-domain. A stored fold left capturing by this rule remains placeable: the placement fork resolves its captures outward
-through the occurrence's lexical environment at offer time, without moving the stored tree.
-
-Three walks compute a capture's provider cone, at three stages, and each is allowed to move something different.
-Normalization's closing rules (`normalize.py`, above) are the only walk that REWRITES the stored tree, and only for
-straight-line providers within one evaluation domain. The placement fork's provider closure
-(`lowering/tile/_cut.py`) moves nothing: it proves every occurrence resolves to equal sources and offers the closed
-value as a seam, recording fold producers as the seam's requirements. Kernel lowering's per-cell closure
-(`lowering/kernel/_factor.py`) moves sibling providers into a computed operand's compute fill of the one kernel being
-emitted — a codegen fact that exists only inside that realization. A new capture-resolution need belongs in one of
-these three, not a fourth walk.
+A term is CLOSED: its values arrive through its operand edges, and the only names its lift reads from outside are the
+iteration axes its ancestors bind. That is a fact of construction, not of a rewrite — the lift makes a statement a
+term reads into that term's operand — so normalization has no capture to drain, the placement fork offers a cone as a
+seam wherever it is closed at the axes of every occurrence, and kernel lowering emits a term's operands ahead of the
+statements that read them. A computed operand (the RMSNorm'd, RoPE'd K vector) is materializable once per key rather
+than recomputed per query row because it is such a closed cone.
 
 An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
 projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same

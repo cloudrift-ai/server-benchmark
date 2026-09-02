@@ -66,8 +66,8 @@ class Lambda:
         # supplied by the enclosing binder, and a ``Load``'s index ``Var`` is the same ``Var`` a
         # value read would be. Deciding it by kind is what this reading does and what asking for
         # every free name could not: binding coordinates as params removed the distinction rather
-        # than making it, and those unapplied trailing params were the whole environment/capture
-        # machinery downstream. :meth:`closing` FORMS a closed lambda; this only refuses.
+        # than making it, and every downstream reader then had to resolve those unapplied trailing
+        # params itself. :meth:`closing` FORMS a closed lambda; this only refuses.
         free = self.body.ssa_uses - defined
         if free:
             raise ValueError(

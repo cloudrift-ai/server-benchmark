@@ -20,7 +20,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 
 from emmy.compiler.ir.expr import affine_form
-from emmy.compiler.ir.pure import Fold, Lambda
+from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import refs_axis
@@ -175,147 +175,6 @@ def _apply_spine(split, carried: str, out: str, taken: set[str]) -> tuple[tuple,
     return tuple(emitted), out
 
 
-def _carries_iteration(node) -> bool:
-    """Whether a provider chain contains a Fold axis rather than only straight-line code."""
-    if getattr(node, "axis", None) is not None:
-        return True
-    children = (*node.operands, *node.lift.body) if isinstance(node, Fold) else tuple(stmt for body in node.nested() for stmt in body)
-    return any(_carries_iteration(child) for child in children)
-
-
-def _with_source(node: Fold, source) -> Fold:
-    """``node`` with ``source`` APPENDED to its operands and its lift rebound positionally.
-
-    Appended, never prepended: the path codec spells a site by its operand role and index, so
-    inserting ahead of the existing edges renumbers every child path and every stored ``PLACE@``
-    pin addressing them stops resolving. Appending leaves the existing indices alone and gives the
-    drained producer the next one. Evaluation order is not tuple order —
-    :func:`~emmy.compiler.ir.pure.fold.splice_operands` places each edge's body before its first
-    read, providers ahead of dependents — so the producer still lands before the value it feeds.
-
-    A zero-axis node rebuilds as a fresh term over the same operands; a
-    reducing node keeps its iteration var first and rebinds the rest, so the formation invariant —
-    one lift param per operand result component — holds at either position."""
-    operands = (*node.operands, source)
-    lead = () if node.axis is None else (node.axis.name,)
-    bound = tuple(name for edge in operands for name in edge.exposes)
-    return replace(node, operands=operands, lift=Lambda.closing((*lead, *bound), node.lift.body, node.lift.results))
-
-
-def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
-    """The shared walk of both closing rewrites: establish the closure invariant on EVERY node.
-
-    A computed zero-axis operand may still carry value captures
-    (:func:`~emmy.compiler.ir.pure.closure.value_captures` — sibling-defined data rather
-    than axes); ``provider(edge, binders)`` returns the source edge that supplies them, or
-    ``None`` to leave the operand open. ``binders`` counts only the iteration domains crossed
-    BELOW ``root`` — a reducing root already evaluates inside its own axis, and a projection root
-    has none — and each caller owns what a provider may take and what happens to the drained
-    chain afterwards.
-
-    The walk does not ask what KIND of node it stands on. The closure invariant is a property of
-    the term — ``ir/pure/closure``: "a normalized term's values arrive through operand edges, and
-    the only names its lift may capture are axes bound by its ancestors" — so a projection's or a
-    twisted reduce's operand edge is closed by the same rule that closes a contraction's. The
-    drained edge carries its PRODUCER, never a reference to the enclosing scope: an operand that
-    named an outer value would be a capture with positional spelling, and the term would still not
-    be evaluable from its own parts. Sharing is restored by :func:`_share_common_cones`, and a
-    value that now has two producers becomes ONE seam at placement — the module-header rule.
-    """
-
-    def close(node: Fold, binders: tuple[str, ...] = ()) -> Fold:
-        inner = (*binders, node.axis.name) if node.axis is not None else binders
-        operands = tuple(close(edge, inner) if isinstance(edge, Fold) else edge for edge in node.operands)
-        body = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.lift.body)
-        current = replace(node, operands=operands) if operands != node.operands else node
-        if body != current.lift.body:
-            current = replace(current, lift=replace(current.lift, body=Body(body)))
-
-        changed = False
-        closed = []
-        for edge in current.operands:
-            if not isinstance(edge, Fold) or edge.axis is not None:
-                closed.append(edge)
-                continue
-            source = provider(edge, binders)
-            if source is None:
-                closed.append(edge)
-                continue
-            closed.append(_with_source(edge, source))
-            changed = True
-        current = replace(current, operands=tuple(closed)) if changed else current
-
-        # A fold sitting as a BODY MEMBER captures exactly as an operand edge does — attention's
-        # twisted per-key statistic reads the scale and the row maximum its siblings define. It
-        # takes them the same way: as operands carrying their producer, at whichever position it
-        # sits. Its own axis stays the lift's leading binder, so the drain is one move either way.
-        members = []
-        for stmt in current.lift.body:
-            source = provider(stmt, binders) if isinstance(stmt, Fold) else None
-            members.append(stmt if source is None else _with_source(stmt, source))
-        if any(fresh is not prior for fresh, prior in zip(members, current.lift.body, strict=True)):
-            current = replace(current, lift=replace(current.lift, body=Body(members)))
-        return current
-
-    rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
-    rewritten_body = Body(close(stmt) if isinstance(stmt, Fold) else stmt for stmt in root.lift.body)
-    return rewritten_operands, rewritten_body
-
-
-def _provider_needs(edge, provider_order: tuple[str, ...], provider_names: frozenset[str]) -> tuple[str, ...]:
-    """The provider names an operand edge captures, in provider order — :attr:`Fold.captures`, the
-    declared roll-up of the edge's own environment and its edges'. Reading it as empty (on the
-    grounds that "a term captures nothing") is what once made the closing rewrites inert: every
-    ``provider()`` returned ``None`` and the drain stopped draining."""
-    return tuple(name for name in provider_order if name in (edge.captures & provider_names))
-
-
-def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
-    """Move a reducing fold's body-resident producer chain onto a captured contraction operand.
-
-    :func:`_close_projection` closes contraction operands against a zero-axis root, but a chain
-    that depends on the fold's own iteration axis lives in the reducing fold's lift body, one
-    scope below any projection — attention's per-key statistic and its rsqrt ahead of the score
-    dot's B cone. Moving that chain onto the captured edge closes the cone at the contraction's
-    fold axis plus the enclosing free axes, which is what lets the placement fork offer the
-    operand as a workspace seam. The move is gated on exclusive consumption: every moved
-    definition must die into the closed edges, so the step's work is repackaged rather than
-    duplicated and a chain a sibling member still reads stays put."""
-    if root.axis is None or root.as_contraction() is not None or not root.lift.body:
-        return root
-    body = root.lift.body
-    provider_order = tuple(dict.fromkeys(name for stmt in body for name in stmt.defines()))
-    provider_names = frozenset(provider_order)
-    moved: set[int] = set()
-
-    def provider(edge, binders: tuple[str, ...]) -> Fold | None:
-        names = _provider_needs(edge, provider_order, provider_names)
-        if not names:
-            return None
-        cone = body.backward_cone(names)
-        defined = {name for stmt in cone.members for name in stmt.defines()}
-        if not set(names) <= defined:
-            return None
-        if binders and any(_carries_iteration(member) for member in cone.members):
-            return None
-        moved.update(id(stmt) for stmt in cone.members)
-        return Fold(lift=Lambda.closing((), Body(cone.members), names))
-
-    rewritten_operands, rewritten_body = _close_tree(root, provider)
-    if not moved:
-        return root
-
-    kept = Body(stmt for stmt in rewritten_body if id(stmt) not in moved)
-    moved_defs = {name for stmt in body if id(stmt) in moved for name in stmt.defines()}
-    outside = {result for result in root.lift.results if isinstance(result, str)}
-    outside.update(name for stmt in kept for name in Body((stmt,)).ssa_uses)
-    if root.observe is not None:
-        outside.update(root.observe.params)  # closed: its reads ARE its params (axis + carried state)
-    if moved_defs & outside:
-        return root  # the chain does not die into the closed edges — moving it would duplicate work
-    return replace(root, operands=rewritten_operands, lift=replace(root.lift, body=kept))
-
-
 def _a_leads(node: Fold) -> Fold:
     """Put the contraction's A operand first — ``operands[0]`` IS A, by canonical form.
 
@@ -329,8 +188,7 @@ def _a_leads(node: Fold) -> Fold:
     Binding is positional, so the lift's params move with the operands; the body reads by name and
     is untouched.
     """
-    ring = node._semiring
-    if ring is None or len(node.operands) < 2:
+    if node.axis is None or len(node.operands) < 2 or any(not isinstance(stmt, Assign) or len(stmt.args) != 2 for stmt in node.lift.body):
         return node
     by_name = {name: edge for edge in node.operands for name in edge.exposes}
     argument_sets = [set(product.args) for product in node.lift.body]
@@ -357,9 +215,9 @@ def _a_leads(node: Fold) -> Fold:
     if node.operands[0] is a_edge:
         return node
     reordered = (a_edge, *(edge for edge in node.operands if edge is not a_edge))
-    lead = (node.axis.name,) if node.axis is not None else ()
-    params = (*lead, *(name for edge in reordered for name in edge.exposes))
-    return replace(node, operands=reordered, lift=replace(node.lift, params=params))
+    params = (node.axis.name, *(name for edge in reordered for name in edge.exposes))
+    candidate = replace(node, operands=reordered, lift=replace(node.lift, params=params))
+    return candidate if candidate.as_contraction is not None else node
 
 
 def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str], sweep_axes: frozenset[str]) -> Fold:
@@ -372,9 +230,6 @@ def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[
     body = _normalize_body(node.lift.body, body_axes, implicit_axes, sweep_axes)
     if body != node.lift.body:
         node = replace(node, lift=replace(node.lift, body=Body(body)))
-    # _canonical_semiring deleted
-    if node.axis is not None:
-        return _close_reduce_body(node, body_axes, sweep_axes)
     return node
 
 

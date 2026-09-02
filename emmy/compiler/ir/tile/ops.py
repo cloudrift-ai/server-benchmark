@@ -340,7 +340,7 @@ class Sched:
             # The first operand's own free axis leads — ``ContractionView.left``, which IS that
             # reading. Which of the pair is physically M stays the placement's answer; this only
             # puts the shared operand's axis first.
-            view = node.as_contraction()
+            view = node.as_contraction
             if mn is None or view is None:
                 return mn
             first, second = mn

@@ -40,7 +40,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold, _placed
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.pure.tree import Visit, walk
 from emmy.compiler.ir.schedule import Placement, WarpSpec
@@ -331,10 +331,9 @@ def lower_with_output_specs(op, specs) -> list[Stmt]:
         return out
 
     if isinstance(op, Fold) and op.axis is None:
-        # Each edge where its dependencies allow — an operand may READ a body-defined name, so
-        # all-operands-first emits it ahead of the value it consumes.
-        edges, statements = op.derived_step
-        body = _placed(edges, lower_body(statements), lambda edge: edge.lower())
+        # Operands first — the same prefix ``Fold.lower`` builds — then the projection, its regions
+        # reconstituted as the loops they were captured from.
+        body = list(dict.fromkeys([*(stmt for edge in op.operands for stmt in edge.lower()), *lower_body(op.lift.body)]))
         root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= _projection_results(op.lift.body))
         return apply_output_specs(body, root_specs, observed=observed_result_names(op))
     return apply_output_specs(op.lower(), specs, observed=observed_result_names(op))
@@ -497,14 +496,14 @@ class TileOp(Op):
             candidate_axes = tuple(dict.fromkeys(axis.name for axis in candidate_scope))
             candidate_sweeps = frozenset(name for name in candidate_axes if name not in {axis.name for axis in candidate_free})
             candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,), sweep_axes=candidate_sweeps)
-            if any(site.node.as_contraction() is not None for site in sites(candidate)):
+            if any(site.node.as_contraction is not None for site in sites(candidate)):
                 normalized = candidate
                 object.__setattr__(self, "place", replace(self.place, free=candidate_free))
         if self.schedule is not None and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
-        contractions = tuple(site.node for site in sites(normalized) if site.node.as_contraction() is not None)
+        contractions = tuple(site.node for site in sites(normalized) if site.node.as_contraction is not None)
         promoted = {
             store.sweep.name
             for store in self.output_specs
@@ -623,7 +622,7 @@ class TileOp(Op):
     def contracts(self, site: NodeId) -> bool:
         """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want."""
         view = self.views[site]
-        return view.as_contraction() is not None
+        return view.as_contraction is not None
 
     @cached_property
     def family_sites(self) -> frozendict[str, tuple[NodeId, ...]]:
@@ -650,7 +649,7 @@ class TileOp(Op):
 
     @cached_property
     def _packed_readings(self) -> frozendict:
-        return packed_readings(tuple(site.node for site in self.sites if site.node.as_contraction() is not None), self.inputs)
+        return packed_readings(tuple(site.node for site in self.sites if site.node.as_contraction is not None), self.inputs)
 
     def packed_reading(self, node) -> tuple:
         """One node's ``(B copy, pair)`` packed-operand readings.

@@ -96,7 +96,7 @@ def test_non_distributing_lift_stays_planar() -> None:
     tile = _tile(Body((Loop(axis=m, body=Body((Loop(axis=n, body=Body(cell)),))),)))
     node = tile.op
     assert isinstance(node, Fold) and node.axis is not None and node.role is AxisRole.PLANAR
-    assert node.as_contraction() is None
+    assert node.as_contraction is None
 
 
 def test_contraction_formation_gates_on_the_semiring() -> None:
@@ -108,7 +108,7 @@ def test_contraction_formation_gates_on_the_semiring() -> None:
     with pytest.raises(ValueError, match="semiring"):
         Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),), product="maximum")
     node = Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),))
-    view = node.as_contraction()
+    view = node.as_contraction
     assert (view.product.name, view.plus.name) == ("multiply", "add")
 
 

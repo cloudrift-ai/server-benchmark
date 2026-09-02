@@ -595,7 +595,7 @@ def test_contraction_orients_a_shared_commutative_argument_first() -> None:
     tile = TileOp(op=planar, place=Placement(free=(Axis("m", 8), Axis("n", 16))))
 
     assert tile.op.role is AxisRole.CONTRACTION
-    view = tile.op.as_contraction()
+    view = tile.op.as_contraction
     assert (view.product.name, view.plus.name) == ("multiply", "add")
     assert tile.op.a.input == "w"
     assert [channel.b.input for channel in tile.op.channels] == ["x0", "x1"]

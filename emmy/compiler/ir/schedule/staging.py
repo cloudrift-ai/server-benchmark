@@ -310,7 +310,7 @@ def resolve_warp_stage(
             return None
     for eb, inner, row_axis in (
         (a_nbytes, bk_elems, None),
-        (b_nbytes, bk_elems if c.as_contraction().b_trans else n.tile, None if c.as_contraction().b_trans else n.axis),
+        (b_nbytes, bk_elems if c.as_contraction.b_trans else n.tile, None if c.as_contraction.b_trans else n.axis),
     ):
         if eb != 1:
             continue
@@ -329,15 +329,15 @@ def resolve_warp_stage(
         stage.transport == "smem-tma"
         and rank_ok
         and box_ok
-        and _warp_tma(c.axis, n.axis, n.tile, bk_elems, a_nbytes, b_nbytes, n.mask, c.as_contraction().b_trans)
+        and _warp_tma(c.axis, n.axis, n.tile, bk_elems, a_nbytes, b_nbytes, n.mask, c.as_contraction.b_trans)
     )
-    vector_copy_ok = _warp_vector_copy(c.axis, n.tile, bk_elems, n.mask, c.as_contraction().b_trans)
+    vector_copy_ok = _warp_vector_copy(c.axis, n.tile, bk_elems, n.mask, c.as_contraction.b_trans)
     cp_ok = stage.transport == "smem-async" and vector_copy_ok
     sync_ok = sync_copy and vector_copy_ok
     if not (tma_ok or cp_ok or sync_ok):
         return None
     pad_a, pad_b = (BYTE_SLAB_PAD if eb == 1 and cp_ok else 0 for eb in (a_nbytes, b_nbytes))
-    b_rows, b_cols = (n.tile, bk_elems + pad_b) if c.as_contraction().b_trans else (bk_elems, n.tile + pad_b)
+    b_rows, b_cols = (n.tile, bk_elems + pad_b) if c.as_contraction.b_trans else (bk_elems, n.tile + pad_b)
     slot_bytes = m.tile * (bk_elems + pad_a) * a_nbytes + b_rows * b_cols * b_nbytes
     if slot_bytes > budget:
         return None
@@ -356,7 +356,7 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int)
     # A masked-N B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
     # hang on the misaligned copy; a transposed B has no scalar drain variant (the warp tier stages
     # it into an N-major slab).
-    if tile.n.mask or c.as_contraction().b_trans:
+    if tile.n.mask or c.as_contraction.b_trans:
         return None
     if not inputs or not c.operands[0].is_slab or not c.operands[1].is_slab or c.operands[0].loads[0].input not in inputs:
         return None
@@ -440,7 +440,7 @@ def computed_operand_cover(c: Fold, tile: Tile, *, converting: bool = False, k_a
                 "chunk runs along K and cannot clamp a symbolic K's partial tail; the masked fill "
                 "covers a COMPUTED (or converting) A only"
             )
-        if c.as_contraction().b_trans:
+        if c.as_contraction.b_trans:
             return (
                 "a transposed B stages N-major (K contiguous), so its cp.async chunk runs along K "
                 "and cannot clamp a symbolic K's partial tail; pin a canonical B layout"

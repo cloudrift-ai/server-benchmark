@@ -473,21 +473,6 @@ def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple
     return frag
 
 
-def _captured_prologue(partial_fold: Fold, projection: tuple, split: Axis, free: tuple) -> tuple:
-    """The projection stmts the sliced fold still CAPTURES — their backward cone, carried into the
-    partial. A projection evaluates a stmt once per cell (a scalar scale load, the reciprocal an
-    attention epilogue scales with) that the fold's lift reads by name; slicing the fold alone
-    would leave that capture dangling in the partial."""
-    # Read off the DECLARATION (:attr:`Fold.captures`) rather than lowering the partial and
-    # scanning it for free names. The axis subtraction stays — a coordinate is supplied by the
-    # enclosing loop, not by the projection.
-    axes = {split.name, *(a.name for a in free)}
-    captures = partial_fold.captures - frozenset(axes)
-    if not captures:
-        return ()
-    return Body(projection).backward_cone(captures).members
-
-
 # ---- the realization -------------------------------------------------------------------------- #
 
 
@@ -506,7 +491,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     assert node is not None, "the split offer fires on node-form kernels only"
     root, projection, projection_pieces = _split_projection(tile, root, node)
     free = tuple(tile.place.free)
-    if node.as_contraction() is not None:
+    if node.as_contraction is not None:
         split, partial_fold = _sliced_contraction(node, cta)
     else:
         _enforce(splitk_width(node.axis, cta))
@@ -516,10 +501,6 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     n_comp = len(states)
     out = root.output
     cell = _cell_index(projection, free)
-    # The prologue cone the sliced fold still captures rides into the partial
-    # (:func:`_captured_prologue`); the wrapper's dependency placement lands it ahead of the fold
-    # that reads it.
-    prologue = _captured_prologue(partial_fold, projection, split, free)
     frag = _frag(match, root)
 
     if finalize == "atomic":
@@ -562,7 +543,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # split axis joins as a lead grid axis via the partial tile's OWN placement — the view derives
     # lead axes from the placement, so nothing is restamped on the node.
     ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
-    partial_tile = _piece(_project(partial_fold, prologue), (split, *free), output_specs=ws_stores)
+    partial_tile = _piece(partial_fold, (split, *free), output_specs=ws_stores)
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the

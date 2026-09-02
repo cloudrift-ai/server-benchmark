@@ -118,10 +118,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   earlier compiler pass wrote onto the operation.
 - **Mutable / immutable** — A mutable object can be changed after creation. An immutable object cannot; code creates
   a replacement instead. Emmy's graph is mutable, while many nested compiler statements are immutable.
-- **Closure** — A pure lambda paired with the enclosing iteration axes it may read. In Emmy the environment is an
-  index space: a normalized term captures only iteration axes, never data values, which arrive through operand
-  edges. Alpha-equivalent closures with equal captures denote one value; under different captures they are one
-  function with distinct values. Defined in `ir/pure/closure.py`.
+- **Closure** — A pure lambda paired with the enclosing iteration axes it may read. A term reads only those axes,
+  never a data value: values arrive through operand edges. Alpha-equivalent closures over equal axes denote one
+  value; over different axes they are one function with distinct values. Defined in `ir/pure/closure.py`.
 - **Structural identity / structural key** — A fingerprint based on computation and data flow rather than cosmetic
   names. It lets Emmy recognize equivalent compiler candidates.
 - **Idempotent rule** — A rule that does not keep changing its own output when applied again. Compiler rewrite rules

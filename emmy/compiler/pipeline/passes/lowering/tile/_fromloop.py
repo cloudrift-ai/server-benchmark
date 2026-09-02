@@ -30,6 +30,65 @@ def _stamp_axes(loop: Loop) -> Loop:
     return replace(loop, body=Body(body))
 
 
+def _unbound(term: Fold) -> frozenset[str]:
+    """What ``term``'s subtree still reads that it does not bind — the names its level must supply
+    through operands before the term is closed. Trailing lift params past the operand binding and
+    the operands' own, less the term's axes, its operands' results and its lift body's defs."""
+    lead = 0 if term.axis is None else 1
+    arity = sum(len(edge.exposes) for edge in term.operands)
+    names = set(term.lift.params[lead + arity :])
+    for edge in term.operands:
+        names |= _unbound(edge)
+    bound = {axis.name for axis in term.axes} | {name for edge in term.operands for name in edge.exposes}
+    return frozenset(names - bound - (term.lift.defined - set(term.lift.params)))
+
+
+def _closed(edges: tuple, stmts: Body, axes: tuple) -> tuple[tuple, Body]:
+    """Close every term at one level over what it reads from that level.
+
+    A term is closed by CONSTRUCTION: a statement it reads arrives as an operand — a bare load as a
+    slab, a scalar chain as a zero-axis cone over the level's statements — and a sibling term's
+    state as that sibling itself, the same object, so sharing keeps it one value. The level keeps
+    a moved statement only while its own remaining statements still read it. Coordinates are not
+    values: an axis the term reads stays a trailing param, bound by the enclosing loop.
+    """
+    defined_by = {name: stmt for stmt in stmts for name in stmt.defines()}
+    exposed: dict[str, Fold] = {}
+    consumed: set[int] = set()
+    drained: set[int] = set()
+    closed = []
+    for edge in edges:
+        needed = _unbound(edge) & (set(defined_by) | set(exposed))
+        extra: list[Fold] = []
+        chain = sorted(name for name in needed if name in defined_by)
+        if chain:
+            cone = stmts.backward_cone(tuple(chain))
+            consumed.update(id(stmt) for stmt in cone.members)
+            if len(cone.members) == 1 and isinstance(cone.members[0], Load):
+                extra.append(Fold.slab(cone.members[0], axes))
+            else:
+                operands = tuple(dict.fromkeys(exposed[name] for name in sorted(cone.external_reads) if name in exposed))
+                bound = tuple(name for edge in operands for name in edge.exposes)
+                extra.append(Fold(operands=operands, lift=Lambda.closing(bound, Body(cone.members), tuple(chain))))
+        extra.extend(dict.fromkeys(exposed[name] for name in sorted(needed) if name in exposed))
+        drained.update(id(term) for term in extra)
+        if extra:
+            operands = (*edge.operands, *extra)
+            lead = () if edge.axis is None else (edge.axis.name,)
+            bound = tuple(name for edge in operands for name in edge.exposes)
+            edge = replace(edge, operands=operands, lift=Lambda.closing((*lead, *bound), edge.lift.body, edge.lift.results))
+        closed.append(edge)
+        exposed.update((name, edge) for name in edge.exposes)
+    rest = tuple(stmt for stmt in stmts if id(stmt) not in consumed)
+    reads = {name for stmt in rest for name in Body((stmt,)).ssa_uses}
+    still = stmts.backward_cone(tuple(reads)).members
+    keep = {id(stmt) for stmt in rest} | {id(stmt) for stmt in still}
+    # A sibling that moved into a reader stays at the level only while the level's own statements
+    # still read it; otherwise its one position is under that reader.
+    level = tuple(edge for edge in closed if id(edge) not in drained or reads & set(edge.exposes))
+    return level, Body(tuple(stmt for stmt in stmts if id(stmt) in keep))
+
+
 def lift_body(body, axes: tuple = ()) -> tuple[tuple, Body]:
     """Lift one statement tree into ``(operand terms, statements)`` — SEPARATED, bottom up.
 
@@ -37,9 +96,9 @@ def lift_body(body, axes: tuple = ()) -> tuple[tuple, Body]:
     statement sequence where its ``Loop`` stood. So no mixed stmt/term stream exists at any point
     and none crosses a function boundary: a ``Body`` holds statements because that is all it was
     ever given, rather than because a later boundary sorted a sequence that should not have been
-    built. Separation IS the construction, and the order between a term and the statements it
-    reads is not lost with it: an operand lands where its dependencies allow when the level lowers
-    (``_placed``), so ``term; scalar; term`` needs no repair.
+    built. Separation IS the construction, and so is closure: a term takes what it reads from its
+    level as operands (:func:`_closed`), so the level lowers its operands first and its statements
+    after, with nothing left to order by dependency.
 
     A reduce under an output SWEEP is a term evaluated over the sweep coordinate — attention's
     ``Σ_k P·V`` per output column. It joins the enclosing level's operands with its slabs declaring
@@ -76,7 +135,7 @@ def lift_body(body, axes: tuple = ()) -> tuple[tuple, Body]:
                 continue
             stmt = stmt.with_bodies(tuple(cell for _, cell in lifted))
         stmts.append(stmt)
-    return tuple(edges), Body(stmts)
+    return _closed(tuple(edges), Body(stmts), axes)
 
 
 def fold_from_loop(loop: Loop) -> Fold:

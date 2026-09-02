@@ -41,7 +41,7 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
     facts = {}
     for site in range(len(owner.sites)):
         view = owner.views[site]
-        if view.as_contraction() is None:
+        if view.as_contraction is None:
             continue
         record = owner.sites[site]
         node, parent = record.node, record.parent
@@ -69,7 +69,7 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
             for edge in node.operands
             if not edge.is_slab
             for visit in walk(edge)
-            if visit.node.as_contraction() is not None and k_axis.name in visit.node.index_space
+            if visit.node.as_contraction is not None and k_axis.name in visit.node.index_space
         )
         producer = nested[0] if len(nested) == 1 else None
         facts[site] = ContractionFacts(

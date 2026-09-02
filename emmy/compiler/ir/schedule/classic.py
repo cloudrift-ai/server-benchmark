@@ -446,7 +446,7 @@ class ClassicMaterialization:
         expected_tiles = {
             site
             for site, assignment in schedule.nodes.items()
-            if assignment.tile.is_tiled and source_tile.views[site].as_contraction() is not None
+            if assignment.tile.is_tiled and source_tile.views[site].as_contraction is not None
         }
         if set(self.tiles) != expected_tiles:
             raise ValueError("classic materialization must contain exactly the tiled node sites")
@@ -913,7 +913,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return None
         stage = next(iter(edges.values())).stage if edges else Stage.direct()
         resolved_stage = None
-        if view.as_contraction() is None or not node.tile.is_tiled:
+        if view.as_contraction is None or not node.tile.is_tiled:
             if not stage.is_direct:
                 cache[key] = None
                 return None
@@ -958,7 +958,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 if isinstance(geometry, PlacedTile)
                 else ()
             ),
-            raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
+            raster_eligible=node.tile.is_tiled and view.as_contraction is not None,
             producer_eligible=not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
         )
         cache[key] = support
@@ -998,7 +998,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             node,
             edges,
             work=work,
-            raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
+            raster_eligible=node.tile.is_tiled and view.as_contraction is not None,
         )
 
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:

@@ -1,13 +1,11 @@
 """``Closure`` — a pure :class:`Lambda` paired with the enclosing iteration axes it may read.
 
 The one scoped-lambda concept shared by the Tile-level canonical forms and the lowering passes.
-Unlike a conventional closure, the environment is an INDEX SPACE: ``axes`` names enclosing
-iteration variables, never data values — a normalized term's values arrive through operand
-edges, and the only names its lift may capture are axes bound by its ancestors. That restriction
-is what keeps equivalence tractable (:meth:`Closure.canonical` renames the environment
-positionally) and what makes a tree position an instantiation: alpha-equal closures under EQUAL
-captures denote one value, while the same form under different captures stays distinct values of
-one function.
+``axes`` names the enclosing iteration variables the lambda may read, never data values — a
+term's values arrive through operand edges. That restriction is what keeps equivalence tractable
+(:meth:`Closure.canonical` renames the axes positionally) and what makes a tree position an
+instantiation: alpha-equal closures under EQUAL axes denote one value, while the same form under
+different axes stays distinct values of one function.
 
 A ``Closure`` is CLOSED BY CONSTRUCTION: :meth:`__post_init__` refuses one whose axes are not
 params of the lambda they scope. Keeping the invariant optional on the type is what let captures
@@ -52,7 +50,7 @@ class Closure:
             raise ValueError(f"Closure axes must be iteration-axis names, got {stray}")
         # No capture check: ``Lambda`` itself refuses a body that reads what it does not bind, so
         # every ``fn`` reaching here is already closed. ``axes`` names WHICH of its params are the
-        # enclosing environment — what :meth:`canonical` renames positionally — not a permission.
+        # enclosing iteration axes — what :meth:`canonical` renames positionally — not a permission.
         stray_axes = [axis for axis in self.axes if axis not in self.fn.params]
         if stray_axes:
             raise ValueError(f"Closure axes {stray_axes} are not params of the lambda they scope")
@@ -62,7 +60,7 @@ class Closure:
 
         :meth:`Lambda.canonical` handles names bound by the lambda itself; this also renumbers the
         captured axes positionally, so equivalent lifts at different tree positions compare equal.
-        Every axis is a param (:meth:`__post_init__`), so which params are the environment is
+        Every axis is a param (:meth:`__post_init__`), so which params are the enclosing axes is
         itself part of the form: one lambda scoped by different axes has different canonical forms.
         """
         return self._canonical

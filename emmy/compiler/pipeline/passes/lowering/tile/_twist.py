@@ -31,7 +31,6 @@ def _decline(what: str, why: str) -> None:
 @dataclass(frozen=True)
 class _NormalizedExp:
     statistic: Fold
-    provider: Fold | None
     inverse: str
 
 
@@ -313,25 +312,11 @@ def _normalized_exp(edge: Fold, axis: str, axes: tuple[str, ...]) -> _Normalized
     if current is None or reference is None or reference != current[0]:
         return _decline("normalized exponential", f"the weight's score {score_name!r} is not the statistic's own score")
 
-    free = set(statistic.environment) - {*axes, statistic.axis.name}
-    provider_cone = body.backward_cone(free)
-    captures = tuple(name for stmt in provider_cone.members for name in stmt.defines() if name in free)
-    if set(captures) != free:
-        return _decline("normalized exponential", f"the statistic captures {sorted(free - set(captures))}, which no operand edge provides")
-    provider = (
-        Fold(
-            operands=(),
-            lift=Lambda.closing(tuple(name for edge in () for name in edge.exposes), Body.coerce(Body(provider_cone.members)), captures),
-        )
-        if captures
-        else None
-    )
-
     expression = _assign_cone(defs, probability, frozenset({score_name, maximum, denominator}))
-    consumed = {id(statistic), *expression, *(id(stmt) for stmt in current[1]), *(id(stmt) for stmt in provider_cone.members)}
+    consumed = {id(statistic), *expression, *(id(stmt) for stmt in current[1])}
     if any(id(stmt) not in consumed for stmt in members):
         return _decline("normalized exponential", "the cone carries statements the rewrite would drop")
-    return _NormalizedExp(statistic=statistic, provider=provider, inverse=inverse)
+    return _NormalizedExp(statistic=statistic, inverse=inverse)
 
 
 def _rewrite_axis(stmt, old: str, new: str):
@@ -344,9 +329,12 @@ def _rewrite_axis(stmt, old: str, new: str):
 def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
     """Add every channel of ``sum(normalized_exp(score) * value)`` to its statistic."""
     statistic = view.statistic
-    values = tuple(_rewrite_axis(channel.b, fold.axis.name, statistic.axis.name) for channel in fold.channels)
-    operands = (*((view.provider,) if view.provider is not None else ()), *statistic.operands, *values)
-    sums = tuple(f"{channel.acc}__sum" for channel in fold.channels)
+    # A is ``operands[0]`` by canonical form; every other edge is one channel's streamed value,
+    # and the combine's results are those channels' accumulators, in the same order.
+    accumulators = tuple(fold.combine.results)
+    values = tuple(_rewrite_axis(edge, fold.axis.name, statistic.axis.name) for edge in fold.operands[1:])
+    operands = (*statistic.operands, *values)
+    sums = tuple(f"{acc}__sum" for acc in accumulators)
     states = (*statistic.combine.results, *sums)
     other = tuple(f"{name}__o" for name in states)
     lift = Lambda(
@@ -355,18 +343,16 @@ def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
         results=(*statistic.lift.results, *(value.exposes[-1] for value in values)),
     )
     combine = Lambda(params=states + other, body=Body(exp_combine_states(states, other)), results=states)
-    merged = Fold(
-        axis=statistic.axis,
-        unroll=statistic.unroll,
+    merged = replace(
+        statistic,
         operands=operands,
         lift=lift,
-        init=(*statistic.init, *((fold.as_contraction().plus.identity,) * len(sums))),
+        init=(*statistic.init, *((fold.as_contraction.plus.identity,) * len(sums))),
         combine=combine,
     )
     epilogue = [Assign(name=view.inverse, op=EXP_FAMILY.inverse, args=(statistic.combine.results[1],))]
     epilogue.extend(
-        Assign(name=channel.acc, op=EXP_FAMILY.product, args=(state, view.inverse))
-        for channel, state in zip(fold.channels, sums, strict=True)
+        Assign(name=acc, op=EXP_FAMILY.product, args=(state, view.inverse)) for acc, state in zip(accumulators, sums, strict=True)
     )
     return Fold(
         operands=(merged,),
@@ -393,10 +379,10 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
 
     # A computed A cone — the term's own reading: operands[0] is A by canonical form, and a
     # cone is an operand that is not a gmem read.
-    if node.as_contraction() is not None and not node.operands[0].is_slab:
+    if node.as_contraction is not None and not node.operands[0].is_slab:
         view = _normalized_exp(node.operands[0], node.axis.name, axes)
         if view is not None and _same_axis(view.statistic, node):
-            ring = node.as_contraction()
+            ring = node.as_contraction
             if ring is not None and ring.product.name == "multiply" and ring.plus.reduce_canon == "add":
                 return _extend_statistic(node, view)
 

@@ -53,13 +53,11 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.pure.fold import Fold, _placed
-from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs, observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, projection_regions, sched_of
@@ -139,26 +137,20 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
     if isinstance(op, Load):
         return Frag(body=[op], out=Handle(op.names[-1]))
     if isinstance(op, Fold) and op.axis is None:
-        # EVERY operand edge, in order — the same prefix ``Fold.lower`` builds. A cone carries one
-        # edge per computed input, including nested reductions and contractions.
-        # Each edge where its dependencies allow — an operand may READ a body-defined name (the
-        # reciprocal an attention epilogue scales with), so all-operands-first emits it ahead of
-        # the value it consumes.
-        edges, statements = op.derived_step
-        body = _placed(edges, statements, lambda edge: _emit(edge, ctx).body)
+        # EVERY operand edge first, in order — the same prefix ``Fold.lower`` builds. A cone carries
+        # one edge per computed input, including nested reductions and contractions.
+        body = dict.fromkeys([*(stmt for edge in op.operands for stmt in _emit(edge, ctx).body), *op.step])
         return Frag(body=_emit_body(Body(tuple(body)), ctx, output_specs), out=_map_wire(op))
     if isinstance(op, Fold):
         # Every fold WITH an axis, at any role — the per-cell scalar contraction (no TILE slice)
-        # included, since a contraction is this same node under the bilinear reading. Loop-
-        # invariant edges emit once ahead of the loop; the rest splice into the step ahead of first
-        # use.
-        # The same hoist ``Fold.lower`` applies: an operand whose declared index space does not
-        # contain the fold's axis is loop-invariant and emits once, ahead of the loop.
-        edges, statements = op.derived_step
-        hoisted = [s for edge in edges if op.axis.name not in edge.index_space for s in _emit(edge, ctx).body]
-        rides = tuple(edge for edge in edges if op.axis.name in edge.index_space)
-        step = _placed(rides, statements, lambda edge: _emit(edge, ctx).body)
-        stmts = _emit_body(Body(step), ctx)
+        # included, since a contraction is this same node under the bilinear reading. The same
+        # hoist ``Fold.lower`` applies: an operand whose declared index space does not contain the
+        # fold's axis is loop-invariant and emits once, ahead of the loop; the rest ride the step,
+        # ahead of the statements that read them.
+        # A shared term — one object at several operand positions — defines once per scope.
+        hoisted = list(dict.fromkeys(s for edge in op.operands if op.axis.name not in edge.index_space for s in _emit(edge, ctx).body))
+        rides = dict.fromkeys(s for edge in op.operands if op.axis.name in edge.index_space for s in _emit(edge, ctx).body)
+        stmts = _emit_body(Body((*rides, *op.step)), ctx)
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
         return Frag(body=[*hoisted, loop], out=Handle(op.out))
     raise TypeError(f"_emit: expected a Fold node, got {type(op).__name__}")
@@ -245,94 +237,21 @@ def factorize(tile, root, store=None) -> Tile:
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
 
 
-def _cell_provider_closure(edge, siblings: tuple) -> tuple[object, frozenset[int]]:
-    """Close one computed contraction operand over sibling providers that its result cone reads."""
-    # Seeded from what the edge DECLARES it captures, not from lowering it and walking the result.
-    needed = set(edge.captures)
-    required: dict[int, set[str]] = {}
-    while True:
-        added = False
-        for provider in siblings:
-            results = set(provider.exposes)
-            prior = required.get(id(provider), set())
-            if not ((results & needed) - prior):
-                continue
-            required[id(provider)] = prior | (results & needed)
-            provider_body = Body(provider.lower())
-            ordered = tuple(result for result in provider.exposes if result in required[id(provider)])
-            needed.update(provider_body.backward_cone(ordered).external_reads)
-            added = True
-        if not added:
-            break
-    if not required:
-        return edge, frozenset()
-    selected = tuple(_provider_slice(provider, required[id(provider)]) for provider in siblings if id(provider) in required)
-    return Fold(
-        operands=(*selected, edge),
-        lift=Lambda.closing(tuple(name for edge in (*selected, edge) for name in edge.exposes), Body(), edge.exposes),
-    ), frozenset(required)
-
-
-def _provider_slice(provider, required: set[str]):
-    """Narrow a projection provider to the result cone its cell consumer needs."""
-    results = provider.exposes
-    if not isinstance(provider, Fold) or provider.axis is not None or required == set(results):
-        return provider
-    ordered = tuple(result for result in results if result in required)
-    cone = provider.body.backward_cone(ordered)
-    operands = tuple(edge for edge in provider.operands if set(edge.exposes) & cone.external_reads)
-    return Fold(
-        operands=operands,
-        lift=Lambda.closing(tuple(name for edge in operands for name in edge.exposes), Body.coerce(Body(cone.members)), ordered),
-    )
-
-
-def _close_cell_providers(contraction: Fold, siblings: tuple) -> tuple[Fold, frozenset[int]]:
-    """Move sibling providers read by computed operands into their per-cell fill."""
-    operands = []
-    consumed: set[int] = set()
-    for edge in contraction.operands:
-        closed, used = _cell_provider_closure(edge, siblings)
-        operands.append(closed)
-        consumed.update(used)
-    return replace(contraction, operands=tuple(operands)), frozenset(consumed)
-
-
-#: Where the peeled root sits in its projection once every operand is placed by its dependencies.
-_ROOT = object()
-
-
-def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs: tuple = (), cell_op=None, head: tuple = ()) -> Tile:
+def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs: tuple = ()) -> Tile:
     """The recursive root walk — peel the projecting zero-axis ``Fold``\\ s, then bind each leaf to the grid via
     the ONE binding pipeline. A zero-axis :class:`Fold` with an operand recurses: its ``body`` (the projection /
-    epilogue) is walked (:func:`_emit_body`, reaching any nested node) and SPLIT around the peeled
-    root. The root is an operand, and an operand lands where its dependencies allow (``_placed``):
-    what it reads from the projection — the reciprocal an attention epilogue scales with — goes
-    ahead of it in ``head``, the rest is the ``tail`` it feeds, with the kernel-boundary output
-    specifications reconstituted into that tail (``apply_output_specs``). Everything else is a
-    leaf, bound by :func:`_bind` — the single pipeline, whose form is read off the node's SCHEDULE
-    (which axes are tiled), never a kernel kind. Nested scheduled contractions and their enclosing
-    carrier factorize through this same walk."""
+    epilogue) is walked (:func:`_emit_body`, reaching any nested node), the kernel-boundary
+    output specifications reconstituted into it (``apply_output_specs``), and the result prepended to ``tail``;
+    everything else is a leaf, bound by :func:`_bind` — the single pipeline, whose form is read off
+    the node's SCHEDULE (which axes are tiled), never a kernel kind. Nested scheduled contractions
+    and their enclosing carrier factorize through this same walk."""
     if (isinstance(op, Fold) and op.axis is None) and op.operands:
-        tiled = [edge for edge in op.operands if edge.as_contraction() is not None and ctx.sched.tile_of(edge) is not None]
+        tiled = [edge for edge in op.operands if edge.as_contraction is not None and ctx.sched.tile_of(edge) is not None]
         if len(tiled) > 1:
             return _bind_roots(op, ctx, output_specs)
         root = tiled[0] if tiled else op.operands[0]
-        other = tuple(edge for edge in op.operands if edge is not root)
-        closed_root, consumed = _close_cell_providers(root, other) if tiled else (None, frozenset())
-        projection_reads = op.lift.body.backward_cone(op.exposes).external_reads
-
-        def emit(edge) -> list:
-            if edge is root:
-                return [_ROOT]
-            if id(edge) not in consumed:
-                return _emit(edge, ctx).body
-            required = set(edge.exposes) & projection_reads
-            return _emit(_provider_slice(edge, required), ctx).body if required else []
-
-        placed = _placed(op.operands, _emit_body(op.lift.body, ctx, output_specs), emit)
-        split = next(index for index, stmt in enumerate(placed) if stmt is _ROOT)
-        before, proj = placed[:split], placed[split + 1 :]
+        siblings = [stmt for edge in op.operands if edge is not root for stmt in _emit(edge, ctx).body]
+        proj = list(dict.fromkeys([*siblings, *_emit_body(op.lift.body, ctx, output_specs)]))
         region_results = _projection_results(op.lift.body)
         root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= region_results)
         # A STREAMED store (values = an observer's results) rides the recursion down to the leaf
@@ -351,7 +270,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         # contraction root) has no such realization — the sweep is distributed across the lanes it
         # would have to re-run on — so the row is declined and the greedy retries the next one.
         sweeps = tuple(spec.sweep.name for spec in plain if spec.sweep is not None)
-        free = frozenset(sweeps) & (root.index_space | {name for stmt in before for name in free_names(stmt)})
+        free = frozenset(sweeps) & root.index_space
         swept = [name for name in sweeps if name in free]
         if swept:
             # The schedule at stake is the ITERATING node's, which a chain of zero-axis projections
@@ -364,24 +283,21 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
                 node = node.operands[0]
             plan = ctx.sched.get("REDUCE", node) if isinstance(node, Fold) and node.axis is not None else None
             if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (
-                node.as_contraction() is not None and ctx.sched.tile_of(node) is not None
+                node.as_contraction is not None and ctx.sched.tile_of(node) is not None
             ):
                 raise UnbindableProjection(
                     f"the bound reduce's cone reads output sweep axis {swept[0]!r} — a cooperative / ILP "
                     f"partition cannot re-run the reduce per swept cell"
                 )
-            return _bind(op, ctx, tail, out_val, store, output_specs=output_specs, head=head)
+            return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
         if plain:
             proj = apply_output_specs(proj, plain)
-        return _factorize(
-            root, ctx, tail=(*proj, *tail), out_val=out_val, store=store, output_specs=streamed, cell_op=closed_root, head=(*head, *before)
-        )
+        return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store, output_specs=streamed)
     if output_specs and isinstance(op, Fold) and op.axis is None:
         # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
         # its output specifications only after that body is emitted so an output sweep wraps every stmt
-        # that reads the sweep coordinate. ``cell_op`` cannot reach this branch: it is only set when
-        # recursing into a tiled contraction root, whose axis is never ``None``.
-        return _bind(op, ctx, tail, out_val, store, output_specs=output_specs, head=head)
+        # that reads the sweep coordinate.
+        return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
     if output_specs:
         # A non-projection flat root can carry plain root ``Write``\\ s only. A STREAMED store
         # (its values an observer's results) stays a spec so the scalar arm splices it into the
@@ -391,8 +307,8 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         streamed = tuple(st for st in output_specs if set(st.write.values) <= observed)
         streamed_ids = {id(st) for st in streamed}
         tail = (*tail, *(st.write for st in output_specs if id(st) not in streamed_ids))
-        return _bind(op, ctx, tail, out_val, store, output_specs=streamed, cell_op=cell_op, head=head)
-    return _bind(op, ctx, tail, out_val, store, cell_op=cell_op, head=head)
+        return _bind(op, ctx, tail, out_val, store, output_specs=streamed)
+    return _bind(op, ctx, tail, out_val, store)
 
 
 def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
@@ -462,9 +378,7 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     return [*stmts, Write(output=output, index=index, value=value)]
 
 
-def _bind(
-    op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: tuple = (), frag_ns: str = "", cell_op=None, head: tuple = ()
-) -> Tile:
+def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: tuple = (), frag_ns: str = "") -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
     finalizer. The cases are points of one ``(output-tiling) × (reduce-folding)`` space, selected by
@@ -484,11 +398,7 @@ def _bind(
       :func:`_tile_chain_members` emits the members in body order around one shared lane axis.
     - anything else (a pure pointwise zero-axis fold, a trivial plan) tiles NOTHING — the degenerate
       one-thread-per-cell fold: the per-cell body (:func:`_emit`; a serial reduce ``Loop`` sits
-      inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region.
-
-    ``head`` is the part of the peeled projection the root READS (:func:`_factorize`): per-cell
-    scalar stmts that run once ahead of the fold — the reduce region's leading slot. An
-    output-tiled contraction has no per-cell slot ahead of its warp cell, so it declines one."""
+      inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
     grid = tuple(ctx.grid)
     # The OUTPUT-tiled dispatch: contraction whose schedule holds a TILE slice, over a
     # grid with an ``(m, n)`` pair to place it on. The node is pure algebra; the tiled reading comes
@@ -503,17 +413,10 @@ def _bind(
         projection = tail
         tail = fold_store_tail(tail, op, c)
     else:
-        # ``cell_op`` is the provider-closed rewrite of ``op``: the emitted per-cell value carries
-        # the sibling providers its computed operands read, while every schedule lookup stays keyed
-        # on the STORED node — ``ctx.sched`` is identity-keyed, so a rewritten node has no schedule.
-        c, value_child, projection = cell_op or op, None, ()
-        tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction() is not None else None
+        c, value_child, projection = op, None, ()
+        tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction is not None else None
         stage = ctx.sched.get("STAGE", op) if tile is not None else None
     if tile is not None and tile.axes is not None and len(grid) >= 2:
-        if head:
-            raise UnbindableProjection(
-                "an output-tiled contraction root reads the projection ahead of it; the warp cell has no per-cell prologue"
-            )
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, c.out)
@@ -590,7 +493,7 @@ def _bind(
             t = replace(t, axes=(lane,)) if lane is not None else t
             bt = lane.extent.as_static() if lane is not None else None
         elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
-            body = [*_emit(op, ctx, output_specs).body, *tail]
+            body = list(dict.fromkeys([*_emit(op, ctx, output_specs).body, *tail]))
             root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= _projection_results(op.lift.body))
             if root_specs:
                 # ``observed`` streams a scan store into its reduce loop; every other spec keeps
@@ -602,10 +505,8 @@ def _bind(
             # shrunk ``<out>_blk`` grid axis (×32) + the 32-wide ``n_lane`` thread axis (with
             # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
             # output-var references were σ-substituted to ``blk·32 + n_lane`` inside (clamped,
-            # and the store guarded, when 32 does not tile the swept extent) — the head included,
-            # so it is consumed there rather than placed below.
-            state, fold, close, lanes_axes = _tile_reduce_axis_transposed(op, plan, ctx, head, tail, out_val)
-            head = ()
+            # and the store guarded, when 32 does not tile the swept extent).
+            state, fold, close, lanes_axes = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
             out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
             blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32), window=Window(parent=out_ax))
             lead = tuple(blk if a.name == out_ax.name else a for a in grid)
@@ -620,7 +521,7 @@ def _bind(
             return state
 
         def reduce_region(_cells, _offset, _mn):
-            return list(head), fold
+            return [], fold
 
         def sink(_i, _j, _offset, _mn):
             return close
@@ -841,7 +742,7 @@ def combine_tail(red, *, reg: int, coop: int, lane) -> list[Stmt]:
 
 
 def _tile_reduce_axis_transposed(
-    op: Fold, plan, ctx: Ctx, head: tuple, tail: tuple, out_val: str
+    op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str
 ) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...]]:
     """The ``coop-t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
     ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
@@ -862,7 +763,7 @@ def _tile_reduce_axis_transposed(
     assert not (stage is not None and stage.smem), "transposed coop cannot ride shared-row staging"
     out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
 
-    (rloop,) = _emit(op, ctx).body
+    *hoisted, rloop = _emit(op, ctx).body
     alg = Reduction(op)
     axis = rloop.axis
     stride = k_ways * reg
@@ -885,8 +786,8 @@ def _tile_reduce_axis_transposed(
     nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
     defined = {nm for s in rloop.body.iter() for nm in s.defines()}
     expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
-    # A value defined ahead of the loop and read inside it (the head's) is one value shared by
-    # every register copy — the same exclusion :func:`_strided_fold` makes.
+    # A value defined ahead of the loop and read inside it (a hoisted operand's) is one value
+    # shared by every register copy — the same exclusion :func:`_strided_fold` makes.
     deps_external = {nm for s in rloop.body.iter() for nm in s.deps()} - defined
     protected = frozenset(
         {axis.name, *(ax.name for ax in grid), blk_name, n_lane.name, *axis.extent_expr().free_vars(), *nested_axes, *expr_external}
@@ -912,7 +813,7 @@ def _tile_reduce_axis_transposed(
         tail_stmts = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(tail_stmts))]
 
     lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
-    return [], [*(s.substitute(subst) for s in head), strided, *merge], tail_stmts, lanes_axes
+    return [], [*(s.substitute(subst) for s in hoisted), strided, *merge], tail_stmts, lanes_axes
 
 
 def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[Stmt]:
@@ -1012,10 +913,10 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # **node** — the walk reaches any nested contraction as a node. The algebra
     # is read off the ``Fold`` node itself (:class:`Reduction` — a contraction's K fold and a
     # monoid's reduce fold both answer it, so the algebra-generic ``merge_stmts`` /
-    # ``combine_states`` machinery folds either). A ``Fold`` has no prologue
-    # ahead of its loop; the enclosing zero-axis ``Fold``'s projection is ``head`` / ``tail``
-    # (already walked and split), and ``head`` rides the reduce region's leading slot.
-    (rloop,) = _emit(op, ctx).body
+    # ``combine_states`` machinery folds either). An operand that does not index the fold's axis
+    # is hoisted ahead of the loop and leads the region; the enclosing zero-axis ``Fold``'s
+    # projection is ``tail`` (already walked).
+    *hoisted, rloop = _emit(op, ctx).body
     axis = rloop.axis
 
     # The cooperative lane axis (Tile-decoded, innermost) — present only when threads
@@ -1050,7 +951,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
         tail_src = _restage_loads(tail_src, staged, smem_name, n_grid, grid_vars)
 
     fold = _strided_fold(op, rloop, plan, ctx, lane)
-    return fill_stmts, fold, _lane_close(tail_src, lane, coop, ctx, out_val), lane
+    return fill_stmts, [*hoisted, *fold], _lane_close(tail_src, lane, coop, ctx, out_val), lane
 
 
 def _tile_chain_members(

@@ -844,13 +844,32 @@ class Fold:
         observed = "" if self.observe is None else Body.coerce(self.observe.body).structural_key(structural=False)
         return digest(body, observed)
 
-    # NO ``deps``. A term is closed: its VALUES arrive through operand edges bound positionally
+    def deps(self) -> tuple[str, ...]:
+        """No SSA name is read from an enclosing scope — a term's VALUES arrive through operand
+        edges bound positionally to lift params.
+
+        Spelled, not inherited: a ``Fold`` is not a :class:`~emmy.compiler.ir.stmt.base.Stmt`
+        (see the module docstring) — it duck-types the protocol — so there is no base ``deps`` to
+        fall back on, and deleting this method removes the attribute rather than defaulting it.
+        The walks call it on whatever they reach (``stmt.body._member_reads``).
+        """
+        return ()
+
+    # The above is the whole story. A term is closed: its VALUES arrive through operand edges bound positionally
     # to lift params, so there is no SSA name it reads from an enclosing scope — the base
     # ``Stmt.deps`` default of ``()`` is exactly right and overriding it would be a claim to the
     # contrary. The ITERATION SPACE is a separate channel and always was: an axis is not a value
     # the term depends on but the space it is evaluated over, carried by :attr:`free_axes` and, on
     # the edges themselves, by each ``Load``'s index ``exprs`` (which already duplicated every name
     # the old ``deps`` reported — that duplication is what made this look load-bearing).
+
+    def exprs(self):
+        """No index / predicate ``Expr`` of its own — a term's coordinates live on the ``Load``
+        edges and the stmts inside its lift, which the walks reach as children.
+
+        Spelled for the same reason as :meth:`deps`: a ``Fold`` duck-types the stmt protocol
+        rather than inheriting it, so there is no base default to fall back on."""
+        return ()
 
     def binds_axes(self) -> frozenset[str]:
         """The iteration var this term binds (empty at zero axes) — what scopes an axis-name read

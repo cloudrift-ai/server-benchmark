@@ -125,7 +125,7 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     # Split by DECLARATION: an edge whose index space holds the reduction axis varies with it and
     # rides the cell; the rest are row-invariant and lower once into the prologue. Same reading as
     # ``Fold.lower``'s hoist, asked of the same property.
-    varying = [k_name in edge.index_space for edge in cone.operands]
+    varying = [k_name in edge.free_axes for edge in cone.operands]
     pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower())
     cell = tuple(stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower()) + tuple(
         cone.lift.body

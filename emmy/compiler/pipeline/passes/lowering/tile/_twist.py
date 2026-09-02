@@ -239,7 +239,7 @@ def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) ->
     varying = {axis}
     members = []
     for stmt in cone.members:
-        direct = refs_axis(stmt, axis) or (isinstance(stmt, (Fold, Load)) and axis in (frozenset((axis,)) & stmt.index_space))
+        direct = refs_axis(stmt, axis) or (isinstance(stmt, (Fold, Load)) and axis in stmt.index_space)
         if direct or varying & (stmt.lift.body.ssa_uses if isinstance(stmt, Fold) else Body((stmt,)).ssa_uses):
             members.append(stmt)
             varying.update(stmt.defines())

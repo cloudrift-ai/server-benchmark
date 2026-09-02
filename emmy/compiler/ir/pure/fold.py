@@ -215,28 +215,20 @@ class Fold:
         return state if self.observe is None else (*state, *self.observe.results)
 
     @cached_property
-    def index_space(self) -> frozenset[str]:
-        """Every coordinate this term is evaluated over — its own :attr:`axes` plus its operands'.
+    def free_axes(self) -> frozenset[str]:
+        """The coordinates this term is evaluated over as seen from OUTSIDE — its free coordinates.
 
-        DECLARED, not discovered: a term states its index space, so a reader intersects instead of
-        walking a lowered body for names that look axis-shaped. Every operand is a term — a gmem
-        read is a :meth:`slab` — so this is a union of declarations with nothing to dispatch on.
+        DECLARED, not discovered: a slab declares the coordinates its load indexes, a term's
+        operands contribute theirs, and the axis a term BINDS (its reduce axis) is not free above
+        it. So a reduce over ``k`` does not vary with ``k`` to the fold that holds it, and a
+        nested reduce that happens to bind the same name as the loop above still hoists. Every
+        reader asks this one question — does the term vary with an axis — and intersects instead
+        of walking a lowered body for names that look axis-shaped.
         """
         space = {axis.name for axis in self.axes}
         for edge in self.operands:
-            space |= edge.index_space
-        return frozenset(space)
-
-    def as_slab(self) -> SlabView | None:
-        """The :class:`SlabView` of this term — its one gmem read and the coordinates it declares —
-        or ``None`` for a computed cone. Memoized (:attr:`_slab`)."""
-        return self._slab
-
-    @cached_property
-    def _slab(self) -> SlabView | None:
-        if self.operands or self.combine is not None or len(self.lift.body) != 1 or not isinstance(self.lift.body[0], Load):
-            return None
-        return SlabView(load=self.lift.body[0], axes=self.axes)
+            space |= edge.free_axes
+        return frozenset(space - ({self.axis.name} if self.axis is not None else set()))
 
     def as_contraction(self) -> ContractionView | None:
         """The :class:`ContractionView` of this term, or ``None`` when it is not bilinear.
@@ -293,7 +285,7 @@ class Fold:
             streamed.append(edge)
 
         b_edge = streamed[0]
-        a_space, b_space = a_edge.index_space, b_edge.index_space
+        a_space, b_space = a_edge.free_axes, b_edge.free_axes
         if self.axis.name not in a_space & b_space:
             return None
         left_only, right_only = a_space - b_space, b_space - a_space
@@ -309,6 +301,17 @@ class Fold:
             plus=plus,
             b_trans=b_trans,
         )
+
+    def as_slab(self) -> SlabView | None:
+        """The :class:`SlabView` of this term — its one gmem read and the coordinates it declares —
+        or ``None`` for a computed cone. Memoized (:attr:`_slab`)."""
+        return self._slab
+
+    @cached_property
+    def _slab(self) -> SlabView | None:
+        if self.operands or self.combine is not None or len(self.lift.body) != 1 or not isinstance(self.lift.body[0], Load):
+            return None
+        return SlabView(load=self.lift.body[0], axes=self.axes)
 
     @property
     def axis(self) -> Axis | None:
@@ -485,7 +488,7 @@ class Fold:
         The ONE lowering spelling — every consumer of a term's statements calls this.
         """
         axis = self.axis
-        rides = [edge for edge in self.operands if axis is not None and axis.name in edge.index_space]
+        rides = [edge for edge in self.operands if axis is not None and axis.name in edge.free_axes]
         ridden = {id(edge) for edge in rides}
         prologue = [stmt for edge in self.operands if id(edge) not in ridden for stmt in edge.lower()]
         step = [*(stmt for edge in rides for stmt in edge.lower()), *self.step]

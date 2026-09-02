@@ -148,8 +148,8 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
         # fold's axis is loop-invariant and emits once, ahead of the loop; the rest ride the step,
         # ahead of the statements that read them.
         # A shared term — one object at several operand positions — defines once per scope.
-        hoisted = list(dict.fromkeys(s for edge in op.operands if op.axis.name not in edge.index_space for s in _emit(edge, ctx).body))
-        rides = dict.fromkeys(s for edge in op.operands if op.axis.name in edge.index_space for s in _emit(edge, ctx).body)
+        hoisted = list(dict.fromkeys(s for edge in op.operands if op.axis.name not in edge.free_axes for s in _emit(edge, ctx).body))
+        rides = dict.fromkeys(s for edge in op.operands if op.axis.name in edge.free_axes for s in _emit(edge, ctx).body)
         stmts = _emit_body(Body((*rides, *op.step)), ctx)
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll)
         return Frag(body=[*hoisted, loop], out=Handle(op.out))
@@ -270,7 +270,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         # contraction root) has no such realization — the sweep is distributed across the lanes it
         # would have to re-run on — so the row is declined and the greedy retries the next one.
         sweeps = tuple(spec.sweep.name for spec in plain if spec.sweep is not None)
-        free = frozenset(sweeps) & root.index_space
+        free = frozenset(sweeps) & root.free_axes
         swept = [name for name in sweeps if name in free]
         if swept:
             # The schedule at stake is the ITERATING node's, which a chain of zero-axis projections

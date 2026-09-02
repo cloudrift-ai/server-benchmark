@@ -143,7 +143,7 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     # seam is a dependency question, not only an index question. Without this, attention's
     # ``exp(s − m)`` chain — which names the score rather than the KV axis — hoists into the
     # row-invariant prologue, where the per-cell score it reads is not yet defined.
-    varying = {nm for n in nodes if k_name in (frozenset((k_name,)) & n.index_space) for nm in n.exposes}
+    varying = {nm for n in nodes if k_name in n.free_axes for nm in n.exposes}
     pro: list = []
     rest = list(cell)
     while rest and not refs_axis(rest[0], k_name) and not (set(rest[0].deps()) & varying):

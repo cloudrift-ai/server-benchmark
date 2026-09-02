@@ -62,7 +62,7 @@ def test_a_slab_declares_the_coordinates_it_indexes() -> None:
     """The leaf binds its own coordinates, so nothing above it has to scan an index expression."""
     slab = _slab("l", "x", (Var("m"), Var("k")))
     assert tuple(axis.name for axis in slab.axes) == ("m", "k")
-    assert slab.index_space == {"m", "k"}
+    assert slab.free_axes == {"m", "k"}
     assert slab.exposes == ("l",)
     assert slab.as_slab() is not None
 
@@ -87,7 +87,7 @@ def test_a_computed_cone_is_not_a_slab() -> None:
     )
     assert cone.as_slab() is None
     assert cone.exposes == ("xhat",)
-    assert cone.index_space == {"m", "k"}  # the union of its operands' declarations
+    assert cone.free_axes == {"m", "k"}  # the union of its operands' declarations
 
 
 # --- the bilinear reading is geometry ------------------------------------------------------------ #
@@ -207,7 +207,7 @@ def test_the_closure_predicate_reads_the_declaration() -> None:
     it and scanning the result."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _external_reads
 
-    assert _external_reads(_matmul()) == {"m", "n", "k"}
+    assert _external_reads(_matmul()) == {"m", "n"}  # ``k`` is bound by the fold — not free above it
 
 
 def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_under_it() -> None:
@@ -244,8 +244,8 @@ def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_unde
     # same object — and the projection keeps only the swept fold; the total lowers once, ahead.
     (swept,) = tile.op.operands
     (spec,) = tile.output_specs
-    assert spec.sweep is not None and spec.sweep.name in swept.index_space
-    assert any(edge.axis is not None and spec.sweep.name not in edge.index_space for edge in swept.operands)
+    assert spec.sweep is not None and spec.sweep.name in swept.free_axes
+    assert any(edge.axis is not None and spec.sweep.name not in edge.free_axes for edge in swept.operands)
     outer, loop = lower_with_output_specs(tile.op, tile.output_specs)
     assert isinstance(outer, Loop) and isinstance(loop, Loop) and loop.axis.name == spec.sweep.name
     assert [type(stmt).__name__ for stmt in loop.body] == ["Loop", "Write"]

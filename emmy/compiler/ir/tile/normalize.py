@@ -111,7 +111,7 @@ def _decode_split(edge, axis_name: str):
 
     def varies(leaf: str) -> bool:
         if leaf in by_param:
-            return axis_name in (frozenset((axis_name,)) & by_param[leaf].index_space)
+            return axis_name in by_param[leaf].free_axes
         return any(refs_axis(stmt, axis_name) for stmt in body.backward_cone((leaf,)).members)
 
     varying = [leaf for leaf in leaves if varies(leaf)]

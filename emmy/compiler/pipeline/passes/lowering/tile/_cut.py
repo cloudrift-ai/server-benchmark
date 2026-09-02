@@ -150,7 +150,7 @@ def _external_reads(node: Fold) -> frozenset[str]:
     the term's own axes unioned with its operands', asked of the term rather than derived here. A
     term is closed: its values arrive through its operand edges, so its coordinates are all it
     takes from outside."""
-    return node.index_space
+    return node.free_axes
 
 
 def _closed_at(node: Fold, axes: tuple) -> bool:
@@ -321,7 +321,7 @@ def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) ->
     captured = {index: tuple(axis.name for axis in seams[index].axes) for index in eligible}
     # The seam's own capture correspondence, and the alpha-quotient taken under it: an operand cone
     # is a TERM, so it quotients as one (``Fold.canonical``) rather than as a scoped lambda.
-    scoped = {index: tuple(axis for axis in captured[index] if axis in seams[index].node.index_space) for index in eligible}
+    scoped = {index: tuple(axis for axis in captured[index] if axis in seams[index].node.free_axes) for index in eligible}
     clusters: dict[object, list[int]] = {}
     for index in eligible:
         clusters.setdefault(seams[index].node.canonical(), []).append(index)

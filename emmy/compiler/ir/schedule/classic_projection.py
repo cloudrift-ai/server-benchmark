@@ -121,7 +121,7 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     """
     if node.observed:
         return (Reduce(),)
-    if {spec.sweep.name for spec in tile.output_specs if spec.sweep is not None} & node.index_space:
+    if {spec.sweep.name for spec in tile.output_specs if spec.sweep is not None} & node.free_axes:
         return (Reduce(),)
     if isinstance(tile.op, Fold) and tile.op.axis is None and not tile.op.operands:
         if _chain_member_serial(tile, node):

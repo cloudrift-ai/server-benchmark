@@ -299,7 +299,7 @@ def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None):
         mapped = sigma.get(name)
         return (name,) if mapped is None else tuple(dict.fromkeys(mapped.free_vars()))
 
-    ops = tuple(e.substitute(sigma) if k_name in e.index_space else e for e in edge.operands)
+    ops = tuple(e.substitute(sigma) if k_name in e.free_axes else e for e in edge.operands)
     body = Body(tuple(s.substitute(sigma) for s in edge.lift.body))
     params = tuple(dict.fromkeys(name for param in edge.lift.params for name in images(param)))
     axes = tuple(dict.fromkeys((kslice if axis.name == k_name else axis) for axis in edge.axes if axis.name != k_name or kslice))

@@ -149,7 +149,7 @@ def _reads_sweep(stmt, axis_name: str) -> bool:
     sweep run after a store whose edge reads the axis. Everything else is an ordinary statement and
     takes the ordinary walk."""
     if isinstance(stmt, Fold):
-        return axis_name in (frozenset((axis_name,)) & stmt.index_space)
+        return axis_name in stmt.free_axes
     return axis_name in free_names(stmt)
 
 
@@ -507,11 +507,7 @@ class TileOp(Op):
         promoted = {
             store.sweep.name
             for store in self.output_specs
-            if store.sweep is not None
-            and any(
-                any(store.sweep.name in (frozenset((store.sweep.name,)) & edge.index_space) for edge in con.operands)
-                for con in contractions
-            )
+            if store.sweep is not None and any(any(store.sweep.name in edge.free_axes for edge in con.operands) for con in contractions)
         }
         if not promoted:
             self._validate_schedule()

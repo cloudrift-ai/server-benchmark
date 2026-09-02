@@ -86,7 +86,13 @@ their captured axis names (attention's normalized K cone, once per score contrac
 duplicate carried as a sibling with its capture correspondence, and the cut replaces every one with workspace loads
 spelled through its own axes. Any stored fold capturing enclosing-scope names — operand edge or body member — is
 cuttable through PROVIDER CLOSURE. Each occurrence resolves captures outward through its lexical environment,
-nearest scope first; every occurrence must resolve to equal straight-line providers and the same Fold producers. A
+nearest scope first; every occurrence must resolve to equal straight-line providers and the same Fold producers.
+A capture is detected in PROGRAM ORDER over the seam's reconstituted lowering — a definition covers only the reads
+that follow it. A stored tree may hold one value object at two positions (a projection member and, canonically
+shared, inside a contraction-operand cone whose position lowers inside the reduce loop, after a shallower sibling
+read of the same name); order-blind resolution let the deeper definition mask that read, offered the seam as closed,
+and cut a piece whose reader had no definition — nvcc's undefined identifier on DeepSeek-V4 post4096's composed-cut
+`mean_reduce` piece. Realization asserts every piece reads nothing before its definition beyond its own axes. A
 pure `Load`/`Assign` chain joins the produced piece verbatim, while a Fold producer makes the seam DEPENDENT: its piece
 reads the name through that producer's workspace, so cutting it composes the producer's cut in. Dtypes for capturing
 seams come from inference rooted at the Tile tree, where the enclosing bindings are visible. This is what lets row
@@ -362,7 +368,7 @@ How to comply:
 - **Bail conservatively on well-formedness, never on shape identity.** `return None` / `RuleSkipped` for a body
   the rule doesn't fully understand is fine; the conditions must be structural properties (escaping values,
   symbolic extents, mixed dtypes), not "is this the X kernel".
-- **Phrase dataflow conditions over cones, don't hand-roll the walk.** `Body.backward_cone` / `forward_cone` /
+- **Phrase dataflow conditions over cones, don't hand-roll the walk.** `Body.backward_cone` /
   `defs_die_at` (`ir/stmt/body.py`) are the shared slicing substrate: a rule asks for a cone and judges its
   *properties* (members, external reads, escapes) — construction never fails, so every bail stays a rule-side
   condition. See the dependence-cones section of `compiler/ir/ARCHITECTURE.md`.

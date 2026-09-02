@@ -487,6 +487,13 @@ class Stmt(Structural):
     # declares itself. ``Lambda.__post_init__`` is the enforcing formation gate.
     pure: bool = False
 
+    # Rolled-deps trait — True iff :meth:`deps` already reports the ENTIRE subtree's reads,
+    # scope-correctly (every nested lambda's params subtracted). A read walk then takes ``deps()``
+    # and must not re-walk ``nested()``: the flat re-walk cannot see an inner lambda's params, so
+    # a factored operand cone's result read inside the lift leaks out as a phantom capture.
+    # Conservative default; ``Fold`` (the memoized scoped rollup) opts in.
+    deps_deep: bool = False
+
     def deps(self) -> tuple[str, ...]:
         """SSA names this stmt reads — its 'requirements'.
 

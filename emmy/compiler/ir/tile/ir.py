@@ -94,6 +94,7 @@ class ProjectionRegion:
     lift: Lambda
     unroll: bool = False
     pure = True
+    deps_deep = False  # :meth:`deps` names only the params — the body may read more; walks descend
 
     @property
     def body(self) -> Body:

@@ -16,7 +16,7 @@ as method-shaped wrappers around the existing free functions.
 Phase 2 surface: def-use queries (``definitions``, ``axis_dependencies``,
 ``deps_closure``, ``depends_on`` / ``independent``, ``deps_of``), type-filtered lookups
 (``loads``, ``writes``, ``accums``, …), and dependence cones
-(:class:`Cone`, :meth:`Body.backward_cone` / :meth:`Body.forward_cone`
+(:class:`Cone`, :meth:`Body.backward_cone`
 / :meth:`Body.defs_die_at`) — the shared substrate behind the rules
 that slice computed-operand cones. Region transforms (``replace_at``,
 ``partition_at``) remain follow-ups; add as needed.
@@ -36,8 +36,7 @@ class Cone:
     """A dependence cone over ONE scope level: the subset of a Body's
     immediate stmts closed under SSA dependence (in body order), plus every
     name the cone reads from outside itself — sibling/enclosing scopes and
-    axis vars alike. Built by :meth:`Body.backward_cone` /
-    :meth:`Body.forward_cone`.
+    axis vars alike. Built by :meth:`Body.backward_cone`.
 
     Construction never fails and applies no eligibility judgment: an
     unresolved name is data (``external_reads``), not an error. Which
@@ -90,6 +89,10 @@ def _member_reads(s: Stmt) -> frozenset[str]:
         for e in st.exprs():
             reads.update(e.free_vars() - bound)
         defs.update(st.defines())
+        if st.deps_deep:
+            return  # ``deps()`` already rolls up the subtree scope-correctly; the flat re-walk
+            # cannot see the lift's params, so a factored operand cone's result read inside the
+            # lift would leak out as a phantom capture
         inner_bound = bound | st.binds_axes()
         for body in st.nested():
             for c in body:
@@ -561,32 +564,6 @@ class Body(tuple[Stmt, ...]):
             member_ids.add(id(s))
             pending.extend(_member_reads(s))
         return Cone(members=tuple(s for s in self if id(s) in member_ids), external_reads=frozenset(external))
-
-    def forward_cone(self, seeds: Iterable[Stmt]) -> Cone:
-        """The forward (taint) :class:`Cone` of the ``seeds`` — top-level
-        stmts of this body — over THIS body's immediate stmts: the seeds
-        plus every member transitively reading a name they expose, to
-        fixpoint, in body order. ``external_reads`` are the member reads not
-        produced inside the cone (reads of earlier non-member siblings
-        included)."""
-        member_ids = {id(s) for s in seeds}
-        names: set[str] = set()
-        for s in seeds:
-            names.update(_exposed_defines(s))
-        reads = {id(s): _member_reads(s) for s in self}
-        changed = True
-        while changed:
-            changed = False
-            for s in self:
-                if id(s) in member_ids:
-                    continue
-                if reads[id(s)] & names:
-                    member_ids.add(id(s))
-                    names.update(_exposed_defines(s))
-                    changed = True
-        members = tuple(s for s in self if id(s) in member_ids)
-        external = set().union(*(reads.get(id(s), _member_reads(s)) for s in members)) if members else set()
-        return Cone(members=members, external_reads=frozenset(external - names))
 
     def defs_die_at(self, members: Iterable[Stmt], *, roots: Iterable[str], allowed: Iterable[Stmt]) -> bool:
         """True iff no stmt in this body outside ``members`` reads a name

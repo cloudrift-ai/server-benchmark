@@ -27,6 +27,7 @@ from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     CutSite,
     _environments,
+    _external_reads,
     _producer_order,
     _workspace_axes,
     cuttable_seams,
@@ -645,6 +646,101 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
 
     unpinned = GoldenRecord(knobs={}, **{**fields, "pins": ()})
     assert unpinned.pool_group != a.pool_group, "the pin regime is a group-key term"
+
+
+def test_lowered_captures_resolve_in_program_order() -> None:
+    """A definition covers only the reads that FOLLOW it.
+
+    A stored tree may hold one value object at two positions — a projection member and, canonically
+    shared, deep inside a contraction-operand cone. A seam that keeps only the deeper position
+    lowers the definition inside the reduce loop, AFTER a shallower sibling read of the same name:
+    the name is still a capture the piece must receive as a provider. Order-blind resolution let
+    the later definition mask the read, offered the seam as closed, and cut a piece whose reader
+    had no definition — nvcc's undefined identifier on DeepSeek-V4 post4096's composed-cut
+    ``mean_reduce`` piece."""
+    scalar = Load(name="x", input="eps", index=())
+    cone = Fold.projection(body=Body((scalar, Assign(name="v", op="rsqrt", args=("x",)))), results=("v",))
+    weight = Load(name="w_e", input="w", index=(Var("k"),))
+    b_edge = Fold.projection(operands=(cone,), body=Body((weight, Assign(name="b", op="multiply", args=("w_e", "v")))), results=("b",))
+    inner = Fold.contraction(
+        k_axis=Axis("k", 8),
+        a=Load(name="a_e", input="a", index=(Var("k"),)),
+        channels=(Channel(b=b_edge, acc="acc"),),
+    )
+    node = Fold.projection(
+        body=Body((Assign(name="r", op="rsqrt", args=("x",)), inner, Assign(name="out", op="multiply", args=("r", "acc")))),
+        results=("out",),
+    )
+    assert "x" in node.deps(), "the stored tree knows the shallow read is a capture"
+    assert "x" in _external_reads(node), "the lowered accounting must agree: a later, deeper definition covers nothing"
+
+
+def test_masked_capture_threads_into_the_piece_and_the_guardrail_fires_without_it() -> None:
+    """End to end at the cut: the recovered capture becomes a provider, and its absence is loud.
+
+    The seam is a reducing fold whose lift reads ``x`` ahead of a contraction holding the ``x``
+    cone on its b edge (the deeper position lowers inside the reduce loop). Provider closure must
+    NEED ``x``, resolve it in the host body, and prepend the ``Load`` to the produced piece; a
+    seam stripped of that provider must trip realization's read-before-definition assert instead
+    of reaching nvcc."""
+    j, k = Axis("j", 4), Axis("k", 16)
+    shared = Load(name="x", input="eps", index=())
+    cone = Fold.projection(body=Body((shared, Assign(name="v", op="rsqrt", args=("x",)))), results=("v",))
+    weight = Load(name="w_v", input="w", index=(Var("k"),))
+    b_edge = Fold.projection(
+        operands=(cone,),
+        body=Body((weight, Assign(name="bv", op="multiply", args=("w_v", "v")), Assign(name="bs", op="multiply", args=("bv", "s")))),
+        results=("bs",),
+    )
+    inner = Fold.contraction(
+        k_axis=k,
+        a=Load(name="a_v", input="a", index=(Var("j"), Var("k"))),
+        channels=(Channel(b=b_edge, acc="acc"),),
+    )
+    reducing = Fold(
+        axis=j,
+        lift=Lambda(
+            params=("j",),
+            body=Body(
+                (
+                    Assign(name="r", op="rsqrt", args=("x",)),
+                    Assign(name="s", op="rsqrt", args=("r",)),
+                    inner,
+                    Assign(name="step", op="multiply", args=("acc", "r")),
+                )
+            ),
+            results=("step",),
+        ),
+        init=(0.0,),
+        combine=Lambda(params=("acc6", "other"), body=Body((Assign(name="acc6", op="add", args=("acc6", "other")),)), results=("acc6",)),
+    )
+    host = Fold.projection(body=Body((shared, reducing, Assign(name="out", op="rsqrt", args=("acc6",)))), results=("out",))
+    tile = TileOp(
+        op=host,
+        name="host_kernel",
+        place=Placement(free=()),
+        output_specs=(OutputSpec(Write(output="out_buf", index=(), value="out")),),
+    )
+    assert tile.op is host, "the shape must survive construction normalization unchanged"
+
+    graph = Graph()
+    for name, shape in (("eps", (1,)), ("a", (4, 16)), ("w", (16,))):
+        _input(graph, name, shape, dtype="f32")
+    graph.add_node(tile, ["eps", "a", "w"], outputs=(Tensor("out_buf", (), "f32"),), node_id="host_kernel")
+    match = Match(graph=graph, root_node_id="host_kernel", rule=Rule(name="test", pattern=[]))
+    root = graph.nodes["host_kernel"]
+
+    seam = next(s for s in cuttable_seams(tile) if s.node is reducing)
+    assert [tuple(p.defines()) for p in seam.providers] == [("x",)], "the masked capture resolves to its host Load"
+
+    fragment = realize(match, root, (seam,), output_map(root))
+    piece = next(node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.op.name)
+    assert piece.op.lift.body[0] is seam.providers[0], "the provider Load opens the piece"
+    assert not _external_reads(piece.op), "the produced piece reads nothing before its definition"
+
+    stripped = CutSite(node=seam.node, spelling=seam.spelling, axes=seam.axes, dtypes=seam.dtypes)
+    with pytest.raises(AssertionError, match=r"reads \['x'\] before any definition"):
+        realize(match, root, (stripped,), output_map(root))
 
 
 def test_a_fold_held_by_a_plain_statement_still_gets_an_environment() -> None:

@@ -261,7 +261,12 @@ def _slice_fold(fold: Fold, b: int, split: Axis) -> Fold:
     # what changes here is the axis itself, which only the caller can say.
     operands = tuple(_sliced_edge(edge, sigma, axis.name, sliced_axis, split) for edge in fold.operands)
     body = Body(tuple(stmt.substitute(sigma) for stmt in fold.lift.body))
-    return replace(fold, axes=(*fold.axes[:-1], sliced_axis), operands=operands, lift=replace(fold.lift, body=body))
+    return replace(
+        fold,
+        axes=tuple(sliced_axis if a.name == axis.name else a for a in fold.axes),
+        operands=operands,
+        lift=replace(fold.lift, body=body),
+    )
 
 
 def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
@@ -320,7 +325,7 @@ def _sliced_contraction(node: Fold, w: int) -> tuple[Axis, Fold]:
     # with a narrower axis, so its lift, monoid and seeds are the node's own — there is nothing for
     # a former to re-derive, and no role to re-name.
     operands = tuple(_sliced_edge(edge, sigma, node.axis.name, kslice, ksplit) for edge in node.operands)
-    sliced = replace(node, axes=(*node.axes[:-1], kslice), operands=operands)
+    sliced = replace(node, axes=tuple(kslice if a.name == node.axis.name else a for a in node.axes), operands=operands)
     return ksplit, sliced
 
 

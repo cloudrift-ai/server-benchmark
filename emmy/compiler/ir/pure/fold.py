@@ -163,7 +163,7 @@ class Fold:
         stray = [type(edge).__name__ for edge in self.operands if not isinstance(edge, Fold)]
         if stray:
             raise TypeError(f"Fold operands must be terms, got {stray}; a gmem read is a term over one Load")
-        if self.axis is None:
+        if self.combine is None:
             # The ZERO-AXIS node: no iteration and no monoid, so the only formation fact is the
             # positional binding — one lift param per operand RESULT COMPONENT, no leading
             # iteration var. (The projection (zero-axis) fold was exactly this, with ``fn`` for ``lift``.)
@@ -179,7 +179,9 @@ class Fold:
         if len(self.combine.params) != 2 * n or len(self.combine.results) != n:
             raise ValueError(f"Fold combine must be S × S → S at arity {n}: params={self.combine.params} results={self.combine.results}")
         lam = self.lift
-        assert lam.params[:1] == (self.axis.name,), f"lift param 0 must be the iteration var {self.axis.name!r}: {lam.params}"
+        assert lam.params and lam.params[0] in {axis.name for axis in self.axes}, (
+            f"lift param 0 must be the iteration var, one of the term's axes {[axis.name for axis in self.axes]}: {lam.params}"
+        )
         # One lift param per operand RESULT COMPONENT (a product edge — split-K's sliced
         # multi-channel fold — binds every component), positionally.
         # POSITIONAL, so checked positionally: param i+1 is operand result component i. Comparing
@@ -324,15 +326,14 @@ class Fold:
 
     @property
     def axis(self) -> Axis | None:
-        """The REDUCTION axis — the innermost of :attr:`axes`, ``None`` when this term binds none.
-
-        A property, not a field: :attr:`axes` is the term's whole iteration space, and every
-        existing reading of ``axis`` (``axis is None`` meaning "does not reduce") keeps answering
-        unchanged while the space itself grows a place to live. A term that iterates WITHOUT
-        reducing — a wrapped ``Load``, whose coordinates are its own binders rather than free
-        names — is what ``axes`` exists for, and it is told apart by :attr:`combine`, not here.
+        """The REDUCTION axis — the one the lift iterates, named by its leading param — or
+        ``None`` when this term binds none: a slab's axes are all coordinates, and a projection has
+        no iteration. Read off the lift, never off a position in :attr:`axes`: which of a term's
+        declared axes it reduces is what the lift says, and the rest are coordinates it reads.
         """
-        return self.axes[-1] if self.axes and self.combine is not None else None
+        if self.combine is None:
+            return None
+        return next(axis for axis in self.axes if axis.name == self.lift.params[0])
 
     @property
     def composed(self) -> Fold | None:
@@ -488,7 +489,7 @@ def _(s: Fold, rename, sigma, axis_fn):
     # names). At zero axes there is no iteration var to rename and no monoid to thread.
     operands = tuple(_rewrite(edge, rename, sigma, axis_fn) for edge in s.operands)
     axes = tuple(axis_fn(axis) for axis in s.axes)
-    axis = axes[-1] if axes else None
+    axis = axis_fn(s.axis) if s.combine is not None else None  # the iteration var — a slab has none
     lead = (axis.name,) if axis is not None else ()
 
     def _param(name: str) -> str:

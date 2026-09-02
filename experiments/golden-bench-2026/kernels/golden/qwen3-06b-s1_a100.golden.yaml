@@ -1288,11 +1288,16 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE: coop-t
-      WORK: t512
+      REDUCE@a1: coop
+      REDUCE@a3: coop
+      WORK: t128
+      TILE: ''
+      STAGE: ''
+      LOOPIFY: '0'
+      RASTER: ''
     measurements:
-      emmy_us: 20.8542
-      reference_us: 11.9701
+      emmy_us: 34.9926
+      reference_us: 14.6153
       reference_backend: torch-eager
 - program: 0
   target:

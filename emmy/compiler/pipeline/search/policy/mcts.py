@@ -34,13 +34,12 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.ir.schedule import ReducePlan, Workers
+from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.pipeline.knob import (
     canonical_row_key,
     context_view,
     decision_view,
     family_of,
-    stamp_schedule_families,
     tuning_knob_items,
 )
 from emmy.compiler.pipeline.search.candidate import LazyCandidate
@@ -189,8 +188,12 @@ class TuningSearch(Search):
         exempt from the strict knob-pin validator — it explores tier-foreign forks and steers
         heterogeneous multi-op graphs with a union pin vector (each op takes its tier's subset).
         A per-op contradiction is a pruned branch here, not the loud user error the greedy
-        compile wants."""
-        return replace(ctx, validate_pins=False) if ctx.validate_pins else ctx
+        compile wants. The session kernel cache is stripped for the same reason it is
+        greedy-only: an artifact bakes a schedule conclusion, and exploration must not inherit
+        conclusions."""
+        if ctx.validate_pins or ctx.kernel_cache is not None:
+            ctx = replace(ctx, validate_pins=False, kernel_cache=None)
+        return ctx
 
     async def evaluate(self, token: object | None, cand, *, backend, db) -> None:
         """Value one terminal the engine's loop yielded — the whole of what a terminal is worth
@@ -280,12 +283,12 @@ class TuningSearch(Search):
         if not knobs:
             return None
         row = dict(tuning_knob_items(knobs))
-        placement = {key: value for key, value in row.items() if family_of(key) == "PLACE"}
+        placement = {key: value for key, value in row.items() if family_of(key) == "PLACE" and value == "cut"}
         if placement:
             return placement
-        work = Workers.parse(row.get("WORK"))
-        if any(ReducePlan.parse(value, work).needs_split for key, value in row.items() if family_of(key) == "REDUCE"):
-            return stamp_schedule_families(row)
+        work = Work.parse(row.get("WORK"))
+        if any(Reduce.parse(value, work).needs_split for key, value in row.items() if family_of(key) == "REDUCE"):
+            return row
         return None
 
     def _structural_replay_row(self, node: SearchNode) -> dict[str, str] | None:

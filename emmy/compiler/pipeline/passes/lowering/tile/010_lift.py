@@ -13,7 +13,8 @@ PATTERN = [Pattern("root", LoopOp)]
 
 def rewrite(match: Match, root: Node, ctx=None) -> TileOp:
     del match, ctx
+    from dataclasses import replace  # noqa: PLC0415
+
     loop: LoopOp = root.op
     tile = lift_loop_op(loop, name=loop.name)
-    tile.outputs = {root.output.name: root.output}
-    return tile
+    return replace(tile, outputs={root.output.name: root.output})

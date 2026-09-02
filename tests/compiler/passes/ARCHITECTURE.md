@@ -42,6 +42,7 @@ tests/compiler/passes/
 ├── test_knob_pinning.py            # EMMY_KNOBS-pinned regression configs (article-reproduction tile/transport sweep)
 ├── test_warp_specialize_deadlock.py # WS=1 stranded-TMA deadlock (Qwen3 k_linear_mean_reduce) regressions
 ├── test_tile_naming.py             # provenance-driven k_<op>_<suffix> kernel naming
+├── test_shared_constant_cone.py    # one broadcast constant, two sibling cones — one declaration per scope
 └── test_pipeline_semantics.py      # full pass chain (decompose → opt → fuse) vs numpy
 ```
 
@@ -89,6 +90,7 @@ lowering.
 | `loop/lifting/025_lift_scan.py`        | `ScanOp` → `LoopOp`        | `test_pipeline_semantics.py::test_scan_*`                                          |
 | `loop/lifting/030_lift_indexmap.py`    | `IndexMapOp` → `LoopOp`    | `test_optimization_rules.py::test_matmul_with_transpose_fuses_to_one_kernel` (e2e) |
 | `loop/lifting/040_lift_gather.py`      | `GatherOp` → `LoopOp`      | `test_torch_ops.py::test_gather`                                                   |
+| `loop/lifting/090_spell_store_rounding.py` | public narrowing boundary → typed `copy` | `test_spell_store_rounding.py`                             |
 | `loop/fusion/010_merge_loop_ops.py`    | `LoopOp → LoopOp` (splice) | `test_fusion_rules.py` (fixpoint)                                                  |
 
 Numerical correctness for lifted + merged kernels runs through the
@@ -110,16 +112,55 @@ numpy backends in three places:
 
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
-sites through the CUDA pipeline. `test_schedule_walk.py` pins the walk's enumeration contracts — one prescan per
-term, computed and derived fold sites keyed as schedule sites, the paired MMA row under exact pins, and the
-structural split fork's atomic and deferred arms on offer — observing complete traversals through the sampled leaf
-stream rather than flattening a live space into test memory. `test_schedule_pool_cache.py` pins the session memo:
+sites through the CUDA pipeline. The direct projection boundary exhaustively compares its production rows with the
+literal compatible subset of the independent Cartesian product before checking materialization. The plain-reduction
+boundary also compares the production set with that literal reference: its independent product contains mismatched
+node and kernel worker choices that only the compatibility relation may reject. `test_schedule_walk.py` pins the
+target enumeration contracts — independent node and edge domains, traversal-order-invariant compatible membership,
+computed and derived folds keyed as schedule sites, and exact pins — without flattening a live space into test memory.
+The scalar-contraction boundary likewise compares production with the literal reference, proves the independent
+product is larger than the accepted set, and checks that a selected output tile alone produces placed materialization
+geometry.
+The gmem-direct tensor-core boundary repeats that proof over a typed f16 contraction and asserts that the independent
+kernel domain contains both warp inventories and raster choices. It also proves that compatibility rejects grouped
+rasterization beside every untiled node choice.
+The staged-edge boundary limits the transport catalog to one copy choice, projects that choice independently onto both
+operand edges, and compares production against the literal product. Only equal edge choices survive compatibility,
+and expanding a selected staged row derives one `ResolvedStage` per edge without changing the typed schedule.
+The compute-fill boundary makes the same bounded comparison with direct, `d1/smem`, and `d2/smem` edge factors. A
+warp node that needs the fill accepts only equal smem edges, while scalar support keeps direct transport in each
+independent public factor.
+The schedule-restriction boundary proves that exact `WORK` and addressed `TILE` parameters leave every independent
+factor unchanged, then compares production with Algorithm 1(c, p, t) under the same immutable `c`. The production
+driver carries that context intact. The context may prune a prefix when the restriction and compatibility state prove
+that it has no accepted completion; an opaque predicate exposes no such proof and is observed only at complete
+assignments. The test deliberately bounds the factor catalogs so the literal oracle remains fast. A complete `c` also
+proves its singleton without changing a factor. Composed GPU cases cover nested and sibling fragment agreements; no
+composed-only enumerator or post-product membership rule exists.
+The structural-split boundary proves that the outer pass consumes a pinned GRID stage before constructing `c` for a
+fresh piece. The piece's schedule restriction therefore compares only the remaining schedule stages. Sampled walks
+and composed cross-CTA split pieces exercise the same enumeration, and the duration baseline records their bounded
+test cost.
+The producer-band boundary projects uniform, `+p1`, and `+p2` kernel choices before reading parameters, proves an exact
+`WORK` parameter leaves that domain unchanged, and checks that only compatible TMA edge assignments survive.
+The shared-constant cone fixture also pins a multi-channel contraction to the scalar tier: every channel remains in one
+serial Fold body, so independently spliced operand cones share the one legal broadcast binding.
+`test_move_catalog.py` also pins the pure-register, one-dimensional thread, parallel-register, and cooperative-width ×
+ILP catalog products, then verifies that a matching `WORK` pin selects only existing rows and an unmatched pin returns
+no row, so restriction cannot manufacture a worker inventory. Precision gates restrict atom choices that remain in the
+fixed domain; exact raster parameters likewise cannot add a value outside the static raster catalog.
+`test_schedule_pool_cache.py` pins the session memo:
 sharing, hit equality, read-only payloads, and the keying that holds pin states, dtypes, extents, stores and the
 sample apart. `test_move_catalog.py` checks that independent
 roots with reversed M/N readings combine only when their tile
 widths and unit counts match on the physical output axes, and that f32 computed-A contractions retain scalar
-output-tile rows when no MMA atom applies. `test_cut_forks.py` checks fused and closed Fold-edge choices for SDPA score
-production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA lowering. Direct
+output-tile rows when no MMA atom applies. `test_cut_forks.py` proves that `040_schedule` does not call the schedule
+enumerator while an undecided cuttable seam remains, and calls it once placement is decided. It also checks fused and
+closed Fold-edge choices for SDPA score
+production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA lowering, and proves
+child-identity schedule receipts round-trip: under a pinned cut each child's stored identity decodes only its own
+kernel's schedule rows and joins the verified tier as-is, including when target-boundary drift makes the regenerated
+Loop target contain several kernels and the stored identity must select one. Direct
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
 The generated carrier's numerical laws are covered
 independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax and

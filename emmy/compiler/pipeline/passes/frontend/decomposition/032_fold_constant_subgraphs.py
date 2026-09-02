@@ -26,9 +26,10 @@ Numbered 032 runs after arithmetic normalization and before the sibling merge an
 
 from __future__ import annotations
 
-import copy
+from dataclasses import replace
 from math import prod
 
+from emmy.compiler.dtype import F4E2M1x2
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
@@ -111,6 +112,11 @@ def _collect_cone(graph: Graph, root_id: str) -> tuple[set[str], bool, bool] | N
         if isinstance(op, ConstantOp):
             if not _is_static_leaf(op):
                 return None
+            # A constant whose stored dtype is the packed-fp4 pair marks the cone as a
+            # storage decode. The elementwise trait below cannot see it: the NVFP4
+            # decode (from_f4e2m1) runs inside the pair table's source_graph, and the
+            # main-graph cone decodes by GATHERING that table, not by an elementwise cast.
+            has_storage_decode |= op.source_dtype == F4E2M1x2.name
             ids.add(nid)
             continue
         if not isinstance(op, _FOLDABLE) or any(not d.is_static for d in node.output.shape):
@@ -218,8 +224,7 @@ def rewrite(match: Match, root: Node, out: Tensor) -> Graph:
         if nid not in cone:
             continue
         node = match.graph.nodes[nid]
-        op = copy.copy(node.op)
-        op.inputs, op.outputs, op.knobs, op.source = {}, {}, {}, None
+        op = replace(node.op, inputs={}, outputs={}, knobs={}, source=None)
         record.add_node(
             op=op,
             inputs=list(node.inputs),

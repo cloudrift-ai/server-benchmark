@@ -283,6 +283,12 @@ def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr
         # result-dtype demotion routes through ``target.convert``, which spells the <cuda_fp8.h>
         # constructor (round-to-nearest-even, saturate-to-finite). Identity here, same as above.
         return inputs[0]
+    if fn == "to_f4e2m1":
+        # e2m1 encode — NOT the fp8 encodes' identity. Those convert to an fp8 type whose
+        # constructor rounds; the codes here land on an ordinary integer carrier, where the same
+        # identity would truncate the value instead. The render emits the rounding as a helper
+        # (``_F4_ENCODE_PRELUDE``).
+        return FuncCallExpr("emmy_to_f4e2m1", (inputs[0],))
     if fn == "square":
         return BinaryExpr("*", inputs[0], inputs[0])
     if fn == "reciprocal":
@@ -519,6 +525,17 @@ class Stmt(Structural):
         about the surrounding declarations."""
         return ()
 
+    def rename_buffers(self, rename) -> Stmt:  # noqa: ANN001 — any str->str mapping
+        """This stmt with every external-buffer field renamed through ``rename`` (a
+        ``str -> str`` mapping; absent names keep). Default: identity — the counterpart of
+        :meth:`external_reads` / :meth:`external_writes`, overridden by exactly the leaves that
+        override those (``Load.input``, ``Write.output``, ``ZeroPrologue.dst``,
+        ``CpAsyncCopy.src``, ``TmaDescriptor.src_buf``, ``FragmentLoad.input``). Wrapper stmts
+        need no override: callers rename whole bodies through ``Body.rename_buffers``, whose
+        recursive ``map`` reaches every nested leaf."""
+        del rename
+        return self
+
     def external_writes(self) -> tuple[str, ...]:
         """External-buffer names this stmt writes to. Default: ``()``.
 
@@ -675,7 +692,11 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
     with ``extra_names`` populated before render. This function's only
     pre-walk responsibility is registering literal-constant Loads so
     their ``Var(name)`` uses inline as float literals instead of
-    materializing a named local.
+    materializing a named local. An INTEGER constant is left out of that
+    inlining: the map holds floats and every use site renders them as
+    float literals, which would put a shift amount or a nibble mask into
+    f32 arithmetic that has no spelling for the bit operation reading it.
+    Those keep their named local, at their own dtype.
     """
     from emmy.compiler.ir.stmt.leaves import Load  # local — avoid cycle
 
@@ -690,7 +711,7 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
         for s in body:
             # Literal-const Loads are always scalar (the vectorize pass
             # excludes literal-const buffers from its widening logic).
-            if isinstance(s, Load) and s.is_scalar and s.is_literal(ctx.literal_constants):
+            if isinstance(s, Load) and s.is_scalar and s.is_literal(ctx.literal_constants) and not _integer_load(s):
                 new_map[s.name] = ctx.literal_constants[s.input]
                 changed = True
         if changed:
@@ -710,6 +731,10 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
 
     inlined: set[str] = set()
     if _readable():
+        # The readability scan runs before this body's Loads / Assigns render, so their dtypes are
+        # not in ``ctx.ssa_dtypes`` yet. Keep their stamped types locally: folding an expression
+        # that needs a target conversion would bypass ``Assign.render`` and drop that conversion.
+        local_dtypes = {name: s.dtype.name for s in body if isinstance(s, (Load, Assign)) and s.dtype is not None for name in s.defines()}
         from emmy.compiler.ir.expr import BinaryExpr, TernaryExpr, Var  # local — avoid cycle
 
         total = _read_counts(body, {})
@@ -734,6 +759,13 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
             # without substituting it, leaving an undefined reference.
             ri = next((j for j, r in enumerate(stmts) if s.name in r.deps()), None)
             if ri is None or not isinstance(stmts[ri], Assign):
+                continue
+            result_dt = s.dtype.name if s.dtype is not None else "f32"
+            arg_dtypes = [local_dtypes.get(arg, ctx.ssa_dtypes.get(arg, "f32")) for arg in s.args]
+            if any(dtype != result_dt for dtype in arg_dtypes):
+                # The named Assign's target-aware renderer inserts conversions (for example
+                # ``__half2float``). The readability-only fold renders a bare Expr tree, so keep
+                # the Assign named rather than silently changing its type semantics.
                 continue
             # Straddle guard: the fold moves this computation from its def site to the read site, so
             # every base operand — transitively, through already-inlined temps — must not be redefined
@@ -764,11 +796,17 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
     out: list[str] = []
     for s in body:
         if isinstance(s, Load) and s.is_scalar and s.name in ctx.literal_ssa and s.is_literal(ctx.literal_constants):
-            continue
+            continue  # its value inlines at every use site
         if isinstance(s, Assign) and s.name in inlined:
             continue  # folded into its consumer
         out.extend(s.render(ctx))
     return out
+
+
+def _integer_load(load) -> bool:
+    """Whether a Load reads an integer buffer — asked of the literal-constant fold, which renders
+    its values as float literals."""
+    return load.dtype is not None and load.dtype.name in _INTEGER_DTYPES
 
 
 def _readable() -> bool:

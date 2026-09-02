@@ -104,7 +104,7 @@ import torch
 import torch.nn.functional as F
 
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import from_pretrained_or_skip, requires_cuda
+from tests.compiler.helpers import direct_classic_leaf, from_pretrained_or_skip, requires_cuda
 
 
 class _Sdpa(torch.nn.Module):
@@ -141,16 +141,33 @@ class _Scaled(torch.nn.Module):
         return torch.nn.functional.scaled_dot_product_attention(q, k, v, scale=1.0)
 
 
-def _trace(module, args, dynamic_shapes=None):
+def _trace(module, args, dynamic_shapes=None, *, direct: bool = False):
     """Trace + compile ``module``; return ``(backend, compiled, graph, kernel_node_ids)``."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
     graph = trace_module(module.cpu(), args, dynamic_shapes=dynamic_shapes)
     backend = CudaBackend()
-    compiled = backend.compile(graph)
+    if direct:
+        from emmy.compiler.context import Context  # noqa: PLC0415
+        from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+        from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
+
+        compiled, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.probe()).resolve(graph, direct_classic_leaf)
+    else:
+        compiled = backend.compile(graph)
     kernels = [nid for nid in compiled.nodes if getattr(compiled.nodes[nid].op, "kernel_source", None)]
     return backend, compiled, graph, kernels
+
+
+def _pin_classic(monkeypatch, pins: dict[str, str]) -> None:
+    """Publish canonical site-scoped classic pins for one attention fixture."""
+    for key, value in pins.items():
+        monkeypatch.setenv(f"EMMY_{key.upper()}", value)
+
+
+def _pin_sdpa_reductions(monkeypatch, value: str = "") -> None:
+    _pin_classic(monkeypatch, {f"REDUCE@n{node}": value for node in (1, 3, 4)})
 
 
 def _max_diff(backend, compiled, feed: dict, ref_fn) -> float:
@@ -314,11 +331,11 @@ def test_scalar_flash_matches_torch(monkeypatch, variant):
     afford to score (module docstring's burner evidence) — this cell protects mask accuracy,
     not the cold policy."""
     if variant == "mask":
-        _pin_scalar_fused(monkeypatch)
+        _pin_mask_direct(monkeypatch)
     torch.manual_seed(0)
     for cfg in _FLASH_VARIANTS[variant][2]:
         module, args, feed, ref = _flash_feed(variant, *cfg)
-        backend, compiled, _graph, kernels = _trace(module, args)
+        backend, compiled, _graph, kernels = _trace(module, args, direct=variant == "mask")
         assert kernels, f"{variant}{cfg}: no kernels"
         if variant == "plain" and cfg == _FLASH_VARIANTS["plain"][2][0]:
             srcs = "\n".join(compiled.nodes[k].op.kernel_source for k in kernels)
@@ -334,8 +351,23 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
 
     Recognition proves the exact two-use score inverse, so nested-reduce readability and work
     account for the producer once. Pin the fused placement because this test protects that sibling,
-    not the tuner's choice between the fused and cut rows."""
+    not the tuner's choice between the fused and cut rows — and pin the paired mma row for the
+    same reason: the assertions below are about the composed score's tensor-core EMISSION, which
+    only that row exercises, while which row a cold compile picks is the evidence hierarchy's
+    business and an accepted-to-be-imperfect one."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    # The score's N tile is the value contraction's streamed K block (the paired fragment seam).
+    _pin_classic(
+        monkeypatch,
+        {
+            "TILE@n3": "mma_m16n8k16_f16_f32/f1x2",
+            "TILE@n4": "mma_m16n8k16_f16_f32/f1x1",
+            **{f"REDUCE@n{node}": "" for node in (1, 3, 4)},
+            **{f"STAGE@n{node}.e{edge}": "" for node in (3, 4) for edge in (0, 1)},
+        },
+    )
+    monkeypatch.setenv("EMMY_RASTER", "")
     torch.manual_seed(0)
     B, H, S, D = cfg
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -392,7 +424,7 @@ def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
     the same keys; a split-K partition does not, and there the two-pass pair stands
     (``test_fused_sdpa_split_partition_keeps_the_two_pass_pair``)."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE", "")  # serial reduce: the sweep and the contraction cover the same keys
+    _pin_sdpa_reductions(monkeypatch)  # serial reduce: the sweep and the contraction cover the same keys
     torch.manual_seed(0)
     B, H, S, D = cfg
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -416,10 +448,10 @@ def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
 def test_fused_causal_sdpa_sweeps_the_score_once(monkeypatch):
     """The causal coordinate Select stays on score fragments, so the one-pass sweep remains legal."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    _pin_sdpa_reductions(monkeypatch)
     monkeypatch.setenv("EMMY_WORK", "w2x1")
-    monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f2x2/k2")
-    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f2x4")
+    monkeypatch.setenv("EMMY_TILE@N3", "mma_m16n8k16_f16_f32/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE@N4", "mma_m16n8k16_f16_f32/f2x4")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 128, 32
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -451,12 +483,14 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
 
     Asserted structurally, because it is invisible to a numerics check: the score's slabs exist and
     no gmem fragment loader is CALLED (the helper definitions always ship)."""
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    _pin_sdpa_reductions(monkeypatch)
     monkeypatch.setenv("EMMY_WORK", "w2x1")
-    monkeypatch.setenv("EMMY_TILE@A3", "mma_m16n8k16_f16_f32/f2x2/k1")
-    monkeypatch.setenv("EMMY_TILE@PJ", "mma_m16n8k16_f16_f32/f2x2")
-    monkeypatch.setenv("EMMY_STAGE@A3", "d1/smem-async")
-    monkeypatch.setenv("EMMY_STAGE@PJ", "d1/smem")
+    monkeypatch.setenv("EMMY_TILE@N3", "mma_m16n8k16_f16_f32/f2x2")
+    monkeypatch.setenv("EMMY_TILE@N4", "mma_m16n8k16_f16_f32/f2x2")
+    for edge in (0, 1):
+        monkeypatch.setenv(f"EMMY_STAGE@N3.E{edge}", "d1/smem-async")
+        monkeypatch.setenv(f"EMMY_STAGE@N4.E{edge}", "d1/smem")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -481,7 +515,7 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
 def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
     """Each partition folds its key slice into the same state; the finalize merges those states."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")  # two cross-CTA partitions with an f32 deferred finalize
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")  # two cross-CTA partitions with an f32 deferred finalize
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -503,7 +537,7 @@ def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
 def test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates(monkeypatch):
     """A causal partial compares absolute query/key coordinates after the Fold is sliced."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 128, 32
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -530,7 +564,7 @@ def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
     (for GQA) the causal guard at once. Accurate vs torch at seq ∈ {8, 16, 37}. The ``mask``
     variant pins the fused scalar row, exactly as in ``test_scalar_flash_matches_torch``."""
     if variant == "mask":
-        _pin_scalar_fused(monkeypatch)
+        _pin_mask_direct(monkeypatch)
     torch.manual_seed(0)
     seq = torch.export.Dim("seq_len", min=4, max=4096)
     module_cls, kwargs, _ = _FLASH_VARIANTS[variant]
@@ -637,7 +671,7 @@ def test_flash_transposed_output_matches_torch(monkeypatch):
 # =========================================================================== #
 # These cases expect a fp16/bf16 SDPA to lower to a single ``mma.sync`` kernel (the warp chain:
 # tiled + atomized contractions, fragment online-softmax, C->A register repack) — realized through the
-# ONE pipeline: the twisted warp enumeration stamps the mma ``TilePlan``\ s on the Q@K / P@V
+# ONE pipeline: the twisted warp enumeration stamps the mma ``Tile``\ s on the Q@K / P@V
 # bilinear ``Fold``\ s and ``_bind``'s reduce arm realizes the TWISTED carrier at fragment residence
 # (``_twist``). No private emitter exists; a bespoke path would be the mandate violation the
 # demolition removed. Unpinned, the warp rows are fork SIBLINGS of the chain / reduce-partition
@@ -814,7 +848,7 @@ def test_fused_tensorcore_flash_reference_matches_torch(S):
 
     from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
 
-    fn = nvcc.load_function(_KERNEL, "fa2", "", uses_tma=False)
+    fn = nvcc.load_function(_KERNEL, "fa2", "", arch_specific=False)
     torch.manual_seed(S)
     D = 16
     q, k, v = (torch.randn(S, D, dtype=torch.float16) for _ in range(3))
@@ -847,13 +881,32 @@ def _chain_tile_pins(monkeypatch):
 
 
 def _pin_scalar_fused(monkeypatch):
-    """Pin the fused placement and the per-cell scalar row (every family at its declared OFF)."""
+    """Pin fused placement; model-chain tests select their schedule from the fork tree."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    for fam in ("WORK", "TILE", "STAGE", "REDUCE", "RASTER"):
-        monkeypatch.setenv(f"EMMY_{fam}", "")
 
 
-def _run_module_with_eager(module: torch.nn.Module, args: tuple, inputs_by_name: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+def _pin_mask_direct(monkeypatch):
+    """Pin fused placement and independently restrict mask c to the complete direct schedule."""
+    _pin_scalar_fused(monkeypatch)
+    monkeypatch.setenv("EMMY_WORK", "")
+    monkeypatch.setenv("EMMY_RASTER", "")
+    _pin_classic(
+        monkeypatch,
+        {
+            **{f"TILE@n{node}": "" for node in (0, 4, 6, 7)},
+            **{f"REDUCE@n{node}": "" for node in (0, 3, 4, 5, 6, 7)},
+            **{f"STAGE@n{node}.e{edge}": "" for node in (0, 4, 6, 7) for edge in (0, 1)},
+        },
+    )
+
+
+def _run_module_with_eager(
+    module: torch.nn.Module,
+    args: tuple,
+    inputs_by_name: dict[str, np.ndarray],
+    *,
+    direct: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
     """Trace + compile ``module``, then run the emmy kernels and the torch eager reference under
     one ``backend.run`` GPU-lock window via ``pre_run``. Returns ``(emmy_flat, eager_flat)``."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
@@ -863,7 +916,14 @@ def _run_module_with_eager(module: torch.nn.Module, args: tuple, inputs_by_name:
 
     graph = trace_module(module.cpu(), args)
     backend = CudaBackend()
-    compiled = backend.compile(graph)
+    if direct:
+        from emmy.compiler.context import Context  # noqa: PLC0415
+        from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+        from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
+
+        compiled, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.probe()).resolve(graph, direct_classic_leaf)
+    else:
+        compiled = backend.compile(graph)
 
     input_set = set(compiled.inputs)
     feed: dict[str, np.ndarray] = {}
@@ -982,7 +1042,12 @@ def test_sdpa_explicit_additive_mask(_chain_tile_pins, n_heads: int, seq_len: in
     mask = torch.zeros((seq_len, seq_len))
     mask.masked_fill_(torch.triu(torch.ones_like(mask, dtype=torch.bool), diagonal=1), float("-inf"))
     mask = mask[None, None]
-    dpd, eager = _run_module_with_eager(m, (q, k, v, mask), {"q": q.numpy(), "k": k.numpy(), "v": v.numpy(), "mask": mask.numpy()})
+    dpd, eager = _run_module_with_eager(
+        m,
+        (q, k, v, mask),
+        {"q": q.numpy(), "k": k.numpy(), "v": v.numpy(), "mask": mask.numpy()},
+        direct=True,
+    )
     _assert_close(dpd, eager)
 
 
@@ -995,7 +1060,7 @@ def _band_mask(seq: int, window: int) -> torch.Tensor:
     return torch.where(keep, 0.0, float("-inf"))[None, None].half()
 
 
-def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4) -> None:
+def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4, *, direct: bool = False) -> None:
     """Run TinyLlama's ``LlamaAttention`` sub-module at ``seq_len`` and verify emmy matches
     eager (forced MATH SDPA backend) within ``threshold``."""
     from transformers import AutoConfig, AutoModelForCausalLM  # noqa: PLC0415
@@ -1020,7 +1085,14 @@ def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4) -> None:
     attn_cpu = attn.cpu()
     graph = trace_module(attn_cpu, (x,), kwargs={"position_embeddings": (cos, sin)})
     backend = CudaBackend()
-    compiled = backend.compile(graph)
+    if direct:
+        from emmy.compiler.context import Context  # noqa: PLC0415
+        from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+        from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
+
+        compiled, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.probe()).resolve(graph, direct_classic_leaf)
+    else:
+        compiled = backend.compile(graph)
 
     input_set = set(compiled.inputs)
     feed: dict[str, np.ndarray] = {}
@@ -1075,8 +1147,8 @@ def test_full_self_attn_tinyllama():
     regression is in the RoPE elementwise kernel or its interaction with the attention numerics.
     Pin the bounded two-kernel scalar route: this is an accuracy test, not a cold-policy test."""
     torch.manual_seed(42)
-    with pinned_knobs({"PLACE": "cut", "RASTER": "", "TILE": "", "STAGE": "", "REDUCE": "", "WORK": ""}):
-        _run_self_attn_tinyllama(seq_len=32, threshold=1e-4)
+    with pinned_knobs({"PLACE": "cut"}):
+        _run_self_attn_tinyllama(seq_len=32, threshold=1e-4, direct=True)
 
 
 @requires_cuda

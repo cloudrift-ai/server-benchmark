@@ -31,12 +31,12 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction
-from emmy.compiler.ir.schedule import Placement, TilePlan, Workers
+from emmy.compiler.ir.schedule import Placement, Tile, Work
+from emmy.compiler.ir.schedule import classic_projection as sched
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
-from emmy.compiler.pipeline.passes.lowering.tile import _schedule as sched
 from tests.compiler.helpers import requires_cuda
 
 K32 = "mma_m16n8k32_e4m3_f32"
@@ -138,10 +138,10 @@ def test_k32_atom_registry_and_geometry():
 
 def test_k32_tile_codec_round_trips():
     """The ``TILE`` codec names the atom by registry key and the spelling round-trips."""
-    work = Workers.parse("w1x8")
-    plan = TilePlan.parse(f"{K32}/f2x2/k2", work)
+    work = Work.parse("w1x8")
+    plan = Tile.parse(f"{K32}/f2x2/k2", work)
     assert plan.atom is ATOM_REGISTRY[K32] and plan.bk == 2
-    assert TilePlan.parse(plan.spell(), work) == plan
+    assert Tile.parse(plan.spell(), work) == plan
     assert atom_for(K32) is ATOM_REGISTRY[K32]
 
 
@@ -208,29 +208,30 @@ def _f8_term(cap=(12, 0), *, a_dtype=F8E4M3, b_dtype=F8E4M3, k=512):
 
 
 def _offered_atoms(tile, ctx, node):
-    """The tensor-core atoms the catalog OFFERS at this node under the live precision pins — the
-    prescan's choice layer (``_node_refusal``) plus the policy half of the atom families."""
+    """The tensor-core atom domain projected from the node and target static facts."""
+    from emmy.compiler.ir.schedule.packing import match_packed_b_node, match_packed_pair_node
     from emmy.compiler.ir.tile.ops import projection_tail
 
     tail = projection_tail(tile)
-    if sched._node_refusal(tile, ctx, node, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op))) is not None:
+    packed = (match_packed_b_node(node, tile.inputs), match_packed_pair_node(node, tile.inputs))
+    if sched._node_refusal(tile, ctx, node, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op)), packed) is not None:
         return ()
-    return sched._atom_families(tile, ctx, node, tail)[0]
+    return sched._atom_families(tile, ctx, node, tail, packed)
 
 
-def test_k32_enumeration_requires_the_precision_gate(monkeypatch):
+def test_k32_domain_is_independent_of_the_precision_restriction(monkeypatch):
     monkeypatch.delenv("EMMY_FP8_MMA", raising=False)
     monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
     term = _f8_term()
-    assert _offered_atoms(*term) == ()
+    assert _offered_atoms(*term) == (K32,)
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     assert _offered_atoms(*term) == (K32,)
     monkeypatch.delenv("EMMY_FAST_MATH")
     monkeypatch.setenv("EMMY_FP8_MMA", "1")
     assert _offered_atoms(*term) == (K32,)
     monkeypatch.setenv("EMMY_FP8_MMA", "0")
-    monkeypatch.setenv("EMMY_FAST_MATH", "1")  # the precise pin wins over the umbrella
-    assert _offered_atoms(*term) == ()
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    assert _offered_atoms(*term) == (K32,)
 
 
 def test_k32_enumeration_structural_requirements(monkeypatch):
@@ -240,7 +241,7 @@ def test_k32_enumeration_structural_requirements(monkeypatch):
     # the sm_89 hardware floor is absolute (the bare PTX form does not compile below)
     assert _offered_atoms(*_f8_term(cap=(8, 6))) == ()
     # a symbolic K declines — no masked-K byte gather
-    plan = TilePlan.parse(f"{K32}/f2x2/k2", Workers.parse("w1x8"))
+    plan = Tile.parse(f"{K32}/f2x2/k2", Work.parse("w1x8"))
     sym = Fold.contraction(
         k_axis=Axis("k", Dim("seq")),
         a=Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=F8E4M3),
@@ -264,10 +265,10 @@ def test_f8_atoms_offer_staged_byte_slabs():
     replaced kept every fp8 arm on the transaction-bound gmem-direct path; the parity/legality
     battery is ``test_fp8_staged``)."""
     from emmy.compiler.ir.schedule import Stage
-    from emmy.compiler.pipeline.passes.lowering.tile._staging import resolve_warp_stage
+    from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 
     _tile, _ctx, node = _f8_term()
-    tile = TilePlan.parse(f"{K32}/f4x1/k4", Workers.parse("w1x8")).at(Axis("m", Dim(512)), Axis("n", Dim(512)))
+    tile = Tile.parse(f"{K32}/f4x1/k4", Work.parse("w1x8")).at(Axis("m", Dim(512)), Axis("n", Dim(512)))
     inputs = {"a_bits": Tensor("a_bits", (512, 512), F8E4M3), "w_bits": Tensor("w_bits", (512, 512), F8E4M3)}
     for spec in ("d2/smem-async", "d2/smem-tma"):
         assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is not None
@@ -303,7 +304,7 @@ def test_k32_mma_matches_lut_reference_cuda():
     m, n, k = 32, 64, 64
     rng = np.random.default_rng(11)
     backend = CudaBackend()
-    with pinned_knobs({"TILE": f"{K32}/f2x2/k1", "WORK": "w1x4", "REDUCE": "", "STAGE": ""}):
+    with pinned_knobs({"TILE": f"{K32}/f2x2", "WORK": "w1x4", "REDUCE": "", "STAGE": ""}):
         compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32" in s), None)
@@ -369,7 +370,7 @@ def _w8a8_graph(m, n, k):
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 def test_w8a8_static_act_quant_e2e_cuda():
-    """The W8A8 e2e (M3 priority 4): under the bare recursive cut, the fused MIMO kernel (whose
+    """The W8A8 e2e (M3 priority 4): one composed cut splits the fused MIMO kernel (whose
     independent ``x_f8`` output refuses the fragment epilogue, so it has no warp tier at all)
     decomposes until the contraction stands alone — the A cone cuts at its STORAGE FRONTIER
     (``storage_frontier``: the encode prefix becomes its own kernel, the raw f8 bytes the
@@ -392,7 +393,17 @@ def test_w8a8_static_act_quant_e2e_cuda():
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": "", "PLACE": "cut"}):
+    with pinned_knobs(
+        {
+            "TILE": f"{K32}/f2x2/k2",
+            "WORK": "w1x8",
+            "REDUCE": "",
+            "STAGE": "",
+            "PLACE": "cut",
+            "PLACE@a": "cut",
+            "PLACE@map": "cut",
+        }
+    ):
         compiled = backend.compile(_w8a8_graph(m, n, k))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     assert any("__nv_fp8_e4m3(" in s and "x_f8[" in s for s in srcs), "no encode kernel materializing x_f8"

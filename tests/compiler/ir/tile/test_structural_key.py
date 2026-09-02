@@ -146,44 +146,32 @@ def test_buffer_aliasing_always_moves_the_key() -> None:
 # ---- bottom-up reuse --------------------------------------------------------------------------- #
 
 
-def test_child_keys_once_and_parents_reuse_the_memo(monkeypatch) -> None:
-    import emmy.compiler.ir.tile._key as keymod
-
+def test_the_key_is_cached_on_the_term() -> None:
     child = _contraction()
-    child.structural_key()
-    assert "_structural_cache" in child.__dict__
-
-    calls = 0
-    real = keymod.digest
-
-    def counting(*parts):
-        nonlocal calls
-        calls += 1
-        return real(*parts)
-
-    monkeypatch.setattr(keymod, "digest", counting)
-    wrapper = Fold(
-        axis=None,
-        operands=(child,),
-        lift=Lambda(params=("acc0",), body=Body((Assign(name="v0", op="relu", args=("acc0",)),)), results=("v0",)),
-    )
-    wrapper.structural_key()
-    assert calls == 1  # ONE digest — the wrapper's own; the child answered from its memo
+    first = child.structural_key()
+    assert "_lowered_key" in child.__dict__, "the key must memoize on the immutable term"
+    assert child.structural_key() is first
 
 
 # ---- the op views ------------------------------------------------------------------------------ #
 
 
-def test_tileop_identity_is_the_term_alone() -> None:
+def test_tileop_content_identity_is_the_term_alone() -> None:
     term = _contraction()
-    assert TileOp(op=term, name="k_a").structural_key() == TileOp(op=term, name="k_b", knobs={"TILE": "f4"}).structural_key()
-    assert TileOp().structural_key() == ""  # placeholder
-    assert isinstance(term, Structural) and isinstance(TileOp(), Structural)
+    a = TileOp(op=term, name="k_a")
+    b = TileOp(op=term, name="k_b", knobs={"TILE": "f4"})
+    assert a.identity_key(structural=False) == b.identity_key(structural=False)
+    assert TileOp().identity_key() is None  # placeholder
+    assert isinstance(term, Structural)
 
 
 def test_cache_key_folds_the_knobs_back_in() -> None:
     term = _contraction()
     plain, knobbed = TileOp(op=term, name="k"), TileOp(op=term, name="k", knobs={"TILE": "f4"})
-    assert plain.cache_key() is not None
-    assert plain.cache_key() != knobbed.cache_key()  # fork variants must not collide
-    assert plain.cache_key() == TileOp(op=_contraction(names="r"), name="renamed").cache_key()  # α-equal terms share
+    assert plain.identity_key(with_io=True, with_knobs=True) is not None
+    assert plain.identity_key(with_io=True, with_knobs=True) != knobbed.identity_key(
+        with_io=True, with_knobs=True
+    )  # fork variants must not collide
+    assert plain.identity_key(with_io=True, with_knobs=True) == TileOp(op=_contraction(names="r"), name="renamed").identity_key(
+        with_io=True, with_knobs=True
+    )  # α-equal terms share

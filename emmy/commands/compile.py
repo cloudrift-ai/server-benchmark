@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from emmy import config
 from emmy.compiler.dim import DEFAULT_SEQ_HINT
+from emmy.compiler.loader.synthesize import SCHEMES
 from emmy.compiler.pipeline import (
     CUDA_PASSES,
     KERNEL_PASSES,
@@ -156,9 +157,11 @@ def resolve_golden_arg(args) -> None:
     Canonical selection retains every measured sibling on ``args.golden_configs``
     for pinned A/B reporting. ``--golden-file`` instead resolves only inside that
     working document and retains its verified siblings, or its one valid direct tune winner, as automatic pins;
-    inventory/proposal siblings still select the target graph. No Python snippet
-    is generated and dynamic shapes need no CLI reconstruction: they are already
-    in the decoded program.
+    inventory/proposal siblings still select the target graph. When every matching
+    realization in an explicit working file shares one input-pin regime containing
+    ``PLACE``, that regime selects the ordinary compile's structural target without
+    promoting any unverified schedule knobs. No Python snippet is generated and
+    dynamic shapes need no CLI reconstruction: they are already in the decoded program.
 
     ``NAME`` matches the same way ``emmy eval --kernel`` filters goldens: an exact
     golden name first, else a name **substring** — so the identifier used to inspect
@@ -170,6 +173,7 @@ def resolve_golden_arg(args) -> None:
     name = getattr(args, "golden", None)
     golden_file = getattr(args, "golden_file", None)
     args.golden_configs = []
+    args.golden_target_pins = {}
     if golden_file and not name:
         logger.error("--golden-file requires --golden NAME")
         sys.exit(2)
@@ -192,6 +196,7 @@ def resolve_golden_arg(args) -> None:
         goldens_for_live_gpu,
         load_golden_file,
         load_golden_records,
+        shared_placement_pins,
     )
 
     # Canonical replay scopes to the live card as before. An explicit working file is
@@ -235,6 +240,8 @@ def resolve_golden_arg(args) -> None:
     if len(targets) != 1:
         logger.error("golden %r resolves to %d different embedded program targets", name, len(targets))
         sys.exit(2)
+    if document is not None:
+        args.golden_target_pins = shared_placement_pins(matches)
     args._golden_graph = matches[0].target_program.copy()
     from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
 
@@ -264,6 +271,28 @@ def resolve_golden_arg(args) -> None:
         "" if len(matches) == 1 else "s",
         len(pinned),
         "" if len(pinned) == 1 else "s",
+    )
+    if args.golden_target_pins:
+        logger.info("[golden] applying shared structural target pins: %s", args.golden_target_pins)
+
+
+def add_quantize_arg(parser) -> None:
+    """``--quantize`` — offered by the commands that ACT on it (``compile`` / ``run``), not by
+    every command sharing the input parser. A flag that says it will quantize and does not is
+    worse than its absence."""
+    parser.add_argument(
+        "--quantize",
+        choices=SCHEMES,
+        default=None,
+        help=(
+            "Quantize the traced module's linear weights to this scheme and compile the result. "
+            "Writes a real checkpoint (into --dump-dir when given, else a temp dir whose path is logged) "
+            "and runs the ordinary spellers over it, so the program is the one that checkpoint would give. "
+            "'nvfp4' declares static 4-bit activations (W4A4, the native block-scaled path); "
+            "'nvfp4-w4a16' declares weights only, leaving activations 16-bit. The weight side is derived "
+            "from each tensor; the activation scale is calibrated over the trace's ONE example input — "
+            "a real calibration, and a poor one."
+        ),
     )
 
 
@@ -400,6 +429,7 @@ def register_compile_command(subparsers):
             "SASS-identical, so it never changes measured perf; tune / run / bench leave it off."
         ),
     )
+    add_quantize_arg(parser)
     add_diagnostics_args(parser)
     add_nvcc_args(parser)
     parser.set_defaults(func=handle_compile)
@@ -425,7 +455,9 @@ def handle_compile(args):
     config.set_readable(False, overwrite=True) if args.no_readable else config.set_readable(True)
     apply_nvcc_flags(args, default="")  # compile uses nvcc default -O3 (representative codegen)
     passes = resolve_passes(args)
-    graph, _, _ = load_or_trace(args)
+    graph, _, bundle = load_or_trace(args)
+    if getattr(args, "quantize", None):
+        _quantize_traced(graph, bundle, args)
     initial_count = len(graph.nodes)
 
     dump = CompilerDump.resolve(args.dump_dir)
@@ -443,7 +475,10 @@ def handle_compile(args):
     else:
         logger.debug("No tuning DB at %s — using rule defaults", tune_db_path)
 
-    result = Pipeline.build(passes).run(graph, db=db, dump=dump)
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    with pinned_knobs(args.golden_target_pins):
+        result = Pipeline.build(passes).run(graph, db=db, dump=dump)
 
     n_compute = sum(1 for n in result.nodes.values() if not _is_boundary(n.op))
     logger.info("Lowered: %d graph nodes -> %d kernels", initial_count, n_compute)
@@ -476,6 +511,34 @@ def format_stage(graph, stage: str) -> str:
     if formatter == "graph":
         return graph.pretty_print()
     return format_kernels(graph)
+
+
+def _quantize_traced(graph: Graph, bundle, args) -> str:
+    """``--quantize``: quantize a TRACED graph's linear weights, then spell the result.
+
+    Deliberately not a second way to build a quantized graph. It writes a real checkpoint and
+    runs the ordinary spellers over it, so what compiles is exactly what compiling that directory
+    would give — and the directory is on disk to be read. ``--dump-dir`` keeps it; otherwise it
+    lands in a temp dir whose path is logged."""
+    import tempfile  # noqa: PLC0415
+
+    from emmy.compiler.loader.synthesize import quantize_and_spell, summarize  # noqa: PLC0415
+
+    if bundle is None:
+        logger.error("--quantize needs a traced module: use --code, or a model that traces")
+        sys.exit(2)
+    out = Path(args.dump_dir) / "quantized-checkpoint" if getattr(args, "dump_dir", None) else Path(tempfile.mkdtemp(prefix="emmy-quant-"))
+    try:
+        ckpt, spelled, marked = quantize_and_spell(graph, bundle, out, scheme=args.quantize)
+    except ValueError as e:
+        logger.error("--quantize: %s", e)
+        sys.exit(2)
+    logger.info("%s checkpoint at %s\n%s", args.quantize, ckpt, summarize(ckpt))
+    logger.info("spelled %d quantized weight(s); %d linear(s) marked for 4-bit activations", spelled, marked)
+    # The isolated bench worker re-traces from ``--code`` and binds the packed constants through a
+    # checkpoint path; this is the one it needs (``load_or_trace`` prefers ``code``, so naming the
+    # directory here does not redirect the trace).
+    return str(ckpt)
 
 
 def _is_boundary(op) -> bool:
@@ -628,7 +691,7 @@ def _trace_model(
     quant_dir = quantized_checkpoint_dir(model_id)
     repo, revision = split_revision(model_id)
     if quant_dir is not None:
-        # Quantized checkpoint (FP8 / AWQ / EXL3): trace the architecture twin from config,
+        # Quantized checkpoint (FP8 / NVFP4 / AWQ / EXL3): trace the architecture twin from config,
         # carrying the decoded real weights (from_pretrained would engage transformers'
         # own quantizer machinery — the trace is quantization-blind; see the FP8 plan).
         if architecture_only:
@@ -667,6 +730,7 @@ def _trace_model(
             from emmy.compiler.loader.quant import (  # noqa: PLC0415
                 spell_dynamic_fp8_activations,
                 spell_quantized_constants,
+                spell_static_fp4_activations,
                 spell_trellis_constants,
             )
             from emmy.compiler.trace.huggingface import retarget_constants_to_model  # noqa: PLC0415
@@ -675,6 +739,7 @@ def _trace_model(
                 retarget_constants_to_model(graph, wrapper, model)
             spell_quantized_constants(graph, str(quant_dir))
             spell_dynamic_fp8_activations(graph, str(quant_dir))
+            spell_static_fp4_activations(graph, str(quant_dir))
             spell_trellis_constants(graph, str(quant_dir))
         return graph
 

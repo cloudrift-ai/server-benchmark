@@ -75,7 +75,7 @@ class _RaisingBackend:
 
 
 def _perf_row(db: SearchDB, cand):
-    return db.lookup_perf(cand.ctx.structural_key(), cand.graph.nodes["out"].op.cache_key(), backend="cuda")
+    return db.lookup_perf(cand.ctx.structural_key(), cand.graph.nodes["out"].op.identity_key(with_io=True, with_knobs=True), backend="cuda")
 
 
 async def test_compile_budget_overrun_records_nothing() -> None:
@@ -132,3 +132,66 @@ async def test_a_real_bench_failure_still_records_bench_fail() -> None:
     assert status == "bench_fail"
     assert stats.median == 2_000_000.0
     assert _perf_row(db, cand).status == "bench_fail"
+
+
+def _candidate_pair():
+    """A terminal with TWO kernels — the shape one hang used to condemn wholesale."""
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1,)), node_id="x")
+    # The bodies must differ materially: ``CudaOp`` identity normalizes the kernel NAME away, so
+    # two kernels differing only in name are one identity and would share a single perf row.
+    for nid, name, body in (("mid", "k_innocent", "out[0] = 1.0f;"), ("out", "k_culprit", "out[0] = 2.0f;")):
+        graph.add_node(
+            CudaOp(
+                kernel_source=f'extern "C" __global__ void {name}(float* out) {{ {body} }}',
+                kernel_name=name,
+                arg_order=("out",),
+            ),
+            [],
+            Tensor(nid, (1,)),
+            node_id=nid,
+        )
+    graph.inputs, graph.outputs = ["x"], ["out"]
+    return SimpleNamespace(graph=graph, ctx=Context.from_target((8, 0)))
+
+
+def _fail_rows(db: SearchDB, cand) -> dict[str, str]:
+    """``kernel_name -> status`` for every kernel of ``cand`` that has a perf row."""
+    out = {}
+    for nid in ("mid", "out"):
+        op = cand.graph.nodes[nid].op
+        row = db.lookup_perf(cand.ctx.structural_key(), op.identity_key(with_io=True, with_knobs=True), backend="cuda")
+        if row is not None:
+            out[op.kernel_name] = row.status
+    return out
+
+
+async def test_a_hung_kernel_is_blamed_alone() -> None:
+    """The watchdog NAMES the kernel that hung, so only that kernel earns the ``bench_fail`` row.
+
+    A terminal benches its kernels together and one hang fails the whole run; recording the
+    failure against all of them manufactures evidence about kernels never shown to fail. Measured
+    on DeepSeek-V4's post block: 70 recorded failures carrying only 7 distinct errors, 20 kernels
+    condemned by a single hang."""
+    db, cand = SearchDB(), _candidate_pair()
+    exc = BenchWorkerJobError("bench worker error: HungKernelError(\"kernel 'k_culprit (iter 0)' did not complete within 60000 ms\")")
+
+    _stats, status, _measured, per_kernel = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
+
+    assert status == "bench_fail", "the terminal still failed — the search must move on"
+    assert _fail_rows(db, cand) == {"k_culprit": "bench_fail"}, "the innocent kernel must carry no failure"
+    assert len(per_kernel) == 1, "only the culprit trains the prior on this failure"
+
+
+async def test_an_unattributable_failure_blames_no_kernel() -> None:
+    """A bench-worker startup timeout is not a property of any kernel — it names none, and with
+    several kernels in the terminal there is no unambiguous culprit. Unknown is not failed, so
+    nothing is persisted; the terminal still reports ``bench_fail`` and the candidate is spent."""
+    db, cand = SearchDB(), _candidate_pair()
+    exc = RuntimeError("bench worker did not accept the request within 74.0s wall budget — SIGKILL'd, stream cleaned")
+
+    _stats, status, _measured, per_kernel = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
+
+    assert status == "bench_fail"
+    assert _fail_rows(db, cand) == {}
+    assert per_kernel == []

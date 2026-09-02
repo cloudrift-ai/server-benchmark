@@ -217,6 +217,65 @@ def test_kernel_op_windowed_axis_roundtrip():
     assert op.smem_bytes() == 128 * 32 * 2
 
 
+def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
+    """A dumped tile-stage graph must rehydrate the scalar output-tile schedule."""
+    import copy
+    import json
+
+    from emmy.compiler.ir.atom import ScalarAtom
+    from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.schedule import Raster, Schedule, Work
+    from emmy.compiler.ir.schedule import Tile as ScheduleTile
+    from emmy.compiler.ir.schedule.classic import (
+        ClassicMaterialization,
+        ClassicScheduleContext,
+        KernelSchedule,
+        ProjectionSchedule,
+    )
+    from emmy.compiler.ir.tile import TileOp
+
+    fold = Fold.projection(results=(0.0,))
+    source = TileOp(op=fold)
+    context = ClassicScheduleContext(source)
+    classic = Schedule(
+        KernelSchedule(Work(), Raster()),
+        {context.tile_op.node_sites[0]: ProjectionSchedule(ScheduleTile())},
+        {},
+    )
+    g = Graph()
+    x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1,), "f16"), node_id="x")
+    g.add_node(
+        op=TileOp(op=fold, schedule=classic, materialization=ClassicMaterialization({}, {})),
+        inputs=[x],
+        output=Tensor("out", (1,), "f16"),
+        node_id="out",
+    )
+    g.inputs, g.outputs = [x], ["out"]
+
+    calls = 0
+    extend = ClassicScheduleContext.extend
+
+    def counted(context, pick):
+        nonlocal calls
+        calls += 1
+        return extend(context, pick)
+
+    monkeypatch.setattr(ClassicScheduleContext, "extend", counted)
+    loaded = Graph.from_dict(json.loads(json.dumps(g.to_dict(), default=str)))
+    assert calls == 1
+    loaded_tile = loaded.nodes["out"].op
+    loaded_context = ClassicScheduleContext(loaded_tile)
+    plan = loaded_tile.schedule.nodes[loaded_context.tile_op.node_sites[0]].tile
+    assert isinstance(plan, ScheduleTile)
+    assert isinstance(plan.atom, ScalarAtom)
+
+    grouped_projection = copy.deepcopy(g.to_dict())
+    schedule_row = grouped_projection["nodes"]["out"]["op_fields"]["schedule"]
+    schedule_row.update({"WORK": "t2", "TILE": "f1x2", "RASTER": "gm8"})
+    with pytest.raises(ValueError, match="RASTER requires a tiled contraction site"):
+        Graph.from_dict(grouped_projection)
+
+
 def test_stmt_eval_scope_reads_non_finite_literals():
     """``repr(float('-inf'))`` is the bare token ``-inf``, which does not eval without a name.
 

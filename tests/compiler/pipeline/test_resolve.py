@@ -19,9 +19,9 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import Fork
-from emmy.compiler.pipeline.pipeline import Run
+from emmy.compiler.pipeline.pipeline import Run, _remember_structural_decision, _replay_structural_decision
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +89,60 @@ def test_option0_decide_matches_no_prior_greedy() -> None:
     assert _graph_signature(plain) == _graph_signature(greedy)
 
 
+def test_fixpoint_rule_repeats_until_quiescent() -> None:
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.pipeline.pipeline import Pass, Pattern, Rule, RuleSkipped
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (4,)), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (4,)), node_id="b")
+    graph.add_node(ElementwiseOp("add"), ["a", "b"], Tensor("o", (4,)), node_id="o")
+    graph.inputs, graph.outputs = ["a", "b"], ["o"]
+
+    def rewrite(root):
+        if root.op.fn == "add":
+            return ElementwiseOp("subtract")
+        if root.op.fn == "subtract":
+            return ElementwiseOp("multiply")
+        raise RuleSkipped("fixpoint reached")
+
+    rule = Rule(
+        name="repeat",
+        pattern=[Pattern("root", ElementwiseOp)],
+        rewrite=rewrite,
+        param_names=("root",),
+        fixpoint=True,
+    )
+    pipeline = Pipeline([Pass("repeat", [rule])])
+
+    terminal, _ = Run(pipeline=pipeline, ctx=Context.from_target((8, 0))).resolve(graph, _option0)
+
+    assert terminal.nodes["o"].op.fn == "multiply"
+
+
+def test_structural_replay_is_scoped_to_the_cut_domain() -> None:
+    """Equal output counts never let a placement choice suppress a reduction choice."""
+    from emmy.compiler.pipeline.fork import DeferredFork
+
+    graph, _ = Run(pipeline=Pipeline.build(LOOP_PASSES), ctx=Context.from_target((8, 0))).resolve(_f32_matmul_graph(), _option0)
+    root = graph.nodes["o"].op
+    placement_cut = Graph()
+    reduction_split = Graph()
+    placement = [
+        DeferredFork(lambda: root, {"PLACE": "fuse"}),
+        DeferredFork(lambda: placement_cut, {"PLACE": "cut"}, structural=True),
+    ]
+    reduction = [
+        DeferredFork(lambda: root, {"REDUCE": ""}),
+        DeferredFork(lambda: reduction_split, {"REDUCE": "g2k"}, structural=True),
+    ]
+    decisions = []
+    _remember_structural_decision(decisions, root, ("PLACE",), {"PLACE": "cut"})
+
+    assert _replay_structural_decision(decisions, root, placement) is placement_cut
+    assert _replay_structural_decision(decisions, root, reduction) is None
+
+
 # ---------------------------------------------------------------------------
 # Trace shape
 # ---------------------------------------------------------------------------
@@ -103,7 +157,7 @@ def test_trace_records_partition_fork(monkeypatch) -> None:
     depending on schedule enumeration order."""
     from emmy.compiler.pipeline.knob import family_of
 
-    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_REDUCE@N0", "")
     g = _f32_matmul_graph()
     run = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((8, 0)))
     terminal, trace = run.resolve(g, _option0)
@@ -145,14 +199,12 @@ def test_try_rewrite_refreshes_swapped_op_io() -> None:
     from emmy.compiler.pipeline.pipeline import Cursor, Pattern, Rule, RuleSkipped
     from emmy.compiler.pipeline.search.candidate import Candidate
 
-    class SpyMatmulOp(MatmulOp):
-        def __init__(self):
-            super().__init__()
-            self.pop_calls = 0
+    pop_calls = []
 
-        def populate_io(self, graph, node):
-            self.pop_calls += 1
-            super().populate_io(graph, node)
+    class SpyMatmulOp(MatmulOp):
+        def with_io(self, graph, node):
+            pop_calls.append(node.id)
+            return super().with_io(graph, node)
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (4, 4)), node_id="a")
@@ -175,10 +227,10 @@ def test_try_rewrite_refreshes_swapped_op_io() -> None:
     # I/O was never matcher-refreshed — exactly what an earlier apply's splice leaves behind.
     fresh = SpyMatmulOp()
     g.nodes["o"].op = fresh
-    assert fresh.pop_calls == 0
+    pop_calls.clear()  # the earlier pl.match already refreshed once
 
     run = Run(pipeline=pl, ctx=Context.from_target((8, 0)))
     Candidate(run=run, graph=g, cursor=Cursor(run=run)).try_rewrite(matches[0])
-    assert fresh.pop_calls == 1, "try_rewrite must refresh the consumed node's op I/O at apply time"
-    assert seen["op"] is fresh, "the rule must see the swapped-in op"
+    assert pop_calls == ["o"], "try_rewrite must refresh the consumed node's op I/O at apply time"
+    assert seen["op"].source is fresh, "the rule must see the swapped-in op (io-refreshed rebind chains to it)"
     assert seen["inputs"].get("a") is g.nodes["a"].output, "the rule must see graph-true operand tensors, not placeholders"

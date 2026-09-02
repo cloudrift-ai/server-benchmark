@@ -8,9 +8,38 @@ from __future__ import annotations
 
 import asyncio
 import functools
+from itertools import product
 
 import numpy as np
 import pytest
+
+
+def classic_cartesian_assignments(context):
+    """Enumerate a classic context's literal kernel × node × edge test oracle."""
+    from emmy.compiler.ir.schedule import Schedule, ScheduleRefused
+
+    nodes = tuple(context.node_choices(site) for site in context.tile_op.node_sites)
+    edges = tuple(context.edge_choices(site) for site in context.tile_op.edge_sites)
+    for kernel, node_values, edge_values in product(context.kernels, product(*nodes), product(*edges)):
+        assignment = Schedule(
+            kernel,
+            dict(zip(context.tile_op.node_sites, node_values, strict=True)),
+            dict(zip(context.tile_op.edge_sites, edge_values, strict=True)),
+        )
+        try:
+            context.extend(assignment)
+        except (ScheduleRefused, TypeError):
+            accepted = False
+        else:
+            accepted = True
+        yield assignment, accepted
+
+
+def enumerate_classic_reference(context):
+    """Yield the accepted subset of the literal classic assignment product."""
+    for assignment, accepted in classic_cartesian_assignments(context):
+        if accepted:
+            yield assignment
 
 
 def has_cuda_gpu() -> bool:
@@ -55,6 +84,30 @@ requires_sm90 = pytest.mark.skipif(
     (device_compute_capability() or (0, 0)) < (9, 0),
     reason="mma.sync warp tier needs sm_90+ (pin-only / non-functional on sm_80-89: ldmatrix fault + sm_NNa TMA compile)",
 )
+
+
+def direct_classic_leaf(fork_point):
+    """Select the direct classic schedule without flattening the schedule tree."""
+    from emmy.compiler.pipeline.fork import Fork
+    from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES, family_of
+
+    def allowed(option) -> bool:
+        knobs = option.knobs if isinstance(option, Fork) else getattr(option, "knobs", {})
+        return all(family_of(key) not in SCHEDULE_FAMILIES or str(value) == "" for key, value in knobs.items())
+
+    def descend(options):
+        for option in options:
+            if not allowed(option):
+                continue
+            if not isinstance(option, Fork) or option.is_leaf:
+                return option
+            try:
+                return descend(option.expand())
+            except ValueError:
+                continue
+        raise ValueError("fork has no direct classic schedule")
+
+    return descend(fork_point.options)
 
 
 def dtype_tol(dtype) -> dict[str, float]:

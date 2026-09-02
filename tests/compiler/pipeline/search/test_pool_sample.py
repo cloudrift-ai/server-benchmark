@@ -68,6 +68,21 @@ def test_every_candidate_is_visited_even_though_most_are_dropped(by_id) -> None:
     assert PoolSample(rows=10, keep=frozenset({12345})).take(space) == PoolSample(rows=10).take(space)
 
 
+def test_a_kept_signature_retains_one_row_however_many_carry_it(monkeypatch) -> None:
+    """A signature is a coarse structural stamp, so a big pool can hold thousands of rows under one
+    of them. Both consumers read the FIRST match and no more, so the keep-set must scale with the
+    corpus that recorded it, never with the pool it is applied to — retaining every match is what
+    let 34 signatures pull 77,279 rows out of a 1.95M-row pool and swamp the draw."""
+    monkeypatch.setattr(features, "tile_signature", lambda row: row["id"] % 4)
+    space = _space(500)  # 125 rows carry each of the four signatures
+    kept = PoolSample(rows=10, seed=0, keep=frozenset({1, 3})).take(space)
+    ids = [row["id"] for row in kept.rows]
+    assert 1 in ids and 3 in ids, "the first row carrying each kept signature is retained"
+    drawn = {row["id"] for row in PoolSample(rows=10, seed=0).take(space).rows}
+    assert set(ids) - drawn == {1, 3}, "and it adds exactly those two rows to the draw, not 250"
+    assert kept.total == 500, "the exact pool size is unchanged by what the keep-set retains"
+
+
 def test_a_pool_no_larger_than_the_draw_is_taken_whole() -> None:
     space = _space(10)
     assert PoolSample(rows=10).take(space) == Candidates(space, 10)
@@ -75,10 +90,9 @@ def test_a_pool_no_larger_than_the_draw_is_taken_whole() -> None:
     assert PoolSample(rows=0).take(space) == Candidates(space, 10), "0 is 'enumerate everything', the live and unsampled default"
 
 
-def test_the_cache_identity_ignores_the_size_sink_and_the_keep_set_order() -> None:
-    """The pool memo keys on this, so it must be stable across processes: a ``frozenset``'s
-    iteration order follows randomized string hashing, and its ``repr`` would key one sample two
-    ways on two runs."""
+def test_the_sample_identity_ignores_the_size_sink_and_the_keep_set_order() -> None:
+    """The sample identity must be stable across processes: a ``frozenset``'s iteration order
+    follows randomized string hashing, and its ``repr`` would spell one sample two ways."""
     a = PoolSample(rows=10, seed=1, keep=frozenset({("x",), ("y",)}))
     b = PoolSample(rows=10, seed=1, keep=frozenset({("y",), ("x",)}))
     b.totals["some-pool"] = 999

@@ -53,7 +53,7 @@ class OnlinePrior(Prior):
         present on this row" off from a knob that is present *and* legitimately
         zero (a BOOL ``False`` → ``0.0``, ``STAGE="00"`` → ``popcount 0.0``).
         Since every *realized leaf* now stamps every declared knob (the schedule
-        codecs get their explicit OFF value ``""`` from ``_schedule``'s option-0
+        codecs get their explicit OFF value ``""`` from the classic schedule's option-0
         stamping; bare-stamped knobs via ``knob.apply_off_defaults`` — see the
         knob-stamp invariant), an absent feature means **only** "not-yet-decided"
         — a partial fork-prefix row scored / collected mid-descent (``_node_knobs``).
@@ -72,6 +72,8 @@ class OnlinePrior(Prior):
             return
         x = np.array([[f.get(c, np.nan) for c in cols] for f in feats], dtype=float)
         y = np.log(np.array([lab for _, lab in rows], dtype=float))
+        if np.ptp(y) == 0:
+            return
         model = CatBoostRegressor(
             iterations=self._iterations,
             depth=self.DEPTH,

@@ -10,7 +10,7 @@ silent-drop bug).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import fields, is_dataclass
 from functools import singledispatch
 
@@ -236,6 +236,34 @@ def _(s: Cond, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         else_body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.else_body),
     )
+
+
+def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
+    """:func:`rewrite` under an alias map, made **hygienic**: the rename stops at a nested scope
+    that re-binds one of the aliased names.
+
+    ``rewrite`` descends into every nested body and maps a stmt's OWN bindings as well as its
+    reads. But ``Assign`` / ``Load`` / ``Select`` names bound inside a ``Loop`` / ``Cond`` body are
+    scoped to that body (see :class:`~emmy.compiler.ir.stmt.blocks.Loop`), so an inner binding that
+    merely shares a spelling with an aliased outer name is a DIFFERENT variable. Renaming it both
+    redeclares the survivor inside the scope and rewires the inner arithmetic to the outer value.
+
+    Use this — not a bare ``rewrite`` — whenever the alias comes from dropping a binding (load
+    dedup, CSE) rather than from a whole-subtree renumbering.
+    """
+    if not alias:
+        return stmt
+    renamed = rewrite(stmt, lambda nm: alias.get(nm, nm), Sigma.IDENTITY, _axis_identity)
+    bodies = stmt.nested()
+    if not bodies:
+        return renamed
+    # ``rewrite`` just descended into the child scopes under the full alias. Redo each one with the
+    # names that scope re-binds pruned out, and put those bodies back.
+    inner = []
+    for b in bodies:
+        pruned = {k: v for k, v in alias.items() if k not in b._all_ssa_defs}
+        inner.append(Body(tuple(rename_free(c, pruned) for c in b)))
+    return renamed.with_bodies(tuple(inner))
 
 
 # ---------------------------------------------------------------------------

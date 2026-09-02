@@ -104,6 +104,18 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
     )
 
 
+def test_schedule_model_does_not_import_pipeline() -> None:
+    """The schedule model defines domains and compatibility; pipeline search only consumes it."""
+    schedule_dir = _REPO_ROOT / "emmy" / "compiler" / "ir" / "schedule"
+    forbidden = re.compile(r"^\s*(?:from|import)\s+emmy\.compiler\.pipeline\b")
+    offenders = []
+    for py in sorted(schedule_dir.rglob("*.py")):
+        for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+            if forbidden.search(line):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
+    assert not offenders, "ir/schedule must not import the pipeline layer:\n" + "\n".join(offenders)
+
+
 # ---------------------------------------------------------------------------
 # Fix 1 firewall — keep the
 # assemble→TileOp boundary clean: every benched scheduling choice lives in the
@@ -227,39 +239,57 @@ def test_search_data_does_not_import_the_prior() -> None:
     )
 
 
-_IDENTITY_HOME = "emmy/compiler/ir/tile/identity.py"
+_IDENTITY_HOME = "emmy/compiler/ir/base.py"
+
+#: The identity interface methods and the modules allowed to define/override each. ``Op`` (the
+#: home) declares ONE public function — ``identity_key`` (``CudaOp`` overrides it whole with its
+#: rendered-source digest); ``_body_identity`` is the ONE extension point (``BodyOp`` answers
+#: with its stored body, ``TileOp`` with its derived ``loop_body``), and ``hint_extent`` is the
+#: ``Axis`` property the scheduler sizes against. ``deploy_identity`` / ``cache_key`` /
+#: ``pool_key`` are retired lattice points, spelled at call sites via ``identity_key`` flags (or
+#: minted at the scheduler's one site) — a method of any of those names reappearing anywhere is a
+#: second spelling.
+_IDENTITY_DEFINERS = {
+    "identity_key": {_IDENTITY_HOME, "emmy/compiler/ir/cuda/ir.py"},
+    "body_identity": {_IDENTITY_HOME, "emmy/compiler/ir/stmt/ir.py", "emmy/compiler/ir/tile/ir.py"},
+    "io_fingerprint": {_IDENTITY_HOME},
+    "deploy_identity": set(),
+    "cache_key": set(),
+    "pool_key": set(),
+    "hint_extent": {"emmy/compiler/ir/axis.py"},
+}
 
 
 def test_kernel_identity_is_not_redefined_outside_its_home() -> None:
-    """No module outside the home may DEFINE one of its readings.
+    """No module outside the home may DEFINE one of the identity readings.
 
     Identity has several legitimate meanings — the algebra digest, the deploy join key, the
-    schedule-space key, the ``S_*`` row — and each is answered once, in a module whose docstring
-    says which. What this forbids is a second copy of one of THESE readings: a fingerprint
-    re-derived beside its caller drifts from the thing it identifies, silently, and the failure is
-    two kernels sharing a cache entry or a golden record joining the wrong shape.
+    schedule-space key, the ``S_*`` row — and each is answered once, on the ``Op`` interface,
+    computed from the op's complete Loop-IR body and its io buffers. What this forbids is a
+    second copy of one of THESE readings: a key re-derived beside its caller drifts from the
+    thing it identifies, silently, and the failure is two kernels sharing a cache entry or a
+    golden record joining the wrong shape.
 
     ``pool_key`` shipped omitting per-axis extents for exactly that reason — it lived next to the
     enumeration it keyed, read as a local memo detail, and nobody treated it as a contract with
     three external consumers.
 
-    Deliberately narrow: it matches the home's own names, not every function whose name contains
-    "identity" or "sig". A guard that flagged those would be exempted rather than obeyed, and the
-    exemption list would become the real rule.
+    Deliberately narrow: it matches the interface's own names, not every function whose name
+    contains "identity" or "sig". A guard that flagged those would be exempted rather than
+    obeyed, and the exemption list would become the real rule.
     """
-    owned = ("deploy_identity", "pool_key", "dtype_fingerprint", "extent_fingerprint", "hint_fingerprint", "hint_extent")
-    forbidden = re.compile(r"^def\s+_?(" + "|".join(owned) + r")\s*\(")
+    forbidden = re.compile(r"^\s*def\s+_?(" + "|".join(_IDENTITY_DEFINERS) + r")\s*\(")
     offenders: list[str] = []
     for py in sorted((_REPO_ROOT / "emmy").rglob("*.py")):
         relative = py.relative_to(_REPO_ROOT).as_posix()
-        if relative == _IDENTITY_HOME:
-            continue
         for lineno, line in enumerate(py.read_text().splitlines(), start=1):
-            if forbidden.match(line):
+            m = forbidden.match(line)
+            if m and relative not in _IDENTITY_DEFINERS[m.group(1)]:
                 offenders.append(f"{relative}:{lineno}: {line.strip()}")
     assert not offenders, (
-        f"these readings are defined in {_IDENTITY_HOME}; import them instead of re-deriving. A new "
-        "fact the enumeration reads belongs in a fingerprint THERE.\n" + "\n".join(offenders)
+        f"these readings live on the Op interface ({_IDENTITY_HOME}); call the method instead of "
+        "re-deriving. A fact a schedule reads that the key misses is a modeling gap to fix in the "
+        "op's loop body or io, never a side-channel fingerprint.\n" + "\n".join(offenders)
     )
 
 
@@ -268,8 +298,8 @@ def test_a_new_fingerprint_fact_moves_the_corpus() -> None:
 
     The corpus stores each case's ``deploy_identity`` and fails when the stored value stops
     matching. That is only a tripwire for identity drift if the corpus actually carries the stamp,
-    so this pins the connection: adding a fingerprint fact — which ``ir/tile/identity.py``
-    documents as routine — must show up as a corpus diff rather than silently re-keying every
+    so this pins the connection: a fact newly folded into ``Op.deploy_identity`` — a loop-body
+    modeling fix, an io fact — must show up as a corpus diff rather than silently re-keying every
     checked-in reproducer.
     """
     cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.yaml"))
@@ -289,15 +319,107 @@ def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
     """Identity readers import ``ir/tile/identity``, never a lowering pass's private module.
 
     ``search/golden.py`` and ``search/policy/greedy.py`` used to import ``deploy_identity`` and
-    ``pool_key`` from ``passes/lowering/tile/_schedule`` — inside functions, with ``noqa: PLC0415``,
-    because the module-level direction is a cycle (``_schedule`` imports ``search.space``). A
+    ``pool_key`` from the private tile scheduler — inside functions, with ``noqa: PLC0415``,
+    because the module-level direction is a cycle (the scheduler imports ``search.space``). A
     deferred import with a lint suppression is what a layering inversion looks like when the code
     has not moved yet.
     """
-    forbidden = re.compile(r"lowering\.tile\._schedule\s+import\s+.*\b(?:deploy_identity|pool_key)\b")
+    forbidden = re.compile(r"lowering\.tile\._classic\s+import\s+.*\b(?:deploy_identity|pool_key)\b")
     offenders: list[str] = []
     for py in sorted((_REPO_ROOT / "emmy").rglob("*.py")):
         for lineno, line in enumerate(py.read_text().splitlines(), start=1):
             if forbidden.search(line):
                 offenders.append(f"{py.relative_to(_REPO_ROOT).as_posix()}:{lineno}: {line.strip()}")
-    assert not offenders, "import kernel identity from emmy.compiler.ir.tile.identity\n" + "\n".join(offenders)
+    assert not offenders, "read kernel identity off the Op interface (Op.deploy_identity)\n" + "\n".join(offenders)
+
+
+def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
+    """``Stmt.rename_buffers`` is the setter counterpart of ``external_reads`` /
+    ``external_writes``: a stmt kind that DECLARES external buffers without knowing how to
+    rename them silently breaks every buffer rebind (``canonicalize_buffer_names``, the session
+    kernel cache) the day it first appears inside a body those walk. Wrapper stmts whose
+    declarations aggregate a nested body are exempt — ``Body.rename_buffers`` reaches their
+    leaves through the recursive map."""
+    import importlib
+    import pkgutil
+
+    import emmy.compiler.ir as ir_pkg
+    from emmy.compiler.ir.stmt.base import Stmt
+
+    for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
+        importlib.import_module(mod.name)
+
+    def subclasses(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from subclasses(sub)
+
+    offenders = [
+        cls.__name__
+        for cls in subclasses(Stmt)
+        if ("external_reads" in cls.__dict__ or "external_writes" in cls.__dict__)
+        and "rename_buffers" not in cls.__dict__
+        and not cls.__dict__.get("nested", None)  # wrapper aggregators rename through their bodies
+    ]
+    assert not offenders, (
+        "these stmt kinds declare external buffers but cannot rename them — add a "
+        "rename_buffers override beside the declaration:\n" + "\n".join(sorted(offenders))
+    )
+
+
+def test_every_op_is_a_frozen_dataclass() -> None:
+    """``Op`` immutability is the type, not a convention: every ``Op`` dataclass is
+    ``frozen=True``, its maps land as ``frozendict`` (``Op.__post_init__``), and mutation-shaped
+    bugs (a stamp editing a shared instance, a cache outdated by a silent write) are
+    unrepresentable. A rewrite is always a ``replace`` + node rebind."""
+    import importlib
+    import pkgutil
+
+    import emmy.compiler.ir as ir_pkg
+    from emmy.compiler.ir.base import Op
+
+    for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
+        importlib.import_module(mod.name)
+
+    def subclasses(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from subclasses(sub)
+
+    offenders = [
+        cls.__name__ for cls in {Op, *subclasses(Op)} if hasattr(cls, "__dataclass_params__") and not cls.__dataclass_params__.frozen
+    ]
+    assert not offenders, "every Op dataclass must be frozen=True:\n" + "\n".join(sorted(offenders))
+
+
+def test_the_op_identity_surface_is_exactly_identity_key() -> None:
+    """One identity function. Any public method on any ``Op`` whose name says identity or key —
+    beyond ``identity_key`` itself — is a second spelling waiting to drift; the retired names
+    (``deploy_identity`` / ``cache_key`` / ``pool_key`` / ``structural_key``-on-ops) must not
+    return under new spellings either."""
+    import importlib
+    import pkgutil
+    import re as _re
+
+    import emmy.compiler.ir as ir_pkg
+    from emmy.compiler.ir.base import Op
+
+    for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
+        importlib.import_module(mod.name)
+
+    def subclasses(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from subclasses(sub)
+
+    pattern = _re.compile(r"identity|(?:^|_)key")
+    offenders = {
+        f"{cls.__name__}.{name}"
+        for cls in {Op, *subclasses(Op)}
+        for name, value in vars(cls).items()
+        if callable(value)
+        and not name.startswith(("_", "is_"))  # ``IndexMapOp.is_identity`` is the identity MAP predicate, not a key
+        and pattern.search(name)
+        and name != "identity_key"
+    }
+    assert not offenders, "the public Op identity surface is identity_key alone:\n" + "\n".join(sorted(offenders))

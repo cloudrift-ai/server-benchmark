@@ -233,3 +233,19 @@ def test_leaf_expand_returns_own_param_materialization():
     leaves = _walk_leaves(tree)
     results = sorted(leaf.expand()[0] for leaf in leaves)
     assert results == ["op(1,1,1)", "op(1,1,2)", "op(1,1,3)"]
+
+
+def test_fork_point_partitions_offers_and_carries_pool_identity():
+    """The engine's typed offer partition: ``splices`` / ``variants`` classify top-level options
+    once, and schedule-tree Forks expose the enumeration's minted ``pool_id`` (``None`` for forks
+    outside a schedule enumeration — the base-class default the tree builder inherits)."""
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.pipeline.pipeline import ForkPoint
+
+    tree = build_fork_tree(params=[_row(1, 1, 1), _row(1, 2, 1)], levels=_LEVELS, materialize=_stub_materialize)
+    splice = Graph()
+    fp = ForkPoint(match=None, options=[splice, tree], root_op=None, ctx=None)
+    assert fp.splices == (splice,)
+    assert fp.structural  # derived from the partition, not a second classification
+    assert fp.variants == (tree,)
+    assert tree.pool_id is None  # build_fork_tree mints no pool identity — only the scheduler does

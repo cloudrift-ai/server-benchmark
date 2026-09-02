@@ -5,10 +5,9 @@ are boundary sentinels that carry tensors into the graph without computing
 anything — they appear unchanged from the frontend stage all the way through
 to fusion, and the numpy backend supplies their values at runtime.
 
-The shared base for body-carrying ops (``LoopOp`` / ``KernelOp`` /
-``TileOp``) lives in :mod:`emmy.compiler.ir.body_op` — split out to
-avoid a circular import with the ``ir.stmt`` package (which imports
-``Stage`` from ``ir.tile.ir`` for normalization).
+The shared base for body-carrying ops (``LoopOp`` / ``KernelOp``) is
+:class:`emmy.compiler.ir.stmt.ir.BodyOp`; ``TileOp`` subclasses ``Op``
+directly (it stores a pure term, not a body).
 
 ``_keepdim_axis`` is a small shape helper used by both ``ReduceOp`` (minimal IR,
 ``tensor.py``) and ``MeanOp`` (frontend IR, ``frontend.py``). Keeping it here
@@ -17,10 +16,14 @@ avoids a frontend→tensor dependency for a single function.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import numpy as np
+from frozendict import frozendict
+
+from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -41,7 +44,22 @@ class _ClassProperty:
         return self.fget(owner)
 
 
-@dataclass
+def _io_fingerprint(op: Op) -> tuple:
+    """The dtypes and hint-free shapes of an op's buffers — operands, then outputs, in program
+    order: the two boundary facts the body digest canonicalizes away (buffer names normalize to
+    ``b0, b1, …``, so the types ride beside the key). An f16 and an f32 trace of one body key
+    apart (different atom eligibility), and so do a ``(128, 128)`` and a ``(4, 32, 128)`` output
+    over one iteration space — the buffer's dim spelling decides store addressability
+    (``ir.address.split_addressable``), and a golden measured on the flat kernel must not
+    join a kernel that cannot realize its row."""
+
+    def sig(t) -> tuple:
+        return (str(t.dtype), tuple(str(d.as_static()) if d.is_static else "sym" for d in t.shape))
+
+    return (*(sig(t) for t in op.inputs.values()), "->", *(sig(t) for t in op.outputs.values()))
+
+
+@dataclass(frozen=True)
 class Op:
     """Base class for all operations.
 
@@ -57,7 +75,7 @@ class Op:
 
     ``inputs`` / ``outputs`` are per-op-instance buffer maps populated by
     the matcher (``_match_at``) just after a match is built — the matcher
-    calls :meth:`populate_io` on every matched node, snapping in real
+    rebinds every matched node through :meth:`with_io`, snapping in real
     :class:`Tensor` values from the surrounding graph so rule rewrites can
     read shapes / dtypes off ``op.inputs[name]`` without re-querying.
     Default: predecessor outputs by predecessor id, this node's output by
@@ -66,6 +84,10 @@ class Op:
     surrounding graph at match time.
     """
 
+    #: Frozen + eq would auto-derive a field-walk hash (hashing whole bodies); ops stay
+    #: UNHASHABLE, as they were — semantic comparison is :meth:`identity_key`, never ``hash``.
+    __hash__ = None
+
     source: Op | None = field(default=None, kw_only=True, repr=False, compare=False)
     # Free-form metadata dict for rules to stamp the knobs they used
     # (e.g. ``{"BN": 64, "BM": 64}`` from ``005_blockify_launch``). The
@@ -73,17 +95,35 @@ class Op:
     # every 1:1 rebind, so a fully-lowered ``CudaOp`` carries every
     # autotune knob picked along the chain. Excluded from structural
     # identity and equality — pure attribution metadata.
-    knobs: dict = field(default_factory=dict, kw_only=True, repr=False, compare=False)
-    inputs: dict[str, Tensor] = field(default_factory=dict, kw_only=True, repr=False, compare=False)
-    outputs: dict[str, Tensor] = field(default_factory=dict, kw_only=True, repr=False, compare=False)
+    knobs: frozendict = field(default_factory=frozendict, kw_only=True, repr=False, compare=False)
+    inputs: frozendict[str, Tensor] = field(default_factory=frozendict, kw_only=True, repr=False, compare=False)
+    outputs: frozendict[str, Tensor] = field(default_factory=frozendict, kw_only=True, repr=False, compare=False)
 
-    def populate_io(self, graph: Graph, node: Node) -> None:
-        """Refresh ``inputs`` / ``outputs`` from the surrounding graph.
-        Called by the matcher after a match is built. Default mapping
-        works for non-body ops (one Tensor per predecessor / this node).
-        :class:`BodyOp` overrides to walk body-derived buf names."""
-        self.inputs = {pid: t for pid in node.inputs if (t := graph.buffer(pid)) is not None}
-        self.outputs = dict(zip(node.buffer_names(), node.outputs, strict=True))
+    def __post_init__(self) -> None:
+        """Frozen construction-time coercion (the STYLE-sanctioned pattern): the io maps and
+        the knob dict land as ``frozendict``, so an ``Op`` is immutable in depth — no attribute
+        rebinding (``frozen=True``) and no in-place map write anywhere. Subclass
+        ``__post_init__`` overrides run this first."""
+        for name in ("knobs", "inputs", "outputs"):
+            value = getattr(self, name)
+            if not isinstance(value, frozendict):
+                object.__setattr__(self, name, frozendict(value))
+
+    def with_io(self, graph: Graph, node: Node) -> Op:
+        """This op with ``inputs`` / ``outputs`` refreshed from the surrounding graph — a PURE
+        builder (the matcher rebinds ``node.op`` to the result; ops are never edited in place).
+        Returns ``self`` unchanged when the refresh is a no-op, so repeated matching does not
+        churn instances or their cached identities. Default mapping works for non-body ops (one
+        Tensor per predecessor / this node); :class:`BodyOp` overrides to walk body-derived buf
+        names."""
+        inputs = frozendict({pid: t for pid in node.inputs if (t := graph.buffer(pid)) is not None})
+        outputs = frozendict(zip(node.buffer_names(), node.outputs, strict=True))
+        if inputs == self.inputs and outputs == self.outputs:
+            return self
+        # A chain ORIGIN's refresh threads itself into ``source``: rewrite chains must keep
+        # ending at the one ultimate frontend object (provenance compares it by identity), and a
+        # refresh is a rebind like any other — one more hop, never a lost origin.
+        return replace(self, inputs=inputs, outputs=outputs, source=self.source if self.source is not None else self)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         """Derive the output shape from input shapes. Override in subclasses."""
@@ -107,29 +147,76 @@ class Op:
         """
         return True
 
-    def cache_key(self) -> str | None:
-        """Tuning / cubin-cache identity for a kernel-bearing op, or ``None`` when this op
-        kind is not cacheable (boundary sentinels, pre-lowering ops). Each kernel-bearing
-        dialect overrides it as a digest of its content identity (``structural_key``) folded
-        with :meth:`_knob_key` — knobs are part of the key because same-body /
-        different-knobs variants must not collide with their parent in the search tree
-        (``SearchTree.expand`` self-parents the node otherwise). The same kernel reached via
-        different rewrite paths produces the same key — ``source`` is never part of it."""
+    def _knob_key(self) -> tuple:
+        """The knob half of the variant key (``identity_key(with_knobs=True)``) — the dict as a sorted item tuple."""
+        return tuple(sorted(self.knobs.items())) if self.knobs else ()
+
+    # ---- the identity interface — THE home, and the WHOLE public surface is one function:
+    # :meth:`identity_key`, a lattice over the ONE base fact (the canonical Loop-IR body,
+    # :meth:`_body_identity`, the single override point) with one flag per additional fact.
+    # The named points live at call sites, not as methods: ``identity_key(with_io=True)`` is
+    # the durable deploy join key (golden records, corpus stamps, child receipts);
+    # ``identity_key(with_io=True, with_knobs=True)`` is the variant key (the search tree,
+    # measurement stores — knobs included because same-body / different-knobs variants must not
+    # collide with their parent, and a measurement belongs to (kernel, knob row)). There is
+    # deliberately NO schedule-space key here: the enumeration stamp is scheduler plumbing,
+    # minted at its one classic schedule site.
+    # A fact a schedule reads that neither the body nor the io carries is a modeling gap to fix
+    # there, never a side-channel fingerprint. ---- #
+
+    def _body_identity(self, *, structural: bool = True) -> str | None:
+        """Does this op COMPUTE the same thing, spelling aside? — the canonical digest of the
+        op's complete Loop-IR body (``Body.structural_key``: SSA / axis / buffer names and
+        commutative-arg order normalized away; the default ``structural=True`` also collapses
+        compute-unit op clusters — the schedule-equivalent reading), or ``None`` for an op kind
+        that carries no Loop-IR body. The ONE identity override point: ``BodyOp`` answers with
+        its stored body, ``TileOp`` with the schedule-free :attr:`TileOp.loop_body` it derives
+        from its term. Cached on the body, which is immutable. Private — consumers go through
+        :meth:`identity_key` (the bare lattice point equals this)."""
         return None
 
-    def _knob_key(self) -> tuple:
-        """The knob half of :meth:`cache_key` — the dict as a sorted item tuple."""
-        return tuple(sorted(self.knobs.items())) if self.knobs else ()
+    @cached_property
+    def _io_key(self) -> tuple:
+        """The cached io digest input (:func:`_io_fingerprint`). No invalidation exists or is
+        needed: an ``Op`` is frozen and its maps are ``frozendict``, so every cache on it is
+        sound outright."""
+        return _io_fingerprint(self)
+
+    def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
+        """THE identity — one function, one lattice. The base fact is the canonical Loop-IR
+        body digest; each flag folds in one more fact:
+
+        - ``structural`` — collapse compute-unit op clusters (the schedule-equivalent reading,
+          the default: cluster siblings share a schedule space and want the same schedule) vs
+          the exact kernel (``structural=False`` — their latency differs);
+        - ``with_io`` — the io dtype/shape fingerprint: what a deployed kernel is bound to;
+        - ``with_knobs`` — the knob row: which variant of the kernel this op is.
+
+        ``None`` for an op kind that carries no Loop-IR body. ``CudaOp`` overrides the whole
+        function with its rendered-source digest: past rendering, body / io / knobs are all
+        realized into the artifact and the flags have nothing left to fold. The same kernel
+        reached via different rewrite paths produces the same key — ``source`` is never part
+        of it, and neither is the dialect tag: every stage of one rewrite chain keys off the
+        same Loop-IR content."""
+        key = self._body_identity(structural=structural)
+        if key is None:
+            return None
+        parts: list = [key]
+        if with_io:
+            parts.append(self._io_key)
+        if with_knobs:
+            parts.append(self._knob_key())
+        return key if len(parts) == 1 else digest(*parts)
 
     @_ClassProperty
     def dialect(cls) -> str | None:  # noqa: N805 — a class property; ``cls`` receives the owner
         """The lowering-stage tag for a kernel-bearing op (``"loop"`` / ``"tile"`` /
         ``"kernel"`` / ``"cuda"``); ``None`` for everything that is not one kernel of work
         (boundary sentinels, pre-fusion ops). DERIVED, never declared: kernel-bearing is
-        exactly "overrides :meth:`cache_key`", and the tag is the class name minus its ``Op``
-        suffix, lowercased. A future subclass of a dialect op that wants its PARENT's tag must
+        exactly "overrides :meth:`_body_identity` or :meth:`identity_key`", and the tag is the
+        class name minus its ``Op`` suffix, lowercased. A future subclass of a dialect op that wants its PARENT's tag must
         override this — the name rule tags it by its own name."""
-        if cls.cache_key is Op.cache_key:
+        if cls.identity_key is Op.identity_key and cls._body_identity is Op._body_identity:
             return None
         return cls.__name__.removesuffix("Op").lower()
 
@@ -141,7 +228,7 @@ class Op:
             cur = cur.source
 
 
-@dataclass
+@dataclass(frozen=True)
 class InputOp(Op):
     """Sentinel for graph input tensors (no computation)."""
 
@@ -152,7 +239,7 @@ class InputOp(Op):
         raise NotImplementedError("InputOp is a sentinel; value is supplied by the executor")
 
 
-@dataclass
+@dataclass(frozen=True)
 class ConstantOp(Op):
     """Fixed tensor: weights, RoPE tables, scalars. Not an activation.
 
@@ -215,6 +302,7 @@ class ConstantOp(Op):
     source_graph: Graph | None = None
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.value is not None and self.context_value is not None:
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a static value OR a context_value, not both")
         if self.source_path is not None and self.source_parts:
@@ -222,7 +310,7 @@ class ConstantOp(Op):
         if self.source_graph is not None and (self.source_path is not None or self.source_parts):
             raise ValueError(f"ConstantOp {self.name!r} binds EITHER a source_graph record OR checkpoint source paths, not both")
         if self.source_parts:  # normalize the JSON round-trip's nested lists back to hashable tuples
-            self.source_parts = tuple((p, tuple(int(d) for d in s)) for p, s in self.source_parts)
+            object.__setattr__(self, "source_parts", tuple((p, tuple(int(d) for d in s)) for p, s in self.source_parts))
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         raise NotImplementedError("ConstantOp has no inputs; use node.output.shape directly")

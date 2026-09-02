@@ -1,4 +1,332 @@
-# Golden-bench kernel corpus: retuned golden datasets after the first fix wave (main @ 001d4f44)
+# Golden-bench kernel corpus
+
+## Current-head corpus requalification (2026-08-29)
+
+The draft is based on current main `b88763fa`; the exact combined source for this pass is `857ba7e9`. Every hardware
+run used deployable O3, the exact GPU capability, task-owned tuning and cubin state, the repository CLI, and strict
+direct correctness where a timing was admissible. The retained A100 VM stayed running.
+
+### A100 corpus
+
+The exact sm80 lane collected 201 tests and found six applicable cases. It completed in 189 seconds with five passes,
+one independent stat-fill watchdog failure, and 195 skips. The result JSON and full log are retained host-local on the retained A100 VM (untracked
+`_tune/a100-corpus-857ba7e9/evidence/full-corpus/`; `_tune/` is not in the repository).
+
+| A100 case | Emmy | `torch.compile` | launches | result |
+| --- | ---: | ---: | ---: | --- |
+| `attention/rmsnorm-gqa-b-cut.yaml` | 6.907 µs | 10.026 µs | 2 | Correct; 1.45x faster |
+| `attention/sdpa-computed-value-cut-mma.yaml` | 6.193 µs | 8.039 µs | 2 | Correct; 1.30x faster |
+| `attention/rmsnorm-qk-sdpa-workspace-chain.yaml` | 75.855 µs | 11.469 µs | 1 | Correct; 6.61x slower |
+| `matmul/f16-cut-splitk-unit-row.yaml` | 9.183 µs | 2.839 µs | 3 | Correct; 3.23x slower |
+| `matmul/f16-mma-broadcast-batched-pv-transpose.yaml` | 17.664 µs | 11.894 µs | 1 | Correct; 1.49x slower |
+| `attention/rmsnorm-gqa-sdpa-stat-fill.yaml` | about 280 ms/iteration | 19.456 µs | — | Pinned row exceeds the aggregate 10-second watchdog |
+
+The GQA win required both a better route and one replay fix. Materializing the clustered normalized-K value produces
+one cooperative producer and one consumer. The A/B path then incorrectly dropped scoped OFF exceptions such as
+`REDUCE@a7=''`, allowing bare `REDUCE=coop` to fan out and change the consumer source. Replay now preserves a scoped
+OFF when it overrides a non-OFF bare family. The unchanged perf command fell from 10.193 to 6.857-7.100 µs and uses
+the same fast source as direct full-row replay.
+
+The PV golden now carries the strict `w8x1`, `f1x8/k8`, `d1/smem-async` schedule. This is about four times faster than
+the prior checked row, but an eight-row neighbour search found no further schedule gain. The kernel uses 48 KiB shared
+memory, 126 registers per thread, and 25% occupancy. Its transpose epilogue emits 32 stride-512 scalar stores per
+thread; toggling vector stores produces byte-identical CUDA. Parity therefore needs a transpose-aware store path or a
+different contraction orientation.
+
+The workspace-chain golden improved 13.5% by using `WORK=t8` and cooperative reductions, with the combined lane
+reaching 75.855 µs. Its CUDA still recomputes Q RMSNorm within output-key work, K RMSNorm within each dot product, and
+the softmax score scan across value-output lanes. No offered schedule changes that structure; reuse or materialization
+must move those cones outside the repeated loops.
+
+The split-K case remains a launch-structure gap. Its fastest strict forced row with a genuine split used `g2k+w1x1`
+at 4.681 µs versus 2.761 µs for `torch.compile`, but the corpus row remains the repeatable authored 9.183 µs result.
+Deferred split-K requires partial, finalize, and cut-consumer kernels. Atomic split-K removes the finalize kernel but
+needs a runtime accumulator reset because its first kernel has no predecessor to own zero initialization. A safe
+improvement needs a cross-CTA last-arriver primitive or a proved consumer-side reset protocol.
+
+The stat-fill case now builds and passes strict correctness after preserving provider evaluation domains, ordering
+sibling operands by dependency, closing tiled provider cones, and retaining computed-B projection providers. Its
+authored fused schedule is nevertheless about 0.28 seconds per iteration and trips the benchmark watchdog. A correct
+six-seam route reached 3,342 µs versus 17.238 µs for `torch.compile`; its best measured factor-16 child was 184.525 µs.
+The parent instead selected an unmeasured factor-32 split, so a 206.592 µs parent canary is not qualified evidence.
+The remaining storage gap is ordering in the child-identity schedule receipts: record the split choice first, then join the identities
+and measured schedules of the children that choice creates.
+
+### Other exact platforms
+
+| platform | exact corpus coverage | current result |
+| --- | --- | --- |
+| V100 sm70 | 2 cases | Volta MMA is correct at 3,130.368 µs versus 757.760 µs; linear-cut latency is inadmissible because strict correctness still has 26,418/524,288 mismatches |
+| RTX 4090 sm89 | 0 cases | 201 collected, 201 skipped; no exact sm89 closed case and therefore no parity claim |
+
+The promoted V100 row uses `WORK=w4x2` and a single `d1/smem` stage. It shares A tiles across two N warps and B tiles
+across four M warps, reducing shared-memory requests, but remains 4.13x behind `torch.compile`. Volta lacks
+`ldmatrix` and `cp.async`; the next useful schedule primitive is a producer/consumer warp band with named barriers,
+not another depth or geometry row. The linear-cut target still differs in contraction accumulation order after the
+public f16 boundary is restored, so its perf-harness number is reported only as diagnostic output.
+
+### Retained fixes and conclusion
+
+This pass retains small, separately tested fixes for provider evaluation domains, dependency-ordered operand splicing,
+scalar-atom dump replay, direct tuning of persisted unscheduled Tile children, provider-cone closure, and scoped-OFF
+A/B replay. It promotes the GQA, PV, workspace-chain, and V100 schedules. The combined local gate is 3,981 passed,
+1,012 skipped, and five expected failures; lint is clean.
+
+Parity is not achieved: A100 has two wins, three measurable losses, and one watchdog; V100 has one correct loss and
+one correctness failure; RTX 4090 has no exact corpus coverage. No large serving experiment was started while those
+kernel-level gaps remain. The next compiler work is structural reuse/materialization for attention, transpose-aware
+PV stores, a cross-CTA completion/reset primitive for split-K, split-first ordering for stat-fill's child-identity
+schedule receipts, and a Volta
+producer/consumer staging primitive.
+
+## Cut-pinned attention qualification after the computed-B changes (main through `d2950079`, 2026-08-28)
+
+### Corrected protocol
+
+The first screen put `PLACE` choices in proposal `knobs`. That measured one structural candidate whose new kernels
+kept greedy schedules; it did not test the route the compiler is designed to tune. This follow-up instead froze the
+kernel set in realization `pins`, ran the normal two-level tuner on every minted kernel identity, and replayed the
+assembled route from the same isolated evidence state. A CPU regression test now protects that exact contract: a
+pinned placement cut enrolls both children and the assembly replays different `WORK` and `STAGE` rows.
+
+The full route has four distinct value seams: shared statistics (`PLACE@map.fold.a21`), Q
+(`PLACE@a.map.a`), K (`PLACE@a.map.b`), and softmax weight (`PLACE@map.fold.a1`). The three previously tested K
+spellings resolve to three different Fold occurrences, but value clustering groups them into one K-value `CutSite`;
+pinning any occurrence replaces all three. They are one cut, not three composed cuts.
+
+The first measurement lanes used exact `6e6181d5` source, deployable `-O3`, isolated tuning state, seed 0, at most 12
+candidates per independent kernel, patience 4, and an outer wall bound. The receipt-aware follow-up rebased the draft
+onto exact `a597f15d` and regenerated the working files before inspecting or measuring any schedule. A fresh trace
+still produces one maximal whole-layer target, so these diagnostics use untrusted copies of the checked self-contained
+score/statistics slice. They are host-local compiler qualification, not replacement publication evidence; no results
+archive was changed.
+
+### Hardware result
+
+| platform | frozen route | result |
+| --- | --- | --- |
+| V100 | K-value cut; two children | Correct replay: 595,101 µs versus 1,920 µs eager. No child candidate finished inside the bounded search, so replay correctly used the offline fallback. |
+| A100 | statistics + Q + K + softmax weight; five primary children plus one recursive statistics split | 67 clean benches in 219 s. Best children were 7-37 µs except the softmax-weight producer at 110,744 µs; tuned route 110,882 µs. Fresh replay was 110,723 µs versus 758 µs eager and passed direct correctness. |
+| RTX 4090 | statistics + Q + K; four launches | Per-identity DB replay used different child schedules: 4,561 µs versus 494 µs eager, direct correctness passed. The remaining consumer was 4,396 µs. |
+| RTX 4090 | add softmax weight; five launches | The consumer fell to 19-31 µs, but the new producer's best row was 100,416 µs; replay was 101,233 µs versus 504 µs eager and passed direct correctness. |
+| RTX 5090 | statistics + Q + K + softmax weight; structural replay only | Exact lowering produced the expected five children. Timing was deferred because an unrelated task owned the host's only compatible GPU; it was not interrupted. |
+
+### Receipt-aware current-main retune
+
+The follow-up regenerated the working targets after rebasing. V100, A100, and RTX 4090 measurements used exact
+`043f1f25`, which adds only the route-contract test to `a597f15d`; RTX 5090 used exact `5ddf7816`, whose receipt
+decoder change does not alter kernel source. All rows used deployable O3 and bounded candidate or explicit-row
+budgets.
+
+| platform | child | best bounded row | result |
+| --- | --- | --- | --- |
+| V100 | K-cut cast producer | `TILE=f2`; other schedule families off | 2.924 µs |
+| V100 | K-cut pointwise producer | `TILE=f4`; other schedule families off | 2.686 µs |
+| V100 | K-cut attention consumer | only offered row: all schedule families off | exceeded the 15 s watchdog; no accepted latency |
+| A100 | softmax materialization (`c3d`) | `WORK=t128, REDUCE@a3=coop, REDUCE@a4=coop` | qualifying repeats 110,768 and 110,786 µs |
+| RTX 4090 | softmax materialization (`c3d`) | `WORK=t128, REDUCE@a3=coop, REDUCE@a4=coop` | search observations 100,351 and 100,335 µs; a noise-scale tie with the prior 100,416 µs row |
+| RTX 4090 | other four-cut children | per-child rows: statistic `t32/coop`, Q all-off, K `t128/coop`, consumer f2x8 MMA with async stage | 4.15-27.89 µs |
+| RTX 5090 | softmax materialization (`c3d`) | `WORK=t128, REDUCE@a3=coop, REDUCE@a4=coop` | after the compiler fix, qualifying repeats 72,380 and 71,966 µs |
+
+The A100 c3d candidate-pool bound is 1,094,745,632 rows and the consumer bound is 1,066,670,432. Whole-target MCTS
+spent 8m30s in first-candidate CPU descent without measuring a row. On RTX 4090, the 24-live-candidate MCTS-only arm
+took 407.5 s and the equally bounded evidence-seeded refinement reached its 600 s wall; neither found a different c3d
+schedule. Exhaustive child-row listing and strict receipt decoding were each stopped at 60 s. The useful schedules
+are visible by deploy identity, but flattening these pools is not a usable listing or validation algorithm.
+
+Current main's child-identity schedule receipts close the representation gap, and `5ddf7816` fixes strict decoding
+when a regenerated target lowers to several kernels. Exact deployment is not closed yet. On RTX 4090 the canonical
+t128 receipt joined the correct c3d identity but reported row DRIFT and fell back to t8: 397,303 µs for c3d and
+397,477 µs for the four-cut route versus 480 µs eager, with direct correctness passing. The explicit working-file
+path also treats receipt siblings as independent flat A/B rows rather than installing them together for base
+lowering. No receipt was promoted; the remaining work is a child-directed exact-row descent shared by strict decode
+and the verified tier, plus grouped working-file replay.
+
+RTX 5090 exposed one independent built-stage gap: every screened row initially emitted ambiguous `float * __half`
+expressions under readable CUDA rendering. The readability fold had inlined a mixed-dtype single-use `Assign` before
+the target-aware renderer could insert `__half2float`. The compiler now keeps such assignments named; the new closed
+sm120 realization case proves offered, realized, built, and correct. The repaired explicit rows measured 72,488 µs
+at t32, 72,405 µs at t64, 71,969 µs at t128, 73,936 µs at t256, and 73,362 µs at t512. This closes compilation but
+does not change the repeated 512×128 work.
+
+### Statistics-sharing replay after #682
+
+PR #682 (`d2950079`) directly closes the repeated-statistics gap identified above: Tile normalization restores object
+sharing between structurally equal cones, and two provider-closed statistics seams make the shared row state
+materializable. On the exact Qwen s512 target, adding those two cuts to the prior four-cut route produces six launches.
+The statistics producer writes max and normalization state once per `(head, query)` row; the softmax-weight child
+loads that workspace and no longer contains the 512-key scan. The consumer also loads the shared state rather than
+recomputing it.
+
+The retained A100 was replayed at exact branch source `31e7e629` (PR #682 plus this draft's receipt and readable-CUDA
+fixes), deployable O3, isolated DB/prior/cubin state, five warmups, and 20 iterations. Both standard repeats passed the
+strict direct eager check.
+
+| lane | eager (µs) | Emmy route (µs) | dominant statistics child (µs) | result |
+| --- | ---: | ---: | ---: | --- |
+| standard repeat 1 | 744.653 | 11,717.632 | 11,501.568 | correct; 6 launches |
+| standard repeat 2 | 744.795 | 11,720.704 | 11,505.664 | correct; 6 launches |
+| `FAST_MATH` | 744.590 | 11,704.320 | 11,501.568 | correct; noise-scale 0.1% change |
+
+The prior four-cut full replay was 110,723 µs, so the shared-statistics route is 9.45x faster. The old c3d child falls
+from about 110,780 µs to 65-66 µs; the consumer is 81 µs and the other three producers are 7-37 µs. This is a real
+algorithmic improvement, but the route remains 15.7x slower than eager. The matched `torch.compile` request again
+produced no positive timing for this embedded target, so it still cannot supply a parity ratio.
+
+The new bottleneck is the one correctly shared statistics producer, not duplicated work. Its greedy row is
+`TILE@a4=f1x2, WORK=t32x8` and takes 11.50 ms. A bounded MCTS-only follow-up measured
+`TILE@a4=f4x6, WORK=t32x16` at 11.535 ms and found no improvement; after 2m55s the next candidate remained in CPU
+descent with the GPU idle, so the arm was stopped. The remaining performance work is to make the nested 128-channel
+score contraction inside the online 512-key statistics reduction eligible for an efficient tensor-core schedule,
+then reduce the still-large candidate descent. No receipt was promoted. Raw host-local evidence is retained under
+`_tune/pr682-a100/remote/`; the task-owned remote scratch was removed while the A100 VM stayed running.
+
+`torch.compile` produced no positive latency for these score/statistics strict replays, including the post-#682
+attempt, so no parity ratio is claimed.
+The earlier output-projection strict result remains a valid separate finding: 1,594,544 µs for Emmy versus 52.6 µs
+for `torch.compile` on RTX 4090. The V100 down-projection also remains a direct correctness failure and was not
+admitted as a performance result.
+
+### Bottleneck and receipt-aware replay
+
+Before #682, the correction changed the diagnosis. Placement worked, and resulting kernels were independently
+schedulable. On A100 and RTX 4090, four children tuned into the tens-of-microseconds range; materializing the softmax
+weight isolated one producer that remained about 100-111 ms. Its lowered loop had free query and output-key axes and,
+for every output weight, recomputed the complete 512-key reduction whose body performs a 128-channel score
+contraction. Ordinary `WORK` and `REDUCE` choices changed the constant factor but preserved that repeated scan. PR #682
+closes that reuse gap; the statistics-sharing replay above supersedes this performance state. On V100, even the K-cut
+consumer did not complete a candidate inside the original search wall.
+
+The earlier cold-replay drift was a separate persistence gap: the DB keyed different rows by child structural
+identity, but the old flat realization could not serialize conflicting child-global `WORK`, `TILE`, `REDUCE`, `STAGE`,
+or `RASTER` values. Main `a597f15d` resolves that representation gap with child-identity schedule receipts. Each
+sibling realization carries the route cuts in `pins`, one child's row in `knobs`, and that child's `deploy_identity`
+in `identity`; strict decoding checks the row only against that child's candidate pool. Copying child rows into the
+parent flat map remains invalid, but the sibling receipts make exact per-child replay representable in the schema.
+The current-main retune above shows that strict enumeration and deploy equality still need a child-directed descent
+before those receipts are promotion-ready for this large route.
+
+No realization was promoted. Offered, realized, built, and correctness stages are closed for the composed route, so
+there was no small compiler failure or new realization-corpus gap to patch. `FAST_MATH` was not promoted because the
+standard route remained far behind eager and changing contraction math does not remove the isolated producer cost.
+
+## Host-local exact-card qualification checkpoint (2026-08-28)
+
+### Question and scope
+
+Can the current Qwen3-0.6B FP16 layer-0 kernel inventory match or beat `torch.compile` on the exact V100, A100,
+RTX 4090, and RTX 5090 cards after bounded retuning? This pass covered the same nine targets at sequence lengths 1
+and 512 on each card: 18 targets per platform. It did not retune the historical FP8, 32B, H200, B200, or serving
+lanes, so it supports no claim about those workloads.
+
+This was bounded tuning and exact `emmy run --golden-file ... --bench` qualification, not a new `emmy bench` recipe
+snapshot. The checked-in `results_*.tar.gz` files and the later platform sections therefore remain the earlier
+archived runs. Current raw evidence is retained in the ignored `_tune` directories listed below; it is not presented
+as a replacement experiment record or archive.
+
+Consequently, this section is a host-local working checkpoint for compiler and golden review, not durable publication
+evidence. The paper must not cite its exact counts or timing ranges until the recipe is rerun and the per-platform
+raw-results archives are replaced through the normal experiment workflow.
+
+### Protocol and acceptance rule
+
+- Model: `Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca`, layer 0, FP16, static sequence lengths
+  1 and 512.
+- All measurements used deployable `-O3`. Ordinary screens used five warmups and 20 iterations; promoted finalists
+  used 10 warmups and 100 iterations in at least two fresh processes. Hard targets used one warmup and one iteration
+  under a bounded watchdog rather than extending the run indefinitely.
+- Direct Emmy-versus-eager correctness was the admission gate. `torch.compile` was compared only when it compiled
+  the whole target and passed its own eager check; an unavailable baseline did not turn a correct Emmy target into a
+  failure. A hung or incorrect Emmy target remained unresolved.
+- Win/tie/loss follows the preregistered two-percent rule in the experiment README. Counts use only targets with a
+  valid `torch.compile` result, and the denominator is reported explicitly.
+- `FAST_MATH` was considered only when the standard row had empty compile flags and the fast-math row independently
+  passed direct eager correctness. It was promoted only when it changed the performance conclusion.
+
+### Platform summary
+
+| platform | direct eager correct | comparable with `torch.compile` | win / tie / loss | baseline unavailable | unresolved | current golden status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| V100 | 16/18 | 14 | 1 / 0 / 13 | 2 | 2 | REPOSITORY validation passes 18/18; one row fails runtime correctness |
+| A100 | 16/18 | 15 | 5 / 1 / 9 | 1 | 2 | sequence 1: REPOSITORY 9/9; sequence 512: WORKING 7/9 |
+| RTX 4090 | 17/18 | 15 | 3 / 1 / 11 | 2 | 1 | REPOSITORY validation passes 18/18 |
+| RTX 5090 | 18/18 | 16 | 3 / 1 / 12 | 2 | 0 | REPOSITORY validation passes 18/18 |
+
+The result does not establish cross-platform parity with `torch.compile`. Emmy matches or beats it on 1/14
+comparable V100 targets, 6/15 A100 targets, 4/15 RTX 4090 targets, and 4/16 RTX 5090 targets. Several targets,
+especially attention targets, are orders of magnitude slower or hang; the V100 MLP down-projection remains
+numerically incorrect.
+
+The strongest new positive promotion is the RTX 4090 sequence-512 input RMSNorm: `WORK=t256, REDUCE=coop` measured
+2.3641-2.3663 µs in the qualifying repeats, against 4.6793-4.6999 µs for `torch.compile` and
+126.61-126.68 µs for eager. The repaired A100 sequence-1 score/statistics schedule repeated at 34.99 µs and passed
+direct correctness, but it still loses to the 11.26-12.16 µs `torch.compile` result.
+
+### Main unresolved targets and performance losses
+
+| platform | target role | result |
+| --- | --- | --- |
+| V100 | sequence-512 down-projection + residual | all four bounded schedules are incorrect; the stored row has 40/524,288 mismatches |
+| V100 | sequence-512 o-projection + residual | the selected kernel exceeds the internal watchdog |
+| A100 | sequence-512 softmax times V | correct greedy execution is about 327 ms versus about 46 µs for `torch.compile`; no safe recorded route |
+| A100 | sequence-512 o-projection + residual | bounded execution hangs, so no timing or correctness result is admitted |
+| A100 | sequence-512 score/statistics | the corrected lowering path still hangs under the bounded greedy replay |
+| RTX 4090 | sequence-512 score/statistics | correct, but 164-372 ms; `torch.compile` is unavailable |
+| RTX 4090 | sequence-512 softmax times V | correct, but 202-235 ms versus 36.1 µs for `torch.compile` |
+| RTX 4090 | sequence-512 o-projection + residual | warmups take about 3.69 s before the internal watchdog aborts |
+| RTX 5090 | sequence-512 score/statistics | correct at about 397 ms; `torch.compile` is unavailable |
+| RTX 5090 | sequence-512 softmax times V | correct at about 152 ms versus 30.8 µs for `torch.compile` |
+| RTX 5090 | sequence-512 o-projection + residual | correct at about 3.35 s versus 40.1 µs for `torch.compile` |
+
+The V100 correctness diagnosis found that fusion removes a public f16 rounding boundary before the residual add.
+Restoring that boundary reduced mean error but did not reproduce eager matmul accumulation and rounding, and it
+changed the kernel identity. The partial change and its provisional realization case were therefore reverted; the
+target remains an explicit compiler correctness gap rather than a promoted schedule.
+
+### `FAST_MATH`
+
+Only the sequence-512 q-projection changed category: RTX 4090 improved from about 20.7 µs to 16.4 µs against a
+20.4 µs `torch.compile` result, and RTX 5090 improved from about 19.1 µs to 16.6 µs against roughly 19-20 µs.
+Other direct-correct fast-math rows on A100, V100, RTX 4090, and RTX 5090 were ties or losses and were not promoted.
+Rows that changed outputs were rejected regardless of speed.
+
+### Compiler changes established by this pass
+
+- Singleton reduction collapse, computed-A statistic-fold selection, and guarded unit-row recovery close reduced
+  correctness or realization failures seen in the Qwen targets.
+- Golden feature derivation, exact path retry, measured-row latency recording, and bounded cold-pool descent repair
+  replay and search without adding a separate benchmark harness.
+- Placement-cut capture preservation, unit-axis preservation, scoped-cut consumption, and output-sweep promotion
+  make the affected schedules realizable. The affected closed realization cases reached `built` with nvcc on their
+  exact-capability cards.
+- A proposed structural-route receipt was audited and reverted. The final design fails closed: whole-slice
+  `PLACE` measurements are not written as deploy evidence, and both tuning-database and online-reservoir measured
+  tiers reject legacy rows containing `PLACE` or `PLACE@...`. Search may retain those rows for ranking and training,
+  but automatic deployment cannot use them without an exact child-schedule receipt.
+
+The final compiler suite reports 3,911 passed, 990 skipped, and 5 xfailed; `make lint` passes. The route contract
+is now a positive fail-closed test replacing one prior xfail.
+
+### Systems and evidence
+
+| platform | exact GPU and software | qualification source | ignored local evidence |
+| --- | --- | --- | --- |
+| V100 | Tesla V100-SXM3-32GB, `GPU-b415579d-cdad-42bb-23d1-32c20cdb729d`; driver 580.159.03, nvcc 12.9, PyTorch 2.13.0+cu126 | `0e4729d5` | `_tune/v100-current/current-head/` |
+| A100 | A100-SXM4-80GB, `GPU-80df657e-2e14-421c-32a5-cb2429dc93e6`; driver 580.65.06, nvcc 12.9, PyTorch 2.13.0+cu130 | `15c27422` | `_tune/a100-current/` |
+| RTX 4090 | GeForce RTX 4090, `GPU-81d79c00-868e-3ec5-2948-745283b756f6`; driver 580.159.03, nvcc 13.3, PyTorch 2.13.0+cu130 | `7b5161e8` | `_tune/rtx4090-current/safe-head/` |
+| RTX 5090 | GeForce RTX 5090, `GPU-bb78f2c5-11d6-02d6-f124-08b719623110`; driver 580.173.02, nvcc 13.0, PyTorch 2.13.0+cu130 | `5e95d2de` | `_tune/rtx5090-current-source-revalidate/` |
+
+The compiler tree after the final safety patch is `c9d8a19e`. Later changes relative to a card's qualification source
+are search or safety changes, except for measurement-only golden promotions already qualified at the listed source.
+They do not supply unmeasured performance claims for that card.
+
+### End-to-end decision
+
+Large serving experiments were intentionally skipped. The kernel gate is not healthy: the common corpus is
+incomplete on V100 and A100, and every card has major `torch.compile` losses in attention. Running a long serving
+matrix now would consume hardware without supporting the requested across-platform compiler claim.
+
+## Earlier archived refresh: first fix wave (main @ 001d4f44)
 
 ## What this refresh is
 
@@ -59,9 +387,9 @@ eager on Volta — #561's tensor-core unlock confirmed in silicon), k/v_proj 3.4
 - Pre-run canaries must check BOTH `cupy.full` AND `torch.cuda.is_available()`; a cupy-only canary passed on
   the old-driver 4090 while every torch-side measurement failed.
 
-## Platform a100x1 — latest tuned routing evidence (2026-08-23)
+## Platform a100x1 — earlier routing measurements (2026-08-23; not current deploy evidence)
 
-The A100 corpus now includes two positive routing realizations measured at deployable `-O3` on the exact
+An earlier pass measured two positive routing realizations at deployable `-O3` on the exact
 NVIDIA A100-SXM4-80GB (`GPU-b0354a1a-37c2-086d-f6fe-953b6fac5c3e`):
 
 | seq | target | routing realization | Emmy | fused/cold Emmy | eager | result |
@@ -69,13 +397,12 @@ NVIDIA A100-SXM4-80GB (`GPU-b0354a1a-37c2-086d-f6fe-953b6fac5c3e`):
 | 512 | score + softmax statistics | `PLACE@b=cut` | 299.69 µs | 21232 µs | 745.47 µs | 2.49x eager |
 | 1 | post-attention norm + gate/up + SiLU | `PLACE@map=cut` | 66.97 µs | 4612 µs | 154.62 µs | 2.31x eager |
 
-Both routing realizations passed strict Emmy-versus-eager correctness. All nine sequence-1 targets and seven of nine
-sequence-512 targets now carry verified pins in the committed experiment goldens; the sequence-512 softmax·V and
-post-attention norm + gate/up + SiLU targets remain unpinned.
+Both routing realizations passed strict Emmy-versus-eager correctness in that pass. They are not current automatic
+deploy evidence: the 2026-08-28 audit showed that a `PLACE` total does not identify the exact child schedules it
+measured, and the final compiler fails closed on such rows. The current qualification above supersedes this section.
 
-This is direct tuning evidence, not yet a matching experiment snapshot. The recipe replays only these committed
-goldens and performs no search, but the clean latest-`main` replay is still pending. The historical section and
-`results_a100x1.tar.gz` below remain the 2026-08-21 run and do not measure the two new routing realizations.
+At the 2026-08-23 boundary this was direct tuning evidence; no matching experiment snapshot was produced.
+`results_a100x1.tar.gz` below remains the 2026-08-21 run and does not measure the two routing realizations.
 
 ## Platform a100x1 — historical chain-form replay (2026-08-21)
 
@@ -171,8 +498,9 @@ deployable `-O3` against the fused form in the same process.
 | 1 | k_linear_sdpa_reduce_14c8c7 | 36.82 | `PLACE=cut` | 37.56 | 0.98x |
 | 1 | k_sdpa_mean_reduce_0a2624 | 39.58 | no legal seam on this tree | — | — |
 
-One cut wins, and it is the k-norm fold: materializing that reduction once removes 8% of the redundant work and is now
-the first committed placement routing in the corpus. The seam that would matter is not in the set. Cutting `a2`
+One cut won in this historical run, and it was the k-norm fold: materializing that reduction once removed 8% of the
+redundant work. It is not current automatic deploy evidence for the reason stated above. The seam that would matter
+is not in the set. Cutting `a2`
 promotes the key axis to a free axis of the residue, whose grid becomes 4.2M blocks and whose cost rises 16x, because
 the k cone is then recomputed with no reuse at all. What the target needs is the RoPE'd k vector materialized once as
 the dot's B operand; that is a binding the contraction binder still declines, not a seam the placement fork can spell.

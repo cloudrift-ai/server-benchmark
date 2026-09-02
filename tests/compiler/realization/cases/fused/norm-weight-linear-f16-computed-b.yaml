@@ -1,0 +1,46 @@
+# evidence: the sibling norm-linear cases realize the same mma tier with the norm on the A side;
+# with the norm on the WEIGHT the contraction takes the computed-B smem compute fill, whose cone
+# re-binds the contraction axis name for its own sum-of-squares statistic. Guards the fill's
+# hygienic σ: a blind substitution rewired that nested reduce onto the slab coordinate, summing
+# one element 128 times (wrong answer, not a refusal).
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x0, x1, x2]
+  outputs: [linear]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [64, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [64, 128]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [128]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x1, x2]
+    outputs: [[rms_norm, f16, [64, 128]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, rms_norm]
+    outputs: [[linear, f16, [64, 64]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - linear
+    - rms_norm
+  realizations:
+  - name: k_rms_norm_linear_reduce_1ede22.aaa04f7f6c00
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
+    identity: 610ac31c981cb8f59aed7105ad0441166e5a509bbbebac0fb381e291c72a546d

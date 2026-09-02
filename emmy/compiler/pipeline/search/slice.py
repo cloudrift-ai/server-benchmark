@@ -14,7 +14,7 @@ identically), declares every retained ``InputOp`` as an external boundary, and
 replaces every *compute* ancestor — another kernel feeding this one — with a
 synthetic ``InputOp`` boundary, so the result is standalone.
 The root op is shared **by reference**: its body (and therefore
-:meth:`~emmy.compiler.ir.base.Op.cache_key`) is byte-for-byte the full-graph op's, which is what lets
+:meth:`~emmy.compiler.ir.base.Op.identity_key`) is byte-for-byte the full-graph op's, which is what lets
 inner-tuned ``perf`` / ``lowering`` rows transfer back to the assembled graph.
 """
 

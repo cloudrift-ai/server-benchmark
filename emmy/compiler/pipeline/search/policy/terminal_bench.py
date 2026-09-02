@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import statistics
 
 from emmy.compiler.backend.cuda.program import compile_budget_overrun
@@ -53,6 +54,31 @@ class TerminalBench:
         #: the total to. Each kernel carries its own decisions and earns its own sample.
         self.per_kernel: list[tuple[dict, float, str]] = []
 
+    #: The kernel a watchdog message NAMES — ``kernel 'k_foo (iter 0)' did not complete …``. The
+    #: exception class does not survive the bench worker's pipe (it arrives wrapped in a
+    #: ``BenchWorkerJobError``), so the label is recovered from the text.
+    _NAMED_KERNEL = re.compile(r"kernel '([A-Za-z_][A-Za-z0-9_]*)")
+
+    def _blamed(self, exc) -> set[int]:
+        """``id()``s of the nodes a failure is EVIDENCE ABOUT — usually not every kernel benched.
+
+        A terminal benches many kernels together and one of them hanging fails the whole run, so
+        blaming all of them records a failure for kernels that were never shown to fail. That is
+        not a cosmetic mislabel: those rows are read as deploy evidence, and on DeepSeek-V4's post
+        block 70 recorded failures carried only 7 distinct errors — 20 kernels condemned by one
+        hang, and 21 by a bench-worker startup timeout that is not a property of any kernel.
+
+        So blame is recorded only where it is unambiguous: the kernel the watchdog named, or the
+        single kernel of a one-kernel terminal. Otherwise nothing is persisted — the run failed,
+        but which kernel failed is unknown, and unknown is not the same as failed. The terminal
+        still reports ``bench_fail`` either way, so the search treats the candidate as failed and
+        moves on; only the durable per-kernel evidence is narrowed to what was actually observed."""
+        named = self._NAMED_KERNEL.search(str(exc))
+        if named is not None:
+            culprit = named.group(1)
+            return {id(n) for n in self.cuda_nodes if getattr(n.op, "kernel_name", "") == culprit}
+        return {id(self.cuda_nodes[0])} if len(self.cuda_nodes) == 1 else set()
+
     def _note(self, op, stats, status: str) -> None:
         self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), float(stats.median), status))
 
@@ -90,7 +116,7 @@ class TerminalBench:
 
     def _record_op_inventory(self, op) -> None:
 
-        key = op.cache_key()
+        key = op.identity_key(with_io=True, with_knobs=True)
         if key is None:
             return
         if isinstance(op, CudaOp):
@@ -109,7 +135,7 @@ class TerminalBench:
             self.db.record_loop_op(key, self._body_json(op, "loop"), op.pretty_body())
 
     def _persist(self, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None) -> None:
-        cuda_key = cuda_op.cache_key()
+        cuda_key = cuda_op.identity_key(with_io=True, with_knobs=True)
         if cuda_key is None:
             return
         chain = [op for op in cuda_op.source_chain() if op.dialect is not None]
@@ -132,8 +158,8 @@ class TerminalBench:
                 # masquerading as the whole op. The decomposition's cost
                 # is a Σ, owned by the two-level tuner, never this table.
                 continue
-            p_key = parent_op.cache_key()
-            c_key = child_op.cache_key()
+            p_key = parent_op.identity_key(with_io=True, with_knobs=True)
+            c_key = child_op.identity_key(with_io=True, with_knobs=True)
             if p_key is None or c_key is None:
                 continue
             p_knobs = getattr(parent_op, "knobs", None) or {}
@@ -194,7 +220,7 @@ class TerminalBench:
         # useful here because ``backend.benchmark`` runs the whole graph.
         cached_rows = []
         for node in self.cuda_nodes:
-            key = node.op.cache_key()
+            key = node.op.identity_key(with_io=True, with_knobs=True)
             row = self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
             if row is None:
                 cached_rows = None
@@ -243,17 +269,20 @@ class TerminalBench:
             )
             return self._point_stats(0.0), "compile_timeout"
         fail_us = float(self.backend.bench_run_timeout_s) * 1_000_000.0
+        blamed = self._blamed(exc)
         logger.warning(
-            "[tune] backend.benchmark failed (%s) — pinning bench_fail @ %.1f us for %d kernel(s)",
+            "[tune] backend.benchmark failed (%s) — pinning bench_fail @ %.1f us for %d of %d kernel(s)",
             exc,
             fail_us,
+            len(blamed),
             len(self.cuda_nodes),
         )
         s = self._point_stats(fail_us)
         agg = None
         for node in self.cuda_nodes:
-            self._persist(node.op, stats=s, status="bench_fail", error=f"{type(exc).__name__}: {exc}")
-            self._note(node.op, s, "bench_fail")
+            if id(node) in blamed:
+                self._persist(node.op, stats=s, status="bench_fail", error=f"{type(exc).__name__}: {exc}")
+                self._note(node.op, s, "bench_fail")
             agg = self._accumulate(agg, s)
         return agg or self._point_stats(0.0), "bench_fail"
 

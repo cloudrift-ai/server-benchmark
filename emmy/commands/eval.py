@@ -895,13 +895,11 @@ def _perf_cell(perf: dict | None, name: str) -> tuple[str, str] | None:
 
 
 def _bare_families(knobs: dict) -> dict:
-    """Canonicalize a resolved op's tuning knobs to bare family spelling (``TILE@a2`` →
-    ``TILE``) so they compare/render against a golden YAML row, whose knobs are recorded
-    bare. The schedule passes stamp the codec knobs axis-suffixed since the tile-IR
-    rebuild — compared raw, ``got.get("TILE")`` never matched and the whole golden
-    reproduction table showed ``-``/0-matches over perfectly good picks. First key wins
-    on a family collision (a matmul golden's pick is single-node; a multi-node kernel
-    has no single bare row to compare against a golden anyway)."""
+    """Aggregate exact-site tuning knobs by family for the single-site summary table.
+
+    The table compares one resolved choice per family rather than schedule identities. First key
+    wins on a family collision; a multi-node kernel has no single family value to summarize.
+    """
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
     out: dict = {}

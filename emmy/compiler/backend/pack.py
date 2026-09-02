@@ -116,8 +116,8 @@ def save_pack(pack_dir: Path | str, plans: dict[str, ExecutionPlan], *, key: dic
         for kname, spec in plan.kernels.items():
             if spec.source is None:
                 raise ValueError(f"pack: kernel {kname!r} of program {program!r} carries no source — cannot resolve a cubin key")
-            cubin = nvcc.compile_to_cubin(spec.source, kname, arch=nvcc.device_arch(spec.uses_tma))
-            kernels[kname] = KernelSpec(source=None, binary_key=cubin.stem, uses_tma=spec.uses_tma)
+            cubin = nvcc.compile_to_cubin(spec.source, kname, arch=nvcc.device_arch(spec.arch_specific))
+            kernels[kname] = KernelSpec(source=None, binary_key=cubin.stem, arch_specific=spec.arch_specific)
         stored = dataclasses.replace(plan, kernels=kernels)
         rel = f"plan/{names[program]}.json"
         (root / rel).write_text(json.dumps(plan_to_dict(stored)))

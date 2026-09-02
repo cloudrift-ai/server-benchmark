@@ -11,42 +11,57 @@ combine.** The combine is not defined here — it is the :class:`~emmy.compiler.
 term (``ir/pure/fold.py``), which a ``TileOp`` holds whole in ``op``. What this module owns is
 everything the term deliberately does not carry:
 
-- the root-global schedule fields — the free-axis → grid :class:`~.schedule.Placement` (``place``),
-  the ONE worker inventory (``work``) and the warp-spec split (``workers``);
-- the per-node schedule SLICES in ``TileOp.schedule`` (``{codec key → resolved TilePlan /
-  ReducePlan / Stage}``, keyed by the tree-path codec and read through ``ops.Sched``);
+- the free-axis → grid :class:`~.schedule.Placement` (``place``), an accepted site-indexed
+  :class:`Schedule`, and its separate materialization;
 - the kernel's EFFECTS — the :class:`OutputSpec` decorations and the ``apply_output_specs`` /
   ``extract_output_specs`` pair that reconstitutes the effectful stmt stream from them.
 
 That split is the layer's invariant, not a convenience. The stored term is pure algebra, IMMUTABLE
-across the whole schedule search — a fork is a different slice map, never a rebuilt tree — which is
-what makes kernel identity (``TileOp.structural_key``) the algebra alone, with placement, slices,
-workers and output specifications all excluded. Tile IR stores only pure terms; statements appear when the term is
+across the whole schedule search — a fork is a different assignment, never a rebuilt tree — which is
+what keeps kernel identity (``Op.identity_key`` over the derived ``loop_body``) schedule-free, with
+the schedule, materialization, placement binding and workers excluded. Tile IR stores only
+pure terms; statements appear when the term is
 lowered, never inside it (``ir/ARCHITECTURE.md``, "Pure terms vs statements").
 
 There is no per-kind kernel/schedule type: dispatch reads the role structurally off the node (a
 fold's role derives), so a projection, a reduction and a contraction all ride the same ``TileOp``.
-The kernel materializer reads the schedule off the slice beside the node — it never re-recognizes
-structure the tile IR already holds.
+The kernel materializer reads the schedule by site — it never re-recognizes structure the tile IR already holds.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import cached_property
+
+from frozendict import frozendict
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold, edge_refs_axis, is_contraction, operand_body
+from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_free_axes, is_contraction, operand_body
+from emmy.compiler.ir.pure.normalize import normalize_lambda_body
+from emmy.compiler.ir.pure.tree import Visit, walk
 from emmy.compiler.ir.schedule import Placement, WarpSpec
+from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.packing import packed_readings
+from emmy.compiler.ir.schedule.views import (
+    ContractionFacts,
+    EdgeSite,
+    NodeId,
+    NodeView,
+    Projection,
+    Reduction,
+    contraction_facts,
+    node_view,
+)
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
 from emmy.compiler.ir.stmt.base import _axis_identity
 from emmy.compiler.ir.stmt.body import _member_reads
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
-from emmy.compiler.structural import digest
+from emmy.compiler.ir.tile.path import sites
 
 
 @dataclass(frozen=True)
@@ -133,10 +148,47 @@ def _sweep_start(stmts, axis_name: str) -> int:
     return len(stmts)
 
 
-def apply_output_specs(stmts, specs) -> list[Stmt]:
+def observed_result_names(op) -> frozenset[str]:
+    """Every observer result name on the term's folds — the STREAMED stores' values. A boundary
+    write over one of these is the scan store: it rides each iteration of the observed fold's
+    reduce loop (after the observer stmts) rather than the kernel tail. Derived from the term at
+    each reconstitution site — never stored on the spec (store only what extraction destroyed)."""
+    names: set[str] = set()
+    stack = [op]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, Fold):
+            continue
+        if node.observe is not None:
+            names.update(node.observe.results)
+        stack.extend(node.operands)
+        stack.extend(s for s in node.lift.body if isinstance(s, Fold))
+    return frozenset(names)
+
+
+def _splice_streamed(stmts: list, write: Write) -> bool:
+    """Splice a streamed store into the (deepest) reduce ``Loop`` whose body defines its observed
+    values — at the body end, after the observer stmts the derived step placed last. ``False``
+    when no such loop is present (a term-level stream, where the store stays at its post-node
+    position)."""
+    values = set(write.values)
+    for i, stmt in enumerate(stmts):
+        if not isinstance(stmt, Loop):
+            continue
+        inner = list(stmt.body)
+        if _splice_streamed(inner, write):
+            stmts[i] = stmt.with_bodies((Body(tuple(inner)),))
+            return True
+        if stmt.is_reduce and values <= set().union(*(deep_defines(s) for s in inner)):
+            stmts[i] = stmt.with_bodies((Body((*inner, write)),))
+            return True
+    return False
+
+
+def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> list[Stmt]:
     """Reassemble the EFFECTFUL projection stmt stream from a pure projection body + the
     kernel-boundary output specifications — the ONE reconstitution rule the scheduler's tail gates, the
-    materializer's zero-axis ``Fold`` peel and ``035_split_reduce`` share, so the lowered kernels stay
+    materializer's zero-axis ``Fold`` peel and ``030_cut`` share, so the lowered kernels stay
     byte-identical to the stored-``Write`` era. A plain store appends its ``Write``; consecutive
     ``sweep`` stores on one axis wrap the trailing run of stmts reading that axis
     (:func:`_sweep_start`) into one per-cell output ``Loop``, with the ``Write`` run last."""
@@ -163,7 +215,11 @@ def apply_output_specs(stmts, specs) -> list[Stmt]:
     while index < len(stores):
         st = stores[index]
         if st.sweep is None:
-            out.append(st.write)
+            # A store over OBSERVED values streams into its reduce loop when the loop is present
+            # (a lowered kernel body); at term level — the fold not yet a ``Loop`` — it keeps its
+            # post-node position, which is also where extraction's round-trip gate expects it.
+            if not (observed and set(st.write.values) <= observed and _splice_streamed(out, st.write)):
+                out.append(st.write)
             index += 1
             continue
         end = index + 1
@@ -185,14 +241,56 @@ def _projection_results(body) -> set[str]:
     return out
 
 
+def _dense_axis_suffix(index: tuple, name: str) -> bool:
+    """Whether ``index`` is one dense coordinate, directly or split by a row-major reshape."""
+    if not index:
+        return False
+    stride = 1
+    for position in reversed(range(len(index))):
+        expr = index[position]
+        dim = None
+        if position:
+            if not (
+                isinstance(expr, BinaryExpr)
+                and expr.op == "%"
+                and isinstance(expr.right, Literal)
+                and isinstance(expr.right.value, int)
+                and expr.right.value > 0
+            ):
+                return False
+            expr, dim = expr.left, expr.right.value
+        if stride != 1:
+            if not (
+                isinstance(expr, BinaryExpr) and expr.op in ("/", "//") and isinstance(expr.right, Literal) and expr.right.value == stride
+            ):
+                return False
+            expr = expr.left
+        if expr != Var(name):
+            return False
+        if dim is not None:
+            stride *= dim
+    return True
+
+
 def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) -> Axis | None:
-    """Recover an elided matrix row when every boundary write proves ``[0, n]``."""
-    if len(free) != 1 or not specs or any(spec.sweep is not None for spec in specs):
+    """Recover an elided matrix row when every boundary write proves ``[0..., n]``.
+
+    The column axis may already be free or may still be the one shared output sweep that
+    contraction canonicalization will promote. The unit coordinates must be a non-empty leading
+    zero prefix, followed by the dense column coordinate directly or through a row-major reshape.
+    """
+    if not specs:
         return None
-    n_name = free[0].name
+    if len(free) == 1 and all(spec.sweep is None for spec in specs):
+        n_name = free[0].name
+    elif not free and all(spec.sweep is not None for spec in specs) and len({spec.sweep.name for spec in specs}) == 1:
+        n_name = specs[0].sweep.name
+    else:
+        return None
     for spec in specs:
         index = spec.write.index
-        if not (len(index) >= 2 and index[-1] == Var(n_name) and isinstance(index[-2], Literal) and index[-2].value == 0):
+        split = next((position for position, expr in enumerate(index) if not (isinstance(expr, Literal) and expr.value == 0)), len(index))
+        if split == 0 or not _dense_axis_suffix(index[split:], n_name):
             return None
     return Axis("_um", Dim(1))
 
@@ -219,8 +317,8 @@ def lower_with_output_specs(op, specs) -> list[Stmt]:
     if isinstance(op, Fold) and op.axis is None:
         body = [*(stmt for edge in op.operands for stmt in operand_body(edge)), *lower_body(op.body)]
         root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= _projection_results(op.body))
-        return apply_output_specs(body, root_specs)
-    return apply_output_specs(op.lower(), specs)
+        return apply_output_specs(body, root_specs, observed=observed_result_names(op))
+    return apply_output_specs(op.lower(), specs, observed=observed_result_names(op))
 
 
 def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...]] | None:
@@ -263,8 +361,13 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
                     return None
                 child_body, child_outputs, child_direct = child
                 results = tuple(dict.fromkeys(value for spec in child_direct for value in spec.write.values))
-                provisional = Lambda(params=(stmt.axis.name,), body=child_body, results=results)
-                captures = tuple(sorted(provisional.free_names()))
+                # A write may store a value captured from the enclosing scope unchanged (a sweep
+                # broadcasting an already-reduced accumulator, ``o[j] = acc``). Such a result is
+                # not a body def, so probe free names with results left off, then bind captured
+                # results as params alongside the body's own free reads.
+                probe = Lambda(params=(stmt.axis.name,), body=child_body, results=())
+                captured_results = tuple(value for value in results if value not in probe.defined)
+                captures = tuple(sorted(probe.free_names() | set(captured_results)))
                 region = ProjectionRegion(
                     axis=stmt.axis,
                     lift=Lambda(params=(stmt.axis.name, *captures), body=child_body, results=results),
@@ -282,12 +385,33 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
     if extracted is None:
         return None
     body, outputs, _ = extracted
-    if apply_output_specs(body, outputs) != original:
+    if _construction_normalized(apply_output_specs(body, outputs)) != _construction_normalized(original):
         return None
     return tuple(body), tuple(outputs)
 
 
-@dataclass
+def _construction_normalized(stmts) -> list[Stmt]:
+    """Both sides of the round-trip gate, under the construction canonicalization — a COMPARATOR.
+
+    A :class:`ProjectionRegion` stores its body in a ``Lambda``, whose construction canonicalizes
+    statement order and commutative arguments (``normalize_lambda_body``), so reconstitution
+    returns the canonical spelling while the captured stream is raw. Gating on byte-identity with
+    the raw stream rejected any input the canonicalization reorders — a semantics-preserving
+    reorder, surfacing as a hard "cannot be represented" compile failure. The gate instead maps
+    BOTH streams through the same canonicalization, recursively into every loop body: the order
+    is dependency-respecting and canonical (not input-stable), so two spellings of one stream
+    converge, and two genuinely different streams still differ. A stream already in canonical
+    form maps to itself, so byte-identity holds exactly where it held before."""
+    out: list[Stmt] = []
+    for stmt in normalize_lambda_body(Body.coerce(tuple(stmts))):
+        bodies = stmt.nested()
+        if bodies and isinstance(stmt, Loop):
+            stmt = replace(stmt, body=Body(tuple(_construction_normalized(stmt.body))))
+        out.append(stmt)
+    return out
+
+
+@dataclass(frozen=True)
 class TileOp(Op):
     """One scheduled map/reduce kernel (see module docstring).
 
@@ -296,7 +420,7 @@ class TileOp(Op):
     body is generated at materialize time by ``op.lower()``, and a bare reduction / contraction's
     output ``Write`` is glue generated there too (from ``place.grid`` + the graph node's output
     buffer; see ``lowering/kernel/010_materialize``). ``inputs`` / ``outputs`` come from the base
-    :meth:`Op.populate_io` (graph edges) — no body walk.
+    :meth:`Op.with_io` (graph edges) — no body walk.
 
     Schedule fields (all defaulted, so a fresh / placeholder node is well-formed):
 
@@ -306,37 +430,33 @@ class TileOp(Op):
 
     There is **no** let table: a computed operand is stored inline on its edge, and sharing is the
     product contraction's arity (see the module docstring), so stored trees are already
-    resolved and every walk is a plain tree walk. The per-node schedule SLICES live in
-    ``schedule``: ``{codec key → resolved TilePlan / ReducePlan / Stage}``, keyed by the
-    tree-path codec's canonical key (:mod:`~emmy.compiler.ir.tile.path` — a fold may carry all
-    three families at once, so the path alone cannot key the map; the family selects the slice
-    kind, so key and value agree by construction). The ``op`` term is pure algebra, IMMUTABLE
-    across the whole schedule search — a fork is a different map, never a rebuilt tree. Read /
-    write through :class:`~emmy.compiler.ir.tile.ops.Sched` (``ops.reduce_plan`` is the plan
-    accessor); ``lower`` never sees the slices, so kernel identity (``Op.cache_key``) is untouched."""
+    resolved and every walk is a plain tree walk. An accepted ``schedule`` assignment contains
+    choices only; ``materialization`` separately contains placed geometry and resolved transport
+    facts. There is no second schedule map or per-node schedule field. The ``op`` term is pure
+    algebra, IMMUTABLE across the whole schedule search. Read through
+    :class:`~emmy.compiler.ir.tile.ops.Sched`; ``lower`` never sees the schedule, so kernel identity
+    (``identity_key(with_io=True, with_knobs=True)``) is untouched."""
 
     op: object = None
     name: str = ""
     place: Placement = field(default_factory=Placement)
     workers: WarpSpec | None = None
-    schedule: dict = field(default_factory=dict)
+    # The accepted semantic assignment and its derived lowering facts. Unscheduled Tile IR carries
+    # neither; scheduling installs both together.
+    schedule: Schedule | None = field(default=None, compare=False, repr=False)
+    materialization: object | None = field(default=None, compare=False, repr=False)
     # The kernel's output specifications: every explicit ``Write`` (and the legacy rms/softmax
     # output-sweep spelling) as a kernel-boundary fact beside ``place``. Empty for a
     # bare reduction / contraction — its grid-cell store
     # stays the materializer's default glue (``_factor.with_store``). Consumers reconstitute
     # the effectful stmt stream via ``apply_output_specs`` — never read a ``Write`` out of the term.
     output_specs: tuple[OutputSpec, ...] = ()
-    # The ONE worker inventory (``ir.schedule.Workers``): the ``w``/``n`` worker
-    # tokens factored out of the per-site TILE values, derived at option assembly
-    # (``ops.Sched.seal_workers`` — loud on cross-site disagreement). ``None`` = the per-cell /
-    # pure-reduce forms (derived launch geometry). The wire format spells the inventory ONCE, in
-    # ``WORK``; the site values carry no worker tokens and the retired embedded spellings raise.
-    work: object = None
-    # Whether the graph-level Fold-edge placement fork kept this kernel fused. Cut pieces are
-    # fresh TileOps with the default ``False`` and may expose their own smaller seam set.
+    # Whether the graph-level Fold-edge placement decision is consumed. Unpinned cut pieces keep
+    # the default ``False`` and may expose their own smaller seam set; a pinned cut sets it on both
+    # pieces because its authoritative decision cannot name a fresh tree.
     placement_decided: bool = False
     # Whether the split QUESTION is consumed for this kernel: the structural cross-CTA fork
-    # (``035_split_reduce``) declined it (the unsplit arm), or the kernel is a realized split's
+    # (``030_cut``) declined it (the unsplit arm), or the kernel is a realized split's
     # independent projection SIBLING — which has no sliced axis, so it carries this flag as its
     # consumed-split receipt (a ``REDUCE`` pin's ``g`` half strips on it). The partial / finalize
     # pieces need no flag: their sliced axis's partition ``Window`` is the receipt. Widening the
@@ -345,32 +465,35 @@ class TileOp(Op):
     split_consumed: bool = False
 
     def __post_init__(self) -> None:
-        from emmy.compiler.ir.tile.ops import head  # noqa: PLC0415 — ops imports TileOp
-
+        Op.__post_init__(self)
         scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
         axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
-        normalized = normalize_fold_tree(self.op, axes)
+        free_names = {axis.name for axis in self.place.free}
+        sweep_axes = frozenset(name for name in axes if name not in free_names)
+        normalized = normalize_fold_tree(self.op, axes, sweep_axes=sweep_axes)
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
         if unit_row is not None:
             candidate_free = (unit_row, *self.place.free)
-            candidate_axes = tuple(axis.name for axis in candidate_free)
-            candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,))
-            if is_contraction(head(candidate)):
+            candidate_scope = (*candidate_free, *(store.sweep for store in self.output_specs if store.sweep is not None))
+            candidate_axes = tuple(dict.fromkeys(axis.name for axis in candidate_scope))
+            candidate_sweeps = frozenset(name for name in candidate_axes if name not in {axis.name for axis in candidate_free})
+            candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,), sweep_axes=candidate_sweeps)
+            if any(is_contraction(site.node) for site in sites(candidate)):
                 normalized = candidate
-                self.place = replace(self.place, free=candidate_free)
-        if self.schedule and normalized != self.op:
-            raise ValueError("cannot canonicalize a TileOp after schedule slices have been attached")
-        self.op = normalized
-        if self.place.is_mapped:
-            return
+                object.__setattr__(self, "place", replace(self.place, free=candidate_free))
+        if self.schedule is not None and normalized != self.op:
+            raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
+        object.__setattr__(self, "op", normalized)
 
-        node = head(normalized)
+        contractions = tuple(site.node for site in sites(normalized) if is_contraction(site.node))
         promoted = {
             store.sweep.name
             for store in self.output_specs
-            if store.sweep is not None and is_contraction(node) and any(edge_refs_axis(edge, store.sweep.name) for edge in node.operands)
+            if store.sweep is not None
+            and any(any(store.sweep.name in edge_free_axes(edge) for edge in con.operands) for con in contractions)
         }
         if not promoted:
+            self._validate_schedule()
             return
         free_names = {axis.name for axis in self.place.free}
         extra = tuple(
@@ -381,10 +504,147 @@ class TileOp(Op):
             }.values()
         )
         if extra:
-            self.place = Placement(free=(*self.place.free, *extra))
-        self.output_specs = tuple(
-            replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store for store in self.output_specs
+            free = (*self.place.free, *extra)
+            if self.place.is_mapped:
+                grid = self.place.grid or self.place.free
+                object.__setattr__(self, "place", replace(self.place, free=free, grid=(*grid, *extra), mapped=True))
+            else:
+                object.__setattr__(self, "place", replace(self.place, free=free))
+        object.__setattr__(
+            self,
+            "output_specs",
+            tuple(
+                replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store
+                for store in self.output_specs
+            ),
         )
+        # Promotion changes the enclosing-axis context that closes computed contraction operands.
+        # Normalize once under the final scope so reconstructing this TileOp cannot expose a
+        # different Fold tree or placement seam.
+        scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
+        final_axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
+        final_sweeps = frozenset(name for name in final_axes if name not in {axis.name for axis in self.place.free})
+        renormalized = normalize_fold_tree(self.op, final_axes, sweep_axes=final_sweeps)
+        if self.schedule is not None and renormalized != self.op:
+            raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
+        object.__setattr__(self, "op", renormalized)
+        self._validate_schedule()
+
+    def _validate_schedule(self) -> None:
+        """Enforce the schedule/materialization boundary on construction."""
+        if self.schedule is None and self.materialization is None:
+            return
+        if self.schedule is None or self.materialization is None:
+            raise ValueError("a scheduled TileOp requires both a schedule and materialization")
+        validate = getattr(self.materialization, "validate", None)
+        if not callable(validate):
+            raise TypeError("schedule materialization must provide validate(schedule, source, place=..., workers=...)")
+        validate(self.schedule, self, place=self.place, workers=self.workers)
+
+    @cached_property
+    def sites(self) -> tuple[Visit, ...]:
+        """The ONE walk over this kernel's term, one record per node identity, indexed by node id.
+
+        Every structural reading is a FIELD of these records — the node, the parent that reached
+        it, the axes in scope there, its segment path, whether it is derived evaluation — so the
+        walk runs once per kernel and nothing re-derives a label it already carries. Those labels
+        are POSITIONS in this kernel's tree, which is why they live here and never on the shared
+        subterms the tree is built from: one Fold reached down two paths has two parents, and keeps
+        the first that reached it.
+        """
+        out, seen = [], set()
+        for visit in walk(self.op) if isinstance(self.op, Fold) else ():
+            if id(visit.node) not in seen:
+                seen.add(id(visit.node))
+                out.append(visit)
+        return tuple(out)
+
+    @cached_property
+    def node_sites(self) -> tuple[NodeId, ...]:
+        """Every node identity, in stable schedule order."""
+        return tuple(range(len(self.sites)))
+
+    @cached_property
+    def edge_sites(self) -> tuple[EdgeSite, ...]:
+        """Every consumer operand position in stable schedule order."""
+        return tuple((consumer, operand) for consumer, site in enumerate(self.sites) for operand in range(len(site.node.operands)))
+
+    @cached_property
+    def _node_ids(self) -> dict[int, NodeId]:
+        return {id(site.node): node_id for node_id, site in enumerate(self.sites)}
+
+    def node_id(self, node: Fold) -> NodeId:
+        """Return ``node``'s schedule identity by object identity."""
+        try:
+            return self._node_ids[id(node)]
+        except KeyError:
+            raise KeyError("Fold is not a node of this TileOp") from None
+
+    @cached_property
+    def incident_edges(self) -> frozendict[NodeId, tuple[EdgeSite, ...]]:
+        """Each consumer's operand positions."""
+        out: dict[NodeId, list[EdgeSite]] = {site: [] for site in range(len(self.sites))}
+        for edge in self.edge_sites:
+            out[edge[0]].append(edge)
+        return frozendict({site: tuple(edges) for site, edges in out.items()})
+
+    @cached_property
+    def views(self) -> tuple[NodeView, ...]:
+        """Each node site classified as a projection or a reduction, without target input.
+
+        Indexed BY node id, which is a dense ordinal — a tuple, not a map keyed by the integers it
+        is already ordered by.
+        """
+        return tuple(node_view(site.node) for site in self.sites)
+
+    def contracts(self, site: NodeId) -> bool:
+        """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want."""
+        view = self.views[site]
+        return isinstance(view, Reduction) and view.contraction is not None
+
+    @cached_property
+    def family_sites(self) -> frozendict[str, tuple[NodeId, ...]]:
+        """The node sites each classic node family can address, by family name.
+
+        One classification, filtered once per family, so a reader dispatches on the family NAME it
+        already holds instead of picking a differently-named member per family.
+        """
+        return frozendict(
+            {
+                "TILE": tuple(
+                    site
+                    for site in self.node_sites
+                    if self.contracts(site)
+                    or (isinstance(self.views[site], Projection) and site == 0 and not self.sites[site].node.operands)
+                ),
+                "REDUCE": tuple(site for site in self.node_sites if isinstance(self.views[site], Reduction)),
+            }
+        )
+
+    @cached_property
+    def stage_edges(self) -> tuple[EdgeSite, ...]:
+        """The operand positions a ``STAGE`` transport can address."""
+        return tuple(edge for edge in self.edge_sites if self.contracts(edge[0]))
+
+    @cached_property
+    def _packed_readings(self) -> frozendict:
+        return packed_readings(tuple(site.node for site in self.sites if is_contraction(site.node)), self.inputs)
+
+    def packed_reading(self, node) -> tuple:
+        """One node's ``(B copy, pair)`` packed-operand readings.
+
+        Only a contraction carries the operand roles the readings match on, so anything else
+        answers ``(None, None)`` rather than being absent."""
+        return self._packed_readings.get(id(node), (None, None))
+
+    @cached_property
+    def contractions(self) -> frozendict[NodeId, ContractionFacts]:
+        """The per-contraction structure every schedule choice over this kernel shares."""
+        return contraction_facts(self) if isinstance(self.op, Fold) else frozendict()
+
+    def __getstate__(self):
+        """Pickle stored fields only; derived schedule inventories recompute after transport."""
+        return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
 
     def pretty_body(self) -> str:
         """The structural dump — delegated to :mod:`~emmy.compiler.ir.tile._dump`, which owns
@@ -393,15 +653,33 @@ class TileOp(Op):
 
         return tile_body(self)
 
-    def structural_key(self) -> str:
-        """Kernel identity — the stored term's α-invariant digest (``""`` for a placeholder).
-        Placement, schedule slices, workers and output specifications are deliberately EXCLUDED: identity is
-        the algebra alone (the NO-schedule-fields rule above), so every fork sibling of one term
-        shares the key and no emission path can leak a schedule into it."""
-        return self.op.structural_key() if self.op is not None else ""
+    @cached_property
+    def loop_body(self) -> Body | None:
+        """The complete schedule-free Loop-IR body this kernel executes, derived from the term
+        — what the identity lattice digests. The free grid axes wrap back
+        as plain loops around the ONE lowering spelling (:func:`lower_with_output_specs` —
+        ``Fold.lower()`` with every output specification attached at its owning scope), so the
+        extents, the store program (index spelling, ``atomicAdd``, width, output sweeps) and a
+        cut child's typed seam ``Load`` are all in the body. Schedule-free by construction:
+        ``lower`` never reads the classic assignment, and ``place``'s grid BINDING stays out (an
+        axis's launch coordinate is execution choice, not identity). A bare reduction carries no
+        ``Write`` — its grid-cell store is materializer glue derived from ``place.grid``, so the
+        empty store stream is itself derivable. Cached: the term and the kernel-boundary fields
+        are immutable across the schedule search. ``None`` for a placeholder."""
+        if self.op is None:
+            return None
+        stmts: list = lower_with_output_specs(self.op, self.output_specs)
+        for axis in reversed(self.place.free):
+            stmts = [Loop(axis=axis, body=Body(stmts))]
+        return Body.coerce(stmts)
 
-    def cache_key(self) -> str | None:
-        return digest(type(self).__name__, self.structural_key(), self._knob_key())
+    def _body_identity(self, *, structural: bool = True) -> str | None:
+        """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s
+        canonical digest, so a golden record derives the SAME key from its persisted program
+        (both sides lower through the one spelling) and term re-spellings that lower alike
+        share it."""
+        body = self.loop_body
+        return None if body is None else body.structural_key(structural=structural)
 
 
 __all__ = [
@@ -411,6 +689,7 @@ __all__ = [
     "apply_output_specs",
     "extract_output_specs",
     "lower_with_output_specs",
+    "observed_result_names",
 ]
 
 

@@ -97,3 +97,45 @@ def test_stamp_types_repairs_a_stale_float_stamp_on_integer_algebra():
     stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(root)
     assign = next(stmt for stmt in stamped.body if isinstance(stmt, Assign))
     assert assign.dtype == U32
+
+
+def test_an_integer_constant_load_keeps_its_dtype_when_it_folds_to_a_literal():
+    """A one-element constant buffer renders as a literal binding rather than a buffer read. An
+    INTEGER one must keep its own dtype: the binding's SSA dtype decides the CONSUMER's arithmetic,
+    and a shift amount folded to f32 sends its shift down the f32 path, which has no `<<`."""
+    ctx = RenderCtx(literal_constants={"shift_c": 4.0})
+    load = Load(name="shift", input="shift_c", index=(Literal(0, "int"),), dtype=U32)
+    assert load.render(ctx) == ["    unsigned int shift = 4;"]
+    assert ctx.ssa_dtypes["shift"] == "u32"
+    ctx.ssa_dtypes["odd"] = "u32"
+    assert Assign(name="hi", op="left_shift", args=("odd", "shift")).render(ctx) == ["    unsigned int hi = odd << shift;"]
+
+
+def test_a_float_constant_load_still_binds_as_a_float_literal():
+    """The float case is untouched — every kernel reading a scalar float constant renders as before."""
+    ctx = RenderCtx(literal_constants={"scale_c": 0.125})
+    load = Load(name="scale", input="scale_c", index=(Literal(0, "int"),), dtype=F32)
+    assert load.render(ctx) == ["    float scale = 0.125f;"]
+    assert ctx.ssa_dtypes["scale"] == "f32"
+
+
+def test_the_literal_prefold_leaves_an_integer_constant_named():
+    """`render_body`'s pre-pass drops a literal-constant Load and inlines its value at every use
+    site — as a FLOAT literal, since that is what its map holds. An integer constant stays out of
+    it and keeps its named local, or the bit operation reading it lands back in f32."""
+    from emmy.compiler.ir.stmt.base import render_body
+
+    ctx = RenderCtx(literal_constants={"shift_c": 4.0, "scale_c": 0.125})
+    body = Body(
+        (
+            Load(name="shift", input="shift_c", index=(Literal(0, "int"),), dtype=U32),
+            Load(name="scale", input="scale_c", index=(Literal(0, "int"),), dtype=F32),
+            Assign(name="hi", op="left_shift", args=("odd", "shift")),
+            Assign(name="lo", op="multiply", args=("odd", "scale")),
+        )
+    )
+    ctx.ssa_dtypes["odd"] = "u32"
+    lines = render_body(body, ctx)
+    assert "    unsigned int shift = 4;" in lines, lines
+    assert not any("scale = 0.125f" in ln for ln in lines), "a float constant still inlines at its use site"
+    assert any("odd << shift" in ln for ln in lines), lines

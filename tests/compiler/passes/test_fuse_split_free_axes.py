@@ -132,6 +132,68 @@ def test_split_m_pair_fuses():
     assert xv.index == (Literal(0, "int"), Var(chain[0].axis.name), Var(_reduce_name(op)))
 
 
+def _packed_kloop(w_index: tuple) -> Loop:
+    """The NVFP4 weight read: two 4-bit codes per byte, so the operand address is the FLAT element
+    offset divided by 2 and wrapped back into the packed row."""
+    return Loop(
+        axis=Axis("k", Dim(K)),
+        body=Body(
+            (
+                Load(name="wv", input="w", index=w_index),
+                Load(name="xv", input="x", index=(Literal(0, "int"), Var("a0"), Var("k"))),
+                Assign(name="prod", op=ElementwiseImpl("multiply"), args=("wv", "xv")),
+                Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+            )
+        ),
+    )
+
+
+def _packed_index(n_expr) -> tuple:
+    """``w[n, ((n*K + k) / 2) % (K/2)]`` — the address a pair-packed constant carries."""
+    flat = BinaryExpr("+", BinaryExpr("*", n_expr, Literal(K, "int")), Var("k"))
+    return (n_expr, BinaryExpr("%", BinaryExpr("/", flat, Literal(2, "int")), Literal(K // 2, "int")))
+
+
+def _packed_split_graph() -> Graph:
+    """The deployed shape: a pair-packed weight under an output whose N axis a fused fp4-block
+    reshape split into ``(H, D)``."""
+    comp = BinaryExpr("+", BinaryExpr("*", Var("a1"), Literal(D, "int")), Var("a2"))
+    cell = (
+        _packed_kloop(_packed_index(comp)),
+        Write(output="out", index=(Literal(0, "int"), Var("a0"), Var("a1"), Var("a2")), value="acc"),
+    )
+    nest = Loop(
+        axis=Axis("a0", Dim(M)),
+        body=Body((Loop(axis=Axis("a1", Dim(H)), body=Body((Loop(axis=Axis("a2", Dim(D)), body=Body(cell)),))),)),
+    )
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, M, K)), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w", (H * D, K // 2)), node_id="w")
+    g.add_node(LoopOp(body=Body((nest,))), ["x", "w"], Tensor("out", (1, M, H, D)), node_id="out")
+    g.inputs, g.outputs = ["x", "w"], ["out"]
+    return g
+
+
+def test_packed_operand_split_pair_fuses():
+    """A pair-packed weight address holds the row axis inside a division. The pair still fuses: the
+    composite collapses to the bare axis, and the division that remains reads ``k`` alone."""
+    op = _run(_packed_split_graph())
+    chain = _free_chain(op)
+    assert [ln.axis.extent for ln in chain] == [Dim(M), Dim(H * D)], "the packed pair must fuse"
+    n = chain[1].axis.name
+    wv = next(s for s in op.body.iter() if isinstance(s, Load) and s.input == "w")
+    assert wv.index[0] == Var(n), "the packed row dim must collapse to the bare fused axis"
+    assert n not in wv.index[1].free_vars(), f"the row axis stayed inside the packed offset: {wv.index[1].pretty()}"
+
+
+def test_packed_split_nest_classifies_as_contraction():
+    """Downstream: the fused packed nest binds the contraction with the weight as B — the tensor-core
+    tier becomes reachable, which is what the split had locked out."""
+    tile = _lift(_run(_packed_split_graph()))
+    assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
+    assert tile.op.axis is not None and tile.op.role is AxisRole.CONTRACTION
+
+
 def test_axis_addressed_alone_declines():
     """A per-column bias read ``b[d]`` pins ``d``'s identity apart from ``h`` — the pair must
     not fuse (the residue ``b[f%D]`` would survive in a load)."""
@@ -263,7 +325,7 @@ def _split_store_ok(index: tuple, shape: tuple, free_names=("m", "n"), atom=(16,
     """Whether an mma fragment store with output ``atom`` cells can address ``index`` — the
     scheduler's own gate (``_split_store_refusal``), so the roles mapping under test is the
     production one."""
-    from emmy.compiler.pipeline.passes.lowering.tile._schedule import _split_store_refusal
+    from emmy.compiler.ir.schedule.classic_projection import _split_store_refusal
 
     free = tuple(Axis(nm, Dim(4)) for nm in free_names)
     shapes = {"out": Tensor("out", shape)}

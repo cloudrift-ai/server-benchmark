@@ -915,3 +915,255 @@ def test_expert_slot_reads_per_expert_fp8_modules_and_stacks_them():
     assert out["w_down"].shape == (e, hidden, inter)
     assert out["w_gate_up_scale"].shape == (e, 2, 1) and out["w_gate_up_scale"][1].flatten().tolist() == [2.0, 6.0]
     assert out["w_down_scale"][0].item() == 9.0
+
+
+# --- Qwen3.5 linear-attention split: the traced/lowered half ----------------------------------
+# What matters here is
+# that both halves of the carve survive ``torch.export`` and reach Loop IR, since that is the whole
+# point of carving them out of a recurrence torch keeps.
+
+_QWEN3_5_TINY = dict(
+    vocab_size=64,
+    hidden_size=64,
+    intermediate_size=128,
+    num_hidden_layers=2,
+    num_attention_heads=4,
+    num_key_value_heads=2,
+    head_dim=16,
+    linear_key_head_dim=16,
+    linear_value_head_dim=16,
+    linear_num_key_heads=2,
+    linear_num_value_heads=4,
+    linear_conv_kernel_dim=4,
+    max_position_embeddings=64,
+    layer_types=["linear_attention", "full_attention"],
+)
+
+
+def _qwen3_5_linear_block():
+    import pytest
+    import torch
+
+    pytest.importorskip("transformers.models.qwen3_5")
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
+
+    torch.manual_seed(0)
+    model = Qwen3_5TextModel(Qwen3_5TextConfig(**_QWEN3_5_TINY)).eval()
+    return model.layers[0]
+
+
+# --- checkpoint keys vs twin parameter names ---------------------------------------------------
+# A checkpoint may store its tensors under names the config-built twin does not have, and the
+# mismatch is silent — the parameters simply stay on the meta device. Transformers registers the
+# per-family translation and applies it inside ``from_pretrained``; emmy's shard-streamed loader
+# does not take that path, so it reads the same table.
+
+
+def _qwen3_5_multimodal_config():
+    import pytest
+
+    pytest.importorskip("transformers.models.qwen3_5")
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
+
+    return Qwen3_5Config(text_config=_QWEN3_5_TINY)
+
+
+def _graph_with_input(name: str, *, consumed: bool):
+    """A one-input graph, with that input either read by a node or left dangling."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("hidden", (4,), "f16"), node_id="hidden")
+    g.add_node(InputOp(), [], Tensor(name, (4,), "f32"), node_id=name)
+    g.inputs = ["hidden", name]
+    src = name if consumed else "hidden"
+    g.add_node(ElementwiseOp(op="copy"), [src], Tensor("out", (4,), "f16"), node_id="out")
+    g.outputs = ["out"]
+    return g
+
+
+def test_a_none_kwarg_placeholder_stops_being_a_graph_input():
+    """``torch.export`` records a ``None`` keyword argument as a scalar placeholder input, while the
+    eager flattener drops the ``None`` — so the graph declares one more input than any caller
+    supplies, and positional binding fails on the arity. Qwen3.5-family layers hit this because
+    their blocks REQUIRE ``attention_mask``, so it cannot simply be omitted at the call."""
+    from emmy.compiler.trace.huggingface import _drop_none_kwarg_inputs
+
+    g = _graph_with_input("attention_mask", consumed=False)
+    _drop_none_kwarg_inputs(g, {"attention_mask": None})
+    assert g.inputs == ["hidden"], "the inert placeholder must not stay an input"
+    assert "attention_mask" not in g.nodes
+
+
+def test_a_mask_the_block_actually_reads_is_never_dropped():
+    """The prune keys on having no consumers, not on the name — so a real mask survives."""
+    from emmy.compiler.trace.huggingface import _drop_none_kwarg_inputs
+
+    g = _graph_with_input("attention_mask", consumed=True)
+    _drop_none_kwarg_inputs(g, {"attention_mask": None})
+    assert "attention_mask" in g.inputs
+
+
+def test_a_supplied_kwarg_is_never_dropped():
+    """Only ``None`` values name a placeholder; a real tensor argument is left alone."""
+    from emmy.compiler.trace.huggingface import _drop_none_kwarg_inputs
+
+    g = _graph_with_input("attention_mask", consumed=False)
+    _drop_none_kwarg_inputs(g, {"attention_mask": object()})
+    assert "attention_mask" in g.inputs
+
+
+def test_checkpoint_key_renamer_bridges_a_multimodal_prefix():
+    """The Qwen3.5 releases are vision-language wrappers, so the text decoder's weights sit one
+    module deeper in the checkpoint than in a text-only twin. The renamer closes that gap, and the
+    name it produces is one the twin actually has."""
+    import torch
+
+    from emmy.compiler.trace.huggingface import _auto_model_from_config, _checkpoint_key_renamer
+
+    with torch.device("meta"):
+        twin = _auto_model_from_config(_qwen3_5_multimodal_config())
+    rename = _checkpoint_key_renamer(twin)
+    assert rename is not None, "the registered qwen3_5_text mapping must be found"
+
+    owned = dict(twin.named_parameters())
+    checkpoint_key = "model.language_model.layers.0.input_layernorm.weight"
+    assert checkpoint_key not in owned, "the fixture must reproduce the mismatch, not hide it"
+    assert rename(checkpoint_key) in owned
+    # Already-canonical keys and model-level ones pass through untouched.
+    assert rename("model.layers.0.input_layernorm.weight") == "model.layers.0.input_layernorm.weight"
+    assert rename("lm_head.weight") == "lm_head.weight"
+
+
+def test_checkpoint_key_renamer_leaves_a_plain_text_model_alone():
+    """A family whose checkpoint names already are its parameter names gets no translation, so
+    every existing loader path is byte-identical."""
+    import torch
+    import transformers
+
+    from emmy.compiler.trace.huggingface import _checkpoint_key_renamer
+
+    config = transformers.Qwen3Config(
+        vocab_size=64, hidden_size=64, intermediate_size=128, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16, max_position_embeddings=64,
+    )  # fmt: skip
+    with torch.device("meta"):
+        twin = transformers.Qwen3ForCausalLM(config)
+    rename = _checkpoint_key_renamer(twin)
+    key = "model.layers.0.self_attn.q_proj.weight"
+    assert rename is None or rename(key) == key
+
+
+def test_checkpoint_to_model_key_applies_the_laguna_literals():
+    from emmy.compiler.trace.huggingface import _checkpoint_to_model_key
+
+    laguna = "model.layers.0.mlp.shared_expert.gate_proj.weight"
+    assert _checkpoint_to_model_key(laguna) == "model.layers.0.mlp.shared_experts.gate_proj.weight"
+    assert _checkpoint_to_model_key("a.weight") == "a.weight"
+
+
+def test_the_split_load_runs_both_key_translations(tmp_path):
+    """Two independent renamers stand between a checkpoint key and the twin's parameter name, and a
+    checkpoint can need both: the native one undoes an architecture published in its own flat
+    namespace, the family one places the result where THIS twin holds its parameters.
+
+    Running only one is silent. An unmatched name raises nothing — the parameter simply stays on the
+    meta device and the twin comes back looking complete. This fixture is a wrapper-prefixed family,
+    so the family renamer is the one that must fire; the native renamer is the identity here and
+    must not displace it."""
+    import json
+
+    import torch
+
+    from emmy.compiler.trace.huggingface import _auto_model_from_config, load_quantized_split
+
+    torch.manual_seed(0)
+    twin = _auto_model_from_config(_qwen3_5_multimodal_config()).eval()
+    leaf = "model.layers.0.mlp.gate_proj.weight"
+    _wrapper_prefixed_nvfp4_checkpoint(tmp_path / "ck", twin, leaf)
+    # The helper's stub config only has to name a quantization scheme; a split load also BUILDS the
+    # twin from it, so give it the real family config the mismatch belongs to.
+    config = _qwen3_5_multimodal_config().to_dict()
+    config["quantization_config"] = {"quant_method": "modelopt", "quant_algo": "NVFP4", "ignore": []}
+    (tmp_path / "ck" / "config.json").write_text(json.dumps(config))
+
+    loaded, _experts = load_quantized_split(str(tmp_path / "ck"), torch.float16)
+    weight = dict(loaded.named_parameters())[leaf]
+    assert not weight.is_meta, "the wrapper-prefixed key never reached the twin's parameter name"
+
+
+# --- the serving lane's reverse direction ------------------------------------------------------
+# Retargeting re-addresses a traced constant from its wrapper-relative path to the key its weight
+# came from, and only the checkpoint knows that name. For a family whose checkpoint names differ
+# from its parameter names the two are not the same string, so the map's values must be checkpoint
+# keys — otherwise the birth-time spellers resolve nothing and quietly leave the weight unspelled.
+
+
+def _wrapper_prefixed_nvfp4_checkpoint(dirpath, twin, leaf: str):
+    """Write ``leaf``'s weight as an NVFP4 trio under the checkpoint's OWN wrapper-prefixed name,
+    every other parameter as a plain tensor. Returns that checkpoint key."""
+    import json
+
+    import numpy as np
+    import torch
+    from safetensors.torch import save_file
+
+    from emmy.compiler.trace.huggingface import _checkpoint_key_renamer
+
+    to_checkpoint = _checkpoint_key_renamer(twin, reverse=True)
+    key = to_checkpoint(leaf)
+    assert key != leaf, "the fixture must reproduce the naming mismatch, not hide it"
+    out, k = dict(twin.named_parameters())[leaf].shape
+    rng = np.random.default_rng(5)
+    tensors = {
+        key: torch.from_numpy(rng.integers(0, 256, (out, k // 2)).astype(np.uint8)),
+        key + "_scale": torch.from_numpy(rng.integers(0, 0x7F, (out, k // 16)).astype(np.uint8)).view(torch.float8_e4m3fn),
+        key + "_scale_2": torch.tensor(0.25, dtype=torch.float32),
+    }
+    dirpath.mkdir(exist_ok=True)
+    save_file(tensors, str(dirpath / "model.safetensors"))
+    (dirpath / "config.json").write_text(
+        json.dumps({"model_type": "test", "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4", "ignore": []}})
+    )
+    return key
+
+
+def test_serving_retargeting_lands_on_checkpoint_keys_so_the_speller_fires(tmp_path):
+    """The reverse direction, end to end: a constant carrying the wrapper-relative path a split
+    trace stamps is retargeted, and the NVFP4 speller then finds its trio and rewrites the
+    constant into the decode cone. Before the map carried checkpoint keys this resolved nothing —
+    quietly, since the speller's miss is a bare ``continue``."""
+    import torch
+
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.loader.quant import spell_quantized_constants
+    from emmy.compiler.trace.huggingface import (
+        _auto_model_from_config,
+        build_attention_split_wrapper,
+        retarget_constants_to_model,
+    )
+
+    torch.manual_seed(0)
+    twin = _auto_model_from_config(_qwen3_5_multimodal_config()).eval()
+    leaf = "model.layers.1.mlp.gate_proj.weight"
+    ckpt_key = _wrapper_prefixed_nvfp4_checkpoint(tmp_path / "ck", twin, leaf)
+
+    # The split wrapper holds the block's own submodules, so tensor identity bridges its
+    # wrapper-relative spelling to the twin's path — the mechanism retargeting relies on. Layer 1
+    # is this config's full-attention layer, which is the carve that ships here.
+    _pre, post = build_attention_split_wrapper(twin.model.layers[1])
+    wrapper_path = next(p for p, t in post.named_parameters() if t is dict(twin.named_parameters())[leaf])
+
+    shape = tuple(dict(twin.named_parameters())[leaf].shape)
+    g = Graph()
+    op = ConstantOp(name="w", source_path=wrapper_path, source_shape=shape, source_dtype="f32")
+    g.add_node(op=op, inputs=[], output=Tensor("w", shape, "f32"), node_id="w")
+    g.inputs, g.outputs = [], ["w"]
+
+    retarget_constants_to_model(g, post, twin)
+    assert g.nodes["w"].op.source_path == ckpt_key, "retargeting must land on the checkpoint's own key"
+    assert spell_quantized_constants(g, str(tmp_path / "ck")) == 1, "the NVFP4 speller must fire through the serving lane's path"

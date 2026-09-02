@@ -6,6 +6,8 @@ module → per-expert ``expert(x, w_gate_up, w_down)`` launches → weighted ``i
 reproduces the eager block tail exactly. Pure eager, CPU, fp32 — no compile.
 """
 
+from dataclasses import replace
+
 import pytest
 
 from tests.support.checkpoints import exl3_linear_tensors
@@ -529,7 +531,7 @@ def test_marked_shared_expert_requires_exact_checkpoint_provenance():
     down = next(
         node for node in graph.nodes.values() if (getattr(node.op, "source_path", "") or "").endswith("shared_experts.down_proj.weight")
     )
-    down.op.source_path = "shared_experts.missing.weight"
+    down.op = replace(down.op, source_path="shared_experts.missing.weight")
     with pytest.raises(RuntimeError, match="gate/up/down checkpoint provenance"):
         promote_shared_expert_float32(graph)
 

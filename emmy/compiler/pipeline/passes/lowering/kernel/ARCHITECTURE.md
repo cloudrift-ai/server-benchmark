@@ -7,9 +7,20 @@ afterwards.
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 
 `010_materialize` is a thin wrapper: after the split-survivor assert it makes **one** call to
-`_factor.factorize(tile, root)`, the entry to the recursive emitter. `factorize` builds the ambient `Ctx` and dispatches
-`tile.op` through `_factorize`, which peels projecting zero-axis `Fold`s and binds each leaf via the ONE root-binding
-pipeline (`_factor._bind`) — its form is read off the node's SCHEDULE (which axes are tiled), never a kernel kind, and
+`_factor.factorize(tile, root)`, the entry to the recursive emitter, then passes the finished body through
+`_drop_repeated_declarations` — the emitted body's one legality guard. Operand cones splice INDEPENDENTLY
+(`Fold.spliced_step`), so two sibling cones reading one shared broadcast constant each carry their own copy of its
+`buf[0]` `Load`, under the same SSA name and at the same address; flattened into one loop body that is two C
+declarations of one name, which nvcc rejects (*already declared in the current scope*). The repeat binds nothing new,
+so it is dropped with NO rewrite — which is what keeps the guard narrow enough to run over a WHOLE kernel body. The
+renaming forms (`_atom._dedup_loads`, `stmt.dedup_loads`) collapse two DIFFERENT names at one address, which needs a
+memory-effect reading neither has: a `Write` or an async fill between two identical loads of a staged buffer makes the
+second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
+illegal. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
+
+`factorize` builds the ambient `Ctx` and dispatches `tile.op` through `_factorize`, which peels projecting zero-axis
+`Fold`s and binds each leaf via the ONE root-binding pipeline (`_factor._bind`) — its form is read off the node's
+SCHEDULE (which axes are tiled), never a kernel kind, and
 it seals through the one `grid_tile` finalizer (the article's "schedule separate from combine" thesis — the op tree +
 `ir/tile` `Fold.lower` are shared across kinds; only the partition changes). Its arms are points of one
 `(output-tiling) × (reduce-folding)` space:
@@ -21,11 +32,20 @@ it seals through the one `grid_tile` finalizer (the article's "schedule separate
   (mma / scalar). A contraction without an applicable output tile takes the ordinary Fold path. The schedule only
   places the algebra and declines with `LoweringError` when there is no `(m, n)` grid pair to place onto.
 - **REDUCE-tiled** (`_tile_reduce_axis`, a `PLANAR` / `TWISTED` reduce — or a non-output-tiled `CONTRACTION` — whose
-  `ReducePlan` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
+  `Reduce` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
   (its unit level) and `reg` ILP chains across per-thread accumulators (its register level), then a REG-tree fold, the
   cross-thread combine (`emit_combine`), and the projection. It reads the reduce straight off the `Fold` node (no
   `lower`-then-refind) and builds its per-cell body via the recursion (`_emit`, below); the output stays one cell per
   thread (the 1×1 `atomize`, the grid riding `lead_axes` untiled).
+- **CHAIN members** (`_tile_chain_members`) — a chain-form root (a zero-axis `Fold` with no operand edge, so nothing
+  was peeled) carries its reduces as direct body members, and the partition rides THEM. Only a DIRECT member binds
+  partitioned; a fold nested deeper under one stays serial, emitted per cell by the body recursion (`_emit`) like any
+  other nested reduce — the offer decides this, not the bind. The members emit in body order: a plain segment runs
+  per cell on every lane (the provider chain the partitioned member reads), each partitioned member becomes its own
+  strided fold + merge (the combine broadcasts in place, so a later segment reads the merged carrier), and the
+  trailing segment closes lane-distributed. Every cooperating member shares ONE lane axis. A swept output spec has no
+  lane-distributed close, and a streamed spec must splice into its own observed fold's reduce loop — unreachable once
+  that loop already sits in an earlier segment — so a root carrying either stays fully serial, decided at the offer.
 - **Degenerate** — nothing tiled: one thread per output cell (`_emit(op)` + an output-store glue).
 
 ### The recursive node walk (`_emit`) — one hierarchical emitter
@@ -42,17 +62,17 @@ NODE. This is the
 tile-IR-rebuild mandate's *one hierarchical emitter, no divergent codegen path*: `_emit(node).body` is byte-identical to
 `node.lower()` for a scalar-nested (block=1) node today. `Handle` carries `name` + `residence` (a scalar
 register value); the **tensor-core seam** is the view arm in `_bind` — an output-warp-tiled contraction (an mma
-`TilePlan`) emits through the register-tile pipeline + the accumulator→operand fragment recast there, where the rebuild
+`Tile`) emits through the register-tile pipeline + the accumulator→operand fragment recast there, where the rebuild
 extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
 the inbound `wires`.
 
 A materialized Fold-edge cut reaches this walk as an ordinary `Load` operand. `_emit` preserves that load and returns
 its bound value as the wire, so cut and fused trees use the same parent emission path.
 
-The output-tiled arm travels as **`(node, tile)`** — the stored `Fold` (bilinear reading) and its PLACED `TilePlan`
+The output-tiled arm travels as **`(node, tile)`** — the stored `Fold` (bilinear reading) and its PLACED `Tile`
 slice. There is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "`is_contraction(op)` with a
 TILE slice over a grid with an `(m, n)` pair" and threads the two on; the slice arrives ALREADY PLACED from
-`Sched.tile_of`, which binds the caller's `(m, n)` through `TilePlan.at`. It is
+`Sched.tile_of`, which binds the caller's `(m, n)` through `Tile.at`. It is
 binding-driven for both atoms, with **no per-atom subclass**, and cleanly
 splits the **placement/schedule the slice owns** (its `axes` and the `Side`
 geometry derived from them — the tiled CELL and nothing outside it, so the kernel's leading batch axes stay the
@@ -62,11 +82,11 @@ contract: the reduce `axis`, the shared `a` operand edge plus the product `chann
 field, its one home is the wrapping zero-axis `Fold.lift`. The edges share ONE type. Canonicalization places the
 argument shared across channels in `a`; `Sched.tile_of` then orients algebraic M toward the physical output axis that
 edge references and N toward the other axis. Either side may be computed and use the synchronous compute fill)
-from the **schedule** (the `TilePlan` slice carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
+from the **schedule** (the `Tile` slice carrying the leaf `atom` — a tensor-core `AtomKind` / the scalar
 `ScalarAtom`, `ir/atom.py` — plus the unit/register widths + K-chunk). The per-CTA geometry (the `(m, n)` `Side` pair —
 tile width / mask / block+unit var names — plus `launch_threads`) is **derived on the slice**, from its widths × its
 own `axes` (`@property`). Keeping the schedule a single swappable
-slice is what lets the same operand/`acc` params be tiled by a *different* `TilePlan`.
+slice is what lets the same operand/`acc` params be tiled by a *different* `Tile`.
 
 A symbolic / non-divisible tail is **clamp-to-identity** (the masked overhang folds a no-op or guards its store); the
 dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `int seq_len` arg.
@@ -89,9 +109,15 @@ loop under the one name; anything else tiles nothing and folds serially one thre
 output cell (the degenerate `_emit(op)` + `with_store`) — there is **no** separate "scalar tier" branch, and no
 per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
 (`out_val`, the root node's produced `Handle`) are threaded down the recursion, so `with_store` is node-agnostic. The
-kernel-boundary `TileOp.output_specs` are reconstituted at their owning projection region or the zero-axis Fold peel,
-so everything below the peel — the sinks, cooperative loop distribution, and split realizers — consumes the
-identical statement stream that entered total lift. The
+kernel-boundary `TileOp.output_specs` are reconstituted at their owning projection region or the zero-axis Fold peel
+(a STREAMED store — one whose values are an observed fold's observer results — rides the recursion down to the leaf
+instead and splices into the reduce loop after the observer stmts), so everything below the peel — the sinks,
+cooperative loop distribution, and split realizers — consumes the identical statement stream that entered total
+lift. An output sweep whose axis the peeled root's cone reads cannot wrap at the peel (the root binds outside the
+projection, so no wrap position encloses it): the serial fold binds the projection UNPEELED so the sweep loop wraps
+operand and projection together, and a cooperative / ILP row — whose lanes the sweep would be distributed across —
+declines via `UnbindableProjection` (`RuleSkipped(reject=True)` at the pass boundary; the greedy retries the next
+row). The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
 node kinds, no algebra, no `Ctx`. That is the decide/realize seam: the tile schedule picks the plan, `_tiling` is
@@ -178,11 +204,12 @@ supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner 
 axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
 CTA-shared across the sibling, so a sibling var can only survive as a value-dead flat-index reshape residue (a
 merged / reshaped weight row), and left unbound it would emit the unsplit axis name the kernel no longer defines. The staging **decision** does not live here at all: the
-`Stage` on the `TileOp` arrives **already resolved** by the scheduler (transport eligibility, the slab K-chunk
-`bk_elems`, the depth clamps — or `None`, gmem-direct), and `state` (which slots the operand fragments) and the
-shared `reduce` (which emits the loop) apply it verbatim. The `Stage` names the intermediate storage and its fill mechanism — `smem` (the synchronous
-thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all (gmem→register on
-a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
+`ResolvedStage` in `ClassicMaterialization` arrives **already resolved** by the scheduler (transport eligibility, the
+slab names, K-chunk `bk_elems`, and depth clamps). A direct edge has an explicit direct `Stage` choice and no resolved
+materialization. The `state` builder (which slots the operand fragments) and shared `reduce` (which emits the loop)
+apply the resolved facts verbatim. The `Stage` choice names the intermediate storage and its fill mechanism — `smem`
+(the synchronous thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all
+(gmem→register on a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
 `d<depth>` is the gmem→smem ring (blocking synchronous slot fill / cp.async commit group / TMA mbarrier-phased
 prefetch over the K-slab loop),
 `p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps). Staging is a
@@ -197,7 +224,8 @@ additionally requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves
 are never offered and a `smem-tma` pin refuses — Ada/Ampere have no
 `cp.async.bulk.tensor` and nvcc has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the
-schedule fork enumerates the resolver-gated stage grid (`search/space.stage_moves`) alongside the tile / reduce moves;
+schedule fork enumerates the resolver-gated stage grid (`ir/schedule/catalog.stage_moves`) alongside the tile / reduce
+moves;
 an `EMMY_STAGE` pin stays authoritative.
 
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
@@ -241,7 +269,17 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
 `RegEpilogue` (`extra_accs`). Materialized A copies into the same single A slab; computed A evaluates into it. Both
-forms use the synchronous compute fill because the gmem-direct and byte-copy MMA paths remain single-channel.
+forms use the synchronous compute fill because the gmem-direct and single-sided byte-copy MMA paths remain
+single-channel. The block-scaled fp4 cell is the exception: it carries N channels on cp.async, staging `2 + 2N` slabs
+over the one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
+
+**A bridged seam value keeps its own dtype.** A computed operand's cone splits at its K seam into a row-invariant
+prologue and a per-cell body, and the prologue publishes its results through smem rows the cell reads back — so
+those rows are the only place a bridged value's dtype is declared (`cone_stat_dtypes`, typed the way `edge_dtypes`
+types an edge's results; a name whose statement kind carries no dtype keeps the float default). Declaring every row
+`float` decides the CELL's arithmetic too: a value that crosses as an integer — a pack's shift amount, a nibble
+mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
+rather than computing something wrong.
 
 **Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
 sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
@@ -256,6 +294,42 @@ every chunk 16 B-aligned and takes the drain from 4-way bank conflicts to ≤ 2-
 TMA byte slab (the U8 `CUtensorMap`) deposits dense and eats the measured conflicts. Legality
 (`resolve_warp_stage`'s byte arm): 16-divisible inner spans (and, canonical-B, a 16-divisible gmem row stride N);
 the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements.
+
+**Staged packed-pair (NVFP4) weights — the byte slab plus a block-scale slab.** A packed weight is a COMPUTED B, so
+the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading
+moves 16-bit values through global memory, which is the whole point of a 4-bit format thrown away. The specialized
+reading keeps it. `ir.schedule.packing.match_packed_b_node` recognizes the node (the ONE question the offer, the
+resolver and the materializer all ask, so they cannot drift apart), and `_atom._packed_operands` stages THREE slabs
+where the
+ordinary matmul stages two: A and the weight's raw bits as `cp.async` peers, plus the weight's block scales as the
+`SyncTransport`'s compute-filled operand. The bits slab is half the K width of a 16-bit one (one byte is two K
+elements) and is addressed canonically — row `n`, byte column `k / 2` over the checkpoint's `[N, K/2]` buffer —
+rather than through the cone's flattened reshape arithmetic, which says the same thing in a form no fill can chunk.
+The scale slab is `tile_n × bk_elems/block` and single-buffer: its fill is compute, which runs on the drain's own
+threads, so ringing it buys no overlap. Evaluating the scale cone at ONE k per block instead of at every k is
+exactly the block-invariance the matcher proved.
+
+The drain is one loader reading both slabs (`LdmatrixLoad.scale_buffer`, rendered as
+`emmy_mma_load_b_smem_trans_f4s_<dtype>`): per fragment element pair it reads one byte, looks both 4-bit codes up in
+a constant value table, and multiplies each by the block's scale. The mma B fragment's own lane map is what makes
+the byte read whole: a lane's two adjacent K positions ARE a stored pair. `render._f4_staged_prelude` emits one
+loader per fragment dtype the kernel actually drains — f16 and bf16, since every e2m1 value is exact in both (the
+format's largest magnitude is 6 and its finest step 0.5, so one mantissa bit carries it). The tables are generated
+from `dtype.F4_VALUES`, so the kernels and the numpy decode stay one table of values, and an f16 kernel never
+carries the bf16 form. Legality (`resolve_warp_stage`'s packed arm) scopes the stage to what those loaders are
+written for — a copy transport, an N-major weight of 16-value blocks under an f16 or bf16 atom whose K step is that
+same 16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8
+slab has. Everything outside the scope declines and keeps the general reading.
+
+Both copy transports carry it, differing in one thing: a cp.async fill pads the byte rows (`BYTE_SLAB_PAD`, for the
+drain's bank spread) while a TMA box deposits DENSE, so its slab is unpadded and its drain reads the narrower row
+stride — the same split the fp8 byte slab makes, and the budget sizes each accordingly. TMA adds the hardware's own
+demands: every box dim within 256, and 16 B-aligned inner spans and gmem row strides per operand at its own width.
+The two also compose differently with the scale fill. cp.async rides INSIDE the `sync` producer as an asynchronous
+peer, because both are issued by the same threads under one CTA barrier. A TMA copy is armed on an mbarrier by one
+elected thread and waited on by parity, which no compute fill folds into — so the packed TMA form is TWO operand
+groups over one drain segment (`pipelined_kloop` already schedules a list of them): the box copies ring at the
+stage's depth, the compute-filled scale slab stays single-buffer.
 
 **Warp specialization (the producer band → `TileOp.workers`; rows spell it as `WORK`'s `+p<n>` suffix, which is also
 how it is pinned — the `WSPEC` key is retired).** A resolved `WarpSpec` splits the SAME staged phases across two
@@ -305,7 +379,7 @@ assuming that all components share the contraction accumulator's residence.
 The Fold move is never re-decided during materialization. `ReduceStage.combine` is the placement-keyed selector:
 within-warp uses `SHFL`, within-block uses a `SHFL` plus shared-memory tree, and cross-CTA uses `ATOMIC` or `KERNEL`
 (a multi-component carrier is kernel-finalize only). Scalar materialization consumes it through `emit_combine`, while
-the structural `tile/035_split_reduce` fork realizes the graph-level partition.
+the structural `tile/030_cut` fork realizes the graph-level partition.
 
 **Shared-row staging (`_tile_reduce_axis`) — the reduce tier's `sync` transport.** The fused norm→linear prologue is a
 cooperative reduce: an input row folded by the cooperative reduce AND re-read per output column of a contraction tail (a

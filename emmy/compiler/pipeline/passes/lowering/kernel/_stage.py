@@ -231,7 +231,15 @@ def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_
 
 
 def sync_stat_fill(
-    *, stats: tuple[str, ...], slab_of, row_axis: Axis, row_body: list[Stmt], cta: CtaTile, stat=None, dtype: str = "float"
+    *,
+    stats: tuple[str, ...],
+    slab_of,
+    row_axis: Axis,
+    row_body: list[Stmt],
+    cta: CtaTile,
+    stat=None,
+    dtype: str = "float",
+    dtypes: dict[str, str] | None = None,
 ) -> list[Stmt]:
     """The ``smem`` compute fill's per-row STATISTIC prologue — the fused norm→linear warp edge's
     cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
@@ -241,8 +249,14 @@ def sync_stat_fill(
     broadcasts to every lane), each lane then runs the scalar epilogue redundantly and lane 0
     writes each bridged ``stats`` value into its length-``rows`` smem row (``slab_of(name)``); one
     CTA barrier publishes them to the A compute-fill. A ``row_body`` with no foldable reduce
-    ``Loop`` (or a sub-warp CTA) falls back to the serial one-row-per-THREAD stripe."""
-    decls: list[Stmt] = [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=dtype) for nm in stats]
+    ``Loop`` (or a sub-warp CTA) falls back to the serial one-row-per-THREAD stripe.
+
+    A row is declared at its OWN bridged value's C type (``dtypes``, name → C type; ``dtype`` for
+    anything absent). The declaration is where a bridged value's dtype is stated — ``Smem.render``
+    registers it and the cell's read picks it up — so a row declared float would put the cell's
+    arithmetic in f32 whatever crossed it, and the bit operations have no f32 spelling."""
+    per = dtypes or {}
+    decls: list[Stmt] = [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=per.get(nm, dtype)) for nm in stats]
     writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats)
     rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.role.is_reduce), None)
     if rl_i is None or stat is None or cta.n_threads % 32 or cta.n_threads < 32:
@@ -277,11 +291,32 @@ _SWIZZLE_SLAB_ALIGN = {"NONE": TMA_SLAB_ALIGN, "B32": 256, "B64": 512, "B128": 1
 
 
 def _swizzle_align(swizzle: str) -> int:
-    """The slab base alignment a SOFTWARE-filled slab needs — the same swizzle-atom alignment the
-    TMA table gives, keyed on the hardware mode behind a shift-overridden spelling. ``NONE`` keeps
-    the NATURAL alignment (``0``), not the TMA entry: nothing faults on an unaligned software fill,
-    so an unswizzled slab packs exactly where it did before this table reached the sync path."""
+    """The slab base alignment the SWIZZLE asks for — the same swizzle-atom alignment the TMA table
+    gives, keyed on the hardware mode behind a shift-overridden spelling. ``NONE`` asks for nothing
+    (``0``), so an unswizzled slab packs where it did before this table reached the sync path.
+
+    This is only half of a copied slab's requirement; :func:`_fill_align` adds the other half."""
     return 0 if swizzle == "NONE" else _SWIZZLE_SLAB_ALIGN[swizzle_base(swizzle)]
+
+
+def _fill_align(cols: int, elem_bytes: int, swizzle: str) -> int:
+    """The base alignment a VECTOR-FILLED slab needs: its swizzle atom, or its fill chunk, whichever
+    is stricter. EVERY staged slab is vector-filled — the copies through ``cp.async`` / the blocking
+    vector store, the compute fill through the ``v``-element runs :meth:`SyncTransport.fill` emits —
+    so every one of them answers here.
+
+    The chunk is the requirement that is easy to miss, because it does not follow the element
+    width. :func:`_cp_async_width` picks the widest legal chunk that divides the inner span — 16 B
+    for any 16 B-divisible row, f16 as much as fp8 — and a vector store faults on a shared address
+    that is not chunk-aligned. Aligning to the ELEMENT would leave an f16 slab 2 B-aligned and its
+    16 B writes free to land at 8 mod 16, which is a real fault and not a theoretical one: it is
+    what a packed weight's odd-sized companion slabs first shifted a neighbouring slab into
+    (compute-sanitizer, ``Invalid __shared__ write of size 16 bytes ... Access to 0x2c58 is
+    misaligned``).
+
+    The row STRIDE keeps every later row aligned once the base is: the byte slab's ``BYTE_SLAB_PAD``
+    is 16-divisible and the staging legality already requires 16-divisible inner spans."""
+    return max(_swizzle_align(swizzle), _cp_async_width(cols, elem_bytes) * elem_bytes)
 
 
 # TMA hardware-swizzle atom widths in bytes, widest-first. The widest atom that divides a
@@ -416,6 +451,12 @@ class Operand:
     # misaligned addresses + overlapped data (the Gemma ``k_linear_reduce`` bench_fail cluster).
     dtype: str | None = None
     elem_bytes: int | None = None
+    # The companion BLOCK-SCALE slab of a PACKED-PAIR operand (NVFP4 weights) — ``(slab name, the
+    # k block the scale spans)``. One stored byte is two logical K elements and every ``block`` of
+    # them share one scale, so the drain reads this slab beside the bits and applies the scale as
+    # it decodes. The scale slab itself is a :class:`SyncOperand`: its values are DECODED from the
+    # checkpoint's e4m3 codes, which is compute, not a copy. ``None`` on every other operand.
+    scale: tuple[str, int] | None = None
 
     @property
     def slab(self) -> str:
@@ -451,6 +492,11 @@ class SyncOperand:
     # cp.async fill uses) and read back by the ``ldmatrix`` drain. NONE outside the mma tier
     # (a plain-``Load`` drain cannot read a swizzled slab).
     swizzle: str = "NONE"
+    # The companion block-scale slab, ``(slab, block)`` — the same fact the copied :class:`Operand`
+    # carries, on the filled side. A block-scaled operand whose codes this matmul COMPUTES fills
+    # its own slab and still hands the drain the stored scales beside it, so the drain must read
+    # the pairing off either kind.
+    scale: tuple | None = None
 
     @property
     def slab(self) -> str:
@@ -513,18 +559,29 @@ class SyncTransport:
     copy_sync: bool = False
 
     def slab_decls(self, ring: int) -> list[Stmt]:
-        # Sync-filled slabs are single-buffer (see :meth:`SyncOperand.slot_row`); only the
-        # copied peer slabs allocate the ring.
+        # Sync-filled slabs are single-buffer (see :meth:`SyncOperand.slot_row`); of the copied
+        # peers only the per-chunk ones allocate the ring — the loop-invariant peers never advance,
+        # so one slot holds them. Each peer is sized by its OWN element width and row pad: a copied
+        # peer here is a copied operand there (a packed-pair weight's byte slab beside an f16 A),
+        # so a byte slab keeps its 16 B alignment and its padded rows. Every copied peer aligns
+        # through :func:`_fill_align` — its swizzle atom or its fill chunk, whichever is stricter.
+        def peer(op: Operand, rows: int) -> Stmt:
+            eb = op.elem_bytes or self.elem_bytes
+            return slab_smem(
+                op.slab,
+                rows,
+                op.shape[1] + op.pad_cols,
+                op.dtype or self.slab_dtype,
+                align=_fill_align(op.shape[1], eb, op.swizzle),
+            )
+
         return [
-            *(slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype, align=_swizzle_align(op.swizzle)) for op in self.operands),
             *(
-                slab_smem(op.slab, ring * op.shape[0], op.shape[1], op.dtype or self.slab_dtype, align=_swizzle_align(op.swizzle))
-                for op in self.copy_operands
+                slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype, align=_fill_align(op.shape[1], self.elem_bytes, op.swizzle))
+                for op in self.operands
             ),
-            *(
-                slab_smem(op.slab, op.shape[0], op.shape[1], op.dtype or self.slab_dtype, align=_swizzle_align(op.swizzle))
-                for op in self.invariant_operands
-            ),
+            *(peer(op, ring * op.shape[0]) for op in self.copy_operands),
+            *(peer(op, op.shape[0]) for op in self.invariant_operands),
         ]
 
     def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
@@ -624,6 +681,7 @@ class SyncTransport:
         # skeleton's PREFETCH chunk/slot, so they additionally cover the previous chunk's drain.
         copy = sync_copy_fill if self.copy_sync else cp_async_fill
         for op in self.copy_operands:
+            assert op.swizzle == "NONE" or op.pad_cols == 0, "a padded slab must stay NONE-swizzle"
             out += copy(
                 slab=op.slab,
                 shape=op.shape,
@@ -726,16 +784,18 @@ class CpAsyncTransport:
     cta: CtaTile
 
     def slab_decls(self, ring: int) -> list[Stmt]:
-        # A 1-byte (fp8) slab pins an explicit 16 B alignment: its natural (1 B) alignment
-        # satisfies neither the 16 B cp.async chunks nor the drain's vector (u32 / fp8x2)
-        # reads; 16 B keeps both, and the padded row stride is 16-divisible by legality.
+        # Every slab here is cp.async-filled, so each aligns to its copy chunk or its swizzle atom,
+        # whichever is stricter (:func:`_fill_align`). The chunk half is what a 1-byte (fp8) slab's
+        # natural 1 B alignment misses, and equally what an f16 slab's 2 B alignment misses — the
+        # chunk follows the row span, not the element. The padded row stride is 16-divisible by
+        # legality, so aligning the base keeps every later row aligned too.
         return [
             slab_smem(
                 op.slab,
                 ring * op.shape[0],
                 op.shape[1] + op.pad_cols,
                 op.dtype or self.slab_dtype,
-                align=16 if (op.elem_bytes or self.elem_bytes) == 1 else 0,
+                align=_fill_align(op.shape[1], op.elem_bytes or self.elem_bytes, op.swizzle),
             )
             for op in self.operands
         ]

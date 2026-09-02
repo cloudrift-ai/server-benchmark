@@ -129,6 +129,20 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   CSA profile and additionally requires the compressor and indexer to enumerate entries at the same rate; a missing
   specialization, a rate mismatch, or a width where top-k is selective fails closed.
 
+- **The fused query/gate layout** is the one shape where the attention seam widens. Qwen3.5's full-attention layer
+  puts its output gate in `q_proj`, making it twice as wide as its query heads and splitting the result per head with
+  `chunk(2)`; the gate then multiplies the attention result before `o_proj`. Every head count in the attention carve
+  is read off the projection widths, so taking them at face value would infer twice the heads and silently drop the
+  gate. The shared `_build_pre_wrapper` instead compares those widths against the module's own declared
+  query-heads-per-key/value-head ratio (`num_key_value_groups`), which identifies the layout without keying on a
+  model name. `pre` then returns a FOURTH tensor, the gate at `[tokens, Hq·D]`, and `post` takes it as a third
+  argument and applies `attn_out * sigmoid(gate)`. It carries a value `q_proj` already produced rather than
+  recompute it, because recomputation is a second full pass over that same large weight — the gate is its other
+  half. `Pre.emits_gate` says which arity a caller got. The dense and MoE posts both take the argument.
+  A query projection whose excess width is anything OTHER than that exact doubling still raises, as does a block
+  carrying both a fused gate and a separate `g_proj` (two gates, undefined order); a module declaring no ratio
+  passes through unchecked.
+
 - `build_moe_split_wrapper(block) → (pre, post_attn, expert)` is the MoE variant of the attention-split carve
   (token-choice top-k, transformers-v5 experts interface — detected by `moe_block_parts`: a router module named
   `gate` (OLMoE/Qwen lineage) or `router` (gpt-oss) beside 3-D `gate_up_proj` / `down_proj` expert parameters).
@@ -188,26 +202,44 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   experts' would-be initialization never materializes), while the dense trunk streams per shard as real values and
   attaches via `load_state_dict(assign=True)`. Expert tensors collect into a per-layer store keyed by the expert
   program's input names: FP8 weights remain raw bits with f32 scales, and native-MXFP4 gpt-oss weights remain uint8
-  blocks with uint8 E8M0 scales; biases stay in the requested value dtype. `expert_range=(lo, hi)` narrows the read to
-  one tensor-parallel rank's expert shard, re-indexed rank-locally, so a rank never reads bytes it does not own.
+  blocks with uint8 E8M0 scales; biases stay in the requested value dtype. An NVFP4 dense-trunk weight streams as
+  values: the loader dequantizes each packed trio (`<key>` + `<key>_scale` + `<key>_scale_2`) on read and consumes the
+  scale siblings. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert lane has no packed-trio
+  decode. `expert_range=(lo, hi)` narrows the read to one tensor-parallel rank's expert shard, re-indexed
+  rank-locally, so a rank never reads bytes it does not own.
   The twin's config must resolve to Transformers' OWN class for the architecture: a hosting process can re-register
   the model type onto its own minimal config class (vLLM's config parser does, process-wide), which drops every field
   the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a same-named native class exists, the
   loader reloads the config with it.
 
-  A checkpoint published in its own namespace is translated by `_native_checkpoint_renamer`, which reuses the renaming
-  Transformers itself publishes for the architecture (`get_checkpoint_conversion_mapping`) instead of keeping a second
-  copy that can drift from the modeling code the twin is built from. Only its `WeightRenaming` entries apply: the
-  accompanying `WeightConverter` entries merge routed experts into one dense parameter, which is exactly what a
-  serving load must not do. DeepSeek V4 is the architecture that needs this today — `layers.N.attn.wq_a`,
+  Checkpoint keys are translated to the twin's own parameter names before any of that, by two composed translations.
+  Nothing raises when a name fails to match: the load is `strict=False, assign=True`, so an unmatched parameter keeps
+  its meta tensor and the twin comes back looking complete.
+
+  The FAMILY translation (`_checkpoint_key_renamer`) places a key where THIS twin holds its parameters. A
+  vision-language release stores its text decoder one module deeper than a text-only twin has it — Qwen3.5 puts every
+  decoder weight under `model.language_model.layers.N.*`, of which a text-only twin matched one name in 851.
+  Transformers registers that translation per model type and applies it inside `from_pretrained`, a path this loader
+  does not take, so the loader reads the same conversion mapping (`get_model_conversion_mapping`) and applies it with
+  upstream's own `rename_source_key`, rather than hand-writing one family's rule. Pre-existing loads are unchanged not
+  because unmapped families exist but because the mappings they do carry — four legacy `LayerNorm.gamma`/`weight_g`
+  renames attach to every model — match no modern checkpoint key.
+
+  The NATIVE translation runs first, since the family one matches on module-namespace names. A checkpoint published in
+  its own namespace is translated by `_native_checkpoint_renamer`, which reuses the renaming Transformers itself
+  publishes for the architecture (`get_checkpoint_conversion_mapping`) instead of keeping a second copy that can drift
+  from the modeling code the twin is built from. Only its `WeightRenaming` entries apply: the accompanying
+  `WeightConverter` entries merge routed experts into one dense parameter, which is exactly what a serving load must not
+  do — the same RENAMINGS-only restriction both translations take, so a converter's key still goes unmatched even when
+  its spelling now differs. DeepSeek V4 is the architecture that needs this today — `layers.N.attn.wq_a`,
   `layers.N.ffn.experts.E.w1`, `hc_attn_fn`, `embed`/`head`, and `.scale` for every block-scale sibling. Two rules
-  finish it: routed `w1`/`w3`/`w2` take their gate/up/down module names, and a `.scale` leaf becomes the
-  `weight_scale` sibling ONLY when the module's `.weight` is also present — the hyper-connection blocks carry a
-  LEARNED `hc_attn_scale` parameter whose name ends the same way, and renaming it leaves the twin's stream mixing on
-  meta. Sibling lookups therefore run in the module namespace, or a natively spelled block scale never pairs and every
-  fp8 trunk weight loads unscaled. That checkpoint also declares an fp8 trunk while storing routed experts as native
-  MXFP4 (`expert_dtype: fp4`, `I8 [out, in/2]` nibble pairs beside `F8_E8M0 [out, in/32]` exponents), which the loader
-  views — never casts — onto the uint8 blocks/scales carrier the expert programs bind.
+  finish it: routed `w1`/`w3`/`w2` take their gate/up/down module names, and a `.scale` leaf becomes the `weight_scale`
+  sibling ONLY when the module's `.weight` is also present — the hyper-connection blocks carry a LEARNED `hc_attn_scale`
+  parameter whose name ends the same way, and renaming it leaves the twin's stream mixing on meta. Sibling lookups
+  therefore run in the module namespace, or a natively spelled block scale never pairs and every fp8 trunk weight loads
+  unscaled. That checkpoint also declares an fp8 trunk while storing routed experts as native MXFP4 (`expert_dtype:
+  fp4`, `I8 [out, in/2]` nibble pairs beside `F8_E8M0 [out, in/32]` exponents), which the loader views — never casts —
+  onto the uint8 blocks/scales carrier the expert programs bind.
 
   A multi-token-prediction head is never owned by this loader: no twin instantiates it, and on DeepSeek V4 its 256
   routed experts are 4,608 of the checkpoint's tensors, read in full on every rank only to be discarded. An EXL3
@@ -232,7 +264,7 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   also carries `codebooks[layer][input_name]`, the marker-derived codebook id the speller stamps on each decode, plus
   `dir` and `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the whole dict at
   once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the whole-dict
-  eager/accuracy twin for models small enough to hold (FP8, native MXFP4, and EXL3 checkpoints alike). A
+  eager/accuracy twin for models small enough to hold (FP8, NVFP4, native MXFP4, and EXL3 checkpoints alike). A
   selected-layer native-MXFP4 eager twin instead decodes and attaches only its shard-streamed expert store, preserving
   the value-reference contract without expanding every layer. On the way in the EXL3 path trims encode padding back to
   the declared parameter shapes (`_trim_padded_weights` — both weight dims round up to 128 at encode time) and packs

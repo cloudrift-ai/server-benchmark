@@ -7,7 +7,7 @@ Tile / Cond) live in ``blocks``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 
 from emmy.compiler.dtype import F32, DataType
@@ -190,6 +190,10 @@ class Load(Stmt):
     def external_reads(self) -> tuple[str, ...]:
         return (self.input,)
 
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.input, self.input)
+        return self if new == self.input else replace(self, input=new)
+
     def exprs(self) -> tuple[Expr, ...]:
         return self.index
 
@@ -209,6 +213,14 @@ class Load(Stmt):
         # literal-const buffers.)
         lit = ctx.literal_constants.get(self.input) if ctx.literal_constants else None
         if lit is not None and self.is_scalar:
+            # An INTEGER constant keeps its own element dtype. Folding it to f32 would decide the
+            # CONSUMER's arithmetic too: ``Assign.render`` reads its args' dtypes to choose between
+            # the native integer spelling and the f32 promotion, and the bit operations (a pack's
+            # shift, a nibble mask) have no f32 spelling at all. Float constants keep the f32
+            # binding, which is what every consumer of them already computes in.
+            if self.dtype is not None and self.dtype.name in _INTEGER_DTYPES:
+                ctx.ssa_dtypes[self.names[0]] = self.dtype.name
+                return [f"{pad}{ctx.type_name(self.dtype.name)} {self.names[0]} = {int(lit)};"]
             ctx.ssa_dtypes[self.names[0]] = "f32"
             return [f"{pad}{ctx.type_name('f32')} {self.names[0]} = {_float_lit(lit)};"]
         # Prefer the stamped ``self.dtype`` (set by ``030_stamp_types``);
@@ -727,7 +739,7 @@ class Write(Stmt):
     index: tuple[Expr, ...]
     values: tuple[str, ...]
     value_dtype: DataType | None
-    # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``035_split_reduce``'s atomic finalize):
+    # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``030_cut``'s atomic finalize):
     # every contributing CTA adds its partial into the SAME output cell, so the store is an
     # atomic accumulate (the output is zero-init'd per launch — ``CudaOp.zero_outputs``).
     # Scalar only; never vectorized (each lane needs its own ``atomicAdd``).
@@ -796,6 +808,10 @@ class Write(Stmt):
 
     def external_writes(self) -> tuple[str, ...]:
         return (self.output,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.output, self.output)
+        return self if new == self.output else replace(self, output=new)
 
     def exprs(self) -> tuple[Expr, ...]:
         return self.index
@@ -975,6 +991,10 @@ class ZeroPrologue(Stmt):
 
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.dst, self.dst)
+        return self if new == self.dst else replace(self, dst=new)
 
     @cached_property
     def has_side_effects(self) -> bool:

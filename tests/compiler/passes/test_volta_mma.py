@@ -12,8 +12,10 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp
+from emmy.compiler.ir.schedule.catalog import MAX_FRAGMENT_REGISTERS, warp_tile_moves
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.search.space import MAX_FRAGMENT_REGISTERS, warp_tile_moves
+from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.target import set_target
 
 VOLTA = "mma_m8n8k4_f16_f32"
@@ -120,8 +122,8 @@ def test_volta_warp_tiles_respect_accumulator_register_budget() -> None:
 def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     _pin(monkeypatch, VOLTA)
     src, knobs = _source(_graph(trans=trans), Context(compute_capability=(7, 0)))
-    assert knobs["TILE"] == f"{VOLTA}/f1x1"
-    assert knobs["STAGE"] == ""
+    assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
+    assert family_value(knobs, "STAGE") == ""
     assert "mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32" in src
     assert "unsigned _a0[2]" in src and "unsigned _b0[2]" in src
     assert "float _c0_0[8]" in src
@@ -138,7 +140,7 @@ def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
     """
     _pin(monkeypatch, VOLTA, tile="f1x1", stage="")
     src, knobs = _source(_graph(m=1, n=16, k=16, trans=True), Context(compute_capability=(7, 0)))
-    assert knobs["TILE"] == f"{VOLTA}/f1x1"
+    assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
     assert knobs["WORK"] == "w1x1"
     assert "emmy_mma_m8n8k4_f16_f32" in src
     assert "_um_b" in src and "< (1)" in src
@@ -148,9 +150,11 @@ def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
 def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch, trans) -> None:
     _pin(monkeypatch, VOLTA, stage="d1/smem")
     src, knobs = _source(_graph(k=16, trans=trans), Context(compute_capability=(7, 0)))
-    assert knobs["STAGE"] == "d1/smem"
-    assert "__shared__ __half _a_smem[64]" in src
-    assert "__shared__ __half _b_smem[64]" in src
+    assert family_value(knobs, "STAGE") == "d1/smem"
+    # Every staged slab now declares its fill-chunk alignment, so match the declaration from the
+    # dtype on — the attribute between ``__shared__`` and the type is not what this test is about.
+    assert "__half _a_smem[64]" in src
+    assert "__half _b_smem[64]" in src
     assert "emmy_mma884_load_a_smem(_a0, &_a_smem" in src
     b_helper = "emmy_mma884_load_b_smem_trans" if trans else "emmy_mma884_load_b_smem"
     assert f"{b_helper}(_b0, &_b_smem" in src
@@ -162,10 +166,10 @@ def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch,
 def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:
     _pin(monkeypatch, VOLTA, tile="f1x1/k2", stage="d2/smem/p2")
     src, knobs = _source(_graph(k=32), Context(compute_capability=(7, 0)))
-    assert knobs["TILE"] == f"{VOLTA}/f1x1/k2"
-    assert knobs["STAGE"] == "d2/smem/p2"
-    assert "__shared__ __half _a_smem[256]" in src
-    assert "__shared__ __half _b_smem[256]" in src
+    assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1/k2"
+    assert family_value(knobs, "STAGE") == "d2/smem/p2"
+    assert "__half _a_smem[256]" in src
+    assert "__half _b_smem[256]" in src
     for fragment in ("_a0_s0", "_a0_s1", "_b0_s0", "_b0_s1"):
         assert fragment in src
     assert src.count("emmy_mma_m8n8k4_f16_f32(_c0_0") == 2
@@ -197,8 +201,8 @@ def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch, 
     _pin(monkeypatch, VOLTA, tile="f1x1", stage=stage)
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     src, knobs = _source(_norm_linear_graph(), Context(compute_capability=(7, 0)))
-    assert knobs["TILE"] == f"{VOLTA}/f1x1"
-    assert knobs["STAGE"] == stage
+    assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
+    assert family_value(knobs, "STAGE") == stage
     assert "emmy_mma884_load_a_smem(_a0, &_a_smem" in src
     assert "emmy_mma884_load_b_smem_trans(_b0, &_b_smem" in src
     assert "rsqrtf" in src  # the norm cone itself, evaluated into the A slab
@@ -225,29 +229,31 @@ def test_modern_mma_source_does_not_gain_the_volta_prelude(monkeypatch) -> None:
     assert "emmy_mma884" not in src and "mma.sync.aligned.m8n8k4" not in src
 
 
-def test_sm70_rejects_a_pinned_modern_atom(monkeypatch) -> None:
+def test_sm70_modern_atom_pin_restricts_the_schedule_to_empty(monkeypatch) -> None:
     _pin(monkeypatch, AMPERE)
-    with pytest.raises(ValueError, match="has_mma_m16n8k16.*unavailable on sm_70"):
-        Pipeline.build(TILE_PASSES).run(_graph(k=16), ctx=Context(compute_capability=(7, 0)))
+    out = Pipeline.build(TILE_PASSES).run(_graph(k=16), ctx=Context(compute_capability=(7, 0)))
+    tile = next(node.op for node in out.nodes.values() if isinstance(node.op, TileOp))
+
+    assert not tile.place.is_mapped and tile.schedule is None
 
 
-@pytest.mark.parametrize(("stage", "message"), [("d1/smem-async", "cp.async requires sm_80"), ("d1/smem-tma", "TMA requires sm_90")])
-def test_sm70_rejects_a_pinned_newer_stage(monkeypatch, stage, message) -> None:
+@pytest.mark.parametrize("stage", ["d1/smem-async", "d1/smem-tma"])
+def test_sm70_newer_stage_pin_refuses(monkeypatch, stage) -> None:
     _pin(monkeypatch, VOLTA, stage=stage)
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="requires sm_"):
         Pipeline.build(TILE_PASSES).run(_graph(), ctx=Context(compute_capability=(7, 0)))
 
 
-def test_requested_target_reaches_nvcc_arch_and_cache_key(monkeypatch) -> None:
+def test_requested_target_reaches_nvcc_arch_and_cubin_key(monkeypatch) -> None:
     monkeypatch.setattr(nvcc, "_toolkit_tag", lambda: "toolkit")
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
     try:
         set_target((7, 0))
         arch70 = nvcc.device_arch(False)
-        key70 = nvcc._cache_key("source", "kernel", arch70)
+        key70 = nvcc._cubin_key("source", "kernel", arch70)
         set_target((8, 0))
         arch80 = nvcc.device_arch(False)
-        key80 = nvcc._cache_key("source", "kernel", arch80)
+        key80 = nvcc._cubin_key("source", "kernel", arch80)
     finally:
         set_target(None)
     assert (arch70, arch80) == ("sm_70", "sm_80")

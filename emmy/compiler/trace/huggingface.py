@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -465,6 +466,7 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
     if ple is not None:
         kwargs["per_layer_input"] = ple
     graph = trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes)
+    _drop_none_kwarg_inputs(graph, kwargs)
     stamp_sliding_windows(
         graph,
         decoder.config,
@@ -472,6 +474,27 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
         sliding_window=deepseek_sliding_window,
     )
     return graph, (block, (x,), kwargs)
+
+
+def _drop_none_kwarg_inputs(graph, kwargs: dict) -> None:
+    """Drop the scalar placeholders ``torch.export`` leaves behind for ``None`` keyword arguments.
+
+    A block whose signature REQUIRES ``attention_mask`` must be called with an explicit ``None``
+    (omitting it is a TypeError), and export then records that ``None`` as a graph input carrying a
+    scalar placeholder. The eager input flattener drops the ``None``, so the graph declares one more
+    input than any caller supplies and every consumer that binds inputs positionally fails on the
+    arity — ``emmy run --layer`` on a Qwen3.5-family layer is the live case, at 4 declared vs 3
+    supplied. The placeholder is inert by construction: it stands for a value the traced code never
+    read, so no node consumes it. Removing an input that nothing consumes changes no computation.
+
+    Deliberately narrow. Only an input NAMED after a ``None``-valued keyword argument is considered,
+    and only when it has no consumers, so a mask that a block genuinely reads is never removed."""
+    for name, value in kwargs.items():
+        if value is not None or name not in graph.inputs:
+            continue
+        if graph.buffer_users(name):
+            continue  # something reads it: not a placeholder, leave it alone
+        graph.remove_node(graph.producer(name).id)
 
 
 def _build_pre_wrapper(block, *, float32_residual: bool = False):
@@ -499,6 +522,29 @@ def _build_pre_wrapper(block, *, float32_residual: bool = False):
     head_dim = attn.head_dim
     num_heads = attn.q_proj.out_features // head_dim
     num_kv_heads = attn.k_proj.out_features // head_dim
+    # Head counts are READ OFF THE PROJECTION WIDTHS, which assumes the query projection carries
+    # queries and nothing else. Qwen3.5's full-attention layer breaks that: its q_proj is
+    # ``num_heads · head_dim · 2`` wide and its forward chunks the result into queries and a
+    # per-element OUTPUT GATE, which multiplies the attention result before ``o_proj``. Taking the
+    # widths at face value there would infer twice the heads and drop the gate — a wrong answer,
+    # not an error. The module declares the true ratio, so ask it, and carve the gate when the
+    # excess is exactly the doubling that layout produces.
+    declared = getattr(attn, "num_key_value_groups", None)
+    true_heads = declared * num_kv_heads if declared and num_kv_heads else num_heads
+    fused_gate = num_heads == 2 * true_heads
+    if num_heads != true_heads and not fused_gate:
+        raise NotImplementedError(
+            f"build_attention_split_wrapper: this attention module declares {declared} query heads per key/value head, "
+            f"but its projection widths give {num_heads // max(num_kv_heads, 1)} — the query projection carries something "
+            f"besides queries, and not the one extra query-width the fused output-gate layout carries. The carve reads "
+            f"its head counts off those widths, so it would mis-shape q and drop whatever shares the projection"
+        )
+    num_heads = true_heads
+    if fused_gate and getattr(attn, "g_proj", None) is not None:
+        raise NotImplementedError(
+            "build_attention_split_wrapper: this attention module has BOTH a fused query/gate projection and a "
+            "separate g_proj gate; which one multiplies the attention result, and in what order, is undefined here"
+        )
     q_norm = getattr(attn, "q_norm", None)
     k_norm = getattr(attn, "k_norm", None)
     v_norm = getattr(attn, "v_norm", None)  # Gemma-4 RMSNorms V too; Qwen3 / Gemma-3 / Llama do not
@@ -508,6 +554,10 @@ def _build_pre_wrapper(block, *, float32_residual: bool = False):
     flat_qk_norm = q_norm is not None and q_norm.weight.numel() != head_dim
 
     class Pre(nn.Module):
+        #: Whether ``forward`` returns a fourth tensor, the attention OUTPUT GATE. True only for a
+        #: fused query/gate projection; the paired ``post`` reads the same flag and consumes it.
+        emits_gate = fused_gate
+
         def __init__(self) -> None:
             super().__init__()
             self.input_layernorm = block.input_layernorm
@@ -524,7 +574,13 @@ def _build_pre_wrapper(block, *, float32_residual: bool = False):
                 k = self.k_norm(self.k_proj(h)).view(t, num_kv_heads, head_dim)
                 v = self.v_proj(h).view(t, num_kv_heads, head_dim)
                 return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
-            q = self.q_proj(h).view(t, num_heads, head_dim)  # [T, Hq, D] — NO transpose
+            gate = None
+            if fused_gate:
+                # One projection, two halves per head: queries then the gate, split on the LAST
+                # axis of the per-head view — NOT on the flat width, where the two would interleave.
+                q, gate = self.q_proj(h).view(t, num_heads, head_dim * 2).chunk(2, dim=-1)
+            else:
+                q = self.q_proj(h).view(t, num_heads, head_dim)  # [T, Hq, D] — NO transpose
             kp = self.k_proj(h).view(t, num_kv_heads, head_dim)
             # Gemma-4's global layers set attention_k_eq_v (no v_proj): V reuses K's projection
             # (un-rotated; v_norm below still differs from k_norm). Otherwise V is its own projection.
@@ -535,7 +591,8 @@ def _build_pre_wrapper(block, *, float32_residual: bool = False):
                 k = self.k_norm(kp)
             if self.v_norm is not None:
                 v = self.v_norm(v)  # Gemma-4: per-head RMSNorm over D on V as well
-            return q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim)
+            out = (q.reshape(t, num_heads * head_dim), k.reshape(t, num_kv_heads * head_dim), v.reshape(t, num_kv_heads * head_dim))
+            return (*out, gate.reshape(t, num_heads * head_dim)) if gate is not None else out
 
     return Pre()
 
@@ -577,7 +634,7 @@ def build_attention_split_wrapper(block, *, float32_residual: bool = False):
       **un-rotated** q,k,v in the 2-D seam ABI ``q[T, Hq·D]``, ``k/v[T, Hkv·D]`` — exactly what
       vLLM's ``Attention.forward`` consumes. RoPE is applied downstream (by vLLM, or by the
       test/oracle reference).
-    - ``post(attn_out[T, Hq·D], residual[T, H]) -> layer_out[T, H]`` runs ``o_proj`` →
+    - ``post(attn_out[T, Hq·D], residual[T, H], gate=None) -> layer_out[T, H]`` runs ``o_proj`` →
       ``residual +`` → ``post_attention_layernorm`` → ``mlp`` → second residual. **Gemma-3/4** is
       instead a 4-norm layer: ``o_proj(attn)`` and ``mlp(...)`` each get wrapped in their OWN
       RMSNorm (``post_attention_layernorm`` / ``post_feedforward_layernorm``) BEFORE the residual
@@ -592,9 +649,24 @@ def build_attention_split_wrapper(block, *, float32_residual: bool = False):
     Qwen3 / Gemma-3/4 (q/k norm) and Llama (no q/k norm) all share the ``pre``; the ``post``
     is the Llama/Qwen 2-norm form or the Gemma 4-norm form above.
 
+    **The fused query/gate layout** (Qwen3.5's full-attention layer) is the one shape where the seam
+    widens. Its ``q_proj`` is twice its query width and its forward chunks the result per head into
+    queries and a per-element OUTPUT GATE that multiplies the attention result before ``o_proj``.
+    ``pre`` then returns a FOURTH tensor, that gate at ``[T, Hq·D]``, and ``post`` takes it as a
+    third argument and applies ``attn_out * sigmoid(gate)``. Carrying it across the seam rather than
+    recomputing it in ``post`` mirrors what the linear-attention carve does with its own gate: both
+    are values some projection has already produced, and recomputing either means a second full pass
+    over a large weight. Here the weight is ``q_proj`` itself — the gate is literally its other half
+    — so recomputing would run the query projection twice per layer. (The linear-attention gate is
+    the same decision over a projection of its OWN, ``in_proj_z``, not a shared one.) ``Pre`` and the
+    builder both expose the flag (``pre.emits_gate``) so a caller can tell which arity it got.
+
     Rejects Gemma-nano PLE blocks (``hidden_size_per_layer_input``) and OLMo-style ``clip_qkv``
-    (in :func:`_build_pre_wrapper`): the carve has no seam for either and would silently drop
+    (in :func:`_build_pre_wrapper`), a query projection whose excess width is anything OTHER than
+    the fused gate's exact doubling, and a block carrying both a fused gate and a separate
+    ``g_proj``: the carve has no seam for any of them and would silently drop or double-apply
     them, corrupting outputs."""
+    import torch
     import torch.nn as nn
 
     if hyper_connection_seam(block) is not None:
@@ -629,7 +701,12 @@ def build_attention_split_wrapper(block, *, float32_residual: bool = False):
             self.register_buffer("layer_scalar", getattr(block, "layer_scalar", None))
             self._emmy_laguna_exl3_post = "dense" if float32_residual else None
 
-        def forward(self, attn_out, residual):
+        def forward(self, attn_out, residual, gate=None):
+            if gate is not None:
+                # The fused query/gate projection's half, carried across the seam by ``pre``
+                # (``Pre.emits_gate``) rather than recomputed: it comes out of the SAME projection
+                # as q, so recomputing it would run that whole projection a second time.
+                attn_out = attn_out * torch.sigmoid(gate)
             if self.g_proj is not None:
                 gate_input = self.gate_input_layernorm(residual)
                 if float32_residual:
@@ -827,16 +904,25 @@ def retarget_constants_to_model(graph, wrapper, model) -> None:
     live-module binding miss, and the CUDA runtime then materializes zero-filled RoPE tables.
     Quantization spellers target weight parameters, so buffers have no reason to cross this seam.
     """
-    id_to_key = {id(tensor): path for path, tensor in model.named_parameters(remove_duplicate=False)}
+    # The map's VALUES are checkpoint keys, not twin paths — the checkpoint-driven spellers read
+    # ``source_path`` against the safetensors index, and for a family whose checkpoint names differ
+    # from its parameter names (a vision-language wrapper's ``model.language_model.``) a twin path
+    # resolves to nothing there. The registered mapping run backwards is what supplies the real
+    # name (:func:`_checkpoint_key_renamer`), so the forward and reverse directions stay one table.
+    to_checkpoint = _checkpoint_key_renamer(model, reverse=True) or (lambda k: k)
+    id_to_key = {id(tensor): to_checkpoint(path) for path, tensor in model.named_parameters(remove_duplicate=False)}
     key_map = {}
     for path, tensor in wrapper.named_parameters(remove_duplicate=False):
         if (full := id_to_key.get(id(tensor))) is not None:
             key_map[path] = full
-    for _node_id, op in graph.loadable_constants():
-        if op.source_path in key_map:
-            op.source_path = key_map[op.source_path]
-        if op.source_parts:
-            op.source_parts = tuple((key_map.get(path, path), shape) for path, shape in op.source_parts)
+    for nid, op in graph.loadable_constants():
+        retargeted = replace(
+            op,
+            source_path=key_map.get(op.source_path, op.source_path),
+            source_parts=tuple((key_map.get(path, path), shape) for path, shape in op.source_parts) if op.source_parts else op.source_parts,
+        )
+        if retargeted != op:
+            graph.nodes[nid].op = retargeted
 
 
 def hyper_connection_seam(block):
@@ -996,7 +1082,9 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
             self._emmy_shared_expert_float32 = shared_experts is not None and routed_scale_folded and float32_residual
             self._emmy_laguna_exl3_post = "sparse" if float32_residual else None
 
-        def forward(self, attn_out, residual):
+        def forward(self, attn_out, residual, gate=None):
+            if gate is not None:
+                attn_out = attn_out * torch.sigmoid(gate)  # the fused query/gate projection's half
             if self.g_proj is not None:
                 gate_input = self.gate_input_layernorm(residual)
                 if float32_residual:
@@ -1247,12 +1335,11 @@ def stamp_sliding_windows(
             f"DeepSeek V4 selected-layer sliding-window stamping expected at most one attention SDPA node, found {len(sdpa_nodes)}"
         )
     for node, lt in zip(sdpa_nodes, types, strict=True):
-        if lt == "sliding_attention" or (deepseek_v4 and lt in deepseek_banded):
-            node.op.sliding_window = window
+        banded = lt == "sliding_attention" or (deepseek_v4 and lt in deepseek_banded)
         # Sliding AND full layers: the wrapper's mask is causal — asserting it structurally lets
         # the lowering derive the stream END (and, banded, the stream START) through the opaque
         # bias operand a whole-model trace carries.
-        node.op.is_causal = True
+        node.op = replace(node.op, is_causal=True, sliding_window=window if banded else node.op.sliding_window)
 
 
 def build_causal_mask(seq_len: int, dtype) -> torch.Tensor:  # noqa: F821
@@ -1278,15 +1365,19 @@ class _PassThroughMask:
 
 def _is_quantized_dir(p) -> bool:
     """Whether the checkpoint at ``p`` declares a quantization scheme the loaders ingest
-    (FP8 scale-paired bits, MXFP4 blocks, AWQ GEMM int4, or EXL3 siblings)."""
+    (FP8 scale-paired bits, NVFP4 packed trios, MXFP4 blocks, AWQ GEMM int4, or EXL3 siblings)."""
     from emmy.compiler.loader.quant import (  # noqa: PLC0415
         _awq_quant_config,
         _exl3_quant_config,
+        _fp4_quant_config,
         _fp8_quant_config,
         _mxfp4_quant_config,
     )
 
-    return any(config(p) is not None for config in (_fp8_quant_config, _mxfp4_quant_config, _awq_quant_config, _exl3_quant_config))
+    return any(
+        config(p) is not None
+        for config in (_fp8_quant_config, _fp4_quant_config, _mxfp4_quant_config, _awq_quant_config, _exl3_quant_config)
+    )
 
 
 def quantized_checkpoint_dir(model_id_or_path: str, revision: str | None = None):
@@ -1542,6 +1633,57 @@ def _checkpoint_to_model_key(key: str) -> str:
     return key
 
 
+def _checkpoint_key_renamer(model, *, reverse: bool = False):
+    """The checkpoint-key → parameter-name translation Transformers would apply to ``model``,
+    or with ``reverse``, the same mapping run backwards: parameter name → checkpoint key.
+
+    A checkpoint may store its tensors under names the twin's own modules do not have, and the
+    mismatch is silent: every parameter simply stays on the meta device, so the twin holds no
+    values at all. Qwen3.5 is the live case. Its releases are vision-language wrappers, so the text
+    decoder's weights are stored under ``model.language_model.layers.N.*``, while the text-only
+    twin built from the config has ``model.layers.N.*`` — on nvidia/Qwen3.6-27B-NVFP4 exactly one
+    of 851 parameter names matched.
+
+    Transformers registers these translations per model type and applies them inside
+    ``from_pretrained``, a path this shard-streamed loader deliberately does not take (it never
+    materializes the whole dequantized dict). So read the same table instead of hand-writing one
+    family's rule: a family whose mapping is renamings becomes loadable here on the same terms
+    upstream loads it on.
+
+    RENAMINGS ONLY. The mapping also carries converters, which combine or divide the tensors
+    themselves (stacking a per-expert stack, concatenating a hybrid model's three separate q/k/v
+    convolution weights into one) — work this loader does not do, so firing their renames would
+    produce a name whose tensor was never assembled. A converter's key still goes unmatched, as it
+    does today, though its spelling may now differ where the same family also carries a renaming.
+
+    Pre-existing loads are unchanged, but not because unmapped families answer ``None``: four
+    legacy renames (``LayerNorm.gamma`` / ``beta``, ``.weight_g`` / ``.weight_v``) attach to every
+    model, so almost every twin gets a renamer. They are unchanged because none of those patterns
+    matches a modern checkpoint key.
+
+    ``reverse`` is what the serving lane needs. It re-addresses a traced constant to the key its
+    weight came from, and only the checkpoint knows that name — so the same mapping, inverted,
+    turns the twin path back into it. One table, read both ways, rather than two rules that can
+    disagree.
+    """
+    try:
+        from transformers.conversion_mapping import get_model_conversion_mapping  # noqa: PLC0415
+        from transformers.core_model_loading import WeightRenaming, rename_source_key  # noqa: PLC0415
+    except ImportError:
+        return None  # an older Transformers without the conversion table: nothing to read
+    renamings = [t for t in get_model_conversion_mapping(model) if isinstance(t, WeightRenaming)]
+    if not renamings:
+        return None
+    if not reverse:
+        return lambda key: rename_source_key(key, renamings, [])[0]
+    # Inverting the transforms IS the reverse direction here. Transformers 5.15 grew a ``reverse``
+    # argument, but all it does is run the converters before the renamings instead of after, and
+    # the converter list passed here is empty — so it would change nothing, while costing the
+    # supported 5.14, whose ``rename_source_key`` has no such parameter.
+    inverted = [t.reverse_transform() for t in renamings]
+    return lambda path: rename_source_key(path, inverted, [])[0]
+
+
 def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:
     """Fold Laguna EXL3's routed-up inverse scale into the router weights.
 
@@ -1640,7 +1782,7 @@ def load_quantized_split(
     - The twin is built from config alone on the META device (weights never read at trace;
       the experts' would-be random init never materializes).
     - The DENSE trunk (attention projections + biases, norms, router, embeddings, lm_head)
-      streams per shard: fp8 weights dequantize by their ``<key>_scale`` partner, everything
+      streams per shard: fp8 and NVFP4 weights dequantize by their scale siblings, everything
       casts to ``dtype``, and the tensors attach via ``load_state_dict(assign=True)``. The
       expert params are skipped — they stay meta on the twin.
     - The EXPERT tensors are collected into a per-layer store keyed by the expert program's
@@ -1693,12 +1835,14 @@ def load_quantized_split(
         _awq_quant_config,
         _exl3_codebook,
         _exl3_quant_config,
+        _fp4_quant_config,
         _fp8_quant_config,
         _is_skipped,
         _mxfp4_quant_config,
         _skip_patterns,
         dequantize,
         dequantize_awq4,
+        dequantize_nvfp4,
         native_mxfp4_experts,
         scale_is_reciprocal,
     )
@@ -1710,7 +1854,6 @@ def load_quantized_split(
         delattr(config, "quantization_config")
     with torch.device("meta"):
         model = _auto_model_from_config(config)
-
     mxfp4_qc = _mxfp4_quant_config(model_dir)
     # DeepSeek V4 declares an fp8 TRUNK while storing its routed experts as native MXFP4: the expert
     # storage is named by ``expert_dtype``, not by ``quant_method``. The twin capture reads the same
@@ -1719,9 +1862,22 @@ def load_quantized_split(
     qc = _fp8_quant_config(model_dir) or mxfp4_qc or {}
     awq = _awq_quant_config(model_dir)
     patterns = _skip_patterns(qc)
+    qc4 = _fp4_quant_config(model_dir)
+    patterns4 = list(qc4.get("ignore") or []) if qc4 else []
     exl3 = _exl3_quant_config(model_dir) is not None
     index = _build_index(model_dir)
-    rename = _native_checkpoint_renamer(config, index)
+    # Two independent checkpoint→module translations, and a checkpoint can need both. The native one
+    # undoes an architecture published in its own flat namespace (DeepSeek V4); it is the identity for
+    # every other architecture. The family one places the result where THIS twin holds its parameters —
+    # a vision-language release stores its text decoder one module deeper than a text-only twin has it,
+    # so read the depth off the model rather than assuming identity. Native first: the family renamer
+    # matches on module spelling, which is what the native one produces.
+    to_module = _native_checkpoint_renamer(config, index)
+    to_twin = _checkpoint_key_renamer(model) or (lambda key: key)
+
+    def rename(key: str) -> str:
+        return to_twin(to_module(key))
+
     # The module-namespace view of the same index, so sibling lookups (block scales, coded leaves)
     # can be spelled the way the modules name them whatever the checkpoint calls them.
     renamed = {rename(key): key for key in index}
@@ -1815,6 +1971,11 @@ def load_quantized_split(
                                 f"tensor {k!r} must be uint8 blocks/scales, got {t.dtype}"
                             )
                         fmt = "mxfp4"
+                    elif qc4 is not None and t.dtype == torch.uint8 and k + "_scale_2" in index:
+                        raise NotImplementedError(
+                            f"NVFP4 expert weight {k!r}: the expert lane has no packed-trio decode yet; "
+                            "casting the raw bytes would silently corrupt the values"
+                        )
                     elif t.dtype in torch_f8:
                         fmt = "f8e4m3" if t.dtype == torch.float8_e4m3fn else "f8e5m2"
                         t = t.view(torch.uint8)
@@ -1852,6 +2013,24 @@ def load_quantized_split(
                 mk = rename(k)
                 if mk.endswith(("_scale", "_scale_inv")) and mk[: mk.rfind("_scale")] in renamed:
                     continue  # consumed by its base weight's dequant
+                if qc4 is not None and k + "_scale" in index and k + "_scale_2" in index and not _is_skipped(k, patterns4):
+                    t = f.get_tensor(k)
+                    if t.dtype == torch.uint8:  # the NVFP4 packed trio
+                        if compress_trunk:
+                            # The serving lane: leave the trio coded and let the caller re-source
+                            # it from the checkpoint, so the packed bits reach the speller instead
+                            # of a decoded tile. Same contract the AWQ and EXL3 arms above follow.
+                            coded_trunk.add(_checkpoint_to_model_key(rename(k)))
+                            continue
+                        vals = dequantize_nvfp4(
+                            t.numpy(),
+                            _sibling(k + "_scale").view(torch.uint8).numpy(),
+                            _sibling(k + "_scale_2").float().numpy(),
+                        )
+                        state[_checkpoint_to_model_key(rename(k))] = torch.from_numpy(vals).to(dtype)
+                        continue
+                    state[_checkpoint_to_model_key(rename(k))] = t.to(dtype) if t.is_floating_point() else t
+                    continue
                 t = f.get_tensor(k)
                 if t.dtype in torch_f8:
                     scale_key = next((c for c in (mk + "_scale", mk + "_scale_inv") if c in renamed), None)

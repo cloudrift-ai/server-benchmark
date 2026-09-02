@@ -11,9 +11,9 @@ before lifting a subtree into its own kernel (``_cut._closed_at``, successor to 
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
+from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name, splice_operands
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite
@@ -85,6 +85,18 @@ def test_single_channel_node_is_the_plain_matmul() -> None:
 
 
 # --- inline computed operands ------------------------------------------------------------------- #
+
+
+def test_splice_orders_a_sibling_provider_before_its_consumer() -> None:
+    """A provider used only by another operand still precedes that dependent operand."""
+    provider = Fold.projection(body=Body((Load(name="raw", input="x", index=()), Assign(name="scale", op="rsqrt", args=("raw",)))))
+    consumer = Fold.projection(body=Body((Assign(name="weighted", op="multiply", args=("value", "scale")),)))
+    independent = Fold.projection(body=Body((Assign(name="offset", op="copy", args=("bias",)),)))
+    projection = (Assign(name="out", op="add", args=("weighted", "offset")),)
+
+    lowered = splice_operands((consumer, independent, provider), projection)
+
+    assert [stmt.defines()[-1] for stmt in lowered] == ["offset", "raw", "scale", "weighted", "out"]
 
 
 def test_a_computed_operand_is_stored_inline_and_flattens_on_the_edge() -> None:
@@ -163,6 +175,45 @@ def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
     assert not _closed_at(cone, (Axis("m", 256), Axis("k", 256))), "a cone capturing carrier state is not closed"
 
 
+def test_contraction_deps_include_inline_operand_captures() -> None:
+    node = _node(_capturing_cone(), ("acc_g", "Wg"))
+
+    assert "m_run" in node.deps()
+
+
+def test_cut_closure_does_not_confuse_a_sibling_loop_axis_for_scope() -> None:
+    """A loop binding ``k`` in one operand does not scope a sibling operand's ``x[k]`` load."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+
+    loop = Loop(
+        axis=Axis("k", 8),
+        body=Body((Load(name="value", input="x", index=(Var("k"),)), Accum(name="total", value="value", op="add"))),
+        role=AxisRole.PLANAR,
+    )
+    bound = fold_from_loop(loop)
+    leak = Fold.projection(body=Body((Load(name="leak", input="x", index=(Var("k"),)),)), results=("leak",))
+    root = Fold.projection(
+        operands=(bound, leak),
+        body=Body((Assign(name="out", op="add", args=("total", "leak")),)),
+    )
+
+    assert not _closed_at(root, ())
+
+
+def test_cut_closure_includes_dead_but_emitted_axis_reads() -> None:
+    """Until lowering removes a dead statement, its free axis still has to reach emitted CUDA."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
+
+    root = Fold.projection(
+        body=Body((Load(name="dead", input="x", index=(Var("m"),)), Load(name="live", input="y", index=()))),
+        results=("live",),
+    )
+
+    assert not _closed_at(root, ())
+    assert _closed_at(root, (Axis("m", 8),))
+
+
 def test_iteration_variables_are_not_captures() -> None:
     """The dominant free names in any cone are loop induction variables (``m`` / ``k``), bound by
     the enclosing nest — excluding them is what makes the predicate mean anything."""
@@ -174,3 +225,32 @@ def test_iteration_variables_are_not_captures() -> None:
 
 
 # --- the projection binder ----------------------------------------------------------------------- #
+
+
+def test_a_shared_cone_is_typed_in_each_occurrence_scope() -> None:
+    """``edge_dtypes`` answers per OCCURRENCE, not per object.
+
+    Normalization shares one Fold object between structurally identical cones, so the same cone
+    can sit under an f16 capture in one host and an f32 capture in another. Its result dtype is a
+    property of the occurrence, and a cache keyed on identity alone handed every occurrence the
+    first one's answer — which a cut then believes when it sizes the seam's workspace."""
+    from emmy.compiler.dtype import get as get_dtype
+    from emmy.compiler.ir.tile.ops import edge_dtypes
+    from emmy.compiler.tensor import Tensor
+
+    shared = Fold.projection(body=Body((Assign(name="y", op="relu", args=("x",)),)), results=("y",))
+    inputs = {"a": Tensor("a", (4,), get_dtype("f16")), "b": Tensor("b", (4,), get_dtype("f32"))}
+
+    def host(buf: str, out: str) -> Fold:
+        source = Fold.projection(body=Body((Load(name="x", input=buf, index=(Var("i"),)),)), results=("x",))
+        return Fold.projection(operands=(source, shared), body=Body((Assign(name=out, op="copy", args=("y",)),)), results=(out,))
+
+    # Both hosts stay referenced for the whole check: the cache keys on object identity, which is
+    # only stable while the keyed objects are alive.
+    narrow_host, wide_host = host("a", "z0"), host("b", "z1")
+    cache: dict = {}
+    narrow = edge_dtypes(narrow_host, inputs, cache)
+    wide = edge_dtypes(wide_host, inputs, cache)
+
+    assert [dtype.name for dtype in narrow] == ["f16"]
+    assert [dtype.name for dtype in wide] == ["f32"]

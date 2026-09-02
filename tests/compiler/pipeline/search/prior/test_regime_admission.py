@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 
+import pytest
+
 from emmy.commands.compile import apply_nvcc_flags
 from emmy.commands.tune import TUNE_NVCC_DEFAULT
 from emmy.compiler.context import split_opt_level
@@ -78,3 +80,18 @@ def test_an_unstamped_row_is_not_admitted() -> None:
     prior = _prior()
     prior.add_rows([({"S_ext_free_prod": 1024.0, "BM": 64}, 7.0)])
     assert prior._dataset == []
+
+
+@pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@a": "cut"}, {"PLACE@a": "cut", "WORK": "t32"}))
+def test_placement_route_rows_train_but_are_not_measured_deploy_evidence(route) -> None:
+    prior = _prior()
+    prior.add_rows(
+        [
+            ({"H_opt": 3.0, "S_shape": 128.0, **route}, 1.0),
+            ({"H_opt": 3.0, "S_shape": 128.0, "WORK": "t64"}, 7.0),
+        ]
+    )
+
+    assert len(prior._dataset) == 2
+    assert prior._o3_evidence() == {frozenset({("S_shape", 128.0)}): [({"WORK": "t64"}, 7.0)]}
+    assert prior.evidence_pick([{"H_opt": 3.0, "S_shape": 128.0, "WORK": "t64"}]) == (0, 7.0)

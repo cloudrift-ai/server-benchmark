@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +29,7 @@ from emmy.compiler.pipeline.search.working_golden import (
     persist_proposal_rankings,
     persist_tune_winner,
     realized_tuning_knobs,
+    record_latency,
     validate_working_gpu,
 )
 from emmy.compiler.pipeline.strategy import discovered_strategies
@@ -81,6 +83,17 @@ def _document(*entries):
     return {"compute_cap": [8, 9], "programs": programs, "configs": [config]}
 
 
+def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
+    """One complete global schedule for synthetic single-node CUDA graphs."""
+    return {
+        "WORK": work,
+        "TILE": tile,
+        "REDUCE": reduce,
+        "STAGE": stage,
+        "RASTER": raster,
+    }
+
+
 def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_path):
     path = tmp_path / "trace.yaml"
     dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})), path)
@@ -123,11 +136,11 @@ def test_empty_knob_map_is_a_forkless_proposal_not_inventory(tmp_path):
 
 def test_multi_cuda_realized_knobs_must_be_conflict_free():
     graph = Graph()
-    graph.add_node(op=CudaOp(kernel_name="a", knobs={"TILE": "f2x2"}), inputs=[], output=Tensor("a", (1,)), node_id="a")
-    graph.add_node(op=CudaOp(kernel_name="b", knobs={"TILE": "f4x2"}), inputs=[], output=Tensor("b", (1,)), node_id="b")
+    graph.add_node(op=CudaOp(kernel_name="a", knobs=_classic_row(tile="f2x2")), inputs=[], output=Tensor("a", (1,)), node_id="a")
+    graph.add_node(op=CudaOp(kernel_name="b", knobs=_classic_row(tile="f4x2")), inputs=[], output=Tensor("b", (1,)), node_id="b")
     assert realized_tuning_knobs(graph) is None
 
-    graph.nodes["b"].op.knobs["TILE"] = "f2x2"
+    graph.nodes["b"].op = replace(graph.nodes["b"].op, knobs=_classic_row(tile="f2x2"))
     assert realized_tuning_knobs(graph)["TILE"] == "f2x2"
 
 
@@ -155,6 +168,7 @@ def test_working_file_is_mutually_exclusive_with_direct_input(tmp_path):
 def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp_path):
     path = tmp_path / "working.yaml"
     verified = _matmul("mm", knobs={"TILE": "f2x2"}, emmy_us=9.0, cublas_us=10.0)
+    verified["latency"] = {"old-gpu": {"emmy_us": 9.0, "tcompile_us": 8.0}}
     proposal = _matmul("mm", knobs={"TILE": "f4x2"})
     document = _document(verified, proposal)
     dump_golden_file(document, path)
@@ -189,6 +203,58 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
     assert winner["ranking"]["source"] == "tune"
     assert winner["ranking"]["tune_winner"] is True
     assert "measurements" not in winner
+    assert "latency" not in winner
+
+
+def test_record_latency_selects_the_measured_row_not_its_same_named_sibling(tmp_path):
+    path = tmp_path / "working.yaml"
+    document = _document(
+        _matmul("mm", knobs={"TILE": "f2x2"}),
+        _matmul("mm", knobs={"TILE": "f4x2"}),
+    )
+    dump_golden_file(document, path)
+
+    record_latency(
+        path,
+        document,
+        "mm",
+        hardware_id="test-gpu",
+        emmy_us=7.5,
+        tcompile_us=8.0,
+        knobs={"TILE": "f4x2"},
+        pins={"FAST_MATH": False},
+    )
+
+    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    assert "latency" not in realizations[0]
+    assert realizations[1]["latency"] == {"test-gpu": {"emmy_us": 7.5, "tcompile_us": 8.0}}
+
+
+def test_direct_winner_promotes_matching_proposal(tmp_path):
+    path = tmp_path / "working.yaml"
+    proposal = _matmul("mm", knobs={"TILE": "f4x2"})
+    document = _document(proposal)
+    dump_golden_file(document, path)
+    document, targets = load_working_targets(path)
+    target = targets[0]
+
+    persist_proposal_rankings(
+        path,
+        document,
+        target,
+        [{"status": "ok", "latency_us": 8.0, "compile_flags": "-O1", "measured_knobs": {"TILE": "f4x2"}}],
+    )
+    persist_tune_winner(path, document, target, ({"TILE": "f4x2"}, 7.5), compile_flags="-O1")
+
+    winner = load_golden_file(path)["configs"][0]["realizations"][0]
+    assert winner["ranking"] == {
+        "status": "ok",
+        "latency_us": 7.5,
+        "compile_flags": "-O1",
+        "measured_knobs": {"TILE": "f4x2"},
+        "source": "tune",
+        "tune_winner": True,
+    }
 
 
 def test_incremental_persist_matches_a_full_dump_and_still_checks_realizations(tmp_path):
@@ -265,25 +331,30 @@ def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
     }
 
 
-def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(tmp_path, monkeypatch):
+def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_perf(tmp_path, monkeypatch):
     from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index, _db_measured_pick
 
     route = {
-        "WORK": "w2x1",
-        "TILE": "mma_m16n8k16_f16_f32/f4x8/k8",
+        **_classic_row(
+            work="w2x1",
+            tile="mma_m16n8k16_f16_f32/f4x8/k8",
+            stage="d1/smem-async",
+        ),
+        # Cross-CTA reduction changes the kernel set before the exact classic sites exist.
         "REDUCE": "g4k",
-        "STAGE": "d1/smem-async",
-        "RASTER": "",
     }
     terminal = Graph()
     terminal.add_node(
-        CudaOp(kernel_name="partial", knobs={**route, "REDUCE": ""}),
+        CudaOp(
+            kernel_name="partial",
+            knobs={**route, "REDUCE": ""},
+        ),
         [],
         Tensor("partial", (1,)),
         node_id="partial",
     )
     terminal.add_node(
-        CudaOp(kernel_name="finalize", knobs={key: "" for key in route}),
+        CudaOp(kernel_name="finalize", knobs=_classic_row()),
         [],
         Tensor("finalize", (1,)),
         node_id="finalize",
@@ -325,8 +396,7 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
             event = SimpleNamespace(graph=loop_graph)
             for strategy in self.strategies:
                 strategy.on_pass_end(event)
-            route_parent = TileOp(knobs=dict(live_features))
-            route_parent.knobs.update(active_route)
+            route_parent = TileOp(knobs={**live_features, **active_route})
             fragment = Graph()
             splice = SimpleNamespace(root_op=route_parent, fragment=fragment)
             for strategy in self.strategies:
@@ -378,27 +448,30 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     assert branch.features["REDUCE"] == "g4k"
     assert branch.value_us == pytest.approx(59.61)
     route_parent = TileOp(knobs={**live_features, **route})
-    assert route_parent.cache_key() != original_loop.cache_key()
-    perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.cache_key(), backend="cuda")
-    assert perf is not None
-    assert perf.status == "ok"
-    assert perf.stats == PerfStats(median=59.61, min=59.61, max=59.61, mean=59.61, variance=0.0, n_samples=1)
-    assert perf.captured is True
-    assert perf.knobs == {**ctx.features(), **live_features, **route}
-    assert reloaded_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
+    assert route_parent.identity_key(with_io=True, with_knobs=True) != original_loop.identity_key(with_io=True, with_knobs=True)
+    perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.identity_key(with_io=True, with_knobs=True), backend="cuda")
+    assert perf is None
+    assert reloaded_db.lookup_perf(ctx.structural_key(), original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
     reloaded_db.close()
 
     # A later ordinary search keeps its own whole-slice bookkeeping and lowering
-    # evidence under the unpinned Loop key. Neither may replace or hide the exact
-    # structural parent measured by the proposal.
+    # evidence under the unpinned Loop key. Neither may fabricate deploy evidence
+    # for the structural parent captured by the proposal's node lineage.
     db = SearchDB(db_path)
     bookkeeping = PerfStats(median=106.95, min=106.95, max=106.95, mean=106.95, variance=0.0, n_samples=1)
     monolithic = PerfStats(median=153.45, min=153.45, max=153.45, mean=153.45, variance=0.0, n_samples=1)
     fallback = {**route, "REDUCE": ""}
     fallback_key = "monolithic-cuda"
-    db.record_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda", status="ok", stats=bookkeeping, captured=True)
+    db.record_perf(
+        ctx.structural_key(),
+        original_loop.identity_key(with_io=True, with_knobs=True),
+        backend="cuda",
+        status="ok",
+        stats=bookkeeping,
+        captured=True,
+    )
     db.record_lowering(
-        original_loop.cache_key(),
+        original_loop.identity_key(with_io=True, with_knobs=True),
         "loop",
         fallback_key,
         "cuda",
@@ -416,14 +489,14 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     )
     db.close()
     reloaded_db = SearchDB.open_readonly(db_path)
-    route_perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.cache_key(), backend="cuda")
-    loop_perf = reloaded_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda")
-    assert route_perf is not None and route_perf.stats.median == pytest.approx(59.61)
+    route_perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.identity_key(with_io=True, with_knobs=True), backend="cuda")
+    loop_perf = reloaded_db.lookup_perf(ctx.structural_key(), original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda")
+    assert route_perf is None
     assert loop_perf is not None and loop_perf.stats.median == pytest.approx(106.95)
-    lowering = reloaded_db.lookup_lowering(original_loop.cache_key())
+    lowering = reloaded_db.lookup_lowering(original_loop.identity_key(with_io=True, with_knobs=True))
     assert lowering is not None and lowering.child_key == fallback_key
     candidates = [{**live_features, **fallback}, {**live_features, **route}]
-    assert _db_measured_pick(_db_measured_index(reloaded_db, ctx), candidates) == (1, 59.61)
+    assert _db_measured_pick(_db_measured_index(reloaded_db, ctx).ok, candidates) == (0, 153.45)
     reloaded_db.close()
     persist_proposal_rankings(path, document, targets[0], rankings)
     reloaded, reloaded_targets = load_working_targets(path)
@@ -433,7 +506,7 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
     assert proposal["ranking"]["status"] == "ok"
     assert reloaded_targets[0].proposals == [((0, 1), route)]
 
-    nonstructural = {**route, "REDUCE": ""}
+    nonstructural = {key: value for key, value in route.items() if key != "REDUCE"}
     active_route = nonstructural
     negative_db = SearchDB(tmp_path / "negative.db")
     [ambiguous] = asyncio.run(
@@ -447,7 +520,7 @@ def test_structural_multi_cuda_proposal_survives_search_continuation_and_reload(
             run_id="proposal-run",
         )
     )
-    assert negative_db.lookup_perf(ctx.structural_key(), original_loop.cache_key(), backend="cuda") is None
+    assert negative_db.lookup_perf(ctx.structural_key(), original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
     negative_db.close()
     assert ambiguous["status"] == "ambiguous_multi_kernel"
     assert ambiguous["measured_knobs"] is None

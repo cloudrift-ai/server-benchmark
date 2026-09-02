@@ -1,5 +1,5 @@
 {
-  "feat_ver": 3,
+  "feat_ver": 4,
   "kind": "linear",
   "weights": {
     "D_aspect": 0.12744471745958774,
@@ -44,7 +44,7 @@
     "D_stage_async": 28.98775971674104,
     "D_stage_depth": -7.773866728004411,
     "D_stage_reg_depth": -22.87426840373923,
-    "D_stage_ring": 38.276315379396564,
+    "D_stage_prefetch": 38.276315379396564,
     "D_stage_tma": 24.381607080020924,
     "D_threads": -0.0009447333009831508,
     "D_tile_n": 0.002676743034038562,
@@ -105,7 +105,7 @@
     "D_stage_async": 20.48734027694898,
     "D_stage_depth": -11.66216633847187,
     "D_stage_reg_depth": -22.874268403739226,
-    "D_stage_ring": 34.160144568140126,
+    "D_stage_prefetch": 34.160144568140126,
     "D_stage_tma": 11.252403563613537,
     "D_threads": -0.0009447333009831508,
     "D_tile_m": 0.010693825864525228,
@@ -142,6 +142,6 @@
       "static": 443,
       "dynamic": 79
     },
-    "notes": "static top1=57/443  top5=152/443  top10=169/443  top25=176/443  top50=185/443  top100=250/443   median=62  mean_log2=5.72; dynamic top1=1/79  top5=25/79  top10=25/79  top25=43/79  top50=49/79  top100=57/79   median=19  mean_log2=5.06; 2026-08-05 migration: the retired scalar_on_warp / splitk_roundtrip gate params folded into the weights on their own features (deployed quality unchanged), so the next refit starts from the function that was deploying"
+    "notes": "static top1=57/443  top5=152/443  top10=169/443  top25=176/443  top50=185/443  top100=250/443   median=62  mean_log2=5.72; dynamic top1=1/79  top5=25/79  top10=25/79  top25=43/79  top50=49/79  top100=57/79   median=19  mean_log2=5.06; 2026-08-05 migration: the retired scalar_on_warp / splitk_roundtrip gate params folded into the weights on their own features (deployed quality unchanged); 2026-08-30 schema migration: D_stage_ring renamed D_stage_prefetch, the identical depth >= 2 signal (deployed score unchanged)"
   }
 }

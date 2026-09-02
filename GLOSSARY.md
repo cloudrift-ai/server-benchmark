@@ -17,6 +17,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   and 16 values per row. The meaning of each dimension depends on the operation.
 - **Dtype (data type)** — The format used to store each tensor value, such as 32-bit floating point (`float32`) or
   16-bit floating point (`float16`). Smaller formats use less memory and can be faster but may lose precision.
+- **NVFP4** — NVIDIA's 4-bit float weight format: e2m1 values (1 sign / 2 exponent / 1 mantissa bit, no inf/nan
+  codes) packed two per byte, each block of 16 values sharing an fp8 e4m3 scale, plus one f32 per-tensor scale.
+  Checkpoints are published with TensorRT Model Optimizer ("modelopt") or llm-compressor. Blackwell tensor cores
+  multiply e2m1 natively; older cards decode to 16-bit first.
 - **Inference** — Using an already-trained model to produce an answer. It is different from training, which changes
   the weights.
 - **Token** — A small piece of text represented by an integer. A tokenizer converts text into tokens before an LLM
@@ -74,6 +78,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Elementwise operation** — An operation independently applied to corresponding tensor elements, such as adding
   two tensors.
 - **Reduction** — Combining many values into fewer values, such as summing a row or finding its maximum.
+- **Scan (prefix reduction)** — A reduction that also stores its running state at every step, such as `cumsum`. In
+  Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
+  kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
+  fold only.
+- **Monoid family** — One registered fold algebra: a componentwise monoid, or its conjugation by a bijection (a
+  twist) such as the exp/LSE family behind online softmax. A family claims a stored combine only when its generator
+  would have emitted exactly that program, and it carries the algebra's legality properties (commutative,
+  observable). Registered in `ir/pure/algebra.py`.
 - **Broadcasting** — Reusing a smaller tensor across a larger shape. For example, one weight per column can be
   reused for every row.
 - **Index map** — A description of how output coordinates correspond to input coordinates. Emmy uses index maps for
@@ -106,6 +118,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   earlier compiler pass wrote onto the operation.
 - **Mutable / immutable** — A mutable object can be changed after creation. An immutable object cannot; code creates
   a replacement instead. Emmy's graph is mutable, while many nested compiler statements are immutable.
+- **Closure** — A pure lambda paired with the enclosing iteration axes it may read. In Emmy the environment is an
+  index space: a normalized term captures only iteration axes, never data values, which arrive through operand
+  edges. Alpha-equivalent closures with equal captures denote one value; under different captures they are one
+  function with distinct values. Defined in `ir/pure/closure.py`.
 - **Structural identity / structural key** — A fingerprint based on computation and data flow rather than cosmetic
   names. It lets Emmy recognize equivalent compiler candidates.
 - **Idempotent rule** — A rule that does not keep changing its own output when applied again. Compiler rewrite rules
@@ -249,6 +265,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   dimension bindings and input pin regimes that were tuned for that target.
 - **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,
   input knob pins, the selected schedule knobs, and (after verification) paired measurements.
+- **Child-identity schedule receipt** — A realization that records one split child's schedule: the route's cut(s)
+  frozen in its input pins, the child's schedule row in its knobs, and the child kernel's deploy identity stored as
+  its identity. The stored identity is the verified-tier join key and the strict decode's kernel selector — one flat
+  knobs map decorates exactly one kernel, so conflicting per-child schedules persist as sibling receipts.
 - **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
   realizations, proposed knob rows, and tune ranking feedback. It is search state, not trusted deployment evidence.
 - **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at

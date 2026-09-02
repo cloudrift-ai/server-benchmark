@@ -1,0 +1,62 @@
+# Qwen3 decode q_proj reshapes one 2048-wide linear output into 16 heads x 128 values. The equivalent
+# boundary used to hide the implicit unit matrix row, leaving only a scalar reduction schedule.
+# evidence: the exact RTX 5090 target strict-replays this authored tensor-core schedule at 8.0 us.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x0, x1]
+  outputs: [to]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 1, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 1024]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [1, 1, 2048]]]
+  - id: reshape
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 1, 16, 128]}}
+    inputs: [linear]
+    outputs: [[reshape, f16, [1, 1, 16, 128]]]
+  - id: to
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 16}, {__dim__: 128}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            select: null
+    inputs: [reshape]
+    outputs: [[to, f32, [1, 1, 16, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - linear
+    - reshape
+    - to
+  realizations:
+  - name: k_linear_ecdd53.94a1952715ee
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
+      REDUCE: ''
+      STAGE: d1/smem-tma
+      LOOPIFY: '0'
+      RASTER: ''
+    identity: 02931414500cc0a30b0968da17f6ecb08927a3191f46a4537843811cc2e35a28

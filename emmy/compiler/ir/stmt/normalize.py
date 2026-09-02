@@ -69,6 +69,7 @@ def normalize_body(
     stmts = Body.coerce(stmts)
     stmts = topo_sort_siblings(stmts)
     stmts = drop_size_one_free_axes(stmts)
+    stmts = drop_size_one_reduce_axes(stmts)
     stmts = canonicalize_free_axis_order(stmts)
     stmts = eliminate_copy_aliases(stmts)
     stmts = unify_sibling_reduce_axes(stmts)
@@ -118,6 +119,49 @@ def drop_size_one_free_axes(stmts: Body) -> Body:
             sub = Sigma({s.axis.name: Literal(0, "int")})
             return tuple(c.rewrite(_identity_rename, sub) for c in s.body)
         return s
+
+    return stmts.map(fn)
+
+
+def drop_size_one_reduce_axes(stmts: Body) -> Body:
+    """Inline a canonical extent-one reduction as its single update.
+
+    Fusion can hoist a singleton reduction's value into the enclosing scope (decode softmax is
+    the common case).  Keeping the reduction wrapper then asks Tile IR to form a fold whose lift
+    returns that enclosing value without defining it locally.  An extent-one fold is just one
+    application of its monoid, so replace each distinct accumulator with an ordinary pure
+    assignment before copy-alias elimination rewires the result.
+
+    Only the canonical one-update form is collapsed.  Scans, nested effects, and repeated updates
+    to one accumulator keep their loop because their sequential state is not an alias.
+    """
+    stmts = Body.coerce(stmts)
+
+    def fn(stmt: Stmt) -> Stmt | Body:
+        if not (isinstance(stmt, Loop) and stmt.is_reduce and stmt.axis.extent.is_static and stmt.axis.extent.as_static() == 1):
+            return stmt
+        accums = tuple(member for member in stmt.body if isinstance(member, Accum))
+        if (
+            not accums
+            or len({accum.name for accum in accums}) != len(accums)
+            or any(not (member.pure or isinstance(member, Accum)) for member in stmt.body)
+        ):
+            return stmt
+
+        sub = Sigma({stmt.axis.name: Literal(0, "int")})
+        out: list[Stmt] = []
+        for member in stmt.body:
+            member = member.rewrite(_identity_rename, sub)
+            if not isinstance(member, Accum):
+                out.append(member)
+                continue
+            if member.base is None or member.base == member.name:
+                if not member.has_identity:
+                    return stmt
+                out.append(Assign(name=member.name, op="copy", args=(member.value,), dtype=member.dtype))
+            else:
+                out.append(Assign(name=member.name, op=member.op, args=(member.base, member.value), dtype=member.dtype))
+        return Body(out)
 
     return stmts.map(fn)
 
@@ -636,7 +680,13 @@ def dedup_loads(stmts: Body) -> Body:
     name. Operates per-scope: a Load at an outer scope is reused by
     inner siblings (their identical ``index`` doesn't reference any
     inner-axis Var, so the values are equal). Loads inside a nested
-    scope are not visible to outer / sibling scopes."""
+    scope are not visible to outer / sibling scopes.
+
+    Hygienic: an inner scope that re-binds a name the outer scope
+    deduped keeps its own binding — those are different variables
+    (see :func:`~emmy.compiler.ir.stmt.passes.rename_free`)."""
+    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
+
     stmts = Body.coerce(stmts)
 
     def walk(
@@ -649,6 +699,18 @@ def dedup_loads(stmts: Body) -> Body:
 
         def rename(n: str) -> str:
             return alias.get(n, n)
+
+        def descend(inner: Body) -> Body:
+            """Enter ``inner``'s scope, dropping every alias / kept name whose spelling ``inner``
+            re-binds. SSA names bound inside a Loop / Cond body are scoped to it, so such a name is
+            a DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
+            value and redeclare the survivor."""
+            shadowed = _all_ssa_defs(inner)
+            return walk(
+                inner,
+                {k: v for k, v in local.items() if v not in shadowed},
+                {k: v for k, v in alias.items() if k not in shadowed},
+            )
 
         out: list[Stmt] = []
         for s in body:
@@ -665,14 +727,14 @@ def dedup_loads(stmts: Body) -> Body:
                     continue
                 local[key] = s.name
                 out.append(s)
-            elif isinstance(s, Loop):
-                out.append(replace(s, body=walk(s.body, local, alias)))
-            elif isinstance(s, StridedLoop):
-                out.append(replace(s, body=walk(s.body, local, alias)))
+            elif isinstance(s, Loop | StridedLoop):
+                out.append(replace(s, body=descend(s.body)))
             elif isinstance(s, Cond):
-                out.append(Cond(cond=s.cond, body=walk(s.body, local, alias), else_body=walk(s.else_body, local, alias)))
+                out.append(Cond(cond=s.cond, body=descend(s.body), else_body=descend(s.else_body)))
             else:
-                out.append(s.rewrite(rename))
+                # ``rename_free``, not ``rewrite``: identical for a leaf, but a block stmt the
+                # ladder above doesn't name (``Tile``) carries scopes the alias must stop at.
+                out.append(rename_free(s, alias))
         return tuple(out)
 
     return walk(stmts, {}, {})
@@ -935,22 +997,14 @@ def canonicalize_buffer_names(stmts: Body) -> Body:
 
     rename: dict[str, str] = {}
     for s in stmts.iter():
-        if isinstance(s, Load) and s.input not in rename:
-            rename[s.input] = f"b{len(rename)}"
-        elif isinstance(s, Write) and s.output not in rename:
-            rename[s.output] = f"b{len(rename)}"
+        for name in (*s.external_reads(), *s.external_writes()):
+            if name not in rename:
+                rename[name] = f"b{len(rename)}"
 
     if all(o == n for o, n in rename.items()):
         return stmts
 
-    def fn(s: Stmt) -> Stmt:
-        if isinstance(s, Load) and s.input in rename:
-            return replace(s, input=rename[s.input])
-        if isinstance(s, Write) and s.output in rename:
-            return replace(s, output=rename[s.output])
-        return s
-
-    return stmts.map(fn)
+    return stmts.rename_buffers(rename)
 
 
 # ---------------------------------------------------------------------------

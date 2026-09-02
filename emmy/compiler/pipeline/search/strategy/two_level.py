@@ -6,7 +6,9 @@
 - **Outer**: drive the graph-changing passes (``OUTER_PASSES`` — ``frontend`` + ``loop``, the
   strategy's OWN boundary config, never an engine parameter). The outer never ventures into
   Tile IR; a terminal is the fused graph of finalized ``LoopOp``\\ s. Today the outer tree is a
-  chain — fusion offers no multi-option forks yet — and nothing here depends on that.
+  chain — fusion offers no multi-option forks yet — and nothing here depends on that. A direct
+  unscheduled ``TileOp`` target passes through that boundary unchanged and joins the inner
+  per-kernel search; an already scheduled ``TileOp`` stays lowering-only.
 - **Scoring is DECLARED SEPARABLE**: an outer terminal's reward is the Σ of its unique kernels'
   bests, each kernel measured independently in its own single-node slice
   (:func:`single_node_graph`) by a plain :class:`TuningSearch` (MCTS) over ``INNER_PASSES``.
@@ -19,7 +21,7 @@
   evidence, not reward terms: the parent slice's Σ already priced them, so they stay out of
   ``per_op`` / ``total_us`` (and out of ``searched_winner()``, which golden seeding reads).
 
-Results key structurally (:meth:`~emmy.compiler.ir.base.Op.cache_key`), so inner-tuned ``perf``
+Results key structurally (:meth:`~emmy.compiler.ir.base.Op.identity_key`), so inner-tuned ``perf``
 / ``lowering`` rows transfer to the assembled graph unchanged AND are shared across outer
 terminals (a shared op is a DB hit). The inner search runs for **every** op on every pass — it is
 never skipped on prior effort; replay is cheap (the per-variant ``perf`` cache serves
@@ -38,8 +40,9 @@ from uuid import uuid4
 
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
-from emmy.compiler.pipeline.knob import stamp_schedule_families
+from emmy.compiler.pipeline.knob import complete_kernel_row
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.pipeline import Run, variant_label
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
@@ -53,7 +56,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Lowering-only passes (post-fusion): ``tile → kernel → cuda``. The inner per-op search runs
-# these on a single-node slice so the finalized LoopOp body — and thus its ``Op.cache_key`` — is
+# these on a single-node slice so the finalized LoopOp body — and thus its ``identity_key(with_io=True, with_knobs=True)`` — is
 # never re-touched by ``loop/fusion``, which is what keeps inner-tuned ``perf`` / ``lowering``
 # rows transferable to the assembled graph. Sliced as the tail of ``CUDA_PASSES`` so it tracks
 # pass-list edits automatically.
@@ -64,7 +67,7 @@ def outer_pipeline() -> Pipeline:
     """The graph-changing passes the outer search drives: ``frontend`` + ``loop`` (the fusion
     forks). An outer terminal is a post-fusion graph of finalized ``LoopOp``\\ s; the strategy's
     separable ``evaluate`` picks each up as its own slice (own patience, own progress leaf,
-    deduped by ``Op.cache_key``) and tunes it via :data:`LOWERING_PASSES`."""
+    deduped by ``identity_key(with_io=True, with_knobs=True)``) and tunes it via :data:`LOWERING_PASSES`."""
     passes = [Pass.load(name, i) for i, name in enumerate(TwoLevelStrategy.OUTER_PASSES)]
     return Pipeline(passes=passes, strategies=discovered_strategies())
 
@@ -140,7 +143,7 @@ class InnerReward:
 class TwoLevelResult:
     """Outcome of :meth:`TwoLevelStrategy.run`."""
 
-    best_fused: Graph | None  # winning fused graph (finalized LoopOps)
+    best_fused: Graph | None  # winning outer terminal (normally finalized LoopOps)
     best_reward: InnerReward | None  # its Σ-per-op breakdown
     n_terminals: int  # outer terminals evaluated (1 today)
     assembled: Graph | None  # greedy DB-best Graph[CudaOp] assembled from the bests
@@ -162,9 +165,14 @@ def _mint_run_id() -> str:
 def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
     """Post-fusion kernel nodes — ``(node_id, op)`` for every kernel-bearing op.
 
-    An outer terminal sits at the loop dialect's end (:func:`outer_pipeline`), so every kernel is a
-    finalized ``LoopOp`` and each gets its own inner slice."""
-    return [(nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp)]
+    A normal outer terminal sits at the loop dialect's end (:func:`outer_pipeline`), so its
+    kernels are finalized ``LoopOp`` instances. A direct post-cut reproducer instead starts at an
+    unscheduled ``TileOp``; it enters the same inner search so its rows keep the child identity
+    ordinary parent-route replay already consumes. A Tile root carrying a classic ``Schedule`` is
+    already decided and stays lowering-only; the typed assignment is the exact scheduled marker."""
+    return [
+        (nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp) or (isinstance(n.op, TileOp) and n.op.schedule is None)
+    ]
 
 
 @dataclass
@@ -172,7 +180,7 @@ class _Work:
     """One inner tuning target: an outer kernel (counts toward the terminal reward) or an
     enrolled minted kernel (evidence only)."""
 
-    key: str  # ``Op.cache_key`` — the perf-row key
+    key: str  # ``identity_key(with_io=True, with_knobs=True)`` — the perf-row key
     nid: str
     op: object
     src_graph: Graph  # what the slice is cut from: the fused graph, or the minting fragment
@@ -334,7 +342,7 @@ class TwoLevelStrategy(SearchStrategy):
     async def _evaluate_terminal(self, fused_graph: Graph, ctx: Context) -> InnerReward:
         """The separable scoring function: tune every post-fusion kernel of ``fused_graph`` in
         its own single-node slice and return ``Σ best-per-op time`` — the outer terminal reward
-        — once ALL Loop kernels are measured. Kernels minted inside the inner loops are enrolled
+        — once all kernel roots are measured. Kernels minted inside the inner loops are enrolled
         in waves (evidence, never reward terms).
 
         One coroutine per work item over a slot queue of ``len(pool)`` device-pinned backends
@@ -346,12 +354,12 @@ class TwoLevelStrategy(SearchStrategy):
         identity = _identity()
         ctx_key = ctx.structural_key()
         backend_name = getattr(self.pool[0], "name", "cuda")
-        # Group structurally-identical LoopOps under one ``Op.cache_key`` — insertion order =
+        # Group structurally-identical kernel roots under one ``identity_key(with_io=True, with_knobs=True)`` — insertion order =
         # first occurrence (drives the progress tail name). Ops with no cache key are
         # unreachable through the bench path so they don't enter the dedup map at all.
         unique: OrderedDict[str, tuple[str, object, int]] = OrderedDict()
         for nid, op in _kernel_nodes(fused_graph):
-            key = op.cache_key()
+            key = op.identity_key(with_io=True, with_knobs=True)
             if key is None:
                 continue
             if key in unique:
@@ -453,7 +461,7 @@ class TwoLevelStrategy(SearchStrategy):
                 searched_structural = False
                 if searched is not None:
                     searched_structural = searched[3]
-                    searched_knobs = dict(searched[0]) if searched_structural else stamp_schedule_families(searched[0])
+                    searched_knobs = dict(searched[0]) if searched_structural else complete_kernel_row(searched[0])
                     searched_us = searched[1]
                     searched_cuda_ops = searched[2]
                 results[op_idx] = OpResult(
@@ -488,7 +496,7 @@ class TwoLevelStrategy(SearchStrategy):
                 wave = [
                     _Work(key=key, nid=nid, op=op, src_graph=frag, count=0, enrolled=True)
                     for nid, op, frag in minted
-                    if (key := op.cache_key()) is not None
+                    if (key := op.identity_key(with_io=True, with_knobs=True)) is not None
                 ]
                 minted.clear()
         finally:

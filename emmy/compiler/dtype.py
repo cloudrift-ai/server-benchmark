@@ -40,9 +40,29 @@ class DataType:
         return self.name
 
     @property
+    def logical_elems(self) -> int:
+        """Logical elements per stored element — 1 for every dtype but the packed pairs, which
+        carry 2: a tensor's stored last-axis extent is then HALF its logical extent, and any size
+        arithmetic keyed on ``nbytes`` alone (slab budgets, k-step spans) must also consult this.
+
+        Derived from the name rather than stored as a field, and that is load-bearing rather than
+        tidiness. ``structural.form`` renders a dataclass by walking its fields, so a field here
+        joins the identity of every kernel that mentions any dtype — while carrying no information
+        the name did not already carry, since the name is the first thing ``form`` renders. As a
+        field it moved every contraction's kernel identity (``Op.identity_key``) and orphaned the names recorded
+        in the checked-in goldens; as a property it is invisible to the walk.
+        """
+        return 2 if self.name in _PACKED_PAIR_NAMES else 1
+
+    @property
     def is_structured(self) -> bool:
         """True for register-composite types (packed vectors, fragments)."""
         return False
+
+
+#: The dtypes whose one stored element is a PAIR of logical ones. Membership is the whole
+#: definition of :attr:`DataType.logical_elems`; a new packed format is one entry here.
+_PACKED_PAIR_NAMES = frozenset({"f4e2m1x2", "f16x2"})
 
 
 @dataclass(frozen=True)
@@ -76,6 +96,15 @@ BF16 = DataType("bf16", np.dtype(np.uint16), 2)
 # are ``__nv_fp8_e4m3`` / ``__nv_fp8_e5m2`` (see ``backend/cuda/dtype.py``).
 F8E4M3 = DataType("f8e4m3", np.dtype(np.uint8), 1)
 F8E5M2 = DataType("f8e5m2", np.dtype(np.uint8), 1)
+# NVFP4 storage format — e2m1 values (1 sign / 2 exponent / 1 mantissa bit; the
+# 16-code space has no inf/nan). The checkpoint packs two adjacent values along
+# the last axis into one byte, b = v_even + 16 * v_odd (the modelopt — TensorRT
+# Model Optimizer — packing order), so the uint8 carrier holds a PAIR (the
+# "x2") and the tensor's last axis is HALF its logical extent. A StructuredType
+# like F16x2 — one element is not one scalar. The format's block scales (one
+# e4m3 per 16 values + one f32 per tensor) are separate plain tensors — a
+# loader concern, not dtype information.
+F4E2M1x2 = StructuredType("f4e2m1x2", np.dtype(np.uint8), 1)
 # Two ``__half`` values packed into a 32-bit register, semantically a
 # 2-wide vector of fp16 — the first ``StructuredType``. Same numpy dtype as
 # F16 since numpy doesn't distinguish — packing is a CUDA-side storage detail;
@@ -122,7 +151,9 @@ def decode_bf16(bits) -> np.ndarray:
     return np.ascontiguousarray(expanded.view(np.float32))
 
 
-_BY_NAME: dict[str, DataType] = {dt.name: dt for dt in (F32, F16, F64, BF16, F8E4M3, F8E5M2, F16x2, I16, I32, I64, U8, U16, U32, U64, BOOL)}
+_BY_NAME: dict[str, DataType] = {
+    dt.name: dt for dt in (F32, F16, F64, BF16, F8E4M3, F8E5M2, F4E2M1x2, F16x2, I16, I32, I64, U8, U16, U32, U64, BOOL)
+}
 
 # Aliases let callers feed PyTorch/numpy-style names without re-canonicalizing
 # at every callsite. The canonical name (``F32.name == "f32"``) is what lands
@@ -137,6 +168,7 @@ _ALIASES: dict[str, str] = {
     "bfloat16": "bf16",
     "float8_e4m3fn": "f8e4m3",  # torch spelling ("fn" — finite + NaN, no inf)
     "float8_e5m2": "f8e5m2",
+    "float4_e2m1fn_x2": "f4e2m1x2",  # torch spelling (packed pair; "fn" — e2m1 has no inf/nan codes at all)
     "int16": "i16",
     "int32": "i32",
     "int64": "i64",
@@ -224,6 +256,82 @@ def encode_f8(values: np.ndarray, fmt: str) -> np.ndarray:
     code = np.where(a >= vals[-1], np.uint8(n_finite - 1), code)  # satfinite
     code = code | (sign.astype(np.uint8) << 7)
     return np.where(np.isnan(x), np.uint8(0x7F), code).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# FP4 numpy decode — the value semantics of the packed e2m1 pair dtype. Same
+# home rationale as the fp8 tables above: the loader's bind-time reads and the
+# in-graph decode intrinsics must share ONE table, and this module is a leaf
+# both can import.
+# ---------------------------------------------------------------------------
+
+#: The 16 e2m1 values in code order — the 8 non-negative ones first (exponent
+#: bias 1; code 1 is the lone subnormal, 0.5), then codes 8..15 mirroring them
+#: with the sign bit set. No inf/nan codes exist in the format, and every value
+#: is exact in f16, so this table IS the decode wherever the format is read:
+#: numpy here, and the CUDA fragment drain that emits it as an f16 constant
+#: table (``render._F4_STAGED_PRELUDE``) rather than keeping a second copy.
+F4_VALUES: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
+_F4_LUT = np.array(F4_VALUES, dtype=np.float32)
+
+
+def decode_f4(codes: np.ndarray) -> np.ndarray:
+    """Decode e2m1 codes to f32 by LUT indexing — the single-code sibling of
+    :func:`decode_f4x2`, for callers that already hold unpacked codes on an
+    integer carrier (the ``from_f4e2m1`` elementwise decode). Codes must lie
+    in ``[0, 16)`` — a set bit above the low 4 is a caller bug, not data."""
+    a = np.asarray(codes)
+    assert np.issubdtype(a.dtype, np.integer), f"decode_f4 expects integer codes, got {a.dtype}"
+    # Masked rather than compared against ~0xF: that literal is negative, which an unsigned
+    # carrier (the one encode_f4 returns) refuses outright.
+    assert np.all((a & 0xF) == a), "decode_f4 expects codes in [0, 16); upper bits set"
+    return _F4_LUT[a]
+
+
+def decode_f4x2(bits: np.ndarray) -> np.ndarray:
+    """Decode packed e2m1 pairs (the f4e2m1x2 uint8 carrier ``b``) to f32, doubling the
+    last axis: ``out[..., 2j] = val4(b[..., j] & 0xF)``, ``out[..., 2j+1] = val4(b[..., j] >> 4)``
+    — the ``b = v_even + 16 * v_odd`` packing order of the dtype."""
+    assert bits.dtype == np.uint8, f"decode_f4x2 expects the uint8 bits carrier, got {bits.dtype}"
+    *lead, last = bits.shape
+    out = np.empty((*lead, last * 2), dtype=np.float32)
+    out[..., 0::2] = _F4_LUT[bits & 0x0F]
+    out[..., 1::2] = _F4_LUT[bits >> 4]
+    return out
+
+
+#: The non-negative half of :data:`F4_VALUES`, which is already ascending in code order —
+#: the encode's search table, the direct analogue of :func:`_f8_finite_values`.
+_F4_POSITIVE = np.array(F4_VALUES[:8], dtype=np.float64)
+
+
+def encode_f4(values: np.ndarray) -> np.ndarray:
+    """Encode an f32/f16 array to e2m1 codes (uint8, ``[0, 16)``) — round-to-nearest-EVEN onto
+    :data:`F4_VALUES`, SATURATING at ±6. The exact inverse of :func:`decode_f4`, and the same
+    rounding contract :func:`encode_f8` carries for the fp8 formats.
+
+    e2m1 has no inf or NaN code, so there is nowhere for a NaN to go; a NaN input is a caller
+    bug rather than something to map onto a finite value silently."""
+    x = np.asarray(values, dtype=np.float64)
+    assert not np.isnan(x).any(), "encode_f4 got NaN, which e2m1 cannot represent"
+    a = np.abs(x)
+    # Same argument as encode_f8: the table IS the representable set, so nearest-neighbour with a
+    # tie-to-even-CODE rule is round-to-nearest-even (adjacent codes differ in the low mantissa
+    # bit, and the higher code across an exponent step has mantissa 0 — even either way).
+    idx = np.clip(np.searchsorted(_F4_POSITIVE, a), 1, 7)
+    lo, hi = _F4_POSITIVE[idx - 1], _F4_POSITIVE[idx]
+    take_hi = (a - lo > hi - a) | ((a - lo == hi - a) & (idx % 2 == 0))
+    code = np.where(take_hi, idx, idx - 1).astype(np.uint8)
+    code = np.where(a >= _F4_POSITIVE[-1], np.uint8(7), code)  # saturate, no inf code exists
+    return (code | (np.signbit(x).astype(np.uint8) << 3)).astype(np.uint8)
+
+
+def encode_f4x2(values: np.ndarray) -> np.ndarray:
+    """Encode to PACKED e2m1 pairs (the f4e2m1x2 uint8 carrier), halving the last axis — the
+    inverse of :func:`decode_f4x2`, so it writes the same ``b = v_even + 16 * v_odd`` order."""
+    codes = encode_f4(values)
+    assert codes.shape[-1] % 2 == 0, f"encode_f4x2 needs an even last axis to pair, got {codes.shape[-1]}"
+    return (codes[..., 0::2] | (codes[..., 1::2] << 4)).astype(np.uint8)
 
 
 def get(dtype: str | DataType) -> DataType:

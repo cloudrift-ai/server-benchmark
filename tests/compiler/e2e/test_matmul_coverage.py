@@ -250,8 +250,8 @@ def _scalar_stage_graph(M: int = 64, N: int = 64, K: int = 64, dtype=F32) -> Gra
 
 
 def _node_stage(tile_op):
-    """The resolved operand pipeline — a schedule slice in ``TileOp.schedule`` keyed on the node
-    it decorates (1r); there is no node ``stage`` field and no ``TileOp.stage``."""
+    """The resolved operand pipeline for the primary contraction edge; there is no node ``stage``
+    field and no ``TileOp.stage``."""
     from emmy.compiler.ir.tile.ops import sched_of  # noqa: PLC0415
 
     op = tile_op.op
@@ -275,7 +275,7 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
-    # ``STAGE`` is keyed ``@<k_axis>`` (axis-named schedule knob); ``family_value`` reads it.
+    # ``STAGE`` is keyed to the exact operand edge; ``family_value`` reads the one site here.
     assert family_value(tile_op.knobs, "STAGE") == "d2/smem-tma", tile_op.knobs  # resolved at the pinned depth
     stage = _node_stage(tile_op)
     assert stage is not None and stage.transport == "smem-tma", stage
@@ -364,7 +364,7 @@ def test_warp_matmul_stamps_the_producer_band(monkeypatch) -> None:
     (the producer/compute band split in ``_stage._producer_band_kloop``)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")  # warp (mma) tier
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")  # warp (mma) tier
     monkeypatch.setenv("EMMY_WORK", "w2x2+p1")
     monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the band, not the split fork
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
@@ -382,7 +382,7 @@ def test_producer_band_without_a_driveable_stage_enumerates_nothing(monkeypatch)
     contract) rather than silently dropping the band the pin asked for."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w2x2+p2")
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(dtype=F16), ctx=Context.from_target((9, 0)))
@@ -445,7 +445,7 @@ def test_fused_prologue_compiles_in_budget(case):
 # The contraction tiles onto ``WM·WN`` warps of ``mma_m16n8k16`` atom cells: f16/bf16 operands,
 # f32 accumulate, f16|f32 store. Requires sm_90+ (the warp tier is pin-only / non-functional
 # below: ldmatrix host fault + ``sm_NNa`` TMA compile).
-_WARP_PIN = ("mma_m16n8k16_f16/f4x8/k2", "w2x2")  # WM·FM·atom_m = WN·FN·atom_n = 128 tile, 128 threads
+_WARP_PIN = ("mma_m16n8k16_f16_f32/f4x8/k2", "w2x2")  # WM·FM·atom_m = WN·FN·atom_n = 128 tile, 128 threads
 _F16 = "f16"
 
 
@@ -732,6 +732,7 @@ def test_matmul_mma_f16acc_coverage(stage, monkeypatch):
     The static-M column of each transport is a corpus case."""
     if stage == "smem-tma" and not _supports_tma():
         pytest.skip("TMA needs sm_90+")
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
     M = N = K = 128
     monkeypatch.setenv("EMMY_STAGE", _F16ACC_STAGES[stage])
     run_m = M + 2
@@ -764,6 +765,7 @@ def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
     it at the symbol's 512 hint, which is a whole number of promote periods; K=70 is off both the
     16-step grid and the promote period, and there is no way to store "compile at the hint, run
     at 70"."""
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f16/f1x1")
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.delenv("EMMY_STAGE", raising=False)
@@ -935,7 +937,7 @@ def test_matmul_mma_epilogue_coverage(epilogue, mode, monkeypatch):
 # on the static half is a corpus case, so what runs here is the symbolic kernel off its hint plus
 # the bit-identity and swizzle invariants, which compare two configs rather than one to a reference.
 _PN, _PK = 1024, 512
-_WARP_CODEC = ("mma_m16n8k16_f16/f2x2/k2", "w2x2")  # WM=WN=FM=FN=2, BK=2 — the 64-row tile
+_WARP_CODEC = ("mma_m16n8k16_f16_f32/f2x2/k2", "w2x2")  # WM=WN=FM=FN=2, BK=2 — the 64-row tile
 
 
 def _parity_mma_graph(mode: str, *, M: int):
@@ -1191,14 +1193,14 @@ def test_cp_staged_slab_is_swizzled(monkeypatch):
 @requires_sm90
 @requires_cuda
 def test_bf16_operands_stage_via_cp_async(monkeypatch):
-    """The bf16 MMA atom (``mma_m16n8k16_bf16``) stages through cp.async and stays accurate vs
+    """The bf16 MMA atom (``mma_m16n8k16_bf16_f32``) stages through cp.async and stays accurate vs
     torch — the cp.async byte-width fill must handle the 2-byte bf16 operand. (No native numpy
     bf16: feed the bits as uint16 and reinterpret the uint16 output.)"""
     import torch  # noqa: PLC0415
 
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_bf16/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_bf16_f32/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w2x2")
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
     M = 256
@@ -1244,7 +1246,7 @@ def _splitk_mma_graph(m: int, k: int, n: int, *, out_dtype=F16) -> Graph:
 @pytest.mark.parametrize("transport", ["smem-async", "smem-tma"])
 def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     """Operand staging composes with split-K: the ``STAGE`` resolved against the SLICED inner node
-    reaches the split partial (a fresh kernel scheduling itself past ``035_split_reduce``), whose K-loop stages its slice through the smem
+    reaches the split partial (a fresh kernel scheduling itself past ``030_cut``), whose K-loop stages its slice through the smem
     pipeline. A pure perf transform — the staged split is **bit-identical** to the gmem-direct
     split (same partials, same finalize), and the partial kernel actually stages."""
     if transport == "smem-tma" and not _supports_tma():
@@ -1257,7 +1259,7 @@ def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
 
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
-        monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f2x2/k2")
+        monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
         monkeypatch.setenv("EMMY_WORK", "w2x2")
         monkeypatch.setenv("EMMY_REDUCE", "g2k")
         # The baseline pins STAGE="" (gmem-direct) explicitly — unpinned, the offline prior may
@@ -1305,7 +1307,7 @@ def test_warp_static_k_indivisible_is_masked(monkeypatch) -> None:
     partial step zero-fills the fragment halves past K, the same masking a symbolic K gets. The
     K-step used to be a hard divisibility gate, which put every such shape out of a golden's reach
     (the emitted zero-fill is asserted by ``test_mma_static_k_tail_zero_fills``)."""
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x1")  # K-step 16
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x1")  # K-step 16
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     _run_tile_pass(_guard_mm_graph(128, 128, 100))  # 100 % 16 == 4 — masked, no raise
     _run_tile_pass(_guard_mm_graph(128, 128, 128))  # 128 % 16 == 0 — exact, no mask
@@ -1314,23 +1316,26 @@ def test_warp_static_k_indivisible_is_masked(monkeypatch) -> None:
 def test_warp_symbolic_k_not_guarded(monkeypatch) -> None:
     """A symbolic K reaches the masked tier (ceil-div grid + zero-filled partial slab), so the
     static-K guard does not fire even when the hint is not a K-step multiple."""
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16/f1x1/k2")  # K-step 32
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x1/k2")  # K-step 32
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     _run_tile_pass(_guard_mm_graph(64, 128, Dim("seq_len")))  # symbolic K — no raise
 
 
 def test_tile_block_over_thread_limit_rejected(monkeypatch) -> None:
-    """A TILE parallel tile over the 1024-thread/CTA limit is rejected at compile time instead
-    of failing the launch with an opaque ``CUDA_ERROR_INVALID_VALUE``."""
-    monkeypatch.setenv("EMMY_TILE", "")  # 16384 threads
+    """A TILE parallel tile over the 1024-thread/CTA limit has no compatible schedule instead of
+    reaching a launch that fails with an opaque ``CUDA_ERROR_INVALID_VALUE``."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_TILE", "f1")  # 16384 threads
     monkeypatch.setenv("EMMY_WORK", "t128x128")
-    with pytest.raises(ValueError, match="exceeds the 1024-thread/CTA limit"):
-        _run_tile_pass(_guard_mm_graph(256, 256, 256, dtype=F32))
+    lowered = _run_tile_pass(_guard_mm_graph(256, 256, 256, dtype=F32))
+    tile = next(node.op for node in lowered.nodes.values() if isinstance(node.op, TileOp))
+    assert not tile.place.is_mapped and tile.schedule is None
 
 
 def test_tile_block_within_limit_ok(monkeypatch) -> None:
     """A TILE parallel tile within the thread limit lowers without the guard firing."""
-    monkeypatch.setenv("EMMY_TILE", "")  # 64 threads
+    monkeypatch.setenv("EMMY_TILE", "f1")  # 64 threads
     monkeypatch.setenv("EMMY_WORK", "t8x8")
     _run_tile_pass(_guard_mm_graph(256, 256, 256, dtype=F32))
 
@@ -1344,7 +1349,7 @@ def test_tile_block_within_limit_ok(monkeypatch) -> None:
 # K slab past a symbolic reduce extent. One cached kernel serves every runtime size. The point is
 # off-hint / straddling sizes (1, 31, 130, 700 — NOT tile-divisor multiples), which exercise the
 # boundary-guard + clamp + zero-fill interplay the tile-divisor parity sweep cannot reach.
-_MASK_WARP = ("mma_m16n8k16_f16/f2x2/k2", "w2x2")
+_MASK_WARP = ("mma_m16n8k16_f16_f32/f2x2/k2", "w2x2")
 # REDUCE pinned serial for the same reason as the ``transport`` fixture: a g<w>k split
 # sibling deploys a partial+finalize pair, and these tests assert on the one ``o`` kernel.
 _CP_KNOBS = {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d2/smem-async", "REDUCE": ""}
@@ -1442,7 +1447,7 @@ def test_masked_symbolic_m_structure(transport, monkeypatch):
         # Per-element row guards from the RegStore (both fragment row blocks).
         assert "+ _g < (seq_len)" in src and "+ _g + 8 < (seq_len)" in src, "fragment store must row-guard against seq_len"
     else:
-        # STAGE is stamped per-node (axis-keyed ``STAGE@<k_axis>``), not bare — find this node's.
+        # STAGE is stamped at the exact operand edge, not bare — this single contraction uses one value.
         stage = next((v for k, v in kop.knobs.items() if k.split("@")[0] == "STAGE"), "")
         assert stage.endswith("/smem-tma"), f"symbolic-M with static innermost dim must stage via TMA: {stage!r}"
         assert "cp.async.bulk.tensor" in src, "A operand must stage via TMA"
@@ -1693,6 +1698,7 @@ _RASTER_TILE = ("mma_m16n8k16_f16_f32/f2x4/k2", "w2x2")  # M-tile 64, N-tile 64 
 
 def _raster_kop(monkeypatch, M: int, raster: str | None = None):
     _pin_tile(monkeypatch, _RASTER_TILE)
+    monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
     if raster is not None:
         monkeypatch.setenv("EMMY_RASTER", raster)
@@ -1896,11 +1902,14 @@ def test_reshaped_a_declines_tma_and_falls_back(monkeypatch):
     assert "cp.async.bulk.tensor" in plain_src, "the canonical (sliced) A still stages via TMA — the pin is not dead"
 
 
-def test_transposed_a_warp_pin_raises(monkeypatch) -> None:
-    """A WARP pin on a transposed A RAISES the layout reason instead of lowering a kernel that
-    reads columns at the wrong stride — the other half of the contract: an unschedulable form is
-    refused loudly under a pin, and dropped silently (onto the scalar tier) without one."""
+def test_transposed_a_warp_pin_restricts_the_schedule_to_empty(monkeypatch) -> None:
+    """A warp-only c excludes every schedule for a transposed A instead of admitting a kernel
+    that reads columns at the wrong stride."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x1")
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    with pytest.raises(ValueError, match="columns CONTIGUOUSLY"):
-        _run_tile_pass(_imap_graph("transpose_a")[0])
+    out = _run_tile_pass(_imap_graph("transpose_a")[0])
+    tile = next(node.op for node in out.nodes.values() if isinstance(node.op, TileOp))
+
+    assert not tile.place.is_mapped and tile.schedule is None

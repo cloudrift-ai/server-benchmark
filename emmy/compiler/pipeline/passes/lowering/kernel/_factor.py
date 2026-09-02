@@ -53,13 +53,21 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
-from emmy.compiler.ir.pure.fold import Fold, _unique_edges, is_contraction
+from emmy.compiler.ir.pure.fold import (
+    Fold,
+    _operand_result_names,
+    _unique_edges,
+    cone_seam,
+    edge_free_axes,
+    is_contraction,
+    operand_body,
+)
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile import FoldMove, Level, ReducePlan, ReduceStage
-from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs
-from emmy.compiler.ir.tile.ops import cone_seam, projection_regions, sched_of
+from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
+from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs, observed_result_names
+from emmy.compiler.ir.tile.ops import UnbindableProjection, projection_regions, sched_of
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     clamp_last,
@@ -120,9 +128,8 @@ class Ctx:
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
     raster: object = None  # the parsed RASTER codec (ir.schedule.Raster; None = flat launch order)
-    # The kernel's schedule slices (``TileOp.schedule`` bound to its op tree — ``ops.Sched``): the
-    # per-node ``tile`` / ``reduce`` / ``stage`` reads all go through here (1r — the term stores
-    # no slices).
+    # The accepted classic assignment bound to its Fold sites (read through ``ops.Sched``): all
+    # per-node tile/reduce and per-edge stage reads go through here; the term stores no choices.
     sched: object = None
     # The placement's FREE axes — the un-shrunk originals. A split partial may prefix ``_ksplit``;
     # contraction views derive their output axes from the trailing pair.
@@ -236,7 +243,54 @@ def factorize(tile, root, store=None) -> Tile:
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
 
 
-def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs: tuple = ()) -> Tile:
+def _cell_provider_closure(edge, siblings: tuple) -> tuple[object, frozenset[int]]:
+    """Close one computed contraction operand over sibling providers that its result cone reads."""
+    body = Body(operand_body(edge))
+    needed = set(body.backward_cone(_operand_result_names(edge)).external_reads)
+    required: dict[int, set[str]] = {}
+    while True:
+        added = False
+        for provider in siblings:
+            results = set(_operand_result_names(provider))
+            prior = required.get(id(provider), set())
+            if not ((results & needed) - prior):
+                continue
+            required[id(provider)] = prior | (results & needed)
+            provider_body = Body(operand_body(provider))
+            ordered = tuple(result for result in _operand_result_names(provider) if result in required[id(provider)])
+            needed.update(provider_body.backward_cone(ordered).external_reads)
+            added = True
+        if not added:
+            break
+    if not required:
+        return edge, frozenset()
+    selected = tuple(_provider_slice(provider, required[id(provider)]) for provider in siblings if id(provider) in required)
+    return Fold.projection(operands=(*selected, edge), results=_operand_result_names(edge)), frozenset(required)
+
+
+def _provider_slice(provider, required: set[str]):
+    """Narrow a projection provider to the result cone its cell consumer needs."""
+    results = _operand_result_names(provider)
+    if not isinstance(provider, Fold) or provider.axis is not None or required == set(results):
+        return provider
+    ordered = tuple(result for result in results if result in required)
+    cone = provider.body.backward_cone(ordered)
+    operands = tuple(edge for edge in provider.operands if set(_operand_result_names(edge)) & cone.external_reads)
+    return Fold.projection(operands=operands, body=Body(cone.members), results=ordered)
+
+
+def _close_cell_providers(contraction: Fold, siblings: tuple) -> tuple[Fold, frozenset[int]]:
+    """Move sibling providers read by computed operands into their per-cell fill."""
+    operands = []
+    consumed: set[int] = set()
+    for edge in contraction.operands:
+        closed, used = _cell_provider_closure(edge, siblings)
+        operands.append(closed)
+        consumed.update(used)
+    return replace(contraction, operands=tuple(operands)), frozenset(consumed)
+
+
+def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs: tuple = (), cell_op=None) -> Tile:
     """The recursive root walk — peel the projecting zero-axis ``Fold``\\ s, then bind each leaf to the grid via
     the ONE binding pipeline. A zero-axis :class:`Fold` with an operand recurses: its ``body`` (the projection /
     epilogue) is walked (:func:`_emit_body`, reaching any nested node), the kernel-boundary
@@ -249,23 +303,71 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         if len(tiled) > 1:
             return _bind_roots(op, ctx, output_specs)
         root = tiled[0] if tiled else op.operands[0]
-        siblings = [stmt for edge in op.operands if edge is not root for stmt in _emit(edge, ctx).body]
+        other = tuple(edge for edge in op.operands if edge is not root)
+        closed_root, consumed = _close_cell_providers(root, other) if tiled else (None, frozenset())
+        projection_reads = op.body.backward_cone(_operand_result_names(op)).external_reads
+        siblings = []
+        for edge in other:
+            if id(edge) not in consumed:
+                siblings.extend(_emit(edge, ctx).body)
+            elif required := set(_operand_result_names(edge)) & projection_reads:
+                siblings.extend(_emit(_provider_slice(edge, required), ctx).body)
         proj = [*siblings, *_emit_body(op.body, ctx, output_specs)]
         region_results = _projection_results(op.body)
         root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= region_results)
-        if root_specs:
-            proj = apply_output_specs(proj, root_specs)
-        return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store)
+        # A STREAMED store (values = an observer's results) rides the recursion down to the leaf
+        # so the scalar arm can splice it into the observed fold's reduce loop — applying it here
+        # would land it in the projection tail, after a loop that is not yet emitted.
+        observed = observed_result_names(op)
+        streamed = tuple(spec for spec in root_specs if set(spec.write.values) <= observed)
+        streamed_ids = {id(spec) for spec in streamed}
+        plain = tuple(spec for spec in root_specs if id(spec) not in streamed_ids)
+        # An output sweep whose axis the peeled root's cone reads cannot wrap here: the peel binds
+        # the root OUTSIDE the projection, so no wrap position inside ``proj`` encloses the reduce
+        # and the sweep coordinate renders as an undefined identifier at nvcc (DeepSeek-V4's fused
+        # ``k_div_36_reduce``, whose per-column mean read the store sweep's column). The serial
+        # fold realizes the shape whole — bind the UNPEELED projection so ``apply_output_specs``
+        # wraps operand and projection together. A cooperative / ILP partition (or an output-tiled
+        # contraction root) has no such realization — the sweep is distributed across the lanes it
+        # would have to re-run on — so the row is declined and the greedy retries the next one.
+        free = edge_free_axes(root)
+        swept = [spec.sweep.name for spec in plain if spec.sweep is not None and spec.sweep.name in free]
+        if swept:
+            # The schedule at stake is the ITERATING node's, which a chain of zero-axis projections
+            # may sit above (``root`` is then a projection, carrying no ``REDUCE`` site of its
+            # own). Descend to it, or the decline reads an absent plan off the wrapper and binds a
+            # partitioned row as the serial fold — the emission is correct but silently drops the
+            # partition the row was priced on.
+            node = root
+            while isinstance(node, Fold) and node.axis is None and node.operands:
+                node = node.operands[0]
+            plan = ctx.sched.get("REDUCE", node) if isinstance(node, Fold) and node.axis is not None else None
+            if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (is_contraction(node) and ctx.sched.tile_of(node) is not None):
+                raise UnbindableProjection(
+                    f"the bound reduce's cone reads output sweep axis {swept[0]!r} — a cooperative / ILP "
+                    f"partition cannot re-run the reduce per swept cell"
+                )
+            return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
+        if plain:
+            proj = apply_output_specs(proj, plain)
+        return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store, output_specs=streamed, cell_op=closed_root)
     if output_specs and isinstance(op, Fold) and op.axis is None:
         # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
         # its output specifications only after that body is emitted so an output sweep wraps every stmt
-        # that reads the sweep coordinate.
+        # that reads the sweep coordinate. ``cell_op`` cannot reach this branch: it is only set when
+        # recursing into a tiled contraction root, whose axis is never ``None``.
         return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
     if output_specs:
-        # A non-projection flat root can carry plain root ``Write``\\ s only.
+        # A non-projection flat root can carry plain root ``Write``\\ s only. A STREAMED store
+        # (its values an observer's results) stays a spec so the scalar arm splices it into the
+        # observed fold's reduce loop; the rest append as the kernel tail.
         assert all(st.sweep is None for st in output_specs), "sweep stores ride a projecting zero-axis fold"
-        tail = (*tail, *(st.write for st in output_specs))
-    return _bind(op, ctx, tail, out_val, store)
+        observed = observed_result_names(op)
+        streamed = tuple(st for st in output_specs if set(st.write.values) <= observed)
+        streamed_ids = {id(st) for st in streamed}
+        tail = (*tail, *(st.write for st in output_specs if id(st) not in streamed_ids))
+        return _bind(op, ctx, tail, out_val, store, output_specs=streamed, cell_op=cell_op)
+    return _bind(op, ctx, tail, out_val, store, cell_op=cell_op)
 
 
 def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
@@ -335,7 +437,7 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     return [*stmts, Write(output=output, index=index, value=value)]
 
 
-def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: tuple = (), frag_ns: str = "") -> Tile:
+def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: tuple = (), frag_ns: str = "", cell_op=None) -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
     finalizer. The cases are points of one ``(output-tiling) × (reduce-folding)`` space, selected by
@@ -346,10 +448,13 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
       :func:`reduce_codegen`, and ``store`` the per-cell sink (default :func:`store_sink`). Its projection
       arrives as ``tail`` — peeled off the wrapping zero-axis fold, the ONE home for a projection; the bare
       grid-``Write`` glue is synthesized here (it needs ``ctx.output``, so it can't ride the node).
-    - a :class:`Fold` whose :class:`ReducePlan` cooperates tiles its REDUCE axis instead
+    - a :class:`Fold` whose :class:`Reduce` cooperates tiles its REDUCE axis instead
       (:func:`_tile_reduce_axis` — ``coop`` lanes at the unit level, ``reg`` ILP chains at the
       register level, the carrier merge closing the fold). The output stays one cell per thread:
       the 1×1 ``atomize`` with the whole grid riding ``lead_axes`` untiled.
+    - a CHAIN-FORM root (a zero-axis :class:`Fold` with no operand edge, so nothing was peeled)
+      carries its reduces as direct body members: the partition rides THEM, and
+      :func:`_tile_chain_members` emits the members in body order around one shared lane axis.
     - anything else (a pure pointwise zero-axis fold, a trivial plan) tiles NOTHING — the degenerate
       one-thread-per-cell fold: the per-cell body (:func:`_emit`; a serial reduce ``Loop`` sits
       inside it) + ``tail`` + the ``out_val`` store glue is the whole fold region."""
@@ -367,7 +472,10 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         projection = tail
         tail = fold_store_tail(tail, op, c)
     else:
-        c, value_child, projection = op, None, ()
+        # ``cell_op`` is the provider-closed rewrite of ``op``: the emitted per-cell value carries
+        # the sibling providers its computed operands read, while every schedule lookup stays keyed
+        # on the STORED node — ``ctx.sched`` is identity-keyed, so a rewritten node has no schedule.
+        c, value_child, projection = cell_op or op, None, ()
         tile = ctx.sched.tile_of(op) if is_contraction(op) else None
         stage = ctx.sched.get("STAGE", op) if tile is not None else None
     if tile is not None and tile.axes is not None and len(grid) >= 2:
@@ -410,16 +518,52 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduction is a
         # ``Fold`` node (a projecting zero-axis
         # ``Fold`` was already peeled off by :func:`_factorize`).
-        plan = (ctx.sched.get("REDUCE", op) or ReducePlan()) if isinstance(op, Fold) else None
+        plan = (ctx.sched.get("REDUCE", op) or Reduce()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
-        if plan is None or (plan.coop <= 1 and plan.reg <= 1):
+        # A CHAIN-FORM root (a zero-axis ``Fold`` with no operand edge) carries its reduces as
+        # direct body members, so the partition rides THEM and the root's own plan is always
+        # absent. Two output-spec shapes keep such a root serial: a SWEPT spec has no
+        # lane-distributed close, and a STREAMED spec must splice into its observed fold's reduce
+        # loop, which the trailing append cannot reach once that loop sits in an earlier segment.
+        # The offer mirrors both exclusions.
+        parts = ()
+        # The streamed-store reading, derived ONCE for both arms below (a full tree walk): the
+        # chain gate here, and the degenerate arm's ``apply_output_specs``. Empty without specs,
+        # which is exactly when neither arm asks.
+        observed = observed_result_names(op) if output_specs else frozenset()
+        if (
+            isinstance(op, Fold)
+            and op.axis is None
+            and not op.operands
+            and all(spec.sweep is None and not set(spec.write.values) <= observed for spec in output_specs)
+        ):
+            # A transposed (``coop-t``) band's σ-substitution and guarded close assume the fold is
+            # the kernel ROOT, so the chain arm cannot realize one, and realizing it as a PLAIN
+            # coop band would mint one kernel from two knob spellings. The reduce domain excludes
+            # it under a chain root; excluded here too, a stamped one falls to the serial arm.
+            parts = tuple(
+                (member, p)
+                for member in op.body
+                if isinstance(member, Fold)
+                and member.axis is not None
+                and (p := ctx.sched.get("REDUCE", member)) is not None
+                and (p.coop > 1 or p.reg > 1)
+                and not p.coop_transposed
+            )
+        if parts:
+            state, fold, close, lane = _tile_chain_members(op, parts, ctx, tail, out_val, output_specs)
+            t = replace(t, axes=(lane,)) if lane is not None else t
+            bt = lane.extent.as_static() if lane is not None else None
+        elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
             body = [*_emit(op, ctx, output_specs).body, *tail]
             root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= _projection_results(op.body))
             if root_specs:
-                body = apply_output_specs(body, root_specs)
+                # ``observed`` streams a scan store into its reduce loop; every other spec keeps
+                # its kernel-tail reconstitution.
+                body = apply_output_specs(body, root_specs, observed=observed)
             state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
         elif plan.coop_transposed:
-            # The ``b<n>t`` k-major matvec partition: the innermost output axis splits into a
+            # The ``coop-t`` k-major matvec partition: the innermost output axis splits into a
             # shrunk ``<out>_blk`` grid axis (×32) + the 32-wide ``n_lane`` thread axis (with
             # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
             # output-var references were σ-substituted to ``blk·32 + n_lane`` inside (clamped,
@@ -599,7 +743,7 @@ def emit_combine(
     smem_c = cuda_name(dtype)
     bufs = tuple(f"{st}_smem" for st in state)
     if inner is not None:
-        # The transposed (``b<n>t``) combine: threads sharing an output lane sit ``scale``
+        # The transposed (``coop-t``) combine: threads sharing an output lane sit ``scale``
         # apart in tid, so a shuffle would fold DIFFERENT outputs — always the segment-indexed
         # smem tree: ``n_threads`` k-slices × ``scale`` lanes per slab, each lane's tree
         # halving its own segment (``TreeHalve.inner``).
@@ -662,7 +806,7 @@ def combine_tail(red, *, reg: int, coop: int, lane) -> list[Stmt]:
 def _tile_reduce_axis_transposed(
     op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str
 ) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...]]:
-    """The ``b<n>t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
+    """The ``coop-t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
     ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
     every k step, and ``coop/32`` ``k_co`` slices ride the upper thread bits. The emitted body
     keeps referencing the original output axis var — one σ substitutes it with
@@ -731,8 +875,88 @@ def _tile_reduce_axis_transposed(
     return [], [strided, *merge], tail_stmts, lanes_axes
 
 
+def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[Stmt]:
+    """The partitioned reduce loop for ONE fold — ``reg`` ILP chains striding ``coop·reg`` from the
+    lane's start, then the REG-tree merge and (when threads cooperate) the cross-thread combine.
+    ``rloop`` is the fold's already-emitted serial reduce ``Loop``; the caller owns any prologue
+    ``_emit`` hoisted ahead of it and any smem row-staging rewrite."""
+    coop, reg = plan.coop, plan.reg
+    alg = Reduction(op)
+    axis = rloop.axis
+    stride = coop * reg
+    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
+    start = Var(lane.name) if lane is not None else Literal(0, "int")
+
+    # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
+    # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
+    # accumulator (``StridedLoop.render``).
+    # The shared iteration coordinates (grid + reduce + lane axis vars) and the symbolic
+    # extent's runtime arg(s) (e.g. ``seq_len``) are common to every register copy — exclude
+    # them from the per-copy SSA rename. So too any nested loop-axis variable (a child contraction
+    # contraction's own reduce coordinate ``dd`` / ``j``): ``copy_cell``'s ``rewrite`` renames
+    # a var's USES but not a ``Loop``'s own axis DECLARATION, so suffixing the uses (``dd__r1``)
+    # while the ``for`` decl stays ``dd`` emits an undefined identifier. Each copy re-declares
+    # its own nested loop, so a shared name is correct (loop-scoped).
+    nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
+    # ... and ANY external name the body's index/extent Exprs read without defining — a symbolic
+    # dim can enter through a buffer's flattened STRIDES (a 4-D tensor's ``seq_len``) on an op
+    # whose own reduce extent is static, where none of the named sets above cover it; renaming
+    # such a use (``seq_len__r3``) emits an undeclared identifier (surfaced by the 2026-07-09
+    # offline-weights refit steering dynamic scalar SDPA onto the ILP fold).
+    defined = {nm for s in rloop.body.iter() for nm in s.defines()}
+    expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
+    # ... and the same for the SSA-deps channel: an ``Assign``'s args are name strings ``deps()``
+    # reports and ``exprs()`` does not, so a value defined ahead of the loop (a hoisted scalar
+    # load, a provider chain a cut left before the reduce) and read inside it is invisible to the
+    # Expr scan above. It is one value shared by every copy — renaming its uses (``in3__r1``)
+    # emits an undeclared identifier (surfaced by DeepSeek-V4 post4096's two-cut piece).
+    deps_external = {nm for s in rloop.body.iter() for nm in s.deps()} - defined
+    protected = frozenset(
+        {axis.name, *(ax.name for ax in ctx.grid), *axis.extent_expr().free_vars(), *nested_axes, *expr_external, *deps_external}
+        | ({lane.name} if lane is not None else set())
+    )
+    # A twisted fold's masked tail clamps the STREAMED VALUE to the pivot fold's identity
+    # (the ``exp`` family's running max, −inf) — see :func:`_mask_streamed`'s twisted form.
+    stream_identity = (str(alg.terms[0]), ElementwiseImpl("maximum").identity) if alg.twisted else None
+    copies: list[Stmt] = []
+    for r in range(reg):
+        copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
+    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
+
+    # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor
+    # (copy 0's names) + (when threads cooperate) the cross-thread combine, reassigning the carried
+    # state in place. The one shared tail a cooperative reduce and a future cooperative-K contraction
+    # both emit (``combine_tail``).
+    return [strided, *combine_tail(alg, reg=reg, coop=coop, lane=lane)]
+
+
+def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_val: str) -> list[Stmt]:
+    """The post-reduce projection close. A full-row output (softmax / RMSNorm) distributes its FREE
+    sweep across the coop lanes; a scalar output is written once, guarded to lane 0. With no
+    cooperation (coop == 1) the single thread runs the projection as-is. A raw REDUCE loop in the
+    tail (a restored sibling fold the classifier could not consume) is NOT a sweep: lane striding
+    it would leave each lane an uncombined partial, so it runs SERIALLY per lane — every lane
+    computes the identical full fold, and the tail's unguarded stores stay deterministic because
+    every lane writes the same value."""
+    if lane is None:
+        body_tail = with_store(tail, ctx.output, ctx.grid, out_val)
+    elif any(isinstance(s, Loop) and not s.is_reduce for s in tail):
+        body_tail = [
+            StridedLoop(axis=s.axis, start=Var(lane.name), step=Literal(coop, "int"), body=s.body, unroll=s.unroll)
+            if isinstance(s, Loop) and not s.is_reduce
+            else s
+            for s in tail
+        ]
+    elif any(isinstance(s, Loop) for s in tail):
+        body_tail = list(tail)  # reduce-bearing scalar tail: identical per lane, stores deterministic
+    else:
+        stored = with_store(tail, ctx.output, ctx.grid, out_val)
+        body_tail = [Cond(cond=BinaryExpr("==", Var(lane.name), Literal(0, "int")), body=tuple(stored))]
+    return body_tail
+
+
 def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
-    """Tile the REDUCE axis per the node's cooperating :class:`ReducePlan` — the reduce counterpart
+    """Tile the REDUCE axis per the node's cooperating :class:`Reduce` — the reduce counterpart
     of the output ``unit_tile`` / ``register_tile`` levels: ``coop`` lanes across threads (the
     ``_co`` lane axis, the axis's UNIT level) and ``reg`` ILP chains across per-thread accumulators
     (its REGISTER level — cyclic, copy ``r`` offset by ``r·coop``, the loop striding ``coop·reg``).
@@ -742,7 +966,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     cross-thread combine), the distributed projection close, and the lane :class:`Axis` (``None``
     for standalone ILP — one thread per cell, lane fixed at 0)."""
     grid = ctx.grid
-    coop, reg = plan.coop, plan.reg
+    coop = plan.coop
 
     # Build the per-cell reduce loop via the recursion (:func:`_emit`) off the :class:`Fold`
     # **node** — the walk reaches any nested contraction as a node. The algebra
@@ -751,10 +975,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # ``combine_states`` machinery folds either). A ``Fold`` has no prologue
     # ahead of its loop; the enclosing zero-axis ``Fold``'s projection is ``tail`` (already walked).
     (rloop,) = _emit(op, ctx).body
-    alg = Reduction(op)
     axis = rloop.axis
-    stride = coop * reg
-    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
 
     # The cooperative lane axis (Tile-decoded, innermost) — present only when threads
     # cooperate; standalone ILP (coop == 1) runs one thread per cell, lane fixed at 0.
@@ -787,63 +1008,47 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
         rloop = replace(rloop, body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))
         tail_src = _restage_loads(tail_src, staged, smem_name, n_grid, grid_vars)
 
-    # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
-    # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
-    # accumulator (``StridedLoop.render``).
-    # The shared iteration coordinates (grid + reduce + lane axis vars) and the symbolic
-    # extent's runtime arg(s) (e.g. ``seq_len``) are common to every register copy — exclude
-    # them from the per-copy SSA rename. So too any nested loop-axis variable (a child contraction
-    # contraction's own reduce coordinate ``dd`` / ``j``): ``copy_cell``'s ``rewrite`` renames
-    # a var's USES but not a ``Loop``'s own axis DECLARATION, so suffixing the uses (``dd__r1``)
-    # while the ``for`` decl stays ``dd`` emits an undefined identifier. Each copy re-declares
-    # its own nested loop, so a shared name is correct (loop-scoped).
-    nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
-    # ... and ANY external name the body's index/extent Exprs read without defining — a symbolic
-    # dim can enter through a buffer's flattened STRIDES (a 4-D tensor's ``seq_len``) on an op
-    # whose own reduce extent is static, where none of the named sets above cover it; renaming
-    # such a use (``seq_len__r3``) emits an undeclared identifier (surfaced by the 2026-07-09
-    # offline-weights refit steering dynamic scalar SDPA onto the ILP fold).
-    defined = {nm for s in rloop.body.iter() for nm in s.defines()}
-    expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
-    protected = frozenset(
-        {axis.name, *(ax.name for ax in grid), *axis.extent_expr().free_vars(), *nested_axes, *expr_external}
-        | ({lane.name} if lane is not None else set())
-    )
-    # A twisted fold's masked tail clamps the STREAMED VALUE to the pivot fold's identity
-    # (the ``exp`` family's running max, −inf) — see :func:`_mask_streamed`'s twisted form.
-    stream_identity = (str(alg.terms[0]), ElementwiseImpl("maximum").identity) if alg.twisted else None
-    copies: list[Stmt] = []
-    for r in range(reg):
-        copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
-    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
+    fold = _strided_fold(op, rloop, plan, ctx, lane)
+    return fill_stmts, fold, _lane_close(tail_src, lane, coop, ctx, out_val), lane
 
-    # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor
-    # (copy 0's names) + (when threads cooperate) the cross-thread combine, reassigning the carried
-    # state in place. The one shared tail a cooperative reduce and a future cooperative-K contraction
-    # both emit (``combine_tail``).
-    merge = combine_tail(alg, reg=reg, coop=coop, lane=lane)
 
-    # Post-reduce projection. A full-row output (softmax / RMSNorm) distributes its FREE sweep
-    # across the coop lanes; a scalar output is written once, guarded to lane 0. With no
-    # cooperation (coop == 1) the single thread runs the projection as-is. A raw REDUCE loop in
-    # the tail (a restored sibling fold the classifier could not consume) is NOT a sweep: lane
-    # striding it would leave each lane an uncombined partial, so it runs SERIALLY per lane —
-    # every lane computes the identical full fold, and the tail's unguarded stores stay
-    # deterministic because every lane writes the same value.
-    tail = tail_src
-    if lane is None:
-        body_tail = with_store(tail, ctx.output, grid, out_val)
-    elif any(isinstance(s, Loop) and not s.is_reduce for s in tail):
-        body_tail = [
-            StridedLoop(axis=s.axis, start=Var(lane.name), step=Literal(coop, "int"), body=s.body, unroll=s.unroll)
-            if isinstance(s, Loop) and not s.is_reduce
-            else s
-            for s in tail
-        ]
-    elif any(isinstance(s, Loop) for s in tail):
-        body_tail = list(tail)  # reduce-bearing scalar tail: identical per lane, stores deterministic
-    else:
-        stored = with_store(tail, ctx.output, grid, out_val)
-        body_tail = [Cond(cond=BinaryExpr("==", Var(lane.name), Literal(0, "int")), body=tuple(stored))]
-
-    return fill_stmts, [strided, *merge], body_tail, lane
+def _tile_chain_members(
+    op: Fold, parts: tuple, ctx: Ctx, tail: tuple, out_val: str, output_specs: tuple
+) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
+    """Bind a chain-form root whose direct members carry partitioned reduce plans. Body members
+    emit IN ORDER: a plain segment per cell on every lane (the provider chain — redundant per
+    lane, and the ILP rename's external-name protection keeps its reads shared), each partitioned
+    member as its strided fold + merge (the combine broadcasts in place, so later segments read
+    the merged carrier on every lane), and the trailing segment closes lane-distributed. All
+    cooperating members share ONE lane axis — the walk's one-inventory rule already forced their
+    ``coop`` to agree. Kernel-boundary output specs arrive sweep-free here (the offer keeps every
+    member serial otherwise); a projection region owns its own writes, the rest append as plain
+    root writes."""
+    plans = {id(member): plan for member, plan in parts}
+    coop = max(plan.coop for _, plan in parts)
+    # The lane axis is ONE width for every cooperating member, but each member strides and combines
+    # by its OWN ``plan.coop`` — a disagreeing pair would stride past its elements and combine only
+    # part of the lanes. The walk's one-inventory rule forces the agreement; check it, never assume.
+    assert len({plan.coop for _, plan in parts if plan.coop > 1}) <= 1, "cooperating chain members must share one coop width"
+    head = next(member for member, plan in parts if plan.coop == coop)
+    lane = Axis(name=f"{head.axis.name}_co", extent=coop) if coop > 1 else None
+    fold: list[Stmt] = []
+    segment: list = []
+    for member in op.body:
+        plan = plans.get(id(member))
+        if plan is None:
+            segment.append(member)
+            continue
+        fold.extend(_emit_body(Body(tuple(segment)), ctx, output_specs))
+        segment = []
+        # A member's own hoisted loop-invariant edges belong ahead of its partitioned loop, not
+        # inside it — ``_strided_fold`` takes the reduce ``Loop`` alone.
+        *hoisted, rloop = _emit(member, ctx).body
+        fold.extend(hoisted)
+        fold.extend(_strided_fold(member, rloop, plan, ctx, lane if plan.coop > 1 else None))
+    region_results = _projection_results(op.body)
+    trailing = [
+        *_emit_body(Body(tuple(segment)), ctx, output_specs),
+        *(spec.write for spec in output_specs if not set(spec.write.values) <= region_results),
+    ]
+    return [], fold, _lane_close([*trailing, *tail], lane, coop, ctx, out_val), lane

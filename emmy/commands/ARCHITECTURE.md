@@ -135,6 +135,13 @@ max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
 identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized checkpoints").
+`compile --quantize <scheme>` quantizes a TRACED module's linear weights and compiles the result. It is deliberately
+not a second way to build a quantized graph: `loader/synthesize.py` writes a real checkpoint and the ordinary
+spellers read it, so the program is the one that checkpoint would give and the directory is on disk to inspect
+(`--dump-dir` keeps it, else a temp dir whose path is logged). The weight side is derived from each tensor; the
+activation scale is calibrated over the trace's ONE example input, by modelopt's own formula, and written into the
+checkpoint so the number is readable rather than implied. It needs a linear whose weight is a module parameter —
+`a @ b` over two tensors has none, and says so.
 For isolated frontend-graph runs, the worker returns the symbolic environment used for execution with its benchmark
 result; `run` uses that same binding when rendering dynamic per-kernel grid statistics.
 For a single-layer trace, the loader derives a missing attention `layer_type` from
@@ -183,13 +190,11 @@ remaining live-measurement slot. A traced target normally maps to one post-fusio
 several CudaOps. A conflicting multi-CudaOp proposal is replayable only when search retains the original exact
 structural row that minted the pieces; otherwise it is reported as ambiguous instead of being assigned an invented
 winner. The measured CUDA pipeline captures the finalized single Loop identity even when the working target starts
-from stable Torch IR, then captures the consumed parent at the kernel-set-changing splice. An authoritative structural
-proposal whose realized-pin check passes therefore persists one captured whole-slice perf row under that exact
-route-specific parent cache key and context, carrying the complete scheduler feature row and route. The unpinned Loop
-key remains two-level cost bookkeeping. The measured DB index consumes the route row after a cold reload;
-parent-linked node rows remain diagnostic and training evidence. Proposal feedback is written immediately after
-measurement, before MCTS, so an interruption
-preserves it.
+from stable Torch IR, then captures the consumed parent at the kernel-set-changing splice. That identity enriches the
+parent-linked node rows used for diagnostics and training. A structural whole-slice latency stays in working ranking
+feedback rather than entering `perf`: without an ordered exact child-schedule receipt, the flat parent row would price
+a different assembly after cold reload. Proposal feedback is written immediately after measurement, before MCTS, so
+an interruption preserves it.
 The final winner annotation is emitted only when one directly searched observation supplies both the knobs and cost;
 the later greedy deploy replay cannot be paired with the search reward. The ranking pass stays at tune's fast compile
 flags and never writes the trusted
@@ -210,9 +215,15 @@ process unless `--target` narrows the file to one exact or unambiguous substring
 `--json DIR` writes one readable JSON record per target; there is no repeat or child-process orchestration layer.
 Invoke `emmy run` again when independent process observations are required. Inventory and proposal rows select the
 graph but are not trusted as automatic A/B pins; only verified rows with paired measurements auto-pin, while a
-proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. Embedded Loop IR stores stable algebra rather than
-derived structural stamps. Registered Boolean values in an explicit `--ab` row remain input pins, so false values are
-not dropped with kernel pass markers and the JSON record identifies the inputs that were compiled. A failed row with
+proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. One explicit working target whose matching
+realizations share an identical input-pin regime containing `PLACE` also applies the placement pins from that regime
+to the ordinary compile: the structural target is part of the requested working slice, while its other input pins and
+unverified schedule knobs remain free for the normal deploy evidence hierarchy. Different input-pin regimes under the
+same name leave the ordinary target unpinned rather than choosing one. Canonical selection never gets this
+working-file behavior. Embedded Loop IR stores stable algebra rather than derived structural stamps. Registered
+Boolean values in an explicit `--ab` row remain input pins, so false values are not dropped with kernel pass markers
+and the JSON record identifies the inputs that were compiled. A scoped schedule-key OFF beside a non-OFF bare family
+pin also remains explicit as the exact-site exception to that bare pin. A failed row with
 no realized graph reports the precision lane requested by those parsed input pins, including explicit false
 overrides, rather than defaulting every failure to the standard lane. `run --golden` replays it through the full
 compiler pipeline. When that replay has
@@ -228,6 +239,9 @@ Repeated names that resolve to different embedded targets remain ambiguous;
 qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
 stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel
 rows, so promotion compares aggregate execution rather than a sum of isolated launch windows.
+`--record` attributes that latency to the measured realization by exact name, pins, and knobs; a repeated name alone
+is never enough to choose a row. Newly appended tune winners start without copied latency because the seed row's
+measurement describes a different schedule.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.

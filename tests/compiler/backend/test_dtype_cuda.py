@@ -32,6 +32,29 @@ def test_cuda_name_int_dtypes():
     assert cuda_name("long") == "long long"
 
 
+def test_cuda_name_table_consistent_with_byte_sizes():
+    """Every C spelling in ``_CUDA_NAME`` resolves through ``nbytes_of`` to its dtype's own byte size."""
+    from emmy.compiler.backend.cuda.dtype import _CUDA_NAME
+
+    for dtype, cname in _CUDA_NAME.items():
+        assert nbytes_of(cname) == dtype.nbytes, (dtype.name, cname)
+
+
+def test_every_shared_c_spelling_names_the_dtype_its_inverse_returns():
+    """The table is not injective — one-byte dtypes share ``unsigned char`` — so the inverse must
+    pick, and the pick has to be written down. Dict order would decide it otherwise, invisibly, and
+    the next byte-wide dtype would flip it."""
+    from collections import Counter
+
+    from emmy.compiler.backend.cuda.dtype import _CUDA_NAME, _SHARED_CUDA_NAMES
+
+    shared = {name for name, n in Counter(_CUDA_NAME.values()).items() if n > 1}
+    assert shared == set(_SHARED_CUDA_NAMES), "a C spelling gained or lost a second dtype without a declared winner"
+    for name, canonical in _SHARED_CUDA_NAMES.items():
+        assert canonical_from_cuda_name(name) == canonical
+        assert canonical in {d.name for d, c in _CUDA_NAME.items() if c == name}
+
+
 def test_canonical_from_cuda_name_int_dtypes():
     # The inverse mapping is what ``Smem.render`` consults to recover the
     # canonical DataType from a kernel-internal C name.

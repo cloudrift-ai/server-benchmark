@@ -7,19 +7,29 @@ import json
 import numpy as np
 import pytest
 
+from emmy.compiler.dtype import F8E4M3, decode_f4x2
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.loader.quant import (
+    _fp4_quant_config,
+    _fp8_quant_config,
+    _static_fp4_activation_declared,
     decode_f8,
     decode_mxfp4,
     dequantize,
     dequantize_awq4,
+    dequantize_nvfp4,
+    encode_f4x2,
+    encode_f8,
+    fuse_nvfp4_scales,
+    quantize_nvfp4,
     spell_dynamic_fp8_activations,
     spell_mxfp4_inputs,
     spell_quantized_constants,
     spell_quantized_inputs,
+    spell_static_fp4_activations,
     unpack_awq4,
 )
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
@@ -62,6 +72,60 @@ def test_decode_f8_e5m2_inf():
 def test_decode_f8_preserves_shape():
     bits = rng.integers(0, 256, (4, 6)).astype(np.uint8)
     assert decode_f8(bits, "f8e4m3").shape == (4, 6)
+
+
+# ===================================================================
+# NVFP4 two-level scale math
+# ===================================================================
+
+
+def _e2m1(*, sign: int, exp: int, man: int) -> int:
+    """e2m1 code from its fields: ``[s | e e | m]`` (value ``(-1)^s * (1 + m/2) * 2^(e-1)``, subnormal e=0 → m/2)."""
+    assert 0 <= sign < 2 and 0 <= exp < 4 and 0 <= man < 2, (sign, exp, man)
+    return sign << 3 | exp << 1 | man
+
+
+def _e4m3(*, sign: int, exp: int, man: int) -> int:
+    """e4m3 code from its fields: ``[s | e e e e | m m m]`` (value ``(-1)^s * (1 + m/8) * 2^(e-7)``)."""
+    assert 0 <= sign < 2 and 0 <= exp < 16 and 0 <= man < 8, (sign, exp, man)
+    return sign << 7 | exp << 3 | man
+
+
+def _pack(*, even: int, odd: int) -> int:
+    """One byte from two e2m1 codes: ``b = v_even + 16 * v_odd``."""
+    assert 0 <= even < 16 and 0 <= odd < 16, (even, odd)
+    return even | odd << 4
+
+
+def test_fuse_nvfp4_scales_e4m3_exact_in_f16():
+    # With scale_2 = 1, fusing is the e4m3 decode itself — every finite code must
+    # survive the f16 round-trip exactly (3 mantissa bits, range ±448 ⊂ f16).
+    codes = np.arange(256, dtype=np.uint8)
+    fused = fuse_nvfp4_scales(codes, np.array(1.0, dtype=np.float32))
+    ref = decode_f8(codes, F8E4M3.name)
+    finite = np.isfinite(ref)
+    np.testing.assert_array_equal(fused.astype(np.float32)[finite], ref[finite])
+
+
+def test_dequantize_nvfp4_hand_example():
+    # One row, K=32, two blocks: values 1.0 then 6.0, block scales 2.0 then 1.0, scale_2 = 2.
+    one = _e2m1(sign=0, exp=1, man=0)
+    six = _e2m1(sign=0, exp=3, man=1)
+    packed = np.array([[_pack(even=one, odd=one)] * 8 + [_pack(even=six, odd=six)] * 8], dtype=np.uint8)
+    scale_bits = np.array([[_e4m3(sign=0, exp=8, man=0), _e4m3(sign=0, exp=7, man=0)]], dtype=np.uint8)
+    out = dequantize_nvfp4(packed, scale_bits, np.array(2.0, dtype=np.float32))
+    np.testing.assert_array_equal(out, np.array([[1.0 * 2 * 2] * 16 + [6.0 * 1 * 2] * 16], dtype=np.float32))
+
+
+def test_dequantize_nvfp4_matches_unfused_reference():
+    # Random codes vs an independently-broadcast reference built from the same fused
+    # scale — equality is exact (see the docstring's significand-budget argument).
+    packed = rng.integers(0, 256, (4, 16)).astype(np.uint8)  # logical K = 32
+    scale_bits = rng.integers(0, 0x7F, (4, 2)).astype(np.uint8)  # finite e4m3 codes
+    scale_2 = np.array(0.03125, dtype=np.float32)
+    out = dequantize_nvfp4(packed, scale_bits, scale_2)
+    fused = (decode_f8(scale_bits, F8E4M3.name) * scale_2).astype(np.float16).astype(np.float32)
+    np.testing.assert_array_equal(out, decode_f4x2(packed) * np.repeat(fused, 16, axis=1))
 
 
 # ===================================================================
@@ -116,6 +180,17 @@ def test_dequantize_rejects_rank_mismatch():
 _FP8_QC = {"quant_method": "fp8", "fmt": "e4m3", "activation_scheme": "dynamic", "modules_to_not_convert": []}
 _AWQ_QC = {"quant_method": "awq", "bits": 4, "group_size": 4, "zero_point": True, "version": "gemm"}
 _MXFP4_QC = {"quant_method": "mxfp4", "modules_to_not_convert": ["lm_head"]}
+
+# The two NVFP4 dialects, pruned to the fields the recognizer reads plus ``ignore``
+# (which the spellers consume). Field shapes mirror nvidia/Qwen3-8B-NVFP4 (modelopt)
+# and RedHatAI/Qwen3-8B-NVFP4 (compressed-tensors).
+_FP4_MODELOPT_QC = {"quant_method": "modelopt", "quant_algo": "NVFP4", "ignore": ["lm_head"]}
+_FP4_CT_QC = {
+    "quant_method": "compressed-tensors",
+    "format": "nvfp4-pack-quantized",
+    "config_groups": {"group_0": {"weights": {"type": "float", "num_bits": 4, "group_size": 16}, "targets": ["Linear"]}},
+    "ignore": ["lm_head"],
+}
 
 
 def _write_checkpoint(dirpath, tensors, quant_config=None):
@@ -931,6 +1006,478 @@ def test_checkpoint_quant_digest_separates_rungs_a_config_hash_cannot(tmp_path):
     assert checkpoint_quant_summary(plain) == "unquantized"
 
 
+def _config_dir(tmp_path, name, qc):
+    d = tmp_path / name
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({"model_type": "test", "quantization_config": qc}))
+    return d
+
+
+def test_fp4_quant_config_recognizes_both_dialects(tmp_path):
+    for name, qc in (("modelopt", _FP4_MODELOPT_QC), ("ct", _FP4_CT_QC)):
+        assert _fp4_quant_config(_config_dir(tmp_path, name, qc)) == qc
+
+
+def test_fp4_quant_config_rejects_other_schemes(tmp_path):
+    mxfp4 = {
+        "quant_method": "compressed-tensors",
+        "config_groups": {"group_0": {"weights": {"type": "float", "num_bits": 4, "group_size": 32}}},
+    }
+    modelopt_fp8 = {"quant_method": "modelopt", "quant_algo": "FP8"}
+    for name, qc in (("mxfp4", mxfp4), ("modelopt-fp8", modelopt_fp8), ("fp8", _FP8_QC)):
+        assert _fp4_quant_config(_config_dir(tmp_path, name, qc)) is None
+    assert _fp4_quant_config(tmp_path / "absent") is None
+
+
+def test_fp4_and_fp8_recognizers_do_not_cross_match(tmp_path):
+    """A family system fails at the seams: each recognizer must decline the other's PURE
+    checkpoints — one whose every quantized leaf is the other scheme. That is the whole contract;
+    a checkpoint that really does hold both is the MIXED case below, where both must answer."""
+    fp4_dir = _config_dir(tmp_path, "fp4", _FP4_CT_QC)
+    fp8_dir = _config_dir(tmp_path, "fp8", _FP8_QC)
+    assert _fp8_quant_config(fp4_dir) is None
+    assert _fp4_quant_config(fp8_dir) is None
+    assert _fp4_quant_config(_config_dir(tmp_path, "modelopt-nvfp4", _FP4_MODELOPT_QC)) is not None
+    assert _fp8_quant_config(_config_dir(tmp_path, "modelopt-nvfp4-b", _FP4_MODELOPT_QC)) is None
+
+
+# ===================================================================
+# MIXED_PRECISION: one checkpoint, two schemes, sorted per leaf
+# ===================================================================
+
+# modelopt's form for a checkpoint whose schemes differ by leaf (the nvidia/Qwen3.6-27B-NVFP4
+# shape): the algo names no single scheme, and one config group per scheme carries the widths
+# instead. The ignore entry here exercises the mechanism; the real 27B ignores mtp*, not lm_head
+# (its lm_head is NVFP4).
+_MIXED_QC = {
+    "quant_method": "modelopt",
+    "quant_algo": "MIXED_PRECISION",
+    "ignore": ["lm_head"],
+    "config_groups": {
+        "group_0": {"weights": {"type": "float", "num_bits": 8}, "input_activations": {"type": "float", "num_bits": 8}, "targets": ["a"]},
+        "group_1": {"weights": {"type": "float", "num_bits": 4, "group_size": 16}, "targets": ["b"]},
+    },
+}
+
+
+def _mixed_checkpoint(dirpath):
+    """One checkpoint holding a leaf of each scheme plus an unquantized one — the three sibling
+    signatures the per-leaf sort has to tell apart. Returns the oracle values."""
+    dirpath.mkdir(exist_ok=True)
+    f8_bits = _finite_bits((8, 16))
+    f8_scale = np.float32(0.25).reshape(())
+    packed = rng.integers(0, 256, (8, 16)).astype(np.uint8)  # 8 x 32 logical
+    blk = rng.integers(0, 0x7F, (8, 2)).astype(np.uint8)
+    s2 = np.array(0.5, dtype=np.float32)
+    plain = rng.standard_normal((8, 16)).astype(np.float16)
+    _write_checkpoint(
+        dirpath,
+        {
+            "f8.weight": _fp8_tensor(f8_bits),
+            "f8.weight_scale": torch.from_numpy(np.asarray(f8_scale)),
+            "f4.weight": torch.from_numpy(packed),
+            "f4.weight_scale": _fp8_tensor(blk),
+            "f4.weight_scale_2": torch.tensor(float(s2), dtype=torch.float32),
+            "plain.weight": torch.from_numpy(plain),
+        },
+        quant_config=_MIXED_QC,
+    )
+    return {
+        "f8": decode_f8(f8_bits, "f8e4m3").astype(np.float32) * f8_scale,
+        "f4": dequantize_nvfp4(packed, blk, s2),
+        "plain": plain,
+    }
+
+
+def test_mixed_precision_answers_both_recognizers(tmp_path):
+    """The declaration names no single scheme, so each recognizer reads the config groups for its
+    own width — and both are present, which is what MIXED means."""
+    d = _config_dir(tmp_path, "mixed", _MIXED_QC)
+    assert _fp8_quant_config(d) is not None
+    assert _fp4_quant_config(d) is not None
+
+
+def test_mixed_precision_summary_names_both_schemes(tmp_path):
+    """A boot log naming one scheme would misreport half the model."""
+    from emmy.compiler.loader.quant import checkpoint_quant_summary
+
+    d = _config_dir(tmp_path, "mixed", _MIXED_QC)
+    assert checkpoint_quant_summary(d) == "mixed fp8+nvfp4 modelopt"
+
+
+def test_mixed_precision_declines_when_only_one_scheme_is_declared(tmp_path):
+    """The arm reads the GROUPS, not the algo string: a MIXED declaration carrying only 8-bit
+    groups is an fp8 checkpoint and must not pull in the NVFP4 speller."""
+    only8 = {**_MIXED_QC, "config_groups": {"g": {"weights": {"type": "float", "num_bits": 8}}}}
+    only4 = {**_MIXED_QC, "config_groups": {"g": {"weights": {"type": "float", "num_bits": 4, "group_size": 16}}}}
+    mx = {**_MIXED_QC, "config_groups": {"g": {"weights": {"type": "float", "num_bits": 4, "group_size": 32}}}}
+    assert _fp4_quant_config(_config_dir(tmp_path, "only8", only8)) is None
+    assert _fp8_quant_config(_config_dir(tmp_path, "only8b", only8)) is not None
+    assert _fp8_quant_config(_config_dir(tmp_path, "only4", only4)) is None
+    assert _fp4_quant_config(_config_dir(tmp_path, "only4b", only4)) is not None
+    assert _fp4_quant_config(_config_dir(tmp_path, "mx", mx)) is None, "32-element blocks are MXFP4, not NVFP4"
+
+
+def test_mixed_precision_sorts_leaves_by_their_stored_siblings(tmp_path):
+    """The load-bearing claim: widening the recognizers is ENOUGH, because which speller takes a
+    leaf was never a config question. The fp8 pair, the NVFP4 trio and the bare tensor sort
+    themselves, and each decodes to its own oracle."""
+    from emmy.compiler.loader.quant import load_dequantized_state_dict
+
+    d = tmp_path / "mixed"
+    want = _mixed_checkpoint(d)
+    sd = load_dequantized_state_dict(d)
+    np.testing.assert_allclose(sd["f8.weight"], want["f8"], rtol=1e-6)
+    np.testing.assert_array_equal(sd["f4.weight"], want["f4"])
+    np.testing.assert_array_equal(sd["plain.weight"], want["plain"])
+    for gone in ("f8.weight_scale", "f4.weight_scale", "f4.weight_scale_2"):
+        assert gone not in sd, f"{gone} survived as its own entry"
+
+
+def test_mixed_precision_spells_each_leaf_into_its_own_cone(tmp_path):
+    """The graph side of the same sort: the fp8 leaf spells the fp8 decode cone, the packed leaf
+    the NVFP4 one, and the plain leaf is left alone — one pass over one checkpoint."""
+    d = tmp_path / "mixed"
+    want = _mixed_checkpoint(d)
+    g = Graph()
+    leaves = (("w8", "f8.weight", (8, 16), "f32"), ("w4", "f4.weight", (8, 32), "f32"), ("wp", "plain.weight", (8, 16), "f16"))
+    for name, path, shape, dt in leaves:
+        op = ConstantOp(name=name, source_path=path, source_shape=shape, source_dtype=dt)
+        g.add_node(op=op, inputs=[], output=Tensor(name, shape, dt), node_id=name)
+    g.inputs, g.outputs = [], ["w8", "w4", "wp"]
+    assert spell_quantized_constants(g, str(d)) == 2, "both quantized leaves spell; the plain one does not"
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    data = load_constants_from_safetensors(g, str(d))
+    result, _ = NumpyBackend().run(g, input_data=data)
+    np.testing.assert_allclose(result.outputs["w8"], want["f8"], rtol=1e-6)
+    np.testing.assert_array_equal(result.outputs["w4"], want["f4"])
+    np.testing.assert_allclose(result.outputs["wp"], want["plain"].astype(np.float16))
+
+
+def _nvfp4_checkpoint(dirpath, *, prefix="layer", ignore=("lm_head",)):
+    """Single NVFP4-quantized linear (K=32) + config; returns (packed, scale_bits, s2)."""
+    packed = rng.integers(0, 256, (8, 16)).astype(np.uint8)
+    scale_bits = rng.integers(0, 0x7F, (8, 2)).astype(np.uint8)  # finite e4m3 codes
+    dirpath.mkdir(exist_ok=True)
+    _write_checkpoint(
+        dirpath,
+        {
+            f"{prefix}.weight": torch.from_numpy(packed),
+            f"{prefix}.weight_scale": _fp8_tensor(scale_bits),
+            f"{prefix}.weight_scale_2": torch.tensor(0.25, dtype=torch.float32),
+        },
+        quant_config={**_FP4_MODELOPT_QC, "ignore": list(ignore)},
+    )
+    return packed, scale_bits, np.array(0.25, dtype=np.float32)
+
+
+def test_spell_nvfp4_matches_oracle(tmp_path):
+    packed, scale_bits, s2 = _nvfp4_checkpoint(tmp_path)
+    g = _weight_graph(shape=(8, 32), dtype="f32", source_path="layer.weight")
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    np.testing.assert_array_equal(_run_spelled(g, str(tmp_path)), dequantize_nvfp4(packed, scale_bits, s2))
+
+
+def test_spell_nvfp4_idempotent(tmp_path):
+    _nvfp4_checkpoint(tmp_path)
+    g = _weight_graph(shape=(8, 32), dtype="f32", source_path="layer.weight")
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
+
+
+def test_spell_nvfp4_respects_ignore(tmp_path):
+    _nvfp4_checkpoint(tmp_path, prefix="lm_head")
+    g = _weight_graph(shape=(8, 32), dtype="f32", source_path="lm_head.weight")
+    assert spell_quantized_constants(g, str(tmp_path)) == 0
+
+
+def test_spell_nvfp4_casts_only_where_the_dtype_changes(tmp_path):
+    """Every ``copy`` the cone spells must change its dtype. The cone's two cast arms (the
+    pair table's cast off f32, the fused scale's cast off f16) fire only when the promised
+    dtype differs; an arm firing without a dtype change is a redundant identity node the
+    packed-B reading then has to look through. (The arms once compared a ``DataType``
+    against a string — never equal — so both always fired.)"""
+
+    def all_graphs(root):
+        yield root
+        for _nid, op in root.loadable_constants():
+            if op.source_graph is not None:
+                yield from all_graphs(op.source_graph)
+
+    for dtype in ("f32", "f16"):
+        d = tmp_path / dtype
+        d.mkdir()
+        _nvfp4_checkpoint(d)
+        g = _weight_graph(shape=(8, 32), dtype=dtype, source_path="layer.weight")
+        assert spell_quantized_constants(g, str(d)) == 1
+        for sub in all_graphs(g):
+            for node in sub.nodes.values():
+                if isinstance(node.op, ElementwiseOp) and node.op.name == "copy":
+                    (src,) = node.inputs
+                    if node.output.dtype == sub.nodes[src].output.dtype:
+                        raise AssertionError(f"identity copy {node.output.name!r} in the {dtype} cone")
+
+
+def _nvfp4_matmul_graph(tmp_path):
+    """x [4, 32] @ dequant(w).T — the spelled cone feeding a matmul consumer."""
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp, TransposeOp
+
+    packed, scale_bits, s2 = _nvfp4_checkpoint(tmp_path)
+    g = Graph()
+    x_in = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, 32), "f32"), node_id="x")
+    w = g.add_node(
+        op=ConstantOp(name="w", source_path="layer.weight", source_shape=(8, 32), source_dtype="f32"),
+        inputs=[],
+        output=Tensor("w", (8, 32), "f32"),
+        node_id="w",
+    )
+    wt = g.add_node(op=TransposeOp(axes=(1, 0)), inputs=[w], output=Tensor("wt", (32, 8), "f32"))
+    y = g.add_node(op=MatmulOp(), inputs=[x_in, wt], output=Tensor("y", (4, 8), "f32"))
+    g.outputs = [y]
+    g.inputs = [x_in]
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    return g, y, (packed, scale_bits, s2)
+
+
+# ===================================================================
+# Static 4-bit activations — the W4A4 declared program's activation half
+# ===================================================================
+
+#: The 8B's own declaration shape: config_groups marking input_activations 4-bit static float.
+_W4A4_MODELOPT_QC = {
+    **_FP4_MODELOPT_QC,
+    "config_groups": {
+        "group_0": {
+            "input_activations": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16},
+            "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16},
+            "targets": ["Linear"],
+        }
+    },
+}
+
+
+def _w4a4_checkpoint(dirpath, modules, *, k=32, qc=_W4A4_MODELOPT_QC):
+    """NVFP4 weight trio + static ``input_scale`` per module — the 8B's marking at toy shape.
+
+    ``modules`` maps a module name to ``(n, input_scale)``; ``input_scale=None`` writes no
+    activation marker for that module. Returns each module's ``(packed, scale_bits)``."""
+    tensors, data = {}, {}
+    for name, (n, iscale) in modules.items():
+        packed = rng.integers(0, 256, (n, k // 2)).astype(np.uint8)
+        scale_bits = rng.integers(0, 0x7F, (n, k // 16)).astype(np.uint8)
+        tensors[f"{name}.weight"] = torch.from_numpy(packed)
+        tensors[f"{name}.weight_scale"] = _fp8_tensor(scale_bits)
+        tensors[f"{name}.weight_scale_2"] = torch.tensor(0.25, dtype=torch.float32)
+        if iscale is not None:
+            tensors[f"{name}.input_scale"] = torch.tensor(iscale, dtype=torch.float32)
+        data[name] = (packed, scale_bits)
+    dirpath.mkdir(exist_ok=True)
+    _write_checkpoint(dirpath, tensors, quant_config=qc)
+    return data
+
+
+def _w4a4_graph(modules, *, k=32, dtype="f32"):
+    """One shared activation feeding a ``LinearOp`` per module — q/k/v's shape at toy size."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4, k), dtype), node_id="x")
+    outs = []
+    for name, n in modules.items():
+        w = g.add_node(
+            op=ConstantOp(name=name, source_path=f"{name}.weight", source_shape=(n, k), source_dtype=dtype),
+            inputs=[],
+            output=Tensor(f"{name}_w", (n, k), dtype),
+            node_id=f"{name}_w",
+        )
+        outs.append(g.add_node(op=LinearOp(), inputs=["x", w], output=Tensor(f"{name}_y", (4, n), dtype), node_id=f"{name}_y"))
+    g.inputs, g.outputs = ["x"], outs
+    return g
+
+
+def _static_quantize_ref(x, s2):
+    """The spelled quantize's numpy twin: :func:`quantize_nvfp4` with the static ``s2``, the
+    divisor floored the way the graph floors it (a zero fused scale divides by the floor; the
+    decode multiplies those blocks back to zero either way)."""
+    blocks = x.astype(np.float32).reshape(*x.shape[:-1], -1, 16)
+    scale_bits = encode_f8(np.abs(blocks).max(axis=-1) / 6.0 / s2, "f8e4m3")
+    fused = fuse_nvfp4_scales(scale_bits, np.float32(s2).reshape(1)).astype(np.float32)
+    quot = blocks / np.maximum(fused[..., None], 1e-12)
+    return dequantize_nvfp4(encode_f4x2(quot.reshape(x.shape)), scale_bits, np.float32(s2).reshape(1))
+
+
+def _count_encodes(g):
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp as EW
+
+    return sum(1 for n in g.nodes.values() if isinstance(n.op, EW) and n.op.name == "to_f4e2m1")
+
+
+def test_spell_static_fp4_matches_the_quantize_oracle(tmp_path):
+    """numpy on the spelled W4A4 graph equals the declared round trip built from the repo's own
+    encode primitives: x̂ @ ŵᵀ with x̂ the static-scale quantize of x. A zeroed block rides along
+    to pin the zero-guard (its codes multiply back to zero, never NaN)."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    s2 = 0.03
+    (packed, scale_bits) = _w4a4_checkpoint(tmp_path, {"layer": (8, s2)})["layer"]
+    g = _w4a4_graph({"layer": 8})
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 1
+
+    x = (rng.standard_normal((4, 32)) * 0.5).astype(np.float32)
+    x[1, :16] = 0.0
+    data = load_constants_from_safetensors(g, str(tmp_path))
+    result, _ = NumpyBackend().run(g, input_data={**data, "x": x})
+    got = result.outputs["layer_y"]
+    ref = _static_quantize_ref(x, s2) @ dequantize_nvfp4(packed, scale_bits, np.array(0.25, dtype=np.float32)).T
+    assert not np.any(np.isnan(got))
+    np.testing.assert_allclose(got, ref, rtol=1e-6, atol=1e-6)
+
+
+def test_spell_static_fp4_shares_equal_scales_and_splits_unequal(tmp_path):
+    """q/k share one calibrated scale value and must share ONE quantize chain; v carries its own
+    value and quantizes separately — two encodes for three rewired linears."""
+    _w4a4_checkpoint(tmp_path, {"q": (8, 0.03), "k": (8, 0.03), "v": (8, 0.07)})
+    g = _w4a4_graph({"q": 8, "k": 8, "v": 8})
+    assert spell_quantized_constants(g, str(tmp_path)) == 3
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 3
+    assert _count_encodes(g) == 2
+
+
+def test_spell_static_fp4_requires_the_per_linear_marker(tmp_path):
+    """A module without its ``input_scale`` keeps its 16-bit activation even when the config
+    declares the scheme — the per-linear tensor is the marker, and eligibility is per linear."""
+    _w4a4_checkpoint(tmp_path, {"a": (8, 0.03), "b": (8, None)})
+    g = _w4a4_graph({"a": 8, "b": 8})
+    assert spell_quantized_constants(g, str(tmp_path)) == 2
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 1
+    assert _count_encodes(g) == 1
+
+
+def test_spell_static_fp4_is_idempotent(tmp_path):
+    _w4a4_checkpoint(tmp_path, {"layer": (8, 0.03)})
+    g = _w4a4_graph({"layer": 8})
+    spell_quantized_constants(g, str(tmp_path))
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 1
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 0
+
+
+def test_static_fp4_declaration_reader():
+    """The config-level reader: 4-bit static input_activations declare; dynamic or absent
+    activation groups decline; a bare modelopt NVFP4 config (no ``config_groups``) defers to the
+    per-linear marker and declares."""
+    assert _static_fp4_activation_declared(_W4A4_MODELOPT_QC)
+    assert _static_fp4_activation_declared(_FP4_MODELOPT_QC), "bare modelopt: input_scale siblings are the marker"
+    assert not _static_fp4_activation_declared(_FP4_CT_QC), "weights-only groups do not mark activations"
+    dyn = {**_W4A4_MODELOPT_QC, "config_groups": {"g": {"input_activations": {"dynamic": True, "num_bits": 4, "type": "float"}}}}
+    assert not _static_fp4_activation_declared(dyn), "a dynamic declaration is not the static path"
+
+
+def test_both_loaders_bind_an_f8_bits_constant_identically(tmp_path):
+    """The DOUBLE-DECODE guard: the graph-keyed and plan-keyed loaders must agree bit-for-bit.
+
+    An NVFP4 block scale is stored e4m3 and consumed as an ``f8e4m3`` graph constant, which its own
+    ``from_f8e4m3`` cone decodes. The graph-keyed loader keys that raw-bits rule on the node's
+    dtype. The plan-keyed loader reaches the checkpoint without a graph, so its caller supplies the
+    same rule from ``WeightSpec.graph_dtype``. Before that field existed the plan-keyed read
+    decoded the scales to f32, the cone decoded them AGAIN, and serving computed silently wrong
+    numbers while every kernel compiled and ran.
+
+    The third assertion is the point: without the flag the two loaders genuinely disagree, so the
+    flag is what makes them agree rather than the checkpoint happening to be read the same way.
+    """
+    from emmy.compiler.loader.quant import F8_SAFETENSORS_DTYPES
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors, load_sources_by_path
+
+    g, _y, _ = _nvfp4_matmul_graph(tmp_path)
+    f8 = set(F8_SAFETENSORS_DTYPES.values())
+    bits = {
+        nid: op.source_path for nid, op in g.loadable_constants() if op.source_path is not None and g.nodes[nid].output.dtype.name in f8
+    }
+    assert bits, "the spelled NVFP4 graph must carry an f8-dtype constant for this to test anything"
+
+    by_graph = load_constants_from_safetensors(g, str(tmp_path))
+    by_path = load_sources_by_path(str(tmp_path), set(bits.values()), bits_paths=frozenset(bits.values()))
+    decoded = load_sources_by_path(str(tmp_path), set(bits.values()))
+
+    for nid, path in bits.items():
+        want, got = np.asarray(by_graph[nid]), np.asarray(by_path[path])
+        assert want.dtype == np.uint8, f"{nid}: an f8-dtype constant binds RAW BITS, got {want.dtype}"
+        assert want.dtype == got.dtype, f"{nid}: {want.dtype} through the graph, {got.dtype} through the plan"
+        np.testing.assert_array_equal(want, got, err_msg=f"{nid} binds different bytes through the two loaders")
+        assert np.asarray(decoded[path]).dtype != np.uint8, "without the flag the plan-keyed read decodes — the bug this guards"
+
+
+def test_spelled_nvfp4_matmul_matches_oracle(tmp_path):
+    """The spelled graph's numpy execution: matmul through the decode cone equals the
+    oracle. Runs on graph-op forwards (pre-lowering), so it needs no Cling."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    g, y, (packed, scale_bits, s2) = _nvfp4_matmul_graph(tmp_path)
+    x = rng.random((4, 32)).astype(np.float32)
+    data = load_constants_from_safetensors(g, str(tmp_path))
+    result, _ = NumpyBackend().run(g, input_data={**data, "x": x})
+    ref = x @ dequantize_nvfp4(packed, scale_bits, s2).T
+    np.testing.assert_allclose(result.outputs[y], ref, rtol=1e-6)
+
+
+def test_spelled_nvfp4_matmul_fuses_into_one_loop(tmp_path):
+    """Baseline of the pre-kernel-phase lowering: the cone survives constant folding
+    and loop fusion folds the decode into the consumer's single LoopOp — no
+    materialized decoded weight between kernels. Structure only; LoopOp execution
+    goes through the Cling JIT and is covered by the CUDA/CI lanes."""
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+    g, _y, _ = _nvfp4_matmul_graph(tmp_path)
+    lowered = Pipeline.build(LOOP_PASSES).run(g)
+    loops = [nid for nid, n in lowered.nodes.items() if type(n.op).__name__ == "LoopOp"]
+    assert len(loops) == 1, f"decode did not fuse into the matmul loop nest: {loops}"
+    consts = {nid for nid, n in lowered.nodes.items() if isinstance(n.op, ConstantOp)}
+    assert consts == {"w_bits", "w_f4_pairs", "w_scale_bits", "w_scale_2"}
+
+
+def test_is_quantized_dir_recognizes_nvfp4(tmp_path):
+    # The trace-side quantized-checkpoint check: an NVFP4 checkpoint must take the
+    # quantized-twin path. Plain from_pretrained skips the unknown modelopt scheme
+    # with a warning, loads raw tensors, and dies on the packed [N, K/2] shape
+    # mismatches.
+    from emmy.compiler.trace.huggingface import _is_quantized_dir
+
+    _nvfp4_checkpoint(tmp_path)
+    assert _is_quantized_dir(tmp_path)
+
+
+def test_load_dequantized_state_dict_nvfp4(tmp_path):
+    """The twin read of a synthetic NVFP4 checkpoint: the packed trio dequantizes to the
+    oracle's exact values, consumed scales drop, activation-quant metadata and bf16
+    modules pass through, and the boot summary names the dialect."""
+    from emmy.compiler.loader.quant import checkpoint_quant_summary, load_dequantized_state_dict
+
+    packed = rng.integers(0, 256, (2, 16)).astype(np.uint8)  # logical K = 32
+    scale_bits = np.array([[_e4m3(sign=0, exp=8, man=0), _e4m3(sign=0, exp=7, man=4)]] * 2, dtype=np.uint8)
+    d = tmp_path / "nvfp4"
+    d.mkdir()
+    _write_checkpoint(
+        d,
+        {
+            "layer.weight": torch.from_numpy(packed),
+            "layer.weight_scale": _fp8_tensor(scale_bits),
+            "layer.weight_scale_2": torch.tensor(0.25, dtype=torch.float32),
+            "layer.input_scale": torch.tensor(1.5, dtype=torch.float32),
+            "emb.weight": torch.randn(4, 8, dtype=torch.bfloat16),
+        },
+        quant_config=_FP4_MODELOPT_QC,
+    )
+
+    sd = load_dequantized_state_dict(d)
+    np.testing.assert_array_equal(sd["layer.weight"], dequantize_nvfp4(packed, scale_bits, np.array(0.25, dtype=np.float32)))
+    assert "layer.weight_scale" not in sd and "layer.weight_scale_2" not in sd
+    assert sd["layer.input_scale"] == np.float32(1.5)
+    assert sd["emb.weight"].shape == (4, 8)
+    assert checkpoint_quant_summary(d) == "nvfp4 modelopt"
+
+
 def test_is_exl3_checkpoint_is_the_narrow_coded_trunk_decision(tmp_path):
     from emmy.compiler.loader.quant import is_exl3_checkpoint
 
@@ -1125,8 +1672,11 @@ def _assert_e2e_gate(emmy_logits, ref_logits, label):
 
 @requires_cuda
 @pytest.mark.skip(
-    reason="greedy flattens the fused dequant-cone schedule pool to score it (the lazify-greedy roadblock): "
-    "measured 2026-08 on a 5090 box, the compile burns >100 s inside iter_leaves at 1.7 GB RSS and climbing"
+    reason="the cold-pool budget bounds the compile (minutes, was >100 s in enumeration alone), but a drawn schedule "
+    "row exposes a knob path-codec collision: the ordinal arm mints '<axis><ordinal>' with abutting digits (a13 + 1 "
+    "-> 'a131'), which collides with a literal a131 axis and resolve() raises 'knob key ... is ambiguous' naming the "
+    "input itself as a candidate (2026-08-28). A canonical spelling must round-trip to its own site — the tree-path "
+    "codec redesign owns this; repro is this test"
 )
 def test_quantized_checkpoint_e2e_cuda(tmp_path):
     """Whole tiny quantized model through the same seam ``emmy compile`` / ``emmy run`` use,
@@ -1159,6 +1709,7 @@ _FRONTEND_BAND_ALLOWLIST = {
     "emmy/compiler/loader/exl3.py",  # EXL3 format reader: the trellis decode + the weight-free allocation sidecar
     "emmy/compiler/loader/quant.py",  # the speller + scheme detection + dequant math
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
+    "emmy/compiler/loader/synthesize.py",  # writes the checkpoint ``--quantize`` then reads back through the speller
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection
     "emmy/serving/vllm_model_gen.py",  # loader-role: routes checkpoint keys (scale siblings included) into the fork's attention
 }
@@ -1177,3 +1728,62 @@ def test_quantization_concepts_stay_in_the_frontend_band():
         "code may key on dtypes and the decode trait, never on checkpoint formats or scale "
         "pairing (see the invariant comment above)."
     )
+
+
+def test_quantize_nvfp4_returns_the_checkpoint_carriers():
+    # The trio must be storable as-is: packed pairs halve the last axis, one e4m3 scale per 16
+    # elements, one f32 for the tensor.
+    x = np.random.default_rng(0).standard_normal((3, 64)).astype(np.float32)
+    packed, scale_bits, scale_2 = quantize_nvfp4(x)
+    assert (packed.dtype, packed.shape) == (np.uint8, (3, 32))
+    assert (scale_bits.dtype, scale_bits.shape) == (np.uint8, (3, 4))
+    assert (scale_2.dtype, scale_2.shape) == (np.float32, (1,))
+    # Non-negative block scales, so the same bits read as the unsigned ue4m3 the hardware wants.
+    assert not (scale_bits >> 7).any()
+
+
+def test_quantize_nvfp4_stays_within_the_format_over_a_wide_range():
+    # Rows three decades apart, which is the case a single scale level would clip. The bound is
+    # the format's own: within a block the largest magnitude maps to 6.0, where the grid steps by
+    # 2, so nearest-rounding cannot miss by more than 1 in 6 of that block's largest value.
+    rng = np.random.default_rng(0)
+    x = (rng.standard_normal((3, 64)) * np.array([[0.01], [1.0], [80.0]])).astype(np.float32)
+    back = dequantize_nvfp4(*quantize_nvfp4(x))
+    block_amax = np.abs(x).reshape(3, 4, 16).max(axis=-1).repeat(16, axis=-1).reshape(3, 64)
+    assert (np.abs(back - x) <= block_amax / 6 + 1e-6).all()
+
+
+def test_quantize_nvfp4_is_idempotent_through_a_dequantize():
+    # Values already ON the grid must quantize to themselves, which is what makes the pair a
+    # round trip rather than a lossy pass that keeps drifting.
+    x = np.random.default_rng(1).standard_normal((2, 32)).astype(np.float32)
+    once = dequantize_nvfp4(*quantize_nvfp4(x))
+    np.testing.assert_array_equal(dequantize_nvfp4(*quantize_nvfp4(once)), once)
+
+
+def test_quantize_nvfp4_keeps_a_zero_block_zero():
+    packed, scale_bits, scale_2 = quantize_nvfp4(np.zeros((1, 16), dtype=np.float32))
+    assert not dequantize_nvfp4(packed, scale_bits, scale_2).any()
+
+
+def test_quantize_nvfp4_rejects_a_ragged_last_axis():
+    with pytest.raises(AssertionError):
+        quantize_nvfp4(np.zeros((1, 20), dtype=np.float32))
+
+
+@pytest.mark.parametrize("magnitude", [0.0, 1e-42, 1e-30])
+def test_quantize_nvfp4_survives_a_vanishing_tensor(magnitude):
+    # Without a floor on the tensor amax, scale_2 underflows to zero and the block-scale division
+    # blows up. The result stays finite and stays zero.
+    x = np.full((1, 16), magnitude, dtype=np.float32)
+    packed, scale_bits, scale_2 = quantize_nvfp4(x)
+    assert scale_2[0] > 0
+    back = dequantize_nvfp4(packed, scale_bits, scale_2)
+    assert np.isfinite(back).all()
+
+
+def test_quantize_nvfp4_rejects_a_tensor_too_large_for_an_f16_fused_scale():
+    # fuse_nvfp4_scales hands back f16, so a tensor whose block scale overflows f16 has no
+    # representable fused scale — an error beats a silent inf.
+    with pytest.raises(AssertionError, match="f16 fused scale"):
+        quantize_nvfp4(np.full((1, 16), 3e38, dtype=np.float32))

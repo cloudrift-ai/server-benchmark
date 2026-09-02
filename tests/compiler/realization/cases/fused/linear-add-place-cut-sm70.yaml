@@ -1,0 +1,41 @@
+# evidence: A measured PLACE=cut route for the Qwen3 down projection must remain a deployable two-kernel realization.
+compute_cap:
+- 7
+- 0
+programs:
+- inputs: [add_5, mul_12, p_mlp_down_proj_weight]
+  outputs: [add_7]
+  nodes:
+  - id: add_5
+    op: input
+    outputs: [[add_5, f16, [1, 512, 1024]]]
+  - id: mul_12
+    op: input
+    outputs: [[mul_12, f16, [1, 512, 3072]]]
+  - id: p_mlp_down_proj_weight
+    op: input
+    outputs: [[p_mlp_down_proj_weight, f16, [1024, 3072]]]
+  - id: linear_6
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [mul_12, p_mlp_down_proj_weight]
+    outputs: [[linear_6, f16, [1, 512, 1024]]]
+  - id: add_7
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [add_5, linear_6]
+    outputs: [[add_7, f16, [1, 512, 1024]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - add_7
+    - linear_6
+  realizations:
+  - name: k_linear_86a1f4.e5633fbc1f1b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+      PLACE: cut
+    knobs: {}
+    identity: 66934f327785a2a558139365cdd921cc02901fc063c17fd91dbac91b58809cb7

@@ -24,9 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 def register_run_command(subparsers):
+    from emmy.commands.compile import add_quantize_arg  # noqa: PLC0415
     from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
 
     parser = subparsers.add_parser("run", help="Compile + run a model / inline torch expression on the CUDA backend")
+    add_quantize_arg(parser)
     parser.add_argument(
         "input",
         nargs="?",
@@ -291,6 +293,11 @@ def _handle_run_once(args):
     # Model ID or --code: trace to a frontend graph + keep the runnable module
     # (+ example inputs) so accuracy / --bench compare against real torch.
     graph, _base_name, bundle = load_or_trace(args)
+    quantized_checkpoint = None
+    if getattr(args, "quantize", None):
+        from emmy.commands.compile import _quantize_traced  # noqa: PLC0415
+
+        quantized_checkpoint = _quantize_traced(graph, bundle, args)
     module, example_args, example_kwargs = bundle
 
     dump = CompilerDump.resolve(args.dump_dir)
@@ -311,13 +318,21 @@ def _handle_run_once(args):
     # table needs the cuBLAS / aten kernel rows in the captured CSV beside
     # the ``k_*`` rows.
     skip_accuracy = config.ncu_child()
+    # ``--quantize`` compiles a DIFFERENT program from the module it traced, on purpose: the
+    # graph declares the quantization, so eager torch is no longer its reference and the eager
+    # tolerance is not a statement about this program. The comparison still runs and still
+    # prints — the delta it reports IS the quantization error, which is worth seeing — but it
+    # stops gating. The oracle for a quantized program is the numpy backend on the same graph.
+    quantized = bool(getattr(args, "quantize", None))
+    if quantized:
+        logger.info("--quantize: eager torch is the UNQUANTIZED module, so its delta is reported, not enforced")
 
     if not args.bench:
         # No bench: the accuracy probe is the command's whole GPU action. It stays
         # in-process — the ``--debug`` per-launch dumps and the ncu child's profiled
         # launches live here — so a hung kernel still poisons this process's stream.
         try:
-            input_data = _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=args.input)
+            input_data = _bind_inputs(compiled, module, example_args, example_kwargs, checkpoint=quantized_checkpoint or args.input)
         except RuntimeError as exc:
             logger.error(exc)
             sys.exit(1)
@@ -328,8 +343,9 @@ def _handle_run_once(args):
                     dump.dump_per_launch_values(backend.last_debug_result.per_launch)
                 err = _check_accuracy(run_result.outputs, _eager_output(module, example_args, example_kwargs))
                 if err is not None:
-                    logger.error(err)
-                    sys.exit(1)
+                    logger.log(logging.INFO if quantized else logging.ERROR, "%s", err)
+                    if not quantized:
+                        sys.exit(1)
             else:
                 # ncu child: one emmy launch (our metrics) + one eager forward
                 # (the reference rows for the comparison table); no accuracy diff.
@@ -361,7 +377,7 @@ def _handle_run_once(args):
     pinned = list(getattr(args, "golden_configs", None) or []) + (_ab_samples(args.ab, dynamic=args.dynamic) if args.ab else [])
     trace_payload = {
         "code": args.code,
-        "input": args.input,
+        "input": quantized_checkpoint or args.input,
         "adapter": getattr(args, "adapter", "causal-lm"),
         "layer": args.layer,
         "seq_len": args.seq_len,
@@ -383,7 +399,7 @@ def _handle_run_once(args):
                     wall_timeout_s=_compare_wall_s(compiled, backend, base_s=_GREEDY_COMPARE_BASE_S),
                     warmup=args.warmup,
                     iters=args.iters,
-                    accuracy=not skip_accuracy,
+                    accuracy=not (skip_accuracy or quantized),
                     want_ref=bool(pinned),
                     strict_accuracy=strict_correctness,
                 )
@@ -521,6 +537,8 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
         hardware_id=Context.probe().hardware_id(),
         emmy_us=emmy_us,
         tcompile_us=tcompile_us,
+        knobs=measured[0].sample.knobs if measured else None,
+        pins=measured[0].sample.pins if measured else None,
     )
     logger.info(
         "recorded %s: emmy %.2f us (%s)%s",
@@ -952,16 +970,10 @@ def _ab_samples(specs, dynamic=None):
 
 
 def _sample_replay_knobs(sample) -> dict:
-    """All knob pins needed to reproduce a golden winner or explicit A/B row, with the
-    no-information spellings dropped (:func:`drop_uninformative_scopes`) so replay pins exactly the
-    row the realization stamps. A stored spelling may still carry a declined scoped key
-    (``STAGE@a1: ''``); pinning it verbatim contradicts the row's own bare value (a bare pin fans
-    out across every eligible site) and the realized kernel — which stamps nothing at a declined
-    site — can never satisfy it. The family-level OFF fill is deliberately NOT applied here: a
-    partial working row leaves a family unmentioned meaning "unpinned", not "pinned OFF"."""
-    from emmy.compiler.pipeline.knob import drop_uninformative_scopes  # noqa: PLC0415
+    """All exact knob pins needed to reproduce a golden winner or explicit A/B row."""
+    from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
-    return {**getattr(sample, "pins", {}), **drop_uninformative_scopes(sample.knobs)}
+    return {**getattr(sample, "pins", {}), **dict(tuning_knob_items(sample.knobs))}
 
 
 def _failed_bench_status(exc: BaseException) -> str:
@@ -1340,11 +1352,9 @@ def _write_ab_json(
     table parsers) and where the intensity-floor / wrong-answer verdicts become fields —
     the confirm-twice rule diffs two of these files instead of two terminal scrollbacks.
 
-    Each kernel row carries ``record_knobs`` — the realized tuning knobs with EVERY schedule
-    family explicitly stamped (:func:`~emmy.compiler.pipeline.knob.stamp_schedule_families`,
-    OFF spelling included) — the map to copy verbatim into a golden YAML ``knobs:`` entry, so
-    a new recording never leaves a family to the planner's replay-time fill (the recurring
-    unpinned-``REDUCE`` drift class). Failure states are fields, not absences: the greedy
+    Each kernel row carries ``record_knobs`` — the realized tuning knobs with the exact complete
+    classic row validated by :func:`~emmy.compiler.pipeline.knob.complete_kernel_row` — the map
+    to copy verbatim into a golden YAML ``knobs:`` entry. Failure states are fields, not absences: the greedy
     block carries ``status`` (``"bench_fail"`` + ``error`` when the deploy failed) and each
     pinned row its ``status`` (``ok`` / ``pin_unmatched`` / ``bench_fail``) with ``us`` /
     ``total_us`` null where nothing was measured.
@@ -1364,7 +1374,7 @@ def _write_ab_json(
     import json as _json  # noqa: PLC0415
 
     from emmy import gpu  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import stamp_schedule_families, tuning_knob_items  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import complete_kernel_row, tuning_knob_items  # noqa: PLC0415
 
     def _kernel_rows(g, b) -> list[dict]:
         import hashlib  # noqa: PLC0415
@@ -1382,7 +1392,7 @@ def _write_ab_json(
                     "us": None if b is None else times.get(idx, 0.0),
                     "smem_bytes": op.smem_bytes,
                     "knobs": {k: str(v) for k, v in tuning_knob_items(op.knobs or {})},
-                    "record_knobs": stamp_schedule_families(op.knobs or {}),
+                    "record_knobs": complete_kernel_row(op.knobs or {}),
                     "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
                 }
             )
@@ -2249,7 +2259,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # prior (uniform PUCT → emission-order, option-0) and does not replay tuned
         # variants from the DB; ``db=`` is kept for perf recording only. Wiring a
         # warm-started prior into single-shot compile is a deferred follow-up.
-        graph = Pipeline.build(tail).run(graph, db=db, dump=dump)
+        with pinned_knobs(getattr(args, "golden_target_pins", None) or {}):
+            graph = Pipeline.build(tail).run(graph, db=db, dump=dump)
 
     if not args.bench:
         # No bench: one in-process run + non-fatal accuracy vs the torch reference

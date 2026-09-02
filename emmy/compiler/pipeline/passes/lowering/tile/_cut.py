@@ -19,18 +19,18 @@ from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.pure.fold import (
     Fold,
     _expectation_bindings,
     _operand_result_names,
+    alpha_canonical,
     deep_defines,
     deep_reads,
     is_contraction,
     loaded_buffers,
 )
 from emmy.compiler.ir.pure.tree import walk
-from emmy.compiler.ir.schedule.views import term_environment
+from emmy.compiler.ir.schedule.views import edge_axes, term_environment
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
@@ -441,7 +441,7 @@ def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) ->
     the cluster's first seam becomes the decision for all of them, carrying each duplicate as a
     sibling with its positional capture correspondence (:class:`CutSite`). Membership reuses the
     closure alpha-equivalence the semiring canonicalization already trusts
-    (:func:`~emmy.compiler.ir.pure.closure.equivalent_clusters`); a member joins only when its
+    (:func:`~emmy.compiler.ir.pure.fold.alpha_canonical`); a member joins only when its
     paired axes agree on extent and window, its workspace dtypes match, and every workspace axis
     is a mapped capture — otherwise it stays its own seam."""
     # A seam ANOTHER seam requires never joins a cluster, as representative or as member. A
@@ -453,22 +453,27 @@ def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) ->
     eligible = [index for index, seam in enumerate(seams) if operand_of.get(id(seam.node)) and id(seam.node) not in required]
     if len(eligible) < 2:
         return tuple(seams)
-    scoped = {index: Closure.over_edge(seams[index].node, tuple(axis.name for axis in seams[index].axes)) for index in eligible}
+    captured = {index: tuple(axis.name for axis in seams[index].axes) for index in eligible}
+    # The seam's own capture correspondence, and the alpha-quotient taken under it: an operand cone
+    # is a TERM, so it quotients as one (``fold.alpha_canonical``) rather than as a scoped lambda.
+    scoped = {index: tuple(axis for axis in captured[index] if axis in edge_axes(seams[index].node, captured[index])) for index in eligible}
+    clusters: dict[object, list[int]] = {}
+    for index in eligible:
+        clusters.setdefault(alpha_canonical(seams[index].node, captured[index]), []).append(index)
     drop: set[int] = set()
     merged: dict[int, CutSite] = {}
-    for cluster in equivalent_clusters(scoped[index] for index in eligible):
-        rep_index, *rest = (eligible[position] for position in cluster)
+    for rep_index, *rest in clusters.values():
         if not rest:
             continue
         rep = seams[rep_index]
-        rep_params = scoped[rep_index].axes
+        rep_params = scoped[rep_index]
         rep_axes = {axis.name: axis for axis in rep.axes}
         if {axis.name for axis in _workspace_axes(rep, rep.node)} - set(rep_params):
             continue  # a workspace axis with no capture to map has no sibling spelling
         siblings = []
         for member_index in rest:
             member = seams[member_index]
-            member_params = scoped[member_index].axes
+            member_params = scoped[member_index]
             member_axes = {axis.name: axis for axis in member.axes}
             aligned = (
                 member.dtypes == rep.dtypes

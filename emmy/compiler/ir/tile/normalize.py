@@ -28,8 +28,7 @@ from emmy.compiler.ir.pure import (
     is_contraction,
 )
 from emmy.compiler.ir.pure.algebra import product_spine
-from emmy.compiler.ir.pure.closure import edge_key, equivalent_clusters, term_key
-from emmy.compiler.ir.pure.fold import _operand_result_names, _ordered_projection, operand_name
+from emmy.compiler.ir.pure.fold import _operand_result_names, _ordered_projection, alpha_canonical, operand_name
 from emmy.compiler.ir.schedule.views import edge_axes
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.stmt.body import _member_reads, refs_axis
@@ -150,8 +149,10 @@ def _orient_shared(pairs: list[tuple], product, axes: tuple[str, ...]) -> list[t
         return pairs
 
     candidates = tuple(edge for pair in pairs for edge in pair)
-    clusters = equivalent_clusters(edge_key(edge, axes) for edge in candidates)
-    complete = [cluster for cluster in clusters if {index // 2 for index in cluster} == set(range(len(pairs)))]
+    clusters: dict[object, list[int]] = {}
+    for index, edge in enumerate(candidates):
+        clusters.setdefault(alpha_canonical(edge, axes), []).append(index)
+    complete = [cluster for cluster in clusters.values() if {index // 2 for index in cluster} == set(range(len(pairs)))]
     if not complete:
         return pairs
 
@@ -230,7 +231,7 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
     if not body.defs_die_at(members, roots=roots, allowed=form.products):
         return fold
 
-    a_clusters = equivalent_clusters(edge_key(candidate, all_axes) for candidate, _ in pairs)
+    a_shared = len({alpha_canonical(candidate, all_axes) for candidate, _ in pairs}) == 1
     member_sets = {name: {id(stmt) for stmt in cone_members} for name, (_, cone_members) in extracted.items()}
     names = tuple(member_sets)
     shared_names = {operand_name(candidate) for candidate, _ in pairs}
@@ -239,7 +240,7 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
         for i in range(len(names))
         for j in range(i + 1, len(names))
     )
-    if a_clusters == (tuple(range(len(pairs))),) and not foreign_overlap:
+    if a_shared and not foreign_overlap:
         if not form.product.commutative:
             for index, (product, (candidate_a, b)) in enumerate(zip(form.products, pairs, strict=True)):
                 canonical_args = (
@@ -738,14 +739,6 @@ def _share_common_cones(root: Fold) -> Fold:
     like ``_replace_fold``."""
     canon: dict[tuple, list[Fold]] = {}
     seen: dict[int, Fold] = {}
-    unify_keys: dict[int, Lambda] = {}
-
-    def unify_key(fold: Fold) -> Lambda:
-        # The whole-term alpha-quotient under an empty environment: free names (the captures) and
-        # the bucket-pinned interface names make canonical equality mean equal VALUE.
-        if id(fold) not in unify_keys:
-            unify_keys[id(fold)] = term_key(fold)
-        return unify_keys[id(fold)]
 
     def member(stmt):
         if isinstance(stmt, Fold):
@@ -772,7 +765,7 @@ def _share_common_cones(root: Fold) -> Fold:
             current = current.with_bodies((Body(body),))
         bucket = canon.setdefault((current.structural_key(), current.defines()), [])
         for prior in bucket:
-            if prior == current or unify_key(prior) == unify_key(current):
+            if prior == current or prior.alpha_eq(current):
                 seen[id(node)] = prior
                 return prior
         bucket.append(current)

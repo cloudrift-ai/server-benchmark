@@ -28,6 +28,7 @@ from functools import cached_property
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.algebra import M, component_ops, family_of, merge_stmts, rename_combine
 from emmy.compiler.ir.pure.carrier import exp_merge
 from emmy.compiler.ir.pure.lam import Lambda
@@ -746,7 +747,7 @@ class Fold:
         # lowered-body scan this replaces is the same inversion removed from `_operand_roles` —
         # asking a term to re-derive what it already states — and it re-lowered every edge on
         # every call. Inlined rather than imported: ``ir/pure`` may not reach the schedule layer
-        # where the general reading lives (``Closure.over_edge`` inlines it for the same reason).
+        # where the general reading lives (``closure.edge_axes`` reads it for the same reason).
         return tuple(
             edge
             for edge in self._splice_edges()
@@ -834,6 +835,26 @@ class Fold:
         the normalize stamp, the codec's spell cache) recomputes after transport — and an
         id-keyed cache carried across processes could collide with a fresh object's id."""
         return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
+
+    def canonical(self) -> Fold:
+        """:func:`alpha_canonical` of this term under the EMPTY environment — a ``Fold``, the same
+        kind that went in, and the whole term: a Fold's value also depends on its axis extent, its
+        monoid and its operand edges, none of which live in ``lift``. Cached because the sharing
+        unification asks it per bucket member; the parameterized readings are not.
+
+        Distinct from :meth:`structural_key`, which digests the LOWERED body to answer schedule
+        identity; this stays in the term algebra and stays reversible.
+        """
+        return self._canonical
+
+    @cached_property
+    def _canonical(self) -> Fold:
+        return alpha_canonical(self)
+
+    def alpha_eq(self, other) -> bool:
+        """α-invariant equality under the empty environment — canonical forms compared structurally
+        (:meth:`Lambda.alpha_eq` for the binder-level pair)."""
+        return isinstance(other, Fold) and self.canonical() == other.canonical()
 
     def structural_key(self) -> str:
         """The α-invariant identity digest of this term — the
@@ -1026,6 +1047,96 @@ def operand_body(op) -> tuple[Stmt, ...]:
     an edge, and whether it is the shared or a channel operand is the Fold's reading of operand
     order, not a property of the edge itself."""
     return (op,) if isinstance(op, Load) else tuple(op.lower())
+
+
+def _alpha_members(members):
+    """Walk every binding inside a member sequence, Fold operand edges and algebra bodies included.
+
+    Takes a plain iterable: it also walks TERM sequences (a Fold's operand edges), which a ``Body``
+    may not hold — a body is statements, and ``Body.__new__`` refuses anything else.
+    """
+    for member in members:
+        yield member
+        if isinstance(member, Fold):
+            for edge in member.operands:
+                if isinstance(edge, Fold):
+                    yield from _alpha_members((edge,))
+                else:
+                    yield edge
+            yield from _alpha_members(member.lift.body)
+        else:
+            for nested in member.nested():
+                yield from _alpha_members(nested)
+
+
+def alpha_rename(members, params: tuple[str, ...] = (), axes: tuple[str, ...] = ()):
+    """Alpha-canonically rename a member sequence; returns the renamed members and the map.
+
+    Enclosing ``axes`` renumber to ``_a0…`` positionally, remaining ``params`` to ``_p0…``,
+    internal defs to ``_v0…`` in walk order; free names pass through untouched.
+
+    The ONE renaming behind every alpha-quotient in ``ir/pure`` — a term's (:meth:`Fold.canonical`),
+    an operand edge's and a term's (:func:`alpha_canonical`), a scoped lambda's
+    (:meth:`Closure.canonical`).
+    Each builds its own kind back from the result, because a canonicalization changes NAMES, not
+    kind: renaming a Fold yields a Fold, renaming a lambda's body yields a Lambda.
+    """
+    members_in = tuple(members)
+    walked = tuple(_alpha_members(members_in))
+    reads = {name for member in walked for name in _member_reads(member)}
+    bound_axes = tuple(name for member in walked for name in member.binds_axes())
+    axis_order = tuple(dict.fromkeys((*axes, *bound_axes)))
+    active_axes = tuple(name for name in axis_order if name in reads or name in params or name in bound_axes)
+    names = {name: f"_a{index}" for index, name in enumerate(active_axes)}
+
+    position = 0
+    for name in params:
+        if name not in names:
+            names[name] = f"_p{position}"
+            position += 1
+    value = 0
+    for member in walked:
+        for name in member.defines():
+            if name not in names:
+                names[name] = f"_v{value}"
+                value += 1
+
+    def rename(name: str) -> str:
+        return names.get(name, name)
+
+    sigma = Sigma({name: Var(names[name]) for name in active_axes})
+
+    def rename_axis(axis: Axis) -> Axis:
+        name = names.get(axis.name)
+        return replace(axis, name=name) if name is not None else axis
+
+    return tuple(member.rewrite(rename, sigma, rename_axis) for member in members_in), rename
+
+
+def alpha_canonical(node, axes: tuple[str, ...] = ()):
+    """The α-canonical form of one term or operand edge, under the enclosing environment ``axes``
+    — the SAME KIND back, renamed. One operation; the environment is what varies.
+
+    Those of ``axes`` the node actually references renumber to ``_a0…`` positionally, so alpha-equal
+    cones under DIFFERENT capture names compare equal — the K-cone family value clustering merges
+    (attention's normalized K cone, once per score contraction). Under the default EMPTY
+    environment the captures stay free names, so equality means equal VALUE under the SAME
+    environment — what the sharing unification hash-conses on (:meth:`Fold.alpha_eq`).
+
+    A free function, not a method: an operand edge is heterogeneous — a ``Load`` statement, a
+    ``Fold``, an inline node — and belongs to no one type. Which axes a node references is read off
+    its DECLARATION, the rule :func:`~emmy.compiler.ir.schedule.views.edge_axes` states for callers
+    above this layer; read here rather than imported for the reason :meth:`Fold._hoisted_edges`
+    gives — ``ir/pure`` may not reach the schedule layer.
+    """
+    declared = (
+        (set(node.lift.params) - node.binds_axes())
+        if isinstance(node, Fold)
+        else {name for expr in node.exprs() for name in expr.free_vars()}
+    )
+    environment = tuple(axis for axis in axes if axis in declared)
+    renamed, _ = alpha_rename((node,), environment, environment)
+    return renamed[0]
 
 
 def operand_name(op) -> str:

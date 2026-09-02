@@ -9,12 +9,14 @@ positionally) and what makes a tree position an instantiation: alpha-equal closu
 captures denote one value, while the same form under different captures stays distinct values of
 one function.
 
-A ``Closure`` is CLOSED BY CONSTRUCTION: :meth:`__post_init__` refuses one whose lambda reads a
-value it did not bind. The two things that must work on an OPEN lambda are free functions beside
-it — :func:`value_captures` (the question "is this closed?", which has to be askable about a term
-that is not) and :func:`canonical_under` (the sharing unification takes the alpha-quotient of
-whole terms that still capture). Keeping the invariant optional on the type is what let captures
+A ``Closure`` is CLOSED BY CONSTRUCTION: :meth:`__post_init__` refuses one whose axes are not
+params of the lambda they scope. Keeping the invariant optional on the type is what let captures
 accumulate: nothing refused them, so every consumer grew a way to cope instead.
+
+Scoping is for LAMBDAS. A term is not one — a ``Fold`` composes through operand edges and no
+``Body`` may hold it — so a term's and an operand edge's alpha-quotient is
+:func:`~emmy.compiler.ir.pure.fold.alpha_canonical`, which returns the same kind back. Both are
+built from the same :func:`~emmy.compiler.ir.pure.fold.alpha_rename`.
 
 Equivalence is a comparison-time VIEW, never a stored normal form — canonicalizing in place
 would clobber meaningful axis names in the tree. And it is a property, not a sharing mechanism:
@@ -25,89 +27,12 @@ already coincide (``tile/normalize._share_common_cones``).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.fold import Fold, operand_name
+from emmy.compiler.ir.pure.fold import alpha_rename
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.body import _member_reads
-
-
-def _lambda_members(members):
-    """Walk every binding inside a lambda, including Fold operand edges and algebra bodies.
-
-    Takes a plain iterable: it also walks TERM sequences (a Fold's operand edges), which a ``Body``
-    may not hold — a body is statements, and ``Body.__new__`` refuses anything else.
-    """
-    for stmt in members:
-        yield stmt
-        if isinstance(stmt, Fold):
-            for edge in stmt.operands:
-                if isinstance(edge, Fold):
-                    yield from _lambda_members((edge,))
-                else:
-                    yield edge
-            yield from _lambda_members(stmt.lift.body)
-        else:
-            for nested in stmt.nested():
-                yield from _lambda_members(nested)
-
-
-def canonical_under(fn: Lambda, axes: tuple[str, ...]) -> tuple:
-    """A whole lambda's alpha-canonical key — :func:`canonical_key` over its parts."""
-    return canonical_key(fn.body, fn.params, fn.results, axes)
-
-
-def canonical_key(members, params: tuple[str, ...], results: tuple, axes: tuple[str, ...]) -> tuple:
-    """The alpha-canonical form of a member sequence, with the enclosing ``axes`` renamed
-    positionally — a comparison KEY, never a stored form.
-
-    Takes the members directly rather than a ``Lambda`` so a bare TERM can be quotiented without
-    being wrapped in a body it may not legally sit in: a ``Fold`` is not a ``Stmt``. Callers that
-    do hold a lambda pass its parts (:func:`canonical_under`).
-    """
-    members_in = tuple(members)
-    members = tuple(_lambda_members(members_in))
-    reads = {name for stmt in members for name in _member_reads(stmt)}
-    bound_axes = tuple(name for stmt in members for name in stmt.binds_axes())
-    axis_order = tuple(dict.fromkeys((*axes, *bound_axes)))
-    active_axes = tuple(name for name in axis_order if name in reads or name in params or name in bound_axes)
-    names = {name: f"_a{i}" for i, name in enumerate(active_axes)}
-
-    p = 0
-    for name in params:
-        if name not in names:
-            names[name] = f"_p{p}"
-            p += 1
-    v = 0
-    for stmt in members:
-        for name in stmt.defines():
-            if name not in names:
-                names[name] = f"_v{v}"
-                v += 1
-
-    def rename(name: str) -> str:
-        return names.get(name, name)
-
-    sigma = Sigma({name: Var(names[name]) for name in active_axes})
-
-    def rename_axis(axis: Axis) -> Axis:
-        name = names.get(axis.name)
-        return replace(axis, name=name) if name is not None else axis
-
-    renamed = tuple(stmt.rewrite(rename, sigma, rename_axis) for stmt in members_in)
-    # A hashable TUPLE, not a Lambda. The members may include a term, which no Lambda body may
-    # hold; and a key only has to compare, not be a well-formed binder. Members are keyed by their
-    # canonical rendering, which is defined for statements and terms alike.
-    return (
-        tuple(rename(name) for name in params),
-        tuple(repr(stmt) for stmt in renamed),  # defined for statements and terms alike; equal after renaming iff equal
-        tuple(rename(result) if isinstance(result, str) else result for result in results),
-    )
+from emmy.compiler.ir.stmt.body import Body
 
 
 @dataclass(frozen=True, eq=False)
@@ -128,12 +53,6 @@ class Closure:
         stray = [axis for axis in self.axes if not isinstance(axis, str)]
         if stray:
             raise ValueError(f"Closure axes must be iteration-axis names, got {stray}")
-        # CLOSED BY CONSTRUCTION. ``Lambda`` states this rule and delegates it ("free names ⊆
-        # params ∪ enclosing iteration vars — the consuming Fold's check") but cannot decide it:
-        # an axis reference and a value reference are the same ``Var``, so ``λ(k) → x[m, k]`` is
-        # legal where ``m`` is an ancestor's axis and illegal where a sibling defines it. This is
-        # the type that carries both halves, so it is the type that enforces it — as a formation
-        # gate, not an optional method. Leaving it optional is how captures accumulated silently.
         # No capture check: ``Lambda`` itself refuses a body that reads what it does not bind, so
         # every ``fn`` reaching here is already closed. ``axes`` names WHICH of its params are the
         # enclosing environment — what :meth:`canonical` renames positionally — not a permission.
@@ -141,18 +60,26 @@ class Closure:
         if stray_axes:
             raise ValueError(f"Closure axes {stray_axes} are not params of the lambda they scope")
 
-    def canonical(self) -> tuple:
-        """The alpha-canonical form, the enclosing iteration axes included.
+    def canonical(self) -> Lambda:
+        """The alpha-canonical form, the enclosing iteration axes included — a ``Lambda``.
 
-        :meth:`Lambda.canonical` handles names bound by the lambda itself. A Fold tree also needs
-        captured axes canonicalized so equivalent lifts at different tree positions compare
-        equal. Unused enclosing axes do not affect the result.
+        :meth:`Lambda.canonical` handles names bound by the lambda itself; this also renumbers the
+        captured axes positionally, so equivalent lifts at different tree positions compare equal.
+        Every axis is a param (:meth:`__post_init__`), so which params are the environment is
+        itself part of the form: one lambda scoped by different axes has different canonical forms.
         """
         return self._canonical
 
     @cached_property
-    def _canonical(self) -> tuple:
-        return canonical_under(self.fn, self.axes)
+    def _canonical(self) -> Lambda:
+        # A change of NAMES, not of kind: the result denotes the same function and satisfies every
+        # invariant ``Lambda`` states, so ``Lambda.__post_init__`` re-checks it on the way out.
+        renamed, rename = alpha_rename(self.fn.body, self.fn.params, self.axes)
+        return Lambda(
+            params=tuple(rename(name) for name in self.fn.params),
+            body=Body(renamed),
+            results=tuple(rename(result) if isinstance(result, str) else result for result in self.fn.results),
+        )
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Closure) and self.canonical() == other.canonical()
@@ -161,39 +88,4 @@ class Closure:
         return hash(self.canonical())
 
 
-def equivalent_clusters(keys: Iterable[tuple]) -> tuple[tuple[int, ...], ...]:
-    """Partition alpha-canonical KEYS into equivalent clusters, in input order.
-
-    Takes keys (:func:`edge_key`, :func:`term_key`) rather than ``Closure`` objects, so a term can
-    be compared without being wrapped in a body it may not sit in. The returned indices let a
-    caller keep its own Fold or graph metadata beside this general equivalence analysis.
-    """
-    clusters: dict[tuple, list[int]] = {}
-    for index, key in enumerate(keys):
-        clusters.setdefault(key, []).append(index)
-    return tuple(tuple(cluster) for cluster in clusters.values())
-
-
-def edge_key(operand, axes) -> tuple:
-    """The alpha-quotient of one operand EDGE, as a comparison key.
-
-    Replaces wrapping the edge in a ``Closure`` — that put a term inside a statement ``Body``, which
-    a body may not hold. The key binds exactly the axes the edge references, so it doubles as the
-    positional capture correspondence the seam clustering pairs siblings by.
-    """
-    declared = (
-        (set(operand.lift.params) - operand.binds_axes())
-        if isinstance(operand, Fold)
-        else {name for expr in operand.exprs() for name in expr.free_vars()}
-    )
-    params = tuple(axis for axis in axes if axis in declared)
-    return canonical_key((operand,), params, (operand_name(operand),), params)
-
-
-def term_key(term) -> tuple:
-    """The alpha-quotient of a whole TERM under an empty environment — the sharing unification's
-    key. Same reason as :func:`edge_key`: no body wrapper, because a term is not a statement."""
-    return canonical_key((term,), (), tuple(term.defines()), ())
-
-
-__all__ = ["canonical_key", "canonical_under", "Closure", "edge_key", "equivalent_clusters", "term_key"]
+__all__ = ["Closure"]

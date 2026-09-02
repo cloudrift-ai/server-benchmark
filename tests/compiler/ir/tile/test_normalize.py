@@ -11,7 +11,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Channel, Fold, Lambda, M, is_contraction
-from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
+from emmy.compiler.ir.pure.closure import Closure
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.normalize import _share_common_cones, normalize_fold_tree
@@ -819,7 +819,7 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
     assert distinct.operands[0].operands[0] is not distinct.operands[1].operands[0]
 
 
-def test_equivalent_clusters_include_captured_axes() -> None:
+def test_closure_equality_includes_captured_axes() -> None:
     # A lambda binds every name it reads, so the enclosing row coordinate is a trailing param;
     # ``axes`` then names WHICH of those params are the environment, not a permission to capture.
     first = Lambda.closing(("k",), Body((Load(name="x", input="q", index=(Var("row"), Var("k"))),)), ("x",))
@@ -827,7 +827,6 @@ def test_equivalent_clusters_include_captured_axes() -> None:
     assert first.params == ("k", "row") and second.params == ("depth", "query")
 
     assert Closure(first, ("row", "k")) == Closure(second, ("query", "depth"))  # equality is alpha-invariant
-    assert equivalent_clusters((Closure(first, ("row", "k")), Closure(second, ("query", "depth")))) == ((0, 1),)
     assert Closure(first, ("row", "k")) != Closure(first, ("k", "row"))  # capture order is the positional identity
     # An axis the lambda does not bind is not an unused environment slot any more — it is a name
     # nothing supplies, and the closure refuses it rather than carrying it into the canonical form.

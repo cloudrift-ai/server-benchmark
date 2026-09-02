@@ -30,7 +30,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp
-from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule import classic_projection as sched
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop

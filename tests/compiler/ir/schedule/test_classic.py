@@ -14,7 +14,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Channel, Fold, Lambda, M
+from emmy.compiler.ir.pure import Fold, Lambda, M
 from emmy.compiler.ir.schedule import (
     PlacedTile,
     Placement,

@@ -18,7 +18,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.carrier import exp_combine_states
-from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda
+from emmy.compiler.ir.pure.fold import Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.loop_wire import loop_graph_to_wire

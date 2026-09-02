@@ -16,7 +16,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Literal, Var
-from emmy.compiler.ir.pure.fold import Channel, Fold
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _slab_operands, _sync_operands, _tile_base

@@ -53,7 +53,7 @@ from emmy.compiler.ir.kernel.ir import (
     frag_layout,
 )
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Channel, Fold
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.sigma import Sigma
@@ -96,7 +96,7 @@ class _ScheduledContraction:
 
     child: Fold
     axis: Axis
-    channels: tuple[Channel, ...]
+    channels: tuple[tuple[Fold, str], ...]  # each streamed operand edge with the accumulator it feeds
 
     @property
     def a(self):
@@ -2402,7 +2402,7 @@ def _fold_staged(
     stream = CpAsyncTransport(operands=(stream_op,), slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta) if stream_op else None
     lead_segment = LeadSegment(build=lambda: producer_body, transport=stream)
     block_ops = replace(ops, frag_ns=f"{ops.frag_ns}_partial")
-    fragment_state = next(channel.acc for channel in c.channels)
+    fragment_state = next(acc for _, acc in c.channels)
 
     def drain(slot):
         block = Value.frag(tuple(tuple(block_ops.frag(f"_c{i}_{j}") for j in range(n.reg)) for i in range(m.reg)))

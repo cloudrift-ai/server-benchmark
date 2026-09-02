@@ -12,7 +12,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda, component_ops, degenerate, merge_stmts
 from emmy.compiler.ir.pure.carrier import exp_combine_states
-from emmy.compiler.ir.pure.fold import Channel, Fold
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop
 from emmy.compiler.ir.stmt.passes import rewrite

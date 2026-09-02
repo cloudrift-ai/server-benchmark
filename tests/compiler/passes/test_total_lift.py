@@ -20,7 +20,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.pure.fold import Channel, Fold, deep_defines
+from emmy.compiler.ir.pure.fold import Fold, deep_defines
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ReduceOp
 from emmy.compiler.ir.tile import ProjectionRegion, lower_with_output_specs

@@ -8,7 +8,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.algebra import component_ops
-from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name
+from emmy.compiler.ir.pure.fold import Fold, operand_body, operand_name
 from emmy.compiler.ir.schedule import Raster, ResolvedStage, Schedule, Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import (
     ClassicMaterialization,

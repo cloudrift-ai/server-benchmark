@@ -7,7 +7,7 @@ accepted :class:`Schedule`, separate materialization facts, and search knobs. Th
 separate from the term; dispatch reads the node's derived classification, not a per-kind type.
 """
 
-from emmy.compiler.ir.pure.fold import Channel, Fold
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import FoldMove, Level, Placement, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import (
     OutputSpec,
@@ -21,7 +21,6 @@ from emmy.compiler.ir.tile.ir import (
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 
 __all__ = [
-    "Channel",
     "Fold",
     "FoldMove",
     "Level",

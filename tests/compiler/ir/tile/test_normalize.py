@@ -10,7 +10,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.pure import Channel, Fold, Lambda, M, is_contraction
+from emmy.compiler.ir.pure import Fold, Lambda, M, is_contraction
 from emmy.compiler.ir.pure.closure import Closure
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp

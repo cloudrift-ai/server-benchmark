@@ -508,17 +508,6 @@ class Fold:
         return self.observe is not None
 
 
-@dataclass(frozen=True)
-class Channel:
-    """One product channel of a contraction — the streamed K×N operand edge ``b`` plus the
-    additive fold accumulator ``acc`` that channel produces. A plain matmul is one channel; the
-    fused gate⊗up MLP edge is two channels over the node's single shared ``a`` (sharing is arity,
-    not naming — the product-carrier contraction outputs a tuple)."""
-
-    b: Load | Fold  # the streamed operand edge — MATERIALIZED or COMPUTED
-    acc: str  # this channel's fold accumulator
-
-
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
 # INLINE node operand dispatches back through the same registry, so a stored computed operand
@@ -563,6 +552,5 @@ def _(s: Fold, rename, sigma, axis_fn):
 
 
 __all__ = [
-    "Channel",
     "Fold",
 ]

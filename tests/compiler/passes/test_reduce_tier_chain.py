@@ -8,7 +8,6 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.kernel.ir import Smem, TreeHalve, WarpShuffle
 from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.pure.fold import Channel
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Tile, Work, derive_inventory
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.classic import (

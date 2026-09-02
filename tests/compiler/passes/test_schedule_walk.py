@@ -23,7 +23,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
 from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.pure.fold import Channel, is_contraction
+from emmy.compiler.ir.pure.fold import is_contraction
 from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.schedule import classic_projection as _classic
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves

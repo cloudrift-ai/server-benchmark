@@ -22,7 +22,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.ir.pure.fold import Channel, Fold
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Reduce, Tile, Work, derive_workers, resolve_site_tile
 from emmy.compiler.ir.schedule.catalog import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
 from emmy.compiler.ir.schedule.catalog import scalar_tile_moves
@@ -218,7 +218,7 @@ def _computed_b_term():
     site."""
     from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.pure.fold import Channel, Fold
+    from emmy.compiler.ir.pure.fold import Fold
     from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.ir.tile.ir import Placement

@@ -7,7 +7,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Channel, Fold
+from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work, schedule
 from emmy.compiler.ir.schedule import classic_projection as classic
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves

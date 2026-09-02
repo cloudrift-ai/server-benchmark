@@ -28,7 +28,7 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction
+from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop

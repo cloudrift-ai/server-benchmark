@@ -29,15 +29,11 @@ from emmy.compiler.ir.pure.algebra import (
     rename_combine,
 )
 from emmy.compiler.ir.pure.carrier import UnstableCarrierError, exp_combine_states, exp_merge
-from emmy.compiler.ir.pure.fold import (
-    Channel,
-    Fold,
-)
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 
 __all__ = [
-    "Channel",
     "Fold",
     "Lambda",
     "M",

@@ -31,10 +31,6 @@ class Lambda:
     iteration vars — is the consuming Fold's check, since a bare Lambda
     cannot know its scope.
 
-    A result may also be a bare ``float`` literal — the injection ι is spelled in the lift
-    (softmax's singleton is ``(x, 1)``, flash's ``(s, 1, v)``), and a literal component has no
-    def to name (mirrors the ``Channel.term: str | float`` convenience it replaces).
-
     α-invariance is CANONICAL RENUMBERING (the existing rename machinery), not de Bruijn:
     :meth:`canonical` renumbers params (``_p0…``) and internal defs (``_v0…``) in walk order,
     leaving free names untouched; :meth:`alpha_eq` compares canonical forms."""

@@ -39,7 +39,6 @@ def test_a_cone_held_as_an_edge_still_reports_its_operand_buffers() -> None:
 
 def test_loaded_buffers_reads_a_contraction_through_its_edges() -> None:
     """A contraction's ``nested()`` is empty by design — its algebra IS its operand edges."""
-    from emmy.compiler.ir.pure import Channel
 
     contraction = Fold.contraction(
         k_axis=Axis("k", Dim(8)),

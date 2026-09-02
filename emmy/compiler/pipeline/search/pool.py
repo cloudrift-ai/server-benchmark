@@ -16,11 +16,15 @@ deterministic and the reservoir never reads a row, so two byte-identical pools d
 samples — which is what keeps the fit reproducible and keeps two goldens over one pool mergeable
 into one training group.
 
-**Membership survives the draw exactly.** ``keep`` is the set of :func:`~.features.tile_signature`
-values that must be retained whatever the draw picks. The reservoir visits every candidate by
-construction, and a row whose signature is in the set is retained beside the draw: a golden that is
-genuinely absent from its pool still reads as absent, which is a real defect class (a pin or dtype
-mismatch) the fit and ``eval golden`` both detect by exactly that miss.
+**Membership survives the draw exactly, at ONE row per signature.** ``keep`` is the set of
+:func:`~.features.tile_signature` values the draw may not lose, and the reservoir visits every
+candidate, so a golden that is genuinely absent from its pool still reads as absent — a real defect
+class (a pin or dtype mismatch) the fit and ``eval golden`` both detect by exactly that miss. One row
+discharges that: both consumers locate a golden with ``next(... == want ...)`` and read the first
+match. The cap is load-bearing, not tidy — a signature is a coarse stamp many schedules share, so
+retaining every match scaled the keep-set with the POOL instead of the corpus: 34 signatures pulled
+77,279 rows out of a 1,950,625-row V100 ``k_linear_matmul_reduce`` pool, 99.8% of its sample, burying
+the uniform draw under the golden's own signature class.
 
 **Reported rank is the RAW sample rank with the exact total beside it, never scaled**
 (:class:`Candidates`). A sample's rank resolution floor is ``n / size``; pretending otherwise would
@@ -69,7 +73,7 @@ class PoolSample:
     #: Candidates to draw. ``0`` (or a pool no larger than it) means the whole pool.
     rows: int
     seed: int = 0
-    #: The ``tile_signature`` values the draw may not drop.
+    #: The ``tile_signature`` values the draw may not drop. One row per value — the first carrying it.
     keep: frozenset = frozenset()
     #: Where each drawn pool reports its EXACT size, keyed by that pool's schedule-space stamp. The sampled
     #: rows cannot carry it and the fork tree has no channel for it, so the enumerator writes here
@@ -92,7 +96,8 @@ class PoolSample:
         One pass, O(size) retained: the first ``size`` candidates fill the reservoir and each later
         one displaces a uniformly chosen slot, so the draw is uniform without knowing the count up
         front — the property that lets a lazy walk be sampled at all. The kept-signature rows ride
-        beside the reservoir (the keep-set ADDS to the draw, it never displaces it), and the whole
+        beside the reservoir (the keep-set ADDS to the draw, it never displaces it) at one row per
+        signature, so what they add is bounded by the keep-set rather than by the pool, and the whole
         stream is returned when ``size`` is 0 or the stream is no larger."""
         stream = iter(rows)
         if self.rows <= 0:
@@ -101,10 +106,12 @@ class PoolSample:
         rng = np.random.default_rng(self.seed)
         reservoir: list[tuple[int, dict]] = []
         kept: dict[int, dict] = {}
+        found: set = set()
         count = 0
         for index, row in enumerate(stream):
             count = index + 1
-            if self.keep and features.tile_signature(row) in self.keep:
+            if self.keep and (sig := features.tile_signature(row)) in self.keep and sig not in found:
+                found.add(sig)
                 kept[index] = row
             if index < self.rows:
                 reservoir.append((index, row))

@@ -204,7 +204,7 @@ def _with_source(node: Fold, source) -> Fold:
     :func:`~emmy.compiler.ir.pure.fold.splice_operands` places each edge's body before its first
     read, providers ahead of dependents — so the producer still lands before the value it feeds.
 
-    A zero-axis node rebuilds through :meth:`Fold.projection` (which re-derives its params); a
+    A zero-axis node rebuilds as a fresh term over the same operands; a
     reducing node keeps its iteration var first and rebinds the rest, so the formation invariant —
     one lift param per operand result component — holds at either position."""
     operands = (*node.operands, source)

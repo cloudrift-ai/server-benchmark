@@ -22,6 +22,7 @@ from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
+from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import PlacedTile, Reduce
 from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
@@ -149,14 +150,21 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
         pro.append(rest.pop(0))
     pro_body = Body((*sweep, *pro))
     pro_ops = () if stat is None else (stat,)
-    prologue = Fold.projection(body=pro_body, operands=pro_ops)
+    # The projection's result is its body's last definition — the value a consumer reads back.
+    pro_bound = tuple(name for edge in pro_ops for name in edge.exposes)
+    pro_results = next((stmt.defines()[-1:] for stmt in reversed(tuple(pro_body)) if stmt.defines()), ())
+    prologue = Fold(operands=pro_ops, lift=Lambda.closing(pro_bound, pro_body, pro_results))
     cell_reads = Body(rest).ssa_uses
     bound = (*(n for e in pro_ops for n in e.exposes), *(n for s in pro_body for n in s.defines()))
     bridged = tuple(n for n in dict.fromkeys(bound) if n in cell_reads and n not in prologue.lift.results)
     if bridged:
-        prologue = Fold.projection(body=pro_body, operands=pro_ops, results=(*prologue.lift.results, *bridged))
+        prologue = Fold(operands=pro_ops, lift=Lambda.closing(pro_bound, pro_body, (*prologue.lift.results, *bridged)))
     src = (prologue,) if (pro or sweep or stat is not None) else ()
-    return Fold.projection(body=Body(tuple(rest)), operands=(*src, *nodes))
+    cell_body = Body(tuple(rest))
+    cell_ops = (*src, *nodes)
+    cell_bound = tuple(name for edge in cell_ops for name in edge.exposes)
+    cell_results = next((stmt.defines()[-1:] for stmt in reversed(tuple(cell_body)) if stmt.defines()), ())
+    return Fold(operands=cell_ops, lift=Lambda.closing(cell_bound, cell_body, cell_results))
 
 
 def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:

@@ -104,7 +104,7 @@ __all__ = [
 # imported from here; the schedule layer is where it belonged all along.
 def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
-    scanning stmts: the cone is ``Fold.projection(body=<the per-cell normalize>, operands=(<the row-invariant
+    scanning stmts: the cone is a zero-axis term over ``<the per-cell normalize>`` with ``<the row-invariant
     prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
     own zero-axis ``Fold`` over the stat ``Fold``) plus any row-invariant cone prefix, placed there
     when the cone was built (:func:`make_cone` splits at the K seam once, structurally).

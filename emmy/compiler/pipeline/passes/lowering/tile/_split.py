@@ -255,11 +255,13 @@ def _slice_fold(fold: Fold, b: int) -> Fold:
     offset = BinaryExpr("+", Var(axis.name), BinaryExpr("*", Var(_SPLIT), Literal(b, "int")))
     sigma = Sigma({axis.name: offset})
     sliced_axis = replace(axis, extent=Dim(b), window=Window(parent=axis.source_axis or axis, partition=True))
-    return fold.rewrite(
-        lambda name: name,
-        sigma,
-        lambda candidate: sliced_axis if candidate.name == axis.name else candidate,
-    )
+    # RE-DERIVED over a narrower axis, not renamed and not substituted-through: the fold keeps its
+    # own binder (same name, sliced extent) while its operands' coordinates take the σ-offset. A
+    # blanket σ would be refused as capture — this fold BINDS the name σ maps — and rightly so;
+    # what changes here is the axis itself, which only the caller can say.
+    operands = tuple(_sliced_edge(edge, sigma, axis.name, sliced_axis) for edge in fold.operands)
+    body = Body(tuple(stmt.substitute(sigma) for stmt in fold.lift.body))
+    return replace(fold, axes=(sliced_axis,), operands=operands, lift=replace(fold.lift, body=body))
 
 
 def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
@@ -391,9 +393,16 @@ def _one(match: Match, frag: Graph, root: Node, piece: TileOp) -> Graph:
     return _add_output_piece(match, frag, root, piece, list(root.inputs))
 
 
+def _wrap(body: Body, operands: tuple) -> Fold:
+    """A zero-axis term over ``body``, exposing its last definition — what a projection returns."""
+    bound = tuple(name for edge in operands for name in edge.exposes)
+    results = next((stmt.defines()[-1:] for stmt in reversed(tuple(body)) if stmt.defines()), ())
+    return Fold(operands=operands, lift=Lambda.closing(bound, body, results))
+
+
 def _piece(body, free, *, output_specs: tuple = ()) -> TileOp:
     """One fresh unscheduled Tile kernel preserving its Fold algebra verbatim."""
-    op = body if isinstance(body, Fold) else Fold.projection(body=Body.coerce(body))
+    op = body if isinstance(body, Fold) else _wrap(Body.coerce(body), ())
     piece = TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs)
     # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
     # identity. Built fresh here, so this states the contract rather than doing work — and the rule
@@ -418,7 +427,7 @@ def _state_fold(axis: Axis, algebra: Fold, loads: tuple[Load, ...], scope: tuple
 def _project(fold: Fold, body) -> Fold:
     """Attach a pure projection body to one Fold, dropping the empty wrapper."""
     body = Body.coerce(body)
-    return Fold.projection(operands=(fold,), body=body) if body else fold
+    return _wrap(body, (fold,)) if body else fold
 
 
 def _output_root(root: Node, outputs: set[str]) -> Node:

@@ -127,7 +127,7 @@ def _identity_body(op) -> Body | None:
         return op.body
     if not isinstance(op, TileOp):
         return getattr(op, "body", None)
-    body = Body(lower_with_output_specs(op.op, op.output_specs))
+    body = lower_with_output_specs(op.op, op.output_specs)
     for axis in reversed(op.place.free):
         body = Body((Loop(axis=axis, body=body),))
     return body

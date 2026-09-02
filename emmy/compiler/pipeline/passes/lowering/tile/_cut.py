@@ -169,7 +169,7 @@ def _fed_store_dtype(tile: TileOp, consumer: Fold):
         tensor = next(iter(tile.outputs.values()), None)
         return None if tensor is None else tensor.dtype
     dependent = set(consumer.exposes)
-    stmts = tuple(tile.op.lower())
+    stmts = tile.op.lower()
     for _ in stmts:
         grown = False
         for stmt in stmts:

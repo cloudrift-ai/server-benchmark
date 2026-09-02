@@ -9,7 +9,7 @@ params; nothing else is stored.
 
 Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Stmt`. A composed step — flash's ``Σ Q·K``
 ahead of its ``Σ_j P·V``, split-K's sliced contraction — is reached through ``operands``, and its
-POSITION in the emitted step stream is produced by the derivation (:attr:`Fold.step`
+POSITION in the emitted step stream is produced by the derivation (:meth:`Fold.step`
 heads the inline-node edges; :func:`splice_operands` places each edge's body before the first read
 of its bound name), not by sitting in a statement list. The term becomes statements in exactly one
 place, :meth:`Fold.lower` / :attr:`Fold.loop`. See ``ir/ARCHITECTURE.md``, "Pure terms vs
@@ -92,7 +92,7 @@ class Fold:
     flat ⊕ — componentwise for a plain ``sum`` / ``max`` / ``mean``, a rescaling program for
     online-softmax / flash — a plain :class:`Lambda` either way) from its **structure** (the
     reduce ``axis`` + the per-element ``step`` it folds). Every reading is **derived** from those
-    params (:meth:`as_contraction`, :meth:`as_slab`, :attr:`step`), never stored. The fold
+    params (:meth:`as_contraction`, :meth:`as_slab`, :meth:`step`), never stored. The fold
     ``Loop`` is **synthesized on demand** (:meth:`lower`), never stored — so the same node tiles under any
     :class:`~emmy.compiler.ir.schedule.Reduce`, which is not a field here: the reduce
     partition is a site choice in ``TileOp.schedule``, read through ``ops.Sched``.
@@ -344,7 +344,7 @@ class Fold:
         """The single sliced contraction this outer reduce COMPOSES (split-K's
         reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``), or ``None`` — the identity-lift
         λ spelling (one inline node operand carrying the outer's exact accumulator state). The
-        structural probe :attr:`step` reads (``030_cut`` builds its sliced partial directly, so
+        structural probe :meth:`step` reads (``030_cut`` builds its sliced partial directly, so
         the composition is a recognized FORM here, never a required input)."""
         if len(self.lift.body) or len(self.operands) != 1:
             return None
@@ -369,7 +369,6 @@ class Fold:
         declared = tuple(axis for axis in axes if axis.name in read)
         return cls(axes=declared, lift=Lambda(params=tuple(axis.name for axis in declared), body=Body((load,)), results=load.names))
 
-    @cached_property
     def step(self) -> Body:
         """The per-step statements this fold DERIVES from its stored parameters: the lift body,
         then the combine APPLIED at the injected singleton — its second-operand params bound to
@@ -381,7 +380,12 @@ class Fold:
         contraction already updates the shared accumulators, so the reassociation is the
         embedding itself. Without a combine the term is a map and the step is the lift body.
         Deterministic from the stored parameters, so kernel identity depends on no classified view.
+        Memoized (:attr:`_step`).
         """
+        return self._step
+
+    @cached_property
+    def _step(self) -> Body:
         if self.combine is None:
             return self.lift.body
         if self.composed is not None:
@@ -457,7 +461,7 @@ class Fold:
             observe=None if self.observe is None else renamed(self.observe),
         )
 
-    def lower(self) -> list[Stmt]:
+    def lower(self) -> Body:
         """Flatten this term to the Loop IR body the materializer expands.
 
         Three parts, read straight off the representation:
@@ -472,16 +476,21 @@ class Fold:
         A SHARED term — one object reached through several operand positions — defines its names
         once per scope: the same object lowers to the same statements, and a repeat is dropped.
 
-        The ONE lowering spelling — every consumer of a term's statements calls this.
+        The ONE lowering spelling — every consumer of a term's statements calls this. Memoized
+        (:attr:`_lowered`).
         """
+        return self._lowered
+
+    @cached_property
+    def _lowered(self) -> Body:
         axis = self.axis
         rides = [edge for edge in self.operands if axis is not None and axis.name in edge.free_axes]
         ridden = {id(edge) for edge in rides}
         prologue = [stmt for edge in self.operands if id(edge) not in ridden for stmt in edge.lower()]
-        step = [*(stmt for edge in rides for stmt in edge.lower()), *self.step]
+        step = [*(stmt for edge in rides for stmt in edge.lower()), *self.step()]
         if axis is None:
-            return list(dict.fromkeys([*prologue, *step]))
-        return [*dict.fromkeys(prologue), Loop(axis=axis, body=Body(tuple(dict.fromkeys(step))), unroll=self.unroll)]
+            return Body(tuple(dict.fromkeys([*prologue, *step])))
+        return Body((*dict.fromkeys(prologue), Loop(axis=axis, body=Body(tuple(dict.fromkeys(step))), unroll=self.unroll)))
 
 
 @_rewrite_kind.register

@@ -201,7 +201,7 @@ def _splice_streamed(stmts: list, write: Write) -> bool:
     return False
 
 
-def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> list[Stmt]:
+def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> Body:
     """Reassemble the EFFECTFUL projection stmt stream from a pure projection body + the
     kernel-boundary output specifications — the ONE reconstitution rule the scheduler's tail gates, the
     materializer's zero-axis ``Fold`` peel and ``030_cut`` share, so the lowered kernels stay
@@ -245,7 +245,7 @@ def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> li
         writes = tuple(store.write for store in stores[index:end])
         out = [*out[:start], Loop(axis=st.sweep, body=Body((*out[start:], *writes)), unroll=st.unroll)]
         index = end
-    return out
+    return Body(tuple(out))
 
 
 def _projection_results(body) -> set[str]:
@@ -311,7 +311,7 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
     return Axis("_um", Dim(1))
 
 
-def lower_with_output_specs(op, specs) -> list[Stmt]:
+def lower_with_output_specs(op, specs) -> Body:
     """Lower one pure Tile term and attach every output specification at its owning scope."""
     specs = tuple(specs)
 
@@ -346,7 +346,7 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
     legacy single output sweep, and recursively nested sibling output loops. Each sibling loop becomes a
     pure :class:`ProjectionRegion`; every write becomes an :class:`OutputSpec`. An already-pure stream
     returns ``(stmts, ())``."""
-    original = list(stmts)
+    original = tuple(stmts)
     rest = list(stmts)
     stores: list[OutputSpec] = []
     while rest and isinstance(rest[-1], Write):
@@ -685,10 +685,10 @@ class TileOp(Op):
         are immutable across the schedule search. ``None`` for a placeholder."""
         if self.op is None:
             return None
-        stmts: list = lower_with_output_specs(self.op, self.output_specs)
+        body = lower_with_output_specs(self.op, self.output_specs)
         for axis in reversed(self.place.free):
-            stmts = [Loop(axis=axis, body=Body(stmts))]
-        return Body.coerce(stmts)
+            body = Body((Loop(axis=axis, body=body),))
+        return body
 
     def _body_identity(self, *, structural: bool = True) -> str | None:
         """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s

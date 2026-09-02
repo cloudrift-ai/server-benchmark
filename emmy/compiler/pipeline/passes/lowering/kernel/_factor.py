@@ -139,7 +139,7 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
     if isinstance(op, Fold) and op.axis is None:
         # EVERY operand edge first, in order — the same prefix ``Fold.lower`` builds. A cone carries
         # one edge per computed input, including nested reductions and contractions.
-        body = dict.fromkeys([*(stmt for edge in op.operands for stmt in _emit(edge, ctx).body), *op.step])
+        body = dict.fromkeys([*(stmt for edge in op.operands for stmt in _emit(edge, ctx).body), *op.step()])
         return Frag(body=_emit_body(Body(tuple(body)), ctx, output_specs), out=_map_wire(op))
     if isinstance(op, Fold):
         # Every fold WITH an axis, at any role — the per-cell scalar contraction (no TILE slice)
@@ -150,7 +150,7 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
         # A shared term — one object at several operand positions — defines once per scope.
         hoisted = list(dict.fromkeys(s for edge in op.operands if op.axis.name not in edge.free_axes for s in _emit(edge, ctx).body))
         rides = dict.fromkeys(s for edge in op.operands if op.axis.name in edge.free_axes for s in _emit(edge, ctx).body)
-        stmts = _emit_body(Body((*rides, *op.step)), ctx)
+        stmts = _emit_body(Body((*rides, *op.step())), ctx)
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll)
         return Frag(body=[*hoisted, loop], out=Handle(op.exposes[0]))
     raise TypeError(f"_emit: expected a Fold node, got {type(op).__name__}")

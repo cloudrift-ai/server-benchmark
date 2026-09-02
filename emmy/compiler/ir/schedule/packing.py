@@ -22,7 +22,6 @@ from dataclasses import dataclass
 
 from frozendict import frozendict
 
-from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Assign, Load
 from emmy.compiler.ir.stmt.body import Body
 

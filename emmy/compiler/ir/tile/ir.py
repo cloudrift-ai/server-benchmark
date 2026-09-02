@@ -50,11 +50,7 @@ from emmy.compiler.ir.schedule.views import (
     ContractionFacts,
     EdgeSite,
     NodeId,
-    NodeView,
-    Projection,
-    Reduction,
     contraction_facts,
-    node_view,
 )
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
@@ -510,7 +506,10 @@ class TileOp(Op):
             store.sweep.name
             for store in self.output_specs
             if store.sweep is not None
-            and any(any(store.sweep.name in (frozenset((store.sweep.name,)) & edge.index_space) for edge in con.operands) for con in contractions)
+            and any(
+                any(store.sweep.name in (frozenset((store.sweep.name,)) & edge.index_space) for edge in con.operands)
+                for con in contractions
+            )
         }
         if not promoted:
             self._validate_schedule()
@@ -609,18 +608,19 @@ class TileOp(Op):
         return frozendict({site: tuple(edges) for site, edges in out.items()})
 
     @cached_property
-    def views(self) -> tuple[NodeView, ...]:
-        """Each node site classified as a projection or a reduction, without target input.
+    def views(self) -> tuple[Fold, ...]:
+        """The TERM at each node site — a term is its own classification.
 
-        Indexed BY node id, which is a dense ordinal — a tuple, not a map keyed by the integers it
-        is already ordered by.
+        ``axis is None`` is the projection reading, :meth:`Fold.as_contraction` the bilinear one,
+        so a wrapper kind restating them bought nothing. Indexed BY node id, which is a dense
+        ordinal — a tuple, not a map keyed by the integers it is already ordered by.
         """
-        return tuple(node_view(site.node) for site in self.sites)
+        return tuple(site.node for site in self.sites)
 
     def contracts(self, site: NodeId) -> bool:
         """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want."""
         view = self.views[site]
-        return isinstance(view, Reduction) and view.contraction is not None
+        return view.as_contraction() is not None
 
     @cached_property
     def family_sites(self) -> frozendict[str, tuple[NodeId, ...]]:
@@ -634,10 +634,9 @@ class TileOp(Op):
                 "TILE": tuple(
                     site
                     for site in self.node_sites
-                    if self.contracts(site)
-                    or (isinstance(self.views[site], Projection) and site == 0 and not self.sites[site].node.operands)
+                    if self.contracts(site) or (self.views[site].axis is None and site == 0 and not self.sites[site].node.operands)
                 ),
-                "REDUCE": tuple(site for site in self.node_sites if isinstance(self.views[site], Reduction)),
+                "REDUCE": tuple(site for site in self.node_sites if self.views[site].axis is not None),
             }
         )
 

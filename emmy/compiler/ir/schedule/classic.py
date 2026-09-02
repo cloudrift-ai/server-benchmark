@@ -28,7 +28,7 @@ from .choices import (
     derive_inventory,
     resolve_site_tile,
 )
-from .views import ContractionFacts, EdgeSite, NodeId, Projection, Reduction
+from .views import ContractionFacts, EdgeSite, NodeId
 
 CLASSIC_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
@@ -440,9 +440,7 @@ class ClassicMaterialization:
         expected_tiles = {
             site
             for site, assignment in schedule.nodes.items()
-            if assignment.tile.is_tiled
-            and isinstance(source_tile.views[site], Reduction)
-            and source_tile.views[site].contraction is not None
+            if assignment.tile.is_tiled and source_tile.views[site].as_contraction() is not None
         }
         if set(self.tiles) != expected_tiles:
             raise ValueError("classic materialization must contain exactly the tiled node sites")
@@ -564,7 +562,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return self.domains.nodes[site]
             except KeyError:
                 raise ValueError(f"classic domains do not contain {node_id_spelling(site)}") from None
-        return (ProjectionSchedule(Tile()),) if isinstance(view, Projection) else (ReductionSchedule(Tile(), Reduce()),)
+        return (ProjectionSchedule(Tile()),) if view.axis is None else (ReductionSchedule(Tile(), Reduce()),)
 
     def edge_choices(self, edge: EdgeSite) -> tuple[EdgeSchedule, ...]:
         self.operand(edge)
@@ -823,9 +821,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         ):
             self._refuse("pick contains a value from another schedule family", site)
         view = self.tile_op.views[site]
-        if isinstance(view, Projection) and not isinstance(node, ProjectionSchedule):
+        if view.axis is None and not isinstance(node, ProjectionSchedule):
             self._refuse("projection site requires a projection schedule", site)
-        if isinstance(view, Reduction) and not isinstance(node, ReductionSchedule):
+        if view.axis is not None and not isinstance(node, ReductionSchedule):
             self._refuse("reduction site requires a reduction schedule", site)
         if isinstance(node.tile, PlacedTile):
             self._refuse("node choices cannot contain placed tile geometry", site)
@@ -909,7 +907,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return None
         stage = next(iter(edges.values())).stage if edges else Stage.direct()
         resolved_stage = None
-        if not isinstance(view, Reduction) or view.contraction is None or not node.tile.is_tiled:
+        if view.as_contraction() is None or not node.tile.is_tiled:
             if not stage.is_direct:
                 cache[key] = None
                 return None
@@ -954,7 +952,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 if isinstance(geometry, PlacedTile)
                 else ()
             ),
-            raster_eligible=node.tile.is_tiled and isinstance(view, Reduction) and view.contraction is not None,
+            raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
             producer_eligible=not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
         )
         cache[key] = support
@@ -994,7 +992,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             node,
             edges,
             work=work,
-            raster_eligible=node.tile.is_tiled and isinstance(view, Reduction) and view.contraction is not None,
+            raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
         )
 
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:
@@ -1137,9 +1135,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         for site in self.tile_op.node_sites:
             view = self.tile_op.views[site]
             assignment = schedule.nodes[site]
-            if isinstance(view, Projection) and not isinstance(assignment, ProjectionSchedule):
+            if view.axis is None and not isinstance(assignment, ProjectionSchedule):
                 self._refuse("projection site requires a projection schedule", site)
-            if isinstance(view, Reduction) and not isinstance(assignment, ReductionSchedule):
+            if view.axis is not None and not isinstance(assignment, ReductionSchedule):
                 self._refuse("reduction site requires a reduction schedule", site)
             if isinstance(assignment.tile, PlacedTile):
                 self._refuse("node choices cannot contain placed tile geometry", site)
@@ -1332,7 +1330,7 @@ class ClassicScheduleCodec:
         for site in self.tile_op.node_sites:
             view = self.tile_op.views[site]
             reduce = None
-            if isinstance(view, Reduction):
+            if view.axis is not None:
                 reduce = Reduce.parse(row[classic_node_key(self.tile_op, "REDUCE", site)], work)
             tile = (
                 resolve_site_tile(

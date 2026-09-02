@@ -53,7 +53,7 @@ from emmy.compiler.ir.schedule.classic import (
     edge_site_spelling,
     node_id_spelling,
 )
-from emmy.compiler.ir.schedule.views import ContractionFacts, Projection, Reduction
+from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
@@ -321,7 +321,7 @@ def _options(state: _ProjectionState, node) -> tuple:
     """Project one independent node factor without crossing it with edge choices."""
     site = state.tile.node_id(node)
     view = state.tile.views[site]
-    if isinstance(view, Projection):
+    if view.axis is None:
         if site not in state.tile.family_sites["TILE"] or not state.tile.place.free:
             return (ProjectionSchedule(Tile()),)
         inner = state.tile.place.free[-1]
@@ -337,7 +337,7 @@ def _options(state: _ProjectionState, node) -> tuple:
 
     choices = (
         _contraction_domain(state.tile, state.target, node, state.tile.contractions[site])
-        if view.contraction is not None
+        if view.as_contraction() is not None
         else tuple(ReductionSchedule(Tile(), reduction) for reduction in _reduction_domain(state.tile, node))
     )
     valid_choices = []
@@ -362,7 +362,7 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
     """Project the independent edge catalog; context composition decides compatibility."""
     node = state.tile.sites[site].node
     view = state.tile.views[site]
-    if not isinstance(view, Reduction) or view.contraction is None:
+    if view.as_contraction() is None:
         return (EdgeSchedule(Stage.direct()),)
     supported = {}
     direct = EdgeSchedule(Stage.direct())
@@ -412,8 +412,7 @@ def project_classic(tile: TileOp, target) -> ClassicDomains:
         )
     raster_values = (
         raster_moves()
-        if any(isinstance(view, Reduction) and view.contraction is not None for view in tile.views)
-        and all(axis.extent.is_static for axis in tile.place.free)
+        if any(view.as_contraction() is not None for view in tile.views) and all(axis.extent.is_static for axis in tile.place.free)
         else [""]
     )
     kernel_work_domain = {

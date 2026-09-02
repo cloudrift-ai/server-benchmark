@@ -15,22 +15,6 @@ type EdgeSite = tuple[NodeId, int]
 
 
 @dataclass(frozen=True)
-class Projection:
-    """A zero-axis Fold."""
-
-
-@dataclass(frozen=True)
-class Reduction:
-    """An iterating Fold, optionally viewed as a contraction."""
-
-    contraction: ContractionView | None = None
-
-    def __post_init__(self) -> None:
-        if self.contraction is not None and not isinstance(self.contraction, ContractionView):
-            raise TypeError("reduction contraction capability must be a ContractionView or None")
-
-
-@dataclass(frozen=True)
 class ContractionFacts:
     """One contraction's schedule-independent structure.
 
@@ -47,19 +31,6 @@ class ContractionFacts:
     need_step: bool = False
 
 
-type NodeView = Projection | Reduction
-
-
-def node_view(node: Fold) -> NodeView:
-    """Classify one Fold without target or schedule input."""
-    if node.axis is None:
-        return Projection()
-    # The term's own reading, not a re-derivation: operand ROLES were positions into a tuple, and
-    # a position is only meaningful beside the tuple it indexes. The geometry — shared axis, one
-    # free axis per operand — says the same thing without the indirection.
-    return Reduction(node.as_contraction())
-
-
 def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
     """Derive every contraction's :class:`ContractionFacts` from ``owner``'s term alone.
 
@@ -70,7 +41,7 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
     facts = {}
     for site in range(len(owner.sites)):
         view = owner.views[site]
-        if not isinstance(view, Reduction) or view.contraction is None:
+        if view.as_contraction() is None:
             continue
         record = owner.sites[site]
         node, parent = record.node, record.parent
@@ -122,11 +93,7 @@ __all__ = [
     "ContractionFacts",
     "EdgeSite",
     "NodeId",
-    "NodeView",
-    "Projection",
-    "Reduction",
     "contraction_facts",
-    "node_view",
 ]
 
 
@@ -160,9 +127,7 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     # ``Fold.lower``'s hoist, asked of the same property.
     varying = [k_name in edge.index_space for edge in cone.operands]
     pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower())
-    cell = tuple(
-        stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower()
-    ) + tuple(cone.body)
+    cell = tuple(stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower()) + tuple(cone.body)
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in edge.exposes}
     stats = tuple(sorted(pro_results & Body(cell).ssa_uses))
     return (pro, cell, stats) if stats else ((), cell, ())

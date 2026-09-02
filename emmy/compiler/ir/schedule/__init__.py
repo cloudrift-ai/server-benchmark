@@ -20,16 +20,9 @@ from .choices import (
     derive_workers,
     resolve_site_tile,
 )
-from .views import (
-    ContractionFacts,
-    ContractionView,
-    EdgeSite,
-    NodeId,
-    NodeView,
-    Projection,
-    Reduction,
-    node_view,
-)
+from emmy.compiler.ir.pure.fold import ContractionView
+
+from .views import ContractionFacts, EdgeSite, NodeId
 
 __all__ = [
     "AtomKind",
@@ -39,14 +32,11 @@ __all__ = [
     "FoldMove",
     "Level",
     "NodeId",
-    "NodeView",
     "Placement",
     "PlacedTile",
-    "Projection",
     "Raster",
     "Reduce",
     "ReduceStage",
-    "Reduction",
     "ResolvedStage",
     "Schedule",
     "ScheduleContext",
@@ -58,7 +48,6 @@ __all__ = [
     "Work",
     "derive_inventory",
     "derive_workers",
-    "node_view",
     "resolve_site_tile",
     "schedule",
 ]

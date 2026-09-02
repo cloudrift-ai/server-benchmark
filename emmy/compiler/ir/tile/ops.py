@@ -76,7 +76,7 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
     if key in cache:
         return cache[key]
     if edge.as_slab() is not None:
-        load = edge.loads[0]
+        load = edge.as_slab().load
         tensor = inputs.get(load.input) if inputs else None
         result = (tensor.dtype if tensor is not None else None,) * len(load.names)
         cache[key] = result

@@ -256,7 +256,7 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
     a_edge = node.operands[0]
     dtype = edge_dtypes(a_edge, tile.inputs)[0]
     a_is_load = a_edge.as_slab() is not None
-    a_step = gmem_axis_step(a_edge.loads[0], node.axis.name, tile.inputs) if a_is_load else None
+    a_step = gmem_axis_step(a_edge.as_slab().load, node.axis.name, tile.inputs) if a_is_load else None
     shapes = {**tile.inputs, **tile.outputs}
 
     def bindable(names: tuple[str, ...]) -> tuple[str, ...]:

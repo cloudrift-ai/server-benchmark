@@ -322,17 +322,6 @@ class Fold:
         )
 
     @property
-    def loads(self) -> tuple[Load, ...]:
-        """Every ``Load`` beneath this term — its operands', recursively, then its lift body's.
-
-        The term's own :attr:`Body.loads`, which cannot reach them: a body walks ``Stmt.nested()``
-        and a term's operands are EDGES, not nested statements. This is the reading a consumer of
-        the STORED tree needs — the cut declaring a piece's graph inputs — and it answers without
-        lowering, so it costs a walk of the tree rather than a construction of its statements.
-        """
-        return tuple(load for edge in self.operands for load in edge.loads) + tuple(self.lift.body.loads)
-
-    @property
     def axis(self) -> Axis | None:
         """The REDUCTION axis — the innermost of :attr:`axes`, ``None`` when this term binds none.
 

@@ -404,14 +404,23 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     return tuple(axis for axis in seam.axes if axis.name in read or (axis.extent.is_static and axis.extent.as_static() == 1))
 
 
+def _buffer_reads(node: Fold) -> set[str]:
+    """The gmem buffers ``node``'s STORED tree reads — every lift body's loads, through the operand
+    edges (a slab's body is its one load). Read off the tree, never by lowering it."""
+    out = {load.input for load in node.lift.body.loads}
+    for edge in node.operands:
+        out |= _buffer_reads(edge)
+    return out
+
+
 def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = ()) -> list[str]:
     """A piece's graph inputs: its workspaces, then every buffer of ``root``'s the piece reads.
 
-    The read set is :attr:`Fold.loads` — the STORED tree's, walked through the operand edges a
+    The read set is the STORED tree's (:func:`_buffer_reads`), walked through the operand edges a
     body cannot reach. A walk that stopped at the stored body named fewer inputs than the kernel
     went on to read; the workspace producers then had no consumer edge, were pruned as orphans,
     and the launch asked for a buffer nothing had allocated."""
-    reads = {load.input for load in fold.loads}
+    reads = _buffer_reads(fold)
     return [*first, *(name for name in root.inputs if name in reads)]
 
 
@@ -456,7 +465,7 @@ def _producer_order(pieces) -> list:
     ordered = []
     available: set[str] = set()
     while remaining:
-        ready = [piece for piece in remaining if {load.input for load in piece[1].loads} & workspaces <= available]
+        ready = [piece for piece in remaining if _buffer_reads(piece[1]) & workspaces <= available]
         assert ready, "strict Fold containment makes the cut-workspace dependency graph acyclic"
         ordered.extend(ready)
         available.update(buffer for *_, buffers in ready for buffer in buffers)
@@ -585,7 +594,7 @@ def realize(
         producer = replace(producer, knobs=consume_kernel_row(producer.knobs))
         shape = tuple(axis.extent for axis in axes)
         workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
-        reads = {load.input for load in produced.loads}
+        reads = _buffer_reads(produced)
         fragment.add_node(
             op=producer,
             inputs=_piece_inputs(root, produced, tuple(buffer for buffer in all_buffers if buffer in reads)),

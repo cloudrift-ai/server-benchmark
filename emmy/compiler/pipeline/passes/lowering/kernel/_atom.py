@@ -862,7 +862,7 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
         shape = (mn[0].tile, bk_elems)
         op = Operand(
             tag="a",
-            buf=c.operands[0].loads[0].input,
+            buf=c.operands[0].as_slab().load.input,
             shape=shape,
             # A >2-D operand boxes as rank-N with leading extent-1 dims — the convention
             # ``_slab_operands`` applies. ``_box_origin`` already yields the FULL-RANK origin, so
@@ -870,9 +870,11 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
             # descriptor's encoded rank, and TMA treats that as an invalid tensor map (measured
             # on a leading unit batch axis: UTMALDG.4D over a rank-3 map raises ILLEGAL
             # INSTRUCTION from the first thread).
-            box=(1,) * (len(c.operands[0].loads[0].index) - 2) + shape if len(c.operands[0].loads[0].index) > 2 else None,
-            coords=_box_origin(c.operands[0].loads[0].index, tile=mn[0], tile_base=row_base, k_axis=c.axis, sibling=mn[1]),
-            index=_slab_index(c.operands[0].loads[0].index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True, sibling=mn[1]),
+            box=(1,) * (len(c.operands[0].as_slab().load.index) - 2) + shape if len(c.operands[0].as_slab().load.index) > 2 else None,
+            coords=_box_origin(c.operands[0].as_slab().load.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, sibling=mn[1]),
+            index=_slab_index(
+                c.operands[0].as_slab().load.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True, sibling=mn[1]
+            ),
             swizzle=swizzle,
         )
         return op, True, []
@@ -1378,8 +1380,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         elems = ops.slab_elems()
         pads = tuple(BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "smem-async" else 0 for e in elems)
         operands = _slab_operands(
-            index_srcs=(c.operands[0].loads[0].index, c.operands[1].loads[0].index),
-            bufs=(c.operands[0].loads[0].input, c.operands[1].loads[0].input),
+            index_srcs=(c.operands[0].as_slab().load.index, c.operands[1].as_slab().load.index),
+            bufs=(c.operands[0].as_slab().load.input, c.operands[1].as_slab().load.input),
             mn=mn,
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
@@ -1683,7 +1685,7 @@ class _MmaOps(_AtomOps):
         out = []
         for edge, role in ((self.c.operands[0], "a"), (self.c.operands[1], "b")):
             dt = self.tile.atom.operand_dtype(role)
-            t = self.inputs.get(edge.loads[0].input) if self.inputs and edge.as_slab() is not None else None
+            t = self.inputs.get(edge.as_slab().load.input) if self.inputs and edge.as_slab() is not None else None
             out.append(t.dtype if t is not None and t.dtype.nbytes == 1 else dt)
         return tuple(out)
 
@@ -1826,8 +1828,8 @@ class _MmaOps(_AtomOps):
         # A materialized edge answers with its own ``Load`` — the shape this code reads an index
         # and a buffer off; a computed cone stays the term, as it was when an edge could be either.
         a_edge, b_edge = c.operands[0], c.operands[1]
-        a_load = a_edge.loads[0] if a_edge.as_slab() is not None else a_edge
-        b_load = b_edge.loads[0] if b_edge.as_slab() is not None else b_edge
+        a_load = a_edge.as_slab().load if a_edge.as_slab() is not None else a_edge
+        b_load = b_edge.as_slab().load if b_edge.as_slab() is not None else b_edge
         b_trans = c.as_contraction().b_trans
         # The loop's final step overhangs K whenever ``atom_k`` does not tile it — a SYMBOLIC K
         # (unknown at compile time) or a static K with a remainder. Both mask the same way: the
@@ -1983,12 +1985,12 @@ class _ScalarOps(_AtomOps):
 
     def slab_elem(self):
         """The slab element dtype — the gmem operand's own dtype (fp32 SGEMM stages fp32)."""
-        return self.inputs[self.c.operands[0].loads[0].input].dtype
+        return self.inputs[self.c.operands[0].as_slab().load.input].dtype
 
     def slab_elems(self) -> tuple:
         """Each gmem operand's OWN dtype — A and B may differ on the scalar tier (fp32 split
         partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
-        return (self.inputs[self.c.operands[0].loads[0].input].dtype, self.inputs[self.c.operands[1].loads[0].input].dtype)
+        return (self.inputs[self.c.operands[0].as_slab().load.input].dtype, self.inputs[self.c.operands[1].as_slab().load.input].dtype)
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The scalar slab drain — the plain-``Load`` fma leaf (:func:`_scalar_drain`), reading by

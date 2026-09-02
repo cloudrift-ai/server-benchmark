@@ -141,7 +141,7 @@ def _edge(edge, ctx: _Ctx, result: str | None = None) -> tuple[str, object]:
     names = edge.exposes
     head = f"operand[{', '.join(names)}]" + (f" -> {result}" if result is not None else "")
     if edge.as_slab() is not None:
-        load = edge.loads[0]
+        load = edge.as_slab().load
         load = load.pretty()[0].strip().removeprefix(f"{load.name} = ")
         return f"{head}: {load}   ‹materialized›", lambda cont: []
     return f"{head}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)

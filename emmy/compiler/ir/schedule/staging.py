@@ -134,7 +134,7 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
     if bits is None:
         return None
     if c.operands[0].as_slab() is not None:
-        a_tensor = inputs.get(c.operands[0].loads[0].input)
+        a_tensor = inputs.get(c.operands[0].as_slab().load.input)
         if a_tensor is None or a_tensor.dtype != a_dtype:
             return None
     # A COMPUTED A has no gmem tensor to match: it evaluates into its slab at the atom's operand
@@ -297,7 +297,7 @@ def resolve_warp_stage(
     a_nbytes, b_nbytes = atom.operand_dtype("a").nbytes, atom.operand_dtype("b").nbytes
     if inputs:
         for edge, role in ((c.operands[0], "a"), (c.operands[1], "b")):
-            t = inputs.get(edge.loads[0].input) if edge.as_slab() is not None else None
+            t = inputs.get(edge.as_slab().load.input) if edge.as_slab() is not None else None
             if t is None or t.dtype == atom.operand_dtype(role):
                 continue
             if sync_copy:
@@ -321,8 +321,8 @@ def resolve_warp_stage(
     rank_ok = (
         c.operands[0].as_slab() is not None
         and c.operands[1].as_slab() is not None  # a descriptor needs a gmem address on BOTH edges
-        and _tma_operand_rank(c.operands[0].loads[0].index, m.axis.name, c.axis.name)
-        and _tma_operand_rank(c.operands[1].loads[0].index, n.axis.name, c.axis.name)
+        and _tma_operand_rank(c.operands[0].as_slab().load.index, m.axis.name, c.axis.name)
+        and _tma_operand_rank(c.operands[1].as_slab().load.index, n.axis.name, c.axis.name)
     )
     box_ok = max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
     tma_ok = (
@@ -358,18 +358,19 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int)
     # it into an N-major slab).
     if tile.n.mask or c.as_contraction().b_trans:
         return None
-    if not inputs or c.operands[0].as_slab() is None or c.operands[1].as_slab() is None or c.operands[0].loads[0].input not in inputs:
+    if not inputs or c.operands[0].as_slab() is None or c.operands[1].as_slab() is None or c.operands[0].as_slab().load.input not in inputs:
         return None
     # 1-byte (fp8) elements decline: the fill's chunk-width and alignment math below is written
     # for the 2/4-byte dtypes and is unaudited at nbytes == 1 — refusing keeps the tier
     # gmem-direct (correct, converts per element) instead of risking a mis-sized slab.
     if any(
-        t is not None and t.dtype.nbytes < 2 for t in (inputs.get(c.operands[0].loads[0].input), inputs.get(c.operands[1].loads[0].input))
+        t is not None and t.dtype.nbytes < 2
+        for t in (inputs.get(c.operands[0].as_slab().load.input), inputs.get(c.operands[1].as_slab().load.input))
     ):
         return None
     if stage.transport == "smem-tma" and not (
-        _tma_operand_rank(c.operands[0].loads[0].index, tile.m.axis.name, c.axis.name)
-        and _tma_operand_rank(c.operands[1].loads[0].index, tile.n.axis.name, c.axis.name)
+        _tma_operand_rank(c.operands[0].as_slab().load.index, tile.m.axis.name, c.axis.name)
+        and _tma_operand_rank(c.operands[1].as_slab().load.index, tile.n.axis.name, c.axis.name)
     ):
         return None
     # Staging needs the CTA to BE one (tile_m x tile_n) output tile (the cooperative fill / drain
@@ -379,12 +380,12 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int)
     if stage.transport == "smem-tma" and max(tile.m.tile, tile.n.tile) > _TMA_MAX_BOX:
         return None
     k = c.axis.extent.as_static()
-    elem_bytes = inputs[c.operands[0].loads[0].input].dtype.nbytes
+    elem_bytes = inputs[c.operands[0].as_slab().load.input].dtype.nbytes
     # Every staged transport needs 16 B-aligned inner global strides — A's is K, B's is N.
     n_ext = tile.n.axis.extent
     if not n_ext.is_static or (k * elem_bytes) % _TMA_ALIGN or (n_ext.as_static() * elem_bytes) % _TMA_ALIGN:
         return None
-    b_bytes = inputs[c.operands[1].loads[0].input].dtype.nbytes if c.operands[1].loads[0].input in inputs else elem_bytes
+    b_bytes = inputs[c.operands[1].as_slab().load.input].dtype.nbytes if c.operands[1].as_slab().load.input in inputs else elem_bytes
     depth, bk_elems = max(1, stage.depth), 0
     while depth >= 1:
         cap = budget // (depth * max(1, tile.m.tile * elem_bytes + tile.n.tile * b_bytes))
@@ -411,7 +412,7 @@ def converting_a(node: Fold, atom, inputs) -> bool:
         return False
     if atom.operand_dtype("a").nbytes < 2:
         return False
-    t = inputs.get(node.operands[0].loads[0].input)
+    t = inputs.get(node.operands[0].as_slab().load.input)
     return t is not None and t.dtype.nbytes >= 2 and t.dtype != atom.operand_dtype("a")
 
 
@@ -468,7 +469,7 @@ def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool
     for edge, role in ((c.operands[0], "a"), *((edge, "b") for edge in c.operands[1:])):
         if edge.as_slab() is None or (role == "a" and converting):
             continue
-        tensor = inputs.get(edge.loads[0].input) if inputs else None
+        tensor = inputs.get(edge.as_slab().load.input) if inputs else None
         # Structural scheduler fixtures intentionally do not carry Tensor metadata. Absence is not
         # evidence of an unsafe byte copy; the concrete lowering path always supplies inputs and
         # is where a known mismatch must be rejected.
@@ -478,7 +479,7 @@ def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool
         if tensor.dtype == want:
             continue
         return (
-            f"smem compute fill: materialized {role.upper()} edge {edge.loads[0].input!r} is {tensor.dtype}, but "
+            f"smem compute fill: materialized {role.upper()} edge {edge.as_slab().load.input!r} is {tensor.dtype}, but "
             f"atom {tile.atom.name} copies it into a {want} slab without conversion; only the "
             "``a`` role has a converting fill"
         )

@@ -206,7 +206,7 @@ def _a_leads(node: Fold) -> Fold:
 
         def k_last(edge: Fold) -> bool:
             # Only a slab has a gmem index to read a layout off; a computed cone answers False.
-            return edge.as_slab() is not None and node.axis.name in edge.loads[0].index[-1].free_vars()
+            return edge.as_slab() is not None and node.axis.name in edge.as_slab().load.index[-1].free_vars()
 
         a_edge = next((edge for edge in pair if k_last(edge)), None)
         if a_edge is None:

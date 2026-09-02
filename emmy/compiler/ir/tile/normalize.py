@@ -260,11 +260,13 @@ def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozen
             if not any(edge is current for current in ordered):
                 ordered.append(edge)
     ordered.extend(edge for edge in operands if not any(edge is current for current in ordered))
-    lift = Lambda(
-        params=(fold.axis.name, *(name for edge in ordered for name in _operand_result_names(edge))),
-        body=Body(form.products),
-        results=fold.lift.results,
-    )
+    # Rebuilding the contraction re-forms its lift, so the enclosing scope has to be re-declared:
+    # constructing the ``Lambda`` directly kept only the operand correspondence and dropped every
+    # axis the caller had supplied. ``closing`` re-appends whatever the canonical body still reads
+    # on top of it, so the declaration survives the canonicalization rather than being reset by it.
+    bound = tuple(name for edge in ordered for name in _operand_result_names(edge))
+    scope = tuple(axis for axis in axes if axis != fold.axis.name and axis not in bound)
+    lift = Lambda.closing((fold.axis.name, *bound, *scope), Body(form.products), fold.lift.results)
     return replace(fold, operands=tuple(ordered), lift=lift)
 
 

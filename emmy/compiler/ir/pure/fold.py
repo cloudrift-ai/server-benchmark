@@ -211,26 +211,47 @@ class Fold:
     def as_contraction(self) -> ContractionView | None:
         """The :class:`ContractionView` of this term, or ``None`` when it is not bilinear.
 
-        Bilinear iff this fold's axis is exactly what its two operands SHARE and each contributes
-        exactly one free axis of its own. A scale (``sum_k a[m,k]·s``) fails because ``s`` brings
-        no ``k``; a pointwise fold fails for having no axis to share.
+        ALGEBRA names the pair, GEOMETRY names the axes. The two readings are not
+        interchangeable: ``sum_k(a[m,k] * b[k,n])`` and ``sum_k(a[m,k] + b[k,n])`` have identical
+        axes and identical free roles, so reading coordinates alone hands an addition to the
+        tensor-core tier. :attr:`semiring` settles what the carrier is — one shared ⊗ per result
+        distributing over a commutative-monoid ⊕ — and each product's ARGUMENTS say which operand
+        edges it multiplies.
+
+        The reduction is then what that pair SHARES, and each side's own free axis is the output
+        role it carries. Sharing is not exclusive to the reduction: a batch axis rides both
+        operands and stays free (``Q[b,h,m,d] x K[b,h,n,d]`` shares ``{b,h,d}``, reduces ``d``),
+        so the fold's axis must be AMONG the shared axes rather than all of them.
+
+        Every product reads ``operands[0]`` — A by canonical form — which is what makes the fused
+        multi-channel edge one contraction over one shared A rather than several.
         """
-        if self.axis is None or len(self.operands) != 2:
+        if self.axis is None or len(self.operands) < 2 or self.semiring is None:
             return None
-        left, right = (edge.index_space for edge in self.operands)
-        shared = left & right
-        # The reduction is shared, but sharing is not exclusive to it: a BATCH axis is carried by
-        # both operands and stays free (``Q[b,h,m,d] x K[b,h,n,d]`` shares ``{b,h,d}`` and reduces
-        # only ``d``). What makes the fold bilinear is that its own axis is among the shared ones
-        # and each operand still contributes a free axis of its own.
-        if self.axis.name not in shared:
+        by_name = {name: edge for edge in self.operands for name in edge.exposes}
+        a_edge = self.operands[0]
+        a_names = set(a_edge.exposes)
+        streamed = []
+        for product in self.lift.body:
+            other = set(product.args) - a_names
+            if len(set(product.args) & a_names) != 1 or len(other) != 1:
+                return None  # a product that does not multiply A by exactly one other edge
+            edge = by_name.get(next(iter(other)))
+            if edge is None or edge is a_edge:
+                return None
+            streamed.append(edge)
+
+        b_edge = streamed[0]
+        a_space, b_space = a_edge.index_space, b_edge.index_space
+        if self.axis.name not in a_space & b_space:
             return None
-        left_only, right_only = left - shared, right - shared
+        left_only, right_only = a_space - b_space, b_space - a_space
         if len(left_only) != 1 or len(right_only) != 1:
             return None
-        streamed = self.operands[1]
-        b_trans = streamed.is_slab and self.axis.name in streamed.lift.body[0].index[-1].free_vars()
-        return ContractionView(axis=self.axis, left=next(iter(left_only)), right=next(iter(right_only)), b_trans=b_trans)
+        b_trans = b_edge.is_slab and self.axis.name in b_edge.lift.body[0].index[-1].free_vars()
+        return ContractionView(
+            axis=self.axis, left=next(iter(left_only)), right=next(iter(right_only)), b_trans=b_trans
+        )
 
     @property
     def is_slab(self) -> bool:

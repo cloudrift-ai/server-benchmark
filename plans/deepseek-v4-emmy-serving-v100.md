@@ -185,12 +185,16 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    streams) inside the consumer piece's sum-of-squares reduce. Characterized GPU-free: the materializing seam
    (`PLACE@a8`, the gate's fn-projection) was OFFERED and priced away — the offline cold-start proxy gave the
    fused 2³⁰-trip nest 4.29e-37 µs against the cut arm's 1.02e-17, with zero weights on any structural feature.
-   The fix is pricing, per `plans/mhc-statistics-hoist.md`: the nest-aware `S_ext_serial_cell_work` stamp, the
-   coverage-adjusted `D_serial_cell_work` feature, and a serial-work calibration floor on the offline deploy
-   score (plus disqualification signatures surviving featurizer vocabulary growth — the stamp alone had silenced
-   the host DB's 9 `bench_fail` rows). Replayed on the pinned twins + host-DB copy, the greedy now elects a
-   29-kernel route whose worst piece is 2¹⁸ per-thread trips (was 2³⁰; the original fused monster was 2³⁸).
-   Still owed on the host: `emmy run --bench` for the measured per-launch time, then gate (c).
+   The landed fix is pricing: the nest-aware `S_ext_serial_cell_work` stamp, the coverage-adjusted
+   `D_serial_cell_work` feature, and a guarded clamp at the kernel-set Σ (`policy/greedy._resolved_price`) — a
+   kernel whose serial-work lower bound exceeds 1 ms prices at least that bound; below the guard elections stand
+   untouched, so a future recomputation nest under ~2²³ per-thread trips is still adjudicated by the uncalibrated
+   proxy. (Plus: disqualification signatures survive featurizer vocabulary growth — the stamp alone had silenced
+   the host DB's 9 `bench_fail` rows — and `SearchDB` schema v4 drops stale `lowering` chains keyed pre-stamp.)
+   Replayed on the pinned twins + host-DB copy, the greedy elects the same 12-piece plan plus exactly the
+   `PLACE@a8` statistics piece — 13 kernels, the consumer drops 2³⁰ → 2¹⁶ and the route's worst piece is 2¹⁹
+   per-thread trips (the unaided fused monster was 2³⁸). Still owed on the host: `emmy run --bench` for the
+   measured per-launch time, then gate (c).
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
 compiles end to end (post-#700) but the first `post4096` prefill forward would take minutes-plus per launch.

@@ -451,9 +451,14 @@ def _serial_cell_trips(knobs: dict) -> float:
     return work / max(decomp.cta * decomp.coop, 1)
 
 
-#: Serial-work calibration bound, µs per per-thread serial trip: no thread retires a dependent
-#: loop iteration faster than ~0.1 ns on any current GPU clock, so a kernel's true latency is
-#: never below ``trips × this``.
+#: Serial-work calibration bound, µs per per-thread serial trip. This is an ISSUE-RATE bound,
+#: not a dependency-latency one: even fully independent, perfectly pipelined trips each issue at
+#: least one instruction, and no current GPU issues a thread's instruction faster than ~0.1 ns —
+#: dependence chains, multi-statement bodies, or an ``Mma`` in the trip body only raise the true
+#: cost, never lower it. The one slack this leaves — a trip whose real cost is far above 0.1 ns —
+#: is absorbed by the enforcement guard at the consumer: the bound only ever decides where it is
+#: orders of magnitude past every legitimate kernel, so under-estimating a trip never flips an
+#: honest election.
 SERIAL_TRIP_FLOOR_US = 1e-4
 
 

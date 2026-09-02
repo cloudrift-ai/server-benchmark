@@ -43,6 +43,17 @@ preference — the alternative is that an all-failed kernel has no ``ok`` row,
 therefore no evidence at all, and falls through to the prior as though nothing
 were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
 every benched variant hung.
+
+**One physical bound, and it is not a preference.** The kernel-set Σ
+(:func:`_resolved_price`) clamps a summand to its serial-work lower bound where
+that bound is decisively large (:data:`_SERIAL_FLOOR_ENFORCE_US`). This is the
+one exception to "no hand-written tier", and it is an exception in the same
+sense the disqualification is: not a ranking opinion but a fact no measurement
+can overrule — no thread retires 2^30 dependent-nest trips in microseconds, and
+no measurement can even EXIST at such magnitudes (the bench watchdog fires
+first), so "fix it by measuring" is unavailable exactly where the bound binds.
+A measured µs is never below the bound, so evidence always wins where evidence
+can exist.
 """
 
 from __future__ import annotations
@@ -213,7 +224,10 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
 #: below the bench watchdog. Below it the bound sits inside the range launch overhead and memory
 #: traffic legitimately dominate, and the model's ranking (however uncalibrated) must stand;
 #: above it per-thread serial work alone makes the kernel un-servable and nothing may price it
-#: lower.
+#: lower. The lower edge is pinned by measurement: the largest legitimate ``serial_floor_us``
+#: across the qwen3emb realization corpus family is **6.55 µs** (``sdpa-s512``'s fused kernel,
+#: 2^16 serial trips — a shape whose fused election is correct and pinned by its ``realized``
+#: replay), so 1 ms stands ~150x above the biggest bound the guard must ignore.
 _SERIAL_FLOOR_ENFORCE_US = 1e3
 
 
@@ -255,7 +269,10 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
     launch overhead and memory traffic, so at ordinary magnitudes it must not adjudicate a
     fused-vs-cut µs delta (an ungated draft flipped three qwen3emb sdpa corpus replays to a cut
     election by comparing trip counts alone) — while a bound past the guard is un-servable
-    whatever those effects are. Sibling ranking within one kernel is decided upstream and never
+    whatever those effects are. The guard's honest escape: a nest under ~2^23 per-thread trips
+    (bound < 1 ms; several ms real) is still adjudicated by the uncalibrated proxy, so a
+    2^23-class recomputation defect stays electable — smaller than the 2^30 class this bound
+    exists for, but not free. Sibling ranking within one kernel is decided upstream and never
     reads this Σ, which is what makes the clamp safe here and NOT on the prior's scoring
     surfaces (there any µs bound collapses live-range deltas — the plateau failure
     ``latency_proxy``'s history warns about)."""
@@ -278,8 +295,10 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
             # only ADDS stamps the featurizer has since gained is that same measured shape (the
             # stamp derives from the same body), so a stored signature also binds as a subset —
             # or one added ``S_*`` feature silently disables this whole tier (measured live when
-            # ``S_ext_serial_cell_work`` landed). The mirror direction stays refused.
-            if sig in failed or any(stored <= sig for stored in failed):
+            # ``S_ext_serial_cell_work`` landed). The mirror direction stays refused, and so is
+            # an EMPTY stored signature: it is a subset of everything, so one degenerate row
+            # (an op that stamped nothing) would silently condemn every kernel in every arm.
+            if sig in failed or any(stored and stored <= sig for stored in failed):
                 return math.inf
         us = scored.get(nid)
         if us is None:

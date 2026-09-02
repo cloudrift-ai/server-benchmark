@@ -404,7 +404,7 @@ The proxy stays uncalibrated, and the one consumer that needs absolute µs enfor
 the kernel-set Σ (`policy/greedy._resolved_price`), a summand whose serial-work lower bound
 (`features.serial_floor_us` — the row's per-thread serial trips, i.e. the nest-aware `S_ext_serial_cell_work`
 stamp after its reduce-partition coverage, at a per-trip constant conservative for any GPU clock) exceeds the
-enforcement guard is clamped to that bound. No fitted weight can guarantee the bound at magnitudes no measurement
+enforcement guard (`_SERIAL_FLOOR_ENFORCE_US`, 1 ms) is clamped to that bound. No fitted weight can guarantee the bound at magnitudes no measurement
 can reach: DeepSeek-V4 `post4096`'s fused 2^30-trip recomputation nest priced 4.29e-37 µs and beat every
 recomputation-free composed-cut arm until the bound priced it honestly. The guard is jurisdiction, not tuning —
 the bound ignores launch overhead and memory traffic, so at ordinary magnitudes the model's ranking stands

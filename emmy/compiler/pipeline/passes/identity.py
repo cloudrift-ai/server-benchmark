@@ -186,23 +186,31 @@ def _loop_depth(body: Body) -> int:
     return best
 
 
-def _serial_cell_work(body) -> float:
+def _bounded_mul(value: float, extent: float) -> float:
+    """One saturating multiply step of an extent product — never an unbounded Python integer."""
+    if extent and value > float_info.max / extent:
+        return float_info.max
+    return value * extent
+
+
+def _serial_cell_work(body: Body) -> float:
     """Worst per-cell serial trip count: the max over loop-nest paths of the product of the
     static reduce-loop extents along the path. Nest-aware where ``S_ext_reduce_prod`` is flat —
     sibling reduces take the max, nested reduces multiply — so a subtree re-evaluated under an
     enclosing reduce is priced by the trips a thread actually serializes (DeepSeek-V4
     ``post4096``'s elected consumer piece recomputed a 16384-step statistics contraction inside a
     4096-step reduce: flat product 2^36-blind, nest product the honest 2^30). Free and sweep
-    loops are excluded (grid-distributed / conservative) and a symbolic extent contributes no
-    factor, so the value is a lower bound; saturates at the largest finite float."""
+    loops are excluded (grid-distributed / conservative), a symbolic extent contributes no
+    factor, and so does a ``StridedLoop`` (like everywhere else in this feature block — a
+    strided respelling can therefore evade the count, in the conservative direction), so the
+    value is a lower bound; saturates at the largest finite float."""
     best = 1.0
     for s in body:
         if isinstance(s, Loop):
             inner = _serial_cell_work(s.body)
             ext = s.axis.extent
             if s.is_reduce and ext.is_static:
-                extent = float(ext.as_static())
-                inner = float_info.max if extent and inner > float_info.max / extent else inner * extent
+                inner = _bounded_mul(inner, float(ext.as_static()))
             best = max(best, inner)
         else:
             for nested in s.nested():
@@ -228,9 +236,7 @@ def _extents(body: Body) -> dict[str, float]:
         """Multiply extent features without constructing an unbounded Python integer."""
         value = 1.0
         for extent in values:
-            if extent and value > float_info.max / extent:
-                return float_info.max
-            value *= extent
+            value = _bounded_mul(value, extent)
         return value
 
     return {

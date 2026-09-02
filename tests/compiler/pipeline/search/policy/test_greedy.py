@@ -120,6 +120,19 @@ def test_a_disqualification_survives_featurizer_vocabulary_growth() -> None:
     assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}) == 5.0
 
 
+def test_an_empty_recorded_signature_condemns_nothing() -> None:
+    """``frozenset() <= sig`` holds for EVERY signature, so one degenerate stored failure (an op
+    that stamped nothing) would silently disqualify every kernel in every arm — an all-``inf``
+    fork decides by option order and logs nothing. An empty signature identifies no shape, so it
+    binds no shape (only its own exact empty-signature echo, which is the recorded fact)."""
+    stamped = SimpleNamespace(knobs={"S_shape": 4096}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=stamped)})
+    trace = [SimpleNamespace(node_id="n", score=5.0)]
+    ctx = SimpleNamespace(features=lambda: {})
+
+    assert greedy._resolved_price(terminal, trace, ctx, None, failed={frozenset(): [2_000_000.0]}) == 5.0
+
+
 def _priced(kernels: dict[str, tuple[dict, float]]) -> float:
     """``_resolved_price`` over SimpleNamespace kernels: ``{node_id: (knobs, traced score)}``."""
     terminal = SimpleNamespace(
@@ -150,11 +163,18 @@ def test_the_kernel_set_price_enforces_the_serial_work_bound():
 def test_the_serial_bound_has_no_jurisdiction_at_ordinary_magnitudes():
     """The bound ignores launch overhead and memory traffic, so below the enforcement guard the
     model's ranking stands exactly as before — an ungated draft flipped three qwen3emb sdpa
-    corpus replays to a cut election by comparing trip counts alone. And a measured µs is never
-    below the bound, so the clamp is a no-op on it even past the guard."""
+    corpus replays to a cut election by comparing trip counts alone. The 2^16 row IS the largest
+    of those shapes (``sdpa-s512``'s fused kernel, ``serial_floor_us`` 6.55 µs — the biggest
+    legitimate floor measured across the qwen3emb corpus family), so lowering the guard under it
+    breaks this test before it breaks the corpus. And a measured µs is never below the bound, so
+    the clamp is a no-op on it even past the guard."""
+    from emmy.compiler.pipeline.search.features import serial_floor_us
+
+    sdpa_s512 = {"S_ext_serial_cell_work": float(2**16)}
+    assert serial_floor_us(sdpa_s512) < greedy._SERIAL_FLOOR_ENFORCE_US
     garbage = 4.29e-37
-    fused_small = _priced({"n": ({"S_ext_serial_cell_work": float(2**14)}, garbage)})
-    assert fused_small == pytest.approx(garbage)  # bound ~1.6 µs — inside the guard, not enforced
+    fused_small = _priced({"n": (sdpa_s512, garbage)})
+    assert fused_small == pytest.approx(garbage)  # bound 6.55 µs — inside the guard, not enforced
     measured = _priced({"n": ({"S_ext_serial_cell_work": float(2**30)}, 2_000_000.0)})
     assert measured == 2_000_000.0  # a measured µs already satisfies the bound
 

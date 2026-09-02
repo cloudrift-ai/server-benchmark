@@ -142,13 +142,14 @@ def storage_frontier(node: Fold) -> Frontier | None:
 
 
 def _external_reads(node: Fold) -> frozenset[str]:
-    """Everything ``node`` needs supplied from outside — read off its DECLARATIONS.
+    """Everything ``node`` needs supplied from outside — read off its DECLARATIONS: the coordinates
+    it is evaluated over (:attr:`Fold.index_space`) and the values it captures
+    (:attr:`Fold.captures`).
 
     Was: lower the term and walk the result for free names. That asked a term to re-derive what it
     already states, re-lowered on every call, and returned a superset (names the term binds
-    internally, which every caller here discards). :attr:`Fold.index_space` is the declaration —
-    the term's own axes unioned with its operands', asked of the term rather than derived here."""
-    return node.index_space
+    internally, which every caller here discards)."""
+    return node.index_space | node.captures
 
 
 def _closed_at(node: Fold, axes: tuple) -> bool:
@@ -642,9 +643,7 @@ def realize(
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
-        loads = tuple(
-            Fold.slab(Load(name=name, input=buffer, index=index), axes) for name, buffer in zip(names, buffers, strict=True)
-        )
+        loads = tuple(Fold.slab(Load(name=name, input=buffer, index=index), axes) for name, buffer in zip(names, buffers, strict=True))
         if front is not None:
             raw = replace(loads[0], dtype=front.dtype)
             loads = (

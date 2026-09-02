@@ -32,6 +32,7 @@ from emmy.compiler.ir.pure.algebra import M, component_ops, family_of, merge_stm
 from emmy.compiler.ir.pure.carrier import exp_merge
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
+from emmy.compiler.ir.stmt.body import free_names
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
@@ -129,35 +130,58 @@ def _placed(edges: tuple, statements, emit) -> list:
     statistic a weight cone divides by, the reciprocal an attention epilogue scales with — so
     emitting every operand up front puts the edge ahead of the value it consumes. An edge lands as
     soon as everything it takes from the body is defined; one that takes nothing leads, as any
-    prologue does.
+    prologue does. The dependence runs both ways: a statement that reads an edge's result (the
+    reciprocal of a sum) pulls that edge, and whatever the edge still needs, ahead of itself.
 
     ``emit`` turns one edge into statements: ``Fold.lower`` for Loop IR, the kernel emitter's
     ``_emit`` for kernel IR.
     """
     statements = list(statements)
-    body_defines = {name for stmt in statements for name in stmt.defines()}
-    pending = [
-        (edge, {name for name in edge.lift.params if name not in {n for inner in edge.operands for n in inner.exposes}} & body_defines)
-        for edge in edges
-    ]
+    exposed = {name for edge in edges for name in edge.exposes}
+    suppliable = exposed | {name for stmt in statements for name in stmt.defines()}
+    needs = {id(edge): edge.captures & suppliable for edge in edges}
     out: list = []
     defined: set[str] = set()
+    pending = list(edges)
+    deferred: list = []
 
     def release() -> None:
         while True:
-            ready = [entry for entry in pending if entry[1] <= defined]
+            ready = [edge for edge in pending if needs[id(edge)] <= defined]
             if not ready:
                 return
-            for entry in ready:
-                out.extend(emit(entry[0]))
-                defined.update(entry[0].exposes)
-                pending.remove(entry)
+            for edge in ready:
+                out.extend(emit(edge))
+                defined.update(edge.exposes)
+                pending.remove(edge)
+
+    def waits(stmt) -> bool:
+        return bool((free_names(stmt) & exposed) - defined)
+
+    def settle() -> None:
+        # Statements keep their order among themselves — a step reassigns its carried state in
+        # place, so a by-name reorder is not sound — and one that reads an edge's result waits
+        # for that edge, then lands as soon as it has.
+        while True:
+            release()
+            ready = [stmt for stmt in deferred if not waits(stmt)]
+            if not ready:
+                return
+            for stmt in ready:
+                out.append(stmt)
+                defined.update(stmt.defines())
+                deferred.remove(stmt)
 
     release()
     for stmt in statements:
+        if waits(stmt):
+            deferred.append(stmt)
+            continue
         out.append(stmt)
         defined.update(stmt.defines())
-        release()
+        settle()
+    settle()
+    assert not pending and not deferred, "an operand edge and the statements around it depend on each other in a cycle"
     return out
 
 
@@ -349,6 +373,26 @@ class Fold:
         for edge in self.operands:
             space |= edge.index_space
         return frozenset(space)
+
+    @cached_property
+    def captures(self) -> frozenset[str]:
+        """Every name this term takes from its ENVIRONMENT: the lift's trailing params past the
+        operand binding, and its operands' captures, less what the term itself binds — its axes,
+        its operands' results and its lift body's own defs.
+
+        The closure invariant (``ir/pure/closure``) says a normalized term captures only iteration
+        axes. A VALUE here is what the closing rewrites drain into an operand edge, what a cut
+        carries beside the piece it slices, and what a kernel's per-cell fill closes over. Each of
+        them reads this declaration; lowering the term and scanning for free names returned a
+        superset (the names the term binds internally) and re-lowered at every ask.
+        """
+        lead = 0 if self.axis is None else 1
+        arity = sum(len(edge.exposes) for edge in self.operands)
+        names = set(self.lift.params[lead + arity :])
+        for edge in self.operands:
+            names |= edge.captures
+        bound = {axis.name for axis in self.axes} | {name for edge in self.operands for name in edge.exposes}
+        return frozenset(names - bound - (self.lift.defined - set(self.lift.params)))
 
     def as_contraction(self) -> ContractionView | None:
         """The :class:`ContractionView` of this term, or ``None`` when it is not bilinear.
@@ -591,9 +635,7 @@ class Fold:
                 return (self.operands[0],), Body()
             # A fully reduced state is an ordinary monoid element, not a singleton injection.
             merged = merge_stmts(self.combine, tuple(self.lift.results), dtype=None)
-            return self.operands, Body(
-                tuple(replace(stmt, axes=(self.axis.name,)) if isinstance(stmt, Accum) else stmt for stmt in merged)
-            )
+            return self.operands, Body(tuple(replace(stmt, axes=(self.axis.name,)) if isinstance(stmt, Accum) else stmt for stmt in merged))
 
         if ops is None:
             terms = tuple(self.lift.results)
@@ -706,7 +748,7 @@ class Fold:
         """
         axis = self.axis
         edges, statements = self.derived_step
-        rides = [edge for edge in edges if axis is not None and axis.name in edge.index_space]
+        rides = [edge for edge in edges if axis is None or axis.name in edge.index_space]
         ridden = {id(edge) for edge in rides}
         prologue = [stmt for edge in edges if id(edge) not in ridden for stmt in edge.lower()]
         step = _placed(tuple(rides), statements, lambda edge: edge.lower())

@@ -95,8 +95,10 @@ dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `
 
 `_factor.factorize(tile, root)` is the **entry** every `TileOp` root lowers through: it builds the ambient `Ctx` and
 dispatches `tile.op` into the recursion `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a
-zero-axis `Fold` with an operand recurses (its projection body is walked via `_emit_body` into the `tail`), and each
-leaf binds to the grid via the **ONE** root-binding pipeline, `_bind` — a single pipeline that reads WHICH AXES the
+zero-axis `Fold` with an operand recurses (its projection body is walked via `_emit_body` and split around the peeled
+root by dependency — what the root reads leads it as the `head`, the reduce region's first slot; the rest is the `tail`
+it feeds), and each leaf binds to the grid via the **ONE** root-binding pipeline, `_bind` — a single pipeline that
+reads WHICH AXES the
 schedule tiles off the node
 and seals through the one `grid_tile` finalizer. A tiled contraction tiles its OUTPUT `(m, n)` axes (register / warp
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —

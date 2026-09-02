@@ -127,14 +127,7 @@ def _twisted_pair(maximum: Fold, denominator: Fold) -> Fold:
     other = tuple(f"{name}__o" for name in states)
     lift = replace(maximum.lift, results=(maximum.lift.results[0], 1.0))
     combine = Lambda(params=states + other, body=Body(exp_combine_states(states, other)), results=states)
-    return Fold(
-        axis=maximum.axis,
-        unroll=maximum.unroll,
-        operands=maximum.operands,
-        lift=lift,
-        init=(maximum.init[0], denominator.init[0]),
-        combine=combine,
-    )
+    return replace(maximum, lift=lift, init=(maximum.init[0], denominator.init[0]), combine=combine)
 
 
 def _merge_siblings(operands: tuple, body: Body, axes: tuple[str, ...]) -> tuple[tuple, Body]:

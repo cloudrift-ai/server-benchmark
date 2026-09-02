@@ -473,21 +473,19 @@ def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple
     return frag
 
 
-def _captured_prologue(partial_fold: Fold, pre: tuple, split: Axis, free: tuple) -> tuple:
-    """The projection-prologue stmts the sliced fold still CAPTURES — their backward cone, carried
-    into the partial. The chain form keeps the head fold as a BODY member of its projection
-    wrapper (:func:`~emmy.compiler.ir.tile.ops.head`), so a prologue stmt evaluated once per cell
-    (a scalar scale load) can define a name the fold's lift reads; slicing the fold alone would
-    leave that capture dangling in the partial."""
-    # Read off the DECLARATION rather than lowering the partial and scanning it for free names:
-    # a term states what it needs, and `edge_axes` reads that declaration. The axis
-    # subtraction stays — a coordinate is supplied by the enclosing loop, not by the prologue —
-    # but the axes a nested term BINDS are already excluded by the reading itself.
+def _captured_prologue(partial_fold: Fold, projection: tuple, split: Axis, free: tuple) -> tuple:
+    """The projection stmts the sliced fold still CAPTURES — their backward cone, carried into the
+    partial. A projection evaluates a stmt once per cell (a scalar scale load, the reciprocal an
+    attention epilogue scales with) that the fold's lift reads by name; slicing the fold alone
+    would leave that capture dangling in the partial."""
+    # Read off the DECLARATION (:attr:`Fold.captures`) rather than lowering the partial and
+    # scanning it for free names. The axis subtraction stays — a coordinate is supplied by the
+    # enclosing loop, not by the projection.
     axes = {split.name, *(a.name for a in free)}
-    captures = partial_fold.index_space - frozenset(axes)
+    captures = partial_fold.captures - frozenset(axes)
     if not captures:
         return ()
-    return Body(pre).backward_cone(captures).members
+    return Body(projection).backward_cone(captures).members
 
 
 # ---- the realization -------------------------------------------------------------------------- #
@@ -518,16 +516,10 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     n_comp = len(states)
     out = root.output
     cell = _cell_index(projection, free)
-    # The chain form keeps the head fold as a BODY member of its projection wrapper (``head``'s
-    # sweep case), so ``projection`` still contains it. Strip it — the epilogue's states come from
-    # the workspace combine (or the atomic partial), and keeping the fold would re-run the whole
-    # reduction per cell AND shadow those states — and carry the prologue cone the sliced fold
-    # still captures into the partial (:func:`_captured_prologue`).
-    fold_at = next((i for i, stmt in enumerate(projection) if stmt is node), None)
-    prologue: tuple = ()
-    if fold_at is not None:
-        prologue = _captured_prologue(partial_fold, projection[:fold_at], split, free)
-        projection = (*projection[:fold_at], *projection[fold_at + 1 :])
+    # The prologue cone the sliced fold still captures rides into the partial
+    # (:func:`_captured_prologue`); the wrapper's dependency placement lands it ahead of the fold
+    # that reads it.
+    prologue = _captured_prologue(partial_fold, projection, split, free)
     frag = _frag(match, root)
 
     if finalize == "atomic":
@@ -543,16 +535,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         else:
             atomic_proj = (Write(output=out.name, index=cell, values=states, atomic=True),)
         p_body, p_stores = _boundary(atomic_proj)
-        if fold_at is not None:
-            # Body-resident form: keep the wrapper's own shape — prologue, the sliced fold in
-            # place, then the per-partition epilogue (operand edges evaluate before the body, so
-            # ``_project`` would put a captured prologue AFTER the fold that reads it).
-            # ``fold_at`` indexes the PRE-strip ``projection``, and it stays valid against
-            # ``p_body`` because the strip removed exactly the stmt AT that index and
-            # ``_boundary`` only extracts trailing ``Write``s, which sit after the fold.
-            piece = _piece((*p_body[:fold_at], partial_fold, *p_body[fold_at:]), (split, *free), output_specs=p_stores)
-        else:
-            piece = _piece(_project(partial_fold, p_body), (split, *free), output_specs=p_stores)
+        piece = _piece(_project(partial_fold, p_body), (split, *free), output_specs=p_stores)
         result = _one(match, frag, root, piece)
         return _add_projection_pieces(match, result, projection_pieces, free)
 
@@ -579,8 +562,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # split axis joins as a lead grid axis via the partial tile's OWN placement — the view derives
     # lead axes from the placement, so nothing is restamped on the node.
     ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
-    partial_body = (*prologue, partial_fold) if prologue else partial_fold
-    partial_tile = _piece(partial_body, (split, *free), output_specs=ws_stores)
+    partial_tile = _piece(_project(partial_fold, prologue), (split, *free), output_specs=ws_stores)
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the

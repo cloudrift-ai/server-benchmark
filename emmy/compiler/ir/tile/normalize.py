@@ -175,17 +175,6 @@ def _apply_spine(split, carried: str, out: str, taken: set[str]) -> tuple[tuple,
     return tuple(emitted), out
 
 
-def _edge_free_names(edge) -> frozenset[str]:
-    """The names an operand edge needs SUPPLIED — :meth:`Fold.deps`, the declared roll-up of its
-    own environment and its edges'.
-
-    Returning an empty set here (on the grounds that "a term captures nothing") is what made the
-    closing rewrites below inert: `_provider_needs` went empty, every `provider()` returned None,
-    and the drain stopped draining. A term declaring a name is exactly what the drain exists to
-    resolve — the declaration says WHAT is needed, and closing supplies it through an operand."""
-    return frozenset(edge.deps()) if isinstance(edge, Fold) else frozenset()
-
-
 def _carries_iteration(node) -> bool:
     """Whether a provider chain contains a Fold axis rather than only straight-line code."""
     if getattr(node, "axis", None) is not None:
@@ -208,11 +197,9 @@ def _with_source(node: Fold, source) -> Fold:
     reducing node keeps its iteration var first and rebinds the rest, so the formation invariant —
     one lift param per operand result component — holds at either position."""
     operands = (*node.operands, source)
+    lead = () if node.axis is None else (node.axis.name,)
     bound = tuple(name for edge in operands for name in edge.exposes)
-    if node.axis is None:
-        bound = tuple(name for edge in operands for name in edge.exposes)
-    return Fold(operands=operands, lift=Lambda.closing(bound, Body.coerce(node.lift.body), node.lift.results))
-    return replace(node, operands=operands, lift=replace(node.lift, params=(node.axis.name, *bound)))
+    return replace(node, operands=operands, lift=Lambda.closing((*lead, *bound), node.lift.body, node.lift.results))
 
 
 def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
@@ -276,8 +263,11 @@ def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
 
 
 def _provider_needs(edge, provider_order: tuple[str, ...], provider_names: frozenset[str]) -> tuple[str, ...]:
-    """The provider names an operand edge captures, in provider order."""
-    return tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
+    """The provider names an operand edge captures, in provider order — :attr:`Fold.captures`, the
+    declared roll-up of the edge's own environment and its edges'. Reading it as empty (on the
+    grounds that "a term captures nothing") is what once made the closing rewrites inert: every
+    ``provider()`` returned ``None`` and the drain stopped draining."""
+    return tuple(name for name in provider_order if name in (edge.captures & provider_names))
 
 
 def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
@@ -405,7 +395,7 @@ def _share_common_cones(root: Fold) -> Fold:
     lowering walks tree positions, and every position holds a term of the same value (a unified
     representative may change internal spelling). Identity-preserving off the replacement spine,
     like ``_replace_fold``."""
-    canon: dict[Fold, Fold] = {}
+    canon: dict[tuple, Fold] = {}
     seen: dict[int, Fold] = {}
 
     def member(stmt):
@@ -432,11 +422,11 @@ def _share_common_cones(root: Fold) -> Fold:
         if any(piece is not stmt for piece, stmt in zip(body, node.lift.body, strict=True)):
             current = replace(current, lift=replace(current.lift, body=Body(body)))
         # The canonical form IS the key: a dict lookup and an alpha-equality test are the same
-        # operation, so there is no prefilter bucket and no pairwise rescan. Keyed on the term
-        # ALONE — a Fold binds nothing. It is a value, reached as the root or as an operand edge,
-        # and an edge binds POSITIONALLY to its consumer's lift params, so which names it happens
-        # to expose is the binder's business and never a reason to keep two equal values apart.
-        prior = canon.setdefault(current.canonical(), current)
+        # operation, so there is no prefilter bucket and no pairwise rescan. The exposed names
+        # ride beside it: a consumer's lift reads an edge's results BY NAME, so two values that
+        # differ only in what they expose stay distinct — unifying them would re-spell every
+        # consumer of the copy (softmax's two reads of one row, spelled ``in0`` and ``in1``).
+        prior = canon.setdefault((current.canonical(), current.exposes), current)
         seen[id(node)] = prior
         return prior
 

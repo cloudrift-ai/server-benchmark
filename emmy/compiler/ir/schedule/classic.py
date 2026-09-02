@@ -207,13 +207,13 @@ def _target_memo(tile_op, target, slot: str) -> dict:
 
 
 def _computed_edge(node: Fold) -> bool:
-    return any(isinstance(edge, Fold) and edge.axis is None for edge in (node.operands[0], *(channel.b for channel in node.channels)))
+    return any(isinstance(edge, Fold) and edge.axis is None for edge in (node.operands[0], *node.operands[1:]))
 
 
 def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
     from . import staging  # noqa: PLC0415
 
-    return plan.is_warp and (_computed_edge(node) or len(node.channels) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs))
+    return plan.is_warp and (_computed_edge(node) or (len(node.operands) - 1) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs))
 
 
 def _kstep_refusal(k_axis, plan: Tile) -> str | None:
@@ -330,11 +330,11 @@ def _paired_budget_refusal(node: Fold, producer: Fold | None, placed: PlacedTile
     if atom.operand_dtype("c").nbytes == 2:
         c_regs += atom.atom_m * atom.atom_n // 32
     depth = max(1, stage.reg_depth)
-    channels = len(node.channels)
+    channels = (len(node.operands) - 1)
     consumer_c = channels * placed.reg_m * placed.reg_n * c_regs
     consumer = placed.reg_m * depth * a_regs + channels * (placed.reg_n * depth * b_regs + placed.reg_m * placed.reg_n * c_regs)
     producer_n = stage.bk_elems // atom.atom_n
-    producer_regs = placed.reg_m * a_regs + len(producer.channels) * (producer_n * b_regs + placed.reg_m * producer_n * c_regs)
+    producer_regs = placed.reg_m * a_regs + (len(producer.operands) - 1) * (producer_n * b_regs + placed.reg_m * producer_n * c_regs)
     required = max(consumer, consumer_c + producer_regs)
     available = min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // placed.block_threads)
     if required <= available:

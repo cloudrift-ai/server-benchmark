@@ -446,10 +446,10 @@ def computed_operand_cover(c: Fold, tile: Tile, *, converting: bool = False, k_a
                 "a transposed B stages N-major (K contiguous), so its cp.async chunk runs along K "
                 "and cannot clamp a symbolic K's partial tail; pin a canonical B layout"
             )
-    materialized_b = [isinstance(ch.b, Load) for ch in c.channels]
+    materialized_b = [edge.is_slab for edge in c.operands[1:]]
     if any(materialized_b) and not all(materialized_b):
         return "the smem compute fill requires homogeneous B channels; mixed computed/materialized B layouts stay on the demoted reading"
-    if tile.n.mask and any(isinstance(ch.b, Load) for ch in c.channels):
+    if tile.n.mask and any(edge.is_slab for edge in c.operands[1:]):
         return (
             f"a smem compute fill with a materialized B needs a TILE whose N width exactly covers "
             f"the static output columns (N={tile.n.axis.extent}; copied inner-row chunks cannot "
@@ -466,7 +466,7 @@ def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool
     cannot feed an f16 ``ldmatrix`` fragment merely because another edge is filled. Filled edges
     are exempt because their slab store performs the normal typed conversion — ``converting``
     marks a materialized ``a`` that rides the converting fill rather than the copy."""
-    for edge, role in ((c.operands[0], "a"), *((ch.b, "b") for ch in c.channels)):
+    for edge, role in ((c.operands[0], "a"), *((edge, "b") for edge in c.operands[1:])):
         if not isinstance(edge, Load) or (role == "a" and converting):
             continue
         tensor = inputs.get(edge.input) if inputs else None
@@ -542,8 +542,8 @@ def resolve_fill_stage(
         async_bytes += a_bytes
     else:
         sync_bytes += a_bytes
-    for ch in c.channels:
-        if isinstance(ch.b, Load):
+    for ch in c.operands[1:]:
+        if ch.is_slab:
             async_bytes += tile.n.tile * bk_elems * b_nbytes
         else:
             sync_bytes += tile.n.tile * bk_elems * b_nbytes
@@ -560,7 +560,7 @@ def resolve_fill_stage(
     # single-buffer), so the clamp budgets the ringed slot against what the fixed slabs leave.
     depth = _clamp_depth(want_depth, async_bytes, budget - fixed) if async_bytes else 1
     computed = [c.operands[0].exposes[-1]] if a_converts or not c.operands[0].is_slab else []
-    computed.extend(ch.b.exposes[-1] for ch in c.channels if not isinstance(ch.b, Load))
+    computed.extend(edge.exposes[-1] for edge in c.operands[1:] if not edge.is_slab)
     return ResolvedStage(Stage(depth=depth, transport="smem"), smem=tuple(computed), bk_elems=bk_elems)
 
 

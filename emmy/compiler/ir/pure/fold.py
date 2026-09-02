@@ -28,7 +28,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.algebra import M, component_ops, family_of, rename_combine
+from emmy.compiler.ir.pure.algebra import M, component_ops, family_of, merge_stmts, rename_combine
 from emmy.compiler.ir.pure.carrier import exp_merge
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Stmt
@@ -94,6 +94,31 @@ def _renamed(fn: Lambda, mapping: dict, rename) -> Lambda:
         params=tuple(rename(name) for name in fn.params),
         body=Body(tuple(stmt.rename(mapping) for stmt in fn.body)),
         results=tuple(rename(result) if isinstance(result, str) else result for result in fn.results),
+    )
+
+
+def _identity_lift(fold: Fold) -> bool:
+    """Whether the lift passes complete operand state through unchanged.
+
+    An empty body whose results ARE the names its operands expose: nothing is computed per step,
+    so the operands are already monoid elements and the stored ``S × S → S`` combine applies
+    directly rather than being specialized at a singleton.
+    """
+    bound = tuple(name for edge in fold.operands for name in edge.exposes)
+    return not fold.lift.body and tuple(fold.lift.results) == bound and all(isinstance(r, str) for r in fold.lift.results)
+
+
+def _composes_state(inner, names: tuple[str, ...], ops) -> bool:
+    """Whether ``inner`` carries EXACTLY the outer fold's accumulator state.
+
+    The identity-lift reassociation's precondition (split-K): a contraction whose channel
+    accumulators are those names, under a componentwise ``add``.
+    """
+    return (
+        isinstance(inner, Fold)
+        and inner.as_contraction() is not None
+        and tuple(inner.exposes) == names
+        and ops == (ElementwiseImpl("add"),) * len(names)
     )
 
 
@@ -486,21 +511,44 @@ class Fold:
     def derived_step(self) -> tuple[tuple, Body]:
         """The per-step evaluation this fold DERIVES — ``(operand edges, statements)``, separated.
 
-        Three carriers, one shape. Without a combine the step IS the lift body. A componentwise
-        monoid specializes the combine at the singleton, appending one ``Accum`` per carried
-        component. A TWISTED (exp-family) carrier generates its streaming merge, and each
-        materialized expectation channel becomes a synthesized contraction — flash's
-        ``Oblk = Σ_j P·V`` — which joins the OPERANDS rather than the statements.
+        Four carriers, one shape:
 
-        That is the whole of the redesign: the old derived step inserted those nodes into the stmt
-        stream, because lowering spliced operand bodies out of that stream. A term composes through
-        operands, so the step says what it reads and what it does, and neither half holds the other.
+        * no combine — the step IS the lift body;
+        * an IDENTITY lift, whose operands are already complete monoid states rather than
+          singleton injections: it applies the stored ``S × S → S`` combine verbatim (the generic
+          split-finalize), and where one operand already updates the shared accumulators it is
+          reassociated by EMBEDDING that contraction — split-K, where the additive channel
+          accumulators carry the outer state;
+        * a componentwise monoid — one ``Accum`` per component, each placed after the stmt that
+          defines its term, with the observer's pure tap last so a streamed store reads the
+          post-combine (inclusive-prefix) state;
+        * a TWISTED (exp-family) carrier — its generated streaming merge, with each materialized
+          expectation channel becoming a synthesized contraction (flash's ``Oblk = Σ_j P·V``) that
+          joins the OPERANDS.
+
+        Deterministic from the stored parameters, so kernel identity depends on no classified
+        view. The old spelling inserted the synthesized and inline nodes into the STMT stream
+        because lowering spliced operand bodies back out of it; as a pair neither is needed.
         """
         if self.combine is None:
             return self.operands, self.lift.body
         family = self.family
-        if family.twisted:
-            states, terms = tuple(self.combine.results), tuple(self.lift.results)
+        ops = None if family.twisted else family.ops
+        states = tuple(self.combine.results)
+
+        if _identity_lift(self):
+            if len(self.operands) == 1 and _composes_state(self.operands[0], states, ops):
+                # Split-K: the inner contraction already updates the shared accumulators, so the
+                # reassociation is the embedding itself — an operand, not a statement.
+                return (self.operands[0],), Body()
+            # A fully reduced state is an ordinary monoid element, not a singleton injection.
+            merged = merge_stmts(self.combine, tuple(self.lift.results), dtype=None)
+            return self.operands, Body(
+                tuple(replace(stmt, axes=(self.axis.name,)) if isinstance(stmt, Accum) else stmt for stmt in merged)
+            )
+
+        if ops is None:
+            terms = tuple(self.lift.results)
             merge = list(exp_merge(states, terms, key=states[0]))
             edges = list(self.operands)
             for state, term, value in self._expectation_bindings:
@@ -508,13 +556,30 @@ class Fold:
                     merge, edge = _split_expect(merge, state, term, value)
                     edges.append(edge)
             return tuple(edges), Body((*self.lift.body, *merge))
-        ops = component_ops(self.combine)
-        assert ops is not None, "a componentwise family carries per-component ops"
+
         accums = tuple(
-            Accum(name=state, value=value, op=plus, axes=(self.axis.name,))
-            for state, value, plus in zip(self.combine.results, self.lift.results, ops, strict=True)
+            Accum(name=state, value=str(term), op=plus, axes=(self.axis.name,))
+            for state, term, plus in zip(states, self.lift.results, ops, strict=True)
         )
-        return self.operands, Body((*self.lift.body, *accums))
+        after: dict[str, list[int]] = {}
+        for index, term in enumerate(self.lift.results):
+            if isinstance(term, str):
+                after.setdefault(term, []).append(index)
+        out: list[Stmt] = []
+        placed: set[int] = set()
+        for stmt in self.lift.body:
+            out.append(stmt)
+            for name in stmt.defines():
+                for index in after.get(name, ()):
+                    out.append(accums[index])
+                    placed.add(index)
+        out.extend(accums[index] for index in range(len(accums)) if index not in placed)
+        if self.observe is not None:
+            # The observer taps the POST-combine state: its stmts run after every Accum, so reading
+            # a state name yields iteration k's inclusive prefix. The streamed store itself stays a
+            # kernel-boundary OutputSpec; only the pure tap rides the step.
+            out.extend(self.observe.body)
+        return self.operands, Body(tuple(out))
 
     @cached_property
     def _expectation_bindings(self) -> tuple[tuple[str, str, Fold], ...]:

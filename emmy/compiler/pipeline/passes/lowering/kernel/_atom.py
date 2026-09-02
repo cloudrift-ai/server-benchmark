@@ -1821,7 +1821,12 @@ class _MmaOps(_AtomOps):
         k_axis = c.axis
         assert c.operands[0].is_slab, "mma matmul arm: a register-resident (computed) A operand has no gmem-direct fragment loader here"
         assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the smem compute fill"
-        a_load, b_load, b_trans = c.operands[0], c.operands[1], c.as_contraction().b_trans
+        # A materialized edge answers with its own ``Load`` — the shape this code reads an index
+        # and a buffer off; a computed cone stays the term, as it was when an edge could be either.
+        a_edge, b_edge = c.operands[0], c.operands[1]
+        a_load = a_edge.loads[0] if a_edge.is_slab else a_edge
+        b_load = b_edge.loads[0] if b_edge.is_slab else b_edge
+        b_trans = c.as_contraction().b_trans
         # The loop's final step overhangs K whenever ``atom_k`` does not tile it — a SYMBOLIC K
         # (unknown at compile time) or a static K with a remainder. Both mask the same way: the
         # loaders zero-fill the fragment halves past ``k_zero``'s bound, so the summed reduction

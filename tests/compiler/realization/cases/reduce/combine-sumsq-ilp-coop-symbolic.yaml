@@ -25,7 +25,7 @@ configs:
     - mul
     - sum_1
   realizations:
-  - name: k_sum_1_reduce.fcd9a08fa012
+  - name: k_sum_1_reduce.db5248838c9c
     bindings: {}
     pins:
       FAST_MATH: false

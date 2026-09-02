@@ -22,7 +22,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_matmul_08e4c1.b987a47dce61
+  - name: k_matmul_08e4c1.bb5a2e4b7ebd
     bindings: {}
     pins:
       FAST_MATH: false

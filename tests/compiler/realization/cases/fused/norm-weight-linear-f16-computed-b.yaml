@@ -36,7 +36,7 @@ configs:
     - linear
     - rms_norm
   realizations:
-  - name: k_rms_norm_linear_reduce_1ede22.aaa04f7f6c00
+  - name: k_rms_norm_linear_reduce_1ede22.ee66c92f94ba
     bindings: {}
     pins:
       FAST_MATH: false

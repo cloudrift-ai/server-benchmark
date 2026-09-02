@@ -494,6 +494,7 @@ def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[s
 
     live = set(root.lift.results)
     live.update(name for stmt in remaining_body for name in _member_reads(stmt))
+    live.update(name for edge in rewritten_operands if id(edge) not in moved_edges for name in _edge_free_names(edge))
     remaining_operands = tuple(
         edge for edge in rewritten_operands if id(edge) not in moved_edges or live & set(_operand_result_names(edge))
     )

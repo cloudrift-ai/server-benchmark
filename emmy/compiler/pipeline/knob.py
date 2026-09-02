@@ -636,9 +636,9 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
     """Return one realized kernel row, rejecting structurally incomplete schedules.
 
     Exact coverage is problem-dependent and is enforced by :class:`ClassicScheduleCodec` at leaf
-    construction. This recording boundary enforces the context-free half: kernel families are
-    bare, node families may be bare or use canonical node sites, and at least one node assignment
-    is present.
+    construction. This recording boundary enforces the context-free half: kernel families are bare,
+    node families may be bare or use canonical sites, and an emitted node or edge family requires a
+    node assignment. A node-free kernel legitimately emits only its two kernel choices.
     """
     out = dict(tuning_knob_items(knobs))
     present = {family_of(key) for key in out}
@@ -666,7 +666,7 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
                     raise ValueError(f"classic schedule key {key!r} is not canonical; expected {family}@n<ordinal>") from None
             if family in {"TILE", "REDUCE"}:
                 node_keys.append(key)
-        if not node_keys:
+        if not node_keys and present & {"TILE", "REDUCE", "STAGE"}:
             raise ValueError("complete classic schedule row has no node assignment")
         for key, value in out.items():
             if family_of(key) in SCHEDULE_FAMILIES:

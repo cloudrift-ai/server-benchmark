@@ -622,6 +622,7 @@ def test_complete_kernel_row_requires_the_emitted_exact_schedule():
     assert out["TILE"] == "mma_m16n8k16_f16_f32/f1x1"
     assert "S_ext_free_prod" not in out
     assert complete_kernel_row(out) == out
+    assert complete_kernel_row({"WORK": "", "RASTER": ""}) == {"WORK": "", "RASTER": ""}
 
     with pytest.raises(ValueError, match="missing RASTER"):
         complete_kernel_row({"WORK": "", "REDUCE": ""})

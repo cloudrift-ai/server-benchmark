@@ -1,7 +1,9 @@
 """The structural placement path codec over the stored Fold tree.
 
-Grammar: ``PLACE@<node-path>[.<axis>][<n>] = value``. Placement addresses a stored Fold edge by
-position because it is a structural decision made before a classic problem exists. Its shortest
+Grammar: ``PLACE@<node-path>[.<axis>][<n>] = value``. A selected result appends
+``.result.<position>``. Placement addresses a stored Fold edge by position because it is a
+structural decision made before schedule sites exist; ``PLACE@root`` addresses the root
+output-region boundary without admitting that boundary to bare ``PLACE`` resolution. A shortest
 unique path spelling is canonical; ambiguity and stale paths fail loudly. The retired
 ``in.<operand>`` prefix and leading-``=`` value-name form remain reserved.
 
@@ -15,7 +17,7 @@ import re
 from dataclasses import dataclass
 from itertools import combinations
 
-from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
 from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.structural import instance_memo
 
@@ -23,7 +25,7 @@ from emmy.compiler.structural import instance_memo
 PATH_FAMILIES = ("PLACE",)
 
 #: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
-_SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
+_SEGMENT_TOKENS = frozenset({"root", "map", "fold", "a", "b"})
 
 #: Split a final component into a literal prefix plus trailing digits. :func:`resolve` tries the
 #: unsplit literal first, then moves the split left one digit at a time. Thus ``a22`` can resolve as
@@ -56,6 +58,9 @@ class Site:
     segments: tuple[str, ...]
     ordinal: int = 1
     derived: bool = False
+    #: One-based selected result position. Ordinary stored node sites carry ``None``; result
+    #: sites are resolved structural addresses and never join :func:`sites`.
+    result: int | None = None
 
     @property
     def depth(self) -> int:
@@ -239,6 +244,10 @@ def spell(root, family: str, node, *, all_sites: tuple[Site, ...] | None = None)
     discriminates, else the shortest anchored path subsequence (deepest anchors preferred), with
     the 1-based ordinal only on a true same-path collision. Stampers and stored evidence use this
     spelling and nothing else."""
+    if node is root:
+        if family not in PATH_FAMILIES:
+            family_sites(family, ())  # raise the structural-family error
+        return f"{family}@root"
     tables = instance_memo(root, "_memo_spellings")
     table = tables.get(family)
     if table is None:
@@ -278,9 +287,23 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
     A final component with trailing digits is first read as a literal axis name; only when no site
     carries that axis is it retried as ``<axis><ordinal>`` (so an axis named ``k2`` never loses to
     an ordinal reading)."""
+    result_key = _result_key(key)
+    if result_key is not None:
+        base, position = result_key
+        site = resolve(root, base, all_sites=all_sites)
+        if site is None or not isinstance(site.node, Fold) or site.node.axis is not None:
+            raise MissingSiteError(f"knob key {key!r} names no zero-axis result on this tree")
+        results = _operand_result_names(site.node)
+        if len(results) < 2 or position > len(results):
+            raise MissingSiteError(f"knob key {key!r} names no result on this tree")
+        return Site(site.node, site.axis, site.segments, site.ordinal, site.derived, position)
+
     parsed = parse_key(key)
     matched_key = parsed
     all_sites = sites(root) if all_sites is None else all_sites
+    if parsed.segments == ("root",) and parsed.axis is None and parsed.ordinal is None:
+        family_sites(parsed.family, ())  # validate the family without admitting root to bare PLACE
+        return all_sites[0] if all_sites else None
     fam_sites = family_sites(parsed.family, all_sites)
     if parsed.bare:
         if not fam_sites:
@@ -338,7 +361,33 @@ def canonical(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> s
     site = resolve(root, key, all_sites=all_sites)
     if site is None:
         return None
+    if site.result is not None:
+        return spell_result(root, site.node, site.result, all_sites=all_sites)
     return spell(root, parse_key(key).family, site.node, all_sites=all_sites)
+
+
+def _result_key(key: str) -> tuple[str, int] | None:
+    """Return the base node key and one-based position from a selected-result spelling."""
+    family, at, suffix = key.partition("@")
+    if not at:
+        return None
+    components = suffix.split(".")
+    if len(components) < 2 or components[-2] != "result" or not components[-1].isdigit():
+        return None
+    position = int(components[-1])
+    if position < 1:
+        raise ValueError(f"knob key {key!r} has a non-positive result position")
+    base_suffix = ".".join(components[:-2])
+    return (family if not base_suffix else f"{family}@{base_suffix}"), position
+
+
+def spell_result(root, node: Fold, position: int, *, all_sites: tuple[Site, ...] | None = None) -> str:
+    """Canonical structural spelling for one result of a multi-result zero-axis Fold."""
+    results = _operand_result_names(node)
+    if node.axis is not None or len(results) < 2 or not 1 <= position <= len(results):
+        raise ValueError("a result address requires a valid position on a multi-result zero-axis Fold")
+    base = spell(root, "PLACE", node, all_sites=all_sites)
+    return f"PLACE@result.{position}" if base == "PLACE" else f"{base}.result.{position}"
 
 
 __all__ = [
@@ -353,4 +402,5 @@ __all__ = [
     "resolve",
     "sites",
     "spell",
+    "spell_result",
 ]

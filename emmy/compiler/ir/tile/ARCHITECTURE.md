@@ -50,6 +50,14 @@ order-visible, so the schedule offers exactly the serial reduce plan and the cro
 There is no SDPA matching, byte-identity recognition gate, softmax pairing, fused view, or raw-loop fallback at this
 boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a later fork over this complete tree.
 
+A structural cut can change which free-axis accesses remain in one kernel. Before a fresh unmapped piece receives its
+identity stamp, Tile lowering derives that piece's complete schedule-free Loop body and reuses Loop's split-free-axis
+canonicalization, then performs this same total lift. The normalization can therefore fuse a reshape's output-axis
+pair once the cut removes the access that kept the pair distinct. Re-lifting preserves the output index through the
+exact quotient/remainder substitution, and the fresh piece converges with the equivalent initially canonical kernel
+identity before semiring recognition or scheduling. This is the same canonicalization at a new structural boundary,
+not a second scheduler path.
+
 ## Canonicalization
 
 `Lambda.__post_init__` owns context-independent construction normalization through `ir/pure/normalize.py`: every
@@ -77,6 +85,11 @@ duplicated. Both rules measure an edge's captures with `Fold.deps` — scope-awa
 inside the edge is not a capture and an already-closed edge never re-fires the rewrite. A cone closed at its axes is
 what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
 vector) becomes materializable once per key instead of recomputed per query row.
+
+Closing one captured edge does not make its provider exclusive to that edge. If another sibling operand still
+captures one of the provider's results, the provider remains at their shared enclosing projection as well as riding
+the closed edge. This remains true after a composed placement cut reconstructs the Fold tree with workspace loads;
+every fresh output-owning piece must stay closed under the same normalization.
 
 An iteration never crosses into a new evaluation domain. Attaching an iteration-bearing provider to a contraction
 operand would evaluate it once per step of every intervening binder; normalization therefore leaves that provider at
@@ -248,6 +261,8 @@ against the schedule. A classic materialization contains exactly the contraction
 placed geometry and exactly the edges whose accepted transport is non-direct. Every placed tile must equal the
 geometry derived from the structural placement and its axis-free choice; every resolved stage must retain its edge's
 choice. Construction rejects missing, extra, mismatched, or partly attached facts.
+Scheduling preserves the structural receipts that say placement and cross-CTA splitting were already consumed, so a
+scheduled cut child can be serialized and reloaded without exposing a different kernel set.
 
 `ir/schedule/classic.py` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
 
@@ -275,17 +290,34 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
   and semantically refused assignments.
 
 Structural choices are deliberately outside this algebra. A cut or split changes the kernel set first; every fresh
-kernel then constructs a fresh problem and fresh sites. Search ranks encoded accepted leaves and materialization
+kernel is itself the new site index. Search ranks encoded accepted leaves and materialization
 consumes the typed assignment, so neither layer defines schedule membership.
 
 The single `lowering/tile/030_cut` pass reaches a fixpoint over kernel-set alternatives before scheduling: placement
-first, then cross-CTA reduction splitting. `PLACE` uses the same tree-path codec to address a
-stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
-writes the child Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with
-ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned cuts re-enter placement
-before scheduling; any pinned cut carries the consumed placement decision on both pieces and proceeds to reduction
-splitting. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation families nor
-filters legal cuts by profitability.
+first, then cross-CTA reduction splitting. `PLACE` uses the tree-path codec to address a stored non-root Fold edge.
+The explicit `PLACE@root` site applies only when a zero-axis root contains a pure prefix followed by one or more
+independent output-owning `ProjectionRegion`s. Its cut sibling partitions sibling regions in one structural choice,
+closes each region over the prefix and root operands, and lifts that region's leading axes into a fresh root-global
+placement. A single region can remain after earlier cuts; the same choice then weighs reusing its prefix under a
+serial projection against duplicating that prefix across the fully parallel placement. Bare `PLACE` still resolves
+only among stored Fold edges. Every fresh region piece re-enters the ordinary placement fixpoint, so nested sibling
+regions use the same rule rather than a separate traversal.
+
+The fused sibling preserves the maximal Fold tree; each semantically closed Fold-edge cut sibling writes the child
+Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with ordinary `Load`
+edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned cuts re-enter placement before scheduling;
+any pinned Fold-edge cut carries the consumed placement decision on both pieces and proceeds to reduction splitting.
+Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation families nor filters legal
+cuts by profitability.
+
+A safe multi-result zero-axis Fold additionally exposes a structural `.result.<position>` child for an independent
+suffix result. The producer materializes that result's dependence slice at its own inferred dtype; the consumer
+retains the prefix slice and replaces only the selected name with a workspace load. Restricting the offer to a suffix
+keeps the parent's positional operand interface unchanged; splitting an interior result would need segmented
+retained edges. Result addresses are resolved by the placement codec but never join `path.sites`, the `TileOp`
+node/edge site index, or the `TILE`, `REDUCE`, and `STAGE` domains. The workspace still uses the ordinary
+captured-axis tuple. Quotienting or flattening repeated coordinates is a separate edge-transport decision, not part
+of result placement.
 
 A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
 when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's

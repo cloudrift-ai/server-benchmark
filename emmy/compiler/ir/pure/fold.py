@@ -1003,6 +1003,49 @@ def _operand_result_names(op) -> tuple[str, ...]:
     return (operand_name(op),)
 
 
+def result_slice(edge, required: set[str]):
+    """Return the minimal projection cone that produces ``required`` edge results.
+
+    Zero-axis projections may expose several independent values. A consumer-local slice keeps
+    only the requested result cone and recursively narrows projection operands it reads. A
+    reducing Fold retains its complete carrier interface; slicing monoid components would change
+    its algebra rather than only its projection.
+    """
+    if not isinstance(edge, Fold):
+        return edge
+    if edge.axis is not None:
+        needed = edge.lift.body.backward_cone(edge.lift.results).external_reads
+        operands = tuple(
+            result_slice(operand, set(_operand_result_names(operand)) & needed) if set(_operand_result_names(operand)) & needed else operand
+            for operand in edge.operands
+        )
+        return edge if all(a is b for a, b in zip(operands, edge.operands, strict=True)) else replace(edge, operands=operands)
+
+    ordered = tuple(result for result in _operand_result_names(edge) if result in required)
+    if not ordered:
+        return edge
+    cone = edge.body.backward_cone(ordered)
+    needed = set(cone.external_reads)
+    selected: dict[int, object] = {}
+    changed = True
+    while changed:
+        changed = False
+        for operand in edge.operands:
+            wanted = set(_operand_result_names(operand)) & needed
+            if not wanted:
+                continue
+            sliced = result_slice(operand, wanted)
+            selected[id(operand)] = sliced
+            lowered = Body(operand_body(sliced))
+            captures = set(lowered.forward_cone(lowered).external_reads)
+            if not captures <= needed:
+                needed.update(captures)
+                changed = True
+    operands = tuple(selected[id(operand)] for operand in edge.operands if id(operand) in selected)
+    sliced = Fold.projection(operands=operands, body=Body(cone.members), results=ordered)
+    return edge if sliced == edge else sliced
+
+
 def refs_axis(s: Stmt, name: str) -> bool:
     """``s`` references axis ``name`` in any carried expr (deep) — ``Stmt.exprs``: a ``Load`` /
     ``Write`` index, a ``Select``'s branch predicates. Both spellings are coordinate reads, so both
@@ -1130,6 +1173,7 @@ __all__ = [
     "loaded_buffers",
     "operand_body",
     "operand_name",
+    "result_slice",
     "refs_axis",
     "splice_operands",
     "stmt_axis_names",

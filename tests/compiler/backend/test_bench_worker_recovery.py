@@ -94,6 +94,36 @@ def test_worker_exits_after_context_corruption() -> None:
         proc.wait(timeout=5)
 
 
+def test_hung_worker_bypasses_python_exit_handlers() -> None:
+    """A reported hung kernel must not wedge in CUDA's process-exit handlers."""
+    child = """
+        import atexit
+        import time
+
+        import emmy.compiler.backend.cuda.program as program
+        from emmy.compiler.backend.cuda.program import HungKernelError
+
+        atexit.register(lambda: time.sleep(60))
+
+        def _hung(graph, **kw):
+            raise HungKernelError('synthetic hung kernel')
+
+        program.benchmark_program = _hung
+        from emmy.compiler.backend.cuda._bench_worker import main
+        main()
+    """
+    proc = _spawn(child)
+    try:
+        _send(proc, _DUMMY_REQ)
+        resp = _recv(proc)
+        assert resp is not None and resp["ok"] is False
+        assert proc.wait(timeout=5) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
 def test_kill_idempotent_when_no_proc() -> None:
     """``_kill()`` on a worker that was never spawned must be a silent no-op."""
     from emmy.compiler.backend.cuda.program import _AsyncBenchWorker

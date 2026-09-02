@@ -1,5 +1,203 @@
 # Golden-bench kernel corpus
 
+## Post-#691 generic-schedule requalification (2026-09-01)
+
+The qualification branch was rebased onto main `b93a86c2`, which replaced the former classic schedule machinery with
+generic schedule composition. Two historical cut-local fixes were omitted during the rebase because main now owns
+their contracts more generally: stored-tree `loaded_buffers` supplies cut inputs and producer ordering, while
+`_stored_folds` supplies placement environments through projection regions. Main already carries regressions for both.
+
+The schedule audit found one compatibility authority and no second pipeline enumerator. `ClassicDomains` exposes
+independent kernel, node, and operand-edge factors; `ClassicScheduleContext` accepts their compatible subset; and the
+generic schedule walk is the only traversal. Grouping a node with its incident edges remains a pruning step under the
+current one-`STAGE`-per-consumer codec, not a collapsed assignment. A divergent-edge probe matched the literal
+Cartesian oracle, and traversal-order tests preserved the accepted set.
+
+All 210 realization cases had current derived halves after the schedule rewrite. GPU-free offered and realized replay
+matched every expectation; an exact sm_120 systemd sandbox slice passed 19 closed build/correct checks and retained
+five expected correctness gaps. No realization verdict changed, so the corpus required no regeneration or new xfail.
+
+The experiment goldens did contain schedule-codec drift. A strict current-candidate audit migrated 78 verified rows
+whose only difference was the applicable empty-family vocabulary; every stored measurement, program, proposal, and
+inventory row was preserved. Exact verified rows increased from 62 to 140. The audit deliberately left 9 unoffered
+rows, 5 substantive schedule mismatches, and 1 invalid `STAGE` pin unchanged, along with 32 verified, 78 proposal, and
+2 inventory records that carry no schedule row. Those require retuning or compiler investigation, not normalization.
+
+The fresh Qwen3-0.6B s512 trace on RTX 5090 now has six targets rather than the old nine. A small boundary was strictly
+correct at 1.390 µs versus 2.051 µs for `torch.compile`. The first large fused target did not complete unpinned
+compilation inside 90 seconds. Profiling attributed 32.9 seconds to structural pricing, including 65 nested kernel
+prices and 24.2 seconds of schedule-tree expansion. Caching each immutable schedule prefix's derived frontier reduced
+the same compile from 95.26 to 88.57 seconds without changing row order or target selection.
+
+An edge-first traversal prototype reduced that compile further to 45.77 seconds by avoiding repeated node × transport
+support checks, but it changed complete-row emission order. A tied structural price then selected an unsplit two-kernel
+route instead of the exact working golden's three-kernel route. The prototype was rejected in full: membership alone
+was unchanged, but deploy selection was not. Separating those factors safely therefore also requires canonical
+tie-breaking that is independent of traversal order; this branch does not mix that larger scoring change into the
+prefix cache.
+
+Pinning all legal cuts exposed 12 child schedules in 28.9 seconds and found one genuine compiler gap. A synchronous
+compute fill flattened nested definitions before replicating its cells, so a later loop-local binding captured an
+earlier outer read with the same SSA spelling and emitted 32 undefined suffixed CUDA names. The fix now accumulates
+visible top-level definitions in statement order while keeping ordinary nested definitions inside their block; the
+exact child lowers with the outer names intact. The complete cut route still exceeded the bounded 180-second replay,
+so no latency or replacement working golden was recorded.
+
+Current-head parity is therefore not established. The small sm_120 boundaries beat `torch.compile`, but the large
+attention target remains blocked first by repeated structural pricing and then by an unqualified large child. The next
+architecture work is traversal-order-independent structural tie-breaking followed by the edge/node factorization
+above, plus separate tuning or compiler work for the 15 nontrivial golden mismatches. The recorded Volta schedule also
+needs an exact V100 timing refresh after #691 before its historical latency can be called current.
+
+## Manual child-schedule qualification after #689 (2026-08-29)
+
+Manual route selection confirmed that child scheduling works once placement exposes ordinary kernels. The exact source
+was `226619ca`; the retained A100, V100, and RTX 4090 lanes used deployable O3, bounded searches, strict eager
+correctness for admissible rows, and fresh `torch.compile` measurements where the current CLI could produce them.
+
+The A100 s512 attention all-four cut produced five kernels, but initially failed before launch with
+`KeyError: linear_1_wt`. Cut-piece graph inputs came from lowered root statements, which omit contraction operands
+retained structurally beneath a projection region even though kernel materialization later expands and reads them.
+The historical cut-local fix was commit `a9672422`. Main's later generic schedule reconstruction superseded it:
+`loaded_buffers` inventories the complete stored Fold tree, and both piece inputs and producer ordering consume that
+shared reading. At the historical source, the route carried all 23 required inputs and exercised A100 tuning. Its gate
+passed 3,993 tests with 1,012 skips and five expected failures; focused replay passed 22 tests with one skip.
+
+A second bounded reduction found that legal placement sites beneath a projection region were absent from provider
+closure: the lexical-environment walk only visited direct Fold members while placement used the complete stored-child
+walk. Historical commit `8c2bb5cb` fixed that locally; main now supersedes it with the generic `_stored_folds` traversal
+and its regression test. At that source, the normalized-K projection plus rotary seam lowered as two
+kernels, but a complete correct s512 assembly still had another child that exceeded the 15-second bound.
+
+Manually selected A100 child rows demonstrate that schedule quality is not the immediate blocker:
+
+| child role | best correct O3 latency | schedule highlight |
+| --- | ---: | --- |
+| s512 attention statistics | 2.322 µs | `WORK=t128`, cooperative reduction |
+| s512 elementwise split | 5.3 µs | `WORK=t128`, cooperative reduction |
+| s512 MLP product | 86.229 µs | `WORK=w2x2`, f16 MMA `f4x8/k8` |
+| s1 final consumer | 60.536 µs | `WORK=w1x1`, f16 MMA `f1x4/k8`, synchronous shared-memory stages |
+
+No complete A100 route is promotable yet. Every legal composed cut retains at least one large child that recomputes a
+Q/K/V projection, rotary transform, SDPA, or output projection inside another projection region. Those children
+either expose no applicable MMA schedule or take 10-15 seconds per launch. The next compiler boundary is therefore
+value materialization across independent projection regions, not a larger schedule search.
+
+The V100 manual screen found one correct and repeatable schedule improvement. The standalone model-sized Volta
+projection fell from 3,571.7 µs to 1,868.8 µs with `WORK=w4x2`, f16 MMA `f2x4/k4`, and `STAGE=d1/smem`, while
+`torch.compile` measured 756.736 µs. A fresh repeat measured 1,881.088 versus 757.760 µs with strict zero error. The
+exact-card CLI recorded the first pair in the realization case. These measurements predate main's #691 generic
+schedule reconstruction and are historical rather than current-head latency evidence; the authored row still passes
+the current GPU-free realization checks but needs an exact V100 timing refresh. At the measured source it was a 1.9x
+Emmy improvement but remained about 2.5x behind; its CUDA used two CTA barriers in a 192-iteration K loop, 123
+registers per thread, and 25% occupancy.
+
+The V100 linear-cut diagnostic fell from 1,160.2 µs to 247.0-247.8 µs by selecting the unsplit child, versus
+65.7-66.0 µs for `torch.compile`, but it is not admissible: both strict repeats fail with 26,441 mismatches and maximum
+absolute error 0.25. Eight tensor-core schedules failed identically, and a plain large FP16 `F.linear` reproducer
+without placement or residual addition has the same numerical character. That row is retained only as diagnostic
+evidence and must not be promoted under the strict contract.
+
+The numerical discrepancy reduces to FP16 `[1,17,1536] × [17,1536]`. Emmy emits FP32-accumulating Volta MMA across
+the complete K dimension and performs one final FP32-to-FP16 store. Disabling PyTorch's reduced-precision FP16 GEMM
+reduction makes the unchanged Emmy row pass the strict comparison, identifying reference reduction policy—not an
+intermediate Emmy FP16 carrier, split-K, or store—as the distinguishing semantic. A proposed `_xfail_correct` corpus
+case correctly XPASSed because corpus correctness uses the NumPy backend and its documented narrow-operand tolerance;
+it cannot encode a PyTorch-eager policy mismatch. Reproducing cuBLAS's reduced-precision chunking would require an
+explicit compiler numerical-policy decision, so no tolerance or speculative code change was committed.
+
+The RTX 4090 selector again found zero exact sm89 corpus cases. A fresh Qwen3-0.6B s512 trace produced six targets;
+the 29-origin target exceeded a six-second watchdog, while manual cuts produced best measured child totals of about
+152,231 + 64 µs and 153,764 + 56 µs. The dominant child preserves the same repeated attention computation as the
+A100 route, so further knob search is not a plausible route to parity. No sm89 realization or canonical golden was
+promoted without repeated correct reference measurements.
+
+Manual scheduling therefore improved the measured ceilings and exposed one fixed compiler bug, but did not establish
+parity. Across Ampere and Ada the next shared problem is forming reusable value boundaries before child scheduling;
+on Volta the independent remaining problems are synchronous staging efficiency and the strict large-linear numerical
+contract. At the historical source, the combined local gate passed 3,994 tests with 1,012 skips and five expected
+failures; lint remained clean. The A100 VM remained running.
+
+## Post-#689 structural-identity qualification (2026-08-29)
+
+The draft was rebased cleanly onto main `e782e991`; exact qualification source was `79f14e3b`. Main's canonical
+Loop-IR identity migration deliberately orphans earlier tune-DB rows. `make test-corpus-regen` reported the realization
+corpus current, and its GPU-free replay passed 623 cases with 424 skips and five expected failures, so its 210 identity
+stamps need no branch-local regeneration.
+
+The two staged A100 experiment goldens do need more than a key update. Reconstructing their embedded stable Torch IR
+on current main yields four s1 targets and six s512 targets, instead of the nine provenance targets in each checked
+file. The s1 layer now has three small targets plus one 73-origin fused target. The s512 layer has four small targets
+plus 53-origin and 29-origin fused targets. The old provenance selections therefore cannot be renamed onto the new
+identities.
+
+A fresh, isolated O3 A100 tune used a four-candidate cap and patience two. The three s1 small targets completed in
+3.5-29.2 seconds with 1.1-2.0 µs winners. Four s512 small targets completed in 4.5-5.8 seconds with 1.684-3.081 µs
+winners. The first candidate for every fused target exceeded the 60-second kernel watchdog: the s1 73-origin target,
+the s512 53-origin target, and the s512 29-origin target. None produced a measured cut assembly or child schedule
+receipts. The regenerated working files are retained as host-local evidence, but were not promoted because an
+incomplete file would replace replayable goldens with unqualified fused rows. Current regeneration therefore needs
+the tuner to select a cut before benchmarking the fused terminal, then tune and persist the resulting child identities
+as one replayable assembly.
+
+The exact post-rebase A100 realization corpus retained two wins, three losses, and the existing stat-fill watchdog:
+
+| A100 case | Emmy | `torch.compile` | result |
+| --- | ---: | ---: | --- |
+| GQA B cut | 7.026 µs | 10.030 µs | 1.43x faster |
+| computed-value attention cut | 6.072 µs | 8.018 µs | 1.32x faster |
+| Q/K workspace chain | 84.224 µs | 11.947 µs | 7.05x slower |
+| unit-row split-K | 9.113 µs | 2.856 µs | 3.19x slower |
+| batched PV transpose | 17.682 µs | 11.658 µs | 1.52x slower |
+| stat-fill | watchdog | — | unchanged failure |
+
+Both current SM70 cases passed correctness on V100. Linear-cut measured 1,160.192 µs versus 66.048 µs for
+`torch.compile`; Volta MMA measured 3,129.344 µs versus 754.688 µs. The command's nonzero status was only the
+missing-duration guard for these newly measured rows. The regenerated corpus still contains no exact SM89 closed case.
+
+The failed fused candidates exposed one independent bounded-tuning bug: after reporting `HungKernelError`, the child
+returned through normal Python teardown, where CUDA waited forever for the still-running kernel. The worker now
+hard-exits after writing the failure response, and a CPU-only regression test proves that Python exit handlers cannot
+wedge the next candidate. This restores the existing clean-worker continuation contract; it does not improve a kernel.
+No new golden or large serving result was promoted, and the retained A100 remains running.
+
+## Post-merge qualification and measured-row replay fix (2026-08-29)
+
+Qualification resumed from merged main `5f0a2076` on branch `codex/post-679-corpus-qualification`. The exact-main
+corpus run reproduced the prior platform verdicts; the merge's review follow-up did not regress a pinned kernel.
+
+| platform | exact coverage | result |
+| --- | --- | --- |
+| A100 sm80 | 6 cases | 2 wins, 3 measurable losses, and the same stat-fill watchdog |
+| V100 sm70 | 2 cases | Volta MMA remains a correct 4.13x loss; linear-cut remains incorrect and inadmissible |
+| RTX 4090 sm89 | 0 cases | 201 collected and skipped; no exact sm89 closed case |
+
+The exact-main A100 rows were 7.041 µs versus 10.016 µs for GQA and 6.076 µs versus 8.009 µs for computed-value
+attention. The remaining pinned rows were 84.224 µs versus 12.902 µs for the workspace chain, 9.060 µs versus
+4.175 µs for split-K, and 17.664 µs versus 11.106 µs for PV transpose. Stat-fill again exceeded its watchdog. V100
+reproduced 3,130.368 µs versus 756.736 µs for the promoted Volta row and 1,160.192 µs versus 66.048 µs for
+linear-cut; strict linear-cut correctness still found 26,418 mismatches with maximum absolute error 0.25.
+
+A fresh 10-candidate workspace tune exposed one deploy replay gap. Its fastest DB row was 76.012 µs, but direct
+descent compared the schedule tree's intermediate `S_warp_eligible` feature with a feature-free measured row after
+the `S_*` signature had already joined them. Every measured row therefore appeared disjoint and deploy fell back to
+the prior at about 85 µs. Historical commit `d2505362` ignored `S_*` / `H_*` fork keys during tuning-knob descent.
+That implementation is now in main; this branch retains its focused measured-row regression coverage. At the measured
+source, exact A100 strict replay selected `WORK=t8` at 76.0 µs with direct eager correctness rather than the prior's
+`WORK=t4` fallback. This closed evidence replay but not the roughly 6.9x workspace performance gap.
+
+Stat-fill's remaining persistence gap is larger. A four-candidate fused probe stayed at 277,229 µs and produced no
+children. Replaying the previously correct six-cut route did enroll its resulting kernels: a four-candidate cap per
+kernel completed 53 measurements and found a 2.093 µs child. The written working golden nevertheless contained only
+the route seed and a 9,950.886 µs placement total—no child identities and no child schedule receipts. That total is
+not deploy evidence because a reload cannot reconstruct the measured ordered assembly. The required change is
+split-first persistence: record the route decision, realize the resulting kernel identities, then join each identity
+to its measured schedule before writing a replayable winner. This is not a safe small follow-up to the DB descent
+fix, and no unqualified stat-fill row was promoted.
+
+Draft PR #687 carried the original replay fix. Its local verification was 3,982 passed, 1,012 skipped, five expected
+failures, and clean lint; its GitHub test and lint jobs were green. The A100 VM remained running.
+
 ## Current-head corpus requalification (2026-08-29)
 
 The draft is based on current main `b88763fa`; the exact combined source for this pass is `857ba7e9`. Every hardware

@@ -11,19 +11,23 @@ import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
+from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.carrier import exp_combine_states
-from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda
-from emmy.compiler.ir.stmt import Assign, Body, Load, Write
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.pure.fold import Channel, Fold, Lambda, is_contraction, loaded_buffers
+from emmy.compiler.ir.schedule.classic_projection import project_classic
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.tile import OutputSpec, Placement, ProjectionRegion, TileOp
+from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
-from emmy.compiler.pipeline.fork import Fork
+from emmy.compiler.pipeline.fork import DeferredFork, Fork
 from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     CutSite,
     _environments,
@@ -34,6 +38,7 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     output_map,
     realize,
 )
+from emmy.compiler.pipeline.passes.lowering.tile._pieces import projection_region_pieces, realize_projection_regions
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
@@ -62,6 +67,81 @@ def test_cut_and_assignment_passes_share_the_generic_schedule_driver() -> None:
 
     assert _CUT.schedule is schedule
     assert import_module("emmy.compiler.pipeline.fork").schedule is schedule
+
+
+def _split_reduction_graph(op=None) -> Graph:
+    """The fresh 761/cc22 producer shape: N is spelled by the clean ``(a1, a25)`` pair."""
+    if op is None:
+        composite = BinaryExpr("+", BinaryExpr("*", Var("a1"), Literal(128, "int")), Var("a25"))
+        reduction = Loop(
+            axis=Axis("a26", 1024),
+            body=Body(
+                (
+                    Load(name="weight", input="linear_wt", index=(Var("a26"), composite)),
+                    Load(name="norm", input="norm", index=(Var("a26"),)),
+                    Load(name="value", input="to", index=(Literal(0, "int"), Var("a0"), Var("a26"))),
+                    Load(name="scale", input="scale", index=(Var("a0"),)),
+                    Assign(name="scaled", op="multiply", args=("scale", "value")),
+                    Assign(name="converted", op="copy", args=("scaled",), dtype=F16),
+                    Assign(name="normalized", op="multiply", args=("norm", "converted")),
+                    Assign(name="product", op="multiply", args=("normalized", "weight")),
+                    Accum(name="acc", value="product", op="add"),
+                )
+            ),
+        )
+        cell = Body((reduction, Write(output="out", index=(Var("a0"), Var("a1"), Var("a25")), value="acc")))
+        body = Body(
+            (
+                Loop(
+                    axis=Axis("a0", 512),
+                    body=Body((Loop(axis=Axis("a1", 16), body=Body((Loop(axis=Axis("a25", 128), body=cell),))),)),
+                ),
+            )
+        )
+        op = LoopOp(body=body)
+
+    graph = Graph()
+    for name, shape in (
+        ("linear_wt", (1024, 2048)),
+        ("norm", (1024,)),
+        ("to", (1, 512, 1024)),
+        ("scale", (512,)),
+    ):
+        _input(graph, name, shape)
+    graph.add_node(op, ["linear_wt", "norm", "to", "scale"], Tensor("out", (512, 16, 128), F16), node_id="out")
+    graph.inputs, graph.outputs = ["linear_wt", "norm", "to", "scale"], ["out"]
+    return graph
+
+
+def test_fresh_cut_piece_fuses_newly_clean_split_axes_before_identity_stamp() -> None:
+    """A structural cut can remove the access that kept a reshape's output axes distinct. Its
+    fresh piece must re-enter the one Loop canonicalization before identity is stamped, so the
+    split-axis spelling converges with an initially canonical kernel and exposes the contraction."""
+    original = _split_reduction_graph()
+    raw_tile = Pipeline.build(["lowering/tile"], select=["lift"]).run(original).nodes["out"].op
+    fresh = _split_reduction_graph(replace(raw_tile, name="mul_3__place_761458f514_0", placement_decided=True))
+    before = fresh.nodes["out"].op
+    assert [axis.extent for axis in before.place.free] == [Dim(512), Dim(16), Dim(128)]
+    assert not any(is_contraction(site.node) for site in sites(before.op))
+
+    choice = DeferredFork(lambda: fresh, {"PLACE@root": "cut"}, structural=True)
+    (fragment,) = _CUT._canonicalized(choice).expand()
+    actual = fragment.nodes["out"].op
+    assert actual.name == before.name and actual.placement_decided
+    assert [axis.extent for axis in actual.place.free] == [Dim(512), Dim(2048)]
+    assert any(is_contraction(site.node) for site in sites(actual.op))
+    domains = project_classic(actual, _CTX)
+    assert any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices)
+
+    canonical_loop = Pipeline.build(["loop/canonicalize"]).run(_split_reduction_graph())
+    canonical = Pipeline.build(["lowering/tile"], select=["lift"]).run(canonical_loop).nodes["out"].op
+    assert actual.loop_body == canonical.loop_body
+    assert actual.identity_key() == canonical.identity_key()
+
+    again = fragment.nodes["out"].op
+    (same_fragment,) = _CUT._canonicalized(DeferredFork(lambda: fragment, structural=True)).expand()
+    assert same_fragment is fragment
+    assert fragment.nodes["out"].op is again
 
 
 def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
@@ -146,6 +226,165 @@ def _mimo_graph() -> Graph:
     return graph
 
 
+def _projection_region_graph() -> Graph:
+    """A scalar Tile root over two independently owned contraction regions."""
+    k = Axis("k", 16)
+
+    def region(row: Axis, column: Axis, a: str, b: str, acc: str) -> ProjectionRegion:
+        product = Fold.contraction(
+            k_axis=k,
+            a=Load(name=f"{a}_v", input=a, index=(Var(row.name), Var("k"))),
+            channels=(Channel(b=Load(name=f"{b}_v", input=b, index=(Var("k"), Var(column.name))), acc=acc),),
+        )
+        inner = ProjectionRegion(
+            axis=column,
+            lift=Lambda(params=(column.name, row.name), body=Body((product,)), results=(acc,)),
+        )
+        return ProjectionRegion(axis=row, lift=Lambda(params=(row.name,), body=Body((inner,)), results=()))
+
+    m, n = Axis("m", 4), Axis("n", 8)
+    p, q = Axis("p", 8), Axis("q", 4)
+    tile = TileOp(
+        op=Fold.projection(body=Body((region(m, n, "a", "b", "first"), region(p, q, "c", "d", "second")))),
+        output_specs=(
+            OutputSpec(Write(output="out0", index=(Var("m"), Var("n")), value="first")),
+            OutputSpec(Write(output="out1", index=(Var("p"), Var("q")), value="second")),
+        ),
+    )
+    graph = Graph()
+    for name, shape in (("a", (4, 16)), ("b", (16, 8)), ("c", (8, 16)), ("d", (16, 4))):
+        _input(graph, name, shape)
+    graph.add_node(
+        tile,
+        ["a", "b", "c", "d"],
+        outputs=(Tensor("out0", (4, 8), "f16"), Tensor("out1", (8, 4), "f16")),
+        node_id="out0",
+    )
+    graph.inputs, graph.outputs = ["a", "b", "c", "d"], ["out0", "out1"]
+    return graph
+
+
+def _single_projection_region_graph() -> Graph:
+    """A cut consumer with one output region behind a prefix and materialized operand."""
+    batch, row, column = Axis("a0", 2), Axis("a1", 4), Axis("a25", 8)
+    inner = ProjectionRegion(
+        axis=column,
+        lift=Lambda(
+            params=("a25", "a0", "a1", "scale"),
+            body=Body(
+                (
+                    Load(name="value", input="x", index=(Var("a0"), Var("a1"), Var("a25"))),
+                    Assign(name="result", op="multiply", args=("value", "scale")),
+                )
+            ),
+            results=("result",),
+        ),
+    )
+    region = ProjectionRegion(
+        axis=row,
+        lift=Lambda(params=("a1", "a0", "scale"), body=Body((inner,)), results=()),
+    )
+    tile = TileOp(
+        op=Fold.projection(
+            operands=(Load(name="stat", input="stat_workspace", index=(Var("a0"),)),),
+            body=Body((Assign(name="scale", op="reciprocal", args=("stat",)), region)),
+        ),
+        place=Placement(free=(batch,)),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("a0"), Var("a1"), Var("a25")), value="result")),),
+    )
+    graph = Graph()
+    _input(graph, "stat_workspace", (2,), dtype="f32")
+    _input(graph, "x", (2, 4, 8), dtype="f32")
+    graph.add_node(tile, ["stat_workspace", "x"], Tensor("out", (2, 4, 8), F32), node_id="out")
+    graph.inputs, graph.outputs = ["stat_workspace", "x"], ["out"]
+    return graph
+
+
+def _shared_provider_region_graph() -> Graph:
+    """Two output regions, one reading a scalar provider from the shared prefix."""
+    m, n, p = Axis("m", 4), Axis("n", 4), Axis("p", 4)
+    contraction_axis, reduction_axis = Axis("k", 8), Axis("h", 8)
+    scaled = Fold.projection(
+        body=Body(
+            (
+                Load(name="qv", input="q", index=(Var("m"), Var("k"))),
+                Assign(name="av", op="multiply", args=("qv", "scale")),
+            )
+        ),
+        results=("av",),
+    )
+    contraction = Fold.contraction(
+        k_axis=contraction_axis,
+        a=scaled,
+        channels=(Channel(b=Load(name="wv", input="w", index=(Var("k"), Var("n"))), acc="acc"),),
+    )
+    reduction = Fold(
+        axis=reduction_axis,
+        lift=Lambda(
+            params=("h",),
+            body=Body((Load(name="rv", input="r", index=(Var("n"), Var("h"))),)),
+            results=("rv",),
+        ),
+        init=(0.0,),
+        combine=Lambda(
+            params=("red", "red__o"),
+            body=Body((Assign(name="red", op="add", args=("red", "red__o")),)),
+            results=("red",),
+        ),
+    )
+    inner = ProjectionRegion(
+        axis=n,
+        lift=Lambda(
+            params=("n", "m", "scale"),
+            body=Body(
+                (
+                    contraction,
+                    reduction,
+                    Assign(name="sum", op="add", args=("acc", "red")),
+                    Assign(name="result", op="add", args=("sum", "scale")),
+                )
+            ),
+            results=("result",),
+        ),
+    )
+    first = ProjectionRegion(axis=m, lift=Lambda(params=("m", "scale"), body=Body((inner,)), results=()))
+    second = ProjectionRegion(
+        axis=p,
+        lift=Lambda(
+            params=("p",),
+            body=Body((Load(name="other", input="z", index=(Var("p"),)),)),
+            results=("other",),
+        ),
+    )
+    tile = TileOp(
+        op=Fold.projection(
+            body=Body(
+                (
+                    Load(name="epsilon", input="epsilon", index=()),
+                    Assign(name="scale", op="reciprocal", args=("epsilon",)),
+                    first,
+                    second,
+                )
+            )
+        ),
+        output_specs=(
+            OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="result")),
+            OutputSpec(Write(output="other_out", index=(Var("p"),), value="other")),
+        ),
+    )
+    graph = Graph()
+    for name, shape in (("epsilon", ()), ("q", (4, 8)), ("w", (8, 4)), ("r", (4, 8)), ("z", (4,))):
+        _input(graph, name, shape, dtype="f32")
+    graph.add_node(
+        tile,
+        ["epsilon", "q", "w", "r", "z"],
+        outputs=(Tensor("out", (4, 4), F32), Tensor("other_out", (4,), F32)),
+        node_id="out",
+    )
+    graph.inputs, graph.outputs = ["epsilon", "q", "w", "r", "z"], ["out", "other_out"]
+    return graph
+
+
 def _sdpa_graph(causal: bool) -> Graph:
     graph = Graph()
     for name in ("q", "k", "v"):
@@ -209,6 +448,55 @@ def _computed_value_expectation_tile() -> TileOp:
         },
         outputs={"out": Tensor("out", (4, 16), F16)},
     )
+
+
+def _typed_value_projection_graph() -> Graph:
+    """A typed value contraction paired with a query-dependent result."""
+    query, column, key, inner = Axis("query", 4), Axis("column", 8), Axis("key", 16), Axis("v", 32)
+    value = Fold.contraction(
+        k_axis=inner,
+        a=Load(name="x_value", input="x", index=(Var("key"), Var("v"))),
+        channels=(Channel(b=Load(name="weight", input="weight", index=(Var("v"), Var("column"))), acc="value"),),
+    )
+    pair = Fold.projection(
+        operands=(value,),
+        body=Body(
+            (
+                Load(name="score", input="score", index=(Var("query"), Var("key"))),
+                Assign(name="probability", op="copy", args=("score",), dtype=F32),
+                Assign(name="rounded_value", op="copy", args=("value",), dtype=F16),
+            )
+        ),
+        results=("probability", "rounded_value"),
+    )
+    attention = Fold(
+        axis=key,
+        operands=(pair,),
+        lift=Lambda(
+            params=("key", "probability", "rounded_value"),
+            body=Body((Assign(name="weighted", op="multiply", args=("probability", "rounded_value")),)),
+            results=("weighted",),
+        ),
+        init=(0.0,),
+        combine=Lambda(
+            params=("out", "out__o"),
+            body=Body((Assign(name="out", op="add", args=("out", "out__o")),)),
+            results=("out",),
+        ),
+    )
+    tile = TileOp(
+        op=attention,
+        name="out",
+        place=Placement(free=(query, column)),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("query"), Var("column")), value="out")),),
+    )
+    graph = Graph()
+    _input(graph, "score", (4, 16))
+    _input(graph, "x", (16, 32))
+    _input(graph, "weight", (32, 8))
+    graph.add_node(tile, ["score", "x", "weight"], Tensor("out", (4, 8), "f16"), node_id="out")
+    graph.inputs, graph.outputs = ["score", "x", "weight"], ["out"]
+    return graph
 
 
 def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
@@ -364,6 +652,65 @@ def test_twisted_expectation_value_cut_uses_the_public_store_dtype() -> None:
     assert seams[("maximum", "denominator", "expectation")].dtypes == (F32, F32, F32)
 
 
+def test_selected_result_cut_uses_its_own_dtype_and_axes() -> None:
+    """A selected result retains its sibling without inheriting the sibling's query axis."""
+    graph = _typed_value_projection_graph()
+    tile = graph.nodes["out"].op
+    value = next(seam for seam in cuttable_seams(tile) if seam.selected == "rounded_value")
+
+    assert value.spelling == "PLACE@result.2"
+    assert value.dtypes == (F16,)
+    match = Match(graph=graph, root_node_id="out", rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({value.spelling: "cut"}):
+        fork = _CUT.rewrite(match, graph.nodes["out"])
+    assert fork.knobs == {value.spelling: "cut"} and _is_structural_option(fork)
+    (fragment,) = fork.expand()
+    producer = next(node for node in fragment.nodes.values() if "__place_" in node.id)
+    consumer = next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and node is not producer)
+
+    assert tuple(dim.as_static() for dim in producer.output.shape) == (8, 16)
+    assert producer.output.dtype == F16
+    assert [axis.name for axis in producer.op.place.free] == ["column", "key"]
+    lowered = Body(consumer.op.op.lower())
+    assert any(isinstance(stmt, Load) and stmt.name == "rounded_value" for stmt in lowered.iter())
+    assert any("probability" in stmt.defines() for stmt in lowered.iter())
+
+
+def test_a_result_needed_by_its_sibling_can_only_be_cut_as_a_whole() -> None:
+    axis = Axis("k", 4)
+    child = Fold.projection(
+        body=Body(
+            (
+                Load(name="raw", input="x", index=(Var("k"),)),
+                Assign(name="value", op="copy", args=("raw",), dtype=F32),
+                Assign(name="dependent", op="multiply", args=("value", "value")),
+            )
+        ),
+        results=("value", "dependent"),
+    )
+    root = Fold(
+        axis=axis,
+        operands=(child,),
+        lift=Lambda(
+            params=("k", "value", "dependent"),
+            body=Body((Assign(name="product", op="multiply", args=("value", "dependent")),)),
+            results=("product",),
+        ),
+        init=(0.0,),
+        combine=Lambda(
+            params=("out", "out__o"),
+            body=Body((Assign(name="out", op="add", args=("out", "out__o")),)),
+            results=("out",),
+        ),
+    )
+    tile = replace(TileOp(op=root), inputs={"x": Tensor("x", (4,), F32)}, outputs={"out": Tensor("out", (), F32)})
+
+    spellings = {seam.spelling for seam in cuttable_seams(tile)}
+
+    assert "PLACE@result.1" not in spellings
+    assert "PLACE@result.2" in spellings
+
+
 def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:
     offered = _offered(_mimo_graph())
     cuts = [next(iter(row)) for row in offered if next(iter(row.values())) == "cut"]
@@ -371,6 +718,107 @@ def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:
     lowered = _lower_cut(_mimo_graph(), cuts[0])
     assert lowered.outputs == ["out0", "out1"]
     assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 2
+
+
+def test_root_projection_region_cut_lifts_each_piece_placement() -> None:
+    offered = _offered(_projection_region_graph())
+    assert {"PLACE": "fuse"} in offered and {"PLACE@root": "cut"} in offered
+
+    graph = _projection_region_graph()
+    match = Match(graph=graph, root_node_id="out0", rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({"PLACE@root": "cut"}):
+        choice = _CUT.rewrite(match, graph.nodes["out0"])
+    choice = choice[0] if isinstance(choice, list) else choice
+    fragment = choice.expand()[0]
+    pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+
+    assert fragment.outputs == ["out0__split", "out1__split"]
+    assert [[axis.extent.as_static() for axis in piece.place.free] for piece in pieces] == [[4, 8], [8, 4]]
+    assert all(not piece.placement_decided for piece in pieces)
+    assert [{spec.write.output for spec in piece.output_specs} for piece in pieces] == [
+        {"out0__split"},
+        {"out1__split"},
+    ]
+
+
+def test_root_projection_region_cut_lifts_a_single_remaining_region() -> None:
+    """A prior cut may leave one region whose axes still need a root placement choice."""
+    graph = _single_projection_region_graph()
+    offered = _offered(graph)
+    assert {"PLACE": "fuse"} in offered
+    assert {"PLACE@root": "cut"} in offered
+
+    graph = _single_projection_region_graph()
+    root = graph.nodes["out"]
+    match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({"PLACE@root": "fuse"}):
+        fused = _CUT.rewrite(match, root).expand()[0]
+    assert isinstance(fused, TileOp)
+    assert [axis.name for axis in fused.place.free] == ["a0"]
+    assert any(isinstance(member, ProjectionRegion) for member in fused.op.body.iter())
+
+    graph = _single_projection_region_graph()
+    root = graph.nodes["out"]
+    match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({"PLACE@root": "cut"}):
+        choice = _CUT.rewrite(match, root)
+    choice = choice[0] if isinstance(choice, list) else choice
+    fragment = choice.expand()[0]
+    pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+
+    assert len(pieces) == 1
+    piece = pieces[0]
+    assert [axis.name for axis in piece.place.free] == ["a0", "a1", "a25"]
+    assert not any(isinstance(member, ProjectionRegion) for member in piece.op.body.iter())
+    assert loaded_buffers(piece.op) == {"stat_workspace", "x"}
+    assert fragment.outputs == ["out__split"]
+
+
+def test_root_projection_region_pin_lowers_two_independently_scheduled_kernels() -> None:
+    lowered = _lower(_projection_region_graph(), {"PLACE@root": "cut"})
+
+    assert lowered.outputs == ["out0", "out1"]
+    assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 2
+    assert not any(isinstance(node.op, TileOp) for node in lowered.nodes.values())
+
+
+def test_composed_cut_keeps_a_shared_prefix_provider_on_an_output_piece() -> None:
+    """Replacing one nested Fold must not move the output piece's shared provider exclusively
+    under a sibling contraction and leave the piece's remaining consumer open."""
+    graph = _shared_provider_region_graph()
+    root = graph.nodes["out"]
+    match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize_projection_regions(match, root, projection_region_pieces(root.op))
+    piece = next(
+        node
+        for node in fragment.nodes.values()
+        if isinstance(node.op, TileOp) and any(spec.write.output == "out__split" for spec in node.op.output_specs)
+    )
+    assert set(piece.op.op.deps()) <= {axis.name for axis in piece.op.place.free}
+
+    seams = tuple(seam for seam in cuttable_seams(piece.op) if seam.node.axis is not None and seam.node.axis.name in {"k", "h"})
+    assert {seam.node.axis.name for seam in seams} == {"k", "h"}
+    composed = realize(
+        Match(graph=fragment, root_node_id=piece.id, rule=Rule(name="test", pattern=[])),
+        piece,
+        seams,
+        output_map(piece),
+        placement_decided=True,
+    )
+
+    for child in (node.op for node in composed.nodes.values() if isinstance(node.op, TileOp)):
+        assert set(child.op.deps()) <= {axis.name for axis in child.place.free}
+
+
+def test_root_region_cut_precedes_scoped_child_site_resolution() -> None:
+    """A root cut changes the kernel set before graph-scoped child paths become meaningful."""
+    graph = _shared_provider_region_graph()
+    tile = graph.nodes["out"].op
+
+    with pinned_knobs({"PLACE@root": "cut", "PLACE@a": "cut"}):
+        restriction = _CUT._placement_restriction(tile, cuttable_seams(tile), projection_region_pieces(tile))
+
+    assert restriction == (("PLACE@root",), "regions", {})
 
 
 def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
@@ -450,6 +898,64 @@ def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     assert len(pieces) == 3 and all(node.op.placement_decided for node in pieces)
+
+
+def test_selected_result_replacement_applies_a_nested_cut_to_its_retained_slice() -> None:
+    """A retained result slice remains a consumer of every nested seam cut beside it."""
+    k = Axis("k", 8)
+    nested = Fold(
+        axis=k,
+        lift=Lambda(
+            params=("k",),
+            body=Body((Load(name="value", input="values", index=(Var("k"),)),)),
+            results=("value",),
+        ),
+        init=(0.0,),
+        combine=Lambda(
+            params=("total", "total__o"),
+            body=Body((Assign(name="total", op="add", args=("total", "total__o")),)),
+            results=("total",),
+        ),
+    )
+    pair = Fold.projection(
+        operands=(nested, Load(name="other", input="other", index=())),
+        body=Body(
+            (
+                Assign(name="kept", op="copy", args=("total",), dtype=F32),
+                Assign(name="selected", op="copy", args=("other",), dtype=F32),
+            )
+        ),
+        results=("kept", "selected"),
+    )
+    root_fold = Fold.projection(
+        operands=(pair,),
+        body=Body((Assign(name="out", op="add", args=("kept", "selected"), dtype=F32),)),
+        results=("out",),
+    )
+    tile = TileOp(op=root_fold, name="out")
+    graph = Graph()
+    _input(graph, "values", (8,), dtype="f32")
+    _input(graph, "other", (), dtype="f32")
+    graph.add_node(tile, ["values", "other"], Tensor("out", (), F32), node_id="out")
+    graph.inputs, graph.outputs = ["values", "other"], ["out"]
+    node = graph.nodes["out"]
+    seams = cuttable_seams(tile)
+    selected = next(seam for seam in seams if seam.node is pair and seam.selected == "selected")
+    nested_seam = next(seam for seam in seams if seam.node is nested and seam.selected is None)
+
+    fragment = realize(
+        Match(graph=graph, root_node_id=node.id, rule=Rule(name="test", pattern=[])),
+        node,
+        (selected, nested_seam),
+        output_map(node),
+        placement_decided=True,
+    )
+
+    consumer = next(piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp) and "__place_" not in piece.id)
+    producer = next(piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp) and "values" in piece.inputs)
+    assert producer.id in loaded_buffers(consumer.op.op)
+    assert "values" not in loaded_buffers(consumer.op.op)
+    assert all(site.node.axis is None or site.node.axis.name != "k" for site in sites(consumer.op.op))
 
 
 def _composed_case_match() -> tuple[Match, Graph]:

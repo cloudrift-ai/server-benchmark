@@ -78,6 +78,28 @@ def _dtype_key(edge, scope: dict | None) -> tuple:
     return (id(edge), tuple((name, getattr(scope.get(name), "name", None)) for name in captures))
 
 
+def _update_dtype_env(members, env: dict, inputs, cache: dict) -> None:
+    """Type one lexical statement sequence and every structural node nested inside it."""
+    for stmt in members:
+        if isinstance(stmt, Load):
+            tensor = inputs.get(stmt.input) if inputs else None
+            env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
+        elif isinstance(stmt, Fold):
+            env.update(zip(_operand_result_names(stmt), edge_dtypes(stmt, inputs, cache, env), strict=True))
+        elif isinstance(stmt, Assign):
+            args = [env.get(name) for name in stmt.args]
+            env[stmt.name] = stmt.dtype or (get_dtype(dtype_promote(stmt.op.name, [dtype.name for dtype in args])) if all(args) else None)
+        elif isinstance(stmt, Init):
+            env[stmt.name] = stmt.dtype
+        elif isinstance(stmt, Select):
+            branch_dtypes = [env.get(branch.value) for branch in stmt.branches]
+            env[stmt.name] = branch_dtypes[0] if branch_dtypes and all(dtype == branch_dtypes[0] for dtype in branch_dtypes) else None
+        else:
+            for body in stmt.nested():
+                _update_dtype_env(body, dict(env), inputs, cache)
+            env.update((name, None) for name in stmt.defines())
+
+
 def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict | None = None) -> tuple:
     """Infer an edge's result dtypes in the lexical scope where the edge occurs.
 
@@ -104,22 +126,7 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
     env = dict(scope or {})
     for operand in edge.operands:
         env.update(zip(_operand_result_names(operand), edge_dtypes(operand, inputs, cache, env), strict=True))
-    for stmt in edge.lift.body:
-        if isinstance(stmt, Load):
-            tensor = inputs.get(stmt.input) if inputs else None
-            env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
-        elif isinstance(stmt, Fold):
-            env.update(zip(_operand_result_names(stmt), edge_dtypes(stmt, inputs, cache, env), strict=True))
-        elif isinstance(stmt, Assign):
-            args = [env.get(name) for name in stmt.args]
-            env[stmt.name] = stmt.dtype or (get_dtype(dtype_promote(stmt.op.name, [dtype.name for dtype in args])) if all(args) else None)
-        elif isinstance(stmt, Init):
-            env[stmt.name] = stmt.dtype
-        elif isinstance(stmt, Select):
-            branch_dtypes = [env.get(branch.value) for branch in stmt.branches]
-            env[stmt.name] = branch_dtypes[0] if branch_dtypes and all(dtype == branch_dtypes[0] for dtype in branch_dtypes) else None
-        else:
-            env.update((name, None) for name in stmt.defines())
+    _update_dtype_env(edge.lift.body, env, inputs, cache)
 
     lifted = tuple(env.get(result) if isinstance(result, str) else F32 for result in edge.lift.results)
     if edge.axis is None:
@@ -384,6 +391,8 @@ def scheduled(
     schedule=None,
     materialization=None,
     workers=None,
+    placement_decided: bool = False,
+    split_consumed: bool = False,
 ):
     """Build a scheduled ``TileOp`` from one accepted semantic assignment.
 
@@ -407,6 +416,8 @@ def scheduled(
         output_specs=tuple(output_specs),
         schedule=schedule,
         materialization=materialization,
+        placement_decided=placement_decided,
+        split_consumed=split_consumed,
     )
 
 

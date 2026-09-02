@@ -318,10 +318,10 @@ def main() -> None:
         os.write(out_fd, len(payload).to_bytes(8, "little"))
         os.write(out_fd, payload)
         if dirty:
-            # Corrupted context — don't serve more requests from it. Exit so the
-            # parent respawns a fresh context on its next bench (program.py
-            # ``_AsyncBenchWorker.run_job`` re-spawns when the proc is dead).
-            return
+            # A corrupted context cannot serve another request; hard-exit because normal CUDA
+            # teardown can wait forever on a reported hung kernel. The parent respawns a clean
+            # worker on its next bench.
+            os._exit(0)
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ configs:
     - matmul
     - transpose
   realizations:
-  - name: k_matmul_8ceacc.35b04e6120a9
+  - name: k_matmul_82c46f.c9dc2f7bdc25
     bindings: {}
     pins:
       FAST_MATH: false
@@ -69,4 +69,4 @@ configs:
       STAGE: d1/smem-async
       LOOPIFY: '0'
       RASTER: ''
-    identity: 42e1e6e2745ac13b5918a329e4c1faf73e0f78a9ae04abbe9653db1798be3925
+    identity: cc270304488e2b5b4937832c7baa6ffd96f6d5ca60e800d1a0355e74eea7fa12

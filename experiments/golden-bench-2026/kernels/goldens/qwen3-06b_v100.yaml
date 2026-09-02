@@ -5014,9 +5014,7 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: t256
-      TILE: ''
       REDUCE: coop
-      STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
@@ -5202,9 +5200,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      REDUCE@n1: ''
+      REDUCE@n4: ''
       WORK: w16x1
       TILE: mma_m8n8k4_f16_f32/f1x8/k8
-      REDUCE: ''
       STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
@@ -5248,9 +5247,7 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: t256
-      TILE: ''
       REDUCE: coop
-      STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
@@ -5443,9 +5440,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      REDUCE@n1: ''
+      REDUCE@n4: ''
       WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f1x2/k8
-      REDUCE: ''
       STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''

@@ -61,7 +61,12 @@ def _schedule_leaves(tile, name, target):
 
 def test_production_enumeration_is_the_compatible_independent_product() -> None:
     root = Fold.projection(body=Body((Assign("y", "add", ("x", "x")),)), results=("y",))
-    tile = TileOp(op=root, place=Placement(free=(Axis("n", 8),)))
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(Axis("n", 8),)),
+        placement_decided=True,
+        split_consumed=True,
+    )
     target = Context.from_target((12, 0))
     domains = project_classic(tile, target)
     codec = ClassicScheduleCodec(_context(tile, target, domains))
@@ -74,6 +79,8 @@ def test_production_enumeration_is_the_compatible_independent_product() -> None:
     (materialized,) = leaves[0].expand()
     assert materialized.schedule == leaves[0].schedule
     assert materialized.place == tile.place.on_grid()
+    assert materialized.placement_decided
+    assert materialized.split_consumed
 
 
 def test_complete_c_proves_its_singleton_without_changing_domains() -> None:

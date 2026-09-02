@@ -816,7 +816,9 @@ def decode_record(record: GoldenRecord) -> str | None:
         axes.extend(store.sweep.name for store in tile.output_specs if store.sweep is not None)
         tile = replace(tile, op=rewrite_twisted(tile.op, axes))
         seams = cuttable_seams(tile)
-        seam_ids = {id(seam.node) for seam in seams}
+        seam_sites = {
+            (id(seam.node), tuple(seam.node.defines()).index(seam.selected) + 1 if seam.selected is not None else None) for seam in seams
+        }
         all_sites = sites(tile.op)
         for key, value in record.knobs.items():
             if str(value) != "cut":
@@ -825,7 +827,7 @@ def decode_record(record: GoldenRecord) -> str | None:
                 site = resolve(tile.op, str(key), all_sites=all_sites)
             except ValueError as exc:
                 return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
-            if site is None or id(site.node) not in seam_ids:
+            if site is None or (id(site.node), site.result) not in seam_sites:
                 return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the Fold tree")
         return _remember_verdict(verdict_key, None)
     candidates = _candidate_rows(record)

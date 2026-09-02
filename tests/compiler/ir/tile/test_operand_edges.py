@@ -291,3 +291,60 @@ def test_a_shared_cone_is_typed_in_each_occurrence_scope() -> None:
 
     assert [dtype.name for dtype in narrow] == ["f16"]
     assert [dtype.name for dtype in wide] == ["f32"]
+
+
+def test_edge_dtypes_reaches_a_fold_nested_in_a_projection_region() -> None:
+    """A region is a lexical container, so its nested Fold results retain their explicit types."""
+    from emmy.compiler.dtype import F16, F32
+    from emmy.compiler.ir.pure import Lambda
+    from emmy.compiler.ir.tile import ProjectionRegion
+    from emmy.compiler.ir.tile.ops import edge_dtypes
+
+    pair = Fold.projection(
+        body=Body(
+            (
+                Assign(name="wide", op="copy", args=("x",), dtype=F32),
+                Assign(name="narrow", op="copy", args=("x",), dtype=F16),
+            )
+        ),
+        results=("wide", "narrow"),
+    )
+    region = ProjectionRegion(axis=Axis("j", 4), lift=Lambda(params=("j", "x"), body=Body((pair,)), results=()))
+    root = Fold.projection(body=Body((region,)), results=())
+    cache: dict = {}
+
+    edge_dtypes(root, {}, cache, {"x": F32})
+
+    assert cache[(id(pair), (("x", "f32"),))] == (F32, F16)
+
+
+def test_zero_axis_results_keep_explicitly_typed_projection_components() -> None:
+    from emmy.compiler.dtype import F16, F32
+    from emmy.compiler.ir.pure import Lambda
+    from emmy.compiler.ir.tile.ops import edge_dtypes
+    from emmy.compiler.tensor import Tensor
+
+    reduction = Fold(
+        axis=Axis("k", 4),
+        operands=(Load(name="x", input="x", index=(Var("k"),)),),
+        lift=Lambda(params=("k", "x"), body=Body(), results=("x",)),
+        init=(0.0,),
+        combine=Lambda(
+            params=("total", "total__o"),
+            body=Body((Assign(name="total", op="add", args=("total", "total__o")),)),
+            results=("total",),
+        ),
+    )
+    pair = Fold.projection(
+        operands=(reduction,),
+        body=Body(
+            (
+                Assign(name="wide_state", op="copy", args=("total",), dtype=F32),
+                Assign(name="wide", op="reciprocal", args=("wide_state",)),
+                Assign(name="narrow", op="copy", args=("total",), dtype=F16),
+            )
+        ),
+        results=("wide", "narrow"),
+    )
+
+    assert edge_dtypes(pair, {"x": Tensor("x", (4,), F16)}) == (F32, F16)

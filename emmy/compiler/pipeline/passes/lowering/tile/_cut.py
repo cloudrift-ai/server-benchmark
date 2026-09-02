@@ -17,7 +17,6 @@ from itertools import islice
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
-from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.pure.fold import (
@@ -28,15 +27,17 @@ from emmy.compiler.ir.pure.fold import (
     deep_reads,
     is_contraction,
     loaded_buffers,
+    result_slice,
 )
 from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Write
 from emmy.compiler.ir.stmt.body import _exposed_defines
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lower_with_output_specs
 from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
-from emmy.compiler.ir.tile.path import family_sites, sites, spell
+from emmy.compiler.ir.tile.path import family_sites, sites, spell, spell_result
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
+from emmy.compiler.pipeline.passes.lowering.tile._pieces import input_fragment, piece_inputs
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 
@@ -52,6 +53,10 @@ class CutSite:
     spelling: str
     axes: tuple
     dtypes: tuple
+    #: One named component selected by a result placement. ``None`` means the complete node.
+    selected: str | None = None
+    #: The consumer-local projection slice the produced piece materializes.
+    produced: Fold | None = None
     frontier: Frontier | None = None
     #: Duplicate cones this seam ALSO stands for — alpha-equivalent up to their captured axis
     #: names (contraction-operand seams only): each sibling is
@@ -407,13 +412,6 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         scopes = occurrence_axes.get(id(node), ())
         if not isinstance(node, Fold) or id(node) in seen or not scopes:
             continue
-        providers: tuple = ()
-        requires: tuple = ()
-        if not all(_closed_at(node, scope) for scope in scopes):
-            closure = _provider_closure(node, scopes, environments.get(id(node), []))
-            if closure is None:
-                continue
-            providers, requires = closure
         if node.observed:
             # An observed fold's per-step results exist only inside its stream — a cut would
             # separate the scan from its streamed boundary store, which no piece can then spell.
@@ -429,17 +427,52 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             continue
         seen.add(id(node))
         axes = tuple({axis.name: axis for scope in scopes for axis in scope}.values())
-        out.append(
-            CutSite(
-                node=node,
-                spelling=spell(tile.op, "PLACE", node, all_sites=all_sites),
-                axes=axes,
-                dtypes=dtypes,
-                frontier=frontier,
-                providers=providers,
-                requires=requires,
+
+        def offer(
+            produced: Fold,
+            selected: str | None,
+            spelling: str,
+            offered_dtypes: tuple,
+            *,
+            node=node,
+            scopes=scopes,
+            axes=axes,
+            frontier=frontier,
+        ) -> None:
+            providers: tuple = ()
+            requires: tuple = ()
+            if not all(_closed_at(produced, scope) for scope in scopes):
+                closure = _provider_closure(produced, scopes, environments.get(id(node), []))
+                if closure is None:
+                    return
+                providers, requires = closure
+            out.append(
+                CutSite(
+                    node=node,
+                    spelling=spelling,
+                    axes=axes,
+                    dtypes=offered_dtypes,
+                    selected=selected,
+                    produced=produced if selected is not None else None,
+                    frontier=frontier,
+                    providers=providers,
+                    requires=requires,
+                )
             )
-        )
+
+        results = _operand_result_names(node)
+        offer(node, None, spell(tile.op, "PLACE", node, all_sites=all_sites), dtypes)
+        if node.axis is None and len(results) > 1 and frontier is None:
+            # A selected suffix result can be replaced by one load after the retained prefix
+            # without reordering the parent's positional operand interface. Interior and prefix
+            # components need a segmented retained edge, which is a separate transport change.
+            position, name = len(results), results[-1]
+            retained = result_slice(node, set(results[:-1]))
+            # A retained sibling that also computes the selected result would bind the same SSA
+            # name as its workspace load. Such an interface can only be cut as a whole.
+            if name not in deep_defines(retained):
+                produced = result_slice(node, {name})
+                offer(produced, name, spell_result(tile.op, node, position, all_sites=all_sites), (dtypes[position - 1],))
     # A dependent seam stands only while every required producer is itself offered; dropping one
     # can orphan the next link of a chain, so filter to the fixpoint.
     while True:
@@ -477,7 +510,11 @@ def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) ->
     # a required producer alone keeps the requirement pointing at a seam that still exists and
     # still binds the name the dependent reads.
     required = {id(producer) for seam in seams for _, producer in seam.requires}
-    eligible = [index for index, seam in enumerate(seams) if operand_of.get(id(seam.node)) and id(seam.node) not in required]
+    eligible = [
+        index
+        for index, seam in enumerate(seams)
+        if seam.selected is None and operand_of.get(id(seam.node)) and id(seam.node) not in required
+    ]
     if len(eligible) < 2:
         return tuple(seams)
     scoped = {index: Closure.over_edge(seams[index].node, tuple(axis.name for axis in seams[index].axes)) for index in eligible}
@@ -520,7 +557,13 @@ def _unchanged(pieces: tuple, members) -> bool:
 
 def _replace_member(member, targets: dict[int, tuple]):
     if id(member) in targets:
-        return targets[id(member)]
+        # A selected-result replacement contains the retained sibling slice. That slice can
+        # still hold another seam selected by the SAME composed decision, so it remains a
+        # consumer and must see the other workspace substitutions. Drop only this target while
+        # walking its replacement: retaining it would recurse into itself, while dropping every
+        # target leaves nested producer cones live beside their already-emitted workspaces.
+        remaining = {target: replacement for target, replacement in targets.items() if target != id(member)}
+        return tuple(piece for replacement in targets[id(member)] for piece in _replace_member(replacement, remaining))
     if isinstance(member, Fold):
         return (_replace_fold(member, targets),)
     nested = member.nested()
@@ -559,25 +602,6 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     operand indices still read it as the outer partition coordinate."""
     captures = _external_reads(produced)
     return tuple(axis for axis in seam.axes if axis.name in captures or (axis.extent.is_static and axis.extent.as_static() == 1))
-
-
-def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = ()) -> list[str]:
-    """A piece's graph inputs: its workspaces, then every buffer of ``root``'s the piece reads.
-
-    The read set is the STORED tree's (:func:`loaded_buffers`), not the lowered body's, because the
-    kernel this node becomes is materialized from that tree. A Fold a region keeps as a term hides
-    its operand edges from a lowered-body walk, so declaring the lowered view named fewer inputs
-    than the kernel went on to read; the workspace producers then had no consumer edge, were pruned
-    as orphans, and the launch asked for a buffer nothing had allocated."""
-    reads = loaded_buffers(fold)
-    return [*first, *(name for name in root.inputs if name in reads)]
-
-
-def _input_fragment(match: Match, root: Node) -> Graph:
-    fragment = Graph()
-    for name in root.inputs:
-        fragment.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(name), node_id=name)
-    return fragment
 
 
 def output_map(root: Node) -> dict[str, str]:
@@ -654,8 +678,8 @@ def realize(
             names = (front.name,)
             produced = Fold.projection(body=Body(front.producer), results=names)
         else:
-            names = _operand_result_names(child)
-            produced = child
+            names = (seam.selected,) if seam.selected is not None else _operand_result_names(child)
+            produced = seam.produced or child
         if seam.providers or seam.requires:
             # Provider closure: the piece carries the host-provided scalar chain, and every
             # required name arrives through its producer seam's workspace load — the same Load
@@ -683,7 +707,11 @@ def realize(
         if front is not None:
             raw = replace(loads[0], dtype=front.dtype)
             loads = (Fold.projection(body=Body((raw, *front.residue)), results=child.lift.results),)
-        replacements = {id(child): loads}
+        replacement = loads
+        if seam.selected is not None:
+            results = _operand_result_names(child)
+            replacement = (result_slice(child, set(results[:-1])), *loads)
+        replacements = {id(child): replacement}
         workspace_loads[id(child)] = loads
         for sibling, pairs in seam.siblings:
             # A clustered duplicate reads the SAME workspace, spelled through its own captured
@@ -717,7 +745,7 @@ def realize(
     dangling = _external_reads(parent_fold) - outer_names
     assert not dangling, f"cut consumer of {tile.name!r} reads {sorted(dangling)} before any definition"
 
-    fragment = _input_fragment(match, root)
+    fragment = input_fragment(match, root)
     all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
     # A producer reading another seam's workspace must follow the node that writes it. Strict
     # containment makes this dependency graph acyclic, including chains whose members have the
@@ -742,7 +770,7 @@ def realize(
         reads = loaded_buffers(produced)
         fragment.add_node(
             op=producer,
-            inputs=_piece_inputs(root, produced, tuple(buffer for buffer in all_buffers if buffer in reads)),
+            inputs=piece_inputs(root, produced, *(buffer for buffer in all_buffers if buffer in reads)),
             outputs=workspace_tensors,
             node_id=buffers[0],
         )
@@ -767,7 +795,7 @@ def realize(
     all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
     fragment.add_node(
         op=consumer,
-        inputs=_piece_inputs(root, parent_fold, all_buffers),
+        inputs=piece_inputs(root, parent_fold, *all_buffers),
         outputs=output_tensors,
         node_id=renamed_outputs[root.id],
     )

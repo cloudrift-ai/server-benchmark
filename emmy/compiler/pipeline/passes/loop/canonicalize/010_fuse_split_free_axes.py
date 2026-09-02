@@ -30,6 +30,12 @@ quiescent — canonicalizing a producer that still awaits a merge could re-spell
 splicer composes through — and before ``loop/stamp``, so kernel identity and everything downstream
 (classification's trailing pair, shape keys, goldens) see one canonical spelling. Split and unsplit
 spellings of the same contraction thereby converge to one kernel identity.
+
+``030_cut`` reuses this substitution when a structural choice creates fresh unmapped Tile pieces.
+A cut can remove the access whose div/mod residue originally kept the pair distinct; the fresh piece
+therefore lowers through its schedule-free Loop spelling, runs this canonicalization, and lifts back
+before the splice stamps its identity. This is deterministic structural normalization, not a schedule
+choice, and never rewrites a TileOp after a schedule is attached.
 """
 
 from __future__ import annotations
@@ -37,119 +43,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.address import split_pair
-from emmy.compiler.ir.axis import Axis, AxisRole
-from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.passes import simplify as _simplify_stmt
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.loop.canonicalize._split_free_axes import fuse_split_free_axes
 
 PATTERN = [Pattern("root", LoopOp)]
-
-
-def _no_divmod_on(e: Expr, name: str) -> bool:
-    """No ``/`` / ``%`` subterm of ``e`` has ``name`` in its dividend — the residue detector."""
-    if isinstance(e, BinaryExpr):
-        if e.op in ("/", "//", "%") and name in e.left.free_vars():
-            return False
-        return _no_divmod_on(e.left, name) and _no_divmod_on(e.right, name)
-    if isinstance(e, TernaryExpr):
-        return all(_no_divmod_on(x, name) for x in (e.cond, e.if_true, e.if_false))
-    if isinstance(e, CastExpr):
-        return _no_divmod_on(e.expr, name)
-    if isinstance(e, FuncCallExpr):
-        return all(_no_divmod_on(a, name) for a in e.args)
-    return True
-
-
-def _access_ok(index: tuple, shape, fname: str, store: bool = False) -> bool:
-    """A rewritten access folds clean when its index exprs carry no div/mod residue on the fused
-    axis, or — the split-store spelling ``[…, f/Q, f%Q]`` — when the buffer's row-major flatten
-    recomposes the residue to an affine address (needs the full static shape). A ``store`` may
-    also keep the bare pair at permuted strides (``[…, f/Q, …, f%Q]``): every tier addresses an
-    output element at its own coordinate, so the spelling is exact by construction."""
-    if all(_no_divmod_on(e, fname) for e in index if fname in e.free_vars()):
-        return True
-    if store and split_pair(index, fname) is not None:
-        return True
-    if shape is None or len(shape) != len(index) or not all(getattr(d, "is_static", False) for d in shape):
-        return False
-    flat: Expr = Literal(0, "int")
-    stride = 1
-    for e, d in zip(reversed(index), reversed(list(shape)), strict=True):
-        flat = BinaryExpr("+", flat, BinaryExpr("*", e, Literal(stride, "int")))
-        stride *= d.as_static()
-    return _no_divmod_on(flat.simplify(SimplifyCtx.empty()), fname)
-
-
-def _folds_clean(fused: Loop, fname: str, shapes: dict) -> bool:
-    for s in Body((fused,)).iter():
-        if isinstance(s, Load):
-            if not _access_ok(s.index, shapes.get(s.input), fname):
-                return False
-        elif isinstance(s, Write):
-            if not _access_ok(s.index, shapes.get(s.output), fname, store=True):
-                return False
-        elif any(fname in e.free_vars() and not _no_divmod_on(e, fname) for e in s.exprs()):
-            return False
-    return True
-
-
-def _fuse_pair(outer: Loop, inner: Loop, shapes: dict, between: tuple[Loop, ...] = ()) -> Loop | None:
-    """The fused nest for a perfectly-nested free pair, or ``None`` when the pair declines. The
-    free loops ``between`` them (outermost first) interchange outward: the fused axis sits where
-    ``inner`` was, under them."""
-    p, q = outer.axis, inner.axis
-    if p.name == q.name or p.window is not None or q.window is not None:
-        return None
-    if not (p.extent.is_static and q.extent.is_static):
-        return None
-    big, small = p.extent.as_static(), q.extent.as_static()
-    if big <= 1 or small <= 1:
-        return None  # a size-1 side is drop_size_one_free_axes' job
-    for s in Body(tuple(inner.body)).iter():
-        ax = getattr(s, "axis", None)
-        if ax is not None and ax.name in (p.name, q.name):
-            return None  # an inner loop shadows a pair name — substitution would capture
-    f = Var(q.name)
-    lit = Literal(small, "int")
-    sigma = Sigma({p.name: BinaryExpr("//", f, lit), q.name: BinaryExpr("%", f, lit)})
-    body = Body(tuple(s.rewrite(lambda n: n, sigma) for s in inner.body))
-    fused = Loop(axis=Axis(q.name, big * small), body=body, unroll=outer.unroll or inner.unroll, role=AxisRole.FREE, seed=inner.seed)
-    fused = _simplify_stmt(fused, SimplifyCtx.empty())
-    if not _folds_clean(fused, q.name, shapes):
-        return None
-    for mid in reversed(between):
-        fused = replace(mid, body=Body((fused,)))
-    return fused
-
-
-def _free_chain(loop: Loop) -> list[Loop]:
-    """``loop`` and the perfectly-nested free loops under it, outermost first."""
-    out = [loop]
-    while len(out[-1].body) == 1 and isinstance(out[-1].body[0], Loop) and not out[-1].body[0].is_reduce:
-        out.append(out[-1].body[0])
-    return out
-
-
-def _fuse_once(body: Body, shapes: dict) -> Body | None:
-    """The body with ONE pair fused (outermost-first, depth-first, the nearest partner first), or
-    ``None`` when no pair fuses. The caller iterates to fixpoint, so an outer pair exposed by an
-    inner fusion is picked up on the next round."""
-    for i, s in enumerate(body):
-        if not isinstance(s, Loop) or s.is_reduce:
-            continue
-        chain = _free_chain(s)
-        for j in range(1, len(chain)):
-            fused = _fuse_pair(s, chain[j], shapes, tuple(chain[1:j]))
-            if fused is not None:
-                return Body((*body[:i], fused, *body[i + 1 :]))
-        inner = _fuse_once(s.body, shapes)
-        if inner is not None:
-            return Body((*body[:i], replace(s, body=inner), *body[i + 1 :]))
-    return None
 
 
 def rewrite(match: Match, root: Node, ctx=None) -> LoopOp:
@@ -157,10 +55,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> LoopOp:
     if not isinstance(op, LoopOp):
         raise RuleSkipped("root is no longer a LoopOp")
     shapes = {name: t.shape for name, t in {**op.inputs, **op.outputs}.items()}
-    body = op.body
-    fused_any = False
-    while (step := _fuse_once(body, shapes)) is not None:
-        body, fused_any = step, True
-    if not fused_any:
+    body = fuse_split_free_axes(op.body, shapes)
+    if body is None:
         raise RuleSkipped("no adjacent free-axis pair fuses")
     return replace(op, body=body)

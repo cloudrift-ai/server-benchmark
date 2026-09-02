@@ -6,12 +6,18 @@ inputs in IndexMapOps, so every ElementwiseOp post-decomposition has all
 inputs at the output shape — the rank-preserving Tensor IR invariant.
 """
 
+from dataclasses import replace
+
 import numpy as np
 
 from emmy.compiler.backend.numpy import NumpyBackend
+from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp
+from emmy.compiler.ir.expr import Var, placeholder
+from emmy.compiler.ir.loop import Accum, Assign, Axis, Load, Loop, LoopOp, Write
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource
+from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 
 rng = np.random.default_rng(42)
@@ -137,3 +143,64 @@ def test_tracer_emits_broadcast_explicit_elementwise():
             assert inp_shape == out_shape, (
                 f"ElementwiseOp {n.id} input shape {inp_shape} != output {out_shape} — tracer must insert broadcast IndexMapOp"
             )
+
+
+# ===================================================================
+# Index-map composition — source-program storage boundaries
+# ===================================================================
+
+
+def _public_indexmap_boundary_graph() -> Graph:
+    row, inner = Axis("row", 4), Axis("inner", 8)
+    reduction = LoopOp(
+        body=(
+            Loop(
+                axis=row,
+                body=(
+                    Loop(
+                        axis=inner,
+                        body=(
+                            Load(name="value", input="x", index=(Var("row"), Var("inner"))),
+                            Accum(name="total", value="value", op="add"),
+                        ),
+                    ),
+                    Write(output="stage", index=(Var("row"),), value="total"),
+                ),
+            ),
+        ),
+    )
+
+    def identity() -> IndexMapOp:
+        return IndexMapOp(out_shape=(4,), sources=(IndexSource(0, (placeholder(0),)),))
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4, 8), F16), node_id="x")
+    graph.add_node(reduction, ["x"], Tensor("stage", (4,), F16, transient=True), node_id="stage")
+    graph.add_node(identity(), ["stage"], Tensor("rounded", (4,), F16), node_id="rounded")
+    graph.add_node(identity(), ["rounded"], Tensor("view", (4,), F16), node_id="view")
+    graph.inputs, graph.outputs = ["x"], ["view"]
+    return graph
+
+
+def test_indexmap_composition_preserves_a_public_rounding_boundary() -> None:
+    graph = _public_indexmap_boundary_graph()
+    values = {"x": rng.standard_normal((4, 8)).astype(np.float16)}
+    before = _run(graph, values)
+
+    optimized = Pipeline.build(["frontend/optimization"], select={"compose_indexmaps"}).run(graph)
+    assert "rounded" in optimized.nodes
+    np.testing.assert_allclose(_run(optimized, values)["view"], before["view"], rtol=0, atol=0)
+
+    lifted = Pipeline.build(["loop/lifting"]).run(optimized)
+    rounded = lifted.nodes["rounded"].op
+    copies = [stmt.dtype for stmt in rounded.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
+    assert copies == [F16]
+
+
+def test_indexmap_composition_still_elides_a_transient_shape_boundary() -> None:
+    graph = _public_indexmap_boundary_graph()
+    graph.nodes["rounded"].outputs = (replace(graph.nodes["rounded"].output, transient=True),)
+
+    optimized = Pipeline.build(["frontend/optimization"], select={"compose_indexmaps"}).run(graph)
+
+    assert "rounded" not in optimized.nodes

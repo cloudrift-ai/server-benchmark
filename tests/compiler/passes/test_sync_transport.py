@@ -92,6 +92,31 @@ def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:
     assert {assign.name for assign in fill.iter_of_type(Assign)} == {f"out__c{i}" for i in range(8)}
 
 
+def test_compute_fill_nested_binding_does_not_capture_an_earlier_hoisted_value() -> None:
+    """A later nested binding with the same spelling must not rename an earlier outer read."""
+
+    def value(_k0, _row, col):
+        inner_axis = Axis("inner", 2)
+        inner = Loop(
+            axis=inner_axis,
+            body=Body((Load(name="scale", input="nested", index=(col, Var(inner_axis.name))),)),
+        )
+        return [
+            Load(name="scale", input="scalar", index=(Literal(0, "int"),)),
+            Load(name="cell", input="x", index=(col,)),
+            Assign(name="mixed", op=ElementwiseImpl("add"), args=("cell", "scale")),
+            inner,
+            Assign(name="out", op=ElementwiseImpl("copy"), args=("mixed",)),
+        ], "out"
+
+    operand = SyncOperand(tag="b", shape=(1, 8), value=value)
+    transport = SyncTransport(operands=(operand,), slab_dtype="half", cta=CtaTile(Literal(0, "int"), 1), elem_bytes=2)
+    fill = Body(tuple(transport.fill(k0=Literal(0, "int"), slot=Literal(0, "int"), k0_cur=Literal(0, "int"))))
+
+    mixed = next(assign for assign in fill.iter_of_type(Assign) if assign.name == "mixed__c0")
+    assert mixed.args == ("cell__c0", "scale")
+
+
 def test_software_swizzle_shifts_by_the_slab_row_not_the_atom() -> None:
     """A software-filled slab's XOR reads its ROW index — which needs the slab's OWN stride once a
     row is wider than one swizzle atom.

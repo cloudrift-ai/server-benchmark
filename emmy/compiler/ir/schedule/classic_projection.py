@@ -472,6 +472,8 @@ def materialize_classic(
         schedule=assignment,
         materialization=ClassicMaterialization(placed, resolved),
         workers=WarpSpec(assignment.kernel.work.producer) if assignment.kernel.work.producer else None,
+        placement_decided=tile.placement_decided,
+        split_consumed=tile.split_consumed,
     )
 
 

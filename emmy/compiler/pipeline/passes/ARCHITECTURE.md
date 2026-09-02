@@ -72,10 +72,13 @@ post-decomposition Python source file for known format names.
 ## The tile scheduler: one stored tree
 
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
-pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically
-closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
-and realization must agree). Once placement is consumed, it offers the unsplit tree beside every cross-CTA reduce
-split the head Fold admits. A selected cut or split replaces the kernel with fresh unmapped pieces. A bare
+pass runs to a fixpoint over two ordered domains. Placement first offers the maximal fused tree beside every
+semantically closed stored Fold-edge cut whose workspace dtypes are determined and, where the root has several
+independent output regions, beside one root output-region cut. A safe multi-result zero-axis edge also offers each
+independently retained result under a `.result.<position>` address; the address is structural and never becomes a
+classic node or edge site. Once placement is consumed, the pass offers the
+unsplit tree beside every cross-CTA reduce split the head Fold admits. A selected cut or split replaces the kernel
+with fresh unmapped pieces. A bare
 `PLACE=cut` pin
 names the
 placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than through the
@@ -108,7 +111,9 @@ rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (attention's statistics cone contains the score dots whose operand cones are
-cut beside it) — and all pieces set `placement_decided` and proceed to scheduling. A bare pinned cut consumes its one
+cut beside it). A selected-result seam's retained sibling slice is itself a consumer, so every other seam in the same
+decision replaces matching descendants inside that slice before the consumer is formed. All pieces set
+`placement_decided` and proceed to scheduling. A bare pinned cut consumes its one
 root-most cut the same way and may join scoped cuts in that single decision. A scoped pin whose site path does
 not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
@@ -185,8 +190,9 @@ exhaustively compared with the literal Cartesian reference. That compatibility p
 flash attention the unconstrained product is 8.9e6 against 13,280 compatible rows, and on an EXL3 coded linear 5.3e12
 against 19,407,312.
 
-The cut phase is the outer enumeration. `030_cut` reaches a fixpoint over fused/cut placement choices and then
-unsplit/split reduction choices and emits those pass-native structural forks directly. `040_schedule` follows and
+The cut phase is the outer enumeration. `030_cut` reaches a fixpoint over fused/output-region/stored-edge placement
+choices and then unsplit/split reduction choices and emits those pass-native structural forks directly.
+`040_schedule` follows and
 supplies `ClassicScheduleContext` to the generic driver for Algorithm 1(c, p, t). A structural realization creates
 ordinary fresh kernels, so any later placement or split decision is discovered by the same pass rather than by a
 classic-context refusal.
@@ -384,6 +390,9 @@ decomposition may place one transient, shape-only buffer between the accumulator
 that direct private copy inherits the same accumulator dtype. Actual computation over private reduction state remains
 untyped, so normalization and softmax keep their f32 state until their own public result store. Fusion and placement
 then preserve the typed `copy` as an ordinary statement rather than reconstructing a boundary from graph topology.
+Index-map composition preserves that same distinction: it composes through a transient shape-only tensor, but stops
+at a non-transient producer because deleting that tensor would erase a source-program storage boundary before store
+rounding can spell its conversion.
 
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized
@@ -536,7 +545,8 @@ unsupported forms remain unmapped.
 Maximal Loop fusion remains canonical. Tile lowering may expose two kinds of graph-fragment siblings without changing
 that canonical input:
 
-- **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam — body-member folds
+- **`030_cut`** offers the maximal fused Fold tree, one composed split of independent root output regions, and every
+  closed stored child-Fold seam — body-member folds
   closed at offer time by provider closure, and dependent seams offered as principal closures (see the placement
   discussion above). A cut writes one workspace
   per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
@@ -558,13 +568,34 @@ that canonical input:
   that seam rather than joining the offer: the raw bits dominate the fed-store workspace on both precision (exact vs
   re-rounded) and footprint (storage width vs store width), so there is no trade for the evidence to decide. Every
   seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
-  disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
+  disagree. An independent suffix result of a zero-axis Fold uses its own dependence slice and dtype, retains the
+  prefix result slice in the consumer, and replaces only selected reads. The suffix restriction preserves the
+  parent's positional operand interface; interior selection needs segmented retained edges. It keeps the ordinary
+  captured-axis workspace transport; flattening a quotient coordinate belongs to edge transport, not this
+  node-placement choice. A cut workspace retains captured
+  axes plus static unit axes: unit extents add no storage, while preserving
   them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
-  unmapped TileOps, so further legal cuts and schedules use the same ordinary passes. An unpinned cut may expose more
+  unmapped TileOps. Before the splice stamps their identities, every structural choice lowers each fresh piece through
+  its schedule-free Loop spelling and reuses the split-free-axis canonicalization. A cut can remove the access that
+  kept a reshape's output-axis pair distinct; re-fusing the now-clean pair makes semiring geometry and the identity
+  match the equivalent initially canonical kernel. This deterministic normalization is neither a placement choice nor
+  a node or edge schedule, and it runs before the fresh pieces re-enter the ordinary cut and schedule passes. An
+  unpinned cut may expose more
   cut choices; any pinned cut consumes its restriction on every piece. If the parent already carries a cross-CTA
   split receipt, every placement piece inherits it, so a later cut cannot make the same split pending again. A piece
   minted by a structural apply stays in the ordinary pass sequence; no schedule-specific visitor discovers or
   realizes another placement decision.
+
+  The root output-region arm exists only when a zero-axis root is exactly a pure prefix followed by one or more
+  `ProjectionRegion`s whose recursive results uniquely partition the output specifications and whose captures close
+  over the prefix and root operands. `PLACE@root=cut` separates sibling regions in one structural choice and lifts
+  each region's leading axes into that fresh piece's root-global placement. When earlier cuts leave one region, the
+  same choice weighs shared-prefix reuse under the serial projection against duplicating that prefix across the fully
+  parallel placement. Because the choice replaces the kernel set, it is consumed before graph-scoped child
+  `PLACE@site` pins are resolved against the fresh pieces; a coincident path in the unsplit parent cannot capture a
+  child's pin. Bare `PLACE` retains its stored-edge primary semantics. Fresh pieces re-enter this same fixpoint, so
+  nested sibling regions need no second enumerator. Node schedules and edge transports remain independent classic
+  domains.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
   changes which kernels exist, so `030_cut` offers it after stored-edge placement and before any assignment

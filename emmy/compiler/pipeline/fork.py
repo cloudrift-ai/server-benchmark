@@ -1,29 +1,21 @@
-"""Fork interface + implementations: the deferred fork options the search
-engine ranks and resolves, and the hierarchical Fork-tree builder shared by
-pipeline rules that enumerate a knob cartesian.
+"""Deferred fork options and the lazy Fork-tree builders shared by pipeline rules.
 
 :class:`Fork` is the interface — ``knobs``, ``is_leaf``, ``expand()``.
-Implementations hold their producer's state as data:
-:class:`OptionFork` (a concrete ``Op``/``Graph`` leaf) and the tree node
-classes :class:`_Branch` / :class:`_Leaf` built by :func:`build_fork_tree`.
+Implementations hold their producer's state as data: :class:`OptionFork` is a concrete ``Op``/``Graph`` leaf, while
+:class:`_Branch` / :class:`_Leaf` are built by :func:`build_fork_tree`.
 
-The tree builder reads an addressable sequence of variant knob rows through
-the root :class:`_Branch`: each ``Level`` groups
-siblings by a (sub)tuple of knob values and collapses levels whose key has
-a single distinct value across the group (rows with an empty key skip the
-level). Below the last level every row becomes one :class:`_Leaf` carrying
-its COMPLETE row as ``knobs`` — the row IS the variant identity (the
-``S_*`` structural-feature knobs ride the merged dict), so the perf DB and
-the online prior key leaves and branches by knobs alone, no structural
-probing. ``expand()`` yields ``materialize(row)`` once the search engine
+The tree builder reads an addressable sequence of variant knob rows through the root :class:`_Branch`. Each ``Level``
+groups siblings by a knob subtuple and collapses levels whose key has one value (rows with an empty key skip the level).
+Below the last level every row becomes one :class:`_Leaf` carrying its COMPLETE row as ``knobs`` — the row IS the
+variant identity, including its ``S_*`` structural-feature knobs. The perf DB and online prior key forks by knobs.
+``expand()`` yields ``materialize(row)`` once the search engine
 resolves a leaf.
-Everything is lazy: construction reads no row, no Fork below the root exists until search expands
-it, and branches retain indices into the shared sequence rather than row copies. Siblings are
-emitted in grouping order — RANKING IS SEARCH POLICY: the
+Everything is lazy: construction reads no row, no Fork below the root exists until search expands it, and branches
+retain indices into the shared sequence rather than row copies. A schedule prefix caches its immutable derived
+children while each expansion returns a fresh list. Siblings are emitted in grouping order — RANKING IS SEARCH POLICY: the
 policies rank the frontier with the online prior (Forks carry no score).
 
-The engine in ``pipeline.py`` consumes ``fork.knobs`` flat (it doesn't walk
-ancestors): branch Forks pin their level's slice of the row, leaves carry
+The engine in ``pipeline.py`` consumes ``fork.knobs`` flat: branches pin their level's row slice, while leaves carry
 the whole row.
 """
 
@@ -39,6 +31,7 @@ if TYPE_CHECKING:
     from emmy.compiler.ir.base import Op
 
 from emmy.compiler.ir.schedule import Schedule, ScheduleContext, schedule
+from emmy.compiler.structural import instance_memo
 
 
 class Fork(ABC):
@@ -153,7 +146,7 @@ class _ScheduleTree:
 
 @dataclass(frozen=True)
 class _ScheduleFork(Fork):
-    """One immutable prefix in a generic lazy schedule tree."""
+    """One immutable prefix in a generic lazy schedule tree, with its derived frontier cached."""
 
     tree: _ScheduleTree
     context: ScheduleContext
@@ -175,8 +168,15 @@ class _ScheduleFork(Fork):
     def pool_descent_bound(self) -> int:
         return self.tree.pool_descent_bound
 
+    def __getstate__(self):
+        """Pickle the schedule prefix, never its derived children."""
+        return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
+
     def expand(self) -> list[Fork]:
-        return self.tree.step(self.context, self.row)
+        memo = instance_memo(self, "_memo_expansion")
+        if "children" not in memo:
+            memo["children"] = tuple(self.tree.step(self.context, self.row))
+        return list(memo["children"])
 
 
 def schedule_forks(

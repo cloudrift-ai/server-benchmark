@@ -7390,9 +7390,7 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: t64
-      TILE: ''
       REDUCE: coop
-      STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
@@ -7415,9 +7413,7 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: t128
-      TILE: ''
       REDUCE: coop
-      STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
@@ -7438,8 +7434,6 @@ configs:
     knobs:
       WORK: ''
       TILE: f4
-      REDUCE: ''
-      STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
@@ -7790,9 +7784,7 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: t128
-      TILE: ''
       REDUCE: coop
-      STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
@@ -7815,9 +7807,7 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: t256
-      TILE: ''
       REDUCE: coop
-      STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
@@ -7838,8 +7828,6 @@ configs:
     knobs:
       WORK: ''
       TILE: f2
-      REDUCE: ''
-      STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:
@@ -7860,8 +7848,6 @@ configs:
     knobs:
       WORK: ''
       TILE: ''
-      REDUCE: ''
-      STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
     measurements:

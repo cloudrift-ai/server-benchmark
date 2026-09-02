@@ -330,13 +330,15 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
         yield
 
     class Backend:
-        async def bench_pinned_async(self, _graph, *, warmup, num_iters):
+        async def bench_pinned_async(self, _graph, *, run_inputs, run_inputs_key, warmup, num_iters):
+            assert run_inputs is None and run_inputs_key is None
             assert (warmup, num_iters) == (1, 2)
             return SimpleNamespace(min_ms=0.1, time_ms=0.1), None
 
     source = tmp_path / "loop.json"
     source.write_text("{}")
     monkeypatch.setattr(run_mod, "pinned_knobs", capture_pins)
+    monkeypatch.setattr(run_mod, "_needs_tile_schedule", lambda _graph: False)
     monkeypatch.setattr(run_mod, "_cuda_knob_dicts", lambda _graph: [{"TILE": "f2x4"}])
     monkeypatch.setattr(Graph, "from_dict", staticmethod(lambda _document: object()))
 
@@ -344,6 +346,59 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
 
     assert seen == [{"FAST_MATH": "False", "TILE": "f2x4"}]
     assert len(rows) == 1 and rows[0].status == "ok"
+
+
+def test_ir_ab_replay_schedules_persisted_tile_child_with_strict_reference(tmp_path, monkeypatch):
+    """A post-cut Tile child runs schedule only and proves its pinned output against greedy."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from emmy.commands import run as run_mod
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.pipeline import Pipeline
+
+    built = []
+
+    class FakePipeline:
+        def run(self, graph, **_kwargs):
+            return graph
+
+    def build(passes, *, select=None):
+        built.append((passes, select))
+        return FakePipeline()
+
+    class Backend:
+        async def bench_pinned_async(self, _graph, *, run_inputs, run_inputs_key, warmup, num_iters):
+            assert run_inputs == {"x": [1.0]} and run_inputs_key is not None
+            assert (warmup, num_iters) == (1, 2)
+            return SimpleNamespace(min_ms=0.1, time_ms=0.1), {"y": np.array([2.0])}
+
+    source = tmp_path / "tile.json"
+    source.write_text("{}")
+    monkeypatch.setattr(Pipeline, "build", build)
+    monkeypatch.setattr(Graph, "from_dict", staticmethod(lambda _document: object()))
+    monkeypatch.setattr(run_mod, "_needs_tile_schedule", lambda _graph: True)
+    monkeypatch.setattr(run_mod, "_cuda_knob_dicts", lambda _graph: [{"WORK": "t128"}])
+    monkeypatch.setattr(run_mod, "_comparison_outputs", lambda outputs, _graph: outputs)
+
+    rows = asyncio.run(
+        run_mod._bench_ab_variants_ir(
+            Backend(),
+            source,
+            (),
+            ["WORK=t128"],
+            warmup=1,
+            iters=2,
+            ref=({"x": [1.0]}, {"y": np.array([2.0])}),
+            strict_correctness=True,
+            strict_reference="same-input-greedy",
+        )
+    )
+
+    assert built == [(["lowering/tile"], {"schedule"})]
+    assert rows[0].status == "ok" and rows[0].flags == []
+    assert rows[0].correctness["reference"] == "same-input-greedy"
 
 
 def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
@@ -1514,6 +1569,32 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     row = rec["pinned"][0]
     assert row["status"] == "pin_unmatched" and row["total_us"] is None
     assert any("NOT benched" in f for f in row["flags"])
+
+
+def test_write_ab_json_records_a_node_free_kernel_schedule(tmp_path):
+    """A projection-only kernel has no classic node assignment, but its accepted schedule still
+    carries the complete kernel-scoped WORK and RASTER choices. Reporting must preserve that
+    accepted row after benchmarking instead of rejecting it as an incomplete node schedule."""
+    import json
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _write_ab_json
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    graph = Graph()
+    graph.add_node(
+        op=CudaOp(kernel_name="k_projection", knobs={"WORK": "", "RASTER": ""}),
+        inputs=[],
+        output=Tensor("o", (4,)),
+        node_id="n0",
+    )
+    args = SimpleNamespace(json=str(tmp_path / "ab.json"), code="x + 1", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1)
+
+    _write_ab_json(args, {}, graph, None, [], greedy_fail=None)
+
+    row = json.loads((tmp_path / "ab.json").read_text())["greedy"]["kernels"][0]
+    assert row["record_knobs"] == {"RASTER": "", "WORK": ""}
 
 
 def test_print_kernel_stats_greedy_bench_fail_row(capsys):

@@ -61,12 +61,13 @@ from emmy.compiler.ir.pure.fold import (
     edge_free_axes,
     is_contraction,
     operand_body,
+    result_slice,
 )
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
-from emmy.compiler.ir.tile.ir import ProjectionRegion, _projection_results, apply_output_specs, observed_result_names
+from emmy.compiler.ir.tile.ir import ProjectionRegion, apply_output_specs, observed_result_names, projection_results
 from emmy.compiler.ir.tile.ops import UnbindableProjection, projection_regions, sched_of
 from emmy.compiler.pipeline.passes.lowering._reduction import Reduction, loop_state_head
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
@@ -270,13 +271,7 @@ def _cell_provider_closure(edge, siblings: tuple) -> tuple[object, frozenset[int
 
 def _provider_slice(provider, required: set[str]):
     """Narrow a projection provider to the result cone its cell consumer needs."""
-    results = _operand_result_names(provider)
-    if not isinstance(provider, Fold) or provider.axis is not None or required == set(results):
-        return provider
-    ordered = tuple(result for result in results if result in required)
-    cone = provider.body.backward_cone(ordered)
-    operands = tuple(edge for edge in provider.operands if set(_operand_result_names(edge)) & cone.external_reads)
-    return Fold.projection(operands=operands, body=Body(cone.members), results=ordered)
+    return result_slice(provider, required)
 
 
 def _close_cell_providers(contraction: Fold, siblings: tuple) -> tuple[Fold, frozenset[int]]:
@@ -313,7 +308,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
             elif required := set(_operand_result_names(edge)) & projection_reads:
                 siblings.extend(_emit(_provider_slice(edge, required), ctx).body)
         proj = [*siblings, *_emit_body(op.body, ctx, output_specs)]
-        region_results = _projection_results(op.body)
+        region_results = projection_results(op.body)
         root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= region_results)
         # A STREAMED store (values = an observer's results) rides the recursion down to the leaf
         # so the scalar arm can splice it into the observed fold's reduce loop — applying it here
@@ -556,7 +551,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             bt = lane.extent.as_static() if lane is not None else None
         elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
             body = [*_emit(op, ctx, output_specs).body, *tail]
-            root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= _projection_results(op.body))
+            root_specs = tuple(spec for spec in output_specs if not set(spec.write.values) <= projection_results(op.body))
             if root_specs:
                 # ``observed`` streams a scan store into its reduce loop; every other spec keeps
                 # its kernel-tail reconstitution.
@@ -1046,7 +1041,7 @@ def _tile_chain_members(
         *hoisted, rloop = _emit(member, ctx).body
         fold.extend(hoisted)
         fold.extend(_strided_fold(member, rloop, plan, ctx, lane if plan.coop > 1 else None))
-    region_results = _projection_results(op.body)
+    region_results = projection_results(op.body)
     trailing = [
         *_emit_body(Body(tuple(segment)), ctx, output_specs),
         *(spec.write for spec in output_specs if not set(spec.write.values) <= region_results),

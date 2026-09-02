@@ -36,6 +36,8 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
     consumer_op = consumer.op
     if not isinstance(producer_op, IndexMapOp) or not isinstance(consumer_op, IndexMapOp):
         raise RuleSkipped("producer or consumer is no longer an IndexMapOp")
+    if not producer.output.transient:
+        raise RuleSkipped("producer output is a source-program storage boundary")
 
     # Only compose when the producer has a single source; multi-source
     # IndexMaps (cat) can't be folded positionally.

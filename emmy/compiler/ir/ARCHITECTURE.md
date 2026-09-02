@@ -130,6 +130,10 @@ These are term operations spelled the same way so one canonicalizer and one deep
 vocabularies; they are not statement behaviour, and `Fold` has no `render`. Impure computation stays
 in Loop IR until total lift; there is no impure `Lambda` construction path.
 
+`result_slice` applies `Body.backward_cone` to a zero-axis Fold's selected results and recursively
+narrows only projection operands. It never slices a reducing Fold's carrier components; that would
+change the monoid rather than select a projection result.
+
 **`nested()` is the STATEMENT protocol, and it deliberately does not reach a Fold's operand edges**
 — it yields the lift body, and nothing at all for a contraction, whose algebra is meant to read as
 edges rather than body deps. Every walk built on it (`Body.iter`, and so `Body.loads` /
@@ -424,7 +428,9 @@ specialized at the singleton), so update-vs-combine consistency holds by constru
 componentwise pair constructor (DEGENERATE is the derived `component_ops(combine)` shape predicate, not a storage
 arm; `rename_combine` carries the rename lockstep incl. the twisted regeneration rule). A `Fold` carries NO
 precision: accumulator dtype is a KERNEL-IR fact, stamped on the lowered `Accum` by the Init-placement pass, and a
-reduce `Loop` arriving with a typed `Accum` is not canonical input to total lift. A twisted
+reduce `Loop` arriving with a typed `Accum` is not canonical input to total lift. Tile edge inference follows the
+typed defining statements in each projection scope; a heterogeneous projection therefore keeps one inferred dtype
+per result without changing a reducing edge's established operand dtype. A twisted
 monoid's
 combine is the exp/LSE generator's program, selected structurally, never by a stored family name. The module also
 ships the executable SPEC: `eval_lambda` / `foldmap_eval`, the ~20-line denotational evaluator the agreement

@@ -6,15 +6,12 @@ import logging
 from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold, Lambda, component_ops, is_contraction
+from emmy.compiler.ir.pure import Fold, Lambda, component_ops
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.carrier import EXP_FAMILY, exp_combine_states
 from emmy.compiler.ir.pure.closure import Closure
-from emmy.compiler.ir.pure.fold import _operand_result_names, operand_name
-from emmy.compiler.ir.schedule.views import edge_axes
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Select, refs_axis
-from emmy.compiler.ir.stmt.body import _member_reads
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +36,7 @@ class _NormalizedExp:
 
 
 def _bindings(fold: Fold) -> dict[str, object]:
-    return {name: edge for edge in fold.operands for name in _operand_result_names(edge)}
+    return {name: edge for edge in fold.operands for name in edge.exposes}
 
 
 def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> Closure | None:
@@ -49,7 +46,7 @@ def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> Closure | None:
     if not members or any(not isinstance(stmt, (Fold, Load, Assign, Select)) for stmt in members):
         return None
 
-    used_edges = tuple(edge for name, edge in bindings.items() if any(name in _member_reads(stmt) for stmt in members))
+    used_edges = tuple(edge for name, edge in bindings.items() if any(name in Body((stmt,)).ssa_uses for stmt in members))
     indexed_loads = tuple(stmt for stmt in members if isinstance(stmt, Load) and any(expr.free_vars() for expr in stmt.index))
     nodes = tuple(stmt for stmt in members if isinstance(stmt, Fold))
     if len({id(source) for source in (*used_edges, *indexed_loads, *nodes)}) != 1:
@@ -188,8 +185,8 @@ def _projection_members(node: Fold) -> Body:
     assert node.axis is None
     members = list(node.body)
     for edge in reversed(node.operands):
-        names = set(_operand_result_names(edge))
-        position = next((i for i, stmt in enumerate(members) if names & set(_member_reads(stmt))), len(members))
+        names = set(edge.exposes)
+        position = next((i for i, stmt in enumerate(members) if names & Body((stmt,)).ssa_uses), len(members))
         expanded = _projection_members(edge) if isinstance(edge, Fold) and edge.axis is None else Body((edge,))
         members[position:position] = expanded
     out = []
@@ -234,8 +231,8 @@ def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) ->
     varying = {axis}
     members = []
     for stmt in cone.members:
-        direct = refs_axis(stmt, axis) or (isinstance(stmt, (Fold, Load)) and axis in edge_axes(stmt, (axis,)))
-        if direct or varying & set(_member_reads(stmt)):
+        direct = refs_axis(stmt, axis) or (isinstance(stmt, (Fold, Load)) and axis in (frozenset((axis,)) & stmt.index_space))
+        if direct or varying & Body((stmt,)).ssa_uses:
             members.append(stmt)
             varying.update(stmt.defines())
     if not members:
@@ -285,7 +282,7 @@ def _normalized_exp(edge: Fold, axis: str, axes: tuple[str, ...]) -> _Normalized
 
     body = Body(members)
     defs = body.definitions
-    probability = operand_name(edge)
+    probability = edge.exposes[-1]
     leaves = _mul_leaves(defs, probability)
     if leaves is None or len(leaves) != 2:
         return _decline("normalized exponential", f"{probability!r} is not a two-leaf product spine")
@@ -335,9 +332,9 @@ def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
     states = (*statistic.combine.results, *sums)
     other = tuple(f"{name}__o" for name in states)
     lift = Lambda(
-        params=(statistic.axis.name, *(name for edge in operands for name in _operand_result_names(edge))),
+        params=(statistic.axis.name, *(name for edge in operands for name in edge.exposes)),
         body=statistic.body,
-        results=(*statistic.lift.results, *(operand_name(value) for value in values)),
+        results=(*statistic.lift.results, *(value.exposes[-1] for value in values)),
     )
     combine = Lambda(params=states + other, body=Body(exp_combine_states(states, other)), results=states)
     merged = Fold(
@@ -362,7 +359,7 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
     body = Body(_rewrite_fold(stmt, body_axes) if isinstance(stmt, Fold) else stmt for stmt in fold.body)
     node = replace(fold, operands=operands) if operands != fold.operands else fold
     if body != node.body:
-        node = node.with_bodies((body,))
+        node = replace(node, lift=replace(node.lift, body=Body(body)))
 
     if node.axis is None:
         new_operands, new_body = _merge_siblings(node.operands, node.body, axes)
@@ -370,7 +367,7 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
             return node
         return Fold.projection(operands=new_operands, body=new_body, results=node.lift.results)
 
-    if is_contraction(node) and isinstance(node.a, Fold) and node.a.axis is None:
+    if node.as_contraction() is not None and isinstance(node.a, Fold) and node.a.axis is None:
         view = _normalized_exp(node.a, node.axis.name, axes)
         if view is not None and _same_axis(view.statistic, node):
             product, plus = node.semiring
@@ -378,7 +375,7 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
                 return _extend_statistic(node, view)
 
     _, new_body = _merge_siblings((), node.body, body_axes)
-    return node.with_bodies((new_body,)) if new_body != node.body else node
+    return replace(node, lift=replace(node.lift, body=Body(new_body))) if new_body != node.lift.body else node
 
 
 def rewrite_twisted(root, axes=()):

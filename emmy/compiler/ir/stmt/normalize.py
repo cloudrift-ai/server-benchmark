@@ -460,17 +460,17 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
                 and t.unroll == merged.unroll
             ):
                 continue
-            merged_defs = _all_ssa_defs(merged.body)
-            if merged_defs & _all_ssa_defs(t.body):
+            merged_defs = Body.coerce(merged.body).ssa_defs
+            if merged_defs & Body.coerce(t.body).ssa_defs:
                 continue
-            if merged_defs & _all_ssa_uses(t.body):
+            if merged_defs & Body.coerce(t.body).ssa_uses:
                 continue
             between_defs: set[str] = set()
             for k in range(i + 1, j):
                 if k in consumed:
                     continue
-                between_defs |= _all_ssa_defs(Body((items[k],)))
-            if between_defs & _all_ssa_uses(t.body):
+                between_defs |= Body.coerce(Body((items[k],))).ssa_defs
+            if between_defs & Body.coerce(t.body).ssa_uses:
                 continue
             merged = Loop(
                 axis=merged.axis,
@@ -705,7 +705,7 @@ def dedup_loads(stmts: Body) -> Body:
             re-binds. SSA names bound inside a Loop / Cond body are scoped to it, so such a name is
             a DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
             value and redeclare the survivor."""
-            shadowed = _all_ssa_defs(inner)
+            shadowed = Body.coerce(inner).ssa_defs
             return walk(
                 inner,
                 {k: v for k, v in local.items() if v not in shadowed},
@@ -839,21 +839,14 @@ def _sibling_defs_uses(stmt: Stmt) -> tuple[frozenset[str], frozenset[str]]:
     all_inner_defs: set[str] = set()
     for b in nested:
         defs |= _exported_accs(b)
-        all_uses |= _all_ssa_uses(b)
-        all_inner_defs |= _all_ssa_defs(b)
+        all_uses |= Body.coerce(b).ssa_uses
+        all_inner_defs |= Body.coerce(b).ssa_defs
     return frozenset(defs), frozenset(all_uses - all_inner_defs)
 
 
 def _exported_accs(body: Body) -> frozenset[str]:
     return Body.coerce(body)._exported_accums
 
-
-def _all_ssa_defs(body: Body) -> frozenset[str]:
-    return Body.coerce(body)._all_ssa_defs
-
-
-def _all_ssa_uses(body: Body) -> frozenset[str]:
-    return Body.coerce(body)._all_ssa_uses
 
 
 # ---------------------------------------------------------------------------

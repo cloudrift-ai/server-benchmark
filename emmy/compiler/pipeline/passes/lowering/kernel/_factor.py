@@ -55,13 +55,9 @@ from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.pure.fold import (
     Fold,
-    _operand_result_names,
-    _unique_edges,
-    is_contraction,
-    operand_body,
 )
 from emmy.compiler.ir.schedule import Raster
-from emmy.compiler.ir.schedule.views import cone_seam, edge_axes, term_environment
+from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
@@ -154,8 +150,13 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
         # included, since a contraction is this same node under the bilinear reading. Loop-
         # invariant edges emit once ahead of the loop; the rest splice into the step ahead of first
         # use.
-        hoisted = [s for e in op._hoisted_edges() for s in _emit(e, ctx).body]
-        stmts = _emit_body(Body(op.spliced_step()), ctx)
+        # The same hoist ``Fold.lower`` applies: an operand whose declared index space does not
+        # contain the fold's axis is loop-invariant and emits once, ahead of the loop.
+        hoisted = [s for e in op.operands if op.axis.name not in e.index_space for s in _emit(e, ctx).body]
+        # The step: the operands that ride it, then the lift body — the same split ``Fold.lower``
+        # makes, without the nested flattening the emitter does for itself.
+        step = tuple(stmt for e in op.operands if op.axis.name in e.index_space for stmt in e.lower()) + tuple(op.lift.body)
+        stmts = _emit_body(Body(step), ctx)
         loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
         return Frag(body=[*hoisted, loop], out=Handle(op.out))
     raise TypeError(f"_emit: expected a Fold node, got {type(op).__name__}")
@@ -245,18 +246,18 @@ def factorize(tile, root, store=None) -> Tile:
 def _cell_provider_closure(edge, siblings: tuple) -> tuple[object, frozenset[int]]:
     """Close one computed contraction operand over sibling providers that its result cone reads."""
     # Seeded from what the edge DECLARES it needs, not from lowering it and walking the result.
-    needed = set(term_environment(edge))
+    needed = set(edge.index_space)
     required: dict[int, set[str]] = {}
     while True:
         added = False
         for provider in siblings:
-            results = set(_operand_result_names(provider))
+            results = set(provider.exposes)
             prior = required.get(id(provider), set())
             if not ((results & needed) - prior):
                 continue
             required[id(provider)] = prior | (results & needed)
-            provider_body = Body(operand_body(provider))
-            ordered = tuple(result for result in _operand_result_names(provider) if result in required[id(provider)])
+            provider_body = Body(provider.lower())
+            ordered = tuple(result for result in provider.exposes if result in required[id(provider)])
             needed.update(provider_body.backward_cone(ordered).external_reads)
             added = True
         if not added:
@@ -264,17 +265,17 @@ def _cell_provider_closure(edge, siblings: tuple) -> tuple[object, frozenset[int
     if not required:
         return edge, frozenset()
     selected = tuple(_provider_slice(provider, required[id(provider)]) for provider in siblings if id(provider) in required)
-    return Fold.projection(operands=(*selected, edge), results=_operand_result_names(edge)), frozenset(required)
+    return Fold.projection(operands=(*selected, edge), results=edge.exposes), frozenset(required)
 
 
 def _provider_slice(provider, required: set[str]):
     """Narrow a projection provider to the result cone its cell consumer needs."""
-    results = _operand_result_names(provider)
+    results = provider.exposes
     if not isinstance(provider, Fold) or provider.axis is not None or required == set(results):
         return provider
     ordered = tuple(result for result in results if result in required)
     cone = provider.body.backward_cone(ordered)
-    operands = tuple(edge for edge in provider.operands if set(_operand_result_names(edge)) & cone.external_reads)
+    operands = tuple(edge for edge in provider.operands if set(edge.exposes) & cone.external_reads)
     return Fold.projection(operands=operands, body=Body(cone.members), results=ordered)
 
 
@@ -298,18 +299,18 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
     the node's SCHEDULE (which axes are tiled), never a kernel kind. Nested scheduled contractions
     and their enclosing carrier factorize through this same walk."""
     if (isinstance(op, Fold) and op.axis is None) and op.operands:
-        tiled = [edge for edge in op.operands if is_contraction(edge) and ctx.sched.tile_of(edge) is not None]
+        tiled = [edge for edge in op.operands if edge.as_contraction() is not None and ctx.sched.tile_of(edge) is not None]
         if len(tiled) > 1:
             return _bind_roots(op, ctx, output_specs)
         root = tiled[0] if tiled else op.operands[0]
         other = tuple(edge for edge in op.operands if edge is not root)
         closed_root, consumed = _close_cell_providers(root, other) if tiled else (None, frozenset())
-        projection_reads = op.body.backward_cone(_operand_result_names(op)).external_reads
+        projection_reads = op.body.backward_cone(op.exposes).external_reads
         siblings = []
         for edge in other:
             if id(edge) not in consumed:
                 siblings.extend(_emit(edge, ctx).body)
-            elif required := set(_operand_result_names(edge)) & projection_reads:
+            elif required := set(edge.exposes) & projection_reads:
                 siblings.extend(_emit(_provider_slice(edge, required), ctx).body)
         proj = [*siblings, *_emit_body(op.body, ctx, output_specs)]
         region_results = _projection_results(op.body)
@@ -330,7 +331,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         # contraction root) has no such realization — the sweep is distributed across the lanes it
         # would have to re-run on — so the row is declined and the greedy retries the next one.
         sweeps = tuple(spec.sweep.name for spec in plain if spec.sweep is not None)
-        free = edge_axes(root, sweeps)
+        free = (frozenset(sweeps) & root.index_space)
         swept = [name for name in sweeps if name in free]
         if swept:
             # The schedule at stake is the ITERATING node's, which a chain of zero-axis projections
@@ -342,7 +343,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
             while isinstance(node, Fold) and node.axis is None and node.operands:
                 node = node.operands[0]
             plan = ctx.sched.get("REDUCE", node) if isinstance(node, Fold) and node.axis is not None else None
-            if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (is_contraction(node) and ctx.sched.tile_of(node) is not None):
+            if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (node.as_contraction() is not None and ctx.sched.tile_of(node) is not None):
                 raise UnbindableProjection(
                     f"the bound reduce's cone reads output sweep axis {swept[0]!r} — a cooperative / ILP "
                     f"partition cannot re-run the reduce per swept cell"
@@ -476,7 +477,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # the sibling providers its computed operands read, while every schedule lookup stays keyed
         # on the STORED node — ``ctx.sched`` is identity-keyed, so a rewritten node has no schedule.
         c, value_child, projection = cell_op or op, None, ()
-        tile = ctx.sched.tile_of(op) if is_contraction(op) else None
+        tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction() is not None else None
         stage = ctx.sched.get("STAGE", op) if tile is not None else None
     if tile is not None and tile.axes is not None and len(grid) >= 2:
         epi = list(tail)

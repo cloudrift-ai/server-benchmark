@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.stmt.base import pretty_body
-from emmy.compiler.ir.stmt.body import Body, _exposed_defines, _member_reads
+from emmy.compiler.ir.stmt.body import Body, _exposed_defines
 
 
 @dataclass(frozen=True)
@@ -60,13 +60,15 @@ class Lambda:
         missing = [r for r in self.results if isinstance(r, str) and r not in defined]
         if missing:
             raise ValueError(f"Lambda results {missing} are not defined by the body or params")
-        # CLOSED. A lambda is a function, so it has no free variables — every name its body reads
-        # is a param or one of its own defs. This is the invariant the docstring used to state and
-        # delegate to "the consuming Fold's check", which nothing performed; stating it here covers
-        # every Lambda in the IR (a fold's lift, its combine, its observer) and needs no scope,
-        # because binding everything removes the axis-vs-value distinction rather than deciding it.
-        # :meth:`closing` FORMS a closed lambda from its parts; this only refuses.
-        free = {name for stmt in self.body for name in _member_reads(stmt)} - defined
+        # CLOSED IN VALUES. A lambda is a function, so every VALUE its body reads is a param or one
+        # of its own defs. Asked through ``Body.ssa_uses`` — SSA reads only — so an index
+        # COORDINATE is not mistaken for a value: an axis is the space the body is evaluated over,
+        # supplied by the enclosing binder, and a ``Load``'s index ``Var`` is the same ``Var`` a
+        # value read would be. Deciding it by kind is what this reading does and what asking for
+        # every free name could not: binding coordinates as params removed the distinction rather
+        # than making it, and those unapplied trailing params were the whole environment/capture
+        # machinery downstream. :meth:`closing` FORMS a closed lambda; this only refuses.
+        free = self.body.ssa_uses - defined
         if free:
             raise ValueError(
                 f"Lambda body reads {sorted(free)} it does not bind. Pass them as params — "
@@ -77,25 +79,27 @@ class Lambda:
     def closing(cls, params: tuple[str, ...], body, results: tuple) -> Lambda:
         """Build a CLOSED lambda from its parts — the one former.
 
-        A term is a function, so it has no free variables. The caller supplies the params it
-        knows — a fold's iteration var, the names its operand edges bind — and every remaining
-        name the body reads is appended as a TRAILING param. Trailing, never interleaved: the
+        A term is a function, so it has no free VALUES. The caller supplies the params it knows —
+        a fold's iteration var, the names its operand edges bind — and every remaining value the
+        body reads is appended as a TRAILING param. An index coordinate is not one: it rides the
+        operand edges' index expressions and is supplied by the enclosing binder. Trailing, never interleaved: the
         operand correspondence is the param PREFIX, so appending leaves every positional read of
         it intact.
 
         Built in ONE step: the body is normalized here, so the residual is computed against the
         same body the lambda stores rather than against a throwaway built open and rebuilt.
 
-        Callers form; :meth:`Fold._assert_closed` refuses. They stay separate because a
-        constructor that repaired its own input would enforce nothing."""
+        Callers form; :meth:`__post_init__` refuses. They stay separate because a constructor that
+        repaired its own input would enforce nothing."""
         body = normalize_lambda_body(Body.coerce(body))
         bound = set(params)
         for stmt in body:
             bound |= _exposed_defines(stmt)
-        # Reads the body does not define, plus any RESULT it does not define either: a write may
-        # pass an enclosing value straight through (``o[j] = acc`` over an already-reduced
+        # VALUE reads the body does not define, plus any RESULT it does not define either: a write
+        # may pass an enclosing value straight through (``o[j] = acc`` over an already-reduced
         # accumulator), and that result has no def to name, so it binds as a param like any read.
-        residual = {name for stmt in body for name in _member_reads(stmt)}
+        # Coordinates are deliberately absent — see the closedness gate in ``__post_init__``.
+        residual = set(body.ssa_uses)
         residual |= {result for result in results if isinstance(result, str)}
         return cls(params=(*params, *sorted(residual - bound)), body=body, results=tuple(results))
 

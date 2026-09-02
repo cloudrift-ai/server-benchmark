@@ -15,8 +15,7 @@ accumulate: nothing refused them, so every consumer grew a way to cope instead.
 
 Scoping is for LAMBDAS. A term is not one — a ``Fold`` composes through operand edges and no
 ``Body`` may hold it — so a term's and an operand edge's alpha-quotient is
-:func:`~emmy.compiler.ir.pure.fold.alpha_canonical`, which returns the same kind back. Both are
-built from the same :func:`~emmy.compiler.ir.pure.fold.alpha_rename`.
+:meth:`Fold.canonical`, which returns the same kind back.
 
 Equivalence is a comparison-time VIEW, never a stored normal form — canonicalizing in place
 would clobber meaningful axis names in the tree. And it is a property, not a sharing mechanism:
@@ -30,9 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 
-from emmy.compiler.ir.pure.fold import alpha_rename
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.stmt.body import Body
 
 
 @dataclass(frozen=True, eq=False)
@@ -74,12 +71,7 @@ class Closure:
     def _canonical(self) -> Lambda:
         # A change of NAMES, not of kind: the result denotes the same function and satisfies every
         # invariant ``Lambda`` states, so ``Lambda.__post_init__`` re-checks it on the way out.
-        renamed, rename = alpha_rename(self.fn.body, self.fn.params, self.axes)
-        return Lambda(
-            params=tuple(rename(name) for name in self.fn.params),
-            body=Body(renamed),
-            results=tuple(rename(result) if isinstance(result, str) else result for result in self.fn.results),
-        )
+        return self.fn.canonical()
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Closure) and self.canonical() == other.canonical()

@@ -6,7 +6,7 @@ reads made ``ops`` half presentation."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 from emmy.compiler.ir.stmt import Body, Load
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
@@ -140,7 +140,7 @@ def _edge(edge, ctx: _Ctx, result: str | None = None) -> tuple[str, object]:
     computed edge recurses into the node stored on it. The binding is explicit because the
     bilinear view prints edges in A/B role order, which can differ from the lift's positional
     parameter order."""
-    names = _operand_result_names(edge)
+    names = edge.exposes
     head = f"operand[{', '.join(names)}]" + (f" -> {result}" if result is not None else "")
     if isinstance(edge, Load):
         load = edge.pretty()[0].strip().removeprefix(f"{edge.name} = ")

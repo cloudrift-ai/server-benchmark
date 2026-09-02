@@ -49,7 +49,7 @@ class Cone:
 
     A member is a whole top-level stmt: a wrapper (Loop / Cond / Tile) joins
     as a unit, exposing names per :func:`_exposed_defines` and reading per
-    :func:`_member_reads` (subtree rolled up, internally-bound axes
+    :func:`free_names` (subtree rolled up, internally-bound axes
     excluded). Axis vars from enclosing scopes survive into
     ``external_reads`` — intersect with an axis-name set to get the cone's
     axis usage, subtract it to get the SSA names that must resolve
@@ -77,11 +77,17 @@ def _exposed_defines(s: Stmt) -> set[str]:
     return out
 
 
-def _member_reads(s: Stmt) -> frozenset[str]:
-    """Names ``s`` (incl. a whole wrapper subtree) reads from its enclosing
-    scope: SSA deps + Expr free vars (Load/Write indices, Select predicates,
-    Cond conditions), recursive, minus internally-defined names and axes
-    bound inside the subtree."""
+def free_names(s: Stmt) -> frozenset[str]:
+    """Every name ``s`` (whole subtree) reads from its enclosing scope — SSA reads AND index
+    coordinates, less what the subtree defines or binds.
+
+    The WIDE reading, for callers that must resolve a statement against everything around it: a
+    dependence cone needs the axis vars as much as the value names, since both have to be
+    available where the cone lands. Callers asking a narrower question — is this VALUE read? —
+    want :attr:`Body.ssa_uses`, which never reports a coordinate. Mixing the two is what let an
+    index ``Var`` be mistaken for a value read; keeping both spellings is what lets each caller
+    say which it meant.
+    """
     reads: set[str] = set()
     defs: set[str] = set()
 
@@ -309,23 +315,31 @@ class Body(tuple[Stmt, ...]):
         return frozenset(out)
 
     @cached_property
-    def _all_ssa_defs(self) -> frozenset[str]:
+    def ssa_defs(self) -> frozenset[str]:
         """Every SSA definition in this immutable subtree."""
         out: set[str] = set()
         for stmt in self:
             out.update(stmt.defines())
             for child in stmt.nested():
-                out.update(child._all_ssa_defs)
+                out.update(child.ssa_defs)
         return frozenset(out)
 
     @cached_property
-    def _all_ssa_uses(self) -> frozenset[str]:
-        """Every SSA read in this immutable subtree."""
+    def ssa_uses(self) -> frozenset[str]:
+        """Every SSA read in this immutable subtree — VALUE names only.
+
+        Deliberately narrower than :attr:`deps_closure` and :attr:`Cone.external_reads`, which
+        report axis names beside SSA names. An index coordinate is not a value the body reads: it
+        is the space the body is evaluated over, supplied by the enclosing binder, and a ``Load``
+        index ``Var`` is the same ``Var`` a value read would be. This reading keeps the two apart,
+        which is what lets :meth:`Lambda.closing` bind values without promoting coordinates to
+        params. Ask :attr:`axis_names` for the other half.
+        """
         out: set[str] = set()
         for stmt in self:
             out.update(stmt.deps())
             for child in stmt.nested():
-                out.update(child._all_ssa_uses)
+                out.update(child.ssa_uses)
         return frozenset(out)
 
     @cached_property
@@ -569,7 +583,7 @@ class Body(tuple[Stmt, ...]):
             if id(s) in member_ids:
                 continue
             member_ids.add(id(s))
-            pending.extend(_member_reads(s))
+            pending.extend(free_names(s))
         return Cone(members=tuple(s for s in self if id(s) in member_ids), external_reads=frozenset(external))
 
     def forward_cone(self, seeds: Iterable[Stmt]) -> Cone:
@@ -583,7 +597,7 @@ class Body(tuple[Stmt, ...]):
         names: set[str] = set()
         for s in seeds:
             names.update(_exposed_defines(s))
-        reads = {id(s): _member_reads(s) for s in self}
+        reads = {id(s): free_names(s) for s in self}
         changed = True
         while changed:
             changed = False
@@ -595,7 +609,7 @@ class Body(tuple[Stmt, ...]):
                     names.update(_exposed_defines(s))
                     changed = True
         members = tuple(s for s in self if id(s) in member_ids)
-        external = set().union(*(reads.get(id(s), _member_reads(s)) for s in members)) if members else set()
+        external = set().union(*(reads.get(id(s), free_names(s)) for s in members)) if members else set()
         return Cone(members=members, external_reads=frozenset(external - names))
 
     def defs_die_at(self, members: Iterable[Stmt], *, roots: Iterable[str], allowed: Iterable[Stmt]) -> bool:

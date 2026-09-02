@@ -53,7 +53,7 @@ from emmy.compiler.ir.schedule.classic import (
     edge_site_spelling,
     node_id_spelling,
 )
-from emmy.compiler.ir.schedule.views import ContractionFacts, Projection, Reduction, edge_axes
+from emmy.compiler.ir.schedule.views import ContractionFacts, Projection, Reduction
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
@@ -121,7 +121,7 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     """
     if node.observed:
         return (Reduce(),)
-    if edge_axes(node, tuple(spec.sweep.name for spec in tile.output_specs if spec.sweep is not None)):
+    if {spec.sweep.name for spec in tile.output_specs if spec.sweep is not None} & node.index_space:
         return (Reduce(),)
     if isinstance(tile.op, Fold) and tile.op.axis is None and not tile.op.operands:
         if _chain_member_serial(tile, node):
@@ -143,7 +143,9 @@ def _fold_states(op) -> frozenset[str]:
         return frozenset()
     if op.axis is not None:
         return frozenset(op.defines())
-    return frozenset(name for edge in (*op.operands, *op.body) if isinstance(edge, Fold) for name in edge.defines())
+    # ``op.body`` holds statements only, so the terms are exactly the operands, and each answers
+    # with the names it binds into its consumer.
+    return frozenset(name for edge in op.operands for name in edge.exposes)
 
 
 def _fragment_epilogue_ok(tail: list, states: frozenset[str]) -> bool:
@@ -160,8 +162,11 @@ def _fragment_epilogue_ok(tail: list, states: frozenset[str]) -> bool:
 
 
 def _channel_dtype(tile: TileOp, node, target):
-    """Return the one tensor-core dtype shared by the contraction's B channels."""
-    dtypes = {edge_dtypes(channel.b, tile.inputs)[0] for channel in node.channels}
+    """Return the one tensor-core dtype shared by the contraction's streamed operands.
+
+    The operand tuple past the shared first edge — a channel was never more than a position in it.
+    """
+    dtypes = {edge_dtypes(edge, tile.inputs)[0] for edge in node.operands[1:]}
     if len(dtypes) == 1:
         return next(iter(dtypes))
     eligible = {dtype for dtype in dtypes if dtype is not None and atoms_for(dtype, ctx=target)}
@@ -179,18 +184,19 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return "the grid supplies no output-axis pair for a fragment"
     if not fragment_epilogue:
         return "the projection epilogue is not a per-fragment straight-line program"
-    if isinstance(node.a, Fold) and node.a.axis is not None:
-        return "a nested scheduling site inhabits the A edge"
-    if len(node.channels) == 1 and isinstance(node.channels[0].b, Fold) and node.channels[0].b.axis is not None:
-        return "a nested scheduling site inhabits the B edge"
+    # The operand tuple in stored order — there is no named A/B role any more, and a nested
+    # scheduling site on ANY operand refuses the same way.
+    if any(edge.axis is not None for edge in node.operands):
+        return "a nested scheduling site inhabits an operand edge"
 
-    dtype = edge_dtypes(node.a, tile.inputs)[0]
+    a_edge = node.operands[0]
+    dtype = edge_dtypes(a_edge, tile.inputs)[0]
     if packed[1] is not None:
         return None
     if dtype is not None and dtype.logical_elems != 1:
         return f"a packed {dtype} A pairs with no packed peer; no atom multiplies packed codes against decoded ones"
     if dtype is not None and dtype.nbytes == 1:
-        if not isinstance(node.a, Load):
+        if not a_edge.is_slab:
             return "fp8 fragment loads require a materialized A edge"
         if _channel_dtype(tile, node, target) != dtype:
             return "fp8 fragment loads require one matching operand dtype"
@@ -246,9 +252,10 @@ def _atom_refusal(
 
 def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None, None)) -> tuple[str, ...]:
     """Project every tensor-core atom allowed by static node and target facts."""
-    dtype = edge_dtypes(node.a, tile.inputs)[0]
-    a_is_load = isinstance(node.a, Load)
-    a_step = gmem_axis_step(node.a, node.axis.name, tile.inputs) if a_is_load else None
+    a_edge = node.operands[0]
+    dtype = edge_dtypes(a_edge, tile.inputs)[0]
+    a_is_load = a_edge.is_slab
+    a_step = gmem_axis_step(a_edge, node.axis.name, tile.inputs) if a_is_load else None
     shapes = {**tile.inputs, **tile.outputs}
 
     def bindable(names: tuple[str, ...]) -> tuple[str, ...]:
@@ -290,7 +297,7 @@ def _contraction_domain(
     wide_warp_tiles = tuple(
         plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
     )
-    scalar_tiles = scalar_tile_moves() if len(node.channels) == 1 else (Tile(),)
+    scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 else (Tile(),)
     catalog = (
         *scalar_tiles,
         *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),

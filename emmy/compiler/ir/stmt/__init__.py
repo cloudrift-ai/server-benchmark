@@ -48,10 +48,10 @@ from emmy.compiler.ir.stmt.base import (
     select_to_ternary,
 )
 from emmy.compiler.ir.stmt.base import (
-    _axis_identity as _axis_identity,  # re-export for downstream IR layers
+    _axis_identity as _axis_identity,  # re-export for downstream IR layers,
 )
 from emmy.compiler.ir.stmt.base import (
-    _pad as _pad,  # re-export for ir.kernel.ir
+    _pad as _pad,  # re-export for ir.kernel.ir,
 )
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, refs_axis, stmt_axis_names

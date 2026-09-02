@@ -1846,12 +1846,12 @@ def _detect_stage(graph) -> str:
 def _passes_after_stage(stage: str) -> list[str]:
     """Pipeline tail to run after a graph has reached ``stage``."""
     from emmy.compiler.pipeline import (
-        CUDA_PASSES,
-        KERNEL_PASSES,
-        LOOP_PASSES,
-        TENSOR_PASSES,
-        TILE_PASSES,
-    )
+    CUDA_PASSES,
+    KERNEL_PASSES,
+    LOOP_PASSES,
+    TENSOR_PASSES,
+    TILE_PASSES,
+)
 
     completed = {
         "torch": [],

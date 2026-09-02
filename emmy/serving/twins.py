@@ -102,13 +102,14 @@ def capture_twin_graphs(
 
     from emmy.compiler.loader.quant import fp8_weight_profile, mxfp4_weight_profile, strip_engine_quant_config  # noqa: PLC0415
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
-    from emmy.compiler.trace.huggingface import (  # noqa: PLC0415
-        build_attention_split_wrapper,
-        build_moe_split_wrapper,
-        hyper_connection_seam,
-        moe_block_parts,
-        moe_expert_layout,
-    )
+    from emmy.compiler.trace.huggingface import (
+    # noqa: PLC0415,
+    build_attention_split_wrapper,
+    build_moe_split_wrapper,
+    hyper_connection_seam,
+    moe_block_parts,
+    moe_expert_layout,
+)
     from emmy.serving.gen_runner import trace_split  # noqa: PLC0415
 
     model, revision = split_revision(model)

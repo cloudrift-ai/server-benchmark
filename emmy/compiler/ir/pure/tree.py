@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import NamedTuple
 
-from emmy.compiler.ir.pure.fold import Fold, is_contraction
+from emmy.compiler.ir.pure.fold import Fold
 
 
 class Visit(NamedTuple):
@@ -74,20 +74,14 @@ def children(node, axes: tuple = (), derived: bool = False) -> tuple[tuple, ...]
     if not isinstance(node, Fold):
         return ()
     inner = axes if node.axis is None else (*axes, node.axis)
-    if is_contraction(node):
-        # A contraction's children are its ROLE-ordered operand edges. Its derived step repeats
-        # those nodes, so reading it here would create duplicate sites.
-        labelled = (
-            (node.a, "a", derived),
-            *((channel.b, "b", derived) for channel in node.channels),
-            *((member, None, derived) for member in node.lift.body),
-        )
-    else:
-        members = (*node.operands, *node.lift.body)
-        labelled = tuple((member, None, derived) for member in members)
-        if node.axis is not None:
-            stored = {id(member) for member in members}
-            labelled += tuple((s, None, True) for s in node.step_stmts() if id(s) not in stored)
+    # Stored order, one rule for every node: the operand edges as the term holds them, then its
+    # lift body. No contraction arm and no role labels — a role was a POSITION into the operand
+    # tuple, which only says something beside that tuple, and the walk is already walking it.
+    members = (*node.operands, *node.lift.body)
+    labelled = tuple((member, None, derived) for member in members)
+    if node.axis is not None:
+        stored = {id(member) for member in members}
+        labelled += tuple((s, None, True) for s in node.lift.body if id(s) not in stored)
     return tuple(visit for member, label, member_derived in labelled for visit in _descend(member, inner, label, member_derived))
 
 

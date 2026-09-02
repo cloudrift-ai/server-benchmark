@@ -40,7 +40,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold, deep_defines, is_contraction, operand_body
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
 from emmy.compiler.ir.pure.tree import Visit, walk
 from emmy.compiler.ir.schedule import Placement, WarpSpec
@@ -54,13 +54,12 @@ from emmy.compiler.ir.schedule.views import (
     Projection,
     Reduction,
     contraction_facts,
-    edge_axes,
     node_view,
 )
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
 from emmy.compiler.ir.stmt.base import _axis_identity
-from emmy.compiler.ir.stmt.body import _member_reads
+from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.path import sites
 
@@ -150,12 +149,12 @@ def _reads_sweep(stmt, axis_name: str) -> bool:
     answers from what it DECLARES (:func:`~emmy.compiler.ir.schedule.views.edge_axes`): its lift
     binds every coordinate it reads, operand edges included, so the declaration is the complete
     answer. The generic stmt walk is not — ``Fold.nested()`` deliberately excludes operand edges,
-    so ``_member_reads`` on a term sees its lift body and none of its edges, and would place the
+    so ``free_names`` on a term sees its lift body and none of its edges, and would place the
     sweep run after a store whose edge reads the axis. Everything else is an ordinary statement and
     takes the ordinary walk."""
     if isinstance(stmt, Fold):
-        return axis_name in edge_axes(stmt, (axis_name,))
-    return axis_name in _member_reads(stmt)
+        return axis_name in (frozenset((axis_name,)) & stmt.index_space)
+    return axis_name in free_names(stmt)
 
 
 def _sweep_start(stmts, axis_name: str) -> int:
@@ -200,7 +199,7 @@ def _splice_streamed(stmts: list, write: Write) -> bool:
         if _splice_streamed(inner, write):
             stmts[i] = stmt.with_bodies((Body(tuple(inner)),))
             return True
-        if stmt.is_reduce and values <= set().union(*(deep_defines(s) for s in inner)):
+        if stmt.is_reduce and values <= set().union(*(Body((s,)).ssa_defs for s in inner)):
             stmts[i] = stmt.with_bodies((Body((*inner, write)),))
             return True
     return False
@@ -336,7 +335,7 @@ def lower_with_output_specs(op, specs) -> list[Stmt]:
         return out
 
     if isinstance(op, Fold) and op.axis is None:
-        body = [*(stmt for edge in op.operands for stmt in operand_body(edge)), *lower_body(op.body)]
+        body = [*(stmt for edge in op.operands for stmt in edge.lower()), *lower_body(op.body)]
         root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= _projection_results(op.body))
         return apply_output_specs(body, root_specs, observed=observed_result_names(op))
     return apply_output_specs(op.lower(), specs, observed=observed_result_names(op))
@@ -499,19 +498,19 @@ class TileOp(Op):
             candidate_axes = tuple(dict.fromkeys(axis.name for axis in candidate_scope))
             candidate_sweeps = frozenset(name for name in candidate_axes if name not in {axis.name for axis in candidate_free})
             candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,), sweep_axes=candidate_sweeps)
-            if any(is_contraction(site.node) for site in sites(candidate)):
+            if any(site.node.as_contraction() is not None for site in sites(candidate)):
                 normalized = candidate
                 object.__setattr__(self, "place", replace(self.place, free=candidate_free))
         if self.schedule is not None and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
-        contractions = tuple(site.node for site in sites(normalized) if is_contraction(site.node))
+        contractions = tuple(site.node for site in sites(normalized) if site.node.as_contraction() is not None)
         promoted = {
             store.sweep.name
             for store in self.output_specs
             if store.sweep is not None
-            and any(any(store.sweep.name in edge_axes(edge, (store.sweep.name,)) for edge in con.operands) for con in contractions)
+            and any(any(store.sweep.name in (frozenset((store.sweep.name,)) & edge.index_space) for edge in con.operands) for con in contractions)
         }
         if not promoted:
             self._validate_schedule()
@@ -649,7 +648,7 @@ class TileOp(Op):
 
     @cached_property
     def _packed_readings(self) -> frozendict:
-        return packed_readings(tuple(site.node for site in self.sites if is_contraction(site.node)), self.inputs)
+        return packed_readings(tuple(site.node for site in self.sites if site.node.as_contraction() is not None), self.inputs)
 
     def packed_reading(self, node) -> tuple:
         """One node's ``(B copy, pair)`` packed-operand readings.

@@ -37,10 +37,9 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.algebra import component_ops
-from emmy.compiler.ir.pure.fold import Fold, is_contraction
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
-from emmy.compiler.ir.schedule.views import edge_axes, term_environment
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
@@ -278,7 +277,7 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     return ksplit, kslice, sigma
 
 
-def _sliced_edge(edge, sigma: Sigma, k_name: str):
+def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None):
     """An operand edge σ-reindexed to absolute k for a split partition — the SAME rule on either
     edge. A MATERIALIZED edge rewrites its gmem index; a COMPUTED cone rewrites its per-cell BODY
     and every K-VARYING producer edge it composes (attention's per-cell score contraction — the
@@ -289,8 +288,21 @@ def _sliced_edge(edge, sigma: Sigma, k_name: str):
     the split trades for parallelism; whether it pays on a given shape is evidence's decision."""
     if isinstance(edge, Load):
         return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
-    ops = tuple(e.rewrite(lambda nm: nm, sigma) if k_name in edge_axes(e, (k_name,)) else e for e in edge.operands)
-    return replace(edge, operands=ops).with_bodies((Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in edge.body)),))
+
+    def images(name: str) -> tuple[str, ...]:
+        # A term BINDS its coordinates — as its own axes and, positionally, as the lift's param
+        # prefix — so a σ-reindex renames all three in lockstep. σ is not a rename: a split maps
+        # one coordinate onto an EXPRESSION over two (slice and partition), so a param's image is
+        # the free names of that expression, in order.
+        mapped = sigma.get(name)
+        return (name,) if mapped is None else tuple(dict.fromkeys(mapped.free_vars()))
+
+    ops = tuple(e.rewrite(lambda nm: nm, sigma) if k_name in e.index_space else e for e in edge.operands)
+    body = Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in edge.lift.body))
+    params = tuple(dict.fromkeys(name for param in edge.lift.params for name in images(param)))
+    axes = tuple(dict.fromkeys((kslice if axis.name == k_name else axis) for axis in edge.axes if axis.name != k_name or kslice))
+    axes = tuple(axis for axis in axes if axis.name in params)
+    return replace(edge, axes=axes, operands=ops, lift=replace(edge.lift, params=params, body=body))
 
 
 def _sliced_contraction(node: Fold, w: int) -> tuple[Axis, Fold]:
@@ -300,14 +312,11 @@ def _sliced_contraction(node: Fold, w: int) -> tuple[Axis, Fold]:
     ⊕-monoid's associativity). ``Fold.contraction`` regenerates the componentwise ⊕ over the same
     accumulator names, so the finalize folds the workspace states through the same monoid."""
     ksplit, kslice, sigma = _factor_k(node.axis, w)
-    mul, plus = node.semiring
-    sliced = Fold.contraction(
-        k_axis=kslice,
-        a=_sliced_edge(node.a, sigma, node.axis.name),
-        channels=tuple(replace(ch, b=_sliced_edge(ch.b, sigma, node.axis.name)) for ch in node.channels),
-        product=mul,
-        fold_op=plus,
-    )
+    # Rebuilt DIRECTLY over the σ-reindexed operands, in stored order: the slice is the same term
+    # with a narrower axis, so its lift, monoid and seeds are the node's own — there is nothing for
+    # a former to re-derive, and no role to re-name.
+    operands = tuple(_sliced_edge(edge, sigma, node.axis.name, kslice) for edge in node.operands)
+    sliced = replace(node, axes=(kslice,), operands=operands)
     return ksplit, sliced
 
 
@@ -392,12 +401,14 @@ def _piece(body, free, *, output_specs: tuple = ()) -> TileOp:
     return replace(piece, knobs=consume_kernel_row(piece.knobs))
 
 
-def _state_fold(axis: Axis, algebra: Fold, loads: tuple[Load, ...]) -> Fold:
+def _state_fold(axis: Axis, algebra: Fold, loads: tuple[Load, ...], scope: tuple[Axis, ...] = ()) -> Fold:
     """Fold already-reduced state tuples through ``algebra``'s unchanged monoid."""
     values = tuple(name for load in loads for name in load.defines())
     return Fold(
-        axis=axis,
-        operands=loads,
+        axes=(axis,),
+        # The workspace reads are slabs like any other gmem read: they declare the split axis and
+        # the output coordinates the enclosing placement binds.
+        operands=tuple(Fold.slab(load, (axis, *scope)) for load in loads),
         lift=Lambda(params=(axis.name, *values), body=Body(), results=values),
         init=algebra.init,
         combine=algebra.combine,
@@ -460,11 +471,11 @@ def _captured_prologue(partial_fold: Fold, pre: tuple, split: Axis, free: tuple)
     (a scalar scale load) can define a name the fold's lift reads; slicing the fold alone would
     leave that capture dangling in the partial."""
     # Read off the DECLARATION rather than lowering the partial and scanning it for free names:
-    # a term states what it needs, and `term_environment` recurses its operand edges. The axis
+    # a term states what it needs, and `edge_axes` reads that declaration. The axis
     # subtraction stays — a coordinate is supplied by the enclosing loop, not by the prologue —
     # but the axes a nested term BINDS are already excluded by the reading itself.
     axes = {split.name, *(a.name for a in free)}
-    captures = term_environment(partial_fold) - axes
+    captures = partial_fold.index_space - frozenset(axes)
     if not captures:
         return ()
     return Body(pre).backward_cone(captures).members
@@ -488,7 +499,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     assert node is not None, "the split offer fires on node-form kernels only"
     root, projection, projection_pieces = _split_projection(tile, root, node)
     free = tuple(tile.place.free)
-    if is_contraction(node):
+    if node.as_contraction() is not None:
         split, partial_fold = _sliced_contraction(node, cta)
     else:
         _enforce(splitk_width(node.axis, cta))
@@ -570,7 +581,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     fin_axis = replace(split, window=Window(parent=split, partition=True))
     other = tuple(f"{nm}__p" for nm in states)
     loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i)) for i in range(n_comp))
-    fin_fold = _state_fold(fin_axis, partial_fold, loads)
+    fin_fold = _state_fold(fin_axis, partial_fold, loads, free)
     fin_proj, fin_stores = _boundary(projection)
     if not fin_stores and not Body(tuple(fin_proj)).writes:
         # The projected value is the LAST defining stmt's name — the epilogue tail may end with

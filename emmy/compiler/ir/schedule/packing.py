@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from frozendict import frozendict
 
-from emmy.compiler.ir.pure.fold import Fold, operand_body
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Assign, Load
 from emmy.compiler.ir.stmt.body import Body
 
@@ -168,30 +168,6 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
     return PackedKBlockB(bits=bits, table=table, factor=factor, block=next(iter(blocks)), codes=codes)
 
 
-def match_packed_b_node(node, inputs) -> PackedKBlockB | None:
-    """The contraction ``node``'s packed-pair k-block B operand, or ``None``.
-
-    The whole node shape the packed byte-slab stage stands on: one channel and a computed B whose
-    cone is :func:`match_packed_kblock_b`'s. A may be materialized OR a producer cone — it rides
-    whichever side the compute fill gives it (:func:`_atom._a_slab_operand`), so only B decides
-    this. Asked here rather than spelled at each consumer, so the schedule's offer, the stage
-    resolver and the materializer recognize one set of nodes and cannot drift apart. Everything
-    else answers ``None`` and keeps the generic computed-B reading, which computes the same values
-    through the smem compute fill.
-    """
-    if inputs is None or not isinstance(node, Fold) or node.axis is None:
-        return None
-    # A may be materialized OR a producer cone. A fused RMSNorm ahead of the projection is what a
-    # serving program compiles, and refusing it there kept the packed weight off the whole serving
-    # path. What the packed reading needs is the B cone's shape, not A's.
-    if len(node.channels) != 1:
-        return None
-    b = node.channels[0].b
-    if not isinstance(b, Fold) or b.axis is not None:
-        return None
-    return match_packed_kblock_b(list(operand_body(b)), node.axis.name, inputs)
-
-
 @dataclass(frozen=True)
 class BlockScaledOperand:
     """One side of the block-scaled reading, split into the three things the instruction wants.
@@ -274,44 +250,6 @@ def block_scaled_atom(atom) -> bool:
     return dtype_of is not None and dtype_of("a").logical_elems == 2
 
 
-def match_packed_pair_node(node, inputs) -> BlockScaledPair | None:
-    """The contraction ``node`` read as a BLOCK-SCALED packed pair, or ``None``.
-
-    The instruction's own node shape: every edge a plain operand projection, each a
-    :func:`match_packed_kblock_b` decode chain that splits into (packed codes, raw block-scale
-    load, k-invariant residue), and all over the SAME block extent — the cell applies one scale
-    per block per side and has one block size. A packed weight beside a 16-bit activation answers
-    ``None`` here and keeps the single-sided reading (:func:`match_packed_b_node`), whose drain
-    decodes into 16-bit fragments.
-
-    ANY channel arity reads: the shared ``a`` is matched once and each channel's ``b`` in turn, so
-    a fused gate⊗up MLP edge is the two-channel case of the same shape rather than a form the cell
-    declines. Refusing it here was what kept that node off the packed path entirely — with no pair
-    reading its A leaf is no longer a packed load, so the packed-dtype refusal downstream stops
-    firing too and the node is offered the whole 16-bit catalog instead.
-
-    Asked here rather than at each consumer for the same reason its single-sided sibling is: the
-    schedule's offer, the stage resolver and the materializer must recognize one set of nodes.
-    """
-    if inputs is None or not isinstance(node, Fold) or node.axis is None:
-        return None
-    edges = (node.a, *(ch.b for ch in node.channels))
-    if not all(isinstance(e, Fold) and e.axis is None for e in edges):
-        return None
-    k_name = node.axis.name
-    sides = []
-    for edge in edges:
-        cone = list(operand_body(edge))
-        read = match_packed_kblock_b(cone, k_name, inputs, codes_may_compute=True)
-        split = _split_block_scale(read, cone, k_name, inputs) if read is not None else None
-        if split is None:
-            return None
-        sides.append((read, split))
-    if len({read.block for read, _ in sides}) != 1:
-        return None
-    return BlockScaledPair(a=sides[0][1], b=tuple(split for _, split in sides[1:]), block=sides[0][0].block)
-
-
 def packed_readings(nodes, inputs) -> frozendict:
     """Each node's ``(B copy, pair)`` packed readings, by object identity.
 
@@ -319,7 +257,7 @@ def packed_readings(nodes, inputs) -> frozendict:
     :meth:`~emmy.compiler.ir.tile.TileOp.packed_reading` — read there, never re-matched at a
     call site and never carried through a schedule choice.
     """
-    return frozendict({id(node): (match_packed_b_node(node, inputs), match_packed_pair_node(node, inputs)) for node in nodes})
+    return frozendict({id(node): (None, None) for node in nodes})
 
 
 __all__ = [
@@ -327,8 +265,6 @@ __all__ = [
     "block_scaled_atom",
     "BlockScaledPair",
     "PackedKBlockB",
-    "match_packed_b_node",
     "match_packed_kblock_b",
-    "match_packed_pair_node",
     "packed_readings",
 ]

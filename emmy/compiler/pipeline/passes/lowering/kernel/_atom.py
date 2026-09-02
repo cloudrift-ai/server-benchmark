@@ -53,9 +53,9 @@ from emmy.compiler.ir.kernel.ir import (
     frag_layout,
 )
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_body, operand_name, subst_free
+from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Side, Stage, Tile
-from emmy.compiler.ir.schedule.packing import block_scaled_atom, match_packed_b_node, match_packed_pair_node
+from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.passes import rename_free
@@ -128,8 +128,8 @@ def scheduled_fold_contraction(fold: Fold, sched):
     """
 
     states = set(fold.combine.results) if fold.combine is not None else set()
-    steps = fold.step_stmts()
-    for child in (stmt for stmt in steps if is_contraction(stmt)):
+    steps = tuple(fold.lift.body)
+    for child in (stmt for stmt in steps if isinstance(stmt, Fold) and stmt.as_contraction() is not None):
         tile = sched.tile_of(child)
         consumers = tuple(stmt for stmt in steps if isinstance(stmt, Accum) and stmt.name in states and stmt.value == child.out)
         stage = sched.get("STAGE", child) if tile is not None else None
@@ -883,7 +883,7 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
         stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
         stmts += [subst_free(s, sigma) for s in cell]
-        return _k_masked(stmts, operand_name(c.a), k, k_ext)
+        return _k_masked(stmts, c.a.exposes[-1], k, k_ext)
 
     prologue: list[Stmt] = []
     if stats:
@@ -980,12 +980,12 @@ def _sync_operands(
     for f, (bl, _) in enumerate(channels):
         tag = "b" if f == 0 else f"b_x{f}"
         if not isinstance(bl, Load):
-            b_body = operand_body(bl)
+            b_body = bl.lower()
 
             def b_value(k0, row, col, *, body=b_body, edge=bl):
                 k = BinaryExpr("+", k0, row)
                 sigma = Sigma({k_name: k_coord(k), n_name: n_coord(col)})
-                return _k_masked([subst_free(s, sigma) for s in body], operand_name(edge), k, k_ext)
+                return _k_masked([subst_free(s, sigma) for s in body], edge.exposes[-1], k, k_ext)
 
             op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value, swizzle=swizzles[1])
             sync_ops.append(op)
@@ -1084,7 +1084,7 @@ def _packed_operands(
 
     # Just the scale factor's own stmts, not the whole decode cone: the bits copy verbatim, so the
     # compute fill evaluates only what feeds the factor.
-    factor_cone = list(Body(tuple(operand_body(c.b))).backward_cone([packed.factor]).members)
+    factor_cone = list(Body(tuple(c.b.lower())).backward_cone([packed.factor]).members)
 
     def scale_value(k0, row, col):
         k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(block, "int")))
@@ -1259,7 +1259,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     native = stage.transport == "smem-async" and block_scaled_atom(tile.atom)
     bs_pair = match_packed_pair_node(c, ops.inputs) if native else None
     copy_transport = stage.transport in ("smem-async", "smem-tma")
-    packed = None if bs_pair is not None else (match_packed_b_node(c, ops.inputs) if copy_transport else None)
+    packed = None
     if bs_pair is not None:
         operands, copies, fills = _block_scaled_operands(
             c,
@@ -1557,7 +1557,7 @@ def _scalar_drain(
     seam the mma drain rides."""
     (a_slab, b_slab), (row_base, col_base) = slabs, base
     off_a, off_b = offs
-    b_name, a_name = operand_name(c.b), operand_name(c.a)
+    b_name, a_name = c.b.exposes[-1], c.a.exposes[-1]
     body: list[Stmt] = []
     for i, j in cells:
         sfx = f"__c{i}_{j}"
@@ -1635,7 +1635,7 @@ class _AtomOps:
     def cone(self) -> tuple:
         """The A cone's ``(row-invariant prologue, per-cell body, bridged stats)`` — the node
         boundary, or the whole operand body when there is no cone to split."""
-        return self.seam if self.seam is not None else ((), operand_body(self.c.a), ())
+        return self.seam if self.seam is not None else ((), self.c.a.lower(), ())
 
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
@@ -2017,9 +2017,9 @@ class _ScalarOps(_AtomOps):
         # fold axes): a replicated read of such a coordinate must keep its name — the loop that
         # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
         # emitted references no scope defines.
-        prot = _scalar_protected(c, self.tile, self.lead, body=(*operand_body(c.a), *operand_body(c.b)))
-        b_name, a_name = operand_name(c.b), operand_name(c.a)
-        a_body, b_body = operand_body(c.a), operand_body(c.b)
+        prot = _scalar_protected(c, self.tile, self.lead, body=(*c.a.lower(), *c.b.lower()))
+        b_name, a_name = c.b.exposes[-1], c.a.exposes[-1]
+        a_body, b_body = c.a.lower(), c.b.lower()
         a_cell, b_cell = _cell_varying(a_body, n), _cell_varying(b_body, m)
 
         def at_m(i):  # register row ``i``'s m coordinate (a 1-D output has no m side)
@@ -2090,18 +2090,20 @@ def _atom_ops(
     atom's — is normalized to its one-``Load`` cone HERE, at the decode boundary: the synchronous
     fill then evaluates the load per slab cell and the typed slab store performs the conversion
     (the scheduler resolved the fill for exactly this edge; the tree itself is never rewritten)."""
+    a_edge = c.operands[0] if c.operands else None
+    a_load = a_edge.lift.body[0] if a_edge is not None and a_edge.is_slab else None
     if (
         stage is not None
         and stage.transport == "smem"
         and isinstance(tile.atom, AtomKind)
-        and isinstance(c.a, Load)
+        and a_load is not None
         and inputs is not None
-        and (t := inputs.get(c.a.input)) is not None
+        and (t := inputs.get(a_load.input)) is not None
         and t.dtype != tile.atom.operand_dtype("a")
     ):
-        # Rebuilds thread the node's OWN semiring — never the constructor default.
-        mul, plus = c.semiring
-        c = Fold.contraction(k_axis=c.axis, a=make_cone([c.a], c.axis.name), channels=c.channels, product=mul, fold_op=plus)
+        # Only the A edge is replaced; the term keeps its own lift, monoid and seeds, so there is
+        # no semiring to re-thread and no former to go through.
+        c = replace(c, operands=(make_cone([a_load], c.axis.name), *c.operands[1:]))
     cls = _MmaOps if isinstance(tile.atom, AtomKind) else _ScalarOps
     return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs)
 
@@ -2176,9 +2178,13 @@ def _fold_staged(
         raise ValueError(f"fragment Fold evaluation requires a scheduled synchronous MMA stage, got {stage!r}")
     if len(c.channels) != 1:
         raise ValueError("fragment Fold evaluation currently requires one fragment-resident carrier channel")
-    steps = fold.step_stmts()
+    steps = tuple(fold.lift.body)
     producer = next(
-        (stmt for stmt in steps if is_contraction(stmt) and stmt is not value_child and sched.tile_of(stmt) is not None),
+        (
+            stmt
+            for stmt in steps
+            if isinstance(stmt, Fold) and stmt.as_contraction() is not None and stmt is not value_child and sched.tile_of(stmt) is not None
+        ),
         None,
     )
     producer_tile = sched.tile_of(producer) if producer is not None else None

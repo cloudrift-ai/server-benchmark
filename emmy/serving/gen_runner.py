@@ -872,12 +872,12 @@ class EmmyGenRunner:
             # gives back most of its memory savings. fp8 trunks stay on the decoded lane, where
             # the values are what the fp8 expert path expects.
             from emmy.compiler.loader.quant import (
-                checkpoint_quant_digest,
-                checkpoint_quant_summary,
-                is_awq_checkpoint,
-                is_exl3_checkpoint,
-                is_nvfp4_checkpoint,
-            )
+    checkpoint_quant_digest,
+    checkpoint_quant_summary,
+    is_awq_checkpoint,
+    is_exl3_checkpoint,
+    is_nvfp4_checkpoint,
+)
             from emmy.compiler.trace.huggingface import load_quantized_split
 
             # Generic EXL3/AWQ/NVFP4 reconstruction algebra is dissolved before lowering, so its
@@ -964,13 +964,13 @@ class EmmyGenRunner:
         import torch
 
         from emmy.compiler.trace.huggingface import (
-            build_attention_split_wrapper,
-            build_moe_split_wrapper,
-            deinterleave_gate_up,
-            hyper_connection_seam,
-            moe_block_parts,
-            moe_expert_layout,
-        )
+    build_attention_split_wrapper,
+    build_moe_split_wrapper,
+    deinterleave_gate_up,
+    hyper_connection_seam,
+    moe_block_parts,
+    moe_expert_layout,
+)
 
         dtype = getattr(torch, dtype_str)
         np_dtype = np.dtype(dtype_str)

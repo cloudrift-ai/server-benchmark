@@ -17,21 +17,15 @@ same value; fix the sharing or the seam offer here instead.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
 from emmy.compiler.ir.expr import affine_form
 from emmy.compiler.ir.pure import (
-    Channel,
     Fold,
-    Lambda,
-    component_ops,
-    is_contraction,
 )
 from emmy.compiler.ir.pure.algebra import product_spine
-from emmy.compiler.ir.pure.fold import _operand_result_names, _ordered_projection, alpha_canonical, operand_name
-from emmy.compiler.ir.schedule.views import edge_axes
 from emmy.compiler.ir.stmt import Assign, Body, Load
-from emmy.compiler.ir.stmt.body import _member_reads, refs_axis
+from emmy.compiler.ir.stmt.body import refs_axis
 from emmy.compiler.structural import instance_memo
 
 
@@ -45,232 +39,6 @@ def _loads_axis_contiguously(operand, axis: str) -> bool:
         return False
     form = affine_form(operand.index[-1], {axis})
     return form is not None and form[1].get(axis) == 1
-
-
-def _extract_operand(body: Body, name: str):
-    """Factor one product argument into a materialized load or a pure projection edge."""
-    cone = body.backward_cone((name,))
-    if not cone.members:
-        return None
-    if len(cone.members) == 1 and isinstance(cone.members[0], Load):
-        load = cone.members[0]
-        return (load, cone.members) if load.is_scalar and load.name == name else None
-    if any(not stmt.pure for stmt in cone.members):
-        return None
-
-    if len(cone.members) == 1 and isinstance(cone.members[0], Fold) and operand_name(cone.members[0]) == name:
-        return cone.members[0], cone.members
-    edge = _ordered_projection(cone.members, (name,))
-    return (edge, cone.members) if operand_name(edge) == name else None
-
-
-@dataclass(frozen=True)
-class _SemiringForm:
-    plus: object
-    product: object
-    products: tuple[Assign, ...]
-    arguments: tuple[tuple[str, str], ...]
-
-
-def _semiring_form(fold: Fold) -> _SemiringForm | None:
-    """Recognize the componentwise semiring law without imposing an operand-sharing shape."""
-    # Pre-existing operands are FINE and are now the normal case: a term composes through
-    # ``operands``, so a fused contraction reaches recognition with its computed cones already on
-    # edges. Refusing them here meant `_semiring_form` could only ever fire on a fold whose lift
-    # body held plain loads — i.e. never for a computed-operand contraction — and the node fell
-    # through to PLANAR. What the recognition still needs is a product per component; the operands
-    # already bound simply widen the argument set it may draw from.
-    if fold.axis is None or is_contraction(fold) or fold.combine is None:
-        return None
-    pluses = component_ops(fold.combine)
-    if not pluses or len(set(pluses)) != 1:
-        return None
-    plus = pluses[0]
-    if not (plus.associative and plus.commutative and plus.has_identity):
-        return None
-    # Params beyond the axis are the operand bindings followed by the ENVIRONMENT — the enclosing
-    # axes the lift declares now that a term carries no free names. Requiring a bare ``(axis,)``
-    # would refuse every contraction that reads an enclosing coordinate, which is all of them.
-    if fold.init != (plus.identity,) * len(pluses) or fold.lift.params[:1] != (fold.axis.name,):
-        return None
-
-    body = fold.lift.body
-    defs = body.definitions
-    products: list[Assign] = []
-    argument_names: list[tuple[str, str]] = []
-    product_op = None
-    for result in fold.lift.results:
-        product = defs.get(result) if isinstance(result, str) else None
-        if not isinstance(product, Assign) or len(product.args) != 2:
-            return None
-        if not product.op.distributes_over(plus) or (product_op is not None and product.op != product_op):
-            return None
-        argument_names.append(product.args)
-        products.append(product)
-        product_op = product.op
-
-    if not products or len(fold.combine.results) != len(products):
-        return None
-    return _SemiringForm(plus=plus, product=product_op, products=tuple(products), arguments=tuple(argument_names))
-
-
-def _merge_operand_cones(body: Body, extracted: dict[str, tuple]) -> tuple[tuple, dict[str, object]]:
-    """Hoist maximal overlapping producer cones once, returning unique operand edges and roots."""
-    roots = tuple(extracted)
-    groups: list[list[str]] = []
-    member_ids = {name: {id(stmt) for stmt in extracted[name][1]} for name in roots}
-    for name in roots:
-        touching = [i for i, group in enumerate(groups) if any(member_ids[name] & member_ids[other] for other in group)]
-        if not touching:
-            groups.append([name])
-            continue
-        first, *rest = touching
-        groups[first].append(name)
-        for index in reversed(rest):
-            groups[first].extend(groups.pop(index))
-
-    operands = []
-    by_root = {}
-    for group in groups:
-        if len(group) == 1:
-            edge = extracted[group[0]][0]
-        else:
-            ids = set().union(*(member_ids[name] for name in group))
-            members = tuple(stmt for stmt in body if id(stmt) in ids)
-            edge = _ordered_projection(members, tuple(group))
-        operands.append(edge)
-        by_root.update((name, edge) for name in group)
-    return tuple(operands), by_root
-
-
-def _orient_shared(pairs: list[tuple], product, axes: tuple[str, ...]) -> list[tuple]:
-    """Put a product argument shared by every channel first when commutativity permits it."""
-    if len(pairs) < 2 or not product.commutative:
-        return pairs
-
-    candidates = tuple(edge for pair in pairs for edge in pair)
-    clusters: dict[object, list[int]] = {}
-    for index, edge in enumerate(candidates):
-        clusters.setdefault(alpha_canonical(edge, axes), []).append(index)
-    complete = [cluster for cluster in clusters.values() if {index // 2 for index in cluster} == set(range(len(pairs)))]
-    if not complete:
-        return pairs
-
-    # Prefer literal reuse over merely equivalent duplicate cones. Ties retain the geometric
-    # orientation already chosen below, which keeps an ordinary one-channel matmul unchanged.
-    shared = min(complete, key=lambda cluster: (len({id(candidates[index]) for index in cluster}), cluster[0]))
-    positions = set(shared)
-    return [pair if 2 * index in positions else (pair[1], pair[0]) for index, pair in enumerate(pairs)]
-
-
-def _canonical_semiring(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[str] = frozenset()) -> Fold:
-    """Factor operand cones, coalesce an equivalent shared argument, and orient it as contraction A."""
-    form = _semiring_form(fold)
-    if form is None:
-        return fold
-
-    body = fold.lift.body
-    all_axes = (*axes, fold.axis.name)
-    extracted = {}
-    for name in dict.fromkeys(arg for pair in form.arguments for arg in pair):
-        operand = _extract_operand(body, name)
-        if operand is None:
-            return fold
-        extracted[name] = operand
-
-    pairs = []
-    axis_position = {name: i for i, name in enumerate(axes)}
-    for left_name, right_name in form.arguments:
-        left, right = extracted[left_name][0], extracted[right_name][0]
-        if not all(fold.axis.name in edge_axes(edge, (fold.axis.name,)) for edge in (left, right)):
-            return fold
-        left_roles, right_roles = edge_axes(left, axes), edge_axes(right, axes)
-        left_only, right_only = left_roles - right_roles, right_roles - left_roles
-        unused_implicit = implicit_axes - left_roles - right_roles
-        broadcast_batch = False
-        if not left_only and len(right_only) == 1 and len(unused_implicit) == 1:
-            left_only = unused_implicit
-        elif not right_only and len(left_only) == 1 and len(unused_implicit) == 1:
-            right_only = unused_implicit
-        one_sided_batch = (len(left_only) > 1 and len(right_only) == 1) or (len(right_only) > 1 and len(left_only) == 1)
-        if one_sided_batch:
-            # A broadcast batch axis may occur in only one operand. The placement's trailing pair
-            # still identifies the contraction's m/n roles; earlier free axes remain ordinary
-            # grid dimensions and do not change that orientation.
-            matrix_axes = frozenset(axes[-2:])
-            left_matrix = left_only & matrix_axes
-            right_matrix = right_only & matrix_axes
-            if len(left_matrix) == 1 and len(right_matrix) == 1:
-                left_only, right_only = left_matrix, right_matrix
-                broadcast_batch = True
-        if len(left_only) != 1 or len(right_only) != 1:
-            return fold
-        left_axis, right_axis = next(iter(left_only)), next(iter(right_only))
-        pair = (left, right) if axis_position[left_axis] < axis_position[right_axis] else (right, left)
-        if broadcast_batch and form.product.commutative:
-            # Physical M/N orientation stays a placement fact; this swap decides only which
-            # commutative argument SPELLS the shared A slot when the batch axis breaks the
-            # symmetric geometry, preferring the operand that reads the reduction axis
-            # contiguously so placement can derive a tensor-core-eligible orientation.
-            # Precedence with ``_orient_shared`` below: a broadcast-batched product is
-            # single-channel, where ``_orient_shared`` is a no-op; with two or more channels its
-            # shared-argument rule wins and its tie-break retains the orientation chosen here.
-            first, second = pair
-            if _loads_axis_contiguously(second, fold.axis.name) and not _loads_axis_contiguously(first, fold.axis.name):
-                pair = (second, first)
-        pairs.append(pair)  # A (earlier output axis), B (later output axis)
-
-    pairs = _orient_shared(pairs, form.product, all_axes)
-
-    consumed = {id(stmt) for stmt in form.products}
-    consumed.update(id(stmt) for _, members in extracted.values() for stmt in members)
-    if any(id(stmt) not in consumed for stmt in body):
-        return fold
-    roots = tuple(extracted)
-    members = tuple(stmt for stmt in body if id(stmt) in consumed and id(stmt) not in {id(product) for product in form.products})
-    if not body.defs_die_at(members, roots=roots, allowed=form.products):
-        return fold
-
-    a_shared = len({alpha_canonical(candidate, all_axes) for candidate, _ in pairs}) == 1
-    member_sets = {name: {id(stmt) for stmt in cone_members} for name, (_, cone_members) in extracted.items()}
-    names = tuple(member_sets)
-    shared_names = {operand_name(candidate) for candidate, _ in pairs}
-    foreign_overlap = any(
-        member_sets[names[i]] & member_sets[names[j]] and not {names[i], names[j]} <= shared_names
-        for i in range(len(names))
-        for j in range(i + 1, len(names))
-    )
-    if a_shared and not foreign_overlap:
-        if not form.product.commutative:
-            for index, (product, (candidate_a, b)) in enumerate(zip(form.products, pairs, strict=True)):
-                canonical_args = (
-                    (operand_name(b), operand_name(candidate_a)) if index == 0 else (operand_name(candidate_a), operand_name(b))
-                )
-                if product.args != canonical_args:
-                    return fold
-        a = pairs[0][0]
-        channels = tuple(Channel(b=b, acc=acc) for (_, b), acc in zip(pairs, fold.combine.results, strict=True))
-        canonical = Fold.contraction(k_axis=fold.axis, a=a, channels=channels, product=form.product, fold_op=form.plus, axes=axes)
-        return replace(canonical, unroll=fold.unroll)
-
-    operands, by_root = _merge_operand_cones(body, extracted)
-    # Order unique edges by the contraction-role traversal (B then A per product), retaining one
-    # occurrence of every shared edge. This agrees with ``Fold.contraction`` for its shared-A
-    # subset while keeping a shared B or overlapping multi-result cone singular.
-    ordered = []
-    for a, b in pairs:
-        for edge in (by_root[operand_name(b)], by_root[operand_name(a)]):
-            if not any(edge is current for current in ordered):
-                ordered.append(edge)
-    ordered.extend(edge for edge in operands if not any(edge is current for current in ordered))
-    # Rebuilding the contraction re-forms its lift, so the enclosing scope has to be re-declared:
-    # constructing the ``Lambda`` directly kept only the operand correspondence and dropped every
-    # axis the caller had supplied. ``closing`` re-appends whatever the canonical body still reads
-    # on top of it, so the declaration survives the canonicalization rather than being reset by it.
-    bound = tuple(name for edge in ordered for name in _operand_result_names(edge))
-    scope = tuple(axis for axis in axes if axis != fold.axis.name and axis not in bound)
-    lift = Lambda.closing((fold.axis.name, *bound, *scope), Body(form.products), fold.lift.results)
-    return replace(fold, operands=tuple(ordered), lift=lift)
 
 
 def _normalize_body(body: Body, axes: tuple[str, ...], implicit_axes: frozenset[str], sweep_axes: frozenset[str]) -> Body:
@@ -297,7 +65,7 @@ def _passthrough(node: Fold) -> Fold | None:
     if node.axis is not None or node.lift.body or len(node.operands) != 1:
         return None
     (operand,) = node.operands
-    if isinstance(operand, Fold) and tuple(node.lift.results) == _operand_result_names(operand):
+    if isinstance(operand, Fold) and tuple(node.lift.results) == operand.exposes:
         return operand
     return None
 
@@ -314,7 +82,7 @@ def _flat_members(edge) -> tuple | None:
     members = tuple(edge.lift.body)
     if any(not isinstance(stmt, (Load, Assign)) for stmt in members):
         return None
-    return members if operand_name(edge) in {name for stmt in members for name in stmt.defines()} else None
+    return members if edge.exposes[-1] in {name for stmt in members for name in stmt.defines()} else None
 
 
 def _decode_split(edge, axis_name: str):
@@ -335,8 +103,8 @@ def _decode_split(edge, axis_name: str):
     body = edge.lift.body
     if any(not isinstance(stmt, (Load, Assign)) for stmt in body):
         return None
-    by_param = {operand_name(operand): operand for operand in edge.operands}
-    result = operand_name(edge)
+    by_param = {operand.exposes[-1]: operand for operand in edge.operands}
+    result = edge.exposes[-1]
     flattened = product_spine(body.definitions, result, divide=True)
     if flattened is None:  # a bare decode: nothing to hoist, but the decode is still absorbed
         leaves, spine = (result,), ()
@@ -345,7 +113,7 @@ def _decode_split(edge, axis_name: str):
 
     def varies(leaf: str) -> bool:
         if leaf in by_param:
-            return axis_name in edge_axes(by_param[leaf], (axis_name,))
+            return axis_name in (frozenset((axis_name,)) & by_param[leaf].index_space)
         return any(refs_axis(stmt, axis_name) for stmt in body.backward_cone((leaf,)).members)
 
     varying = [leaf for leaf in leaves if varies(leaf)]
@@ -409,85 +177,6 @@ def _apply_spine(split, carried: str, out: str, taken: set[str]) -> tuple[tuple,
     return tuple(emitted), out
 
 
-def _hoist_decode_factors(node: Fold, taken: set[str]):
-    """Bind a quantized contraction's operands as raw storage loads with the factors on the
-    epilogue. Returns ``(contraction, epilogue statements)`` or ``None``."""
-    if not is_contraction(node) or node.semiring is None:
-        return None
-    axis_name = node.axis.name
-    a_split = _decode_split(node.a, axis_name)
-    b_splits = [_decode_split(channel.b, axis_name) for channel in node.channels]
-    if a_split is None and not any(b_splits):
-        return None
-    if a_split is None and not all(b_splits):
-        return None  # homogeneous channels only: a half-bound B pair has no single slab dtype
-
-    def hoists(split) -> bool:
-        return split is not None and bool(split[1] or split[2])
-
-    product, plus = node.semiring
-    accs = tuple(channel.acc for channel in node.channels)
-    any_hoist = hoists(a_split) or any(hoists(split) for split in b_splits)
-    renamed = tuple(f"{acc}__mh" for acc in accs) if any_hoist else accs
-
-    epilogue: list = []
-    for index, (acc, out) in enumerate(zip(renamed, accs, strict=True)):
-        chain = [split for split in (a_split, b_splits[index]) if hoists(split)]
-        carried = acc
-        for position, split in enumerate(chain):
-            target = out if position == len(chain) - 1 else f"{out}__mh{position}"
-            stmts, carried = _apply_spine(split, carried, target, taken)
-            epilogue.extend(stmts)
-
-    rebuilt = Fold.contraction(
-        k_axis=node.axis,
-        a=a_split[0] if a_split is not None else node.a,
-        channels=tuple(
-            Channel(b=split[0] if split is not None else channel.b, acc=acc)
-            for channel, split, acc in zip(node.channels, b_splits, renamed, strict=True)
-        ),
-        product=product,
-        fold_op=plus,
-    )
-    return replace(rebuilt, unroll=node.unroll), tuple(epilogue)
-
-
-def _hoist_decode_root(node: Fold) -> Fold:
-    """Hoist a contraction reached with no projection wrapper, creating the one it needs.
-
-    A split piece, or a root whose projection already collapsed, has nowhere to put the factors.
-    The wrapper defines exactly the names the contraction defined, so consumers are unaffected."""
-    hoisted = _hoist_decode_factors(node, set(node.defines()))
-    if hoisted is None:
-        return node
-    rebuilt, epilogue = hoisted
-    if not epilogue:
-        return rebuilt
-    return Fold.projection(operands=(rebuilt,), body=Body(epilogue), results=node.defines())
-
-
-def _hoist_decode_operands(root: Fold) -> Fold:
-    """Apply the storage-decode hoist to every contraction stored in a projection's body."""
-    if root.axis is not None:
-        return root
-    taken = {name for stmt in root.lift.body for name in stmt.defines()}
-    taken.update(operand_name(operand) for operand in root.operands)
-    members: list = []
-    changed = False
-    for stmt in root.lift.body:
-        hoisted = _hoist_decode_factors(stmt, taken) if isinstance(stmt, Fold) else None
-        if hoisted is None:
-            members.append(stmt)
-            continue
-        rebuilt, epilogue = hoisted
-        members.append(rebuilt)
-        members.extend(epilogue)
-        changed = True
-    if not changed:
-        return root
-    return Fold.projection(operands=root.operands, body=Body(tuple(members)), results=root.lift.results)
-
-
 def _edge_free_names(edge) -> frozenset[str]:
     """The names an operand edge needs SUPPLIED — :meth:`Fold.deps`, the declared roll-up of its
     own environment and its edges'.
@@ -521,7 +210,7 @@ def _with_source(node: Fold, source) -> Fold:
     reducing node keeps its iteration var first and rebinds the rest, so the formation invariant —
     one lift param per operand result component — holds at either position."""
     operands = (*node.operands, source)
-    bound = tuple(name for edge in operands for name in _operand_result_names(edge))
+    bound = tuple(name for edge in operands for name in edge.exposes)
     if node.axis is None:
         return Fold.projection(operands=operands, body=node.body, results=node.lift.results)
     return replace(node, operands=operands, lift=replace(node.lift, params=(node.axis.name, *bound)))
@@ -554,7 +243,7 @@ def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
         body = Body(close(stmt, inner) if isinstance(stmt, Fold) else stmt for stmt in node.body)
         current = replace(node, operands=operands) if operands != node.operands else node
         if body != current.body:
-            current = current.with_bodies((body,))
+            current = replace(current, lift=replace(current.lift, body=Body(body)))
 
         changed = False
         closed = []
@@ -579,7 +268,7 @@ def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
             source = provider(stmt, binders) if isinstance(stmt, Fold) else None
             members.append(stmt if source is None else _with_source(stmt, source))
         if any(fresh is not prior for fresh, prior in zip(members, current.body, strict=True)):
-            current = current.with_bodies((Body(members),))
+            current = replace(current, lift=replace(current.lift, body=Body(members)))
         return current
 
     rewritten_operands = tuple(close(edge) if isinstance(edge, Fold) else edge for edge in root.operands)
@@ -590,72 +279,6 @@ def _close_tree(root: Fold, provider) -> tuple[tuple, Body]:
 def _provider_needs(edge, provider_order: tuple[str, ...], provider_names: frozenset[str]) -> tuple[str, ...]:
     """The provider names an operand edge captures, in provider order."""
     return tuple(name for name in provider_order if name in (_edge_free_names(edge) & provider_names))
-
-
-def _close_projection(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
-    """Move an enclosing projection's dependencies onto captured contraction operands."""
-    assert root.axis is None
-    provider_order = tuple(
-        dict.fromkeys(
-            (
-                *(name for edge in root.operands for name in _operand_result_names(edge)),
-                *(name for stmt in root.body for name in stmt.defines()),
-            )
-        )
-    )
-    provider_names = frozenset(provider_order)
-    edge_by_name = {name: edge for edge in root.operands for name in _operand_result_names(edge)}
-    moved_members: set[int] = set()
-    moved_edges: set[int] = set()
-
-    def provider(edge, binders: tuple[str, ...]):
-        names = _provider_needs(edge, provider_order, provider_names)
-        if not names:
-            return None
-        cone = root.body.backward_cone(names)
-        required = set(cone.external_reads) | set(names)
-        edges = tuple(dict.fromkeys(edge_by_name[name] for name in provider_order if name in required and name in edge_by_name))
-        defined = {name for stmt in cone.members for name in stmt.defines()}
-        defined.update(name for edge in edges for name in _operand_result_names(edge))
-        if not set(names) <= defined:
-            return None
-        # Attaching a provider to a nested operand evaluates it inside every binder crossed by
-        # the move. An iteration-bearing chain therefore stays at its defining scope; straight-
-        # line chains still close normally. The two arms deliberately differ: a whole operand
-        # EDGE that iterates is kept unconditionally — the enclosing projection evaluates it
-        # once, so even the depth-0 move into a contraction operand's per-cell fill multiplies
-        # it, and closure cannot split the edge without changing its value — while an iterating
-        # body MEMBER is blocked only past a new binder (``_close_reduce_body`` states the
-        # mirror convention: a reducing root's own axis is its existing domain). A fold this
-        # rule leaves capturing stays placeable through provider closure at offer time
-        # (``lowering/tile/_cut.py``).
-        if any(_carries_iteration(edge) for edge in edges) or (binders and any(_carries_iteration(stmt) for stmt in cone.members)):
-            return None
-        moved_members.update(id(stmt) for stmt in cone.members)
-        moved_edges.update(id(edge) for edge in edges)
-        hoisted = Fold.projection(operands=edges, body=Body(cone.members), results=names, axes=axes)
-        return _passthrough(hoisted) or hoisted
-
-    rewritten_operands, rewritten_body = _close_tree(root, provider)
-    if not moved_members and not moved_edges:
-        if rewritten_operands == root.operands and rewritten_body == root.body:
-            return root
-        return Fold.projection(operands=rewritten_operands, body=rewritten_body, results=root.lift.results, axes=axes)
-
-    candidates = tuple(stmt for stmt in rewritten_body if id(stmt) in moved_members)
-    moved_defs = {name for stmt in candidates for name in stmt.defines()}
-    outside_reads = set(root.lift.results)
-    outside_reads.update(name for stmt in rewritten_body if id(stmt) not in moved_members for name in _member_reads(stmt))
-    remaining_body = (
-        Body(stmt for stmt in rewritten_body if id(stmt) not in moved_members) if not (moved_defs & outside_reads) else rewritten_body
-    )
-
-    live = set(root.lift.results)
-    live.update(name for stmt in remaining_body for name in _member_reads(stmt))
-    remaining_operands = tuple(
-        edge for edge in rewritten_operands if id(edge) not in moved_edges or live & set(_operand_result_names(edge))
-    )
-    return Fold.projection(operands=remaining_operands, body=remaining_body, results=root.lift.results, axes=axes)
 
 
 def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[str]) -> Fold:
@@ -669,7 +292,7 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
     operand as a workspace seam. The move is gated on exclusive consumption: every moved
     definition must die into the closed edges, so the step's work is repackaged rather than
     duplicated and a chain a sibling member still reads stays put."""
-    if root.axis is None or is_contraction(root) or not root.lift.body:
+    if root.axis is None or root.as_contraction() is not None or not root.lift.body:
         return root
     body = root.lift.body
     provider_order = tuple(dict.fromkeys(name for stmt in body for name in stmt.defines()))
@@ -696,7 +319,7 @@ def _close_reduce_body(root: Fold, axes: tuple[str, ...], sweep_axes: frozenset[
     kept = Body(stmt for stmt in rewritten_body if id(stmt) not in moved)
     moved_defs = {name for stmt in body if id(stmt) in moved for name in stmt.defines()}
     outside = {result for result in root.lift.results if isinstance(result, str)}
-    outside.update(name for stmt in kept for name in _member_reads(stmt))
+    outside.update(name for stmt in kept for name in Body((stmt,)).ssa_uses)
     if root.observe is not None:
         outside.update(root.observe.params)  # closed: its reads ARE its params (axis + carried state)
     if moved_defs & outside:
@@ -712,12 +335,11 @@ def _normalize_fold(fold: Fold, axes: tuple[str, ...], implicit_axes: frozenset[
     body_axes = (*axes, node.axis.name) if node.axis is not None else axes
     body = _normalize_body(node.lift.body, body_axes, implicit_axes, sweep_axes)
     if body != node.lift.body:
-        node = node.with_bodies((body,))
-    node = _canonical_semiring(node, axes, implicit_axes)
+        node = replace(node, lift=replace(node.lift, body=Body(body)))
+    # _canonical_semiring deleted
     if node.axis is not None:
         return _close_reduce_body(node, body_axes, sweep_axes)
-    node = _hoist_decode_operands(node)
-    return _close_projection(node, axes, sweep_axes)
+    return node
 
 
 def _share_common_cones(root: Fold) -> Fold:
@@ -737,7 +359,7 @@ def _share_common_cones(root: Fold) -> Fold:
     lowering walks tree positions, and every position holds a term of the same value (a unified
     representative may change internal spelling). Identity-preserving off the replacement spine,
     like ``_replace_fold``."""
-    canon: dict[tuple, list[Fold]] = {}
+    canon: dict[Fold, Fold] = {}
     seen: dict[int, Fold] = {}
 
     def member(stmt):
@@ -762,15 +384,15 @@ def _share_common_cones(root: Fold) -> Fold:
         if any(piece is not edge for piece, edge in zip(operands, node.operands, strict=True)):
             current = replace(current, operands=operands)
         if any(piece is not stmt for piece, stmt in zip(body, node.lift.body, strict=True)):
-            current = current.with_bodies((Body(body),))
-        bucket = canon.setdefault((current.structural_key(), current.defines()), [])
-        for prior in bucket:
-            if prior == current or prior.alpha_eq(current):
-                seen[id(node)] = prior
-                return prior
-        bucket.append(current)
-        seen[id(node)] = current
-        return current
+            current = replace(current, lift=replace(current.lift, body=Body(body)))
+        # The TERM is the key: a dict lookup and the equality test are one operation, so there is
+        # no prefilter bucket and no pairwise rescan. Structural equality only — an α-quotient
+        # would need a canonical form, and a canonical form is not available while an edge's
+        # result names are still the spelling its consumer binds. This merges strictly less, which
+        # is the safe direction: it leaves copies distinct, it never merges distinct values.
+        prior = canon.setdefault(current, current)
+        seen[id(node)] = prior
+        return prior
 
     return visit(root)
 
@@ -797,11 +419,6 @@ def normalize_fold_tree(root, axes: Iterable[str] = (), implicit_axes: Iterable[
         # stamp must mean the REACHED fixpoint, so iterate here rather than relying on the next
         # construction to finish the job.
         again = _normalize_fold(normalized, scope[0], scope[1], scope[2])
-        # A contraction reached as the whole tree has no projection to host hoisted factors, so
-        # the hoist creates one here. Nested contractions are handled by their own projection,
-        # which keeps the common shape flat.
-        if again.axis is not None:
-            again = _hoist_decode_root(again)
         if again == normalized:
             break
         normalized = again

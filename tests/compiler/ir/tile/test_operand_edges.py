@@ -1,155 +1,170 @@
-"""Operand edges + the product-carrier a bilinear ``Fold`` — sharing is arity, not naming.
+"""Operand edges — every edge is a TERM, and a term declares what a reader used to walk for.
 
-A computed operand is stored INLINE on its edge (there is no let table and no name-reference arm);
-"these two matmuls read the same A" is ONE bilinear ``Fold`` with one ``a`` edge and N product
-:class:`Channel`\\ s ``(b_i, acc_i)``. These pin the node's derived product loop (shared A lifted
-once, N-component product-monoid carrier), the arity-vs-copies distinction, the inline-arm
-and inline-arm canonicalization through ``rewrite``, and the CLOSURE predicate a placement cut asks
-before lifting a subtree into its own kernel (``_cut._closed_at``, successor to the deleted
-``_captured_values``).
+A ``Fold``'s operands are ``Fold``s, without exception: a gmem read is a :meth:`Fold.slab`, a
+wrapped ``Load`` whose index coordinates are its own :attr:`Fold.axes`. That one invariant is what
+lets every per-edge question be an attribute rather than a helper branching on what the edge
+happens to be — its coordinates (:attr:`Fold.index_space`), the names it binds
+(:attr:`Fold.exposes`), whether it is a leaf (:attr:`Fold.is_slab`), and whether the term above it
+is bilinear (:meth:`Fold.as_contraction`).
+
+These pin the readings and the ONE lowering spelling built on them: operands lower before the body,
+an operand that does not index the fold's axis lowers once ahead of the loop, and a combine folds
+the step into an ``Accum`` per carried component.
 """
 
 from __future__ import annotations
 
+from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.fold import Channel, Fold, operand_body, operand_name, splice_operands
-from emmy.compiler.ir.sigma import Sigma
+from emmy.compiler.ir.pure import Fold, Lambda, M
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.stmt.passes import rewrite
+
+M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(256)), Axis("n", Dim(256)), Axis("k", Dim(256))
+SCOPE = (M_AXIS, N_AXIS, K_AXIS)
 
 
-def _cone(name: str = "xhat") -> Fold:
-    """A minimal computed A-cone — ``xhat = x[m, k] * s[k]``, the shape the fused norm→linear edge's
-    computed A takes (here without its statistic reduce, which the tree vocabulary does not need)."""
-    load = Load(name=f"{name}_e", input="x", index=(Var("m"), Var("k")))
-    scale = Load(name=f"{name}_s", input="w", index=(Var("k"),))
-    return Fold.projection(body=Body((load, scale, Assign(name=name, op="multiply", args=(f"{name}_e", f"{name}_s")))))
+def _slab(name: str, buffer: str, index: tuple) -> Fold:
+    """One gmem read, as a term declaring the coordinates it indexes."""
+    return Fold.slab(Load(name=name, input=buffer, index=index), SCOPE)
 
 
-def _node(a, *channels: tuple[str, str]) -> Fold:
-    """A contraction over operand edge ``a`` with one ``(acc, weight-buffer)`` channel per arg."""
-    return Fold.contraction(
-        k_axis=Axis("k", 256),
-        a=a,
-        channels=tuple(Channel(b=Load(name=f"{acc}_b", input=w, index=(Var("k"), Var("n"))), acc=acc) for acc, w in channels),
+def _projection(operands: tuple, body: tuple, results: tuple) -> Fold:
+    """A zero-axis term — the pointwise cell. Its lift binds one param per operand result."""
+    bound = tuple(name for edge in operands for name in edge.exposes)
+    return Fold(operands=operands, lift=Lambda.closing(bound, Body(body), results))
+
+
+def _reduce(operands: tuple, body: tuple, accs: tuple[str, ...]) -> Fold:
+    """A reducing term over ``k`` — one ``⊕`` component per accumulator."""
+    bound = tuple(name for edge in operands for name in edge.exposes)
+    init, combine = M(*([ElementwiseImpl("add")] * len(accs)), names=accs)
+    return Fold(
+        axes=(K_AXIS,),
+        operands=operands,
+        lift=Lambda.closing((K_AXIS.name, *bound), Body(body), tuple(f"{acc}__v" for acc in accs)),
+        init=init,
+        combine=combine,
     )
 
 
-def _product() -> Fold:
-    """The gate⊗up shape: ONE product contraction, two channels over one inline cone."""
-    return _node(_cone(), ("acc_g", "Wg"), ("acc_u", "Wu"))
+def _matmul() -> Fold:
+    a = _slab("l", "x", (Var("m"), Var("k")))
+    b = _slab("r", "w", (Var("k"), Var("n")))
+    return _reduce((a, b), (Assign(name="acc__v", op="multiply", args=("l", "r")),), ("acc",))
 
 
-# --- the product node: sharing is arity --------------------------------------------------------- #
+# --- a slab declares what a walk used to discover ------------------------------------------------ #
 
 
-def test_product_node_derives_one_fold_loop_with_the_shared_a_lifted_once() -> None:
-    """The fused group lowers to ONE derived loop — the shared A evaluated once, each further
-    channel splicing its ``b → ⊗ → ⊕`` triple after it — never one loop per channel."""
-    stmts = _product().lower()
-    assert len(stmts) == 1 and isinstance(stmts[0], Loop)
-    body = list(stmts[0].body)
-    assert sum(1 for s in body if isinstance(s, Assign) and s.name == "xhat") == 1
-    assert [s.name for s in body if isinstance(s, Accum)] == ["acc_g", "acc_u"]
+def test_a_slab_declares_the_coordinates_it_indexes() -> None:
+    """The leaf binds its own coordinates, so nothing above it has to scan an index expression."""
+    slab = _slab("l", "x", (Var("m"), Var("k")))
+    assert tuple(axis.name for axis in slab.axes) == ("m", "k")
+    assert slab.index_space == {"m", "k"}
+    assert slab.exposes == ("l",)
+    assert slab.is_slab
 
 
-def test_product_loop_folds_the_n_component_product_state() -> None:
-    loop = _product().loop
-    accums = [s for s in loop.body if isinstance(s, Accum)]
-    assert [a.name for a in accums] == ["acc_g", "acc_u"]
-    assert all(a.op.reduce_canon == "add" for a in accums)  # the componentwise additive family
+def test_a_slab_lowers_to_exactly_its_load() -> None:
+    """Wrapping is a declaration, not a layer: the emitted statements are unchanged."""
+    load = Load(name="l", input="x", index=(Var("m"), Var("k")))
+    assert Fold.slab(load, SCOPE).lower() == [load]
 
 
-def test_arity_is_not_two_copies() -> None:
-    """One node with two channels ≢ two independent contractions each computing their own A: the
-    former lifts the shared A once (one loop), the latter lower to two loops with a cone each."""
-    fused = Fold.projection(body=Body(()), operands=(_product(),)).lower()
-    copies = Fold.projection(body=Body(()), operands=(_node(_cone(), ("acc_g", "Wg")), _node(_cone("xhat2"), ("acc_u", "Wu"))))
-    assert len([s for s in fused if isinstance(s, Loop)]) == 1
-    assert len([s for s in copies.lower() if isinstance(s, Loop)]) == 2
+def test_a_slab_does_not_reduce() -> None:
+    """``axes`` is an index space; ``combine`` is what makes an axis a REDUCTION."""
+    slab = _slab("l", "x", (Var("m"), Var("k")))
+    assert slab.axes and slab.axis is None and slab.role is AxisRole.FREE
 
 
-def test_defines_and_out_read_the_channels() -> None:
-    node = _product()
-    assert node.defines() == ("acc_g", "acc_u")
-    assert node.out == "acc_g" and node.acc == "acc_g"  # the primary channel
-    assert node.b is node.channels[0].b  # the primary-channel read single-channel tiers use
+def test_a_computed_cone_is_not_a_slab() -> None:
+    cone = _projection(
+        (_slab("e", "x", (Var("m"), Var("k"))), _slab("s", "w", (Var("k"),))),
+        (Assign(name="xhat", op="multiply", args=("e", "s")),),
+        ("xhat",),
+    )
+    assert not cone.is_slab
+    assert cone.exposes == ("xhat",)
+    assert cone.index_space == {"m", "k"}  # the union of its operands' declarations
 
 
-def test_single_channel_node_is_the_plain_matmul() -> None:
-    node = _node(Load(name="a_e", input="x", index=(Var("m"), Var("k"))), ("acc", "W"))
+# --- the bilinear reading is geometry ------------------------------------------------------------ #
+
+
+def test_as_contraction_reads_the_shared_and_free_axes() -> None:
+    """``a[m,k] × b[k,n]``: the shared axis is the reduction, the difference is the output."""
+    view = _matmul().as_contraction()
+    assert view is not None
+    assert view.axis is K_AXIS and {view.left, view.right} == {"m", "n"}
+
+
+def test_a_scale_is_not_a_contraction() -> None:
+    """An operand that brings no ``k`` makes the fold a scale, not a bilinear cell."""
+    a = _slab("l", "x", (Var("m"), Var("k")))
+    scale = _slab("s", "s", (Var("m"),))
+    node = _reduce((a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",))
+    assert node.as_contraction() is None
+    assert node.role is AxisRole.PLANAR
+
+
+def test_a_pointwise_term_has_no_view() -> None:
+    """No axis to share, so nothing to read."""
+    assert _projection((_slab("l", "x", (Var("m"),)),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).as_contraction() is None
+
+
+# --- lowering ------------------------------------------------------------------------------------ #
+
+
+def test_a_matmul_lowers_to_one_loop_with_both_operands_riding_the_step() -> None:
+    """Both operands index ``k``, so both are re-read per step and nothing hoists."""
+    (loop,) = _matmul().lower()
+    assert isinstance(loop, Loop) and loop.axis is K_AXIS
+    assert [stmt.input for stmt in loop.body if isinstance(stmt, Load)] == ["x", "w"]
+    assert [stmt.name for stmt in loop.body if isinstance(stmt, Accum)] == ["acc"]
+
+
+def test_an_operand_that_does_not_index_the_axis_lowers_once_ahead_of_the_loop() -> None:
+    """The hoist is a DECLARATION compared against an axis — no body walked for free names."""
+    a = _slab("l", "x", (Var("m"), Var("k")))
+    scale = _slab("s", "s", (Var("m"),))
+    stmts = _reduce((a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",)).lower()
+    hoisted, loop = stmts
+    assert isinstance(hoisted, Load) and hoisted.input == "s"
+    assert [stmt.input for stmt in loop.body if isinstance(stmt, Load)] == ["x"]
+
+
+def test_the_combine_folds_one_accum_per_carried_component() -> None:
+    """The fused gate⊗up shape: one loop, the shared A read once, an ``Accum`` per channel."""
+    shared = _projection(
+        (_slab("e", "x", (Var("m"), Var("k"))), _slab("sc", "w", (Var("k"),))),
+        (Assign(name="xhat", op="multiply", args=("e", "sc")),),
+        ("xhat",),
+    )
+    node = _reduce(
+        (shared, _slab("bg", "Wg", (Var("k"), Var("n"))), _slab("bu", "Wu", (Var("k"), Var("n")))),
+        (
+            Assign(name="acc_g__v", op="multiply", args=("xhat", "bg")),
+            Assign(name="acc_u__v", op="multiply", args=("xhat", "bu")),
+        ),
+        ("acc_g", "acc_u"),
+    )
     (loop,) = node.lower()
-    assert [s.name for s in loop.body if isinstance(s, Accum)] == ["acc"]
-    assert isinstance(node.a, Load)
+    body = list(loop.body)
+    assert sum(1 for stmt in body if isinstance(stmt, Assign) and stmt.name == "xhat") == 1
+    assert [stmt.name for stmt in body if isinstance(stmt, Accum)] == ["acc_g", "acc_u"]
+    assert all(stmt.op.reduce_canon == "add" for stmt in body if isinstance(stmt, Accum))
 
 
-# --- inline computed operands ------------------------------------------------------------------- #
+def test_a_zero_axis_term_lowers_to_its_operands_then_its_body() -> None:
+    """No axis, no monoid: the step IS the answer."""
+    stmts = _projection((_slab("l", "x", (Var("m"),)),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).lower()
+    assert [type(stmt).__name__ for stmt in stmts] == ["Load", "Assign"]
 
 
-def test_splice_orders_a_sibling_provider_before_its_consumer() -> None:
-    """A provider used only by another operand still precedes that dependent operand."""
-    provider = Fold.projection(body=Body((Load(name="raw", input="x", index=()), Assign(name="scale", op="rsqrt", args=("raw",)))))
-    consumer = Fold.projection(body=Body((Assign(name="weighted", op="multiply", args=("value", "scale")),)))
-    independent = Fold.projection(body=Body((Assign(name="offset", op="copy", args=("bias",)),)))
-    projection = (Assign(name="out", op="add", args=("weighted", "offset")),)
-
-    lowered = splice_operands((consumer, independent, provider), projection)
-
-    assert [stmt.defines()[-1] for stmt in lowered] == ["offset", "raw", "scale", "weighted", "out"]
-
-
-def test_a_computed_operand_is_stored_inline_and_flattens_on_the_edge() -> None:
-    node = _product()
-    assert not isinstance(node.a, Load)
-    assert operand_body(node.a) == tuple(node.a.lower())
-    assert operand_name(node.a) == "xhat"
-
-
-def test_pretty_prints_the_channels_once() -> None:
-    """One shared A edge, one branch per channel, each labelled by the lift param it binds."""
-    from emmy.compiler.ir.tile._dump import pretty
-
-    text = "\n".join(pretty(_product()))
-    assert text.count("operand[xhat]:") == 1  # the SHARED A edge — printed once, not once per channel
-    assert text.count("xhat = multiply") == 1  # and its cone body with it
-    assert "operand[acc_g_b] -> acc_g" in text and "operand[acc_u_b] -> acc_u" in text
-
-
-# --- canonicalization: inline arms rewrite like any other subtree -------------------------------- #
-
-
-def test_rewrite_renames_channel_accs_and_inline_arms_in_lockstep() -> None:
-    """The canonicalizer runs over STORED trees — the node: the accs and the inline cone rename
-    through one map."""
-    node = _product()
-    renamed = rewrite(node, lambda n: {"xhat": "v0", "acc_g": "v1", "acc_g__v": "v1__v"}.get(n, n), Sigma({}), lambda a: a)
-    assert renamed.channels[0].acc == "v1" and renamed.channels[1].acc == "acc_u"
-    assert renamed.a.out == "v0"  # the inline cone canonicalized through the same map
-
-
-def test_rewrite_reaches_a_channels_b_edge() -> None:
-    node = _product()
-    renamed = rewrite(node, lambda n: {"acc_u_b": "vb"}.get(n, n), Sigma({}), lambda a: a)
-    assert renamed.channels[1].b.names == ("vb",)
-
-
-# --- closure: the predicate a placement cut asks -------------------------------------------------- #
-
-
-def _capturing_cone(name: str = "xhat") -> Fold:
-    """A cone that READS a value the enclosing body defines (``m_run``) instead of producing it —
-    the flash ``P = exp(s - m)`` shape, where the running max comes from the carrier merge."""
-    load = Load(name=f"{name}_e", input="x", index=(Var("m"), Var("k")))
-    return Fold.projection(body=Body((load, Assign(name=name, op="subtract", args=(f"{name}_e", "m_run")))))
-
-
-def test_external_reads_cover_every_channel() -> None:
-    """RESTORED: the node's derived loop reads every buffer it touches — the shared A's two and
-    both channels' weights. A channel dropped from the reading is a kernel missing an argument.
-
-    ``Fold.external_reads`` is gone with the recognition-era node API, so the reading comes off the
-    derived loop, which is what materialization and kernel binding actually walk."""
+def test_every_buffer_the_term_touches_reaches_the_lowered_body() -> None:
+    """A buffer dropped here is a kernel missing an argument."""
 
     def buffers(stmts):
         for stmt in stmts:
@@ -158,106 +173,38 @@ def test_external_reads_cover_every_channel() -> None:
             for body in stmt.nested():
                 yield from buffers(body)
 
-    assert set(buffers(_product().lower())) == {"x", "w", "Wg", "Wu"}
-
-
-def test_a_capturing_inline_operand_is_legal_but_reports_its_capture() -> None:
-    """Flash's ``P`` is exactly this: an inline operand reading the running max its own loop step
-    updates. Legal to build and lower (its one home is in scope) — just not CUTTABLE, which is
-    what the closure predicate is for. RESTORED: cutting a capturing cone into its own kernel
-    produces a kernel that reads an undefined name."""
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
-
-    node = _node(_capturing_cone(), ("acc_g", "Wg"))
-    assert node.lower()  # lowers fine — position in the enclosing body is what makes it legal
-    cone = node.a
-    # The output axes are the CALLER's placement — never on the node — so the cut supplies them.
-    assert not _closed_at(cone, (Axis("m", 256), Axis("k", 256))), "a cone capturing carrier state is not closed"
-
-
-def test_contraction_deps_include_inline_operand_captures() -> None:
-    """A term declares its own environment and nothing more, so the enclosing node's capture set
-    is read off what it LOWERS TO — the walk the cut predicate above uses. An inline operand's
-    capture has to surface there, or a cut would separate it from the value it reads."""
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _external_reads
-
-    node = _node(_capturing_cone(), ("acc_g", "Wg"))
-
-    assert node.environment == ()  # declared locally: the contraction binds only its own edges
-    assert "m_run" in node.a.environment  # the capturing edge declares it
-    assert "m_run" in _external_reads(node)  # and it reaches the enclosing node's reads
-
-
-def test_cut_closure_does_not_confuse_a_sibling_loop_axis_for_scope() -> None:
-    """A loop binding ``k`` in one operand does not scope a sibling operand's ``x[k]`` load."""
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-
-    loop = Loop(
-        axis=Axis("k", 8),
-        body=Body((Load(name="value", input="x", index=(Var("k"),)), Accum(name="total", value="value", op="add"))),
-        role=AxisRole.PLANAR,
+    shared = _projection(
+        (_slab("e", "x", (Var("m"), Var("k"))), _slab("sc", "w", (Var("k"),))),
+        (Assign(name="xhat", op="multiply", args=("e", "sc")),),
+        ("xhat",),
     )
-    bound = fold_from_loop(loop)
-    leak = Fold.projection(body=Body((Load(name="leak", input="x", index=(Var("k"),)),)), results=("leak",))
-    root = Fold.projection(
-        operands=(bound, leak),
-        body=Body((Assign(name="out", op="add", args=("total", "leak")),)),
+    node = _reduce(
+        (shared, _slab("bg", "Wg", (Var("k"), Var("n")))),
+        (Assign(name="acc_g__v", op="multiply", args=("xhat", "bg")),),
+        ("acc_g",),
     )
+    assert set(buffers(node.lower())) == {"x", "w", "Wg"}
 
-    assert not _closed_at(root, ())
 
-
-def test_cut_closure_includes_dead_but_emitted_axis_reads() -> None:
-    """Until lowering removes a dead statement, its free axis still has to reach emitted CUDA."""
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
-
-    root = Fold.projection(
-        body=Body((Load(name="dead", input="x", index=(Var("m"),)), Load(name="live", input="y", index=()))),
-        results=("live",),
-    )
-
-    assert not _closed_at(root, ())
-    assert _closed_at(root, (Axis("m", 8),))
+# --- closure: the predicate a placement cut asks -------------------------------------------------- #
 
 
 def test_iteration_variables_are_not_captures() -> None:
-    """The dominant free names in any cone are loop induction variables (``m`` / ``k``), bound by
-    the enclosing nest — excluding them is what makes the predicate mean anything."""
+    """The dominant names in any cone are induction variables, bound by the enclosing nest."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
 
-    cone = _cone()
-    assert _closed_at(cone, (Axis("m", 256), Axis("k", 256))), "an ordinary cone over its own axes is closed"
+    cone = _projection(
+        (_slab("e", "x", (Var("m"), Var("k"))), _slab("s", "w", (Var("k"),))),
+        (Assign(name="xhat", op="multiply", args=("e", "s")),),
+        ("xhat",),
+    )
+    assert _closed_at(cone, (M_AXIS, K_AXIS)), "an ordinary cone over its own axes is closed"
     assert not _closed_at(cone, ()), "unfiltered, the axes themselves read as captures"
 
 
-# --- the projection binder ----------------------------------------------------------------------- #
+def test_the_closure_predicate_reads_the_declaration() -> None:
+    """``_external_reads`` is :attr:`Fold.index_space` — asked of the term, not derived by lowering
+    it and scanning the result."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _external_reads
 
-
-def test_a_shared_cone_is_typed_in_each_occurrence_scope() -> None:
-    """``edge_dtypes`` answers per OCCURRENCE, not per object.
-
-    Normalization shares one Fold object between structurally identical cones, so the same cone
-    can sit under an f16 capture in one host and an f32 capture in another. Its result dtype is a
-    property of the occurrence, and a cache keyed on identity alone handed every occurrence the
-    first one's answer — which a cut then believes when it sizes the seam's workspace."""
-    from emmy.compiler.dtype import get as get_dtype
-    from emmy.compiler.ir.tile.ops import edge_dtypes
-    from emmy.compiler.tensor import Tensor
-
-    shared = Fold.projection(body=Body((Assign(name="y", op="relu", args=("x",)),)), results=("y",))
-    inputs = {"a": Tensor("a", (4,), get_dtype("f16")), "b": Tensor("b", (4,), get_dtype("f32"))}
-
-    def host(buf: str, out: str) -> Fold:
-        source = Fold.projection(body=Body((Load(name="x", input=buf, index=(Var("i"),)),)), results=("x",))
-        return Fold.projection(operands=(source, shared), body=Body((Assign(name=out, op="copy", args=("y",)),)), results=(out,))
-
-    # Both hosts stay referenced for the whole check: the cache keys on object identity, which is
-    # only stable while the keyed objects are alive.
-    narrow_host, wide_host = host("a", "z0"), host("b", "z1")
-    cache: dict = {}
-    narrow = edge_dtypes(narrow_host, inputs, cache)
-    wide = edge_dtypes(wide_host, inputs, cache)
-
-    assert [dtype.name for dtype in narrow] == ["f16"]
-    assert [dtype.name for dtype in wide] == ["f32"]
+    assert _external_reads(_matmul()) == {"m", "n", "k"}

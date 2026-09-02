@@ -261,7 +261,7 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
     # names that scope re-binds pruned out, and put those bodies back.
     inner = []
     for b in bodies:
-        pruned = {k: v for k, v in alias.items() if k not in b._all_ssa_defs}
+        pruned = {k: v for k, v in alias.items() if k not in b.ssa_defs}
         inner.append(Body(tuple(rename_free(c, pruned) for c in b)))
     return renamed.with_bodies(tuple(inner))
 

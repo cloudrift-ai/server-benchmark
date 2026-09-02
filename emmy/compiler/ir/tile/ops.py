@@ -21,9 +21,6 @@ from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.fold import (
     Fold,
-    _operand_result_names,
-    deep_reads,
-    is_contraction,
 )
 from emmy.compiler.ir.schedule import PlacedTile, Reduce
 from emmy.compiler.ir.schedule.classic import (
@@ -31,7 +28,6 @@ from emmy.compiler.ir.schedule.classic import (
     classic_node_key,
     classic_stage_key,
 )
-from emmy.compiler.ir.schedule.views import edge_axes
 from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select, refs_axis, stmt_axis_names
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
@@ -64,34 +60,18 @@ def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, ob
     return {nm: dt for nm in stats if (dt := env.get(nm)) is not None}
 
 
-def _dtype_key(edge, scope: dict | None) -> tuple:
-    """An edge's cache key: its identity plus the dtypes its CAPTURES resolve to at this
-    occurrence. Captures are what make the answer occurrence-dependent; an edge with none keys the
-    same with or without a scope, so the unscoped and scoped walks share their entries."""
-    # Identity keying is only valid while the tree is alive — which it is for every caller, who
-    # holds the root across the walk.
-    # What the edge DECLARES it needs supplied (`Fold.deps` — its environment plus its edges',
-    # recursively). Hard-coding this to () on the grounds that "a term captures nothing" was wrong:
-    # a term declaring a name is precisely what makes its dtypes occurrence-dependent, because the
-    # name resolves to a different producer per occurrence. Emptying it collapsed the per-occurrence
-    # cache this key exists to keep apart.
-    captures = sorted(edge.deps()) if isinstance(edge, Fold) else ()
-    if not captures or not scope:
-        return (id(edge), ())
-    return (id(edge), tuple((name, getattr(scope.get(name), "name", None)) for name in captures))
-
-
 def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict | None = None) -> tuple:
     """Infer an edge's result dtypes in the lexical scope where the edge occurs.
 
-    A capturing Fold cannot be typed in an empty environment. Starting this walk at the root and
-    threading each enclosing environment produces one dtype table for every stored edge. The
-    ``cache`` is keyed by object identity, so a SHARED node keeps the dtypes of the first
-    environment reached — sound for placement's consumers because provider closure only offers a
-    capturing seam whose occurrences resolve to equal providers, and equal providers type equally.
+    A term is closed, so an edge types the same wherever it occurs: its values arrive positionally
+    through its own operand edges, never from the scope around it. The ``cache`` is therefore keyed
+    by object identity alone, and a shared node is typed once.
     """
     cache = {} if cache is None else cache
-    key = _dtype_key(edge, scope)
+    # Identity alone: a term is CLOSED, so it captures nothing and its dtypes cannot depend on the
+    # occurrence. Keying is valid while the tree is alive, which it is for every caller — each
+    # holds the root across the walk.
+    key = id(edge)
     if key in cache:
         return cache[key]
     if isinstance(edge, Load):
@@ -100,19 +80,19 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
         cache[key] = result
         return result
     if not isinstance(edge, Fold):
-        result = (None,) * len(_operand_result_names(edge))
+        result = (None,) * len(edge.exposes)
         cache[key] = result
         return result
 
     env = dict(scope or {})
     for operand in edge.operands:
-        env.update(zip(_operand_result_names(operand), edge_dtypes(operand, inputs, cache, env), strict=True))
+        env.update(zip(operand.exposes, edge_dtypes(operand, inputs, cache, env), strict=True))
     for stmt in edge.lift.body:
         if isinstance(stmt, Load):
             tensor = inputs.get(stmt.input) if inputs else None
             env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
         elif isinstance(stmt, Fold):
-            env.update(zip(_operand_result_names(stmt), edge_dtypes(stmt, inputs, cache, env), strict=True))
+            env.update(zip(stmt.exposes, edge_dtypes(stmt, inputs, cache, env), strict=True))
         elif isinstance(stmt, Assign):
             args = [env.get(name) for name in stmt.args]
             env[stmt.name] = stmt.dtype or (get_dtype(dtype_promote(stmt.op.name, [dtype.name for dtype in args])) if all(args) else None)
@@ -129,7 +109,7 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
         result = lifted
     else:
         carried = lifted[: len(edge.combine.results)]
-        result = carried + tuple(env.get(name) for name in _operand_result_names(edge)[len(carried) :])
+        result = carried + tuple(env.get(name) for name in edge.exposes[len(carried) :])
     cache[key] = result
     return result
 
@@ -162,7 +142,7 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     # seam is a dependency question, not only an index question. Without this, attention's
     # ``exp(s − m)`` chain — which names the score rather than the KV axis — hoists into the
     # row-invariant prologue, where the per-cell score it reads is not yet defined.
-    varying = {nm for n in nodes if k_name in edge_axes(n, (k_name,)) for nm in _operand_result_names(n)}
+    varying = {nm for n in nodes if k_name in (frozenset((k_name,)) & n.index_space) for nm in n.exposes}
     pro: list = []
     rest = list(cell)
     while rest and not refs_axis(rest[0], k_name) and not (set(rest[0].deps()) & varying):
@@ -170,8 +150,8 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     pro_body = Body((*sweep, *pro))
     pro_ops = () if stat is None else (stat,)
     prologue = Fold.projection(body=pro_body, operands=pro_ops)
-    cell_reads = deep_reads(rest)
-    bound = (*(n for e in pro_ops for n in _operand_result_names(e)), *(n for s in pro_body for n in s.defines()))
+    cell_reads = Body(rest).ssa_uses
+    bound = (*(n for e in pro_ops for n in e.exposes), *(n for s in pro_body for n in s.defines()))
     bridged = tuple(n for n in dict.fromkeys(bound) if n in cell_reads and n not in prologue.lift.results)
     if bridged:
         prologue = Fold.projection(body=pro_body, operands=pro_ops, results=(*prologue.lift.results, *bridged))
@@ -348,11 +328,14 @@ class Sched:
         )
 
         def orient(mn):
-            if mn is None or not is_contraction(node):
+            # The first operand's own free axis leads — ``ContractionView.left``, which IS that
+            # reading. Which of the pair is physically M stays the placement's answer; this only
+            # puts the shared operand's axis first.
+            view = node.as_contraction()
+            if mn is None or view is None:
                 return mn
             first, second = mn
-            free = edge_axes(node.a, (first.name, second.name))
-            return (second, first) if second.name in free and first.name not in free else mn
+            return (second, first) if second.name == view.left and first.name != view.left else mn
 
         if site.depth == 1 or all(getattr(candidate.node, "axis", None) is None for candidate in ancestors):
             return orient(self.place.root_mn)
@@ -431,7 +414,7 @@ def axis_names(root) -> set[str]:
             out |= stmt_axis_names(node.body)
         else:
             out.add(node.axis.name)
-            out |= stmt_axis_names(node.step_stmts())
+            out |= stmt_axis_names(tuple(node.lift.body))
     return out
 
 

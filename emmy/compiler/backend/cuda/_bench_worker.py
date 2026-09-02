@@ -198,12 +198,12 @@ async def _run_job(req: dict) -> dict:
                 # ships this run's (inputs, outputs) back as the pinned rows' wrong-answer
                 # reference (bounded: pinned rows only exist for --code inputs).
                 from emmy.commands.run import (
-                    _bind_inputs,
-                    _check_accuracy,
-                    _comparison_outputs,
-                    _eager_output,
-                    _strict_correctness_proof,
-                )
+    _bind_inputs,
+    _check_accuracy,
+    _comparison_outputs,
+    _eager_output,
+    _strict_correctness_proof,
+)
 
                 input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)

@@ -26,9 +26,9 @@ from dataclasses import replace
 
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.pure.fold import Fold, operand_name
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
-from emmy.compiler.ir.schedule.packing import block_scaled_atom, match_packed_b_node, match_packed_pair_node
+from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.stmt import Load
 
@@ -286,7 +286,7 @@ def resolve_warp_stage(
     # ``readings`` is the caller's memo of the two packed questions, both pure functions of the
     # node. Recomputing them here costs a backward cone per side PER CANDIDATE, and a warp site
     # has hundreds; the prescan asks once and hands the answer down (``_SiteFacts.packed``).
-    single, pair = readings if readings is not None else (match_packed_b_node(c, inputs), match_packed_pair_node(c, inputs))
+    single, pair = readings if readings is not None else (None, None)
     if pair is not None and block_scaled_atom(tile.atom):
         return _block_scaled_warp_stage(c, tile, stage, budget, pair, inputs)
     if single is not None:
@@ -556,8 +556,8 @@ def resolve_fill_stage(
     # Only the asynchronous peer slabs ring (the compute-filled slab and stat rows stay
     # single-buffer), so the clamp budgets the ringed slot against what the fixed slabs leave.
     depth = _clamp_depth(want_depth, async_bytes, budget - fixed) if async_bytes else 1
-    computed = [operand_name(c.a)] if a_converts or not isinstance(c.a, Load) else []
-    computed.extend(operand_name(ch.b) for ch in c.channels if not isinstance(ch.b, Load))
+    computed = [c.a.exposes[-1]] if a_converts or not isinstance(c.a, Load) else []
+    computed.extend(ch.b.exposes[-1] for ch in c.channels if not isinstance(ch.b, Load))
     return ResolvedStage(Stage(depth=depth, transport="smem"), smem=tuple(computed), bk_elems=bk_elems)
 
 

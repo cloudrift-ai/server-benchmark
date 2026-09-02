@@ -12,7 +12,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda, M
-from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 
@@ -30,43 +30,104 @@ def _stamp_axes(loop: Loop) -> Loop:
     return replace(loop, body=Body(body))
 
 
-def lift_body(body, axes: tuple[str, ...] = ()) -> tuple:
-    """Replace every reduction in one statement tree with a ``Fold``.
+def _term_reads(term) -> frozenset[str]:
+    """What one operand edge needs supplied — asked of the edge, never of a statement protocol.
 
-    Returns a PLAIN TUPLE, not a ``Body``. The result is a mixed stmt/term stream — a body may not
-    hold a term (``Body.__new__`` refuses a non-``Stmt``), because a Fold tree composes through
-    ``operands`` and a term in a statement sequence is a second, competing mechanism. The stream is
-    separated where it is consumed, by :meth:`Fold.projection`, which is the formation boundary.
+    A term is closed in VALUES, so its lift body contributes only what its own params do not bind;
+    its coordinates and its captures live on the edges below it, which carry their own arguments.
+    Walked here rather than answered by the term, because the walk is the INSPECTOR's business:
+    the thing being inspected is a Fold tree, and a tree is walked through ``operands``.
+    """
+    if not isinstance(term, Fold):
+        return Body((term,)).ssa_uses | {name for expr in term.exprs() for name in expr.free_vars()}
+    out = set(term.lift.body.ssa_uses) - set(term.lift.params)
+    for edge in term.operands:
+        out |= _term_reads(edge)
+    return frozenset(out - ({term.axis.name} if term.axis is not None else set()))
+
+
+def _separate(members: tuple, needed: frozenset[str]) -> tuple[tuple, Body]:
+    """Split ONE level's ordered members into ``(operand terms, statements)``.
+
+    A projection evaluates every operand before its statements, so ``term; scalar; term`` cannot
+    flatten: the later term reads the scalar and as an edge would splice ahead of its own provider.
+    The prefix closes into a SOURCE term instead, which becomes the first operand — the ordering
+    rule applied while the level is being built, not repaired afterwards by a pass that had to
+    take a mixed sequence to work on.
+
+    ``needed`` is what the ENCLOSING level still reads, so a prefix that feeds nothing is left flat
+    rather than nested around a value nobody consumes.
+    """
+    scalar_seen = False
+    split = None
+    for index, member in enumerate(members):
+        if isinstance(member, Fold):
+            if scalar_seen:
+                split = index
+                break
+        else:
+            scalar_seen = True
+    if split is not None:
+        prefix, suffix = members[:split], members[split:]
+        wanted = set(needed)
+        for member in suffix:
+            wanted |= _term_reads(member)
+        bridge = tuple(name for member in prefix for name in _defines_of(member) if name in wanted)
+        if bridge:
+            operands, stmts = _separate(prefix, frozenset(bridge))
+            source = Fold.projection(operands=operands, body=stmts, results=bridge)
+            return _separate((source, *suffix), needed)
+    operands = tuple(member for member in members if isinstance(member, Fold))
+    return operands, Body(member for member in members if not isinstance(member, Fold))
+
+
+def _defines_of(member) -> tuple[str, ...]:
+    """The names one level member binds — a term's lift results, a statement's own defs."""
+    return member.lift.results if isinstance(member, Fold) else member.defines()
+
+
+def lift_body(body, axes: tuple = (), needed: frozenset[str] = frozenset()) -> tuple[tuple, Body]:
+    """Lift one statement tree into ``(operand terms, statements)`` — SEPARATED, bottom up.
+
+    A reduction becomes an operand EDGE of the level it sat in; it is never substituted into the
+    statement sequence where its ``Loop`` stood. So no mixed stmt/term stream exists at any point
+    and none crosses a function boundary: a ``Body`` holds statements because that is all it was
+    ever given, rather than because a later boundary sorted a sequence that should not have been
+    built. Separation IS the construction.
 
     ``axes`` names the iteration variables the ENCLOSING loops bind, threaded down from
     :func:`_peel`. A term cannot tell an axis from a value — both are a bare ``Var`` — but the
     binder can, because it bound them; so the classification arrives from above rather than being
-    inferred by walking a lowered body for names that look axis-shaped."""
-    out = []
+    inferred by walking a lowered body for names that look axis-shaped.
+    """
+    members: list = []
     for stmt in Body.coerce(body):
         if not isinstance(stmt, Loop):
             nested = stmt.nested()
             if nested:
-                stmt = stmt.with_bodies(tuple(Body(lift_body(child, axes)) for child in nested))
-            out.append(stmt)
+                lifted = tuple(lift_body(child, axes) for child in nested)
+                if any(edges for edges, _ in lifted):
+                    # A reduce under a surviving wrapper is not representable: the term would have
+                    # to sit in that wrapper's statement body. Leave it intact and let the raw-loop
+                    # check report it, rather than failing here as a body type error.
+                    members.append(stmt)
+                    continue
+                stmt = stmt.with_bodies(tuple(stmts for _, stmts in lifted))
+            members.append(stmt)
             continue
         if stmt.is_reduce:
             fold, trailing = scan_from_loop(stmt, axes)
             seeds = set(fold.combine.results)
-            out = [s for s in out if not (isinstance(s, Init) and s.name in seeds)]
-            out.append(fold)
-            out.extend(trailing)
+            members = [m for m in members if not (isinstance(m, Init) and m.name in seeds)]
+            members.append(fold)
+            members.extend(trailing)
             continue
-        lifted = lift_body(stmt.body, (*axes, stmt.axis.name))
-        if any(isinstance(member, Fold) for member in lifted):
-            # A reduce under a SURVIVING parallel loop is not representable: the term would have to
-            # sit in that loop's statement body. It was already a failure — ``_raw_loops`` rejects
-            # any loop the total lift did not consume — so leave the loop intact and let that
-            # report it, rather than failing here as a body type error.
-            out.append(stmt)
+        edges, stmts = lift_body(stmt.body, (*axes, stmt.axis))
+        if edges:
+            members.append(stmt)
             continue
-        out.append(replace(stmt, body=Body(lifted)))
-    return tuple(out)
+        members.append(replace(stmt, body=stmts))
+    return _separate(tuple(members), needed)
 
 
 def fold_from_loop(loop: Loop) -> Fold:
@@ -77,7 +138,7 @@ def fold_from_loop(loop: Loop) -> Fold:
     return fold
 
 
-def scan_from_loop(loop: Loop, axes: tuple[str, ...] = ()) -> tuple[Fold, tuple[Write, ...]]:
+def scan_from_loop(loop: Loop, axes: tuple = ()) -> tuple[Fold, tuple[Write, ...]]:
     """Lift one reduction from its explicit ``Accum`` statements. A per-step ``Write`` makes it a
     SCAN: the store observes the carried state, so the fold gains an observer — a pure per-step
     tap binding fresh ``<state>__obs`` names — and each store returns rewritten to read the
@@ -85,7 +146,7 @@ def scan_from_loop(loop: Loop, axes: tuple[str, ...] = ()) -> tuple[Fold, tuple[
     names are the fold's extra ``defines``), where boundary extraction claims them as ordinary
     ``OutputSpec``\\ s and reconstitution splices them back into the loop."""
     loop = _stamp_axes(loop)
-    body = lift_body(loop.body)
+    edges, body = lift_body(loop.body)
     accums = tuple(stmt for stmt in body if isinstance(stmt, Accum))
     if not accums:
         raise ValueError(f"reduce loop {loop.axis.name!r} has no Accum")
@@ -93,28 +154,28 @@ def scan_from_loop(loop: Loop, axes: tuple[str, ...] = ()) -> tuple[Fold, tuple[
         raise ValueError(f"reduce loop {loop.axis.name!r} is not in canonical Loop IR")
     writes = tuple(stmt for stmt in body if isinstance(stmt, Write))
     write_ids = {id(stmt) for stmt in writes}
-    # A plain tuple: the step is still the mixed stmt/term stream, separated into `edges` and
-    # `plain` just below. Only the term-free half becomes a ``Body``.
+    # Already separated by :func:`lift_body` — ``edges`` are the step's nested reductions, ``plain``
+    # its statements. ``splice_operands`` places each edge before its first read, so the split
+    # preserves evaluation order without the step ever having been a mixed sequence.
     step = tuple(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
+    # Every ``Load`` in the step becomes a SLAB — a term declaring the coordinates it indexes.
+    # This is what makes a semiring fold canonical BY CONSTRUCTION: its product arguments arrive as
+    # operand edges, so the lift body is the product alone and there is no non-canonical spelling
+    # for a later pass to rewrite. The factoring pass that used to hoist these cones existed only
+    # because the representation admitted the unfactored form.
+    scope = (*axes, loop.axis)
+    slabs = tuple(Fold.slab(stmt, scope) for stmt in step if isinstance(stmt, Load))
+    plain = Body(stmt for stmt in step if not isinstance(stmt, Load))
+    edges = (*edges, *slabs)
     names = tuple(stmt.name for stmt in accums)
     # FORM the lift closed: the step reads the enclosing grid / sweep axes this loop sits under
     # (a matmul cell's ``a0`` / ``a1``), and a term carries no free names, so they are bound here —
     # at the construction site, which is the one that knows it is turning a Loop into a term.
-    # SEPARATE the terms: a nested reduce in the step is an operand EDGE, never a member of the
-    # lift body. A Fold tree composes through operands — that is the tree — so a term embedded in
-    # a lambda body would be a second, competing composition mechanism. ``splice_operands`` places
-    # each edge before its first read, so lifting them out preserves evaluation order.
-    edges = tuple(stmt for stmt in step if isinstance(stmt, Fold))
-    plain = Body(stmt for stmt in step if not isinstance(stmt, Fold))
-    bound = tuple(name for edge in edges for name in _operand_result_names(edge))
-    # The enclosing binders' axes are declared because THEY said so, not because this term went
-    # looking: an edge's index coordinates are as much a param as anything in the step, and only
-    # the binder can say which names are axes at all.
-    scope = tuple(axis for axis in axes if axis != loop.axis.name and axis not in bound)
-    lift = Lambda.closing((loop.axis.name, *bound, *scope), plain, tuple(stmt.value for stmt in accums))
+    bound = tuple(name for edge in edges for name in edge.exposes)
+    lift = Lambda.closing((loop.axis.name, *bound), plain, tuple(stmt.value for stmt in accums))
     init, combine = M(*(stmt.op for stmt in accums), names=names)
     if not writes:
-        return Fold(axis=loop.axis, unroll=loop.unroll, operands=edges, lift=lift, init=init, combine=combine), ()
+        return Fold(axes=(loop.axis,), unroll=loop.unroll, operands=edges, lift=lift, init=init, combine=combine), ()
     stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))
     if any(value not in names for value in stored):
         raise ValueError(f"reduce loop {loop.axis.name!r}: a per-step store may only observe the carried state {names}")
@@ -123,7 +184,7 @@ def scan_from_loop(loop: Loop, axes: tuple[str, ...] = ()) -> tuple[Fold, tuple[
         body=Body(tuple(Assign(name=f"{value}__obs", op="copy", args=(value,)) for value in stored)),
         results=tuple(f"{value}__obs" for value in stored),
     )
-    fold = Fold(axis=loop.axis, unroll=loop.unroll, operands=edges, lift=lift, init=init, combine=combine, observe=observe)
+    fold = Fold(axes=(loop.axis,), unroll=loop.unroll, operands=edges, lift=lift, init=init, combine=combine, observe=observe)
     renamed = tuple(replace(stmt, values=tuple(f"{value}__obs" for value in stmt.values)) for stmt in writes)
     return fold, renamed
 
@@ -145,13 +206,13 @@ def _peel(body: Body) -> tuple[list, list[Stmt]]:
         current = list(rest[0].body)
 
 
-def _raw_loops(body) -> list[Loop]:
+def _raw_loops(body: Body) -> list[Loop]:
     """Return every Loop that survived total reduction lifting.
 
-    Iterates the sequence directly: it is handed the mixed stmt/term stream the lift produces,
-    which is not a ``Body`` and must not be coerced into one."""
+    Takes a ``Body``: the lift hands back statements and terms already separated, so this walks a
+    statement sequence with statement vocabulary and never meets a term."""
     out = []
-    for stmt in tuple(body):
+    for stmt in body:
         if isinstance(stmt, Loop):
             out.append(stmt)
         for nested in stmt.nested():
@@ -159,21 +220,38 @@ def _raw_loops(body) -> list[Loop]:
     return out
 
 
+def _root_results(body: Body) -> tuple[str, ...]:
+    """The names a root projection passes to its consumer — its body's last definition.
+
+    Spelled here, at the one construction site that needs it, rather than as a former's default.
+    """
+    for stmt in reversed(tuple(body)):
+        names = stmt.defines()
+        if names:
+            return (names[-1],)
+    return ()
+
+
 def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
     """Peel free axes and lift the complete remaining nest as one Fold tree."""
     free, cell = _peel(op.body)
-    split = extract_output_specs(lift_body(cell, tuple(axis.name for axis in free)))
+    edges, stmts = lift_body(cell, tuple(free))
+    split = extract_output_specs(stmts)
     if split is None:
         raise ValueError("Loop IR effects cannot be represented as output specifications")
     body, output_specs = split
-    raw = _raw_loops(body)
+    raw = _raw_loops(Body(body))
     if raw:
         axes = ", ".join(inner.axis.name for inner in raw)
         raise ValueError(f"total lift left raw inner loops: {axes}")
     return TileOp(
-        # ``body`` is the mixed stmt/term stream; ``Fold.projection`` is the boundary that
-        # separates it, so it is handed over unwrapped rather than coerced into a ``Body`` first.
-        op=Fold.projection(body=body, axes=tuple(axis.name for axis in free)),
+        # The root term, constructed DIRECTLY: ``lift_body`` already handed back its operands and
+        # its statements apart, so there is nothing for a former to separate, dedup or name. The
+        # lift binds one param per operand result component, positionally.
+        op=Fold(
+            operands=edges,
+            lift=Lambda.closing(tuple(name for edge in edges for name in edge.exposes), Body(body), _root_results(Body(body))),
+        ),
         name=name,
         place=Placement(free=tuple(free)),
         inputs=dict(op.inputs),

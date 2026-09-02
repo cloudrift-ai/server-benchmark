@@ -65,7 +65,6 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
     swizzle_base,
 )
-from emmy.compiler.ir.pure.fold import deep_defines
 from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, Stmt, StridedLoop, Write
 
 
@@ -671,7 +670,7 @@ class SyncTransport:
                 plans.append("vector")
             else:
                 plans.append("cell")
-            cell_defs |= deep_defines(a)
+            cell_defs |= Body((a,)).ssa_defs
         return plans
 
     def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:
@@ -718,7 +717,7 @@ class SyncTransport:
                 stmts, val = op.value(k0_cur, row, cell_col)
                 cell_stmts.append(stmts)
                 vals.append(val)
-            hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p] == "hoist" for nm in deep_defines(stmt)}
+            hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p] == "hoist" for nm in Body((stmt,)).ssa_defs}
             vals = [val if val in hoisted_defs else f"{val}__c{j}" for j, val in enumerate(vals)]
             # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
             # stmts: the stat-row loads, whose value is identical across the run's cells) emit once,
@@ -728,7 +727,7 @@ class SyncTransport:
             # binding every cell's suffixed name (one 16 B ld like the cp.async fill, instead of V
             # scalar loads — the compute fill issued 3.6x cuBLAS's LSU instructions). Everything
             # else replicates per cell as before.
-            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in deep_defines(st)}
+            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in Body((st,)).ssa_defs}
             for p in range(len(cell_stmts[0])):
                 if plans[p] == "hoist":
                     body.append(cell_stmts[0][p])

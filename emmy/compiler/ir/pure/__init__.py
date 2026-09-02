@@ -32,12 +32,6 @@ from emmy.compiler.ir.pure.carrier import UnstableCarrierError, exp_combine_stat
 from emmy.compiler.ir.pure.fold import (
     Channel,
     Fold,
-    deep_defines,
-    deep_reads,
-    is_contraction,
-    operand_body,
-    operand_name,
-    splice_operands,
 )
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.normalize import normalize_lambda_body
@@ -49,18 +43,12 @@ __all__ = [
     "M",
     "UnstableCarrierError",
     "component_ops",
-    "deep_defines",
-    "deep_reads",
     "degenerate",
     "eval_lambda",
     "exp_combine_states",
     "exp_merge",
     "foldmap_eval",
-    "is_contraction",
     "merge_stmts",
     "normalize_lambda_body",
-    "operand_body",
-    "operand_name",
-    "splice_operands",
     "rename_combine",
 ]

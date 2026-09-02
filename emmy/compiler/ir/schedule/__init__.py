@@ -21,8 +21,8 @@ from .choices import (
     resolve_site_tile,
 )
 from .views import (
-    Contraction,
     ContractionFacts,
+    ContractionView,
     EdgeSite,
     NodeId,
     NodeView,
@@ -34,7 +34,7 @@ from .views import (
 __all__ = [
     "AtomKind",
     "ContractionFacts",
-    "Contraction",
+    "ContractionView",
     "EdgeSite",
     "FoldMove",
     "Level",

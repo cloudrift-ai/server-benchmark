@@ -51,6 +51,12 @@ class ContractionView:
     axis: Axis
     left: str
     right: str
+    b_trans: bool = False
+    """Whether the streamed operand is stored N-major — its reduction axis LAST, ``B[n, k]``,
+    against the canonical ``B[k, n]``. A gmem LAYOUT fact, so it is meaningful only for a
+    materialized slab; a computed B answers ``False``. A stored on the same side is not a
+    question: ``operands[0]`` is A by canonical form, k-last, which is what normalization
+    guarantees by swapping the pair."""
 
 
 @dataclass(frozen=True)
@@ -218,7 +224,9 @@ class Fold:
         left_only, right_only = left - shared, right - shared
         if len(left_only) != 1 or len(right_only) != 1:
             return None
-        return ContractionView(axis=self.axis, left=next(iter(left_only)), right=next(iter(right_only)))
+        streamed = self.operands[1]
+        b_trans = streamed.is_slab and self.axis.name in streamed.lift.body[0].index[-1].free_vars()
+        return ContractionView(axis=self.axis, left=next(iter(left_only)), right=next(iter(right_only)), b_trans=b_trans)
 
     @property
     def is_slab(self) -> bool:

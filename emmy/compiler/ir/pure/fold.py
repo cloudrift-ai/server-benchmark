@@ -82,8 +82,8 @@ class ContractionView:
     """Whether the streamed operand is stored N-major — its reduction axis LAST, ``B[n, k]``,
     against the canonical ``B[k, n]``. A gmem LAYOUT fact, so it is meaningful only for a
     materialized slab; a computed B answers ``False``. A stored on the same side is not a
-    question: ``operands[0]`` is A by canonical form, k-last, which is what normalization
-    guarantees by swapping the pair."""
+    question: ``operands[0]`` is A by canonical form, k-last, which formation guarantees by
+    orienting the pair."""
 
 
 @dataclass(frozen=True)
@@ -215,6 +215,27 @@ class Fold:
         assert len(lam.params) >= 1 + arity, f"lift binds {len(lam.params) - 1} params after the axis for {arity} operand result components"
         assert len(lam.results) == n, "one lift result per monoid component"
         self._declares((self.axis.name, *lam.params[1 + arity :]))
+        # CANONICAL ORIENTATION of a bilinear term: A — the operand every product multiplies —
+        # comes first, so ``operands[0]`` IS A by construction. With several channels (the fused
+        # gate⊗up edge) A is the argument the products SHARE, and that names it outright; with one
+        # product both arguments are shared, so the layout rule decides: A reads ``[…, k]``, its
+        # reduction axis last, which lets a fragment load stride its rows contiguously. Binding is
+        # positional, so the lift's params move with the operands; the body reads by name.
+        if len(self.operands) >= 2 and all(isinstance(stmt, Assign) and len(stmt.args) == 2 for stmt in lam.body):
+            by_name = {name: edge for edge in self.operands for name in edge.exposes}
+            arguments = [set(product.args) for product in lam.body]
+            if len(arguments) > 1:
+                shared = [by_name[name] for name in set.intersection(*arguments) if name in by_name]
+                a_edge = shared[0] if len(shared) == 1 else None
+            else:
+                pair = [by_name[name] for name in arguments[0] if name in by_name]
+                k_last = [e for e in pair if e.as_slab() is not None and self.axis.name in e.as_slab().load.index[-1].free_vars()]
+                a_edge = k_last[0] if len(pair) == 2 and k_last else None
+            if a_edge is not None and self.operands[0] is not a_edge:
+                reordered = (a_edge, *(edge for edge in self.operands if edge is not a_edge))
+                bound = tuple(name for edge in reordered for name in edge.exposes)
+                object.__setattr__(self, "operands", reordered)
+                object.__setattr__(self, "lift", replace(lam, params=(lam.params[0], *bound, *lam.params[1 + arity :])))
         if self.observe is not None:
             assert tuple(self.observe.params) == (self.axis.name, *self.combine.results), (
                 f"observer params {self.observe.params} must bind the iteration var then the carried state "

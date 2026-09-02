@@ -62,6 +62,29 @@ def _chain(body) -> list[str]:
     return out
 
 
+# --- formation: a bilinear term orients itself ---------------------------------------------------- #
+
+
+def test_a_bilinear_term_puts_its_k_last_operand_first_at_formation() -> None:
+    """``operands[0]`` IS A by construction: with one product, the slab whose reduction axis is
+    its last index coordinate leads, and the lift's params move with the operands."""
+    w, x = _slab("r", "w", "k", "n"), _slab("l", "x", "m", "k")
+    mm = _matmul(w, x)
+    assert mm.operands == (x, w) and mm.lift.params == ("k", "l", "r")
+    assert mm.as_contraction() is not None and mm.as_contraction().left == "m"
+
+
+def test_a_multi_channel_term_puts_the_shared_operand_first_at_formation() -> None:
+    """With several products A is the argument they share, whatever the slab layouts say."""
+    x, g, u = _slab("l", "x", "k", "m"), _slab("g", "wg", "n", "k"), _slab("u", "wu", "n", "k")
+    init, combine = M("add", "add", names=("acc_g", "acc_u"))
+    body = (Assign(name="acc_g__v", op="multiply", args=("g", "l")), Assign(name="acc_u__v", op="multiply", args=("u", "l")))
+    lift = Lambda.closing(("k", "g", "u", "l"), Body(body), ("acc_g__v", "acc_u__v"))
+    fold = Fold(axes=(K_AXIS,), operands=(g, u, x), lift=lift, init=init, combine=combine)
+    assert fold.operands == (x, g, u) and fold.lift.params == ("k", "l", "g", "u")
+    assert fold.as_contraction() is not None
+
+
 # --- the binding contract ------------------------------------------------------------------------ #
 
 

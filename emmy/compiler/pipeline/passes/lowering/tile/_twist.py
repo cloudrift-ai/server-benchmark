@@ -206,8 +206,8 @@ def _projection_members(node: Fold) -> Body:
 def _mul_leaves(defs: dict[str, object], name: str) -> tuple[str, ...] | None:
     """The product tree's leaves, read through the shared trait-based spine flattener.
 
-    ``divide=True`` is the SAME reading the storage-decode hoist uses
-    (``tile/normalize._decode_split``), so a normalized exponential spelled ``w / d`` parses like
+    ``divide=True`` reads a divide as a product by a reciprocal, so a normalized exponential
+    spelled ``w / d`` parses like
     one spelled ``w * (1/d)``. Without it this depended on ``split_invariant_divides`` having
     rewritten the divide at ``LoopOp`` construction — a Loop-IR hoisting heuristic gated on a
     strict axis-subset, whose firing is not a fact this pass can assume.

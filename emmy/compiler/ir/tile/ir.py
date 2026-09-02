@@ -274,21 +274,12 @@ class TileOp(Op):
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)
-        scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
-        axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
-        free_names = {axis.name for axis in self.place.free}
-        sweep_axes = frozenset(name for name in axes if name not in free_names)
-        normalized = normalize_fold_tree(self.op, axes, sweep_axes=sweep_axes)
+        normalized = normalize_fold_tree(self.op)
+        # A matrix row Loop IR elided at extent one is restored as a free axis when the stores
+        # prove it and the tree holds a contraction to orient on it (:func:`_implicit_unit_row`).
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
-        if unit_row is not None:
-            candidate_free = (unit_row, *self.place.free)
-            candidate_scope = (*candidate_free, *(store.sweep for store in self.output_specs if store.sweep is not None))
-            candidate_axes = tuple(dict.fromkeys(axis.name for axis in candidate_scope))
-            candidate_sweeps = frozenset(name for name in candidate_axes if name not in {axis.name for axis in candidate_free})
-            candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,), sweep_axes=candidate_sweeps)
-            if any(site.node.as_contraction() is not None for site in sites(candidate)):
-                normalized = candidate
-                object.__setattr__(self, "place", replace(self.place, free=candidate_free))
+        if unit_row is not None and any(site.node.as_contraction() is not None for site in sites(normalized)):
+            object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
         if self.schedule is not None and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
@@ -325,16 +316,6 @@ class TileOp(Op):
                 for store in self.output_specs
             ),
         )
-        # Promotion changes the enclosing-axis context that closes computed contraction operands.
-        # Normalize once under the final scope so reconstructing this TileOp cannot expose a
-        # different Fold tree or placement seam.
-        scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
-        final_axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
-        final_sweeps = frozenset(name for name in final_axes if name not in {axis.name for axis in self.place.free})
-        renormalized = normalize_fold_tree(self.op, final_axes, sweep_axes=final_sweeps)
-        if self.schedule is not None and renormalized != self.op:
-            raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
-        object.__setattr__(self, "op", renormalized)
         self._validate_schedule()
 
     def _validate_schedule(self) -> None:

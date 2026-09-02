@@ -1499,9 +1499,9 @@ comparing two fits is running the same eval against two files and diffing the re
 ## Part 9: Tile lowering at the pipeline level
 
 `lowering/tile/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer parallel
-axes and mechanically lifts every inner reduction as a nested `Fold`; `TileOp` construction then canonicalizes the
-complete tree, including maximal pure operand-cone factoring for semiring contractions, canonical shared-argument
-orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. An output loop's per-cell
+axes and mechanically lifts every inner reduction as a nested `Fold`; each term orients a bilinear lift A-first at
+formation, and `TileOp` construction canonicalizes the complete tree — an identity projection dissolves into its
+operand, same-value cones become one shared object. No Tile IR classifier runs. An output loop's per-cell
 projection is a zero-axis term declaring its sweep axis, while its writes live as `OutputSpec`s at the `TileOp`
 boundary.
 

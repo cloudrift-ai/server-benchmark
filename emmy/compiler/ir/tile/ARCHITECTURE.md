@@ -123,7 +123,8 @@ reading dropped the fp8 decode cone's scale out of the kernel entirely. Both are
 and only the measurement moves. Treat a contraction that canonicalizes to PLANAR as a coverage bug to investigate, not
 as a supported slow path.
 
-Canonicalization runs entirely in `TileOp.__post_init__`, including the legacy output-sweep-to-free-axis adjustment
+A node's own canonical forms are formation's (`Fold.__post_init__` orients a bilinear term A-first, `Lambda` orders
+its body); `TileOp.__post_init__` applies the tree-wide ones and the legacy output-sweep-to-free-axis adjustment
 whenever a contraction operand reads the sweep axis. The contraction may be the root compute node or a later site in
 the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute output loop.
 Consecutive output specifications over one sweep axis reconstitute one loop, sibling sweeps sibling loops. The

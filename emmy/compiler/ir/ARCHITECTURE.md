@@ -666,10 +666,9 @@ A nonzero-axis Fold exposes its combine result names through `Fold.defines()`, s
 folds may consume its result without hoisting it to an operand edge. `Fold.loop` mechanically lowers the tree back to
 the corresponding nested Loop IR.
 
-The total-lift invariant is that no raw inner `Loop` survives. `TileOp.__post_init__` then applies general contextual
-canonicalization, including maximal pure operand-cone factoring into semiring contractions and closed-child
-extraction. Commutative products place their shared argument in the contraction's canonical shared operand slot;
-overlapping producer cones become one multi-result operand edge. Scoped lambda equivalence is an analysis over the
+The total-lift invariant is that no raw inner `Loop` survives. A bilinear term orients itself at formation, its
+shared argument in the contraction's canonical A slot; `TileOp.__post_init__` then applies the tree-wide
+canonicalization — an identity projection dissolves into its operand, and same-value cones become one shared object. Scoped lambda equivalence is an analysis over the
 canonical Folds. A separate pre-scheduling rewrite joins equivalent maximum and exp-weighted sibling Folds into the
 general `(maximum, denominator, expectations…)` twisted carrier, including when contraction canonicalization has
 nested the statistics inside a computed probability edge; softmax and masked or unmasked SDPA are arity variants, not

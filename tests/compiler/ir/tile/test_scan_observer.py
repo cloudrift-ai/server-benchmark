@@ -62,7 +62,7 @@ def _observed(fold: Fold, obs: str | None = None) -> Fold:
 def test_observer_formation_gates() -> None:
     fold = _sum_fold()
     scan = _observed(fold)
-    assert scan.observed and not fold.observed
+    assert scan.observe is not None and fold.observe is None
     assert scan.defines() == ("acc", "acc__obs")
 
     with pytest.raises(AssertionError, match="zero-axis"):
@@ -118,7 +118,7 @@ def test_rewrite_threads_the_observer() -> None:
 
 def test_scan_from_loop_lifts_the_per_step_store() -> None:
     fold, trailing = scan_from_loop(_scan_loop())
-    assert fold.observed and fold.observe.results == ("acc__obs",)
+    assert fold.observe is not None and fold.observe.results == ("acc__obs",)
     assert len(trailing) == 1 and trailing[0].values == ("acc__obs",)
     with pytest.raises(ValueError, match="scan, not a pure reduction"):
         fold_from_loop(_scan_loop())

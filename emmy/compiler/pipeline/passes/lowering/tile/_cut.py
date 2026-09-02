@@ -252,7 +252,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             continue
         providers: tuple = ()
         requires: tuple = ()
-        if node.observed:
+        if node.observe is not None:
             # An observed fold's per-step results exist only inside its stream — a cut would
             # separate the scan from its streamed boundary store, which no piece can then spell.
             continue

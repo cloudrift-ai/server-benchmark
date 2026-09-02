@@ -496,23 +496,6 @@ class Fold:
             return list(dict.fromkeys([*prologue, *step]))
         return [*dict.fromkeys(prologue), Loop(axis=axis, body=Body(tuple(dict.fromkeys(step))), unroll=self.unroll)]
 
-    # ---- the STRUCTURAL protocol — children, defs, reads, bound axes. Spelled with the stmt
-    # vocabulary's names on purpose: one canonicalizer and one deep walk then serve a term and its
-    # stmt siblings without dispatching on which they are. Nothing here is statement behaviour —
-    # a term has no scope to seed, no effect to order and no ``render``; it becomes statements
-    # once, through :meth:`lower`. ---------- #
-    @property
-    def observed(self) -> bool:
-        """Whether this fold carries a per-step observer — the structural probe (like
-        :attr:`composed`, not a role) the schedule gates and the boundary read."""
-        return self.observe is not None
-
-
-# ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
-# stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
-# INLINE node operand dispatches back through the same registry, so a stored computed operand
-# (the cone, flash's ``P``) canonicalizes like any other subtree.
-
 
 @_rewrite_kind.register
 def _(s: Fold, rename, sigma, axis_fn):

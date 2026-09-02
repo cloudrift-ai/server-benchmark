@@ -119,7 +119,7 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     is written once here so a normalizer that later keeps one in place inherits the reading rather
     than acquiring a different one by omission.
     """
-    if node.observed:
+    if node.observe is not None:
         return (Reduce(),)
     if {spec.sweep.name for spec in tile.output_specs if spec.sweep is not None} & node.free_axes:
         return (Reduce(),)

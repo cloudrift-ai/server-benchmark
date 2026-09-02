@@ -166,7 +166,6 @@ class Fold:
                 "(the boundary distinguishes a streamed store from a post-fold store by the name)"
             )
             assert not any(isinstance(stmt, Fold) for stmt in self.observe.body), "an observer body holds plain stmts, never a nested node"
-            assert not _identity_lift(self), "an identity-lift fold (a split partial/finalize) carries no observer"
         if not family.twisted:
             return  # the componentwise family — nothing further to validate
         # TWISTED: the state-component ROLE decision is shape-derived off the lift's injected
@@ -361,14 +360,6 @@ class Fold:
             axes=declared,
             lift=Lambda(params=tuple(axis.name for axis in declared), body=Body((load,)), results=tuple(load.names)),
         )
-
-    @cached_property
-    def _derived_twisted(self) -> tuple[Stmt, ...]:
-        """The MEMOIZED derived blocked evaluation of a λ-spelled twisted fold — cached so the
-        synthesized expectation contraction (flash's PV) has ONE identity per stored fold: the
-        path walker's derived sites, the schedule accessors (``Sched.tile_of``) and every
-        realizer read the same node object (site matching is by identity)."""
-        return _twisted_derived_step(self)
 
     @property
     def out(self) -> str:

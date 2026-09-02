@@ -485,13 +485,10 @@ def head(op):
     reduce ``Axis``, the operand edges — is a STORED param on what this returns."""
     node = op
     if isinstance(op, Fold) and op.axis is None:
-        if op.operands:
-            node = op.operands[0]
-        else:
-            # The chain form's sweep case: the column fold reads the boundary store's sweep axis,
-            # so root formation keeps it as the projection's one fold BODY member.
-            members = [s for s in op.body if isinstance(s, Fold)]
-            node = members[0] if len(members) == 1 else op
+        # A term composes through operands, so a projection's node is its first edge. The chain
+        # form's sweep case used to keep that fold as a BODY member; a ``Body`` refuses a term now,
+        # so there is nothing to scan for.
+        node = op.operands[0] if op.operands else op
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 

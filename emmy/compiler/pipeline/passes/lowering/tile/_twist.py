@@ -9,7 +9,6 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.carrier import EXP_FAMILY, exp_combine_states
-from emmy.compiler.ir.pure.closure import Closure
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Const, Load, Select, refs_axis
 
@@ -38,8 +37,8 @@ def _bindings(fold: Fold) -> dict[str, object]:
     return {name: edge for edge in fold.operands for name in edge.exposes}
 
 
-def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> Closure | None:
-    """A fold's one-source pure score cone, scoped by its streaming axis."""
+def _score(fold: Fold, result: str) -> Lambda | Fold | None:
+    """A fold's one-source pure score cone, as its alpha-canonical form — a comparison VIEW."""
     bindings = _bindings(fold)
     members = (bindings[result],) if result in bindings else fold.lift.body.backward_cone((result,)).members
     if not members or any(not isinstance(stmt, (Fold, Load, Assign, Select)) for stmt in members):
@@ -54,18 +53,13 @@ def _score(fold: Fold, result: str, axes: tuple[str, ...]) -> Closure | None:
     nodes = tuple(stmt for stmt in members if isinstance(stmt, Fold))
     if len({id(source) for source in (*used_edges, *indexed_loads, *nodes)}) != 1:
         return None
-    # A comparison VIEW, not a stored term: the cone is wrapped only to ask whether two scores are
-    # alpha-equal. It still has to be a well-formed lambda, so it closes over what the members read
-    # — the enclosing axes, and any value the cone takes from its scope — and the Closure's
-    # environment is narrowed to the axes that actually became params, since `axes` may name
-    # coordinates this particular cone never touches.
+    # A comparison VIEW, not a stored term: the cone is read only to ask whether two scores are
+    # alpha-equal. A cone that IS an operand edge answers with the term's own alpha-quotient; a
+    # statement-shaped one closes into a lambda over its streaming axis and whatever else the
+    # members read, and answers with that lambda's. Both kinds compare, which is all this is for.
     if len(members) == 1 and isinstance(members[0], Fold):
-        # The cone IS an operand edge. A term can neither sit in a ``Body`` nor be scoped as a
-        # lambda — ``Closure`` is for lambdas — so it answers with its own alpha-quotient. Both
-        # kinds compare, which is all this reading is for.
         return members[0].canonical()
-    fn = Lambda.closing((fold.axis.name,), Body(members), (result,))
-    return Closure(fn, tuple(axis for axis in (*axes, fold.axis.name) if axis in fn.params))
+    return Lambda.closing((fold.axis.name,), Body(members), (result,)).canonical()
 
 
 def _same_axis(left: Fold, right: Fold) -> bool:
@@ -86,21 +80,21 @@ def _exp_score(defs: dict[str, object], name: str, pivots: frozenset[str]) -> st
     return None
 
 
-def _maximum(fold: Fold, axes: tuple[str, ...]) -> tuple[str, Closure] | None:
+def _maximum(fold: Fold) -> tuple[str, Lambda | Fold] | None:
     if fold.axis is None:
         return None
     ops = fold.as_reduction().ops
     if ops is None or len(ops) != 1 or ops[0].reduce_canon != EXP_FAMILY.pivot:
         return None
     result = fold.lift.results[0]
-    score = _score(fold, result, axes)
+    score = _score(fold, result)
     cone = fold.lift.body.backward_cone((result,))
     if score is None or {id(stmt) for stmt in cone.members} != {id(stmt) for stmt in fold.lift.body}:
         return None
     return fold.combine.results[0], score
 
 
-def _denominator(fold: Fold, pivots: frozenset[str], score: Closure, axes: tuple[str, ...]) -> bool:
+def _denominator(fold: Fold, pivots: frozenset[str], score: Lambda | Fold) -> bool:
     if fold.axis is None:
         return False
     ops = fold.as_reduction().ops
@@ -108,7 +102,7 @@ def _denominator(fold: Fold, pivots: frozenset[str], score: Closure, axes: tuple
         return False
     result = fold.lift.results[0]
     candidate = _exp_score(fold.lift.body.definitions, result, pivots)
-    candidate_score = _score(fold, candidate, axes) if candidate is not None else None
+    candidate_score = _score(fold, candidate) if candidate is not None else None
     cone = fold.lift.body.backward_cone((result,))
     return (
         candidate_score is not None
@@ -127,13 +121,13 @@ def _twisted_pair(maximum: Fold, denominator: Fold) -> Fold:
     return replace(maximum, lift=lift, init=(maximum.init[0], denominator.init[0]), combine=combine)
 
 
-def _merge_siblings(operands: tuple, body: Body, axes: tuple[str, ...]) -> tuple[tuple, Body]:
+def _merge_siblings(operands: tuple, body: Body) -> tuple[tuple, Body]:
     """Join a maximum and its additive exponential denominator wherever they are siblings."""
     items = [("operand", edge) for edge in operands] + [("body", stmt) for stmt in body]
     while True:
         changed = False
         for index, (_, candidate) in enumerate(items):
-            found = _maximum(candidate, axes) if isinstance(candidate, Fold) else None
+            found = _maximum(candidate) if isinstance(candidate, Fold) else None
             if found is None:
                 continue
             maximum, score = found
@@ -145,7 +139,7 @@ def _merge_siblings(operands: tuple, body: Body, axes: tuple[str, ...]) -> tuple
                 section, denominator = items[position]
                 if not isinstance(denominator, Fold) or not _same_axis(candidate, denominator):
                     continue
-                if not _denominator(denominator, frozenset(pivots), score, axes):
+                if not _denominator(denominator, frozenset(pivots), score):
                     continue
                 items[index] = (items[index][0], _twisted_pair(candidate, denominator))
                 del items[position]
@@ -155,11 +149,11 @@ def _merge_siblings(operands: tuple, body: Body, axes: tuple[str, ...]) -> tuple
                 break
         if not changed:
             break
-    _report_unpaired(items, axes)
+    _report_unpaired(items)
     return tuple(value for section, value in items if section == "operand"), Body(value for section, value in items if section == "body")
 
 
-def _report_unpaired(items: list, axes: tuple[str, ...]) -> None:
+def _report_unpaired(items: list) -> None:
     """Name every ``maximum`` fold left with a same-axis sibling once the loop above settles.
 
     Order-independent on purpose. :func:`_merge_siblings` pairs FORWARD only, because the
@@ -169,7 +163,7 @@ def _report_unpaired(items: list, axes: tuple[str, ...]) -> None:
     """
     folds = [value for _, value in items if isinstance(value, Fold) and value.axis is not None]
     for fold in folds:
-        found = _maximum(fold, axes)
+        found = _maximum(fold)
         if found is None:
             continue
         siblings = [other for other in folds if other is not fold and _same_axis(fold, other)]
@@ -234,7 +228,7 @@ def _inverse_leaf(defs: dict[str, object], leaves: tuple[str, ...], denominator:
     return f"{denominator}__inv" if len(divisors) == 1 and not bound else None
 
 
-def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) -> tuple[Closure, Body] | None:
+def _varying_score(body: Body, result: str, axis: str) -> tuple[Lambda, Body] | None:
     cone = body.backward_cone((result,))
     varying = {axis}
     members = []
@@ -245,8 +239,7 @@ def _varying_score(body: Body, result: str, axis: str, axes: tuple[str, ...]) ->
             varying.update(stmt.defines())
     if not members:
         return None
-    fn = Lambda(params=(axis,), body=Body(members), results=(result,))
-    return Closure(fn, (*axes, axis)), Body(members)
+    return Lambda(params=(axis,), body=Body(members), results=(result,)).canonical(), Body(members)
 
 
 def _assign_cone(defs: dict[str, object], root: str, stops: frozenset[str]) -> frozenset[int]:
@@ -266,7 +259,7 @@ def _assign_cone(defs: dict[str, object], root: str, stops: frozenset[str]) -> f
     return frozenset(found)
 
 
-def _normalized_exp(edge: Fold, axis: str, axes: tuple[str, ...]) -> _NormalizedExp | None:
+def _normalized_exp(edge: Fold, axis: str) -> _NormalizedExp | None:
     """View a canonical pointwise edge as ``exp(score - maximum) / denominator``."""
     members = _projection_members(edge)
     statistics = [
@@ -305,8 +298,8 @@ def _normalized_exp(edge: Fold, axis: str, axes: tuple[str, ...]) -> _Normalized
         )
 
     score_name = weights[0][1]
-    current = _varying_score(body, score_name, axis, axes)
-    reference = _score(statistic, statistic.lift.results[0], axes)
+    current = _varying_score(body, score_name, axis)
+    reference = _score(statistic, statistic.lift.results[0])
     if current is None or reference is None or reference != current[0]:
         return _decline("normalized exponential", f"the weight's score {score_name!r} is not the statistic's own score")
 
@@ -358,16 +351,15 @@ def _extend_statistic(fold: Fold, view: _NormalizedExp) -> Fold:
     )
 
 
-def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
-    operands = tuple(_rewrite_fold(edge, axes) if isinstance(edge, Fold) else edge for edge in fold.operands)
-    body_axes = (*axes, fold.axis.name) if fold.axis is not None else axes
-    body = Body(_rewrite_fold(stmt, body_axes) if isinstance(stmt, Fold) else stmt for stmt in fold.lift.body)
+def _rewrite_fold(fold: Fold) -> Fold:
+    operands = tuple(_rewrite_fold(edge) if isinstance(edge, Fold) else edge for edge in fold.operands)
+    body = Body(_rewrite_fold(stmt) if isinstance(stmt, Fold) else stmt for stmt in fold.lift.body)
     node = replace(fold, operands=operands) if operands != fold.operands else fold
     if body != node.lift.body:
         node = replace(node, lift=replace(node.lift, body=Body(body)))
 
     if node.axis is None:
-        new_operands, new_body = _merge_siblings(node.operands, node.lift.body, axes)
+        new_operands, new_body = _merge_siblings(node.operands, node.lift.body)
         if new_operands == node.operands and new_body == node.lift.body:
             return node
         return Fold(
@@ -378,19 +370,19 @@ def _rewrite_fold(fold: Fold, axes: tuple[str, ...]) -> Fold:
     # A computed A cone — the term's own reading: operands[0] is A by canonical form, and a
     # cone is an operand that is not a gmem read.
     if node.as_contraction() is not None and node.operands[0].as_slab() is None:
-        view = _normalized_exp(node.operands[0], node.axis.name, axes)
+        view = _normalized_exp(node.operands[0], node.axis.name)
         if view is not None and _same_axis(view.statistic, node):
             ring = node.as_contraction()
             if ring is not None and ring.product.name == "multiply" and ring.plus.reduce_canon == "add":
                 return _extend_statistic(node, view)
 
-    _, new_body = _merge_siblings((), node.lift.body, body_axes)
+    _, new_body = _merge_siblings((), node.lift.body)
     return replace(node, lift=replace(node.lift, body=Body(new_body))) if new_body != node.lift.body else node
 
 
-def rewrite_twisted(root, axes=()):
+def rewrite_twisted(root):
     """Rewrite maximum/normalized-exponential Fold algebra into exp-family monoids."""
-    return _rewrite_fold(root, tuple(axes)) if isinstance(root, Fold) else root
+    return _rewrite_fold(root) if isinstance(root, Fold) else root
 
 
 __all__ = ["rewrite_twisted"]

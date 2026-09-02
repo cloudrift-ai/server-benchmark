@@ -812,9 +812,7 @@ def decode_record(record: GoldenRecord) -> str | None:
         from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
         from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
 
-        axes = [axis.name for axis in tile.place.free]
-        axes.extend(store.sweep.name for store in tile.output_specs if store.sweep is not None)
-        tile = replace(tile, op=rewrite_twisted(tile.op, axes))
+        tile = replace(tile, op=rewrite_twisted(tile.op))
         seams = cuttable_seams(tile)
         seam_ids = {id(seam.node) for seam in seams}
         all_sites = sites(tile.op)

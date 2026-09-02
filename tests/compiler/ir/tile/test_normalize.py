@@ -11,7 +11,6 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda, M, is_contraction
-from emmy.compiler.ir.pure.closure import Closure
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.normalize import _share_common_cones, normalize_fold_tree
@@ -385,7 +384,7 @@ def test_normalization_shares_structurally_identical_cones() -> None:
         return out
 
     def unify_key(node: Fold):
-        return Closure(Lambda(params=(), body=Body((node,)), results=node.defines()), ()).canonical()
+        return Lambda(params=(), body=Body((node,)), results=node.defines()).canonical()
 
     by_identity = folds(tile.op, {})
     by_value: dict[tuple, list[Fold]] = {}
@@ -818,21 +817,6 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
 
     distinct = rooted(cone("l2", "p2", row="q"))  # same form, different capture — a different value
     assert distinct.operands[0].operands[0] is not distinct.operands[1].operands[0]
-
-
-def test_closure_equality_includes_captured_axes() -> None:
-    # A lambda binds every name it reads, so the enclosing row coordinate is a trailing param;
-    # ``axes`` then names WHICH of those params are the environment, not a permission to capture.
-    first = Lambda.closing(("k",), Body((Load(name="x", input="q", index=(Var("row"), Var("k"))),)), ("x",))
-    second = Lambda.closing(("depth",), Body((Load(name="value", input="q", index=(Var("query"), Var("depth"))),)), ("value",))
-    assert first.params == ("k", "row") and second.params == ("depth", "query")
-
-    assert Closure(first, ("row", "k")) == Closure(second, ("query", "depth"))  # equality is alpha-invariant
-    assert Closure(first, ("row", "k")) != Closure(first, ("k", "row"))  # capture order is the positional identity
-    # An axis the lambda does not bind is not an unused environment slot any more — it is a name
-    # nothing supplies, and the closure refuses it rather than carrying it into the canonical form.
-    with pytest.raises(ValueError, match="not params of the lambda"):
-        Closure(second, ("unused", "query", "depth"))
 
 
 def test_total_lift_produces_canonical_contraction() -> None:

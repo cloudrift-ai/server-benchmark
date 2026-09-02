@@ -219,7 +219,11 @@ class Fold:
             return None
         left, right = (edge.index_space for edge in self.operands)
         shared = left & right
-        if shared != {self.axis.name}:
+        # The reduction is shared, but sharing is not exclusive to it: a BATCH axis is carried by
+        # both operands and stays free (``Q[b,h,m,d] x K[b,h,n,d]`` shares ``{b,h,d}`` and reduces
+        # only ``d``). What makes the fold bilinear is that its own axis is among the shared ones
+        # and each operand still contributes a free axis of its own.
+        if self.axis.name not in shared:
             return None
         left_only, right_only = left - shared, right - shared
         if len(left_only) != 1 or len(right_only) != 1:

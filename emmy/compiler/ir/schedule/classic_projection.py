@@ -141,10 +141,11 @@ def _fold_states(op) -> frozenset[str]:
     """Return the Fold state names visible to the projection tail."""
     if not isinstance(op, Fold):
         return frozenset()
+    # What the term binds into its consumer, at either arity: a reducing fold exposes its carried
+    # state, a projection its operands'. ``lift.body`` holds statements only, so the terms below a
+    # projection are exactly its operands.
     if op.axis is not None:
-        return frozenset(op.defines())
-    # ``op.body`` holds statements only, so the terms are exactly the operands, and each answers
-    # with the names it binds into its consumer.
+        return frozenset(op.exposes)
     return frozenset(name for edge in op.operands for name in edge.exposes)
 
 

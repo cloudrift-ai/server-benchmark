@@ -361,7 +361,10 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
     if all(s.pure for s in rest) and apply_output_specs(rest, stores) == original:
         return tuple(rest), tuple(stores)
 
-    def extract(body: Body) -> tuple[Body, list[OutputSpec], list[OutputSpec]] | None:
+    def extract(body) -> tuple[tuple, list[OutputSpec], list[OutputSpec]] | None:
+        # Plain tuples throughout: this walks the mixed stmt/term stream the lift produces, which a
+        # ``Body`` may not hold. Only the pieces that are genuinely statement sequences — a nested
+        # loop's own body, a region's lift — are Bodies, and they are built by their own owners.
         pure = []
         outputs: list[OutputSpec] = []
         direct: list[OutputSpec] = []
@@ -392,9 +395,9 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
             if not stmt.pure:
                 return None
             pure.append(stmt)
-        return Body(pure), outputs, direct
+        return tuple(pure), outputs, direct
 
-    extracted = extract(Body.coerce(stmts))
+    extracted = extract(tuple(stmts))
     if extracted is None:
         return None
     body, outputs, _ = extracted

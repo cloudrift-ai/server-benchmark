@@ -197,7 +197,7 @@ def name_for(loop: LoopOp, base_name: str, node_prov: dict, all_totals: dict[str
     # ``dtype_sig`` — buffer decls are outside the body, and two kernels identical except an
     # operand/output dtype must NOT share a name) to a short alphanumeric token (valid in a C
     # identifier; identical bodies + dtypes → same token).
-    h = hashlib.sha1((loop.body.structural_key() + "|" + dtype_sig).encode()).hexdigest()[:6]
+    h = hashlib.sha1((loop.body.structural_key(structural=False) + "|" + dtype_sig).encode()).hexdigest()[:6]
     cov = coverage(node_prov, all_totals)
     if len(meaningful) == 1 and cov[meaningful[0]][2]:  # single op, fully covered
         return f"k_{joined}_{h}"

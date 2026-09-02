@@ -48,7 +48,7 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.axis import Axis, Window
+from emmy.compiler.ir.axis import Axis, AxisRole, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
@@ -151,7 +151,7 @@ def _emit(op, ctx: Ctx, output_specs: tuple = ()) -> Frag:
         hoisted = list(dict.fromkeys(s for edge in op.operands if op.axis.name not in edge.index_space for s in _emit(edge, ctx).body))
         rides = dict.fromkeys(s for edge in op.operands if op.axis.name in edge.index_space for s in _emit(edge, ctx).body)
         stmts = _emit_body(Body((*rides, *op.step)), ctx)
-        loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=op.role)
+        loop = Loop(axis=op.axis, body=Body(tuple(stmts)), unroll=op.unroll, role=AxisRole.PLANAR)
         return Frag(body=[*hoisted, loop], out=Handle(op.out))
     raise TypeError(f"_emit: expected a Fold node, got {type(op).__name__}")
 

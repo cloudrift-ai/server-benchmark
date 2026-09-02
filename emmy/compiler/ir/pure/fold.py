@@ -3,8 +3,9 @@
 The whole stored vocabulary of Tile IR, and a PURE term throughout: an optional iteration
 ``axis``, a pure ``lift`` :class:`~emmy.compiler.ir.pure.lam.Lambda`, the monoid's flat
 ``(init, combine)`` pair, and a tuple of ``operands`` — the closed inputs, each an edge bound
-positionally to a lift param. Every reading (``Map`` at zero axes, the bilinear ``Contraction``,
-the ``AxisRole``, the serial step) is DERIVED from those params; nothing else is stored.
+positionally to a lift param. Every reading (the map at zero axes, the bilinear
+:class:`ContractionView`, the :class:`SlabView` leaf, the serial step) is DERIVED from those
+params; nothing else is stored.
 
 Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Stmt`. A composed step — flash's ``Σ Q·K``
 ahead of its ``Σ_j P·V``, split-K's sliced contraction — is reached through ``operands``, and its
@@ -28,7 +29,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis, AxisRole
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.algebra import component_ops, degenerate, rename_combine
+from emmy.compiler.ir.pure.algebra import component_ops, rename_combine
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Stmt
 
@@ -89,12 +90,11 @@ class ContractionView:
 class Fold:
     """A scheduled reduce — the typed successor of the bare annotated reduce
     ``Loop`` (``ir/pure/algebra``). It splits the reduce's **algebra** (the loop-carried
-    flat ⊕ — degenerate/componentwise for a plain
-    ``sum`` / ``max`` / ``mean``, twisted (exp-family) for online-softmax / flash) from its **structure**
-    (the reduce ``axis`` + the per-element ``step`` it folds). Its :class:`AxisRole`
-    (``PLANAR`` / ``TWISTED`` / ``CONTRACTION``) is **derived** from those params (:attr:`role`),
-    never stored. The fold ``Loop`` is **synthesized on
-    demand** (:attr:`loop`), never stored — so the same node tiles under any
+    flat ⊕ — componentwise for a plain ``sum`` / ``max`` / ``mean``, a rescaling program for
+    online-softmax / flash — a plain :class:`Lambda` either way) from its **structure** (the
+    reduce ``axis`` + the per-element ``step`` it folds). Every reading is **derived** from those
+    params (:meth:`as_contraction`, :meth:`as_slab`, :attr:`step`), never stored. The fold
+    ``Loop`` is **synthesized on demand** (:meth:`lower`), never stored — so the same node tiles under any
     :class:`~emmy.compiler.ir.schedule.Reduce`, which is not a field here: the reduce
     partition is a site choice in ``TileOp.schedule``, read through ``ops.Sched``.
 
@@ -189,10 +189,6 @@ class Fold:
         assert len(lam.params) >= 1 + arity, f"lift binds {len(lam.params) - 1} params after the axis for {arity} operand result components"
         assert len(lam.results) == n, "one lift result per monoid component"
         if self.observe is not None:
-            # The serial stream visits elements in axis order, so a componentwise ⊕'s running
-            # state at step k is the k-prefix reduction (a scan); a twisted carrier's per-step
-            # state has no customer yet, and the smaller surface keeps this gate meaningful.
-            assert degenerate(self.combine), "a per-step observer rides a componentwise combine only"
             assert tuple(self.observe.params) == (self.axis.name, *self.combine.results), (
                 f"observer params {self.observe.params} must bind the iteration var then the carried state "
                 f"{(self.axis.name, *self.combine.results)} positionally"
@@ -203,12 +199,6 @@ class Fold:
                 "(the boundary distinguishes a streamed store from a post-fold store by the name)"
             )
             assert not any(isinstance(stmt, Fold) for stmt in self.observe.body), "an observer body holds plain stmts, never a nested node"
-        if degenerate(self.combine):
-            return  # componentwise — nothing further to validate
-        # TWISTED: the state-component ROLE decision is shape-derived off the lift's injected
-        # singleton, no annotation: the pivot is component 0 (its injected term the score), a
-        # literal-1 injection is a denominator, a value injection an expectation.
-        assert isinstance(lam.results[0], str), "the twisted lift's pivot component must inject the score name"
 
     @property
     def exposes(self) -> tuple[str, ...]:
@@ -334,39 +324,12 @@ class Fold:
         return self.axes[-1] if self.axes and self.combine is not None else None
 
     @property
-    def role(self) -> AxisRole:
-        """The fold's :class:`AxisRole`, DERIVED from the stored params — never stored:
-
-        - ``FREE`` iff there is no axis (the zero-axis node — a pure pointwise cell or the
-          projection over a source node; what zero-axis ``Fold`` was).
-        - ``TWISTED`` iff the stored combine is not componentwise (a cross-component read, a
-          rescale temp — ``exp``'s online softmax / flash).
-        - ``CONTRACTION`` iff the bilinear reading holds (:attr:`_contraction` — a ``⊗`` lift
-          distributed over ≥ 2 operand edges under a componentwise-additive ⊕). Split-K's outer
-          reduce is NOT one: it tiles nothing and has no operand pair, so it derives ``PLANAR``
-          like any other additive fold and :attr:`composed` — a structural probe, not a role —
-          stays the one read that recognizes the reassociation.
-        - ``PLANAR`` otherwise — including an unbindable contraction (matvec-shaped 1-D output,
-          no ``(m, n)`` loads, the zero-legal-rows fallback): recognition keeps its loads inline
-          in the lift instead of building the node, so there are no edges for the bilinear
-          reading to bind and the fold takes the reduce tiers at schedule dispatch. The demotion
-          is a FORMATION fact and there is no role rewrite anywhere: recognition keeps an
-          unbindable contraction's loads inline in the lift, so there are no edges to bind."""
-        if self.axis is None:
-            return AxisRole.FREE
-        if not degenerate(self.combine):
-            return AxisRole.TWISTED
-        if self.as_contraction() is not None:
-            return AxisRole.CONTRACTION  # the bilinear cell itself — the node kind that was
-        return AxisRole.PLANAR
-
-    @property
     def composed(self) -> Fold | None:
         """The single sliced contraction this outer reduce COMPOSES (split-K's
         reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``), or ``None`` — the identity-lift
         λ spelling (one inline node operand carrying the outer's exact accumulator state). The
-        structural probe the derived :attr:`role` reads (``030_cut`` builds its sliced
-        partial directly, so the composition is a recognized FORM here, never a required input)."""
+        structural probe :attr:`step` reads (``030_cut`` builds its sliced partial directly, so
+        the composition is a recognized FORM here, never a required input)."""
         if len(self.lift.body) or len(self.operands) != 1:
             return None
         inner = self.operands[0]
@@ -534,7 +497,9 @@ class Fold:
         step = [*(stmt for edge in rides for stmt in edge.lower()), *self.step]
         if axis is None:
             return list(dict.fromkeys([*prologue, *step]))
-        return [*dict.fromkeys(prologue), Loop(axis=axis, body=Body(tuple(dict.fromkeys(step))), unroll=self.unroll, role=self.role)]
+        # The loop is stamped as one that FOLDS — the one bit Loop IR reads off the annotation —
+        # since a composed reduce's own step is empty and its carriers sit in the inner loop.
+        return [*dict.fromkeys(prologue), Loop(axis=axis, body=Body(tuple(dict.fromkeys(step))), unroll=self.unroll, role=AxisRole.PLANAR)]
 
     # ---- the STRUCTURAL protocol — children, defs, reads, bound axes. Spelled with the stmt
     # vocabulary's names on purpose: one canonicalizer and one deep walk then serve a term and its

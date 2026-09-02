@@ -104,7 +104,8 @@ def _head(node, ctx: _Ctx) -> str:
     if node.axis is None:
         text = "Fold  free" + ("" if node.operands else "  ‹pointwise›")
     else:
-        text = f"Fold[{_axis_span(node.axis)}] {node.role.name.lower()}" + (" unroll" if node.unroll else "")
+        kind = "contraction" if node.as_contraction() is not None else "reduce"
+        text = f"Fold[{_axis_span(node.axis)}] {kind}" + (" unroll" if node.unroll else "")
     return text + ctx.note(node)
 
 

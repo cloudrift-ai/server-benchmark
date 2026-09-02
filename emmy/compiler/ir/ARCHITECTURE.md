@@ -347,7 +347,11 @@ identity with the knobs; and the deploy join key (the deploy identity (`identity
 schedule evidence.
 `Fold.deps()` exposes names captured outside the lift params, including captures reached recursively through operand
 edges. A contraction deliberately hides its pure lift body from generic nested-body walks, so this direct dependency
-surface is what keeps an operand's captured statistic ordered before the contraction that reads it.
+surface is what keeps an operand's captured statistic ordered before the contraction that reads it. A read walk
+STOPS at this rollup — the **`Stmt.deps_deep` trait** (a `Stmt`-protocol member beside `pure`, conservative `False`
+default; `Fold` opts in) tells `_member_reads` that `deps()` already answers for the whole subtree, scope-correctly.
+Re-walking the lift's flat namespace cannot see its params, so an operand-supplied name read inside the lift leaked
+out of every enclosing lambda as a phantom capture: an operand-supplied name is not an enclosing capture.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two

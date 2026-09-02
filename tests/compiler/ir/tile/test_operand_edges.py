@@ -195,6 +195,29 @@ def test_an_operand_supplied_name_is_not_an_enclosing_capture() -> None:
     assert outer.deps() == (), "an operand-supplied read must not surface as an enclosing capture"
 
 
+def test_a_hoist_candidate_shadowing_a_body_define_is_not_fed_by_it() -> None:
+    """The three-level shape whose hoist verdict the scoped-rollup fix flips, REFUSED to ALLOWED.
+
+    A plain root member defines ``p``; the candidate fold's INNER fold takes its own ``p`` from a
+    factored operand edge, so the candidate never reads the body's ``p``. The phantom capture made
+    ``fed_by_body`` see a feed and refuse the hoist; with ``deps()`` honest, the candidate hoists
+    onto an operand edge — the semantically correct verdict, pinned here because it is a real
+    normalize behavior change, not only a reporting change."""
+    from emmy.compiler.ir.tile.normalize import _hoist_closed_folds, fed_by_body
+
+    cone = Fold.projection(body=Body((Load(name="p", input="eps", index=()),)), results=("p",))
+    inner = Fold.projection(operands=(cone,), body=Body((Assign(name="q", op="rsqrt", args=("p",)),)), results=("q",))
+    candidate = Fold.projection(body=Body((inner, Assign(name="r", op="rsqrt", args=("q",)))), results=("r",))
+    root = Fold.projection(
+        body=Body((Load(name="p", input="host", index=()), candidate, Assign(name="out", op="rsqrt", args=("r",)))),
+        results=("out",),
+    )
+
+    assert not fed_by_body(candidate, root.lift.body), "a shadowed name is not a feed"
+    hoisted = _hoist_closed_folds(root, (), frozenset())
+    assert any(edge is candidate for edge in hoisted.operands), "the closed candidate hoists onto an operand edge"
+
+
 def test_cut_closure_does_not_confuse_a_sibling_loop_axis_for_scope() -> None:
     """A loop binding ``k`` in one operand does not scope a sibling operand's ``x[k]`` load."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at

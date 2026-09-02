@@ -150,7 +150,9 @@ def storage_frontier(node: Fold) -> Frontier | None:
 
 def _ordered_captures(stmts, scope: frozenset[str]) -> set[str]:
     """Names read before any definition, walking nested bodies in program order. A definition
-    covers only the reads that FOLLOW it; loop-carried accumulators are live on entry."""
+    covers only the reads that FOLLOW it; loop-carried accumulators are live on entry. The
+    mirror direction keeps `_exposed_defines`' documented over-approximation: a definition inside
+    an EARLIER sibling's body still covers a later outer-scope read."""
     captured: set[str] = set()
     seen = set(scope)
     for stmt in stmts:
@@ -158,10 +160,11 @@ def _ordered_captures(stmts, scope: frozenset[str]) -> set[str]:
         for expr in stmt.exprs():
             reads |= expr.free_vars()
         captured |= reads - seen
-        inner = seen | stmt.binds_axes() | set(stmt.defines())
-        for body in stmt.nested():
-            carried = {child.name for child in Body(body).iter() if isinstance(child, Accum)}
-            captured |= _ordered_captures(body, frozenset(inner | carried))
+        if not stmt.deps_deep:  # a term's ``deps()`` is already the scoped rollup — see ``Stmt.deps_deep``
+            inner = seen | stmt.binds_axes() | set(stmt.defines())
+            for body in stmt.nested():
+                carried = {child.name for child in Body(body).iter() if isinstance(child, Accum)}
+                captured |= _ordered_captures(body, frozenset(inner | carried))
         seen |= _exposed_defines(stmt)
     return captured
 
@@ -703,7 +706,11 @@ def realize(
     for seam, produced, axes, index, token, names, buffers, replacements in pieces:
         others = {target: loads for target, loads in everything.items() if target not in replacements}
         piece = _replace_fold(produced, others) if others else produced
-        dangling = _external_reads(piece) - {axis.name for axis in seam.axes}
+        # The bound is the piece's REAL placement (its workspace axes) — what the produced kernel
+        # binds — not the wider seam.axes. Two caveats on what this proves: the check reads the
+        # reconstituted lowering while ``_piece_inputs`` reads the stored tree's ``loaded_buffers``
+        # (two views of one piece), and observer-only captures sit outside both.
+        dangling = _external_reads(piece) - {axis.name for axis in axes}
         assert not dangling, f"cut piece for seam {seam.spelling!r} reads {sorted(dangling)} before any definition"
         produced_pieces.append((seam, piece, axes, index, token, names, buffers))
     outer_names = {axis.name for axis in tile.place.free} | {store.sweep.name for store in tile.output_specs if store.sweep is not None}

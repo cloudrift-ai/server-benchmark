@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
-from emmy.compiler.ir.stmt import Body, Load
+from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.tile.ir import ProjectionRegion
 from emmy.compiler.ir.tile.ops import axis_names, sched_of
@@ -142,8 +142,9 @@ def _edge(edge, ctx: _Ctx, result: str | None = None) -> tuple[str, object]:
     parameter order."""
     names = edge.exposes
     head = f"operand[{', '.join(names)}]" + (f" -> {result}" if result is not None else "")
-    if isinstance(edge, Load):
-        load = edge.pretty()[0].strip().removeprefix(f"{edge.name} = ")
+    if edge.is_slab:
+        load = edge.loads[0]
+        load = load.pretty()[0].strip().removeprefix(f"{load.name} = ")
         return f"{head}: {load}   ‹materialized›", lambda cont: []
     return f"{head}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)
 

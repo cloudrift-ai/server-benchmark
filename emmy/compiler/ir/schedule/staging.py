@@ -30,7 +30,6 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import cone_seam
-from emmy.compiler.ir.stmt import Load
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
 # at 4 so it stays within the 5-dim limit.
@@ -298,7 +297,7 @@ def resolve_warp_stage(
     a_nbytes, b_nbytes = atom.operand_dtype("a").nbytes, atom.operand_dtype("b").nbytes
     if inputs:
         for edge, role in ((c.operands[0], "a"), (c.operands[1], "b")):
-            t = inputs.get(edge.input) if isinstance(edge, Load) else None
+            t = inputs.get(edge.loads[0].input) if edge.is_slab else None
             if t is None or t.dtype == atom.operand_dtype(role):
                 continue
             if sync_copy:
@@ -467,9 +466,9 @@ def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool
     are exempt because their slab store performs the normal typed conversion — ``converting``
     marks a materialized ``a`` that rides the converting fill rather than the copy."""
     for edge, role in ((c.operands[0], "a"), *((edge, "b") for edge in c.operands[1:])):
-        if not isinstance(edge, Load) or (role == "a" and converting):
+        if not edge.is_slab or (role == "a" and converting):
             continue
-        tensor = inputs.get(edge.input) if inputs else None
+        tensor = inputs.get(edge.loads[0].input) if inputs else None
         # Structural scheduler fixtures intentionally do not carry Tensor metadata. Absence is not
         # evidence of an unsafe byte copy; the concrete lowering path always supplies inputs and
         # is where a known mismatch must be rejected.
@@ -479,7 +478,7 @@ def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool
         if tensor.dtype == want:
             continue
         return (
-            f"smem compute fill: materialized {role.upper()} edge {edge.input!r} is {tensor.dtype}, but "
+            f"smem compute fill: materialized {role.upper()} edge {edge.loads[0].input!r} is {tensor.dtype}, but "
             f"atom {tile.atom.name} copies it into a {want} slab without conversion; only the "
             "``a`` role has a converting fill"
         )

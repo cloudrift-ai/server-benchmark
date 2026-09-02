@@ -75,9 +75,10 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
     key = id(edge)
     if key in cache:
         return cache[key]
-    if isinstance(edge, Load):
-        tensor = inputs.get(edge.input) if inputs else None
-        result = (tensor.dtype if tensor is not None else None,) * len(edge.names)
+    if edge.is_slab:
+        load = edge.loads[0]
+        tensor = inputs.get(load.input) if inputs else None
+        result = (tensor.dtype if tensor is not None else None,) * len(load.names)
         cache[key] = result
         return result
     if not isinstance(edge, Fold):

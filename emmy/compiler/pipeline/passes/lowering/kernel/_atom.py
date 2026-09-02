@@ -1683,7 +1683,7 @@ class _MmaOps(_AtomOps):
         out = []
         for edge, role in ((self.c.operands[0], "a"), (self.c.operands[1], "b")):
             dt = self.tile.atom.operand_dtype(role)
-            t = self.inputs.get(edge.input) if self.inputs and isinstance(edge, Load) else None
+            t = self.inputs.get(edge.loads[0].input) if self.inputs and edge.is_slab else None
             out.append(t.dtype if t is not None and t.dtype.nbytes == 1 else dt)
         return tuple(out)
 

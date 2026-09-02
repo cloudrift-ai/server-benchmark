@@ -65,7 +65,7 @@ def test_gather_index_survives_rename_chain_collision() -> None:
 
 def test_fold_combine_tracks_accum_rename() -> None:
     # The algebra lives on the ``Fold`` NODE — its stored combine/lift must track the body's SSA
-    # renames in lockstep (the Fold rewrite handler's ``rename_combine``), or the cooperative
+    # renames in lockstep (the Fold rewrite handler renames it through ``Lambda.rename``), or the cooperative
     # combine reads a state name the renamed body no longer defines (the M=1 cut-consumer's
     # ``acc1``-undefined miscompile).
     from emmy.compiler.ir.pure.fold import Fold

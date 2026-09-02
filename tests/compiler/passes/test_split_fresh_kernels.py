@@ -320,15 +320,14 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     from types import SimpleNamespace
 
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.pure import Lambda, M
+    from emmy.compiler.ir.pure import Lambda
     from emmy.compiler.ir.stmt import Assign, Body, Load, Write
     from emmy.compiler.ir.tile import OutputSpec, Placement
     from emmy.compiler.ir.tile.ops import head
     from emmy.compiler.pipeline.passes.lowering.tile._split import _projection_refusal, split_forks
 
-    init, combine = M(ElementwiseImpl("add"), names=("acc",))
+    init, combine = (0.0,), Lambda.componentwise(("add",), ("acc",))
     # The fold reads ``in0``, a name the projection body defines, so normalization keeps it a BODY
     # member (a free-standing fold would be hoisted to an operand edge) — and that prologue reads
     # the sweep axis ``j``, so the whole chain lands inside the sweep ``Loop``.

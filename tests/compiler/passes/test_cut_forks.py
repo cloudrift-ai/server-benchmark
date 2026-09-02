@@ -11,14 +11,13 @@ import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import F16, F32
+from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
-from emmy.compiler.ir.pure.carrier import exp_combine_states
-from emmy.compiler.ir.pure.fold import Fold, Lambda
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.loop_wire import loop_graph_to_wire
@@ -160,54 +159,6 @@ def _softmax_graph() -> Graph:
     graph.add_node(SoftmaxOp(axis=-1), ["x"], Tensor("out", (4, 32), "f16"), node_id="out")
     graph.inputs, graph.outputs = ["x"], ["out"]
     return graph
-
-
-def _computed_value_expectation_tile() -> TileOp:
-    """A twisted expectation whose value is a stored contraction until placement cuts it."""
-    query, column, key, inner = Axis("q", 4), Axis("n", 16), Axis("j", 8), Axis("k", 16)
-    value = Fold.contraction(
-        k_axis=inner,
-        a=Load(name="xv", input="x", index=(Var("j"), Var("k"))),
-        channels=(Channel(b=Load(name="wv", input="w", index=(Var("n"), Var("k"))), acc="vacc"),),
-    )
-    states = ("maximum", "denominator", "expectation")
-    other = tuple(f"{name}__o" for name in states)
-    carrier = Fold(
-        axis=key,
-        operands=(value,),
-        lift=Lambda(
-            params=("j", "vacc"),
-            body=Body((Load(name="score", input="scores", index=(Var("q"), Var("j"))),)),
-            results=("score", 1.0, "vacc"),
-        ),
-        init=(float("-inf"), 0.0, 0.0),
-        combine=Lambda(params=states + other, body=Body(exp_combine_states(states, other)), results=states),
-    )
-    root = Fold.projection(
-        operands=(carrier,),
-        body=Body(
-            (
-                Assign(name="inverse", op="reciprocal", args=("denominator",)),
-                Assign(name="out", op="multiply", args=("expectation", "inverse")),
-            )
-        ),
-        results=("out",),
-    )
-    tile = TileOp(
-        op=root,
-        name="out",
-        place=Placement(free=(query, column)),
-        output_specs=(OutputSpec(Write(output="out", index=(Var("q"), Var("n")), value="out")),),
-    )
-    return replace(
-        tile,
-        inputs={
-            "x": Tensor("x", (8, 16), F16),
-            "w": Tensor("w", (16, 16), F16),
-            "scores": Tensor("scores", (4, 8), F16),
-        },
-        outputs={"out": Tensor("out", (4, 16), F16)},
-    )
 
 
 def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
@@ -353,14 +304,6 @@ def test_softmax_state_cut_is_offered_and_pinned_cut_lowers() -> None:
     shifted = values.astype(np.float32) - values.max(axis=-1, keepdims=True).astype(np.float32)
     expected = np.exp(shifted) / np.exp(shifted).sum(axis=-1, keepdims=True)
     np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
-
-
-def test_twisted_expectation_value_cut_uses_the_public_store_dtype() -> None:
-    """Cutting a computed expectation value turns it into the derived contraction's B slab."""
-    seams = {tuple(seam.node.defines()): seam for seam in cuttable_seams(_computed_value_expectation_tile())}
-
-    assert seams[("vacc",)].dtypes == (F16,)
-    assert seams[("maximum", "denominator", "expectation")].dtypes == (F32, F32, F32)
 
 
 def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:

@@ -20,8 +20,10 @@ from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold, Lambda, M, exp_combine_states
+from emmy.compiler.ir.pure import Fold, Lambda
+from emmy.compiler.ir.pure.twist import SOFTMAX
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, OutputSpec, Write
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
@@ -35,7 +37,7 @@ def _slab(name: str, buffer: str, *index: str) -> Fold:
 def _reduce(operands: tuple[Fold, ...], body: tuple, acc: str, op: str = "add") -> Fold:
     """A reducing term over ``k``: one ``⊕`` state, the lift's results its per-step value."""
     bound = tuple(name for edge in operands for name in edge.exposes)
-    init, combine = M(op, names=(acc,))
+    init, combine = (ElementwiseImpl(op).identity,), Lambda.componentwise((op,), (acc,))
     lift = Lambda.closing((K_AXIS.name, *bound), Body(body), (f"{acc}__v",))
     return Fold(axes=(K_AXIS,), operands=operands, lift=lift, init=init, combine=combine)
 
@@ -77,7 +79,7 @@ def test_a_bilinear_term_puts_its_k_last_operand_first_at_formation() -> None:
 def test_a_multi_channel_term_puts_the_shared_operand_first_at_formation() -> None:
     """With several products A is the argument they share, whatever the slab layouts say."""
     x, g, u = _slab("l", "x", "k", "m"), _slab("g", "wg", "n", "k"), _slab("u", "wu", "n", "k")
-    init, combine = M("add", "add", names=("acc_g", "acc_u"))
+    init, combine = (0.0, 0.0), Lambda.componentwise(("add", "add"), ("acc_g", "acc_u"))
     body = (Assign(name="acc_g__v", op="multiply", args=("g", "l")), Assign(name="acc_u__v", op="multiply", args=("u", "l")))
     lift = Lambda.closing(("k", "g", "u", "l"), Body(body), ("acc_g__v", "acc_u__v"))
     fold = Fold(axes=(K_AXIS,), operands=(g, u, x), lift=lift, init=init, combine=combine)
@@ -228,7 +230,7 @@ def test_a_broadcast_store_opens_the_sweep_axis_its_spec_names() -> None:
 
 
 def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
-    init, combine = M("add", names=("acc",))
+    init, combine = (0.0,), Lambda.componentwise(("add",), ("acc",))
     observe = Lambda(params=("k", "acc"), body=Body((Assign(name="acc__obs", op="copy", args=("acc",)),)), results=("acc__obs",))
     lift = Lambda.closing(("k", "y"), Body((Assign(name="acc__v", op="copy", args=("y",)),)), ("acc__v",))
     scan = Fold(axes=(K_AXIS,), operands=(_slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine, observe=observe)
@@ -240,19 +242,23 @@ def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
 # --- the merge: the combine applied at a second state -------------------------------------------- #
 
 
-def _twisted() -> Fold:
-    """The exp-family ``(m, l)`` carrier: a generated twisted combine over a ``(score, 1)`` singleton."""
-    names, other = ("m", "l"), ("m__o", "l__o")
-    combine = Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names)
+def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
+    """The exp-family ``(m, l)`` carrier: the softmax recipe's program over a ``(score, 1)`` singleton."""
     body = Body((Assign(name="s", op="copy", args=("y",)), Const(name="one", value=1.0)))
     lift = Lambda.closing(("k", "y"), body, ("s", "one"))
-    return Fold(axes=(K_AXIS,), operands=(_slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), combine=combine)
+    return Fold(axes=(K_AXIS,), operands=(_slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), combine=SOFTMAX.program(states))
+
+
+def test_a_twisted_state_spelling_never_reaches_the_canonical_form() -> None:
+    """The combine's own names — its second operand, its rescale temps — renumber after the term's,
+    so two folds equal up to what they called their accumulators have EQUAL canonical forms."""
+    assert _twisted().canonical() == _twisted(("p", "q")).canonical()
 
 
 def test_a_componentwise_merge_is_one_accum_per_state() -> None:
     """Each state component is reassigned by an ``Accum`` — the form that folds in place AND whose
     ``op.identity`` the ONE identity placement seeds with. A planar ⊕ needs no temps."""
-    init, combine = M("add", "maximum", names=("acc0", "acc1"))
+    init, combine = (0.0, -1e30), Lambda.componentwise(("add", "maximum"), ("acc0", "acc1"))
     body = Body((Assign(name="a0", op="copy", args=("y",)), Assign(name="a1", op="negative", args=("y",))))
     lift = Lambda.closing(("k", "y"), body, ("a0", "a1"))
     fold = Fold(axes=(K_AXIS,), operands=(_slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine)

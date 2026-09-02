@@ -4,7 +4,7 @@ The value types are used by both the tile IR and the kernel materializer, so the
 one concrete schedule implementation.
 
 **The schedule is separate from the combine.** The combine (the ⊕) lives in the op tree
-(:mod:`emmy.compiler.ir.pure.algebra` + :mod:`~emmy.compiler.ir.tile.ir`). This module owns the
+(:mod:`emmy.compiler.ir.pure.fold` + :mod:`~emmy.compiler.ir.tile.ir`). This module owns the
 leaf choice types (:class:`Reduce` / :class:`Tile` / :class:`Stage` / :class:`WarpSpec` plus
 :class:`Placement`); :mod:`emmy.compiler.ir.schedule.classic` composes them into the accepted
 kernel, node, and edge assignment stored on ``TileOp.schedule``. The Fold term itself carries no

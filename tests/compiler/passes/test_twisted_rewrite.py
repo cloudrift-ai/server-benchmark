@@ -25,7 +25,6 @@ from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.pure.twist import SOFTMAX
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import split_invariant_factors
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.lowering.tile._twist import _hoist_invariant, rewrite_twisted
@@ -181,26 +180,6 @@ def test_twisted_folds_lowered_loop_is_well_formed() -> None:
     for stmt in loop.body:
         assert set(stmt.deps()) <= defined, f"{stmt} reads {sorted(set(stmt.deps()) - defined)} before definition"
         defined |= set(stmt.defines())
-
-
-def test_split_invariant_factors_reads_the_product() -> None:
-    """``sum_k c*x_k = c*sum_k x_k``: the loop-invariant leaves split off the multiply spine, the
-    loop-varying ones stay."""
-    body = [
-        Load(name="xk", input="x", index=(Var("k"),)),
-        Assign(name="p", op="multiply", args=("c", "xk")),
-    ]
-    assert split_invariant_factors(body, "p", "k") == (("c",), ("xk",))
-    assert split_invariant_factors([Load(name="xk", input="x", index=(Var("k"),))], "xk", "k") == ((), ("xk",))
-    axis_body = [Assign(name="p", op="multiply", args=("c", "k"))]
-    assert split_invariant_factors(axis_body, "p", "k") == (("c",), ("k",))
-    shared = [
-        Load(name="xk", input="x", index=(Var("k"),)),
-        Assign(name="inner", op="multiply", args=("c", "xk")),
-        Assign(name="p", op="multiply", args=("inner", "d")),
-        Assign(name="other", op="add", args=("inner", "xk")),
-    ]
-    assert split_invariant_factors(shared, "p", "k") is None
 
 
 @pytest.mark.parametrize("spelling", ["reciprocal", "divide"])

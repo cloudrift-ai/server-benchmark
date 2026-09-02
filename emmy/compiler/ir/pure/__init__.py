@@ -6,42 +6,18 @@ scope of its own to seed or tear down. The statements live in :mod:`emmy.compile
 two vocabularies meet in exactly one direction — a term is RENDERED into statements at the point
 of use (``Fold.merge`` / ``Fold.lower``), never spliced in as one.
 
-- :mod:`.lam` — :class:`~emmy.compiler.ir.pure.lam.Lambda`, the ONE binder kind.
+- :mod:`.lam` — :class:`~emmy.compiler.ir.pure.lam.Lambda`, the ONE binder kind; a plain fold's
+  combine is its ``componentwise`` program, and ``components`` reads that shape back.
 - :mod:`.fold` — :class:`~emmy.compiler.ir.pure.fold.Fold`, the ONE reduce term (what Tile IR
-  stores) plus its derived readings and its render-to-statements (``merge`` / ``step`` / ``lower``).
-- :mod:`.algebra` — the TRUE monoid ``(init, combine)``: the free constructor ``M``, the
-  DEGENERATE/TWISTED shape test, the rename lockstep and the denotational foldMap spec oracle.
+  stores) plus its derived readings, its render-to-statements (``merge`` / ``step`` / ``lower``)
+  and ``twist``.
 - :mod:`.twist` — the twist RECIPES (a twisted monoid as data: the pivot's ⊕, the channel patterns,
   the fused ⊕ program) that ``Fold.twist`` fuses a two-pass reduce pair into.
-- :mod:`.carrier` — the exp/LSE-family combine GENERATORS (twisted monoid via ψ-conjugation) and
-  the stability certificate.
-- :mod:`.normalize` — construction and alpha-equivalence normalization for pure Lambdas.
 
 The invariant these modules exist to state lives in ``ir/ARCHITECTURE.md`` ("Pure terms vs statements").
 """
 
-from emmy.compiler.ir.pure.algebra import (
-    M,
-    component_ops,
-    degenerate,
-    eval_lambda,
-    foldmap_eval,
-    rename_combine,
-)
-from emmy.compiler.ir.pure.carrier import UnstableCarrierError, exp_combine_states, exp_merge
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.lam import Lambda
 
-__all__ = [
-    "Fold",
-    "Lambda",
-    "M",
-    "UnstableCarrierError",
-    "component_ops",
-    "degenerate",
-    "eval_lambda",
-    "exp_combine_states",
-    "exp_merge",
-    "foldmap_eval",
-    "rename_combine",
-]
+__all__ = ["Fold", "Lambda"]

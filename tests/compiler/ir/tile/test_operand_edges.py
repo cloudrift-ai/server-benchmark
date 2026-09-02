@@ -18,7 +18,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold, Lambda, M
+from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(256)), Axis("n", Dim(256)), Axis("k", Dim(256))
@@ -39,7 +39,7 @@ def _projection(operands: tuple, body: tuple, results: tuple) -> Fold:
 def _reduce(operands: tuple, body: tuple, accs: tuple[str, ...]) -> Fold:
     """A reducing term over ``k`` — one ``⊕`` component per accumulator."""
     bound = tuple(name for edge in operands for name in edge.exposes)
-    init, combine = M(*([ElementwiseImpl("add")] * len(accs)), names=accs)
+    init, combine = (0.0,) * len(accs), Lambda.componentwise(("add",) * len(accs), accs)
     return Fold(
         axes=(K_AXIS,),
         operands=operands,

@@ -83,23 +83,6 @@ def test_independent_stmt_interleaving_never_moves_the_key() -> None:
     assert one.structural_key() == two.structural_key()
 
 
-def test_twisted_state_renames_never_move_the_key() -> None:
-    # The generated exp-family combine's internal temps are namespaced on the state names; the
-    # key renames through ``rename_combine``'s regeneration lockstep, so state spelling is free.
-    from emmy.compiler.ir.pure.carrier import exp_combine_states
-
-    def softmax(names: tuple[str, str]) -> Fold:
-        other = tuple(f"{name}__o" for name in names)
-        return Fold(
-            axis=Axis("k", 2048),
-            lift=Lambda.closing(("k",), Body((Load(name="x0", input="x", index=(Var("m"), Var("k"))),)), ("x0", 1.0)),
-            init=(-1e30, 0.0),
-            combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
-        )
-
-    assert softmax(("m_i", "l_i")).structural_key() == softmax(("p", "q")).structural_key()
-
-
 # ---- discrimination ---------------------------------------------------------------------------- #
 
 

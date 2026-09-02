@@ -10,7 +10,6 @@ import logging
 from dataclasses import replace
 
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.pure.algebra import product_spine, rename_combine
 from emmy.compiler.ir.pure.twist import RECIPES
 from emmy.compiler.ir.stmt import Assign, Body
 
@@ -65,6 +64,34 @@ def _varies(fold: Fold, name: str, bound: dict[str, Fold]) -> bool:
     return False
 
 
+def _product_spine(defs: dict, name: str, *, divide: bool = False):
+    """Flatten the ``⊗`` spine defining ``name`` into ``(leaf names, spine statements)`` — the
+    spine recognized by the ``semiring_product`` TRAIT, never an op-name list. ``divide``
+    additionally admits a division on the numerator side: ``(Σ x)/c`` equals ``Σ (x/c)`` for a
+    fold-invariant ``c``, but nothing licenses moving a fold into a denominator, so the divisor is a
+    leaf and only the numerator continues the spine. ``None`` when a spine node is not binary; a
+    name with no product above it is the one-leaf product."""
+    spine: list = []
+    leaves: list[str] = []
+
+    def walk(current: str) -> bool:
+        stmt = defs.get(current)
+        if isinstance(stmt, Assign):
+            if stmt.op.semiring_product:
+                if len(stmt.args) != 2:
+                    return False
+                spine.append(stmt)
+                return all(walk(arg) for arg in stmt.args)
+            if divide and stmt.op.name == "divide" and len(stmt.args) == 2:
+                spine.append(stmt)
+                leaves.append(stmt.args[1])
+                return walk(stmt.args[0])
+        leaves.append(current)
+        return True
+
+    return (tuple(leaves), tuple(spine)) if walk(name) else None
+
+
 def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     """``Σ_k c·x_k = c·Σ_k x_k`` for every factor ``c`` of the summand constant along the axis —
     the fold over the varying factors alone and the epilogue projection that applies the rest to
@@ -74,7 +101,7 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     if view is None or view.ops is None or len(view.states) != 1 or view.ops[0].reduce_canon != "add":
         return None
     result = fold.lift.results[0]
-    flattened = product_spine(fold.lift.body.definitions, result, divide=True)
+    flattened = _product_spine(fold.lift.body.definitions, result, divide=True)
     if flattened is None:
         return None
     leaves, spine = flattened
@@ -100,7 +127,7 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
         body=Body((*kept, *product)),
         results=(value,),
     )
-    inner = replace(fold, operands=operands, lift=lift, combine=rename_combine(fold.combine, lambda n: inner_state if n == state else n))
+    inner = replace(fold, operands=operands, lift=lift, combine=fold.combine.rename({state: inner_state}))
     epilogue: list[Assign] = []
     current = inner_state
     for index, leaf in enumerate(invariant):

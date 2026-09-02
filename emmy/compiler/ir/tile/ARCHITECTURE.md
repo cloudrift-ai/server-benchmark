@@ -25,12 +25,11 @@ error.
 `Fold.defines()` exposes the fold results to its containing lambda. This is what lets later statements in an SDPA
 cell read the maximum, denominator, or nested QK result without extracting or relocating any subtree.
 
-`Fold.loop` is the inverse spelling used by materialization. The term itself carries no placement or schedule.
+`Fold.lower` is the inverse spelling used by materialization. The term itself carries no placement or schedule.
 
-Every stored `combine` is claimed by a registered **monoid family** (`ir/pure/algebra.py` — componentwise, or a
-twisted entry such as exp/LSE; membership is generator-output equality, never an annotation), and the claiming family
-answers the family-shaped reads: the `TWISTED` role, the cross-partition merge realization, the rename regeneration,
-and the legality properties (`commutative`, `observable`).
+A stored `combine` is read, never annotated: `Lambda.components()` says whether it is componentwise (a planar fold —
+one `Accum` per state) or twisted (a recipe's program, `ir/pure/twist.py`), and `Fold.merge` realizes either as the
+cross-partition merge statements.
 
 A fold with an `observe` is a **scan**: the observer binds `(axis, *state)` positionally, its results are fresh names
 only kernel-boundary `OutputSpec` writes consume, and the streamed store reconstitutes inside the reduce loop after

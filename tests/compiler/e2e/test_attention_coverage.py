@@ -411,9 +411,8 @@ def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
 
     The two halves cannot share a pass while the weight names a denominator the sweep has not
     finished, so the cone's state-only factors are split off and multiplied back onto the output
-    fragments after the loop, and the carrier's psi-rescale (``carrier.exp_rescale`` — the factor
-    the merge puts on every carried channel) advances the enclosing drain's output tile per KV
-    chunk.
+    fragments after the loop, and the recipe's rescale factor (the one the merge puts on every
+    carried channel) advances the enclosing drain's output tile per KV chunk.
 
     What is asserted is that form's OBSERVABLE consequence: the carried ``(pivot, denominator)``
     pair never leaves the registers, so nothing is bridged through the stat smem rows the two-pass

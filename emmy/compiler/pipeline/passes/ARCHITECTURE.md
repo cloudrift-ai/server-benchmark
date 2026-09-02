@@ -355,9 +355,8 @@ How to comply:
 - **Write the rule per element, not per shape.** Total lift converts every reduction from its own `Accum` statements;
   nested reductions remain nested `Fold` statements regardless of which frontend operation produced them.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
-  report the first thing the transform *fundamentally cannot do*, like `ir/pure/algebra.classify_fragment_epilogue`
-  (the epilogue folds unless it has an ineligible op/dependency) — the eligible set then grows with the renderer
-  instead of with a hand-maintained list.
+  report the first thing the transform *fundamentally cannot do* (an epilogue folds unless it has an ineligible op or
+  dependency) — the eligible set then grows with the renderer instead of with a hand-maintained list.
 - **Bail conservatively on well-formedness, never on shape identity.** `return None` / `RuleSkipped` for a body
   the rule doesn't fully understand is fine; the conditions must be structural properties (escaping values,
   symbolic extents, mixed dtypes), not "is this the X kernel".

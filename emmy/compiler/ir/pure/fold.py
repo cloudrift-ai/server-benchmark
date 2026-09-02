@@ -28,7 +28,6 @@ from functools import cached_property
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.algebra import component_ops, rename_combine
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt
@@ -114,7 +113,7 @@ class ReductionView:
 @dataclass(frozen=True)
 class Fold:
     """A scheduled reduce — the typed successor of the bare annotated reduce
-    ``Loop`` (``ir/pure/algebra``). It splits the reduce's **algebra** (the loop-carried
+    ``Loop``. It splits the reduce's **algebra** (the loop-carried
     flat ⊕ — componentwise for a plain ``sum`` / ``max`` / ``mean``, a rescaling program for
     online-softmax / flash — a plain :class:`Lambda` either way) from its **structure** (the
     reduce ``axis`` + the per-element ``step`` it folds). Every reading is **derived** from those
@@ -376,7 +375,7 @@ class Fold:
             states=states,
             other=self.combine.params[len(states) :],
             terms=self.lift.results,
-            ops=component_ops(self.combine),
+            ops=self.combine.components(),
         )
 
     @cached_method
@@ -519,7 +518,7 @@ class Fold:
             if pview.ops is not None:
                 if len(pview.states) != 1 or pview.ops[0].reduce_canon != recipe.pivot:
                     continue
-            elif pivot.combine != recipe.program(pview.states):
+            elif not pivot.combine.alpha_eq(recipe.program(pview.states)):
                 continue
             if self.axis.extent != pivot.axis.extent or self.axis.window != pivot.axis.window:
                 continue
@@ -637,12 +636,20 @@ class Fold:
                 bound += 1
             operands.append(_rewrite_kind(canon, lambda name, local=local: local.get(name, name), Sigma.IDENTITY, lambda axis: axis))
 
+        combine = None
+        if self.combine is not None:
+            # The combine's own names — its second operand, its temps — are nobody else's: they
+            # renumber after the term's, so how a fold spelled its accumulators never reaches the form.
+            own = dict(mapping)
+            for name in (*self.combine.params, *(name for stmt in self.combine.body for name in stmt.defines())):
+                own.setdefault(name, f"_c{len(own)}")
+            combine = self.combine.rename(own)
         return replace(
             self,
             axes=tuple(replace(axis, name=mapping[axis.name]) for axis in self.axes),
             operands=tuple(operands),
             lift=self.lift.rename(mapping),
-            combine=None if self.combine is None else rename_combine(self.combine, lambda name: mapping.get(name, name)),
+            combine=combine,
             # The observer binds the iteration var and reads the carried state, so it renames in
             # LOCKSTEP: renaming the axis without it leaves the observer reading a name that no
             # longer exists, and a scan would then canonicalize to something that is not a term.
@@ -816,7 +823,7 @@ def _(s: Fold, rename, sigma, axis_fn):
         body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
         results=tuple(rename(r) for r in s.lift.results),
     )
-    combine = rename_combine(s.combine, rename) if s.combine is not None else None
+    combine = s.combine.rename(rename) if s.combine is not None else None
     observe = None
     if s.observe is not None:
         # The observer renames in lockstep: param 0 tracks the axis, the state params track the

@@ -227,7 +227,7 @@ def _(s: Select, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 def _(s: Loop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # Preserve the reduce ``role`` annotation through σ-offsets / axis-renames. The loop carries
     # no algebra — the fold's ⊕ lives on the ``Fold`` node, whose own rewrite handler renames the
-    # stored combine in lockstep (``rename_combine``).
+    # stored combine in lockstep (``Lambda.rename``).
     return Loop(
         axis=axis_fn(s.axis),
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),

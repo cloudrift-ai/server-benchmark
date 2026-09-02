@@ -23,10 +23,8 @@ Two vocabularies, and exactly one direction between them.
 A **statement** (`ir/stmt/`) occupies a position in an instruction stream: it has an order, a
 scope, and — for a carrier — a seed the enclosing scope has to declare. A **pure term**
 (`ir/pure/`) denotes a value: it binds names, carries an algebra, substitutes and compares up to
-α-renaming, and has no position at all. `Lambda`, the `Fold` term, the monoid vocabulary (`M` / `component_ops` /
-`rename_combine` / the foldMap spec oracle), the twist recipes (`ir/pure/twist.py` — a twisted monoid as data,
-which `Fold.twist` fuses a reduce and the reduce it reads into) and the exp-family combine generators all live on
-the term side.
+α-renaming, and has no position at all. `Lambda`, the `Fold` term and the twist recipes (`ir/pure/twist.py` — a
+twisted monoid as data, which `Fold.twist` fuses a reduce and the reduce it reads into) all live on the term side.
 
 **A pure class is never a `Stmt` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
@@ -305,9 +303,8 @@ stored `combine`). Commutativity
 is unused — split/reorder legality is a future cooperative-tier concern, recorded
 structurally when it returns.
 
-**The algebra is in the term, not a tag** (`ir/pure/algebra.py` — the consolidated algebraic
-vocabulary). There is no stored / derived `AlgebraKind` and no op-tree node zoo. The stored tile IR has
-exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
+**The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
+stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
 
 - an OPTIONAL iteration `axis` (`None` = the zero-axis node);
 - a pure `lift` `Lambda` `λ(k, v₁…vₙ) → S` — the element's SINGLETON state (ι is spelled in the lift;
@@ -355,11 +352,11 @@ semiring and operand roles prove it; the mma atom tier reads the resulting Fold 
 
 **The `Algebra` bundle is retired** — the stored term keeps exactly ONE spelling of ⊕, the
 `Fold` node's flat `(init, combine)` pair, and everything else derives where it is consumed.
-`ir/pure/algebra.py` is the IR core only: `M` (the componentwise free constructor),
-`component_ops`/`degenerate` (the DEGENERATE-vs-TWISTED shape test on a stored combine — `None` ⇒
-the exp family; no family annotation), `rename_combine` (the SSA-rename lockstep, applied by the
-`Fold` rewrite handler — a twisted program regenerates over the renamed state), and the
-denotational foldMap spec oracle. The state⊕state combine's one statement realization is the term's
+`Lambda.componentwise` builds a plain fold's combine and `Lambda.components` reads the shape back off any
+stored combine (the componentwise op vector, or `None` for a twisted program — no family annotation); the `Fold`
+rewrite handler renames the combine through `Lambda.rename` in lockstep with the body, and `Fold.canonical`
+renumbers the combine's own names (its second operand, its temps) after the term's, so how a fold spelled its
+accumulators never reaches the form. The state⊕state combine's one statement realization is the term's
 own `Fold.merge(other)`, of which `Fold.step` is the instance at the injected singleton; the kernel
 materializer reads the algebra through `Fold.as_reduction()` (the `ReductionView`: states, the
 second operand's names, the terms, the componentwise op vector or `None` for a twisted combine) and
@@ -377,13 +374,14 @@ its own definition, not a value the lowering path consults — which is why remo
 measurement replay and the cubin cache, in exchange for a field nothing reads.
 
 **The twisted combine — a recipe, never hand-authored on a term.** Transport of structure: a monoid `(·, e)`
-conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`. Generation
-(`ir/pure/carrier.py` — `exp_combine_states` over `(names, other)`) builds the naive `ψ∘base∘(ψ⁻¹×ψ⁻¹)` combine —
-associativity inherited from the base monoid for free — then a per-family stabilizer rewrites it to the
-numerically-stable form and a structural certificate asserts every surviving `exp` has a `≤ 0` argument. A
-**recipe** (`ir/pure/twist.py`) states the twisted monoid as data: the pivot's ⊕, one pattern per channel (the
-per-element map a dependent reduce's lift must spell, over ROLES — `exp(s − g)` for a denominator, `exp(s − g)·v` for
-an expectation), what each channel injects at the singleton (`1`, `v`), and the fused ⊕ builder. `Fold.twist(recipe)`
+conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`, associative because the base
+monoid is. A **recipe** (`ir/pure/twist.py`) states that monoid as data, in its numerically stable form: the pivot's
+⊕, one pattern per channel (the per-element map a dependent reduce's lift must spell, over ROLES — `exp(s − g)` for a
+denominator, `exp(s − g)·v` for an expectation), what each channel injects at the singleton (`1`, `v`), and the fused
+⊕ as two lambdas over roles — the pivot pair's `advance` to the new pivot and the factors the move puts on every
+carried channel (`exp(g − G)`, `exp(g′ − G)`: no `exp` argument is ever positive), and one channel pair's `rescale`
+by those factors. `Recipe.program(states)` instantiates them over a fold's state names by renaming, and the
+property tests pin the result's associativity. `Fold.twist(recipe)`
 fuses a reduce onto the reduce it reads, found among its operands: the pivot's state is the lift param bound to it,
 the score is the sub-cone of the lift alpha-equal to the pivot's own per-element map (operand for operand, through a
 projection's
@@ -393,7 +391,7 @@ and flash attention are one recipe: the expectation channel joins by the same ca
 fold. **Example** — the online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf, 0)`, merge
 `m_new=max(m,s); d=d·exp(m−m_new)+exp(s−m_new); m=m_new`.
 
-**The λ-foldMap primitives** (`ir/pure/lam.py` / `ir/pure/algebra.py`) — the finished algebra vocabulary the tile IR
+**The λ-foldMap primitives** (`ir/pure/lam.py`) — the finished algebra vocabulary the tile IR
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
 binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated in
 `__post_init__` via the **`Stmt.pure` trait** (declared on the `Stmt` interface, conservative `False` default;
@@ -415,16 +413,13 @@ may be a bare
 is `(x, 1)`). The TRUE monoid is the flat `(init, combine)` pair stored directly on the `Fold` (the `Monoid` wrapper
 class dissolved at 1r) — ONE program, `combine : S × S → S` a pure `Lambda` whose
 results carry the fold's REAL accumulator names; the serial streaming step is NEVER stored (it derives as combine
-specialized at the singleton), so update-vs-combine consistency holds by construction. `M(op…)` is the free
-componentwise pair constructor (DEGENERATE is the derived `component_ops(combine)` shape predicate, not a storage
-arm; `rename_combine` carries the rename lockstep incl. the twisted regeneration rule). A `Fold` carries NO
+specialized at the singleton), so update-vs-combine consistency holds by construction. `Lambda.componentwise`
+builds a plain fold's combine (DEGENERATE is the derived `Lambda.components()` shape reading, not a storage
+arm). A `Fold` carries NO
 precision: accumulator dtype is a KERNEL-IR fact, stamped on the lowered `Accum` by the Init-placement pass, and a
-reduce `Loop` arriving with a typed `Accum` is not canonical input to total lift. A twisted
-monoid's
-combine is the exp/LSE generator's program, selected structurally, never by a stored family name. The module also
-ships the executable SPEC: `eval_lambda` / `foldmap_eval`, the ~20-line denotational evaluator the agreement
-(`⟦tree⟧ == lowered loop`) and ASSOCIATIVITY property tests in `tests/compiler/ir/stmt/test_lambda_monoid.py` run
-against.
+reduce `Loop` arriving with a typed `Accum` is not canonical input to total lift. A twisted monoid's combine is a
+recipe's program, recognized by canonical form (`Fold.twist`), never by a stored family name;
+`tests/compiler/ir/pure/test_twist.py` pins its associativity on random states.
 
 ### `loop/ir.py` — LoopOp types
 
@@ -464,10 +459,7 @@ Construction never fails: unresolved names are data, and chaining scope levels m
 matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
 `lowering/tile/030_cut`) — eligibility judgments stay in the rules, per
-`pipeline/passes/ARCHITECTURE.md`. The
-`classify_fragment_epilogue` walk (`ir/pure/algebra.py`) deliberately does NOT use it: it is a single pass
-interleaving reduce-scope flags with its negative-form blocker reporting, a different operator than the cone's
-any-dep taint.
+`pipeline/passes/ARCHITECTURE.md`.
 
 `rewrite` has two distinct rename channels that must stay disjoint:
 `rename_ssa` carries **SSA-name** renames, `sigma` carries **axis**

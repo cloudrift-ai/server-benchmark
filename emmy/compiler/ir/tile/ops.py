@@ -17,7 +17,6 @@ ahead of a lowering walk."""
 from __future__ import annotations
 
 from emmy.compiler.dtype import get as get_dtype
-from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -165,34 +164,6 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     cell_bound = tuple(name for edge in cell_ops for name in edge.exposes)
     cell_results = next((stmt.defines()[-1:] for stmt in reversed(tuple(cell_body)) if stmt.defines()), ())
     return Fold(operands=cell_ops, lift=Lambda.closing(cell_bound, cell_body, cell_results))
-
-
-def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
-    """The general additive-fold factor split ``Σₖ c·xₖ = c·Σₖ xₖ``: flatten the two-arg
-    ``multiply`` spine defining ``value`` over a reduce-loop body and split the leaf factor
-    names into ``(c — the loop-invariant factors, names defined outside the body; the
-    loop-varying leaves)``, left-to-right. The loop axis itself counts as loop-varying. The
-    spine must be private to the product — a spine temp read by any other body stmt (or a
-    non-binary multiply) returns ``None``, and the caller keeps the loop's current reading.
-    A bare leaf is the degenerate product: ``((), (value,))``.
-
-    The ALGEBRAIC LICENSE is a semiring fact: a factor constant along the fold axis commutes out
-    of the fold because ⊗ is associative + commutative and distributes over the fold's ⊕ — the
-    same reassociation category as split-K and the mul-hoist. The one registered ⊗ today is
-    ``multiply`` (``ElementwiseImpl._SEMIRING``), which this helper spells directly."""
-    defs: dict[str, object] = {n: s for s in body for n in s.defines()}
-    flattened = product_spine(defs, value)
-    if flattened is None:
-        return None
-    leaf_names, spine_stmts = flattened
-    leaves = list(leaf_names)
-    spine = [stmt.name for stmt in spine_stmts]
-    spine_reads = {n for n in spine if n != value}
-    for s in body:
-        if not (isinstance(s, Assign) and s.name in spine) and set(s.deps()) & spine_reads:
-            return None
-    inv = tuple(n for n in leaves if n not in defs and n != axis_name)
-    return inv, tuple(n for n in leaves if n in defs or n == axis_name)
 
 
 class Sched:
@@ -589,5 +560,4 @@ __all__ = [
     "projection_tail",
     "reduce_plan",
     "sched_of",
-    "split_invariant_factors",
 ]

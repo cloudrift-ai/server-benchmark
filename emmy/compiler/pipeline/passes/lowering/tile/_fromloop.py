@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.pure import Lambda, M
+from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
@@ -224,7 +224,10 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     # own — at the construction site, which is the one that knows it is turning a Loop into a term.
     edges, lift, coordinates = _close((loop.axis.name,), edges, plain, tuple(stmt.value for stmt in accums), axes, levels)
     fold_axes = (*coordinates, loop.axis)
-    init, combine = M(*(stmt.op for stmt in accums), names=names)
+    ops = tuple(stmt.op for stmt in accums)
+    if not all(op.has_identity for op in ops):
+        raise ValueError(f"reduce loop {loop.axis.name!r}: an Accum op without an identity is not a monoid ⊕")
+    init, combine = tuple(op.identity for op in ops), Lambda.componentwise(ops, names)
     if not writes:
         return Fold(axes=fold_axes, operands=edges, lift=lift, init=init, combine=combine), ()
     stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))

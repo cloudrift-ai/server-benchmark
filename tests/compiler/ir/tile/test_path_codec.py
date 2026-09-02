@@ -9,7 +9,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.path import Site, _spellings, canonical, family_sites, parse_key, primary, resolve, sites, spell
+from emmy.compiler.ir.tile.path import Site, _spellings, canonical, parse_key, resolve, sites, spell
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
@@ -57,38 +57,6 @@ def _norm_linear_tree() -> tuple[Fold, Fold, Fold]:
     product = _contraction_fold("k", a=_cone(stat))
     root = Fold.projection(operands=(product,))
     return root, product, stat
-
-
-def _flash_tree() -> tuple[Fold, Fold, Fold, Fold]:
-    """The flash shape, λ-spelled (step 7 — mirroring ``_flash._flash_op``): the stream fold
-    reduces ``kv`` with the QK (axis ``dd``) score fold hoisted as ``operands[0]`` and the value
-    ``Load`` as ``operands[1]``; the PV (axis ``pj``) contraction is DERIVED — synthesized into
-    the blocked evaluation, found among ``stream.step_stmts()``.
-
-    Both are read by AXIS, not by position: the derived step PLACES an inline-node edge at the
-    first read of its bound name, so the score sits after any lift stmt that precedes it (here the
-    ``scale`` ``Load``)."""
-    from emmy.compiler.ir.pure import Lambda
-    from emmy.compiler.ir.pure.carrier import exp_combine_states
-
-    qk = _contraction_fold("dd", acc="sacc", w="K")
-    names = ("m_i", "l_i", "O_i")
-    other = tuple(f"{n}__o" for n in names)
-    lift = Lambda(
-        params=("kv", "sacc", "v_e"),
-        body=Body((Load(name="scale", input="_scale", index=()), Assign(name="s", op="multiply", args=("sacc", "scale")))),
-        results=("s", 1.0, "v_e"),
-    )
-    stream = Fold(
-        axis=Axis("kv", 512),
-        operands=(qk, Load(name="v_e", input="V", index=(Var("kv"), Var("d")))),
-        lift=lift,
-        init=(float("-inf"), 0.0, 0.0),
-        combine=Lambda(params=names + other, body=Body(exp_combine_states(names, other)), results=names),
-    )
-    pv = next(s for s in stream.step_stmts() if isinstance(s, Fold) and s.axis.name == "pj")  # the derived PV site
-    root = Fold.projection(operands=(stream,))
-    return root, stream, qk, pv
 
 
 # ---- canonical placement spellings -------------------------------------------------------------- #
@@ -144,14 +112,6 @@ def test_walker_enumerates_paths_axes_and_ordinals() -> None:
     assert all(s.ordinal == 1 for s in sites(root))
 
 
-def test_family_sites_and_primary() -> None:
-    root, stream, qk, _pv = _flash_tree()
-    all_sites = sites(root)
-    placements = family_sites("PLACE", all_sites)
-    assert {id(s.node) for s in placements} == {id(stream), id(qk)}
-    assert primary("PLACE", placements).node is stream
-
-
 def test_site_is_a_frozen_value() -> None:
     s = Site(node=None, axis="k", segments=("fold",))
     assert s.depth == 1 and s.ordinal == 1
@@ -190,30 +150,6 @@ def test_exact_full_path_uses_the_ordinal_reading_that_matched() -> None:
     key = _spellings("PLACE", shallow, all_sites)
     assert key == "PLACE@map.fold.a.fold.b1"
     assert resolve(None, key, all_sites=all_sites).node is shallow.node
-
-
-def test_identity_miss_is_loud_never_the_untiled_path() -> None:
-    """A copied node (``dataclasses.replace`` — structurally equal, a different object) is NOT a
-    site of the tree: addressing a schedule read through it must raise ``UnknownSiteError``, never
-    resolve to ``None``/untiled. A node that IS a site but not of the asked family keeps its plain
-    ``ValueError`` — the "family doesn't apply" decline the accessors swallow."""
-    import dataclasses
-
-    from emmy.compiler.ir.tile.ops import Sched
-    from emmy.compiler.ir.tile.path import UnknownSiteError
-
-    root, stream, qk, pv = _flash_tree()
-    copy = dataclasses.replace(qk)
-    assert copy == qk and copy is not qk
-    sched = Sched(TileOp(op=root))
-    with pytest.raises(UnknownSiteError):
-        sched.site_of(copy)
-    with pytest.raises(UnknownSiteError):
-        sched.key("TILE", copy)
-    assert sched.site_of(qk).node is qk
-    plain = _planar_fold()
-    wrapper = Fold.projection(body=Body((Assign(name="o", op="copy", args=(plain.out,)),)), operands=(plain,))
-    assert Sched(TileOp(op=wrapper)).key("TILE", plain) is None  # a real site, family declines — not an identity miss
 
 
 def test_tile_axis_orientation_is_read_once_per_site(monkeypatch) -> None:

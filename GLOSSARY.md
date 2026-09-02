@@ -82,10 +82,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
   kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
   fold only.
-- **Monoid family** — One registered fold algebra: a componentwise monoid, or its conjugation by a bijection (a
-  twist) such as the exp/LSE family behind online softmax. A family claims a stored combine only when its generator
-  would have emitted exactly that program, and it carries the algebra's legality properties (commutative,
-  observable). Registered in `ir/pure/algebra.py`.
+- **Componentwise / twisted combine** — The two shapes a stored fold combine takes: one independent ⊕ per state (a
+  planar fold — sum, max — built by `Lambda.componentwise` and read back by `Lambda.components`), or a componentwise
+  monoid conjugated by a bijection (a twist) such as the exp/LSE family behind online softmax, stated by a twist
+  recipe. Read off the program, never annotated.
 - **Broadcasting** — Reusing a smaller tensor across a larger shape. For example, one weight per column can be
   reused for every row.
 - **Index map** — A description of how output coordinates correspond to input coordinates. Emmy uses index maps for
@@ -124,8 +124,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   over equal axes denote one value; over different axes they are one function with distinct values.
 - **Twist recipe** — A twisted monoid stated as data (`ir/pure/twist.py`): the pivot's ⊕, one pattern per channel
   (the per-element map a dependent reduce's lift must spell, over roles), what each channel injects at the singleton,
-  and the fused ⊕ program. `Fold.twist(recipe)` finds the pivot among the term's operands and matches by position
-  and canonical form, never by a term's names.
+  and the fused ⊕ program as two lambdas over roles (the pivot pair's advance and the factors it puts on every
+  carried channel; one channel pair's rescale by them). `Fold.twist(recipe)` finds the pivot among the term's
+  operands and matches by position and canonical form, never by a term's names.
 - **Structural identity / structural key** — A fingerprint based on computation and data flow rather than cosmetic
   names. It lets Emmy recognize equivalent compiler candidates.
 - **Idempotent rule** — A rule that does not keep changing its own output when applied again. Compiler rewrite rules

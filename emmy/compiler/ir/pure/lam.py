@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.stmt.base import pretty_body
 from emmy.compiler.ir.stmt.body import Body, _exposed_defines
 from emmy.compiler.ir.stmt.leaves import Assign, Load
@@ -148,6 +149,31 @@ class Lambda:
         residual = set(body.ssa_uses)
         residual |= set(results)
         return cls(params=(*params, *sorted(residual - bound)), body=body, results=tuple(results))
+
+    @classmethod
+    def componentwise(cls, ops, names: tuple[str, ...]) -> Lambda:
+        """The componentwise binary program — each result its own ⊕ over its two operands,
+        ``nᵢ = ⊕ᵢ(nᵢ, nᵢ__o)``: ``S × S → S`` with the second operand spelled ``<n>__o``, a plain
+        fold's combine, the shape :meth:`components` reads back."""
+        other = tuple(f"{name}__o" for name in names)
+        body = Body(tuple(Assign(name=name, op=op, args=(name, second)) for name, op, second in zip(names, ops, other, strict=True)))
+        return cls(params=(*names, *other), body=body, results=tuple(names))
+
+    def components(self) -> tuple[ElementwiseImpl, ...] | None:
+        """The per-result ops when this program is componentwise — every result ``rᵢ = ⊕ᵢ(pᵢ, pₙ₊ᵢ)``
+        on its own, in either argument order for a commutative ⊕ — else ``None``: the planar-vs-
+        twisted reading of a fold's combine (a cross-component read or a rescale temp fails it)."""
+        n = len(self.results)
+        if len(self.body) != n or len(self.params) != 2 * n:
+            return None
+        definitions = self.body.definitions
+        ops = []
+        for index, result in enumerate(self.results):
+            stmt, pair = definitions.get(result), (self.params[index], self.params[n + index])
+            if not isinstance(stmt, Assign) or (stmt.args != pair and not (stmt.op.commutative and stmt.args == pair[::-1])):
+                return None
+            ops.append(stmt.op)
+        return tuple(ops)
 
     @property
     def defined(self) -> frozenset[str]:

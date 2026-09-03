@@ -4,8 +4,10 @@
 `Placement.free`, then converts every remaining reduction loop into a `Fold`, recording every axis the nest bound —
 free, reduce, sweep — in the kernel's axis table, `TileOp.axes`: a term names its axes and the kernel holds their
 extents and windows (`TileOp.axis_of`, `Sched.axis_of`), so a split registers its slice and partition there and
-`Fold.lower` takes the table whole. `TileOp.__post_init__` subsequently canonicalizes the complete Fold tree before
-the separate algebraic rewrite and scheduling passes.
+`Fold.lower` takes the table whole. The kernel OWNS that table, complete by construction: `TileOp.__post_init__`
+adds the placement's free axes and refuses a term binding a reduce axis, or a store carrying a sweep, the table has no
+extent for — a piece that drops a traced axis fails where it is built, never later under a reader. It also
+canonicalizes the complete Fold tree before the separate algebraic rewrite and scheduling passes.
 
 The invariant is simple: **a lifted Tile IR kernel contains no raw inner `Loop`**. A reduction nested in another
 reduction occupies the same statement position in the parent fold's `lift.body`, so source order and SSA scope are

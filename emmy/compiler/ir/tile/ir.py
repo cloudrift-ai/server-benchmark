@@ -294,6 +294,7 @@ class TileOp(Op):
             if store.sweep is not None and any(any(store.sweep.name in edge.free_axes for edge in con.operands) for con in contractions)
         }
         if not promoted:
+            self._own_axes()
             self._validate_schedule()
             return
         free_names = {axis.name for axis in self.place.free}
@@ -319,7 +320,28 @@ class TileOp(Op):
                 for store in self.output_specs
             ),
         )
+        self._own_axes()
         self._validate_schedule()
+
+    def _own_axes(self) -> None:
+        """The kernel owns its axis table, COMPLETE by construction: the free axes' extents are the
+        placement's and join the table here; every reduce axis the term binds and every store
+        sweep must already be in it. The term carries names only, so a reader resolving a name the
+        table lacks would fail long after the site that dropped it — the cut piece that forgot a
+        traced reduce axis surfaced as ``lower: no extent`` under the greedy's pricing."""
+        if self.op is None:
+            return
+        table = {axis.name: axis for axis in self.axes}
+        for axis in self.place.free:
+            table.setdefault(axis.name, axis)
+        needed = {site.node.axis for site in sites(self.op) if site.node.axis is not None}
+        needed |= {spec.sweep.name for spec in self.output_specs if spec.sweep is not None}
+        if missing := needed - table.keys():
+            raise ValueError(
+                f"TileOp {self.name!r}: the axis table has no extent for {sorted(missing)} — "
+                "every reduce axis the term binds and every store sweep is the kernel's to hold"
+            )
+        object.__setattr__(self, "axes", tuple(table.values()))
 
     def _validate_schedule(self) -> None:
         """Enforce the schedule/materialization boundary on construction."""

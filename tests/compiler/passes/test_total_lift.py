@@ -94,6 +94,32 @@ def test_epilogue_stays_in_the_projection_body() -> None:
     assert {stmt.input for stmt in node.lift.body if isinstance(stmt, Load)} == {"b"}
 
 
+def test_a_product_argument_computed_in_the_step_factors_into_a_cone_operand() -> None:
+    """The norm→linear step ``acc += (x[m,k] * r[m]) * w[n,k]`` is a semiring step whose A is
+    COMPUTED: formation hoists the ``x * r`` chain into a zero-axis operand so the lift is the
+    product alone and the term reads as a contraction, A first, over the cone and the weight slab."""
+    m, n, k = Axis("m", Dim(32)), Axis("n", Dim(64)), Axis("k", Dim(128))
+    inner = Body(
+        (
+            Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+            Load(name="rv", input="r", index=(Var("m"),)),
+            Assign(name="xn", op=ElementwiseImpl("multiply"), args=("xv", "rv")),
+            Load(name="wv", input="w", index=(Var("n"), Var("k"))),
+            Assign(name="prod", op=ElementwiseImpl("multiply"), args=("xn", "wv")),
+            Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+        )
+    )
+    cell = (Loop(axis=k, body=inner), Write(output="out", index=(Var("m"), Var("n")), value="acc"))
+    tile = _tile(Body((Loop(axis=m, body=Body((Loop(axis=n, body=Body(cell)),))),)))
+    node = tile.op
+    view = node.as_contraction()
+    assert view is not None and (tile.axis_of(view.left).extent, tile.axis_of(view.right).extent) == (Dim(32), Dim(64))
+    cone, weight = node.operands
+    assert cone.axis is None and len(cone.exposes) == 1 and weight.as_slab().load.input == "w"
+    assert {edge.as_slab().load.input for edge in cone.operands} == {"x", "r"}
+    assert [stmt.op.name for stmt in node.lift.body] == ["multiply"]
+
+
 def test_non_distributing_lift_stays_planar() -> None:
     m, n, k = Axis("m", Dim(32)), Axis("n", Dim(64)), Axis("k", Dim(128))
     inner = Body(

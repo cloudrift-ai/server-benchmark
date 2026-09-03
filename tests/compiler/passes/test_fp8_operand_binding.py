@@ -74,7 +74,13 @@ def _bind(loop, m: str = "m", n: str = "n"):
     inner = [edge for edge in root.operands if edge.as_contraction() is not None]
     if not inner:
         return None
-    return inner[0], tuple(root.lift.body)
+    return inner[0], _statements(root)
+
+
+def _statements(term) -> tuple:
+    """A zero-axis term's statements in the old flat spelling — its slab operands as their loads
+    ahead of its lift body — so an epilogue or a cone reads as one statement list."""
+    return (*(edge.as_slab().load for edge in term.operands if edge.as_slab() is not None), *term.lift.body)
 
 
 def _dequant_loop(*, scale_index=None, scale_op="multiply", decode="from_f8e4m3", extra_factor=False):
@@ -155,8 +161,7 @@ def test_k_varying_scale_binds_as_whole_computed_b_cone():
     con, epi = bound
     assert con.operands[0].as_slab() is not None and con.operands[1].as_slab() is None and con.operands[1].axis is None
     assert not [s for s in epi if isinstance(s, Load) and s.input == "w_scale"], "a k-varying scale must NOT hoist"
-    cone = list(con.operands[1].lift.body)
-    assert {s.input for s in cone if isinstance(s, Load)} == {"w_scale", "w_bits"}
+    assert {s.input for s in _statements(con.operands[1]) if isinstance(s, Load)} == {"w_scale", "w_bits"}
 
 
 def test_non_decode_computed_b_preserves_cone_instead_of_positional_misbind():

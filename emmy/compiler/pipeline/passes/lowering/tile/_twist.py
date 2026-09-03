@@ -12,6 +12,7 @@ from dataclasses import replace
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import RECIPES
 from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import product_spine
 
 logger = logging.getLogger(__name__)
 
@@ -69,34 +70,6 @@ def _varies(fold: Fold, name: str, bound: dict[str, Fold]) -> bool:
     return False
 
 
-def _product_spine(defs: dict, name: str, *, divide: bool = False):
-    """Flatten the ``⊗`` spine defining ``name`` into ``(leaf names, spine statements)`` — the
-    spine recognized by the ``semiring_product`` TRAIT, never an op-name list. ``divide``
-    additionally admits a division on the numerator side: ``(Σ x)/c`` equals ``Σ (x/c)`` for a
-    fold-invariant ``c``, but nothing licenses moving a fold into a denominator, so the divisor is a
-    leaf and only the numerator continues the spine. ``None`` when a spine node is not binary; a
-    name with no product above it is the one-leaf product."""
-    spine: list = []
-    leaves: list[str] = []
-
-    def walk(current: str) -> bool:
-        stmt = defs.get(current)
-        if isinstance(stmt, Assign):
-            if stmt.op.semiring_product:
-                if len(stmt.args) != 2:
-                    return False
-                spine.append(stmt)
-                return all(walk(arg) for arg in stmt.args)
-            if divide and stmt.op.name == "divide" and len(stmt.args) == 2:
-                spine.append(stmt)
-                leaves.append(stmt.args[1])
-                return walk(stmt.args[0])
-        leaves.append(current)
-        return True
-
-    return (tuple(leaves), tuple(spine)) if walk(name) else None
-
-
 def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     """``Σ_k c·x_k = c·Σ_k x_k`` for every factor ``c`` of the summand constant along the axis —
     the fold over the varying factors alone and the epilogue projection that applies the rest to
@@ -106,7 +79,7 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     if view is None or view.ops is None or len(view.states) != 1 or view.ops[0].reduce_canon != "add":
         return None
     result = fold.lift.results[0]
-    flattened = _product_spine(fold.lift.body.definitions, result, divide=True)
+    flattened = product_spine(fold.lift.body.definitions, result, divide=True)
     if flattened is None:
         return None
     leaves, spine = flattened
@@ -181,15 +154,22 @@ def _reads_reduce(edge: Fold) -> bool:
 def _candidates(term: Fold):
     """The spellings of ``term`` a recipe is tried on, each with the replacement its fusion implies
     — the term itself; with its invariant factors hoisted into an epilogue projection; with a
-    projection composed in, so a pivot behind one is an operand."""
-    yield term, lambda fused, offset: (fused, offset)
-    hoisted = _hoist_invariant(term)
-    if hoisted is not None:
-        inner, epilogue = hoisted
-        yield inner, lambda fused, offset, inner=inner, epilogue=epilogue: (_replace(epilogue, {id(inner): (fused, offset)}), 0)
+    projection composed in, so a pivot behind one is an operand, and hoisted again after that."""
+
+    def spellings(candidate: Fold):
+        yield candidate, lambda fused, offset: (fused, offset)
+        hoisted = _hoist_invariant(candidate)
+        if hoisted is not None:
+            inner, epilogue = hoisted
+            yield inner, lambda fused, offset, inner=inner, epilogue=epilogue: (_replace(epilogue, {id(inner): (fused, offset)}), 0)
+
+    yield from spellings(term)
     for edge in term.operands:
         if _reads_reduce(edge) and len(edge.exposes) == 1:
-            yield _inline(term, edge), lambda fused, offset: (fused, offset)
+            # A factored product argument (flash's P cone) is composed back in, then hoisted like
+            # the term itself: the two rewrites compose, so a pivot behind a cone that also carries
+            # an invariant factor (P's ``1/l``) is reachable.
+            yield from spellings(_inline(term, edge))
 
 
 def _click(root: Fold, axes: dict) -> dict[int, tuple[Fold, int]] | None:

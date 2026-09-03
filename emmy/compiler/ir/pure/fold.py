@@ -210,7 +210,7 @@ class Fold:
         # product both arguments are shared, so the layout rule decides: A reads ``[…, k]``, its
         # reduction axis last, which lets a fragment load stride its rows contiguously. Binding is
         # positional, so the lift's params move with the operands; the body reads by name.
-        if len(self.operands) >= 2 and all(isinstance(stmt, Assign) and len(stmt.args) == 2 for stmt in lam.body):
+        if len(self.operands) >= 2 and lam.body and all(isinstance(stmt, Assign) and len(stmt.args) == 2 for stmt in lam.body):
             by_name = {param: edge for param, edge, _ in self.bindings}
             arguments = [product.args for product in lam.body]
             if len(arguments) > 1:
@@ -218,7 +218,9 @@ class Fold:
                 a_edge = shared[0] if len(shared) == 1 else None
             else:
                 pair = [by_name[name] for name in arguments[0] if name in by_name]
-                k_last = [e for e in pair if e.as_slab() is not None and self.axis in e.as_slab().load.index[-1].free_vars()]
+                # Two SLABS orient by layout; a computed operand keeps the order its former chose.
+                slabs = len(pair) == 2 and all(e.as_slab() is not None for e in pair)
+                k_last = [e for e in pair if slabs and self.axis in e.as_slab().load.index[-1].free_vars()]
                 # Both k-last (a matmul): A is the one reading the earlier free coordinate — the
                 # row, under the lift's declaration order — so alpha-equal terms orient alike.
                 k_last.sort(key=lambda e: min((n for n in e.free_axes if n != self.axis), default=""))
@@ -489,6 +491,8 @@ class Fold:
             if pview.ops is not None:
                 if len(pview.states) != 1 or pview.ops[0].reduce_canon != recipe.pivot:
                     continue
+            elif recipe.combine is not None and len(pview.states) != len(recipe.combine.results):
+                continue  # a fixed-arity recipe's ⊕ is over exactly its carrier; another recipe's fold is not its pivot
             elif not pivot.combine.alpha_eq(recipe.program(pview.states)):
                 continue
             if axes[self.axis].extent != axes[pivot.axis].extent or axes[self.axis].window != axes[pivot.axis].window:
@@ -719,8 +723,10 @@ class Fold:
         read = self.free_axes | {name for spec in stores for expr in spec.write.index for name in expr.free_vars()}
         if missing := read - bound - internal - set(coordinates):
             raise ValueError(f"lower: no extent for coordinates {sorted(missing)} — the closed program takes them as axes")
+        # A name a nested reduce binds is still a free coordinate here when the tree reads it free
+        # (a stat over the row beside a slab of the same row): the reduce loop shadows it inside.
         opened = sorted(
-            (name for name in coordinates if name in read and name not in bound and name not in internal),
+            (name for name in coordinates if name in read and name not in bound and (name not in internal or name in self.free_axes)),
             key=lambda name: (-readers.get(name, 0), declared.index(name)),
         )
         nest: dict[tuple[str, ...], list[Stmt]] = {(): []}

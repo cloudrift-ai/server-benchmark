@@ -65,12 +65,14 @@ materialized operand reads it contiguously, the commutative product puts the con
 placement then derives the corresponding physical M/N orientation from the operand axes. Physical M/N orientation
 remains a placement fact rather than part of the Fold algebra.
 
-`normalize.py` owns only the idempotent, bottom-up rules that need Tile context: scoped lambda alpha-equivalence and
-clustering, semiring contraction canonicalization, and closed child-Fold extraction from a root projection. The
-contraction rule keeps the distributive product in the outer reduction and factors each maximal pure product-operand
-cone into a zero-axis Fold edge. Alpha-equivalent product arguments coalesce to one shared result even when their
-source cones overlap; other overlapping cones become one multi-result operand edge so shared computation remains
-single. A semiring without one shared product argument remains a general planar Fold.
+The bilinear form is CANONICAL BY CONSTRUCTION: formation (`lowering/tile/_fromloop`) turns every load of a reduce
+step into a slab operand and, when the step is a semiring step — every accumulated value one `⊗` of two distinct
+names, all products sharing the `⊗`, and `⊗` distributing over the one commutative-monoid `⊕` — hoists each product
+argument the step computes into a zero-axis operand cone, so the lift is the products alone and `as_contraction()` is
+a reading of the stored term. Overlapping argument cones become one multi-result operand edge so shared computation
+remains single; a step that is not a semiring step (a square `x × x`, a member no product reads) lifts as it came and
+reads as a planar fold. `normalize.py` keeps only the tree-wide rule that needs the whole tree: hash-consing
+alpha-equal cones back onto one object, so a value the frontend inlined twice is one edge again.
 
 A term is CLOSED: its values arrive through its operand edges, and the only names its lift reads from outside are the
 iteration axes its ancestors bind. That is a fact of construction, not of a rewrite — the lift makes a statement a
@@ -101,14 +103,15 @@ construction and a reconstruction therefore expose the same closed operand edges
 The invariant also applies when a schedule row constructs or reloads an already-mapped Tile: promotion extends the
 grid in lockstep with the free axes, so per-cell replication never mistakes the swept coordinate for an SSA name.
 
-**Storage-decode factors hoist to the epilogue.** A product operand whose cone is a STORAGE DECODE
+**Storage-decode factors hoist to the epilogue.** A product argument whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
-axis is not left as a computed cone. The decode is absorbed by the raw load's storage dtype, since every
-consumer converts a bits-carrier element by dtype, and the invariant factors commute out onto the
-accumulator: `Sum_k a*(s*w) = s*Sum_k a*w`, the same reassociation category as split-K. The rule is
+axis is not left as a computed cone. Formation splits it: the decode is absorbed by the raw slab's storage
+dtype, since every consumer converts a bits-carrier element by dtype, and the invariant factors commute out
+onto the accumulator: `Sum_k a*(s*w) = s*Sum_k a*w`, the same reassociation category as split-K. The rule is
 side-generic, so a W8A8 cell binds BOTH operands raw and composes the two scales into one epilogue
-chain; with several channels a shared operand's factor is applied to each accumulator. A contraction
-reached with no projection to host the factors gets one; nested contractions use their parent's.
+chain; with several channels a shared operand's factor is applied to each accumulator. The epilogue is a
+zero-axis term over the fold and the factors' slabs, exposing the accumulator's original name; a bare
+decode absorbs with no epilogue at all.
 
 This is what makes quantized weights reach the tensor cores at storage width. Without it the residue is
 a computed cone, and a computed cone can feed no native fp8 atom at all — those atoms require a

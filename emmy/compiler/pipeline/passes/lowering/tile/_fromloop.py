@@ -2,8 +2,10 @@
 
 A reduce ``Loop`` already states its fold algebra in its ``Accum`` members. Lift it directly:
 recursively replace nested reductions in place, remove the ``Accum`` statements from the step,
-and store their operations as the fold's componentwise monoid. There is no shape recognition
-and no round-trip gate.
+and store their operations as the fold's componentwise monoid. The one shape formation reads is
+the SEMIRING step (:func:`_factor_products`): its product arguments become operand edges — a slab,
+a cone over the step, or the raw slab of a storage decode with the invariant factors hoisted to an
+epilogue — so the bilinear reading is canonical by construction. There is no round-trip gate.
 """
 
 from __future__ import annotations
@@ -100,6 +102,214 @@ def _close(lead: tuple, operands: tuple, body, results: tuple, scope: tuple, lev
     return operands, lift
 
 
+def product_spine(defs: dict, name: str, *, divide: bool = False):
+    """Flatten the ``⊗`` spine defining ``name`` into ``(leaf names, spine statements)`` — the
+    spine recognized by the ``semiring_product`` TRAIT, never an op-name list. ``divide``
+    additionally admits a division on the numerator side: ``(Σ x)/c`` equals ``Σ (x/c)`` for a
+    fold-invariant ``c``, but nothing licenses moving a fold into a denominator, so the divisor is a
+    leaf and only the numerator continues the spine. ``None`` when a spine node is not binary; a
+    name with no product above it is the one-leaf product."""
+    spine: list = []
+    leaves: list[str] = []
+
+    def walk(current: str) -> bool:
+        stmt = defs.get(current)
+        if isinstance(stmt, Assign):
+            if stmt.op.semiring_product:
+                if len(stmt.args) != 2:
+                    return False
+                spine.append(stmt)
+                return all(walk(arg) for arg in stmt.args)
+            if divide and stmt.op.name == "divide" and len(stmt.args) == 2:
+                spine.append(stmt)
+                leaves.append(stmt.args[1])
+                return walk(stmt.args[0])
+        leaves.append(current)
+        return True
+
+    return (tuple(leaves), tuple(spine)) if walk(name) else None
+
+
+@dataclass
+class _Hoist:
+    """Fold-invariant factors commuted off one product argument — ``Σ_k a·(s·w) = s·Σ_k a·w`` —
+    the terms and statements that define them, and the factors in spine order, each with whether it
+    divides."""
+
+    terms: tuple = ()
+    stmts: tuple = ()
+    factors: tuple = ()
+
+
+def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str) -> tuple[Fold, _Hoist] | None:
+    """A product argument that is a STORAGE DECODE of one raw slab times fold-invariant factors,
+    split into ``(the raw slab, its hoist)`` — or ``None`` for any other cone, which stays whole.
+
+    The decode is absorbed by the slab's storage dtype (every consumer converts a bits-carrier
+    element by dtype, the mma fragment loaders included), and the invariant factors commute out
+    onto the accumulator: the same reassociation category as split-K. Only a decode licenses it,
+    so an ordinary floating-point factor chain is never reassociated here."""
+    flattened = product_spine(defs, arg, divide=True)
+    leaves, spine = flattened if flattened is not None else ((arg,), ())
+
+    def varies(leaf: str) -> bool:
+        if leaf in exposed:
+            return k_name in exposed[leaf].free_axes
+        if leaf not in defs:
+            return False  # an enclosing value — bound above the reduce loop
+        reads = plain.backward_cone((leaf,)).external_reads
+        return k_name in reads or any(k_name in exposed[name].free_axes for name in reads if name in exposed)
+
+    varying = [leaf for leaf in leaves if varies(leaf)]
+    decode = defs.get(varying[0]) if len(varying) == 1 else None
+    if not isinstance(decode, Assign) or decode.op.decodes is None or len(decode.args) != 1:
+        return None
+    slab = exposed[decode.args[0]].as_slab() if decode.args[0] in exposed else None
+    if slab is None or (slab.load.dtype is not None and slab.load.dtype.name != decode.op.decodes):
+        return None
+    seen = {id(decode)} | {id(stmt) for stmt in spine}
+    stmts: list[Stmt] = []
+    terms: list[Fold] = []
+    for leaf in leaves:
+        if leaf == varying[0]:
+            continue
+        if leaf in exposed:
+            terms.append(exposed[leaf])
+        elif leaf in defs:
+            stmts.extend(stmt for stmt in plain.backward_cone((leaf,)).members if id(stmt) not in seen)
+            seen.update(id(stmt) for stmt in stmts)
+    if any(id(stmt) not in seen for stmt in plain.backward_cone((arg,)).members):
+        return None
+    terms.extend(exposed[name] for stmt in stmts for name in stmt.deps() if name in exposed and all(exposed[name] is not t for t in terms))
+    divisors = {stmt.args[1] for stmt in spine if stmt.op.name == "divide"}
+    factors = tuple((leaf, leaf in divisors) for leaf in leaves if leaf != varying[0])
+    return exposed[decode.args[0]], _Hoist(tuple(terms), tuple(stmts), factors)
+
+
+def _factor_products(
+    plain: Body, values: tuple, ops: tuple, terms: tuple, scope: tuple, levels: tuple, axes: tuple, *, hoist: bool
+) -> tuple:
+    """Factor a SEMIRING step into ``(operand edges, products)`` — the bilinear form by construction.
+
+    The step is a semiring step when every accumulated value is one product ``⊗`` of two distinct
+    names, all products share the ⊗, and ⊗ distributes over the one commutative-monoid ⊕ the
+    accumulators fold through. Each product argument the step computes (the dequant ``w_bits ×
+    scale``, the normalized ``x × rsqrt``) is then a cone over the step, hoisted into a zero-axis
+    term closed like any other (:func:`_close`); arguments whose cones overlap share one term
+    exposing both; a slab or a nested reduce an argument names outright rides as that edge. The
+    products are all that remains of the step. Any other step — a non-semiring ⊕, a square
+    ``x × x``, a member no product reads — is returned as it came. With ``hoist``, an argument that
+    is a storage decode times invariant factors is split (:func:`_decode_split`) and the factors
+    are returned per accumulator, for the epilogue :func:`_hoisted` wraps around the fold.
+
+    The pair is ORIENTED here, where the enclosing axis order is known: a product argument shared
+    by every channel leads (the fused sibling edge's one A), else the argument carrying the earlier
+    output axis does, so ``operands[0]`` is A by construction and placement reads M/N off it."""
+    unfactored = (terms, plain, {})
+    plus = ops[0]
+    if len(set(ops)) != 1 or not (plus.associative and plus.commutative and plus.has_identity):
+        return unfactored
+    defs = plain.definitions
+    products = [defs.get(value) for value in values]
+    if any(not isinstance(product, Assign) or len(set(product.args)) != 2 for product in products):
+        return unfactored
+    if any(product.op != products[0].op or not product.op.distributes_over(plus) for product in products):
+        return unfactored
+    product_ids = {id(product) for product in products}
+    exposed = {name: term for term in terms for name in term.exposes}
+    computed = tuple(dict.fromkeys(arg for product in products for arg in product.args if arg in defs))
+    if any(id(defs[arg]) in product_ids for arg in computed):
+        return unfactored
+    cones = {arg: plain.backward_cone((arg,)) for arg in computed}
+    covered = product_ids | {id(member) for cone in cones.values() for member in cone.members}
+    if any(id(stmt) not in covered for stmt in plain):
+        return unfactored
+    edge_of: dict[str, Fold] = {}
+    hoists: dict[str, _Hoist] = {}
+    k_name = scope[-1].name
+    for arg in computed if hoist else ():
+        split = _decode_split(arg, plain, defs, exposed, k_name)
+        if split is not None:
+            edge_of[arg], hoists[arg] = split
+    # A split argument's product reads the raw slab in its place.
+    raw_names = {arg: edge.exposes[0] for arg, edge in edge_of.items()}
+    products = [replace(product, args=tuple(raw_names.get(name, name) for name in product.args)) for product in products]
+    # Overlapping cones are one term exposing every root they share members with.
+    groups: list[list[str]] = []
+    for arg in (arg for arg in computed if arg not in edge_of):
+        members = {id(member) for member in cones[arg].members}
+        touching = [group for group in groups if any(members & {id(member) for member in cones[other].members} for other in group)]
+        if touching:
+            touching[0].append(arg)
+            for group in touching[1:]:
+                touching[0].extend(group)
+                groups.remove(group)
+        else:
+            groups.append([arg])
+    consumed: set[int] = set()
+    for group in groups:
+        cone = plain.backward_cone(tuple(group))
+        reads = tuple(term for term in terms if any(name in cone.external_reads for name in term.exposes))
+        consumed.update(id(term) for term in reads)
+        operands, lift = _close((), reads, Body(cone.members), tuple(group), scope, levels)
+        edge_of.update((arg, Fold(operands=operands, lift=lift)) for arg in group)
+    pairs = [tuple(edge_of.get(arg) or exposed.get(arg) for arg in product.args) for product in products]  # raw names are exposed
+    ordered = _orient(pairs, tuple(axis.name for axis in axes))
+    split_names = {raw: arg for arg, raw in raw_names.items()}
+    consumed.update(id(term) for hoist in hoists.values() for term in hoist.terms)  # a factor's slab rides the epilogue
+    consumed -= {id(edge) for edge in ordered}
+    leftover = tuple(term for term in terms if id(term) not in consumed and all(term is not edge for edge in ordered))
+    per_state = {
+        index: tuple(hoists[split_names[name]] for name in product.args if name in split_names) for index, product in enumerate(products)
+    }
+    hoisted = {index: hoist for index, hoist in per_state.items() if any(h.factors for h in hoist)}  # a bare decode has no epilogue
+    return (*ordered, *leftover), Body(tuple(products)), hoisted
+
+
+def _hoisted(fold: Fold, names: tuple[str, ...], hoists: dict, axes: tuple, levels: tuple) -> Fold:
+    """The epilogue projection that applies the hoisted factors to the fold's states, under the
+    original state names: the fold reduces into ``<state>__sum``, the projection multiplies (or
+    divides) that by each factor in spine order and exposes the result as ``<state>``."""
+    inner = {name: f"{name}__sum" for index, name in enumerate(names) if index in hoists}
+    fold = replace(fold, combine=fold.combine.rename(inner))
+    terms: list[Fold] = [fold]
+    epilogue: list[Stmt] = []
+    for index, name in enumerate(names):
+        current = inner.get(name, name)
+        factors = [factor for hoist in hoists.get(index, ()) for factor in hoist.factors]
+        for hoist in hoists.get(index, ()):
+            terms.extend(term for term in hoist.terms if all(term is not held for held in terms))
+            epilogue.extend(stmt for stmt in hoist.stmts if all(stmt is not held for held in epilogue))
+        for position, (leaf, divide) in enumerate(factors):
+            result = name if position == len(factors) - 1 else f"{name}__c{position}"
+            epilogue.append(Assign(name=result, op="divide" if divide else "multiply", args=(current, leaf)))
+            current = result
+    operands, lift = _close((), tuple(terms), Body(tuple(epilogue)), names, axes, levels)
+    return Fold(operands=operands, lift=lift)
+
+
+def _orient(pairs: list[tuple], axes: tuple[str, ...]) -> tuple[Fold, ...]:
+    """The unique edges the products read, A first: the edge every channel shares, else — for one
+    channel — the edge whose own output axis comes earlier in ``axes``. An argument no edge here
+    supplies (an enclosing value ``_close`` binds later) leaves the order as read."""
+    edges: list[Fold] = []
+    for pair in pairs:
+        edges.extend(edge for edge in pair if edge is not None and all(edge is not seen for seen in edges))
+    if any(edge is None for pair in pairs for edge in pair):
+        return tuple(edges)
+    if len(pairs) > 1:
+        shared = [edge for edge in edges if all(any(edge is member for member in pair) for pair in pairs)]
+        lead = shared[0] if len(shared) == 1 else None
+    else:
+        left, right = pairs[0]
+        left_only, right_only = left.free_axes - right.free_axes, right.free_axes - left.free_axes
+        lead = None
+        if len(left_only) == 1 and len(right_only) == 1:
+            position = {name: index for index, name in enumerate(axes)}
+            lead = left if position.get(next(iter(left_only)), len(axes)) <= position.get(next(iter(right_only)), len(axes)) else right
+    return tuple(edges) if lead is None else (lead, *(edge for edge in edges if edge is not lead))
+
+
 def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     """Lift one statement tree into ``(operand terms, statements)`` — SEPARATED, bottom up.
 
@@ -130,7 +340,7 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     for stmt in Body.coerce(body):
         if isinstance(stmt, Loop) and stmt.is_reduce:
             fold, trailing = scan_from_loop(stmt, axes, inner_levels)
-            seeds = set(fold.combine.results)
+            seeds = set(fold.exposes)  # the accumulators, or the epilogue's names for them once hoisted factors wrap the fold
             level.stmts = [m for m in level.stmts if not (isinstance(m, Init) and m.name in seeds)]
             edges.append(fold)
             level.exposed.update((name, fold) for name in fold.exposes)
@@ -205,25 +415,26 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     # its statements. ``Fold.lower`` places each edge ahead of its reader, so the split preserves
     # evaluation order without the step ever having been a mixed sequence.
     step = tuple(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
-    # Every ``Load`` in the step becomes a SLAB — a term declaring the coordinates it indexes.
-    # This is what makes a semiring fold canonical BY CONSTRUCTION: its product arguments arrive as
-    # operand edges, so the lift body is the product alone and there is no non-canonical spelling
-    # for a later pass to rewrite. The factoring pass that used to hoist these cones existed only
-    # because the representation admitted the unfactored form.
+    # Every ``Load`` in the step becomes a SLAB — a term declaring the coordinates it indexes —
+    # and a semiring step's product ARGUMENTS become operand edges too (:func:`_factor_products`):
+    # a chain the step computes ahead of a product is a zero-axis cone. That is what makes a
+    # semiring fold canonical BY CONSTRUCTION: the lift body is the products alone, so the bilinear
+    # reading is a reading of the stored term and no later pass rewrites the tree into that form.
     slabs = tuple(Fold.slab(stmt) for stmt in step if isinstance(stmt, Load))
     plain = Body(stmt for stmt in step if not isinstance(stmt, Load))
-    edges = (*edges, *slabs)
+    values, ops = tuple(stmt.value for stmt in accums), tuple(stmt.op for stmt in accums)
+    edges, plain, hoists = _factor_products(plain, values, ops, (*edges, *slabs), scope, levels, axes, hoist=not writes)
     names = tuple(stmt.name for stmt in accums)
     # FORM the lift closed: a value the step reads from an enclosing level arrives as an operand;
     # the coordinates it reads outright (a mask's ``Select``) stay free — at the construction
     # site, which is the one that knows it is turning a Loop into a term.
-    edges, lift = _close((loop.axis.name,), edges, plain, tuple(stmt.value for stmt in accums), axes, levels)
-    ops = tuple(stmt.op for stmt in accums)
+    edges, lift = _close((loop.axis.name,), edges, plain, values, axes, levels)
     if not all(op.has_identity for op in ops):
         raise ValueError(f"reduce loop {loop.axis.name!r}: an Accum op without an identity is not a monoid ⊕")
     init, combine = tuple(op.identity for op in ops), Lambda.componentwise(ops, names)
     if not writes:
-        return Fold(operands=edges, lift=lift, init=init, combine=combine), ()
+        fold = Fold(operands=edges, lift=lift, init=init, combine=combine)
+        return (_hoisted(fold, names, hoists, axes, levels) if hoists else fold), ()
     stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))
     if any(value not in names for value in stored):
         raise ValueError(f"reduce loop {loop.axis.name!r}: a per-step store may only observe the carried state {names}")

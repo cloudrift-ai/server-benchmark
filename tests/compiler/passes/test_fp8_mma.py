@@ -61,7 +61,9 @@ def _bind(loop, m: str = "m", n: str = "n"):
     inner = [edge for edge in root.operands if edge.as_contraction() is not None]
     assert inner, "the W8A8 shape must canonicalize to a contraction, not PLANAR"
     con = inner[0]
-    return con.operands[0], con.operands[1], con.combine.results[0], tuple(root.lift.body)
+    # The epilogue in the old flat spelling: the root's slab operands as their loads, then its body.
+    epilogue = (*(edge.as_slab().load for edge in root.operands if edge.as_slab() is not None), *root.lift.body)
+    return con.operands[0], con.operands[1], con.combine.results[0], epilogue
 
 
 def _w8a8_loop(*, a_scale=True, b_scale=True):

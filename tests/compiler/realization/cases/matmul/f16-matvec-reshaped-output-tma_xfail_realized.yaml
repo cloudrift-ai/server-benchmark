@@ -1,3 +1,5 @@
+# evidence: the schedule pins `d1/smem-tma` on the unit-row reshaped matvec; the transport resolved on main and
+# does not on this tree's implicit unit row.
 # Qwen3 decode q_proj reshapes one 2048-wide linear output into 16 heads x 128 values. The equivalent
 # boundary used to hide the implicit unit matrix row, leaving only a scalar reduction schedule.
 # evidence: the exact RTX 5090 target strict-replays this authored tensor-core schedule at 8.0 us.

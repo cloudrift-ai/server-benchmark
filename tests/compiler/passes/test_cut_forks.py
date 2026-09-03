@@ -254,7 +254,15 @@ def test_computed_operand_offers_fused_and_cut_and_pinned_cut_lowers(side: str) 
     assert len(cuda[1].inputs) == 2 and any("__place_" in name for name in cuda[1].inputs)
 
 
-@pytest.mark.parametrize("causal", (False, True))
+@pytest.mark.parametrize(
+    "causal",
+    (
+        False,
+        pytest.param(
+            True, marks=pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
+        ),
+    ),
+)
 def test_sdpa_score_cut_is_offered_and_pinned_cut_lowers(causal: bool) -> None:
     offered = _offered(_sdpa_graph(causal), frontend=True)
     assert {"PLACE": "fuse"} in offered

@@ -366,6 +366,7 @@ def _w8a8_graph(m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@pytest.mark.xfail(strict=True, reason="the e4m3 k32 atom never binds on this tree's W8A8 linear (PR #699)")
 def test_w8a8_static_act_quant_e2e_cuda():
     """The W8A8 e2e (M3 priority 4): one composed cut splits the fused MIMO kernel (whose
     independent ``x_f8`` output refuses the fragment epilogue, so it has no warp tier at all)

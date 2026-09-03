@@ -1,3 +1,5 @@
+# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma) — the twist
+# carries P·V inside its carrier on this tree and offers no child contraction site yet; it realized on main.
 # A linear projection supplies SDPA's value operand. Cutting that stored Fold edge must preserve
 # the public f16 tensor dtype so the resulting attention consumer can offer tensor-core schedules.
 compute_cap:

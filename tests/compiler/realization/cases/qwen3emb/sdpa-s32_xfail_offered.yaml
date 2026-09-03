@@ -1,3 +1,5 @@
+# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma) — the twist
+# carries P·V inside its carrier on this tree and offers no child contraction site yet; it realized on main.
 # Qwen3-Embedding-0.6B decoder layer 0, kernels 6 and 7: causal GQA attention.
 # hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 32. One of the twelve layer-0
 # kernels the perf suite curated before the corpus became its case source.

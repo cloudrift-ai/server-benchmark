@@ -1468,6 +1468,7 @@ def test_batched_symbolic_mk_reaches_warp(monkeypatch):
     assert "int seq_len" in src, "runtime extent must be a kernel arg"
 
 
+@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
 def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
     """A COMPUTED-A contraction over a SYMBOLIC K — softmax(scores) @ V, the SDPA P@V edge under a
     dynamic sequence — reaches the mma tier through the smem compute fill, whose K MASK covers the

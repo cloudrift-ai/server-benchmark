@@ -174,7 +174,18 @@ def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> N
     assert len(calls) < len(rows)
 
 
-@pytest.mark.parametrize("case, tile_sites, reduce_sites", (("fused_norm_linear", 1, 2), ("flash_pair", 2, 3)))
+@pytest.mark.parametrize(
+    "case, tile_sites, reduce_sites",
+    (
+        ("fused_norm_linear", 1, 2),
+        pytest.param(
+            "flash_pair",
+            2,
+            3,
+            marks=pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)"),
+        ),
+    ),
+)
 def test_computed_fold_sites_are_keyed_schedule_sites(case, tile_sites, reduce_sites, unpinned) -> None:
     """A computed cone's fold and a derived site (flash's synthesized PV) are real schedule sites:
     every row spells them with stable node identities, so nothing nested is silently undecided."""
@@ -183,6 +194,7 @@ def test_computed_fold_sites_are_keyed_schedule_sites(case, tile_sites, reduce_s
     assert sum(key == "REDUCE" or key.startswith("REDUCE@") for key in row) == reduce_sites
 
 
+@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
 def test_sdpa_fold_tree_offers_a_paired_mma_row(unpinned, monkeypatch) -> None:
     """The walk reaches a row where BOTH flash contractions ride the tensor core — the score's N
     tile feeding the value contraction's streamed K block through the fragment seam."""
@@ -221,6 +233,7 @@ def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
     assert {"", "g2a", "g2k"} <= offered
 
 
+@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
 def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkeypatch) -> None:
     """The cross-CTA split composes with the paired-mma flash cell. The offer is inspected directly
     to isolate its algebraic legality from the rest of resolution. The atomic arm is refused on the

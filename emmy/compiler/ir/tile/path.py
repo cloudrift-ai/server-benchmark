@@ -46,7 +46,7 @@ class Site:
     the full segment path from the root (this node's own segment last), the 1-based ``ordinal``
     among sites sharing the identical ``(segments, axis)`` (1 when unique — the no-collision common
     case, where the ordinal is never spelled), and ``scope``, the axes (by name) the path binds
-    above the node. Every Fold is a site; residence choices on an enclosing edge never hide its
+    above the node. Every Fold but a slab is a site; residence choices on an enclosing edge never hide its
     algebra."""
 
     node: object
@@ -61,9 +61,12 @@ class Site:
 
 
 def sites(root) -> tuple[Site, ...]:
-    """Every node of ``root``'s tree as a :class:`Site`, preorder, root first — the ONE node walk in
-    the layer. A term's operands in stored order, each labelled ``map`` (zero-axis) or ``fold``
-    (reducing): the segment vocabulary every stored golden / DB key is spelled in. The per-site
+    """Every node of ``root``'s tree that carries a schedule decision, as a :class:`Site`, preorder,
+    root first — the ONE node walk in the layer. A term's operands in stored order, each labelled
+    by its ROLE under a contraction (``a`` the shared operand, ``b`` a streamed one) and otherwise
+    ``map`` (zero-axis) or ``fold`` (reducing): the segment vocabulary every stored golden / DB key
+    is spelled in. A slab is not a site: a gmem read has no residence, partition or tile of its
+    own — the atom reads it through its parent — so it takes no path and no ordinal. The per-site
     ordinal among sites with identical ``(segments, axis)`` is assigned in traversal order, and a
     subterm reached down two paths is two sites — the positions are the kernel's, the term's own
     identity is not."""
@@ -77,8 +80,12 @@ def sites(root) -> tuple[Site, ...]:
         counts[key] = counts.get(key, 0) + 1
         result.append(Site(node=node, axis=node.axis, segments=segments, ordinal=counts[key], scope=scope))
         inner = scope if node.axis is None else (*scope, node.axis)
-        for edge in node.operands:
-            visit(edge, inner, (*segments, "map" if edge.axis is None else "fold"))
+        bilinear = node.as_contraction() is not None
+        for position, edge in enumerate(node.operands):
+            if edge.as_slab() is not None:
+                continue
+            role = ("a" if position == 0 else "b") if bilinear else ("map" if edge.axis is None else "fold")
+            visit(edge, inner, (*segments, role))
 
     visit(root, (), ("map" if root.axis is None else "fold",))
     return tuple(result)

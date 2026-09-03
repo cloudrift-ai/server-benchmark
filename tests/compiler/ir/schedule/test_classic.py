@@ -100,7 +100,7 @@ def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
     root = projection((left, right), (), ("left", "right"))
     inventory = TileOp(op=root, axes=(_K,))
 
-    assert len(inventory.sites) == 5  # root, left, right, the shared sum and the slab it reads
+    assert len(inventory.sites) == 4  # root, left, right, the shared sum — the slab it reads is no site
     assert inventory.node_id(shared) == inventory.node_id(shared)  # one site, however many uses
     uses = tuple(edge for edge in inventory.edge_sites if inventory.sites[edge[0]].node.operands[edge[1]] is shared)
     assert uses == ((inventory.node_id(left), 0), (inventory.node_id(right), 0))
@@ -115,7 +115,7 @@ def test_classification_binds_contraction_roles_to_consumer_operands() -> None:
     assert view.as_contraction() is not None and view.axis == "k"
     a, b = (edge.as_slab().load.input for edge in view.operands)
     assert (a, b) == ("a", "b") and inventory.edge_sites == ((0, 0), (0, 1))
-    assert inventory.node_sites == (0, 1, 2)  # the two slabs are sites of their own
+    assert inventory.node_sites == (0,)  # the two slabs carry no schedule of their own: no sites
 
 
 def test_classification_does_not_read_the_target() -> None:
@@ -187,11 +187,8 @@ def test_independent_nodes_compose_only_at_matching_physical_axis_geometry() -> 
         )
 
     def contract(context, node, choice):
-        """Pick ``node``'s reduction, then the slab sites it reads — the next independent positions."""
-        context = context.extend(pick(context, node, choice))
-        for edge in node.operands:
-            context = context.extend(pick(context, edge, ProjectionSchedule(Tile())))
-        return context
+        """Pick ``node``'s reduction — its slabs are no sites, so nothing else is left to pick under it."""
+        return context.extend(pick(context, node, choice))
 
     context = ClassicScheduleContext(*problem)
     context = context.extend(pick(context, root, ProjectionSchedule(Tile())))

@@ -165,7 +165,11 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         ]
         if len(tiled) > 1:
             return _bind_roots(op, ctx, output_specs)
-        root = tiled[0] if tiled else op.operands[0]
+        # The peel stops at a projection whose operands are slabs alone: a slab is no site — it
+        # carries no schedule to bind — so the pointwise cell itself is the leaf.
+        root = tiled[0] if tiled else next((edge for edge in op.operands if edge.as_slab() is None), None)
+        if root is None:
+            return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
         siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=ctx.sched.tile.axes)]
         proj = list(dict.fromkeys([*siblings, *op.step()]))
         # A STREAMED store (values = an observer's results) rides the recursion down to the leaf

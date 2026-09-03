@@ -106,12 +106,13 @@ def test_walker_enumerates_paths_axes_and_ordinals() -> None:
     by_node = {id(s.node): s for s in sites(root)}
     assert by_node[id(product)].segments == ("map", "fold")
     assert by_node[id(product)].axis == "k"
-    assert by_node[id(stat)].segments == ("map", "fold", "map", "map", "fold")
+    assert by_node[id(stat)].segments == ("map", "fold", "a", "map", "fold")
     assert by_node[id(stat)].axis == "k"
-    # Every operand is a site, a slab included: the product's cone and its B slab share a path and
-    # take ordinals in stored order; the reducing sites are unique on theirs.
-    cone, b_slab = (by_node[id(edge)] for edge in product.operands)
-    assert cone.segments == b_slab.segments == ("map", "fold", "map") and (cone.ordinal, b_slab.ordinal) == (1, 2)
+    # A contraction's operands are labelled by ROLE, and a slab is no site: the product's A cone is
+    # its one operand site, the B slab takes no path, and every site here is unique on its own.
+    cone, b_slab = product.operands
+    assert by_node[id(cone)].segments == ("map", "fold", "a") and by_node[id(cone)].ordinal == 1
+    assert id(b_slab) not in by_node
     assert by_node[id(product)].ordinal == by_node[id(stat)].ordinal == 1
 
 

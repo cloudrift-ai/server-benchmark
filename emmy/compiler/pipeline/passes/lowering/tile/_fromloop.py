@@ -398,10 +398,13 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     rest = tuple(stmt for stmt in stmts if id(stmt) not in level.consumed)
     reads = {name for stmt in rest for name in Body((stmt,)).ssa_uses}
     keep = {id(stmt) for stmt in rest} | {id(stmt) for stmt in stmts.backward_cone(tuple(reads)).members}
+    kept = tuple(stmt for stmt in stmts if id(stmt) in keep)
     # A statement or a sibling that moved under a reader stays at the level only while the level's
-    # own remaining statements still read it; otherwise its one position is under that reader.
+    # own KEPT statements still read it — a consumed statement the level keeps for another reader
+    # reads its providers here too; otherwise its one position is under that reader.
+    reads = {name for stmt in kept for name in Body((stmt,)).ssa_uses}
     remaining = tuple(edge for edge in edges if id(edge) not in level.drained or reads & set(edge.exposes))
-    return remaining, Body(tuple(stmt for stmt in stmts if id(stmt) in keep))
+    return remaining, Body(kept)
 
 
 def fold_from_loop(loop: Loop) -> Fold:

@@ -96,7 +96,9 @@ def _share_common_cones(root: Fold) -> Fold:
         # ride beside it: a consumer's lift reads an edge's results BY NAME, so two values that
         # differ only in what they expose stay distinct — unifying them would re-spell every
         # consumer of the copy (softmax's two reads of one row, spelled ``in0`` and ``in1``).
-        prior = canon.setdefault((current.canonical(), current.exposes), current)
+        # The free coordinates ride the key by NAME: canonical renumbers them, so a cone over ``x[q, k]``
+        # and one over ``x[m, k]`` spell the same canonical form and are two values all the same.
+        prior = canon.setdefault((current.canonical(), current.exposes, frozenset(current.free_axes)), current)
         seen[id(node)] = prior
         return prior
 

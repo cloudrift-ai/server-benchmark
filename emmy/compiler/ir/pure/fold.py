@@ -281,6 +281,10 @@ class Fold:
         """
         return self.lift.rename({param: edge.exposes[index] for param, edge, index in self.bindings})
 
+    def binds_axes(self) -> frozenset[str]:
+        """The axis this term binds — what the statement-door ``rewrite`` drops from σ for the subtree."""
+        return frozenset() if self.axis is None else frozenset({self.axis})
+
     @property
     def axis(self) -> str | None:
         """The name of the axis this term BINDS — its lift's iteration var, the first param — or
@@ -809,8 +813,8 @@ def _(s: Fold, rename, sigma, axis_fn):
     # σ is applied hygienically to the term's own binder: the reduce axis this term binds is a
     # different variable from any σ key spelled alike, so its mapping is dropped for the subtree.
     # Operand edges are terms, so they rewrite through this same registry, never the statement entry.
-    if s.axis is not None and sigma is not None and s.axis.name in sigma.mapping:
-        sigma = Sigma({name: value for name, value in sigma.mapping.items() if name != s.axis.name})
+    if s.axis is not None and sigma is not None and s.axis in sigma.mapping:
+        sigma = Sigma({name: value for name, value in sigma.mapping.items() if name != s.axis})
     operands = tuple(_rewrite_kind(edge, rename, sigma, axis_fn) for edge in s.operands)
     lead = (rename(s.axis),) if s.axis is not None else ()  # the iteration var — a slab has none
 

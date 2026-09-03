@@ -11,7 +11,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import RECIPES
-from emmy.compiler.ir.stmt import Assign, Body
+from emmy.compiler.ir.stmt import Assign, Body, Load
 
 logger = logging.getLogger(__name__)
 
@@ -150,33 +150,73 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     return inner, projection
 
 
+def _inline(term: Fold, edge: Fold) -> Fold:
+    """``term`` with its zero-axis operand ``edge`` composed into the lift — the reader binds the
+    edge's operands in its place and computes the edge's body itself, a projection β-reduced into
+    its reader. What lets a recipe see a pivot a projection stands in front of (Welford's
+    ``mean = sum / N``); the tree keeps the projection for any other reader."""
+    (param,) = [p for p, e, _ in term.bindings if e is edge]
+    applied = edge.applied
+    loads = tuple(stmt for stmt in applied.body if isinstance(stmt, Load))  # a projection keeps its gmem reads inline
+    reader = term.lift.rename({param: applied.results[0]})
+    lead = 1 if term.axis is not None else 0
+    params: list[str] = list(reader.params[:lead])
+    operands: list[Fold] = []
+    for operand in term.operands:
+        if operand is edge:
+            params.extend((*applied.params, *(load.name for load in loads)))
+            operands.extend((*edge.operands, *(Fold.slab(load) for load in loads)))
+        else:
+            params.extend(p for p, e, _ in term.bindings if e is operand)
+            operands.append(operand)
+    params.extend(reader.params[lead + len(term.bindings) :])
+    body = Body((*(stmt for stmt in applied.body if not isinstance(stmt, Load)), *reader.body))
+    return replace(term, operands=tuple(operands), lift=Lambda(params=tuple(params), body=body, results=reader.results))
+
+
+def _reads_reduce(edge: Fold) -> bool:
+    return edge.axis is None and any(operand.axis is not None for operand in edge.operands)
+
+
+def _candidates(term: Fold):
+    """The spellings of ``term`` a recipe is tried on, each with the replacement its fusion implies
+    — the term itself; with its invariant factors hoisted into an epilogue projection; with a
+    projection composed in, so a pivot behind one is an operand."""
+    yield term, lambda fused, offset: (fused, offset)
+    hoisted = _hoist_invariant(term)
+    if hoisted is not None:
+        inner, epilogue = hoisted
+        yield inner, lambda fused, offset, inner=inner, epilogue=epilogue: (_replace(epilogue, {id(inner): (fused, offset)}), 0)
+    for edge in term.operands:
+        if _reads_reduce(edge) and len(edge.exposes) == 1:
+            yield _inline(term, edge), lambda fused, offset: (fused, offset)
+
+
 def _click(root: Fold, axes: dict) -> dict[int, tuple[Fold, int]] | None:
     """The first fusion some recipe accepts anywhere in the tree, as the operand replacement it
-    implies — the dependent and its pivot both become the fused fold (an epilogue projection
-    stands in for the dependent when its invariant factors had to hoist first)."""
+    implies — the dependent and its pivot both become the fused fold, the dependent's state its
+    last, the pivot's its first."""
     for term in _terms(root):
-        if term.axis is None or not any(edge.axis is not None for edge in term.operands):
+        # A reduce reading a reduce — directly, or through a projection of one (Welford's mean).
+        if term.axis is None or not any(edge.axis is not None or _reads_reduce(edge) for edge in term.operands):
             continue
         for recipe in RECIPES:
-            fused = term.twist(recipe, axes)
-            if fused is not None:
-                pivot = _pivot_of(term, fused)
-                return {id(term): (fused, len(pivot.exposes)), id(pivot): (fused, 0)}
-            hoisted = _hoist_invariant(term)
-            if hoisted is None:
-                continue
-            inner, epilogue = hoisted
-            fused = inner.twist(recipe, axes)
-            if fused is not None:
-                pivot = _pivot_of(inner, fused)
-                return {id(term): (_replace(epilogue, {id(inner): (fused, len(pivot.exposes))}), 0), id(pivot): (fused, 0)}
+            for candidate, stands_in in _candidates(term):
+                fused = candidate.twist(recipe, axes)
+                if fused is not None:
+                    pivot = _pivot_of(candidate, fused)
+                    return {id(term): stands_in(fused, len(fused.exposes) - len(term.exposes)), id(pivot): (fused, 0)}
     return None
 
 
 def _pivot_of(dependent: Fold, fused: Fold) -> Fold:
     """The operand of ``dependent`` the fusion absorbed — the one whose states lead ``fused``'s."""
     states = fused.as_reduction().states
-    return next(edge for edge in dependent.operands if edge.axis is not None and edge.as_reduction().states == states[:-1])
+    return next(
+        edge
+        for edge in dependent.operands
+        if edge.axis is not None and states[: len(edge.as_reduction().states)] == edge.as_reduction().states
+    )
 
 
 def _report(root: Fold, axes: dict) -> None:

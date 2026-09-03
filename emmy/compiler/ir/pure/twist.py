@@ -4,9 +4,12 @@ A *dependent* reduce ``F`` reads an earlier reduce ``G`` over the same stream: `
 then ``l = Σ_k exp(s_k − m)``. After the lift that dependency is in the tree — ``G`` is an operand
 of ``F`` — and a recipe is what says the pair fuses into ONE fold with state ``(m, l)``: which ⊕
 the pivot folds, which per-element maps its channels recognize (over ROLES, never over any term's
-names), what each channel injects at the singleton, and the fused ⊕ program — a twisted monoid,
-the base componentwise monoid conjugated by the family's ψ, stated in its numerically stable form:
-how the pivot pair advances and what factors that move puts on every carried channel.
+names), what each channel injects at the singleton, what further states the carrier keeps, and
+the fused ⊕ program — a twisted monoid, the base componentwise monoid conjugated by the family's
+ψ, stated in its numerically stable form. Two recipes so far: online softmax (its program spelled
+as a pivot advance and a per-channel rescale, so one recipe serves any channel count — softmax and
+flash attention alike) and Welford's variance (a fixed carrier ``(sum, count, mean, M2)``, its
+program one lambda over every state pair).
 
 A recipe is DATA. The one generic algorithm that applies any of them is :meth:`Fold.twist`,
 which finds the pivot among ``F``'s own operands: matching is alpha-invariant by construction —
@@ -28,39 +31,52 @@ from emmy.compiler.ir.stmt import Assign, Body, Const, Stmt
 
 @dataclass(frozen=True)
 class Channel:
-    """One dependent channel of a recipe.
+    """One state of the fused carrier beyond the pivot's.
 
-    ``pattern`` is the per-element map a dependent fold's lift must spell, over the roles
-    ``(score, pivot, *extras)``; ``injection`` is what the channel contributes at the injected
-    singleton, over ``(score, *extras)`` — the pivot IS the score there, and the recipe's author has
-    already simplified the pattern at that point (``exp(s − s)`` is ``1``)."""
+    ``injection`` is what the state is at the injected singleton, over ``(score, *extras)`` — the
+    pivot IS the score there, and the recipe's author has already simplified the map at that point
+    (``exp(s − s)`` is ``1``). With a ``pattern``, the state is a dependent fold's own, fused: the
+    per-element map that fold's lift must spell, over the roles ``(score, pivot, *extras)`` — the
+    extras operand-bound values, a streamed row or a scalar read from a buffer (Welford's ``1/N``)
+    alike. Without one, the state is one the two-pass form never had (Welford's count and running
+    mean): ``name`` suffixes the fused channel's state name, ``init`` seeds it."""
 
-    pattern: Lambda
     injection: Lambda
+    pattern: Lambda | None = None
+    name: str = ""
+    init: float = 0.0
 
 
 @dataclass(frozen=True)
 class Recipe:
     """A twisted monoid as data: the pivot's ⊕ (``reduce_canon`` name), the channels' ⊕, the
-    channel patterns, and the fused ⊕ program as two lambdas over roles — ``advance`` takes the
-    pivot pair ``(g, g′)`` to the advanced pivot and the factors the move puts on every carried
-    channel, ``rescale`` takes one channel pair and those factors ``(s, s′, *factors)`` to the
-    channel's merged value. Applied by the one generic algorithm, :meth:`Fold.twist`."""
+    carrier's ``channels`` — every state beyond the pivot's, matched to a dependent fold or kept by
+    the recipe — and the fused ⊕ program in one of two spellings. ``advance`` / ``rescale`` serve
+    any channel count: ``advance`` takes the pivot pair ``(g, g′)`` to the advanced pivot and the
+    factors the move puts on every carried channel, ``rescale`` takes one channel pair and those
+    factors ``(s, s′, *factors)`` to the channel's merged value. ``combine`` is one lambda over
+    every state pair in role order — pivot, then the channels in recipe order, then the same with
+    ``__o`` — for a carrier of fixed arity. Applied by the one generic algorithm, :meth:`Fold.twist`."""
 
     name: str
     pivot: str
     plus: str
     channels: tuple[Channel, ...]
-    advance: Lambda
-    rescale: Lambda
+    advance: Lambda | None = None
+    rescale: Lambda | None = None
+    combine: Lambda | None = None
 
     def program(self, states: tuple[str, ...]) -> Lambda:
-        """The fused ⊕ over these state names — ``S × S → S``, the second operand ``<n>__o``: the
-        advance over the pivot pair, every channel rescaled by its factors, the pivot written last
-        (the channels read the old pivot through the factors). Temps are namespaced on the second
-        pivot's name, so two merges into one state never collide."""
+        """The fused ⊕ over these state names — ``S × S → S``, the second operand ``<n>__o``. Temps
+        are namespaced on the second pivot's name, so two merges into one state never collide. The
+        advance/rescale spelling: the advance over the pivot pair, every channel rescaled by its
+        factors, the pivot written last (the channels read the old pivot through the factors)."""
         other = tuple(f"{name}__o" for name in states)
         key = other[0]
+        if self.combine is not None:
+            roles = self.combine.results
+            names = dict(zip((*roles, *(f"{role}__o" for role in roles)), (*states, *other), strict=True))
+            return self.combine.rename(lambda name: names.get(name, f"{key}__{name}"))
         roles = dict(zip(self.advance.params, (states[0], key), strict=True))
         advance = self.advance.rename(lambda name: roles.get(name, f"{key}__{name}"))
         pivot, *factors = advance.results
@@ -75,6 +91,10 @@ class Recipe:
 
 def _lam(params: tuple[str, ...], body: tuple[Stmt, ...], *results: str) -> Lambda:
     return Lambda(params=params, body=Body(body), results=results)
+
+
+def _const(name: str, value: float) -> Lambda:
+    return _lam(("s",), (Const(name=name, value=value),), name)
 
 
 SOFTMAX = Recipe(
@@ -119,6 +139,55 @@ SOFTMAX = Recipe(
     ),
 )
 
-RECIPES = (SOFTMAX,)
+# Welford's variance: ``mean = Σ_k x_k / N`` then ``Σ_k (x_k − mean)²``, fused into the carrier
+# ``(sum, count, mean, M2)`` — the running mean beside the sum so the seed ``(0, 0, 0, 0)`` is a true
+# identity (a mean of nothing is any value, a sum over nothing divided by its count is not), the sum
+# kept so the pivot's readers keep their value. Chan's merge: ``δ = mean′ − mean``, ``mean +=
+# δ·n′/n``, ``M2 += M2′ + δ²·n·n′/(n + n′)``.
+WELFORD = Recipe(
+    name="welford",
+    pivot="add",
+    plus="add",
+    channels=(
+        # The count and the running mean: states the two-pass form never had, one element counting
+        # one and averaging to itself.
+        Channel(injection=_const("one", 1.0), name="n"),
+        Channel(injection=_lam(("s",), (), "s"), name="mean"),
+        # The squared deviation from the mean, the mean being the pivot scaled by ``1/N`` — a scalar
+        # the tree reads like any operand; a single element deviates from its own mean by nothing.
+        Channel(
+            pattern=_lam(
+                ("s", "g", "c"),
+                (Assign("m", "multiply", ("g", "c")), Assign("d", "subtract", ("s", "m")), Assign("sq", "multiply", ("d", "d"))),
+                "sq",
+            ),
+            injection=_const("zero", 0.0),
+        ),
+    ),
+    combine=_lam(
+        ("g", "n", "m", "q", "g__o", "n__o", "m__o", "q__o"),
+        (
+            Assign("tn", "add", ("n", "n__o")),
+            Assign("d", "subtract", ("m__o", "m")),
+            Assign("w", "divide", ("n__o", "tn")),
+            Assign("dw", "multiply", ("d", "w")),
+            Assign("nn", "multiply", ("n", "n__o")),
+            Assign("r", "divide", ("nn", "tn")),
+            Assign("dd", "multiply", ("d", "d")),
+            Assign("corr", "multiply", ("dd", "r")),
+            Assign("q1", "add", ("q", "q__o")),
+            Assign("g", "add", ("g", "g__o")),
+            Assign("m", "add", ("m", "dw")),
+            Assign("q", "add", ("q1", "corr")),
+            Assign("n", "copy", ("tn",)),
+        ),
+        "g",
+        "n",
+        "m",
+        "q",
+    ),
+)
 
-__all__ = ["RECIPES", "SOFTMAX", "Channel", "Recipe"]
+RECIPES = (SOFTMAX, WELFORD)
+
+__all__ = ["RECIPES", "SOFTMAX", "WELFORD", "Channel", "Recipe"]

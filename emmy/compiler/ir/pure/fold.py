@@ -562,7 +562,7 @@ class Fold:
             extras = fn.params[2:]
             if any(p not in by_param or p in pivot_params for p in extras):
                 continue
-            channel = next((c for c in recipe.channels if fn.canonical() == c.pattern.canonical()), None)
+            channel = next((c for c in recipe.channels if c.pattern is not None and fn.canonical() == c.pattern.canonical()), None)
             if channel is None:
                 continue
             # Instantiate: every operand an extra binds joins, its axis spelled as the pivot's.
@@ -577,18 +577,33 @@ class Fold:
                     for edge in extra_edges
                 )
             operands = (*pivot.operands, *extra_edges)
-            names = {channel.injection.params[0]: pivot.lift.results[0]}
-            names.update(zip(channel.injection.params[1:], extras, strict=True))
-            names.update((stmt.name, f"{view.states[0]}__{stmt.name}") for stmt in channel.injection.body)
-            injection = channel.injection.rename(names)
+            # The carrier's states: the pivot's, then every channel in recipe order — the matched one
+            # is this fold's own state, one without a pattern a state the recipe adds; each injection
+            # instantiated at the score, its temps namespaced on the state it feeds.
+            state = view.states[0]
+            score = pivot.lift.results[0]
+            injections = [
+                (state, channel.injection, self.init[0]) if c is channel else (f"{state}__{c.name}", c.injection, c.init)
+                for c in recipe.channels
+                if c is channel or c.pattern is None
+            ]
+            roles = dict(zip(channel.pattern.params[2:], extras, strict=True))  # the channel's extras, by role
+            body, results, inits = list(pivot.lift.body), list(pivot.lift.results), list(pivot.init)
+            for name, injection, init in injections:
+                names = {injection.params[0]: score, **{param: roles[param] for param in injection.params[1:]}}
+                names.update((stmt.name, f"{name}__{stmt.name}") for stmt in injection.body)
+                instance = injection.rename(names)
+                body.extend(instance.body)
+                results.extend(instance.results)
+                inits.append(init)
             arity = sum(len(edge.exposes) for edge in pivot.operands)
             lift = Lambda(
                 params=(pivot.axis, *pivot.lift.params[1 : 1 + arity], *extra_params, *pivot.lift.params[1 + arity :]),
-                body=Body((*pivot.lift.body, *injection.body)),
-                results=(*pivot.lift.results, *injection.results),
+                body=Body(body),
+                results=tuple(results),
             )
-            states = (*pview.states, view.states[0])
-            return Fold(operands=operands, lift=lift, init=(*pivot.init, *self.init), combine=recipe.program(states))
+            states = (*pview.states, *(name for name, _, _ in injections))
+            return Fold(operands=operands, lift=lift, init=tuple(inits), combine=recipe.program(states))
         return None
 
     @cached_method

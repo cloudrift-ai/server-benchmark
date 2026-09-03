@@ -390,8 +390,10 @@ monoid is. A **recipe** (`ir/pure/twist.py`) states that monoid as data, in its 
 denominator, `exp(s − g)·v` for an expectation), what each channel injects at the singleton (`1`, `v`), and the fused
 ⊕ as two lambdas over roles — the pivot pair's `advance` to the new pivot and the factors the move puts on every
 carried channel (`exp(g − G)`, `exp(g′ − G)`: no `exp` argument is ever positive), and one channel pair's `rescale`
-by those factors. `Recipe.program(states)` instantiates them over a fold's state names by renaming, and the
-property tests pin the result's associativity. `Fold.twist(recipe)`
+by those factors — or, for a carrier of fixed arity, one lambda over every state pair (Welford's variance, whose
+carrier `(sum, count, mean, M2)` keeps two states the two-pass form never had, each with its own injection and
+seed). `Recipe.program(states)` instantiates either over a fold's state names by renaming, and the property tests
+pin the result's associativity. `Fold.twist(recipe)`
 fuses a reduce onto the reduce it reads, found among its operands: the pivot's state is the lift param bound to it,
 the score is the sub-cone of the lift alpha-equal to the pivot's own per-element map (operand for operand, through a
 projection's

@@ -22,7 +22,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.pure.twist import SOFTMAX
+from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
@@ -141,6 +141,61 @@ def _sum_exp_shifted() -> Loop:
     )
 
 
+def _sum_x() -> Loop:
+    idx = (Var("a0"), Var("a1"))
+    return _reduce_loop(Load(name="in0", input="x", index=idx), Accum(name="acc0", value="in0", op=ElementwiseImpl("add")))
+
+
+def _mean_of_sum() -> tuple:
+    # ``1/N`` is a scalar input, as the frontend spells a constant in Loop IR: a zero-index load.
+    return (Load(name="inv_n", input="inv_n", index=()), Assign(name="mean", op="multiply", args=("acc0", "inv_n")))
+
+
+def _sum_sq_dev() -> Loop:
+    idx = (Var("a0"), Var("a1"))
+    return _reduce_loop(
+        Load(name="in1", input="x", index=idx),
+        Assign(name="v0", op="subtract", args=("in1", "mean")),
+        Assign(name="v1", op="multiply", args=("v0", "v0")),
+        Accum(name="acc1", value="v1", op=ElementwiseImpl("add")),
+    )
+
+
+def test_welford_variance_pair_fuses_into_one_carrier() -> None:
+    """The two-pass variance — a sum, its mean, then the sum of squared deviations from it — fuses
+    by the Welford recipe into ONE fold carrying ``(sum, count, mean, M2)``: the pivot sits behind
+    the mean's projection, the ``1/N`` inside the deviation is a scalar operand the pattern binds
+    as an extra, and the count and running mean are states the two-pass form never had."""
+    root, axes = _rewrite(_sum_x(), *_mean_of_sum(), _sum_sq_dev())
+    (fold,) = _twisted_folds(root)
+    view = fold.as_reduction()
+    assert view.states == ("acc0", "acc1__n", "acc1__mean", "acc1")
+    assert fold.combine.alpha_eq(WELFORD.program(view.states))
+    assert fold.init == (0.0, 0.0, 0.0, 0.0)
+    score, one, mean, zero = fold.lift.results
+    consts = {stmt.name: stmt.value for stmt in fold.lift.body if isinstance(stmt, Const)}
+    assert mean == score and consts[one] == 1.0 and consts[zero] == 0.0, "the singleton is (x, 1, x, 0)"
+    lowered = fold.lower(axes=axes)
+    (loop,) = [stmt for stmt in lowered if isinstance(stmt, Loop)]  # ``1/N`` is hoisted ahead of it
+    defined = {loop.axis.name, "a0", *view.states, *(name for stmt in lowered for name in stmt.defines())}
+    for stmt in loop.body:
+        assert set(stmt.deps()) <= defined, f"{stmt} reads a name not yet defined"
+        defined |= set(stmt.defines())
+
+
+def test_welford_declines_a_deviation_that_is_not_squared() -> None:
+    """A sum followed by ``Σ (x − mean)`` is not the variance's second pass: no channel of the
+    recipe matches, and the pair stays two folds."""
+    idx = (Var("a0"), Var("a1"))
+    linear = _reduce_loop(
+        Load(name="in1", input="x", index=idx),
+        Assign(name="v0", op="subtract", args=("in1", "mean")),
+        Accum(name="acc1", value="v0", op=ElementwiseImpl("add")),
+    )
+    root, _ = _rewrite(_sum_x(), *_mean_of_sum(), linear)
+    assert not _twisted_folds(root)
+
+
 def _plain_sum() -> Loop:
     idx = (Var("a0"), Var("a1"))
     return _reduce_loop(
@@ -149,10 +204,10 @@ def _plain_sum() -> Loop:
     )
 
 
-def _rewrite(*loops: Loop) -> tuple[Fold, tuple]:
-    """Lift the loops under one row and rewrite: the second loop's read of ``acc0`` arrives as an
-    operand edge, which is what the recipe matches on. Returns the tree and the kernel's axis table."""
-    cell = (*loops, Write(output="out", index=(Var("a0"),), value="acc1"))
+def _rewrite(*stmts) -> tuple[Fold, tuple]:
+    """Lift the statements under one row and rewrite: the second loop's read of ``acc0`` arrives as
+    an operand edge, which is what the recipe matches on. Returns the tree and the kernel's axis table."""
+    cell = (*stmts, Write(output="out", index=(Var("a0"),), value="acc1"))
     tile = lift_loop_op(LoopOp(body=(Loop(axis=Axis("a0", Dim(4)), body=Body(cell)),)), name="k_pair")
     return rewrite_twisted(tile.op, tile.axes), tile.axes
 

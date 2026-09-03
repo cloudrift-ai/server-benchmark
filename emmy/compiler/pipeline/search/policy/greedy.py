@@ -43,6 +43,17 @@ preference — the alternative is that an all-failed kernel has no ``ok`` row,
 therefore no evidence at all, and falls through to the prior as though nothing
 were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
 every benched variant hung.
+
+**One physical bound, and it is not a preference.** The kernel-set Σ
+(:func:`_resolved_price`) clamps a summand to its serial-work lower bound where
+that bound is decisively large (:data:`_SERIAL_FLOOR_ENFORCE_US`). This is the
+one exception to "no hand-written tier", and it is an exception in the same
+sense the disqualification is: not a ranking opinion but a fact no measurement
+can overrule — no thread retires 2^30 dependent-nest trips in microseconds, and
+no measurement can even EXIST at such magnitudes (the bench watchdog fires
+first), so "fix it by measuring" is unavailable exactly where the bound binds.
+A measured µs is never below the bound, so evidence always wins where evidence
+can exist.
 """
 
 from __future__ import annotations
@@ -57,6 +68,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves, iter_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
+from emmy.compiler.pipeline.search.features import serial_floor_us
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +219,18 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
     )
 
 
+#: Enforcement guard for the serial-work bound (µs): the clamp in :func:`_resolved_price` applies
+#: only to a kernel whose bound exceeds this — 1 ms, three orders above launch overhead and three
+#: below the bench watchdog. Below it the bound sits inside the range launch overhead and memory
+#: traffic legitimately dominate, and the model's ranking (however uncalibrated) must stand;
+#: above it per-thread serial work alone makes the kernel un-servable and nothing may price it
+#: lower. The lower edge is pinned by measurement: the largest legitimate ``serial_floor_us``
+#: across the qwen3emb realization corpus family is **6.55 µs** (``sdpa-s512``'s fused kernel,
+#: 2^16 serial trips — a shape whose fused election is correct and pinned by its ``realized``
+#: replay), so 1 ms stands ~150x above the biggest bound the guard must ignore.
+_SERIAL_FLOOR_ENFORCE_US = 1e3
+
+
 def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: dict | None = None) -> float | None:
     """Σ over a resolved slice's kernels of each one's estimated µs — the ONE cost rule.
 
@@ -234,14 +258,31 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
     measured µs, one the model decided contributes the model's ranking score. Mixing them in a Σ is
     the known cost of comparing kernel SETS with a per-kernel ranker — the exposure the module
     docstring names, and the prior's to fix by being calibrated, not this function's to paper
-    over."""
+    over. What this Σ DOES enforce is the physical bound no calibration could relax: a summand
+    whose serial-work lower bound (:func:`~..features.serial_floor_us` — the kernel's per-thread
+    serial trips at a per-trip time conservative for any GPU clock) exceeds
+    :data:`_SERIAL_FLOOR_ENFORCE_US` is clamped to that bound. A measured µs is never below the
+    bound, so the clamp only ever lifts model garbage: the cold proxy priced DeepSeek-V4
+    ``post4096``'s fused 2^30-trip recomputation nest at 4.29e-37 µs, under every one of its
+    recomputation-free composed-cut arms, and no fitted weight can guarantee the bound at
+    magnitudes no measurement can reach. The guard is jurisdiction, not tuning: the bound ignores
+    launch overhead and memory traffic, so at ordinary magnitudes it must not adjudicate a
+    fused-vs-cut µs delta (an ungated draft flipped three qwen3emb sdpa corpus replays to a cut
+    election by comparing trip counts alone) — while a bound past the guard is un-servable
+    whatever those effects are. The guard's honest escape: a nest under ~2^23 per-thread trips
+    (bound < 1 ms; several ms real) is still adjudicated by the uncalibrated proxy, so a
+    2^23-class recomputation defect stays electable — smaller than the 2^30 class this bound
+    exists for, but not free. Sibling ranking within one kernel is decided upstream and never
+    reads this Σ, which is what makes the clamp safe here and NOT on the prior's scoring
+    surfaces (there any µs bound collapses live-range deltas — the plateau failure
+    ``latency_proxy``'s history warns about)."""
     scored: dict[str, float | None] = {d.node_id: d.score for d in trace}
     total = 0.0
     for nid, node in terminal.nodes.items():
         if node.op.identity_key(with_io=True, with_knobs=True) is None:
             continue
+        knobs = getattr(node.op, "knobs", None) or {}
         if failed:
-            knobs = getattr(node.op, "knobs", None) or {}
             sig = frozenset((k, str(v)) for k, v in knobs.items() if k.startswith("S_"))
             # EXACT signature, deliberately not the drift-tolerant :func:`_sig_groups` the ranking
             # tier uses. There, a loose match only widens the candidate pool and a second filter
@@ -250,15 +291,23 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
             # happens not to contradict one recorded failure — measured on DeepSeek-V4's post
             # block, where it priced all 17 leaves of a fork ``inf`` and thereby decided nothing.
             # An elimination must fail safe: a failure condemns the shape that was measured.
-            if sig in failed:
+            # Exact AT THE RECORDED VOCABULARY: a candidate that agrees on every recorded fact and
+            # only ADDS stamps the featurizer has since gained is that same measured shape (the
+            # stamp derives from the same body), so a stored signature also binds as a subset —
+            # or one added ``S_*`` feature silently disables this whole tier (measured live when
+            # ``S_ext_serial_cell_work`` landed). The mirror direction stays refused, and so is
+            # an EMPTY stored signature: it is a subset of everything, so one degenerate row
+            # (an op that stamped nothing) would silently condemn every kernel in every arm.
+            if sig in failed or any(stored and stored <= sig for stored in failed):
                 return math.inf
         us = scored.get(nid)
         if us is None:
-            rows = [{**ctx.features(), **(getattr(node.op, "knobs", None) or {})}]
+            rows = [{**ctx.features(), **knobs}]
             us = prior.mean_scores(rows)[0] if prior is not None else None
         if us is None:
             return None
-        total += us
+        floor = serial_floor_us(knobs)
+        total += max(us, floor) if floor > _SERIAL_FLOOR_ENFORCE_US else us
     return total
 
 

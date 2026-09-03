@@ -400,6 +400,19 @@ is reached only by pointing `EMMY_OFFLINE_FILE` (or `--offline-file`) at it. Eac
 `provenance.scope`; read that before drawing conclusions from one, because a scoped artifact has no reason to beat
 the shipped weights outside the slice it was fit on.
 
+The proxy stays uncalibrated, and the one consumer that needs absolute µs enforces a physical bound instead: in
+the kernel-set Σ (`policy/greedy._resolved_price`), a summand whose serial-work lower bound
+(`features.serial_floor_us` — the row's per-thread serial trips, i.e. the nest-aware `S_ext_serial_cell_work`
+stamp after its reduce-partition coverage, at a per-trip constant conservative for any GPU clock) exceeds the
+enforcement guard (`_SERIAL_FLOOR_ENFORCE_US`, 1 ms) is clamped to that bound. No fitted weight can guarantee the bound at magnitudes no measurement
+can reach: DeepSeek-V4 `post4096`'s fused 2^30-trip recomputation nest priced 4.29e-37 µs and beat every
+recomputation-free composed-cut arm until the bound priced it honestly. The guard is jurisdiction, not tuning —
+the bound ignores launch overhead and memory traffic, so at ordinary magnitudes the model's ranking stands
+untouched, while a bound past the guard is un-servable whatever those effects are. A measured µs is never below
+the bound, so the clamp only ever lifts model garbage; the prior's own scoring surfaces are untouched, because
+any µs bound there collapses live-range sibling deltas — the plateau failure `latency_proxy`'s history warns
+about. (`D_serial_cell_work`, the same quantity log-scaled, rides the featurization as an ordinary fit signal.)
+
 What a newcomer needs to know about the fit:
 
 - **The fit optimizes the deployed score itself, not a linear stand-in for it.** Both sides go through one

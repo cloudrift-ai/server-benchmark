@@ -156,6 +156,7 @@ class Fold:
     stays byte-identical whichever partition the fork picked."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
+    deps_deep = True  # :meth:`deps` is the memoized scoped rollup — read walks must not re-walk the lift
 
     # The CLOSED inputs, each an operand edge (a slab or an inline node) — the 1k fold
     # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it

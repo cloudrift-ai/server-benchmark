@@ -332,7 +332,11 @@ class SearchDB:
     #       schedule family (``RASTER: ''``/``gm8``), so ``identity_key(with_io=True, with_knobs=True)`` shifts for every
     #       matmul TileOp/KernelOp; cached pre-RASTER chains would silently replay
     #       old-key kernels and starve the new rows of evidence.
-    _SCHEMA_VERSION = 3
+    #   4: the ``S_ext_serial_cell_work`` structural stamp — every op's knob row gains one
+    #       ``S_*`` feature, so ``identity_key(with_io=True, with_knobs=True)`` shifts for every
+    #       TileOp/KernelOp (the realization corpus's 211 restamped identities are the same
+    #       shift); stale ``lowering`` rows would silently never match.
+    _SCHEMA_VERSION = 4
 
     _SCHEMA = [
         """

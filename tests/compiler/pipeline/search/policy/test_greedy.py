@@ -98,6 +98,86 @@ def test_a_disqualification_condemns_only_the_shape_that_was_measured() -> None:
     assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}) == 5.0
 
 
+def test_a_disqualification_survives_featurizer_vocabulary_growth() -> None:
+    """A stored failure signature is exact AT ITS OWN VOCABULARY: a candidate that agrees on every
+    recorded fact and only ADDS stamps the featurizer has since gained is the same measured shape
+    (the stamp derives from the same body the failure was measured on). Without this, one added
+    ``S_*`` feature silently disables the whole disqualification tier — measured live when the
+    ``S_ext_serial_cell_work`` stamp landed and the DeepSeek-V4 ``post4096`` election fell back to
+    the 2^38-trip serial route its recorded ``bench_fail`` rows exist to eliminate. The mirror
+    direction (a candidate MISSING a recorded key) stays refused: what was measured is not known
+    to describe that shape."""
+    recorded = frozenset({("S_shape", "4096"), ("S_dtype_f16", "1.0")})
+    grown = SimpleNamespace(knobs={"S_shape": 4096, "S_dtype_f16": 1.0, "S_ext_serial_cell_work": 64.0}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=grown)})
+    trace = [SimpleNamespace(node_id="n", score=5.0)]
+    ctx = SimpleNamespace(features=lambda: {})
+
+    assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}) == math.inf
+    shrunk = SimpleNamespace(knobs={"S_shape": 4096}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=shrunk)})
+    assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}) == 5.0
+
+
+def test_an_empty_recorded_signature_condemns_nothing() -> None:
+    """``frozenset() <= sig`` holds for EVERY signature, so one degenerate stored failure (an op
+    that stamped nothing) would silently disqualify every kernel in every arm — an all-``inf``
+    fork decides by option order and logs nothing. An empty signature identifies no shape, so it
+    binds no shape (only its own exact empty-signature echo, which is the recorded fact)."""
+    stamped = SimpleNamespace(knobs={"S_shape": 4096}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=stamped)})
+    trace = [SimpleNamespace(node_id="n", score=5.0)]
+    ctx = SimpleNamespace(features=lambda: {})
+
+    assert greedy._resolved_price(terminal, trace, ctx, None, failed={frozenset(): [2_000_000.0]}) == 5.0
+
+
+def _priced(kernels: dict[str, tuple[dict, float]]) -> float:
+    """``_resolved_price`` over SimpleNamespace kernels: ``{node_id: (knobs, traced score)}``."""
+    terminal = SimpleNamespace(
+        nodes={nid: SimpleNamespace(op=SimpleNamespace(knobs=knobs, identity_key=lambda **_kw: "k")) for nid, (knobs, _) in kernels.items()}
+    )
+    trace = [SimpleNamespace(node_id=nid, score=score) for nid, (_, score) in kernels.items()]
+    return greedy._resolved_price(terminal, trace, SimpleNamespace(features=lambda: {}), None)
+
+
+def test_the_kernel_set_price_enforces_the_serial_work_bound():
+    """A summand whose serial-work lower bound is past the enforcement guard prices at least that
+    bound. Measured live on DeepSeek-V4 ``post4096``: the cold proxy priced the fused 2^30-trip
+    recomputation nest at 4.29e-37 µs, UNDER its recomputation-free composed-cut arms (best
+    1.02e-17 µs Σ), so the greedy kept the nest; bounded, the fused arm prices its honest ~1e5 µs
+    and loses."""
+    garbage = 4.29e-37
+    fused_monster = _priced({"n": ({"S_ext_serial_cell_work": float(2**30)}, garbage)})
+    assert fused_monster == pytest.approx(float(2**30) * 1e-4, rel=1e-6)
+    cut_arm = _priced(
+        {
+            "p": ({"S_ext_serial_cell_work": float(2**16)}, garbage),
+            "c": ({"S_ext_serial_cell_work": float(2**16)}, garbage),
+        }
+    )
+    assert cut_arm < fused_monster  # the recomputation nest loses on its serial-work bound
+
+
+def test_the_serial_bound_has_no_jurisdiction_at_ordinary_magnitudes():
+    """The bound ignores launch overhead and memory traffic, so below the enforcement guard the
+    model's ranking stands exactly as before — an ungated draft flipped three qwen3emb sdpa
+    corpus replays to a cut election by comparing trip counts alone. The 2^16 row IS the largest
+    of those shapes (``sdpa-s512``'s fused kernel, ``serial_floor_us`` 6.55 µs — the biggest
+    legitimate floor measured across the qwen3emb corpus family), so lowering the guard under it
+    breaks this test before it breaks the corpus. And a measured µs is never below the bound, so
+    the clamp is a no-op on it even past the guard."""
+    from emmy.compiler.pipeline.search.features import serial_floor_us
+
+    sdpa_s512 = {"S_ext_serial_cell_work": float(2**16)}
+    assert serial_floor_us(sdpa_s512) < greedy._SERIAL_FLOOR_ENFORCE_US
+    garbage = 4.29e-37
+    fused_small = _priced({"n": (sdpa_s512, garbage)})
+    assert fused_small == pytest.approx(garbage)  # bound 6.55 µs — inside the guard, not enforced
+    measured = _priced({"n": ({"S_ext_serial_cell_work": float(2**30)}, 2_000_000.0)})
+    assert measured == 2_000_000.0  # a measured µs already satisfies the bound
+
+
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     materialized = []
     rows = [{"TILE": str(tile), "STAGE": str(stage)} for tile in range(100) for stage in range(100)]

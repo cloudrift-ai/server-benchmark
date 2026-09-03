@@ -170,7 +170,12 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         root = tiled[0] if tiled else next((edge for edge in op.operands if edge.as_slab() is None), None)
         if root is None:
             return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
-        siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=ctx.sched.tile.axes)]
+        # A sibling that holds the peeled root among its operands (the ``1/l`` epilogue over the fused
+        # carrier) lowers the root again inside itself; the root is bound below, once and under its
+        # own partition, so its statements are dropped from the sibling's lowering here.
+        axes = ctx.sched.tile.axes
+        placed = set(root.lower(axes=axes))
+        siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes) if stmt not in placed]
         proj = list(dict.fromkeys([*siblings, *op.step()]))
         # A STREAMED store (values = an observer's results) rides the recursion down to the leaf
         # so the scalar arm can splice it into the observed fold's reduce loop — applying it here

@@ -217,9 +217,14 @@ def _(s: Write, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 @_rewrite_kind.register
 def _(s: Select, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    # A branch condition reads coordinates exactly as a Load index does: σ first, then the rename
+    # — an axis renumbering that reached the indices and not the conditions left the causal mask
+    # comparing loop variables its kernel no longer bound.
     return Select(
         name=rename(s.name),
-        branches=tuple(SelectBranch(value=rename(b.value), select=sigma.apply(b.select)) for b in s.branches),
+        branches=tuple(
+            SelectBranch(value=rename(b.value), select=_rename_ssa_vars_in_expr(sigma.apply(b.select), rename)) for b in s.branches
+        ),
     )
 
 

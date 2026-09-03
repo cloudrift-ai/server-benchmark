@@ -543,7 +543,11 @@ class Fold:
         candidates = [p for p in self.lift.params[1:] if p not in pivot_params] + [n for s in self.lift.body for n in s.defines()]
         for x in candidates:
             found = cone(self, x)
-            if not same(found, score):
+            # The cone may read coordinates free (the causal mask's ``key <= query``): this fold's
+            # own axis is the pivot's once fused, so it is COMPARED under the pivot's name, while
+            # the residual below is cut by the cone's own statements.
+            spelled = found if self.axis == pivot.axis else (found[0].rename({self.axis: pivot.axis}), found[1])
+            if not same(spelled, score):
                 continue
             # What remains of the lift with the score cut out, closed over what it still reads —
             # ``(score, pivot, *extras)`` in role order, the extras operand-bound values.

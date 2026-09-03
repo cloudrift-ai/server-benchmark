@@ -1,8 +1,10 @@
 ---
 sidebar_position: 1
-validated_against_commit: 3c54f4dd594a6bd981b357669cd78e5d0a65d804
+validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
 title: "Learn Emmy: A Code-First Course"
-description: A beginner-friendly, code-first course on Emmy's compiler, deployment, benchmarking, provisioning, and serving architecture.
+description: >-
+  A beginner-friendly, code-first course on Emmy's compiler, deployment, benchmarking, provisioning, and serving
+  architecture.
 keywords: [Emmy, architecture, compiler, CUDA, vLLM, deployment, benchmarking, course]
 ---
 
@@ -30,7 +32,7 @@ quick reference. When a term is shown in `code font`, it is usually a name that 
 
 The course describes the current `emmy/` Python package—the main application code in the `emmy/` directory.
 `pyproject.toml` tells Python which package to install and connects the terminal command `emmy` to the function
-`emmy.emmy:main`. Folders such as `recipes/`, `experiments/`, `results/`, and `scripts/` contain inputs, examples,
+`emmy.emmy:main`. Folders such as `recipes/`, `experiments/`, and `scripts/` contain inputs, durable evidence,
 outputs, and helper tools around the application.
 
 ## How to use this course
@@ -53,7 +55,8 @@ deployment and benchmarking track. If your immediate goal is operations rather t
 lessons 0–5, 12, and 13 first.
 
 The main course is the beginner path. For a more implementation-focused treatment of lessons 6–12, use the
-[From PyTorch to CUDA: Compiler Deep Dive](./compiler_deep_dive). It follows one operation through every IR, then explains rewrite mechanics,
+[From PyTorch to CUDA: Compiler Deep Dive](./compiler_deep_dive). It follows one operation through every IR, then
+explains rewrite mechanics,
 algebra recognition, scheduling, CUDA dispatch, dynamic shapes, autotuning, and how to extend the compiler.
 
 For hands-on performance work, [Benchmarking and Comparing Emmy](./benchmarking_emmy) separates local compiler
@@ -100,7 +103,8 @@ compiling the model's mathematical work.
 
 There are three architectural ideas to keep in mind throughout the course:
 
-- The CLI is a thin coordination layer: it reads options and calls reusable code. Reusable behavior lives in `emmy/recipe`, `emmy/benchmark`, `emmy/deploy`,
+- The CLI is a thin coordination layer: it reads options and calls reusable code. Reusable behavior lives in
+  `emmy/recipe`, `emmy/benchmark`, `emmy/deploy`,
   `emmy/provisioning`, `emmy/compiler`, and `emmy/serving`.
 - The compiler keeps one editable `Graph`, a data structure that represents operations and the values flowing between
   them. A sequence of **passes** gradually replaces high-level operations with lower-level ones.
@@ -165,11 +169,11 @@ putting reusable compiler behavior inside a command handler.
 make setup
 ./venv/bin/emmy --help
 ./venv/bin/python -c "import emmy; print(emmy.__file__)"
-./venv/bin/pytest tests/test_config.py tests/test_hardware.py -q
+./venv/bin/pytest tests/recipe/test_types.py tests/test_hardware.py -q
 ```
 
 Use `rg --files emmy | sort` to compare the installed package with the top-level repository contents. Notice that
-`recipes/`, `experiments/`, `results/`, and `scripts/` are consumers or artifacts around the package.
+`recipes/`, `experiments/`, and `scripts/` are consumers or durable artifacts around the package.
 
 ### Checkpoint
 
@@ -255,11 +259,11 @@ across a long terminal command, a shell script, and a person's memory:
 - What GPU resources does the work require?
 - What workload should the benchmark send?
 - Which combinations should be compared?
-- Which output files or aggregate report should be kept?
+- Which raw output files should be preserved?
 
 Recipes exist for **repeatability**. A reviewed YAML file can be committed to Git, run again by another person, and
 used to compare results without reconstructing dozens of flags. It is also one shared contract between Emmy's recipe,
-planning, provisioning, deployment, benchmarking, and result-reporting code.
+planning, provisioning, deployment, benchmarking, and experiment-recording code.
 
 A recipe describes desired work; it does not perform the work by itself. Different commands consume it:
 
@@ -292,7 +296,7 @@ flowchart LR
     Deploy -->|bench| Variants[Expand experiment variants]
     Variants --> Tasks[Create and group benchmark tasks]
     Tasks --> Run[Provision, deploy, and measure]
-    Run --> Results[Save results and aggregate reports]
+    Run --> Results[Preserve raw results and experiment records]
 ```
 
 ### What a recipe contains
@@ -307,7 +311,6 @@ YAML is a human-readable format for nested lists and key/value settings. Emmy's 
 | `deploy` | Which GPU resources are required? | planning and provisioning |
 | `command` | Which arbitrary command should run instead of model inference? | command-workload execution |
 | `matrices` | Which setting combinations should become separate runs? | variant expansion and planning |
-| `aggregate` | How should results from all runs be summarized? | post-benchmark reporting |
 
 A recipe represents either model inference (`model` plus `engine`) or an arbitrary `command`; those are different
 workload types and cannot be mixed in one recipe. It contains references and settings, not model weights or CUDA code.
@@ -326,7 +329,7 @@ recipe path
   -> translate shared engine settings into vLLM or SGLang flags
   -> generate Docker Compose and start the service
   -> run a smoke test and benchmark workload
-  -> save each result and run the optional aggregate command
+  -> preserve raw results and update one system-only experiment record per row
 ```
 
 The next three lessons examine task planning, execution, provisioning, and deployment separately. For now, remember
@@ -385,13 +388,12 @@ inside one `zip`, the output would contain only `(A100, 1)` and `(H100, 8)`.
 
 ### Read
 
-1. `recipes/Qwen3-Embedding-0.6B/recipe.yaml`: a real inference recipe with `cross`, nested `zip`, and aggregation.
-2. `experiments/test_command/recipe.yaml`: a generic command workload.
-3. `emmy/recipe/types.py`: `Recipe`, `LLMConfig`, `ModelConfig`, `CommandConfig`, and `DeployConfig`.
-4. `emmy/recipe/matrix.py`: `expand_matrix`, `_expand_cross`, `_expand_zip`, `build_override`.
-5. `emmy/recipe/recipe.py`: `deep_merge`, `_validate_and_build`, `load_recipe`, `resolve_for_hardware`.
-6. `emmy/recipe/engines.py`: flag maps and `build_engine_args`.
-7. `emmy/recipe/ARCHITECTURE.md`: use it to resolve edge cases after reading the implementation path.
+1. `recipes/Qwen3-Embedding-0.6B/recipe.yaml`: a real inference recipe with `cross` and nested `zip` matrices.
+2. `emmy/recipe/types.py`: `Recipe`, `LLMConfig`, `ModelConfig`, `CommandConfig`, and `DeployConfig`.
+3. `emmy/recipe/matrix.py`: `expand_matrix`, `_expand_cross`, `_expand_zip`, `build_override`.
+4. `emmy/recipe/recipe.py`: `deep_merge`, `_validate_and_build`, `load_recipe`, `resolve_for_hardware`.
+5. `emmy/recipe/engines.py`: flag maps and `build_engine_args`.
+6. `emmy/recipe/ARCHITECTURE.md`: use it to resolve edge cases after reading the implementation path.
 
 ### Lab — inspect expansion directly
 
@@ -428,7 +430,7 @@ You can explain:
 
 - Why Emmy uses a version-controlled recipe instead of asking users to reconstruct a long command for every run.
 - How `emmy deploy` and `emmy bench` consume the same recipe for different workflows.
-- Which recipe sections describe the model or command, engine, hardware, workload, comparisons, and aggregation.
+- Which recipe sections describe the model or command, engine, hardware, workload, and comparisons.
 - Why matrix expansion returns flat dot-path dictionaries before `build_override` nests them.
 - Why `deep_merge` is necessary instead of a shallow dictionary update.
 - How one `LLMConfig` becomes different vLLM and SGLang command-line flags.
@@ -519,7 +521,7 @@ flowchart LR
     Prepare --> Deploy[Start model server]
     Deploy --> Smoke[Run a quick smoke test]
     Smoke --> Benchmark[Measure the workload]
-    Benchmark --> Save[Save structured results]
+    Benchmark --> Save[Preserve raw results and update the experiment record]
     Save --> Cleanup[Stop services and release resources]
 ```
 
@@ -527,23 +529,32 @@ A **smoke test** is a small request that catches obvious startup failures before
 the cleanup step that stops services and, when appropriate, releases the machine. Command tasks instead upload needed
 files, run their command template, and retrieve the declared result files.
 
-The same `PhaseTimer` travels through this path. Provisioning time is incurred once per group but copied into each task
-result, making a task's result reflect the cost of obtaining its host. Model-load subphases are parsed from engine logs
-but excluded from the top-level total to avoid double counting.
+Each expanded row has a typed `ExperimentRecord`. Emmy creates the record before provisioning and updates its lifecycle,
+provenance, system information, timestamps, and failure details atomically as the row progresses. Measurements remain
+raw artifacts: orchestration deliberately does not parse them into a second result schema or produce an interpreted
+report. A `PhaseTimer` records orchestration phases without changing that ownership boundary.
 
 ### Small example — make cleanup unavoidable
 
 The central control flow is similar to this pseudocode:
 
 ```python
+records = initialize_experiment_records(group.tasks)
+record = None
 host = provision_or_reuse_host(group)
 try:
     prepare(host)
     for task in group.tasks:
+        record = records[task.id]
         deploy(task, host)
         smoke_test(task, host)
-        save(benchmark(task, host))
+        preserve_raw_artifacts(benchmark(task, host))
+        update_experiment_record(record, state="succeeded")
         teardown_service(task, host)
+except Exception as error:
+    if record is not None:
+        update_experiment_record(record, state="failed", error=error)
+    raise
 finally:
     release_host_if_owned(host)
 ```
@@ -556,9 +567,10 @@ cleanup. The real implementation has more detailed failure handling and timing, 
 1. `emmy/benchmark/execution.py`: `run_execution_group`; read one branch at a time.
 2. `emmy/benchmark/workload.py`: inference benchmark command construction.
 3. `emmy/benchmark/command_workload.py`: template variables, staging, and result retrieval.
-4. `emmy/benchmark/results.py`: parsing and result composition.
-5. `emmy/timing.py`: `PhaseTimer` and phase constants.
-6. `emmy/commands/ARCHITECTURE.md`: Data Flow and Timing metrics.
+4. `emmy/benchmark/experiment_record.py`: the typed, system-only lifecycle and provenance record.
+5. `emmy/benchmark/ARCHITECTURE.md`: artifact ownership and the experiment-record contract.
+6. `emmy/timing.py`: `PhaseTimer` and phase constants.
+7. `emmy/commands/ARCHITECTURE.md`: command ownership and orchestration boundaries.
 
 ### Lab — use tests as a side-effect-free execution trace
 
@@ -568,15 +580,13 @@ For a complete command walkthrough and definitions of TTFT, TPOT, ITL, latency, 
 ```bash
 ./venv/bin/pytest \
   tests/benchmark/test_command_workload.py \
-  tests/benchmark/test_results.py \
-  tests/deploy/test_log_phases.py -q
+  tests/benchmark/test_experiment_record.py \
+  tests/benchmark/test_bench_status.py -q
 ```
 
-Open one result manifest and compare its persisted identity with `BenchmarkTask.to_dict`:
-
-```bash
-sed -n '1,200p' results/qwen3_coder_awq_sglang_vs_vllm/manifest.json
-```
+Open `tests/benchmark/test_experiment_record.py` and compare the serialized identity and lifecycle fields with the
+contract in `emmy/benchmark/ARCHITECTURE.md`. A real benchmark writes collision-safe `*.experiment.yaml` files beside
+its raw artifacts; historical experiment directories may still contain older layouts and are not the current contract.
 
 ### Trace exercise
 
@@ -604,8 +614,8 @@ cleaned up any partially created instance.
 
 Deployment converts a typed recipe into engine arguments and Docker Compose. **Docker** runs applications in isolated
 packages called containers; **Docker Compose** describes how several containers should run together. Deployment pulls
-images, obtains model data, starts services, waits for health, runs a task-aware smoke test, and exposes teardown through the same transport
-abstraction. Multi-instance configurations add nginx and use a scale-out strategy.
+images, obtains model data, starts services, waits for health, runs a task-aware smoke test, and exposes teardown
+through the same transport abstraction. Multi-instance configurations add nginx and use a scale-out strategy.
 
 ### Small example — separate the two responsibilities
 
@@ -1219,8 +1229,9 @@ the frontend operations it implements.
 ### Learn
 
 **Lowering** means translating into a more detailed, machine-oriented form while preserving the answer. Tile lowering
-recognizes the algebra in a loop body and attaches a **schedule**: the plan that assigns calculations and data movement
-to GPU hardware. A **tile** is a small piece of a larger tensor calculation that can fit in faster memory.
+lifts every loop operation into a canonical pure `Fold` tree, classifies its algebra, exposes structural cuts, and then
+attaches a **schedule**: the plan that assigns calculations and data movement to GPU hardware. A **tile** is a small
+piece of a larger tensor calculation that can fit in faster memory.
 
 The key classification comes from how a reduction combines partial results (its **carrier**) and what job each loop
 axis performs, rather than from tensor dimension names:
@@ -1230,9 +1241,10 @@ axis performs, rather than from tensor dimension names:
 - A twisted carrier keeps several related values so numerically stable softmax or attention results can be combined.
 - A contraction repeatedly multiplies values and adds the products, as in matrix multiplication.
 
-The Tile IR records structural work and scheduling choices. Kernel lowering binds that schedule to threads, blocks,
-shared memory, cooperative reductions, tensor-core atoms, and synchronization. CUDA lowering renders the resulting
-kernel statement tree to source.
+The Loop-to-Tile boundary is a **total lift**: every loop node has a structural Tile representation, with no raw-loop
+escape hatch. The Tile IR stores the pure `Fold`, placement, output specifications, and scheduling choices. Kernel
+lowering binds the selected schedule to threads, blocks, shared memory, cooperative reductions, tensor-core atoms, and
+synchronization. CUDA lowering renders the resulting kernel statement tree to source.
 
 Canonical pass lists in `emmy/compiler/pipeline/__init__.py` define the stages:
 
@@ -1268,11 +1280,13 @@ threads' results.
 1. `emmy/compiler/ir/ARCHITECTURE.md`: Dialects at a glance and stage invariants.
 2. `emmy/compiler/pipeline/__init__.py`: canonical pass lists.
 3. `emmy/compiler/pipeline/passes/ARCHITECTURE.md`: no shape-specific pattern matching and cut versus split.
-4. `emmy/compiler/ir/tile/ir.py` and `tile/ops.py`: structural nodes, schedules, and lowering.
-5. `emmy/compiler/pipeline/passes/lowering/tile/010_recognize.py` and `_schedule.py`.
-6. `emmy/compiler/pipeline/passes/lowering/kernel/ARCHITECTURE.md`: materialization, factorization, and staging.
-7. `emmy/compiler/ir/kernel/ir.py` and `render.py`.
-8. `emmy/compiler/pipeline/passes/lowering/cuda/010_lower_kernelop.py`.
+4. `emmy/compiler/ir/pure/`: the pure `Fold` algebra and classification vocabulary.
+5. `emmy/compiler/ir/tile/`: `TileOp`, placement, output specifications, and Tile rendering.
+6. `emmy/compiler/pipeline/passes/lowering/tile/010_lift.py`, `020_twisted.py`, `030_cut.py`, and `040_schedule.py`.
+7. `emmy/compiler/ir/schedule/`: the generic `Schedule`, `ScheduleContext`, and classic schedule implementation.
+8. `emmy/compiler/pipeline/passes/lowering/kernel/ARCHITECTURE.md`: materialization, factorization, and staging.
+9. `emmy/compiler/ir/kernel/ir.py` and `render.py`.
+10. `emmy/compiler/pipeline/passes/lowering/cuda/010_lower_kernelop.py`.
 
 ### Lab — compare the final four stages
 
@@ -1292,9 +1306,10 @@ Run GPU-independent structure tests:
 
 ```bash
 ./venv/bin/pytest \
-  tests/compiler/ir/tile/test_structural_reduction.py \
-  tests/compiler/ir/tile/test_codec_roundtrip.py \
-  tests/compiler/passes/test_recognize_boundary_rules.py -q
+  tests/compiler/passes/test_total_lift.py \
+  tests/compiler/passes/test_twisted_rewrite.py \
+  tests/compiler/passes/test_cut_forks.py \
+  tests/compiler/passes/test_schedule_walk.py -q
 ```
 
 ### Checkpoint
@@ -1409,11 +1424,11 @@ The identity model has two layers:
 
 ### What is a golden?
 
-A **golden configuration** is a reviewed, version-controlled record of a known schedule for one canonical operation
-shape on one specific GPU model. Think of it as an approved benchmark card:
+A **golden configuration** is one persisted symbolic program target. A reviewed canonical golden records one or more
+realizations for that target on an exact GPU platform. Think of one verified realization as an approved benchmark card:
 
 ```text
-For this operation and shape,
+For this exact program target and binding,
 on this exact GPU,
 these schedule choices were realized,
 the result was checked for correctness,
@@ -1428,34 +1443,36 @@ A checked-in golden contains information such as:
 
 | Field | Meaning |
 |---|---|
-| `kernel` and `name` | The operation family and human-readable canonical case |
-| shape and `dtype` | The exact tensor dimensions and number format |
+| stable Torch IR and optional Loop IR | The exact program and target reconstructed for replay |
+| `configs` and `realizations` | Symbolic targets plus concrete bindings and pin regimes |
 | `gpu_name` and `compute_cap` | The GPU model and NVIDIA hardware capability on which it was recorded |
-| `knobs` | Every realized schedule choice, including choices that are explicitly off |
-| `emmy_us` | Emmy's reproduced latency in microseconds |
-| `cublas_us` | The reference latency; the historical field name is also used when the reference is PyTorch rather than literally cuBLAS |
-| `dynamic` | Whether this is a symbolic-shape program rather than a static-shape program |
+| `pins` and `knobs` | The input regime and every exact realized schedule choice, including explicit OFF |
+| `measurements` | Reproduced Emmy and named-reference latency in microseconds |
 
 For example, a simplified record looks like:
 
 ```yaml
-gpu_name: NVIDIA GeForce RTX 5090
-compute_cap: [12, 0]
+gpu_name: NVIDIA GeForce RTX 4080
+compute_cap: [8, 9]
+programs:
+  - inputs: [x0, x1]
+    outputs: [matmul]
+    nodes: [...]  # Stable Torch IR, abbreviated here.
 configs:
-  - kernel: rms_norm
-    name: rms_norm.k2048
-    M: 512
-    K: 2048
-    knobs:
-      REDUCE: b512
-      VECTORIZE_LOADS: true
-      FAST_EXP: false
-    emmy_us: 3.8
-    cublas_us: 4.1
+  - program: 0
+    target:
+      origins: [matmul]
+    realizations:
+      - name: matmul.square.512.fp16
+        bindings: {}
+        pins: {FAST_MATH: false}
+        knobs: {WORK: w2x1, TILE: mma_m16n8k16_f16_f32/f1x4/k2, RASTER: '', STAGE: d4/smem-async}
+        measurements: {emmy_us: 8.3, reference_us: 6.0, reference_backend: cublas}
 ```
 
-The real files live under `emmy/compiler/pipeline/search/goldens/`. They are split by GPU because a schedule that is
-excellent on one card can be slower or invalid on another.
+Model goldens live under each recipe's `golden/` directory; model-agnostic hardware goldens live under
+`emmy/compiler/pipeline/search/goldens/`. A mutable working golden may contain inventory, proposals, and ranking
+feedback, but only a reviewed canonical file is verified deployment evidence.
 
 ### How a golden is created
 
@@ -1463,44 +1480,41 @@ A normal tuning measurement does not automatically become a golden. Creating one
 
 ```mermaid
 flowchart LR
-    Shape[Choose a canonical operation and shape] --> Tune[Autotune alternatives on the intended GPU]
-    Tune --> O3[Recompile promising candidates at deployable O3]
-    O3 --> Pin[Pin the exact knobs and run an A/B benchmark]
+    Shape[Create a working golden inventory] --> Tune[Autotune alternatives on the intended GPU at deployable O3]
+    Tune --> Pin[Pin the exact knobs and run an A/B benchmark]
     Pin --> Gates{Integrity checks pass?}
     Gates -->|no| Reject[Reject the candidate]
     Gates -->|yes| Repeat[Repeat to confirm the measurement]
     Repeat --> Copy[Copy record_knobs and pinned latency]
-    Copy --> YAML[Add to the GPU-specific golden YAML]
-    YAML --> Review[Review and regression checks]
+    Copy --> YAML[Promote the complete program-backed row]
+    YAML --> Review[Run the file-scoped audit and qualification checks]
 ```
 
 The important steps are:
 
-1. Choose a representative operation, shape, dtype, static/dynamic regime, and target GPU.
-2. Run `emmy tune` to explore valid schedules. Tune-time `-O1` measurements are useful for ranking candidates quickly,
-   but they are not final deployment measurements.
-3. Recompile and benchmark promising candidates at deployable `-O3`.
-4. Pin a candidate's exact knobs and compare it through the A/B path.
-5. Require three integrity checks: the requested knobs were actually realized, the output matches the reference, and
+1. Create a working golden inventory for the exact program, bindings, pins, and target GPU.
+2. Run `emmy tune --golden-file` to explore valid schedules at the default deployable `-O3` settings.
+3. Pin a candidate's exact knobs and compare it through the A/B path.
+4. Require three integrity checks: the requested knobs were actually realized, the output matches the reference, and
    the reported speed is physically plausible for the GPU.
-6. Repeat the measurement. Use the pinned row's `record_knobs` and latency, not a partial knob diff or an incomparable
+5. Repeat the measurement. Use the pinned row's `record_knobs` and latency, not a partial knob diff or an incomparable
    timing from another benchmark path.
-7. Add the record manually to the correct GPU YAML and review it like source code.
+6. Promote the complete program-backed record into the correct canonical per-GPU YAML and run its release audit.
 
 A new candidate workflow has this general shape; the actual knob string comes from tuning output:
 
 ```bash
-# 1. Search and re-benchmark the winner at deployable optimization settings.
-./venv/bin/emmy tune \
-  --code "nn.RMSNorm(2048)(torch.randn(512, 2048, device='cuda'))" \
-  --bench
+# 1. Search every target in a mutable working inventory.
+EMMY_TUNE_DB=/tmp/emmy-golden-course.db \
+  ./venv/bin/emmy tune \
+  --golden-file /tmp/model-working.golden.yaml \
+  --patience 8
 
 # 2. Re-run a promising exact configuration through integrity-checked A/B measurement.
 ./venv/bin/emmy run \
-  --code "nn.RMSNorm(2048)(torch.randn(512, 2048, device='cuda'))" \
+  --golden matmul.square.512.fp16 \
   --bench --warmup 5 --iters 20 \
-  --ab "REDUCE=b512,VECTORIZE_LOADS=true,FAST_EXP=false" \
-  --json /tmp/rmsnorm-golden-candidate.json
+  --json /tmp/matmul-golden-candidate.json
 ```
 
 Do not copy the illustrative knob string blindly: valid knobs depend on current enumeration, shape, dtype, and GPU.
@@ -1511,43 +1525,42 @@ checks pass.
 
 Goldens have three main consumers:
 
-1. **Deployment-time schedule selection.** During an ordinary `compile` or `run`, greedy selection first checks for a
-   golden recorded for the live `(gpu_name, compute_cap)` and matching operation `ShapeKey`. If the current compiler
-   still offers a candidate compatible with the recorded knobs, that candidate is stronger evidence than ordinary tune
-   measurements or model predictions.
-2. **Reproduction and regression checks.** `compile`, `run`, and `tune` accept `--golden NAME`. The name resolves to the
-   golden's canonical PyTorch snippet and recorded configuration, making it easy to reproduce the case. `emmy eval
-   golden` checks how current compiler choices compare with checked-in records.
-3. **Evaluation of ranking systems.** Goldens test whether offline and online rankers place trusted schedules well.
-   They remain held out from online-prior training so evaluation does not become circular.
+1. **Deployment-time schedule selection.** Greedy selection first checks for a verified record on the live GPU whose
+   strict deploy identity matches the current schedule-free Loop program and whose schedule row equals one exact
+   enumerated leaf. It is stronger evidence than ordinary tune measurements or model predictions.
+2. **Reproduction and release checks.** `compile` and `run` accept `--golden NAME`; `tune` and strict multi-target runs
+   accept a working `--golden-file`. `emmy eval golden FILE --serving-config FILE` performs the file-scoped release
+   audit against a pinned serving realization matrix.
+3. **Offline-prior fitting and evaluation.** `emmy fit` reconstructs each canonical golden's candidate pool to train
+   the offline prior. Goldens do not enter the online reservoir, which learns from ordinary tuning measurements.
 
 ```bash
 # Reproduce a checked-in golden on its recorded GPU.
 ./venv/bin/emmy run \
-  --golden rms_norm.k2048 \
+  --golden matmul.square.512.fp16 \
   --bench --warmup 5 --iters 20 \
-  --json /tmp/rmsnorm-golden-reproduction.json
+  --json /tmp/matmul-golden-reproduction.json
 
-# Compare current compiler choices with checked-in golden records.
-./venv/bin/emmy eval golden --kernel matmul.square.512
+# Rank both prior halves on the canonical golden dataset.
+./venv/bin/emmy eval prior --dataset golden --kernel matmul.square.512 --pool-sample 2000
 ```
 
-A golden never forces an impossible or stale schedule. Emmy matches it against candidates the current compiler actually
-offers. If no candidate realizes the recorded configuration, Emmy warns about enumeration drift and falls through to
-weaker compatible evidence or a prior instead of blindly replaying old settings. Goldens only arbitrate the deployable
-`-O3` lane.
+A golden never forces an impossible or stale schedule. If its program identity matches but no live leaf exactly equals
+the recorded schedule row, Emmy warns about drift and falls through to weaker evidence instead of replaying it
+approximately. Goldens arbitrate only the deployable `-O3` lane and matching pin regime.
 
 This gives the evidence order a useful shape:
 
 ```text
 matching, realizable golden for this GPU
-    -> compatible deployable measurements
-    -> trustworthy online prediction
-    -> fixed offline prior
+    -> compatible reservoir measurements
+    -> compatible tune-DB perf measurements
+    -> global Prior (online checkpoint with offline cold-start fallback)
+    -> rule fallback option
 ```
 
-The dedicated [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens) chapter traces this hierarchy from a compiler fork through
-feature construction, MCTS labels, persistence, live-card matching, and safe golden recording.
+The dedicated [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens) chapter traces this hierarchy from a compiler
+fork through feature construction, MCTS labels, persistence, live-card matching, and safe golden recording.
 
 ### Small example — choose among valid schedules
 
@@ -1571,22 +1584,24 @@ Normal `emmy compile` selects from existing evidence; it does not run this exper
 4. `emmy/compiler/pipeline/search/policy/greedy.py`: deployment-time resolution.
 5. `emmy/compiler/pipeline/search/db.py`: persistent measurements.
 6. `emmy/compiler/pipeline/search/prior/`: offline, online, and fallback ranking.
-7. `emmy/compiler/pipeline/search/two_level.py`: structural outer search and per-operation inner tuning.
+7. `emmy/compiler/pipeline/search/strategy/two_level.py`: structural outer search and per-operation inner tuning.
 8. `emmy/commands/tune.py` and `emmy/commands/eval.py`: user-facing drivers.
-9. `emmy/compiler/pipeline/search/golden.py`: golden schemas, YAML loading, GPU scoping, and canonical snippets.
-10. `emmy/compiler/pipeline/search/policy/greedy.py`: `_golden_pick` and the evidence hierarchy.
-11. `emmy/commands/run.py`: pinned A/B checks, `record_knobs`, and machine-readable JSON output.
+9. `emmy/compiler/pipeline/search/golden.py`: generic program-backed canonical records and strict decode.
+10. `emmy/compiler/pipeline/search/working_golden.py`: mutable inventories, proposals, and tune feedback.
+11. `emmy/compiler/pipeline/search/policy/greedy.py`: verified evidence and the full hierarchy.
+12. `emmy/commands/run.py`: pinned A/B checks, `record_knobs`, and machine-readable JSON output.
 
 ### Lab — inspect the search system without tuning a GPU
 
 ```bash
 ./venv/bin/emmy eval knobs
-./venv/bin/emmy eval golden
+./venv/bin/emmy eval prior --dataset golden --pool-sample 2000
 ./venv/bin/pytest \
   tests/compiler/pipeline/test_knob.py \
-  tests/compiler/pipeline/search/test_db.py \
-  tests/compiler/pipeline/search/test_online_prior.py \
-  tests/compiler/pipeline/search/test_two_level.py -q
+  tests/compiler/pipeline/search/policy/test_greedy.py \
+  tests/compiler/pipeline/search/prior/test_score_rows.py \
+  tests/compiler/pipeline/search/test_two_level_strategy.py \
+  tests/compiler/pipeline/search/data/test_freeze.py -q
 ```
 
 **GPU:** use a tiny target and a separate database while learning:
@@ -1603,10 +1618,9 @@ tuning cache until you understand the evidence and compiler-flag keys.
 
 ### Checkpoint
 
-You can distinguish a rule fork from a knob, exploration from greedy resolution, offline from online priors, and
-ranking measurements from deployable measurements. You can also explain what a golden stores, why creating one requires
-pinned and repeated integrity-checked measurement, how it participates in deployment selection, and why it is not an
-online-prior training row.
+You can distinguish a rule fork from a knob, exploration from greedy resolution, and offline from online priors. You
+can also explain the verified, reservoir, DB, and prior tiers; what a program-backed golden stores; why promotion
+requires repeated integrity-checked measurement; and why canonical goldens fit the offline half but not the online one.
 
 ## Lesson 13 — Bridge compiled programs into vLLM serving
 
@@ -1718,7 +1732,7 @@ tensor-core tiers, staging transports, and reduction strategies—visible.
 
 ```text
 change: reject an invalid recipe field
-first test: tests/recipe/test_recipe.py
+first test: tests/recipe/test_types.py
 
 change: alter loop fusion
 first test: tests/compiler/passes/test_fusion_rules.py
@@ -1833,10 +1847,10 @@ When debugging or extending Emmy, first decide which dataflow you are in:
 | Why did this YAML produce these runs? | `recipe/matrix.py` | `benchmark/tasks.py`, planner |
 | Why did this host or provider get selected? | `provisioning/candidates.py` | `provisioning/cloud.py` |
 | Why did Docker start with these flags? | `recipe/engines.py` | `deploy/compose.py`, `deploy/orchestrate.py` |
-| Why is a result missing or mislabeled? | `benchmark/execution.py` | workload, results, planner variant |
+| Why is a raw artifact or row record missing? | `benchmark/execution.py` | workload, experiment record, planner variant |
 | Why did tracing produce this operation? | `compiler/trace` | frontend IR |
 | Why did an operation split or fuse? | pipeline rule diff | decomposition or fusion pass |
-| Why was this GPU schedule selected? | tile recognition and schedule | fork, knob, prior evidence |
+| Why was this GPU schedule selected? | total lift and scheduling | fork, knob, deploy evidence hierarchy |
 | Why is emitted CUDA wrong? | kernel IR and renderer | CUDA launch geometry and buffers |
 | Why does serving differ from a standalone run? | `serving/vllm_model.py` | runner, packed spans, captured programs |
 

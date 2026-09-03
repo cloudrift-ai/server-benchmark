@@ -1,6 +1,6 @@
 ---
 sidebar_position: 5
-validated_against_commit: 3c54f4dd594a6bd981b357669cd78e5d0a65d804
+validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
 title: Integrating Emmy with vLLM
 description: >-
   Learn how Emmy plugs compiled embedding and generation programs into vLLM, then run and validate both serving paths.
@@ -356,10 +356,11 @@ capture. vLLM's graph can then contain the entire decode step, including the Emm
 
 ### Supported-model boundaries matter
 
-The generation adapter is architecture-aware. For example, it builds per-layer attention and rotary metadata when a
-model mixes local and global attention. It rejects unsupported structures such as the currently unwired uniform
-sliding-window and dual-chunk configurations. A clean startup error is safer than producing plausible but incorrect
-tokens.
+The generation adapter is architecture-aware. It builds per-layer attention and rotary metadata for mixed local and
+global attention, supports routed-expert models through the MoE third seam, and can shard layers and experts across
+vLLM tensor and pipeline ranks. Current serving paths include compressed expert formats and the published DeepSeek V4
+checkpoint; uniform sliding-window and dual-chunk configurations remain rejected. A clean startup error is safer than
+producing plausible but incorrect tokens.
 
 Read `emmy/serving/ARCHITECTURE.md` before adding a new architecture. The important question is not merely whether
 Hugging Face can load it; the model must also expose a sound split around vLLM attention.
@@ -460,8 +461,9 @@ The script compares pairwise cosine similarity. This is stronger than checking o
 the full HTTP, tokenization, model, and pooling path.
 
 For generation, use deterministic prompts and compare tokens or logits with a trusted eager or stock reference before
-running throughput experiments. `scripts/validate_gemma4_serve.py` is an example of a sequential GPU accuracy gate for
-the supported Gemma path.
+running throughput experiments. `scripts/validate_serve.py` is the sequential GPU accuracy gate used by the serving
+image workflow; it compares a checkpoint's Emmy server with a Hugging Face eager reference without keeping both models
+resident at once.
 
 ## 8. Benchmark Emmy against stock vLLM
 

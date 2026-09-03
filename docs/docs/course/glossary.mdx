@@ -1,8 +1,10 @@
 ---
 sidebar_position: 6
-validated_against_commit: 3c54f4dd594a6bd981b357669cd78e5d0a65d804
+validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
 title: Emmy Course Glossary
-description: Plain-language definitions of the machine-learning, compiler, GPU, deployment, and tuning terms used in the Emmy course.
+description: >-
+  Plain-language definitions of the machine-learning, compiler, GPU, deployment, and tuning terms used in the Emmy
+  course.
 keywords: [Emmy, glossary, LLM, compiler, CUDA, GPU, vLLM]
 ---
 
@@ -51,6 +53,11 @@ A small piece of text represented by an integer. A tokenizer converts text into 
 **Embedding**
 A list of numbers representing the meaning or features of an input. Similar inputs often have nearby embeddings.
 
+**Pooling**
+Combining a sequence of token-level hidden-state vectors into one vector for the whole input. The name comes from
+collecting, or pooling, many token representations into one fixed-size result. vLLM's pooling runner owns this final
+step for Emmy embedding models.
+
 **Batch**
 Several inputs processed together. Batching often makes better use of a GPU.
 
@@ -61,6 +68,20 @@ work. Emmy can plug compiled model operations into that system.
 **Transformer**
 The neural-network architecture used by most modern LLMs. It processes token representations through repeated layers
 containing attention and other tensor operations.
+
+**Mixture of experts (MoE)**
+A model layer with many expert subnetworks and a router that selects a small subset for each token. Emmy's generative
+serving path splits this work at the MoE third seam so routing stays outside the compiled expert program while one
+weight-parameterized program serves the selected experts.
+
+**Quantization**
+Representing model weights or activations with fewer bits to reduce memory and bandwidth. Formats used by current Emmy
+serving paths include FP8, NVFP4, MXFP4, AWQ INT4, and EXL3; each format has its own scaling and layout contract.
+
+**NVFP4 / MXFP4 / EXL3**
+Low-bit weight formats. NVFP4 and MXFP4 are four-bit floating-point formats with different block-scaling conventions.
+EXL3 is a mixed-rate coded format whose allocation can vary by tensor. Emmy decomposes their decoding into generic
+compiler algebra at the loader boundary.
 
 **KV cache (key/value cache)**
 GPU memory that stores attention information for tokens a model has already processed. Reusing it avoids recalculating
@@ -106,6 +127,39 @@ such as `ElementwiseOp`, `ReduceOp`, and `IndexMapOp`.
 **Loop IR**
 The same outer Emmy `Graph` after tensor operations have been lifted into explicit loop bodies and compatible bodies
 have been fused. Its compute nodes carry `LoopOp` operations.
+
+**Fold**
+Tile IR's one stored pure reduction term: an optional iteration axis, a lift lambda that produces one contribution, an
+initial state, an associative state-combine lambda, and operand edges. Pointwise maps, ordinary reductions, twisted
+state, and contractions are derived readings of this single representation.
+
+**Total lift**
+The Loop-to-Tile invariant that every reduction loop becomes a Fold and every output effect becomes an output
+specification. Tile IR has no raw-loop escape hatch; an unrepresentable boundary fails loudly.
+
+**Classification**
+A derived algebraic reading of a Fold, such as planar, twisted, or contraction. Classification does not change the
+stored term and is distinct from choosing a hardware schedule.
+
+**Monoid family**
+The associative combine algebra carried by a Fold. A componentwise family includes ordinary sum or maximum; a twisted
+family combines multi-component state such as a stable exponential pivot and expectation.
+
+**Scan**
+A Fold that exposes its carried state at every step, rather than only its final state. Emmy represents the per-step tap
+with an observer lambda and preserves its writes through output specifications.
+
+**Closure**
+The transitive set of values or operations required by a result. Compiler transformations use closures to move or cut
+complete dependency cones without leaving a required producer behind.
+
+**Multi-output node**
+One graph node that produces several tensor outputs. All outputs share one execution and schedule identity, so fusion,
+cutting, and lowering must preserve them together.
+
+**Output equivalence cluster**
+Outputs that represent the same computation boundary and must be rewritten or scheduled consistently even if they have
+different graph names.
 
 **`LoopOp` versus `Loop`**
 A `LoopOp` is an operation stored in a Graph node and describes one kernel-sized region of computation. A `Loop` is a
@@ -284,8 +338,8 @@ A human-readable configuration format. Emmy recipes are written in YAML.
 
 **Recipe**
 A version-controlled plan describing what model or command to run, how to deploy it, which hardware and benchmark
-settings to use, which variants to compare, and how to aggregate results. Commands such as `emmy deploy` and
-`emmy bench` consume recipes; a recipe does not execute by itself.
+settings to use, which variants to compare, and which raw files a command workload declares. Commands such as
+`emmy deploy` and `emmy bench` consume recipes; a recipe does not execute or interpret results by itself.
 
 **Variant**
 One concrete combination of recipe settings. A matrix can expand one recipe into many variants.
@@ -296,6 +350,22 @@ position.
 
 **Benchmark**
 A controlled measurement of speed, latency, throughput, or resource use.
+
+**Experiment row**
+One expanded recipe variant executed as an independent unit. A row has a stable identity even when its readable variant
+label is abbreviated.
+
+**Experiment record**
+The system-only YAML record for one experiment row. It stores identity, provenance, lifecycle, timings, errors,
+infrastructure state, and observed host facts, but no benchmark measurements or conclusions.
+
+**Raw experiment results**
+The workload's unparsed output files and logs. Emmy preserves them without deciding whether latency, throughput,
+accuracy, request counts, or coverage are acceptable.
+
+**Heat score**
+A prioritization score used by model discovery to combine public attention with operational relevance. It helps decide
+what to investigate and is not a benchmark measurement or quality claim.
 
 **Profiling**
 Collecting detailed evidence about where time or hardware resources are used. A benchmark says how long something
@@ -366,6 +436,18 @@ A compiler decision point with several correct alternatives. Each branch can lea
 **Knob**
 A named tuning choice, such as a tile size or memory-staging strategy.
 
+**Pin**
+Forcing a tuning choice instead of letting the compiler decide it, through an `EMMY_<KNOB>` value or exact recorded
+replay. A pinned benchmark must prove that the requested row actually realized before its timing is evidence.
+
+**Schedule key**
+The path-aware name of one schedule choice, such as bare `TILE` for the primary site or `REDUCE@<axis>` when one Fold
+tree contains several choices from the same family. Golden files, the tune DB, and pins use the shortest unambiguous key.
+
+**Realize**
+A recorded configuration realizes when the current compiler offers an exact candidate matching it at the decision
+point. A record that realizes nowhere cannot be deployed, regardless of its stored measurement.
+
 **Candidate**
 One complete set of choices that the compiler could use.
 
@@ -377,19 +459,73 @@ A search method that treats decisions as a tree and balances trying promising br
 
 **Prior**
 In Emmy, a ranker that estimates which schedule will be fast before the current candidate is measured. The offline
-prior is fixed; the online prior learns from collected measurements.
+prior is fitted ahead of time by `emmy fit` on canonical goldens and ships with the repository; the online prior learns
+from local tuning measurements.
+
+**Trainer**
+An immutable object that turns candidate-pool data into a fitted model. `emmy fit --trainer linear` uses
+`LinearTrainer`; `--trainer catboost` uses `CatBoostTrainer`.
+
+**Blend**
+The named strategy that decides which prior half owns deployment ranking and how the halves influence MCTS selection.
+`EMMY_PRIOR_BLEND` selects it; the default uses the offline half until the online half is trustworthy.
+
+**Candidate pool**
+Every valid schedule row for one kernel. Pool members compute the same result and differ only in realization and speed;
+rows from different pools are not directly comparable.
 
 **Golden configuration**
-A reviewed, version-controlled, GPU-specific record containing a canonical operation shape, exact realized schedule
-knobs, and reproduced Emmy/reference latencies. It is trusted deployment evidence and a regression reference—not model
-weights, expected output values, a CUDA binary, or automatically promoted tuning data. A candidate becomes a golden only
-after pinned A/B measurement, correctness and plausibility checks, reproduction, and review into GPU-specific YAML.
+A persisted symbolic program target. Its `realizations` contain dimension bindings, input pins, schedule knobs, and,
+after verification, paired measurements for one exact GPU platform.
+
+**Realization**
+One statically bound or symbolic instance of a golden configuration: named bindings, input pins, selected schedule
+knobs, and optional measurements and ranking feedback.
+
+**Working golden file**
+A mutable local YAML inventory containing program targets, unverified realizations, proposals, and tuning feedback. It
+is search state, not trusted deployment evidence.
+
+**Canonical golden file**
+A reviewed per-GPU YAML in a recipe's `golden/` directory or the model-agnostic hardware-golden directory. Every
+realization has verified deployable measurements, and `emmy tune` refuses to mutate the file directly.
+
+**Child-identity schedule receipt**
+A realization that freezes structural cuts in its pins, records one resulting child kernel's schedule row, and stores
+that child's deploy identity. It lets verified evidence describe per-child schedules without flattening a kernel tree.
 
 **Evidence**
 A compatible recorded measurement used to select between schedule candidates.
 
+**Reservoir**
+The bounded sample of past tuning measurements stored inside the online-prior checkpoint. It trains the online model,
+and its compatible deployable rows are also a direct evidence tier.
+
+**Measurement freeze**
+A checksum- and vocabulary-pinned snapshot of node measurements used for reproducible evaluation. Unlike one machine's
+mutable tune DB or reservoir, the same freeze yields the same evaluation dataset wherever it is read.
+
+**Deploy evidence hierarchy**
+The fixed greedy-compile order: exact verified goldens, compatible reservoir measurements, compatible tune-DB `perf`
+rows, the prior prediction, and finally the rule's first emitted option when every other tier is silent.
+
 **Calibration**
 A check of whether a learned model ranks measured candidates well enough to influence compilation.
+
+**Regime**
+The compile settings under which a candidate is measured or deployed, especially nvcc optimization and fast-math pins.
+The default deployable regime is `-O3`; a measurement from another regime does not silently decide it.
+
+**Regret**
+The latency ratio between the candidate selected by a ranker and the fastest measured candidate in the same pool. A
+regret of `1.00` is best; `1.40` means the selected row was 40 percent slower.
+
+**Rank correlation**
+How closely a model's ordering follows measured ordering, from `+1` for identical order through `0` for no relationship.
+
+**Golden rank**
+The position of a verified realization in the prior's ordering of its candidate pool. It measures discoverability, not
+the realization's absolute speed.
 
 **Quarantine**
 The state in which an online model may continue learning but is not trusted to choose deployed schedules.

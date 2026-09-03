@@ -1,8 +1,10 @@
 ---
 sidebar_position: 3
-validated_against_commit: 3c54f4dd594a6bd981b357669cd78e5d0a65d804
+validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
 title: Benchmarking and Comparing Emmy
-description: Measure Emmy kernels and deployed model servers, compare them fairly with PyTorch, and understand the resulting performance metrics.
+description: >-
+  Measure Emmy kernels and deployed model servers, compare them fairly with PyTorch, and understand the resulting
+  performance metrics.
 keywords: [Emmy, benchmark, PyTorch, torch.compile, CUDA, profiling, latency, throughput, TTFT]
 ---
 
@@ -201,7 +203,7 @@ Before drawing a conclusion, verify that every backend used:
 - the same physical GPU with no unrelated heavy workload;
 - the same static or dynamic-shape regime;
 - enough warmup and measurement iterations;
-- deployable compiler settings rather than tune-time shortcuts; and
+- the same deployable compiler regime and explicit fast-math pins; and
 - a numerically correct result.
 
 Repeat important measurements. GPU temperature, power limits, clock changes, and other processes can create noise.
@@ -231,7 +233,7 @@ flowchart LR
     Hosts --> Server[Deploy and warm model server]
     Server --> Smoke[Send smoke request]
     Smoke --> Workload[Send measured request load]
-    Workload --> Save[Save text, JSON, logs, and timing]
+    Workload --> Save[Preserve raw artifacts and update row records]
     Save --> Teardown[Stop service and release owned host]
 ```
 
@@ -281,7 +283,7 @@ After reviewing the dry run, choose one host mode:
 :::warning Cloud runs can cost money
 The last command may create cloud GPU machines. Confirm credentials, provider selection, task count, expected runtime,
 quota, and teardown behavior first. `--no-teardown` intentionally leaves cloud machines running for investigation;
-the run directory then contains `instances.json`, and you must later run `emmy teardown RUN_DIR`.
+each row's experiment record retains the active infrastructure handle, and you must later run `emmy teardown RUN_DIR`.
 :::
 
 `--max-workers` limits how many planned execution groups run simultaneously. `--gpu-concurrency` splits a logical
@@ -324,20 +326,20 @@ operational startup cost.
 
 ### Step 4: find and compare the results
 
-Each invocation prints its run directory. Emmy creates a timestamped directory inside the recipe directory, with a
-short code hash in its name. It contains:
+Each actual invocation prints a timestamped run directory inside each recipe directory. Dry runs report the path but do
+not create it. Every expanded row receives one collision-safe `*.experiment.yaml`; declared result files use the same
+readable variant and stable row ID, and logs and partial raw artifacts remain available after a handled failure.
 
-| Artifact | Purpose |
-|---|---|
-| `recipe.yaml` | Exact copied recipe used for the run |
-| `tasks.json` | Stable identities and expected files for all expanded tasks |
-| `*_benchmark.json` | Structured workload metrics, recipe, system information, command, and phase timing |
-| `*_benchmark.txt` | Human-readable benchmark output |
-| `benchmark.log` and group logs | Execution and failure details |
-| `report.md` | Optional aggregate report when the recipe defines `aggregate` |
+The YAML record contains system-only facts: row identity and matrix parameters, Git revision and dirty state,
+lifecycle status, timestamps, phase timings, errors, infrastructure state, and observed host information. It contains
+no serving metrics, interpreted model responses, repeat aggregation, rendered command, comparison, or conclusion.
+Those measurements remain in the workload's raw artifacts.
 
-The JSON system section records evidence such as GPU, CUDA and driver versions, CPU, memory, and container setup. Use
-that information when deciding whether two files are comparable.
+This boundary is deliberate. `emmy bench` records what ran and preserves its evidence; it does not judge request
+counts, accuracy, latency, throughput, or coverage, and it does not generate `RESULTS.md`. The repository's
+`run-experiment` skill validates row coverage, archives the raw run under Git LFS, and writes the durable interpretation.
+Use the observed GPU, CUDA/driver, CPU, memory, and container facts in the record when deciding whether two raw files
+are comparable.
 
 For an apples-to-apples recipe comparison, keep these constant unless they are the intended experiment variable:
 

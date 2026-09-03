@@ -1,6 +1,6 @@
 ---
 sidebar_position: 2
-validated_against_commit: 3c54f4dd594a6bd981b357669cd78e5d0a65d804
+validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
 title: "From PyTorch to CUDA: Compiler Deep Dive"
 description: Follow Emmy's compiler from PyTorch tracing through graph rewrites, scheduling, CUDA, runtime, and tuning.
 keywords: [Emmy, compiler, IR, CUDA, graph rewriting, scheduling, autotuning]
@@ -17,9 +17,9 @@ NVIDIA GPU threads should calculate it. Emmy uses several intermediate forms bec
 one step would be difficult to understand, optimize, and test.
 
 :::info Recommended preparation
-Read lessons 6–12 in [Learn Emmy: A Code-First Course](./project_course) first. Keep the [Emmy Course Glossary](./glossary) open for quick
-definitions. Every stage below preserves the intended answer; it only changes how explicitly the computation is
-described.
+Read lessons 6–12 in [Learn Emmy: A Code-First Course](./project_course) first. Keep the
+[Emmy Course Glossary](./glossary) open for quick definitions. Every stage below preserves the intended answer; it only
+changes how explicitly the computation is described.
 :::
 
 Start with [Learn Emmy from the code](./project_course) if you have not yet covered the repository and CLI architecture.
@@ -419,7 +419,7 @@ The axes have distinct roles:
 This representation is still hardware-independent. It says which iteration and arithmetic must happen, not how CUDA
 blocks and threads should cooperate.
 
-### Stage 4 — Tile IR recognizes algebra and attaches a schedule
+### Stage 4 — Tile IR lifts algebra and attaches a schedule
 
 ```bash
 sed -n '1,160p' /tmp/emmy-rmsnorm-tile.txt
@@ -427,19 +427,20 @@ sed -n '1,160p' /tmp/emmy-rmsnorm-tile.txt
 
 ```text
 === 0: k_rms_norm_<hash> ===
-    Reduction[a2] planar
-        for a2 in 0..16
-            in2 = load x[a0, a1, a2]
-            v1 = multiply(in2, in2)
-            acc0 <- add(acc0, v1)
-    v0 = reciprocal(16)
-    v2 = multiply(acc0, v0)
-    v3 = add(1e-06, v2)
-    v4 = rsqrt(v3)
-    for a3 in 0..16
-        in3 = load x[a0, a1, a3]
-        in4 = load p_weight[a3]
-        rms_norm[a0, a1, a3] = multiply(in4, multiply(in3, v4))
+    place  free=(a0)  grid=(a0)
+    work   t128
+    Fold  free
+    ├─ operand[acc0]: Fold[a1 in 0..16] planar   <REDUCE=coop>   <computed>
+    │  ├─ init: (0)
+    │  ├─ lift: lambda(a1) -> (v1)
+    │  │    in2 = load x[(a0 // 8), (a0 % 8), a1]
+    │  │    v1 = multiply(in2, in2)
+    │  └─ combine: lambda(acc0, acc0__o) -> (acc0)
+    │       acc0 = add(acc0, acc0__o)
+    └─ lift: lambda(acc0) -> (v6)
+         ... reciprocal, epsilon, rsqrt, scale, and weight ...
+    outputs
+    └─ sweep(a2) rms_norm[(a0 // 8), (a0 % 8), a2] = v6
 ```
 
 **In-memory structural operation tree (schematic):**
@@ -449,27 +450,25 @@ operation from `LoopOp` to `TileOp`; the nested payload becomes:
 
 ```text
 TileOp
-├── op: Map
-│   ├── source: Reduction
-│   │   ├── axis: a2
-│   │   ├── carrier: Carrier(...)  # state acc0, combined with add
-│   │   ├── partial: Body[Load, Assign, Accum]
-│   │   ├── role: PLANAR
-│   │   └── reduce: ReducePlan(...)
-│   └── body: Body[Load constants, Assign(v0), Assign(v2), Assign(v3), Assign(v4), Loop(a3, ...)]
-├── place: Placement(...)
-├── tier: TilePlan(...) or None
-├── stage: Stage(...) or None
-└── workers: WarpSpec(...) or None
+├── op: Fold(axis=None)                 # zero-axis projection
+│   ├── operands: Fold(axis=a1)         # planar sum
+│   │   ├── lift: Lambda(...)
+│   │   ├── init: (0)
+│   │   └── combine: Lambda(add)
+│   └── lift: Lambda(...)               # normalize and scale
+├── place: Placement(free=(a0), grid=(a0))
+├── output_specs: sweep(a2) -> rms_norm
+└── schedule: Schedule(...)             # choices indexed by Fold-tree sites
 ```
 
-The dataflow graph is still small, but the node now contains a scheduled structural tree. For RMSNorm, the root is a
-`Map` whose `source` is a `Reduction`; the post-reduction projection remains in the map body. Schedule descriptors are
-fields on `TileOp` or its structural nodes rather than separate graph nodes.
+The dataflow graph is still small, but the node now contains one scheduled pure `Fold` tree. A zero-axis `Fold` is the
+map/projection reading; an iterating `Fold` stores a reduction's lift, initial state, and associative combine. Roles
+such as planar, twisted, and contraction are derived from that one representation rather than stored as different
+node classes. The accepted `Schedule` is indexed by sites in the immutable tree.
 
-The important new fact is `Reduction[a2] planar`. Recognition has recovered the algebraic role of the `a2` loop: it
-is an ordinary reduction whose partial sums may be combined. Tile IR keeps that mathematical structure separate from
-the chosen realization so alternative valid schedules can be compared.
+The important new fact is `Fold[a1] planar`. Total lifting made the sum's algebra explicit: its partial states combine
+with addition. Tile IR keeps that pure mathematical structure separate from the selected schedule so alternative valid
+realizations can be compared without rebuilding the term.
 
 ### Stage 5 — Kernel IR materializes GPU mechanisms
 
@@ -696,8 +695,9 @@ This gives statement bodies stable equality and hashing while keeping whole-grap
 ### Structural identity
 
 `Graph.structural_key()` creates a digest: a compact fingerprint of meaningful graph structure. “Merkle-style” means
-that each part's fingerprint incorporates the fingerprints of the parts it depends on. The key includes operation structure, tensor shape and dtype, input
-relationships, and graph inputs/outputs. It excludes cosmetic node and tensor names, hints, and mutable internal ids.
+that each part's fingerprint incorporates the fingerprints of the parts it depends on. The key includes operation
+structure, tensor shape and dtype, input relationships, and graph inputs/outputs. It excludes cosmetic node and tensor
+names, hints, and mutable internal ids.
 
 The key is recomputed rather than cached because the graph is mutable. It is used to deduplicate compiler candidates
 whose spelling differs but whose generated computation and dataflow are equivalent.
@@ -960,30 +960,34 @@ their decomposition pieces. Decomposition mints pieces, fusion aggregates piece 
 the hint attached. Provenance determines human-readable kernel names and dumped PyTorch reproducers; it is excluded
 from structural identities.
 
-## 8. Tile recognition: recover the algebra
+## 8. Total lift: express Loop IR as one pure Fold tree
 
 **Algebra** here means the mathematical structure of the work—for example, whether a loop is a sum, a pointwise map,
-or matrix multiplication. Loop IR says what iterations and arithmetic occur, but not what high-level algebra they
-form. `lowering/tile` analyzes the statement tree and creates structural nodes:
+or matrix multiplication. Loop IR already states each reduction through `Accum` operations. Tile lowering mechanically
+lifts every reduction into a `Fold` and stores the complete result as one canonical pure tree. This **total lift** has
+no raw-loop fallback or round-trip recognition gate.
 
-- `Map`: pointwise work or a projection around another structural node.
-- `Reduction`: a planar or twisted fold with an axis, per-element partial, carrier, and reduction schedule.
-- `Contraction`: distributive lift-and-fold work with bound operands and output axes.
+`Fold` is the only stored structural node. It contains an optional axis, a pure lift lambda, monoid initialization and
+combine programs, and operand edges. Familiar forms are derived readings of those fields:
+
+- a zero-axis `Fold` is pointwise work or a projection;
+- an iterating planar `Fold` is an ordinary associative reduction;
+- a twisted `Fold` carries stable multi-component state for online softmax or attention; and
+- a contraction is a bilinear lift followed by an additive fold.
 
 ### Why these names?
 
 The names come from functional programming and tensor algebra. They describe how values relate mathematically, not
 which GPU instruction will execute them:
 
-- **Map** applies a function independently at each output position: `y[i] = f(x[i])`. The function is *mapped over*
-  the elements, so one position does not need a result from another. Emmy also uses `Map` as a projection wrapper
-  around another structural node, such as the normalization performed after a sum.
-- **Reduction** combines many values into fewer values with an associative operation: `y = sum_i x[i]`. It *reduces*
-  the collection, and the reduced axis disappears from the output. Sum, maximum, and minimum are familiar examples.
-- **Contraction** is the tensor-algebra name for pairing indexed operands and reducing a shared index. In
+- **Map** applies a function independently at each output position: `y[i] = f(x[i])`. In stored Tile IR this is the
+  zero-axis reading of `Fold`, often wrapping an operand `Fold` such as the normalization performed after a sum.
+- **Reduction** combines many values into fewer values with an associative operation: `y = sum_i x[i]`. In stored
+  Tile IR this is an iterating `Fold`; the reduced axis disappears from the output.
+- **Contraction** is the tensor-algebra reading for pairing indexed operands and reducing a shared index. In
   `C[m,n] = sum_k A[m,k] * B[k,n]`, `k` occurs in both operands but not in the result: it has been *contracted away*.
-  A contraction is a specialized reduction, but Emmy represents it separately because its reuse and GPU schedules
-  are substantially different.
+  A contraction is a specialized reduction. Emmy derives a distinct contraction view because its reuse and GPU
+  schedules are substantially different, while storing it in the same Fold representation.
 
 The three basic shapes are therefore:
 
@@ -1037,45 +1041,44 @@ product for every output row-and-column pair.
 
 These algebraic forms correspond to the following Loop IR patterns:
 
-| Loop IR shape | Tile IR structure | Meaning |
+| Loop IR shape | Fold-tree reading | Meaning |
 |---|---|---|
-| Free loops containing independent scalar work | `Map(body=..., source=None)` | Calculate each output cell independently |
-| One associative fold | `Reduction(...)` | Combine values along one axis |
-| A fold followed by post-processing | `Map(source=Reduction(...), body=projection)` | Reduce first, then project the result |
-| A product-like lift followed by an additive fold | `Contraction(..., epilogue=...)` | Contract indexed operands and carry its bound epilogue |
-| A larger projection around structural work | `Map(source=Reduction(...) or Contraction(...), body=...)` | Compose more work around a structural source |
-| Structure that cannot be classified safely | Flat `Map(body=original_statements)` | Preserve Loop IR semantics and use the scalar tier |
+| Free loops containing independent scalar work | zero-axis `Fold` | Calculate each output cell independently |
+| One associative reduction loop | iterating planar `Fold` | Combine values along one axis |
+| A fold followed by post-processing | zero-axis `Fold` with a `Fold` operand | Reduce first, then project the result |
+| A product-like lift followed by an additive fold | contraction reading of `Fold` | Contract indexed operands |
+| Stable exponential state | twisted reading of `Fold` | Combine pivot and expectation state safely |
 
-A `Map` is therefore more than the pointwise case. It is also the projection wrapper that composes with a reduction or
-contraction:
+A zero-axis `Fold` is therefore more than the pointwise case. It is also the projection wrapper that composes with an
+iterating fold:
 
 ```text
-pure pointwise:         Map(body=pointwise, source=None)
-projected reduction:    Map(body=projection, source=Reduction(...))
-projected contraction:  Map(body=epilogue, source=Contraction(...))
+pure pointwise:         Fold(axis=None, lift=pointwise)
+projected reduction:    Fold(axis=None, operands=(Fold(axis=k, ...),), lift=projection)
+projected contraction:  Fold(axis=None, operands=(Fold.contraction(...),), lift=epilogue)
 ```
 
-A `Reduction` stores the parts that make an associative fold explicit:
+A `Fold` stores the parts that make an associative reduction explicit:
 
 ```text
-Reduction
-├── axis: the dimension being combined
-├── carrier: accumulated state, identity, and combine operation
-├── partial: work that produces one contribution
-├── role: PLANAR or TWISTED
-└── reduce: ReducePlan describing its selected partition
+Fold
+├── axis: the dimension being combined, or None for a projection
+├── operands: closed input edges, which may themselves be Folds
+├── lift: pure work that produces one contribution
+├── init: the monoid identity state
+└── combine: the associative state × state -> state program
 ```
 
-A `Contraction` is a specialized fold. Its two output axes and one reduction axis are bound once:
+A contraction is a derived reading of one `Fold`. Its bilinear operands and reduction channels are recovered from the
+same stored fields:
 
 ```text
-Contraction
-├── axes: (m, n)
-├── k_axis: k
-├── a_operand: A[m, k]
-├── folds: B[k, n] and the accumulator they update
-├── tile: TilePlan
-└── epilogue: work after the fold
+Fold.contraction
+├── axis: k
+├── a: A[m, k]
+├── channels: B[k, n] paired with accumulator state
+├── init/combine: additive monoid
+└── schedule site: selected separately on TileOp
 ```
 
 “Contraction” means a tensor contraction, not the act of merging graph nodes. Ordinary matrix multiplication is the
@@ -1088,14 +1091,14 @@ for m
             acc[m, n] += A[m, k] * B[k, n]
 ```
 
-The small vocabulary does not mean the recognizer must force every loop nest into a high-level category. A flat
-`Map` can retain unclassified `Loop`, `Load`, `Assign`, `Accum`, and `Write` objects unchanged. This conservative
-escape hatch preserves correctness when the compiler cannot prove a stronger algebraic interpretation.
+Total lift does not force every fold to be a contraction or twisted carrier. An unclassified reduction remains a
+plain planar `Fold` and uses the scalar scheduling tiers. What it may not do is retain a raw reduction loop inside Tile
+IR: every `Accum` loop has one structural representation, and output effects become explicit output specifications.
 
-The RMSNorm loop becomes a planar reduction wrapped in a projection map:
+The RMSNorm loop becomes a planar fold used by a zero-axis projection:
 
 ```text
-Reduction[a2] planar
+Fold[a1] planar
     for a2 in 0..16
         in2 = load x[a0, a1, a2]
         v1 = multiply(in2, in2)
@@ -1107,7 +1110,7 @@ for a3 in 0..16
     write rms_norm
 ```
 
-The reduction owns the fold. The wrapping map owns the work performed after the fold. This corresponds to:
+The operand fold owns the sum. The zero-axis parent owns the work performed after it. This corresponds to:
 
 ```text
 project(reduce(map(input)))
@@ -1115,7 +1118,7 @@ project(reduce(map(input)))
 
 ### Axis roles
 
-Recognition annotates reduction structure with an `AxisRole`:
+Classification derives an `AxisRole` from the stored fold algebra:
 
 - `PLANAR`: ordinary sum, max, mean, or a reduction that does not meet contraction rules.
 - `TWISTED`: online softmax or flash-attention state whose stable combine rescales previous state.
@@ -1123,8 +1126,7 @@ Recognition annotates reduction structure with an `AxisRole`:
 - `FREE`: non-reduction iteration.
 
 The dispatch is algebraic, not shape-specific. A rule must not say “this is matmul because the dimensions are 4096 by
-4096.” It recognizes that the lift distributes over the fold and that at least two bindable reduction-axis operand
-loads participate.
+4096.” It derives contraction when the lift is bilinear over the additive fold and its operand channels are bindable.
 
 ### Carriers
 
@@ -1148,7 +1150,7 @@ program from the carrier specification rather than hand-coding a separate cooper
 This abstraction is what lets the same partition machinery combine a scalar sum, a multi-component online softmax,
 or flash-attention state.
 
-### Contraction recognition
+### Contraction classification
 
 The simple matmul:
 
@@ -1163,189 +1165,108 @@ for m
         C[m, n] = acc
 ```
 
-is recognized as a contraction because multiply distributes over add and the body contains two bindable
+is classified as a contraction because multiply distributes over add and the body contains two bindable
 `k`-indexed operand loads. Those loads can be different affine views of one packed buffer; a squared reduction
 `sum(x * x)` is not classified as a contraction merely because the expression mentions `x` twice.
 
-Recognition binds the contraction's M, N, and K roles once. Later passes consume those roles instead of repeatedly
+The contraction view binds its M, N, and K roles once. Later passes consume those derived roles instead of repeatedly
 guessing operand meaning from indices.
 
 ### How Loop IR becomes Tile IR
 
-The boundary is implemented by `pipeline/passes/lowering/tile/010_recognize.py`. It matches a `LoopOp`, reads its
-statement tree, creates one of the structural forms above, wraps it in a `TileOp`, and invokes scheduling. Recognition
-does not use variable names such as `a2` or `acc0` to guess meaning. It examines statement types, dependency edges,
-index expressions, loop roles, and algebraic properties of the elementwise operations.
+The boundary begins in `pipeline/passes/lowering/tile/010_lift.py`, which delegates to `_fromloop.lift_loop_op`. It
+matches a `LoopOp`, peels its outer free-axis chain into `Placement`, mechanically replaces every reduction loop with a
+`Fold`, extracts output effects as `OutputSpec` values, and emits an unmapped `TileOp`. Later passes rewrite twisted
+clusters, enumerate structural cuts, and schedule the immutable Fold tree.
 
 ```mermaid
 flowchart TD
-    Loop["LoopOp.body"] --> Special{"Special streaming form?"}
-    Special -->|Flash attention| Flash["Build fused flash TileOp"]
-    Special -->|Online softmax| Softmax["Annotate TWISTED carrier"]
-    Special -->|Neither| Peel["_peel: separate outer free axes<br/>from the per-cell body"]
-    Softmax --> Peel
-    Peel --> Count{"One flat<br/>reduction loop?"}
-
-    Count -->|No or ambiguous| Flat["Flat Map fallback<br/>retain original statements"]
-    Count -->|Yes| Annotate["_annotate_reduce:<br/>recover role and carrier"]
-    Annotate --> Role{"Recovered role"}
-
-    Role -->|PLANAR or TWISTED| Reduction["Reduction"]
-    Role -->|CONTRACTION| Bind{"Bind operands and<br/>output axes m, n, k?"}
-    Role -->|No safe carrier| Flat
-
-    Bind -->|Yes| Contraction["Contraction"]
-    Bind -->|No| Demote["Demote to PLANAR Reduction"]
-
-    Reduction --> Projection{"Projection remains?"}
-    Contraction --> ContractNode["Contraction<br/>carries its bound epilogue"]
-    Demote --> Projection
-    Projection -->|Yes| Wrap["Map(source=node,<br/>body=projection)"]
-    Projection -->|No| Root["Structural node is root"]
-
-    Flat --> Tile["TileOp + Placement"]
-    Wrap --> Tile
-    Root --> Tile
-    ContractNode --> Tile
-    Flash --> Schedule
-    Tile --> Schedule["Enumerate and select<br/>legal schedules"]
+    Loop["LoopOp.body"] --> Peel["Peel outer free axes<br/>into Placement"]
+    Peel --> Lift["Lift every reduce Loop<br/>into Fold"]
+    Lift --> Outputs["Extract writes<br/>into OutputSpecs"]
+    Outputs --> Check{"Any raw inner Loop<br/>or unrepresented effect?"}
+    Check -->|yes| Error["Reject the invalid boundary"]
+    Check -->|no| Tile["Unmapped TileOp<br/>with one Fold tree"]
+    Tile --> Twist["Rewrite exp-family<br/>twisted clusters"]
+    Twist --> Cuts["Enumerate placement and<br/>cross-CTA cuts"]
+    Cuts --> Schedule["Enumerate and select<br/>site-indexed schedules"]
 ```
 
 The implementation proceeds in the following order.
 
-#### 1. Recognize streaming special cases first
+#### 1. Peel free axes
 
-Flash attention and online softmax must be recognized before the general lift because they combine several ordinary
-folds into one streaming state:
-
-- `try_flash` looks for the compatible score, softmax, and value-contraction structure and can rewrite more than one
-  graph node into a fused flash `TileOp`.
-- `_softmax._fuse` recognizes the adjacent row-maximum and sum-of-exponentials folds and gives the resulting loop a
-  multi-component `TWISTED` carrier.
-
-These are structural recognizers, but they are currently dedicated cases. Emmy does not yet have one universal
-algorithm that derives every possible algebra from arbitrary loops.
-
-#### 2. Peel off independent axes
-
-`_peel` walks through the outer chain of non-reduction loops:
+`_fromloop._peel` walks the outer chain of non-reduction loops. Those axes become `Placement.free`; leading pure
+statements remain in the cell so their dependencies are preserved.
 
 ```text
-for batch:                 free
-    for row:               free
-        for k:             reduction begins
+for batch:                 free placement axis
+    for row:               free placement axis
+        for k:             reduction Fold axis
             acc += ...
 ```
 
-It returns:
+#### 2. Lift every reduction mechanically
 
-```text
-free axes = [batch, row]
-per-cell body = [the k reduction and its projection]
-```
+`lift_body` recursively replaces each reduction `Loop` with a `Fold`. Its `Accum` operations determine the state names
+and componentwise monoid, while the remaining statements become the lift lambda. A scan—a fold whose per-step writes
+observe its carried state—adds an observer lambda and returns those writes for output extraction.
 
-The free axes belong to placement and later map onto the CUDA grid. Leading pure statements such as invariant loads or
-assignments are moved into the per-cell body so their dependencies remain available.
+For an ordinary sum, zero is the initial state and addition is the stored state-combine program. Associativity is what
+allows later schedules to partition and recombine the axis.
 
-#### 3. Find a classifiable fold
+#### 3. Extract the program boundary
 
-`_lift_cell` counts top-level reduction loops in the per-cell body:
+`extract_output_specs` removes final writes from the pure term and records their destination indices and optional sweep
+axes as `OutputSpec` values. `lift_loop_op` rejects any remaining raw inner loop or output effect it cannot represent.
+That fail-loud check is what makes the Loop-to-Tile boundary total.
 
-- no reduction means a pure pointwise `Map`;
-- one flat reduction is eligible for annotation; and
-- several reductions or an unsupported nested reduction remain a flat `Map`.
+#### 4. Build one immutable Fold tree
 
-For one reduction, dependency analysis separates statements before the loop into those feeding the fold and those
-feeding only the projection. Fold dependencies move into the reduction body; projection-only dependencies remain
-after it. If one statement must live on both sides and cannot be moved safely, recognition declines to the flat-map
-fallback rather than changing evaluation order.
-
-#### 4. Recover the reduction role and carrier
-
-`_annotate_reduce` inspects the chosen loop:
-
-1. A loop already annotated by online-softmax or flash recognition keeps its carrier and role.
-2. A clean lift-and-fold pattern receives the `CONTRACTION` role.
-3. A loop containing exactly one `Accum` becomes `PLANAR`; `Accum.as_carrier()` supplies its state, identity, and
-   combine operation.
-4. A loop with no unambiguous carrier remains inside a flat `Map`.
-
-For an ordinary sum:
-
-```text
-acc0 <- add(acc0, value)
-```
-
-the fold operation supplies an additive carrier with zero as its identity. Emmy can later partition the axis because
-addition is associative: separate workers may form partial sums and combine them without changing the intended result.
-
-#### 5. Prove contraction structure and bind operands
-
-`_is_clean_contraction` requires more than the presence of multiplication:
-
-- exactly one `Accum`;
-- an `Assign` whose result is the value folded by that accumulator;
-- at least two operand loads indexed by the reduction axis;
-- a lift operation that distributes over the fold operation; and
-- a body whose operand preprocessing can be assigned safely to the contraction.
-
-The operand loads may be different affine views of one packed buffer, as with packed QKV. Their load expressions and
-indices identify the operands; backing-buffer identity alone does not. Conversely, `sum(x * x)` does not become a
-matrix contraction merely because `x` appears twice.
-
-After the free axes are ordered by the output layout, `_nodify_contraction` tries to bind the final two as `(m, n)`,
-the reduce axis as `k`, and the indexed loads as the A and B operands. If the shape or indexing cannot support that
-binding—for example, a one-dimensional output with no usable `(m, n)` pair—the loop is demoted to a `PLANAR`
-`Reduction`. It still compiles through the general reduction machinery.
-
-#### 6. Separate the fold from its projection
-
-A bare reduction becomes a root `Reduction`. If work remains after that fold, recognition stores it in a wrapping
-`Map`:
-
-```text
-Map
-├── source: Reduction
-└── body: post-fold projection
-```
-
-For RMSNorm, the `a2` sum is the `Reduction`; division, epsilon, reciprocal square root, the `a3` sweep, and the final
-write form the projection map.
-
-A `Contraction` carries the epilogue bound directly to its output cells in `Contraction.epilogue`. In larger composed
-forms, such as a fused statistic feeding a contraction, a `Map` may additionally wrap the `Contraction` as its
-structural source. This distinction keeps ordinary contraction epilogues near their operand binding while still
-allowing higher-level composition.
-
-#### 7. Attach placement and schedule choices
-
-Recognition constructs an initially unmapped wrapper:
+The cell becomes a zero-axis `Fold.projection`, with nested folds connected as operands. A contraction is stored through
+the same `Fold` fields and discovered by algebraic accessors; a squared reduction such as `sum(x * x)` remains planar
+because it does not expose the required distinct bilinear operand channels.
 
 ```text
 TileOp(
-    op=recognized_node,
+    op=Fold.projection(body=cell, operands=(nested_folds, ...)),
     place=Placement(free=free_axes),
+    output_specs=outputs,
 )
 ```
 
-The scheduling half then maps free axes to the grid and offers the legal `ReducePlan`, `TilePlan`, staging, and worker
-alternatives. Recognition determines which transformations preserve the algebra; scheduling chooses among their
-hardware realizations.
+#### 5. Rewrite twisted clusters
 
-One useful invariant closes the loop: `tile.ops.lower` can flatten `Map`, `Reduction`, and `Contraction` back into
-equivalent loop statements. Tile recognition adds algebraic meaning and schedule metadata; it does not change the
-program's mathematical result.
+`020_twisted.py` applies the general exponential-family rewrite to compatible Fold clusters before scheduling. Stable
+online softmax and flash-attention state derive their multi-component streaming combine from the stored monoid rather
+than carrying a separate hand-coded reduction node.
+
+#### 6. Enumerate structural cuts
+
+`030_cut.py` runs to a fixed point. It first offers cuts along closed stored-Fold edges, then cross-CTA reduction
+splits. A cut may return a graph fragment with fresh kernels, so every fresh unscheduled `TileOp` re-enters the same
+lifted-tree scheduling path.
+
+#### 7. Assign a schedule
+
+`040_schedule.py` projects the immutable Fold tree into classic scheduling domains, restricts them by pins and the
+target, and enumerates `Schedule` assignments. The generic scheduler walks site-indexed kernel, node, and edge choices;
+the classic adapter supplies the concrete `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` vocabulary.
+
+`Fold.lower()` is the single boundary that synthesizes equivalent Loop statements from the pure term. Schedule choices
+live on `TileOp`, so changing a schedule never mutates the algebra or its structural identity.
 
 ## 9. Scheduling: choose a valid GPU realization
 
 A **schedule** chooses how the already-correct mathematics uses GPU threads, blocks, and memory. Tile IR keeps algebra
-and schedule separate. Structural nodes hold computation-specific schedule slices:
+and schedule separate. One `Schedule` assigns choices to paths in the Fold tree:
 
 - `Placement` maps independent axes to the CUDA grid, the full collection of thread blocks for one launch.
-- `ReducePlan` chooses grid-split, cooperative-block, or register-local reduction behavior.
-- `TilePlan` describes contraction tiles, units, register cells, and hardware atom.
+- `Reduce` chooses grid-split, cooperative-block, or register-local reduction behavior.
+- `Tile` describes contraction tiles, units, register cells, and hardware atom.
 - `Stage` describes movement from large GPU global memory into faster per-block shared memory and its pipeline depth.
-- `WarpSpec` describes warp-specialized roles when used.
+- `Work` describes thread or warp worker geometry.
+- `Raster` describes traversal order when the schedule uses one.
 
 The compilation `Context` supplies hardware facts and **code generation** context—the information needed to emit code:
 
@@ -1391,8 +1312,8 @@ by resolving and estimating their kernel slices rather than comparing one raw op
 ## 10. Kernel materialization: schedule to hardware statements
 
 **Materialization** turns an abstract schedule into concrete hardware-oriented statements. `lowering/kernel` consumes
-the scheduled structural tree. Its first major rule, `010_materialize`, recursively walks
-`Map`, `Reduction`, and `Contraction` nodes and emits a `KernelOp` body.
+the scheduled Fold tree. Its first major rule, `010_materialize`, follows the generic Fold-tree walk, reads the
+schedule assignment for each site, and emits a `KernelOp` body.
 
 The kernel statement vocabulary adds hardware mechanisms to the Loop statements:
 
@@ -1421,7 +1342,7 @@ Tile[a0, a1] (N=16)
         write rms_norm
 ```
 
-For a wider reduction, a `ReducePlan` can instead add a cooperative lane axis. Each lane folds a strided portion, then
+For a wider reduction, a `Reduce` choice can instead add a cooperative lane axis. Each lane folds a strided portion, then
 the carrier-generic combine uses shuffles or shared memory to produce the block result.
 
 ### Contraction materialization
@@ -1517,11 +1438,13 @@ binary in advance.
 2. Compiles each unique kernel name through `backend/cuda/nvcc.py`.
 3. Builds an ordered launch record with kernel, argument names, grid, block, shared memory, and zeroing requirements.
 
-The preferred compiler path invokes offline nvcc to produce a **cubin**, a compiled CUDA binary, caches it by source, target, and flags, then loads
-the symbol through cupy. If nvcc is absent or compilation fails, the runtime can fall back to cupy's NVRTC path.
+The preferred compiler path invokes offline nvcc to produce a **cubin**, a compiled CUDA binary, caches it by source,
+target, and flags, then loads the symbol through cupy. If nvcc is absent or compilation fails, the runtime can fall
+back to cupy's NVRTC path.
 
-`EMMY_NVCC_FLAGS` participates in both cubin and performance-context keys. Tune-time `-Xcicc -O1` measurements must not
-collide with deployable `-O3` results because compiler optimization changes runtime behavior.
+`EMMY_NVCC_FLAGS` participates in both cubin and performance-context keys. Tune and deployment default to the same
+deployable `-O3` regime. The correctness test lane uses `-Xcicc -O1` only to reduce compilation time; it does not
+measure performance, and a deliberately non-default tune remains isolated by its context key.
 
 ### Buffer roles and scratch reuse
 
@@ -1607,13 +1530,14 @@ At a fork, greedy resolution:
 
 1. Expands lazy branches to complete knob configurations.
 2. Filters options that are invalid for the compilation context.
-3. Looks for applicable measured evidence.
-4. Otherwise asks the loaded prior for predicted latency.
-5. Falls back to conservative emission order if no prior exists.
+3. Tries an exact verified golden for the live GPU and pin regime.
+4. Tries compatible deployable measurements in the online reservoir, then the tune DB.
+5. Otherwise asks the trustworthy online prior, or its fitted offline cold-start fallback.
+6. Uses the first emitted option only when every evidence and prior tier is silent.
 
 If a chosen tile later fails validation or leaves an operation unlowered, the pipeline blocklists it and resolves
-again. Structural choices can be retired as a group. A final conservative option-zero resolution provides a bounded
-last fallback. If no valid lowering exists, compilation fails loudly.
+again. Structural choices can be retired as a group. A final option-zero resolution provides a bounded validity
+fallback, but enumeration order makes no performance promise. If no valid lowering exists, compilation fails loudly.
 
 This explains an important behavior: `emmy compile` can benefit from a tuning database and prior, but it never trains
 them and does not time alternatives during compilation.
@@ -1653,8 +1577,9 @@ The online prior learns latency from hardware, shape, structural, and knob featu
 ranking before enough local evidence exists. Golden configurations are known-good reference evidence and integrity
 checks; they are not ordinary online-training samples.
 
-This section gives the compiler-facing boundary. The full data model, score units, evidence order, CatBoost persistence,
-`ShapeKey` join, A/B gates, and evaluation workflow are in [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens).
+This section gives the compiler-facing boundary. The full data model, score units, evidence order, CatBoost
+persistence, strict deploy-identity join, A/B gates, and evaluation workflow are in
+[How Emmy Chooses Fast GPU Schedules](./prior_and_goldens).
 
 ## 17. Dynamic shapes through the entire pipeline
 
@@ -1709,7 +1634,7 @@ Ask one question per transition:
 | PyTorch -> frontend | Did tracing capture the intended operation, constants, mask, and shapes? |
 | Frontend -> tensor | Is the mathematical decomposition correct and is broadcasting explicit? |
 | Tensor -> loop | Are indices, accumulator identities, loop bounds, and writes correct? |
-| Loop -> tile | Was the correct algebra recognized and was the right projection attached? |
+| Loop -> tile | Were all reductions lifted into the correct Fold tree and were output specifications preserved? |
 | Tile -> kernel | Do thread mapping, masking, staging, reductions, and synchronization match the schedule? |
 | Kernel -> CUDA | Did rendering preserve types, indices, launch metadata, and arguments? |
 | CUDA -> result | Are buffers allocated, arguments ordered, dimensions resolved, and launches sequenced correctly? |
@@ -1744,7 +1669,7 @@ Use this sequence for a wrong answer:
 1. Reproduce with the smallest operation and shape that still fails.
 2. Compare eager/PyTorch with `NumpyBackend` or the frontend evaluator.
 3. Compare `LoopBackend` with numpy to test decomposition and fusion.
-4. Inspect Tile IR to check recognition and schedule selection.
+4. Inspect Tile IR to check total lift, Fold classification, structural cuts, and schedule selection.
 5. Inspect Kernel IR for masks, indexes, staging, and synchronization.
 6. Inspect emitted CUDA and `CudaOp` launch metadata.
 7. Use backend debug snapshots to find the first incorrect launch output.
@@ -1815,12 +1740,13 @@ Read one vertical slice rather than a directory at a time.
 4. Mean and broadcast decomposition helpers used by the fragment.
 5. `pipeline/passes/loop/lifting`: elementwise, reduction, and index-map lifting.
 6. `pipeline/passes/loop/fusion/010_merge_loop_ops.py`.
-7. `pipeline/passes/lowering/tile/010_recognize.py`: `_lift_cell` and reduce annotation.
-8. `compiler/ir/tile/ir.py`: `Reduction`, `Map`, and `ReducePlan`.
-9. `pipeline/passes/lowering/kernel/010_materialize.py` and `_factor.py`.
-10. `compiler/ir/kernel/render.py`.
-11. `pipeline/passes/lowering/cuda/010_lower_kernelop.py`.
-12. `backend/cuda/program.py`: compilation, allocation, and launch.
+7. `pipeline/passes/lowering/tile/010_lift.py` and `_fromloop.py`: total Fold lifting and output extraction.
+8. `compiler/ir/pure/fold.py`, `tree.py`, and `compiler/ir/tile/ir.py`: pure terms and the Tile boundary.
+9. `pipeline/passes/lowering/tile/020_twisted.py`, `030_cut.py`, and `040_schedule.py`.
+10. `pipeline/passes/lowering/kernel/010_materialize.py` and `_factor.py`.
+11. `compiler/ir/kernel/render.py`.
+12. `pipeline/passes/lowering/cuda/010_lower_kernelop.py`.
+13. `backend/cuda/program.py`: compilation, allocation, and launch.
 
 ### Matmul slice
 
@@ -1828,8 +1754,8 @@ Read one vertical slice rather than a directory at a time.
 2. `frontend/decomposition/070_matmul.py` and its helpers.
 3. Tensor multiply plus reduction output.
 4. Loop fusion into multiply/accumulate form.
-5. `010_recognize.py`: `_is_clean_contraction` and contraction binding.
-6. Tile scheduling and `TilePlan` codec.
+5. `compiler/ir/pure/fold.py`: the derived contraction view and operand channels.
+6. `compiler/ir/schedule/` and `040_schedule.py`: generic traversal and the classic schedule codec.
 7. Kernel `_factor.py`, `_atom.py`, and `_stage.py`.
 8. Scalar and warp-MMA coverage in `tests/compiler/e2e/test_matmul_coverage.py`.
 
@@ -1838,7 +1764,7 @@ Read one vertical slice rather than a directory at a time.
 1. Softmax or SDPA frontend decomposition.
 2. Loop fusion of max, exponential, denominator, and projection.
 3. Carrier construction in `compiler/ir/stmt/carrier.py`.
-4. Twisted recognition and structural node composition.
+4. `020_twisted.py` and `_twist.py`: exponential-family Fold rewriting and structural composition.
 5. Cooperative and flash materialization through `_twist.py` and atom strategies.
 6. Coverage in `test_reduce_coverage.py` and `test_attention_coverage.py`.
 
@@ -1881,8 +1807,8 @@ Explain why the first is planar and the second is a contraction without referrin
   --ir kernel --target sm_80 -vv --color never
 ```
 
-Find the rule that changes the kernel set, the rule that recognizes contraction algebra, and the rule that materializes
-the schedule.
+Find the rule that changes the kernel set, the Fold accessor that classifies contraction algebra, and the rule that
+materializes the schedule.
 
 ### D. Run semantic tests
 
@@ -1891,7 +1817,9 @@ the schedule.
   tests/compiler/passes/test_decompose_rules.py \
   tests/compiler/passes/test_fusion_rules.py \
   tests/compiler/passes/test_pipeline_semantics.py \
-  tests/compiler/ir/tile/test_structural_reduction.py -q
+  tests/compiler/passes/test_total_lift.py \
+  tests/compiler/passes/test_twisted_rewrite.py \
+  tests/compiler/passes/test_schedule_walk.py -q
 ```
 
 ### E. Run a GPU comparison
@@ -1927,5 +1855,5 @@ semantics. The runtime sits after realization. It must execute the source and me
 inventing new compiler decisions.
 
 When those boundaries stay clear, a bug becomes local: tracing, math decomposition, loop construction, algebra
-recognition, schedule selection, hardware materialization, source rendering, or runtime dispatch. That locality is the
-central architectural advantage of Emmy's compiler stack.
+Fold lifting, classification, schedule selection, hardware materialization, source rendering, or runtime dispatch.
+That locality is the central architectural advantage of Emmy's compiler stack.

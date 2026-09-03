@@ -434,7 +434,7 @@ def test_a_shape_group_is_never_split_across_folds():
         _case("matmul.square.512", "thread", "gpuA", shape="S(free=512,red=512)"),
         _case("matmul.square.1024", "thread", "gpuB", shape="S(free=1024,red=1024)"),
     ]
-    by_shape = fit_cv.assign_folds(groups, 3)
+    by_shape = fit_cv.assign_folds([g.shape for g in groups], 3)
     folds = {c.key: by_shape[c.shape] for c in groups}
     shared = [k for k in folds if "rms_norm" in k]
     assert len({folds[k] for k in shared}) == 1, "one shape, one fold — on every card"
@@ -449,8 +449,8 @@ def test_folds_are_balanced_and_deterministic():
     largest-first onto the currently-smallest fold; a thin fold's median would be noise. Assignment is
     a pure function of the group list, so a re-run reproduces it."""
     groups = [_case(f"m.{i}", "thread", "gpuA", shape=f"s{i // 2}") for i in range(12)]  # 6 groups of 2
-    a = fit_cv.assign_folds(groups, 3)
-    assert a == fit_cv.assign_folds(list(reversed(groups)), 3)
+    a = fit_cv.assign_folds([g.shape for g in groups], 3)
+    assert a == fit_cv.assign_folds([g.shape for g in reversed(groups)], 3)
     counts = {f: sum(1 for c in groups if a[c.shape] == f) for f in set(a.values())}
     assert set(counts) == {0, 1, 2} and max(counts.values()) - min(counts.values()) <= 1
 

@@ -47,6 +47,7 @@ the incumbent seeding — the difference is recorded in the metrics header.
 from __future__ import annotations
 
 import statistics
+from collections.abc import Sequence
 
 from emmy.compiler.pipeline.search.data.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_dual_rank
@@ -61,8 +62,13 @@ OUT_OF_SCOPE = "kernel kind not group-buildable"
 DEFAULT_FOLDS = 5
 
 
-def assign_folds(groups: list[GoldenGroup], k: int = DEFAULT_FOLDS) -> dict[str, int]:
-    """Shape group → fold index, balanced by group count.
+def assign_folds(keys: Sequence[str], k: int = DEFAULT_FOLDS) -> dict[str, int]:
+    """Grouping key → fold index, balanced by how many rows carry each key.
+
+    Takes the keys rather than the groups so both fits can share one spelling of the split: the
+    ranking fit passes each golden's shape, the best-latency fit passes each row's card-blind
+    kernel key. What the key MEANS is the caller's business; what must not vary is that rows
+    sharing one are held out together.
 
     Groups are wildly uneven — on the golden dataset the largest holds 122 groups, the next 14, and 162 are
     singletons — so groups are assigned largest-first to whichever fold is currently smallest. Random or hashed
@@ -72,13 +78,13 @@ def assign_folds(groups: list[GoldenGroup], k: int = DEFAULT_FOLDS) -> dict[str,
     Ties break on the group key, so the assignment is a pure function of the group list and a re-run reproduces
     it exactly."""
     sizes: dict[str, int] = {}
-    for c in groups:
-        sizes[c.shape] = sizes.get(c.shape, 0) + 1
+    for key in keys:
+        sizes[key] = sizes.get(key, 0) + 1
     loads = [0] * k
     out: dict[str, int] = {}
-    for shape, n in sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0])):
+    for key, n in sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0])):
         f = min(range(k), key=lambda i: (loads[i], i))
-        out[shape] = f
+        out[key] = f
         loads[f] += n
     return out
 
@@ -164,7 +170,7 @@ def run_folds(groups: list[GoldenGroup], *, trainer, k: int = DEFAULT_FOLDS) -> 
     Folds group by :attr:`GoldenGroup.shape` (:func:`assign_folds`), so every golden sharing a candidate
     pool is held out together — on any card. Splitting them is not a bias, it is a hole: the fold
     model would be scored on a pool it had already been given the answer to."""
-    by_shape = assign_folds(groups, k)
+    by_shape = assign_folds([g.shape for g in groups], k)
     holdout: list[tuple[GoldenGroup, tuple[int, int]]] = []
     holdout_fold: dict[str, int] = {}
     train_acc: dict[str, tuple[GoldenGroup, list[int], list[int]]] = {}

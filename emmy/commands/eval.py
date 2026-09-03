@@ -164,6 +164,14 @@ def register_eval_command(subparsers) -> None:
     add_dataset_args(pf, default="db")
     pf.set_defaults(func=handle_eval_failures)
 
+    pc = sub.add_parser(
+        "cost",
+        help="Cross-validate the best-latency estimate over the golden corpus, against the roofline it corrects",
+    )
+    pc.add_argument("--out", metavar="PATH", help="Also fit over every row and write the shipping artifact here.")
+    pc.add_argument("--json", dest="json_out", metavar="PATH", help="Also write the report as JSON, for diffing two runs.")
+    pc.set_defaults(func=handle_eval_cost)
+
 
 def handle_eval_knobs(args) -> None:
     """``eval knobs`` — the registered knob schema, then (with a tune DB) per-knob
@@ -350,6 +358,16 @@ def _metric(block: dict, key: str, fmt: str) -> str:
 # Per dataset: the axis columns, then ``(header, render(summary))`` for each metric column. The axes are the ones the
 # report keyed its summaries on — the renderer names them rather than discovering them, so a column order is a
 # decision made here and not a side effect of dict insertion.
+def _cost_cell(summary, half: str, key: str, fmt: str, transform=None) -> str:
+    """One cost-report cell, blank where that row does not carry the metric.
+
+    The ordering rows measure pairs and the error rows measure rows, so the two carry different
+    metrics and neither can fill the other's columns. Blank says "not this question" — which is
+    honest, where a zero or a dash would read as an answer."""
+    value = summary.metrics.get(half, {}).get(key)
+    return "" if value is None else fmt.format(transform(value) if transform else value)
+
+
 _REPORT_TABLES = {
     "nodes": (
         ["half", "gpu", "H_opt"],
@@ -368,6 +386,19 @@ _REPORT_TABLES = {
             *((f"top{k}", lambda c, k=k: f"{c.metrics[f'top{k}']['count']}/{c.groups - c.unscored}") for k in (1, 10, 50)),
         ],
     ),
+    "cost": (
+        ["axis", "cell"],
+        [
+            ("bias", lambda c: _cost_cell(c, "model", "bias", "{:+.2f}")),
+            ("x true", lambda c: _cost_cell(c, "model", "bias", "{:.2f}x", math.exp)),
+            ("err", lambda c: _cost_cell(c, "model", "err", "{:.2f}")),
+            ("p90", lambda c: _cost_cell(c, "model", "p90", "{:.2f}")),
+            ("order", lambda c: _cost_cell(c, "model", "concordance", "{:.2f}")),
+            ("base bias", lambda c: _cost_cell(c, "baseline", "bias", "{:+.2f}")),
+            ("base err", lambda c: _cost_cell(c, "baseline", "err", "{:.2f}")),
+            ("base order", lambda c: _cost_cell(c, "baseline", "concordance", "{:.2f}")),
+        ],
+    ),
 }
 
 _REPORT_CAPTIONS = {
@@ -378,6 +409,17 @@ _REPORT_CAPTIONS = {
     "golden": [
         "golden rank — a SCREEN, not a gate: it says where a verified config landed, never what",
         "missing it costs. Only regret over benched pools (--dataset nodes) measures that.",
+    ],
+    "cost": [
+        "every figure is a MEDIAN (p90 aside): the error distribution has a heavy tail even in log",
+        "space, and a mean would let 1% of rows set a number meant to describe the typical one.",
+        "bias is the signed log error: negative = priced FASTER than it runs. That is what",
+        "flips a fuse-or-cut comparison, since bias even across families cancels from it and bias",
+        "that differs does not. The baseline is the roofline scaled by one constant — the best a",
+        "predictor can do without looking at the kernel. held_out_card rows trained without that",
+        "card entirely; the others are cross-validated by kernel. order is the fraction of CLOSE",
+        "same-card pairs (true latencies within 1.5x) ordered as the hardware does — 0.5 is a coin",
+        "flip. It is the question a fork actually asks, and its rows count PAIRS, not pools.",
     ],
 }
 
@@ -1090,3 +1132,35 @@ def _percentile(xs: list[float], p: float) -> float:
 
 def _geomean(xs: list[float]) -> float:
     return math.exp(sum(math.log(x) for x in xs) / len(xs))
+
+
+def handle_eval_cost(args) -> None:
+    """``eval cost`` — how well the best-latency estimate prices a kernel it has never seen.
+
+    Always cross-validated: the estimate is fitted here rather than loaded, because the only
+    honest reading of a corpus this size is a held-out one, and scoring a pre-fitted artifact
+    against the rows it was fitted on would report numbers no deploy will ever see. ``--out``
+    additionally fits over every row and writes the artifact that ships.
+
+    Every cell prints the strongest kernel-blind predictor beside the model's — the roofline scaled
+    by one constant. That comparison IS the report: the floor already removes most of the corpus's
+    spread, so what a reader needs is what the fit adds on top of it, and whether what it adds is
+    even across kernel families or concentrated in one."""
+    from emmy import storage  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.cost_model import evaluate, fit  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.data.cost_dataset import build_rows  # noqa: PLC0415
+
+    rows, skipped = build_rows()
+    if not rows:
+        logger.error("no rows built from the golden corpus — nothing to evaluate.")
+        return
+    report = evaluate(rows)
+    _emit_report(report)
+
+    if args.json_out:
+        storage.write_json(Path(args.json_out), report.to_json(), indent=2)
+        logger.info("Wrote %s", args.json_out)
+    if args.out:
+        provenance = {"rows": len(rows), "skipped": len(skipped), "folds": report.header["folds"]}
+        storage.write_json(Path(args.out), fit(rows).to_artifact(provenance=provenance), indent=2)
+        logger.info("Wrote %s", args.out)

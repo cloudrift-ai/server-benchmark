@@ -51,7 +51,11 @@ class CostRow:
     fold: str
     gpu: str
     name: str
-    features: dict[str, float | str]
+    #: The kernel family, for grouping a report — ``""`` when the stamps match no sweep kind.
+    #: Carried rather than re-derived from ``features``: the builder holds the ``ShapeKey``
+    #: already, and a reader should not have to reconstruct one from the model's input vector.
+    kind: str
+    features: dict[str, float]
     #: The label: the fastest ``emmy_us`` any golden in this pool recorded.
     best_us: float
     #: How many goldens shared this pool. A DIAGNOSTIC, deliberately not a training weight: every
@@ -100,7 +104,7 @@ def build_rows(records: list | None = None) -> tuple[list[CostRow], list[tuple[s
     had an opinion."""
     # Deferred like ``dataset.py``'s: ``golden.py`` imports this package for ``ShapeKey``, so a
     # module-level import here would close the cycle.
-    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, _target_kernel_nodes, precision_trading_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, _target_kernel_nodes  # noqa: PLC0415
 
     rows: list[CostRow] = []
     skipped: list[tuple[str, str, str]] = []
@@ -131,13 +135,14 @@ def build_rows(records: list | None = None) -> tuple[list[CostRow], list[tuple[s
         op = node.op.with_io(lowered, node)
         spec = gpu.by_name(namer.gpu_name)
         best_us = min(m.emmy_us for m in members)
-        features = kernel_row(op, spec, precision_trading=precision_trading_pins(namer.pin_map))
+        features = kernel_row(op, spec)
         rows.append(
             CostRow(
                 key=namer.pool_group,
                 fold=namer.shape_key.fold_key,
                 gpu=namer.gpu_name,
                 name=namer.name,
+                kind=namer.shape_key.kind,
                 features=features,
                 best_us=best_us,
                 members=len(members),

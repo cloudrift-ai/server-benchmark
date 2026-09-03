@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-from emmy.compiler.pipeline.search.data.shape import ShapeKey, stamped_flops, stamped_peak_dtype
+from emmy.compiler.pipeline.search.data.shape import stamped_flops, stamped_peak_dtype
 
 if TYPE_CHECKING:
     from emmy.compiler.tensor import Tensor
@@ -154,7 +154,7 @@ def t_roofline_us(op, spec: GpuSpec, stamps: dict | None = None) -> float:
     return max(terms)
 
 
-def kernel_row(op, spec: GpuSpec, *, precision_trading: bool) -> dict[str, float | str]:
+def kernel_row(op, spec: GpuSpec) -> dict[str, float]:
     """The feature row for one kernel on one card — what a best-latency estimate is regressed on.
 
     Deliberately absent:
@@ -168,15 +168,25 @@ def kernel_row(op, spec: GpuSpec, *, precision_trading: bool) -> dict[str, float
       / 76), so one is available whatever the peaks do. Moving predictions between cards is a real
       job and the card columns exist to do it; whether a fit memorizes instead is a question for
       leave-one-card-out, not for the column list.
+    - **The kernel KIND.** ``ShapeKey.kind`` is derived from these very stamps, so as a column it
+      is the same fact twice. Measured: adding it as a native categorical moves held-out error
+      from 0.328 to 0.330 and the fused bias from +0.499 to +0.505 — nothing. It stays the right
+      way to GROUP a report; it is not information a model lacks.
     - **``S_n_mma``.** Structurally zero on every stamped row — the stamp pass runs before the
       tile tier emits ``Mma`` statements (``data/shape.py`` documents the trap at length).
     - **``H_opt``.** The corpus this is fitted on is one compile regime throughout.
 
-    ``precision_trading`` comes from the record's PINS, never from its recorded knobs: a fast-math
-    kernel and its standard sibling are separate kernels with separate labels but identical
-    stamps, so without this column nearly half the corpus's feature-identical cells would be
-    contradictory training pairs. The pin is the reliable side — a large minority of golden
-    records carry the pin while their recorded knobs do not spell ``FAST_MATH``.
+    - **The precision regime.** Tried and removed. A fast-math kernel and its standard sibling are
+      separate rows with separate labels but identical stamps, so 292 of 638 feature-identical
+      ``(card, S_*)`` cells hold both — which sounds like a column that must exist. Measured, it
+      buys nothing for the decision: both arms of a real fork come from one program under one
+      precision setting, so the column is CONSTANT across every comparison the model is asked to
+      make and cannot change one (concordance on close pairs 0.726 with it, 0.726 without), and it
+      ranked 34th of 42 by importance at 0.3%. Its one real effect was a ~3% bias correction on
+      fast-math rows. Against that it was the only feature with no clean compile-time source — in
+      training it reads a golden's recorded pins, and at a fork there is no golden — so it risked
+      reading 0 at deploy on rows that trained as 1. The 292 cells now carry identical features
+      with differing labels, which the fit averages; that cost is accepted deliberately.
 
     A missing value is ``nan``, never ``0.0``, matching the convention the online prior's
     featurizer states: ``nan`` means "not knowable here", which a tree splits on separately from a
@@ -187,16 +197,12 @@ def kernel_row(op, spec: GpuSpec, *, precision_trading: bool) -> dict[str, float
     traffic = kernel_bytes(op)
     floor = t_roofline_us(op, spec, stamps)
 
-    row: dict[str, float | str] = dict(stamps)
+    row: dict[str, float] = dict(stamps)
     row.pop("S_n_mma", None)
-    # The one non-numeric column: a categorical for the model to split on natively rather than a
-    # one-hot block. ``""`` (a plain loop nest) is a value like any other.
-    row["K_kind"] = ShapeKey.from_s_features(stamps).kind
     row["R_log_flops"] = math.log(flops) if flops else nan
     row["R_log_bytes"] = math.log(traffic) if traffic > 0 else nan
     row["R_intensity"] = flops / traffic if (flops and traffic > 0) else nan
     row["R_log_roofline_us"] = math.log(floor)
-    row["R_precision_trading"] = float(precision_trading)
     # Card facts, plus three ratios against them. A tree can read the operands separately, so what
     # these add is nothing WITHIN one card and a comparable quantity ACROSS cards, which is the
     # job the card columns exist for. Not an occupancy model: a real one needs a CTA count, and

@@ -156,9 +156,7 @@ def test_the_row_reads_the_kernel_and_never_the_fork_that_made_it():
         {**_matmul_stamps(256, 256, 256), "PLACE@a": "cut", "TILE": "f4x8", "WORK": "t32x8", "STAGE": "d3/smem-tma"},
         *io,
     )
-    assert kernel_cost.kernel_row(plain, _5090, precision_trading=False) == kernel_cost.kernel_row(
-        from_a_cut, _5090, precision_trading=False
-    )
+    assert kernel_cost.kernel_row(plain, _5090) == kernel_cost.kernel_row(from_a_cut, _5090)
 
 
 def test_the_row_carries_no_knob_features_and_no_raw_peaks():
@@ -167,7 +165,7 @@ def test_the_row_carries_no_knob_features_and_no_raw_peaks():
     so a column would hand a tree a route to re-derive the per-card constant and undo the
     normalization the floor exists to provide."""
     op = _Op(_matmul_stamps(256, 256, 256), {"a": _t("a", 256, 256)}, {"c": _t("c", 256, 256)})
-    row = kernel_cost.kernel_row(op, _5090, precision_trading=False)
+    row = kernel_cost.kernel_row(op, _5090)
     assert not [k for k in row if k.split("@")[0] in ("TILE", "WORK", "STAGE", "REDUCE", "RASTER", "PLACE")]
     assert not [k for k in row if k.startswith(("D_", "MMA_"))]
     assert not [k for k in row if "peak" in k or "tflops" in k]
@@ -175,21 +173,23 @@ def test_the_row_carries_no_knob_features_and_no_raw_peaks():
     assert "H_opt" not in row  # the corpus is one compile regime throughout
 
 
-def test_precision_trading_is_the_only_thing_separating_a_fast_math_twin():
-    """A fast-math kernel and its standard sibling carry identical stamps and share a card, so
-    without this column they would be feature-identical rows with different labels."""
+def test_a_fast_math_kernel_and_its_twin_are_feature_identical():
+    """An accepted cost, pinned so it is a decision rather than a surprise.
+
+    A fast-math kernel and its standard sibling stamp identically, and the row carries nothing to
+    tell them apart — a precision column was tried and removed (see :func:`kernel_row`) because it
+    is constant across both arms of any real fork and so cannot affect the comparison. They remain
+    separate ROWS with separate labels, since the pool key carries the pin; the fit averages
+    them."""
     op = _Op(_matmul_stamps(256, 256, 256), {"a": _t("a", 256, 256)}, {"c": _t("c", 256, 256)})
-    std = kernel_cost.kernel_row(op, _5090, precision_trading=False)
-    fm = kernel_cost.kernel_row(op, _5090, precision_trading=True)
-    assert std != fm
-    assert {k for k in std if std[k] != fm[k]} == {"R_precision_trading"}
+    assert not [k for k in kernel_cost.kernel_row(op, _5090) if "precision" in k or "fast" in k.lower()]
 
 
 def test_unknowable_values_are_nan_not_zero():
     """``nan`` means "not knowable here", which a tree splits on separately from a real zero —
     the convention the online prior's featurizer states."""
     norm = _Op({**_matmul_stamps(1024, 1024, 16), "S_loop_depth": 2.0}, {"a": _t("a", 1024, 1024)}, {"o": _t("o", 1024, 1024)})
-    row = kernel_cost.kernel_row(norm, _5090, precision_trading=False)
+    row = kernel_cost.kernel_row(norm, _5090)
     assert math.isnan(row["R_log_flops"]) and math.isnan(row["R_intensity"])
     assert not math.isnan(row["R_log_bytes"])  # traffic is always knowable
 
@@ -260,8 +260,8 @@ def test_a_fast_math_twin_stays_a_separate_row():
     pairs = {r.name: r for r in _corpus()}
     fm_name = next(n for n in pairs if n.endswith(".fm") and n[:-3] in pairs)
     rows, _ = build_rows([pairs[fm_name], pairs[fm_name[:-3]]])
-    assert len(rows) == 2
-    assert {row.features["R_precision_trading"] for row in rows} == {0.0, 1.0}
+    assert len(rows) == 2  # separate rows, because the pin is part of the pool key ...
+    assert rows[0].features == rows[1].features  # ... and feature-identical, which is accepted
 
 
 def test_every_row_carries_a_fold_key_that_ignores_the_card():
@@ -333,9 +333,7 @@ def test_the_invariance_holds_on_a_real_reconstructed_kernel():
 
     spec = gpu.by_name(record.gpu_name)
     as_cut_piece = replace(standalone, knobs={**standalone.knobs, "PLACE@a": "cut", "TILE": "f4x8", "WORK": "t16x8"})
-    assert kernel_cost.kernel_row(as_cut_piece, spec, precision_trading=False) == kernel_cost.kernel_row(
-        standalone, spec, precision_trading=False
-    )
+    assert kernel_cost.kernel_row(as_cut_piece, spec) == kernel_cost.kernel_row(standalone, spec)
 
 
 def test_every_symbolic_golden_is_traced_at_the_default_hint():

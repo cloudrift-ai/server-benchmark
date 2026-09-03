@@ -19,6 +19,7 @@ from enum import StrEnum
 from functools import cached_property
 from numbers import Real
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
@@ -743,11 +744,11 @@ def _record_fingerprint(record: GoldenRecord) -> str:
     return digest(cached[1], str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
 
 
-#: Enumerated rows per exact target and pins, bucketed by kernel identity. Sibling realizations of
-#: one config decode against one enumeration because the tripwire and migration validator walk
-#: whole files. Context construction is also shared per card; neither cache changes schedule-space
+#: One :class:`_Replay` per exact target, pins and spelled knobs — the tripwire and the evidence
+#: import walk whole files, and sibling realizations that spell the same kernel-set decisions share
+#: one replay. Context construction is also shared per card; neither cache changes schedule-space
 #: membership.
-_DECODE_ROWS_CACHE: dict[tuple, dict[str | None, frozenset]] = {}
+_REPLAY_CACHE: dict[tuple, _Replay] = {}
 _DECODE_CTX_CACHE: dict[tuple, object] = {}
 
 
@@ -812,9 +813,10 @@ def decode_record(record: GoldenRecord) -> str | None:
     """STRICTLY decode one record against the current compiler — ``None`` on success, else the
     failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
     program selects exactly one kernel, except that a child-identity schedule receipt may select its
-    kernel from a multi-kernel target by stored identity; a routing record names a legal closed Fold
-    seam; a SCHEDULE record's spelled row equals one enumerated leaf (``canonical_row_key`` equality
-    under the record's own pins) — no prefix matching, no any-of, no classified shape. A receipt's
+    kernel from a multi-kernel target by stored identity; a routing record's every cut key names a
+    seam the cut pass offers on the replay (:func:`_replay`); a SCHEDULE record's spelled row equals
+    one enumerated leaf (``canonical_row_key`` equality under the record's own pins) — no prefix
+    matching, no any-of, no classified shape. A receipt's
     identity must equal one kernel resolved under the record's pins, and the spelled row must equal
     one of THAT kernel's rows — a sibling child's row must not vouch for it."""
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
@@ -830,11 +832,11 @@ def decode_record(record: GoldenRecord) -> str | None:
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         if not record.is_receipt:
             return _remember_verdict(verdict_key, f"{type(exc).__name__}: {exc}")
+    replay = _replay(record)
     if record.is_routing:
-        from emmy.compiler.pipeline.passes.lowering.tile._cut import route_resolves  # noqa: PLC0415
-
-        return _remember_verdict(verdict_key, route_resolves(tile, record.route))
-    candidates, _signatures = _candidate_rows(record)
+        reason = f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam" if replay.unresolved else None
+        return _remember_verdict(verdict_key, reason)
+    candidates = replay.rows
     row = schedule_row_key(record.knobs)
     if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
         child_rows = candidates.get(record.identity)
@@ -860,47 +862,84 @@ def _remember_verdict(key: str, reason: str | None) -> str | None:
     return reason
 
 
-def _candidate_rows(record: GoldenRecord) -> tuple[dict[str | None, frozenset], dict[str, frozenset]]:
-    """Every schedule-row identity the record's target can realize under its pins, bucketed by the
-    the deploy identity (``identity_key(with_io=True)``) of the kernel that offers it (``None`` for forks whose root is not a
-    recognized ``TileOp``): the fork leaves' rows, PLUS each resolved kernel's own realized row — a
-    forkless kernel (the schedule space collapsed to one row, often the all-OFF anchor) never opens
-    a fork, so its one row is read off the resolved op instead. Under pinned cuts the buckets are
-    exactly the split children, which is what lets a child-identity receipt decode against its own
-    kernel only. The second map is each resolved kernel's ``S_*`` signature by identity — how a
-    receipt's row is keyed as evidence for the child it decorates."""
+class _Replay(NamedTuple):
+    """One replay of a record's target through the tile passes under the record's pins, following
+    the record's knobs at every kernel-set fork (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`).
+
+    ``rows`` — every schedule-row identity each kernel can realize, bucketed by the kernel's deploy
+    identity (``identity_key(with_io=True)``; ``None`` for forks whose root is not a recognized
+    ``TileOp``): the fork leaves' rows, PLUS each resolved kernel's own realized row — a forkless
+    kernel (the schedule space collapsed to one row, often the all-OFF anchor) never opens a fork,
+    so its one row is read off the resolved op instead. Behind a cut the buckets are exactly the
+    pieces, which is what lets a child-identity receipt decode against its own kernel only.
+    ``signatures`` — each resolved kernel's ``S_*`` signature by identity: how a row is keyed as
+    evidence for the kernel it decorates. ``arms`` — the arm the record's knobs spelled at each
+    kernel-set fork it decided (a cut seam, a cross-CTA plan), keyed by the signature of the kernel
+    that fork was offered on: the record's route rows. ``unresolved`` — the record's scoped cut keys
+    no offered seam carried, the strict decode's routing failure."""
+
+    rows: dict[str | None, frozenset]
+    signatures: dict[str, frozenset]
+    arms: tuple[tuple[frozenset, dict[str, str]], ...]
+    unresolved: tuple[str, ...]
+
+
+def _replay(record: GoldenRecord) -> _Replay:
+    """Replay ``record``'s target through the tile passes — see :class:`_Replay`. The record's pins
+    are the environment it was measured under and go to the environment whole; its knobs are the
+    decisions it took at forks and are followed fork by fork. A piece a cut or split mints is a
+    brand-new kernel: it inherits nothing, and the record's remaining keys are read against its own
+    offers, exactly as the deploy reads a route row of its signature."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import flatten_leaves, leaf_knobs  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import canonical_row_key, family_of, schedule_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm  # noqa: PLC0415
 
-    cache_key = (_record_cache_key(record), record.pins)
-    cached = _DECODE_ROWS_CACHE.get(cache_key)
+    cache_key = (_record_cache_key(record), record.pins, canonical_row_key(record.knobs))
+    cached = _REPLAY_CACHE.get(cache_key)
     if cached is not None:
         return cached
     ctx_key = (record.compute_cap, record.gpu_name or None)
     ctx = _DECODE_CTX_CACHE.get(ctx_key)
     if ctx is None:
         ctx = _DECODE_CTX_CACHE.setdefault(ctx_key, Context.from_target(ctx_key[0], gpu_name=ctx_key[1]))
+    spelled = {str(key): str(value) for key, value in record.knobs.items()}
+    pending = {key for key, value in spelled.items() if family_of(key) == "PLACE" and value == "cut"}
     buckets: dict[str | None, set] = {}
     signatures: dict[str, frozenset] = {}
+    arms: list[tuple[frozenset, dict[str, str]]] = []
 
     def _identity_of(op) -> str | None:
         return op.identity_key(with_io=True) if isinstance(op, TileOp) else None
 
-    def _note_signature(op) -> None:
+    def _signature_of(op) -> frozenset:
+        return frozenset((k, str(v)) for k, v in (op.knobs or {}).items() if k.startswith("S_"))
+
+    def _note(op) -> None:
         identity = _identity_of(op)
         if identity is not None:
-            signatures[identity] = frozenset((k, str(v)) for k, v in (op.knobs or {}).items() if k.startswith("S_"))
+            signatures[identity] = _signature_of(op)
 
     def decide(fp):
+        _note(fp.root_op)
+        if fp.structural:
+            arm = spelled_arm(fp.options, spelled)
+            if arm is not None:
+                option, knobs = arm
+                if _is_structural_option(option):
+                    # A cut consumes the key that spelled it (a bare ``PLACE=cut`` its one root-most
+                    # cut), so the pieces are read against what the record has left to say.
+                    arms.append((_signature_of(fp.root_op), dict(knobs)))
+                    for key in (*(pending & set(knobs)), *(("PLACE",) if spelled.get("PLACE") == "cut" else ())):
+                        pending.discard(key)
+                        spelled.pop(key, None)
+                return option
         leaves = flatten_leaves(fp.options)
         ops = [o for o in leaves if not _is_structural_option(o)]
         identity = _identity_of(fp.root_op)
-        _note_signature(fp.root_op)
         for leaf in ops:
             row = leaf_knobs(leaf)
             if row:
@@ -912,9 +951,9 @@ def _candidate_rows(record: GoldenRecord) -> tuple[dict[str | None, frozenset], 
     for node in out.nodes.values():
         if isinstance(node.op, TileOp):
             buckets.setdefault(_identity_of(node.op), set()).add(schedule_row_key(dict(node.op.knobs or {})))
-            _note_signature(node.op)
-    result = ({identity: frozenset(rows) for identity, rows in buckets.items()}, signatures)
-    _DECODE_ROWS_CACHE[cache_key] = result
+            _note(node.op)
+    result = _Replay({identity: frozenset(rows) for identity, rows in buckets.items()}, signatures, tuple(arms), tuple(sorted(pending)))
+    _REPLAY_CACHE[cache_key] = result
     return result
 
 
@@ -1197,39 +1236,50 @@ def evidence_rows(gpu_name: str, compute_cap: tuple[int, int]) -> list[tuple[fro
     knobs, µs, record name)``, the same shape the tune DB's ``perf`` rows take in the deploy's
     evidence index. Only a MEASURED record in the live input regime (:func:`regime_live`) is
     evidence; a proposal has no µs to rank with and deploys once ``run --golden PATH --bench``
-    has measured it. A record's route rides in its knobs (the ``PLACE`` keys of its pins), so a
-    receipt, a corpus case or a routing row is the measured price of the whole kernel set it
-    spells, keyed by the kernel it was recorded on; a receipt's schedule row is keyed by the child
-    kernel its stored identity names. Best-effort per record: a record the current compiler cannot
+    has measured it.
+
+    Every row is keyed by the kernel it decides — a piece a cut or split mints is a brand-new
+    kernel, so nothing a record says about the kernel it was offered on reaches the pieces. A
+    record that decorates one kernel (no route, no cross-CTA split, no stored child identity) is
+    that kernel's schedule row under the target's signature. Any other record is read through its
+    replay (:func:`_replay`): each kernel-set arm it spelled is a route row under the signature of
+    the kernel that fork was offered on, and its schedule row is keyed under the child its stored
+    identity names — or, for a row the tuner merged with the parent's split (a flat split row),
+    under the one child whose enumerated rows contain it. A row no kernel of the replay enumerates
+    is stale and is no evidence. Best-effort per record: a record the current compiler cannot
     lower is skipped, since the strict decode is where that is loud."""
+    from emmy.compiler.pipeline.knob import family_of, schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import parse_reduce  # noqa: PLC0415
+
     rows: list[tuple[frozenset, dict, float, str]] = []
     for record in records_for_card(gpu_name, compute_cap):
         if record.measurements is None or record.emmy_us <= 0 or not regime_live(record):
             continue
-        try:
-            parent = frozenset((key, str(value)) for key, value in record.structural_features.items())
-        except Exception:  # noqa: BLE001 — a stale record is no evidence, not an error
+        row = record.schedule_row
+        split = any(family_of(k) == "REDUCE" and (plan := parse_reduce(v)) is not None and plan.needs_split for k, v in row.items())
+        if record.identity is None and not record.route and not split:
+            try:
+                signature = frozenset((key, str(value)) for key, value in record.structural_features.items())
+            except Exception:  # noqa: BLE001 — a stale record is no evidence, not an error
+                continue
+            if row:
+                rows.append((signature, row, record.emmy_us, record.name))
             continue
-        route, row = record.route, record.schedule_row
-        if route:
-            rows.append((parent, {**route, **(row if record.identity is None else {})}, record.emmy_us, record.name))
-        if row and record.identity is None:
-            rows.append((parent, row, record.emmy_us, record.name))
-        elif row:
-            child = _child_signature(record)
-            if child is not None:
-                rows.append((child, row, record.emmy_us, record.name))
+        try:
+            replay = _replay(record)
+        except Exception:  # noqa: BLE001 — see above
+            continue
+        rows.extend((signature, arm, record.emmy_us, record.name) for signature, arm in replay.arms)
+        if not row:
+            continue
+        child = record.identity
+        if child is None:
+            key = schedule_row_key(row)
+            child = next((identity for identity, keys in replay.rows.items() if identity is not None and key in keys), None)
+        signature = replay.signatures.get(child) if child is not None else None
+        if signature is not None:
+            rows.append((signature, row, record.emmy_us, record.name))
     return rows
-
-
-def _child_signature(record: GoldenRecord) -> frozenset | None:
-    """The ``S_*`` signature of the child kernel a receipt's stored identity names, read off the
-    kernels the record's target resolves to under its own pins."""
-    try:
-        signatures = _candidate_rows(record)[1]
-    except Exception:  # noqa: BLE001 — see evidence_rows
-        return None
-    return signatures.get(record.identity)
 
 
 _DOCUMENT_MEMO: dict[Path, list[GoldenRecord]] = {}

@@ -102,19 +102,14 @@ root-most cut the same way and may join scoped cuts in that single decision. A s
 not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Only unpinned cuts leave the pieces undecided, so search can explore their smaller
-seams before scheduling. The pass reads two pin sources through one call (`knob.family_pins(family, own)`): the
-ambient `EMMY_<KNOB>` environment, and the kernel's OWN pins (`TileOp.pins`) — a measured route row the greedy pick
-installed on the kernel when that row won its placement or split fork, the deploy's way of applying a recorded
-kernel-set decision whole. Every piece a cut mints inherits the kernel's own pins minus `PLACE`, a split's pieces
-inherit them whole, so the row's schedule keys reach the kernels the route creates; the kernel's identity never
-reads them. A route whose pins leave a piece un-lowered is not an error here — the deploy policy retires that row
-and resolves again.
+seams before scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
+never becomes a pin — the deploy's evidence pick takes one of the pass's own offered arms with it
+(`pins.spelled_arm`), and every piece the arm mints is a brand-new kernel whose own forks consult its own rows.
 `040_schedule` is the classic assignment boundary. The model under `ir/schedule` projects direct, plain-reduction,
 scalar-contraction, precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem
 compute-fill, and kernel-global raster domains. `ClassicScheduleContext` alone composes their compatibility. The pass
-reads pins (the environment's and the kernel's own), mints the search-pool identity — the kernel's own pins are part
-of it, so a pinned kernel and its unpinned twin never share a pool — and adapts accepted typed assignments to
-generic lazy Forks. A cross-CTA
+reads the environment's pins, mints the search-pool identity, and adapts accepted typed assignments to generic lazy
+Forks. A cross-CTA
 split
 piece with several contraction schedule sites uses the same boundary. A split piece's partition receipt consumes the
 GRID stage
@@ -205,9 +200,7 @@ compare their exact canonical values with the applicable factors in Algorithm 1.
 value the static catalog did not project. Precision gates are restrictions of the same enumeration: their atom choices
 remain in the fixed node domain, and the immutable `c` excludes them when it evaluates a complete assignment. A
 malformed or unavailable exact value therefore names no member of `D(p, t)` and is refused; pinning cannot manufacture
-a worker inventory, tile, transport, or raster value. A kernel's own pins are the same restriction with validation
-off: a measured row this enumeration cannot offer is an empty offer the deploy policy retires by source, never an
-addressing error raised out of the pass. A bare pin must be supported by at least one factor in a strict
+a worker inventory, tile, transport, or raster value. A bare pin must be supported by at least one factor in a strict
 kernel and restricts every factor that supports its value; non-supporting sibling sites are not silently given another
 meaning. Under union probing, a kernel that supports the value nowhere ignores the bare pin so a sibling kernel may
 carry it. Once the parameter set contains scoped schedule pins, its bare kernel values travel with that partial row:

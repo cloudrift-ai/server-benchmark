@@ -106,10 +106,9 @@ compile, and both are deliberately harder to trigger.
 work into kernels. An explicit placement pin decides it outright; unpinned, the cut is offered as an ordinary
 structural fork (the fused form first, one fragment per legal seam), so a tuning run can discover a profitable
 split and a chosen cut records as a row whose keys spell the route. Such a row is measured evidence for the kernel
-it was recorded on: at the placement fork it is the measured price of applying that route, it outranks any arm the
-prior would have to price, and it is applied by installing the route as the kernel's own pins for the cut pass to
-compose — so the measured tree is the tree that deploys. Each resulting piece is recognized afresh and works down
-the same hierarchy for its own schedule.
+it was recorded on: at the placement fork it is the measured price of that cut, it outranks any arm the prior would
+have to price, and taking it means taking the pass's own cut arm. Each resulting piece is a brand-new kernel,
+recognized afresh, that works down the same hierarchy for its own schedule from rows of its own.
 
 **Splitting a reduction across blocks.** Dividing a long reduction among several blocks turns one kernel into a
 kernel that computes partial results plus one that combines them (or, on the cheaper arm, a single kernel that adds
@@ -119,11 +118,11 @@ are differently shaped kernels doing different work, so there is no reason for t
 and nothing makes them. Each also records its own measurements under its own identity, so a stored time always
 describes the kernel that earned it.
 
-Because a pinned setting is a statement about how kernels run, it reaches those new kernels too — a measured row
-that spells a split installs its remaining schedule keys on the pieces it mints — which raises an obvious question:
-does a split kernel then split again? No. Dividing a reduction that is *already* one block's
-share of a larger one is not a further choice, it is the same choice applied twice, so the compiler does not offer
-it. What remains of the pin — how each piece folds its own share within a block, say — still applies.
+Because a hand pin is a statement about how kernels run, it reaches those new kernels too, which raises an obvious
+question: does a split kernel then split again? No. Dividing a reduction that is *already* one block's share of a
+larger one is not a further choice, it is the same choice applied twice, so the compiler does not offer it. What
+remains of the pin — how each piece folds its own share within a block, say — still applies. A measured row is
+different: it says nothing to the pieces, whose own rows say what they measured.
 
 **A structural fork nothing measured.** The prior is never asked to rank structural options against each other,
 because it would be comparing predictions across different kinds of kernel, where its errors do not cancel the way
@@ -151,9 +150,7 @@ evidence as before, so backtracking is cheap and needs no saved snapshots. Retri
 If the budget runs out with the node still un-lowered — a trained prior can rank many oversized tiles above the first
 one that fits — there is a last resort: resolve once more taking each rule's first option, which is emitted to be
 budget-safe. The block list still applies during that last pass, so a tile that already failed cannot be chosen
-again, and a measured route whose pieces failed to lower is retired for the compile the same way. Only if even the
-first option does not fit does the compile stop with a clear
-error naming the node.
+again. Only if even the first option does not fit does the compile stop with a clear error naming the node.
 
 ## How to tell whether evidence answered
 

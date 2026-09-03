@@ -551,21 +551,16 @@ At a **kernel-set fork** (the cut pass's placement fork and its cross-CTA split 
 first — over a different kind of row. A **route row** is a measured row whose keys spell a kernel-set decision: a
 `PLACE@…` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half (`greedy._is_route_row`); its µs is the measured
 price of applying that decision to the kernel it was recorded on, and the index files it under `routes` rather than
-`ok`. `greedy._route_candidates` turns the route rows of the kernel's signature that apply here — every `PLACE@…`
-seam resolves on this Fold tree (`_cut.route_resolves`); a split's `g<n>` half is on the ballot — into measured
-candidates: the kernel rebound with the row installed as its own pins (`TileOp.pins`, a `KernelPins(values,
-source)`). A route candidate outranks every arm priced by nested resolution (a Σ that may hold predictions); the fused
-arm competes only when a measured row decided it; among measured candidates the fastest wins. With no route row the
-arms are priced exactly as Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work
-floor). Applying the route is the cut pass's ordinary job: it reads the kernel's own pins beside the ambient
-`EMMY_<KNOB>` pins (`knob.family_pins(family, own)`), composes the multi-seam route or the split, and every piece it
-mints inherits the pins minus the family the decision consumed (`KernelPins.without("PLACE")` in `_cut.realize`; whole
-for `_split`, since the schedule pass strips the `g` half); the schedule pass restricts each piece's enumeration to
-them, with pin validation off for evidence-installed pins, so a stale row is an empty offer rather than an error. A
-pinned kernel and its unpinned twin are different offer sites for structural replay (`pipeline._offer_site_key`) and
-different schedule pools (`knob.schedule_pin_fingerprint(own)`). A route whose pins leave a kernel un-lowered is
-retired for the compile (`GreedyStrategy` → `_stale_route_pins` → `retired_routes`) and the resolve repeats without
-it.
+`ok`. `greedy._route_candidates` turns the route rows of the kernel's signature into measured candidates, each one
+of the pass's OWN offered arms: the arm a row spells (`pins.spelled_arm` — the first offered seam the row marks
+`cut`, the fuse arm when its `PLACE` keys mark none, the offered plan whose `g<n>` half its `REDUCE` value carries;
+a row whose cut seams are not on this ballot decides nothing). A route candidate outranks every arm priced by nested
+resolution (a Σ that may hold predictions); the fused arm competes only when a measured row decided it; among
+measured candidates the fastest wins. With no route row the arms are priced exactly as Part 4 describes
+(`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is installed on the kernel:
+a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every decision family and every
+feature), its own forks consult the rows of its own signature, and a piece that fails to lower is handled the way any
+structural pick's is (`Pipeline.run`'s retry with the splices withdrawn).
 
 Env pins sit ABOVE the whole list: a hand pin (`--ab`, `EMMY_KNOBS`, `EMMY_<KNOB>`) settles the pinned families before
 any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH --bench` pins each golden row and each
@@ -664,16 +659,20 @@ that regime, and the paired Emmy/reference timings. Its uses are measured eviden
 pinned measurement (`run --golden PATH --bench`, `--ab`), training data for the offline prior (`emmy fit`), the
 `emmy eval` datasets, and regression reference points.
 
-At deploy a record is rows, nothing more. Its route — the `PLACE` keys of its pins and knobs (`GoldenRecord.route`) —
-enters the index as a route row of the kernel its target lifts to, carrying its schedule knobs beside it when the
-record stores no child identity (a corpus case or an `--ab` row: that row belongs to the pieces the route mints). Its
-schedule row (`GoldenRecord.schedule_row`) enters under the kernel it decorates. A child-identity schedule receipt is
-therefore two ordinary rows: the route under the parent's signature, the child's schedule under the child's. Whether a
-record still realizes is a separate question the nightly `onboard-model` workflow asks with the strict decode
-(`golden.decode_record`): the persisted program must select exactly one kernel (a receipt selects its child by stored
-identity), a routing record must name legal closed Fold seams, and a schedule row must equal one enumerated leaf under
-the record's own pins. The per-commit tests do not load checked-in goldens because proving a row enumerates its whole
-fork costs record count times fork size.
+At deploy a record is rows, nothing more, and every row is keyed by the kernel it decides (`golden.evidence_rows`).
+A record that decorates one kernel is that kernel's schedule row under the target's signature. Any other record is
+read through its replay (`golden._replay`): the target is resolved through the tile passes under the record's pins
+(the environment it was measured under), its knobs followed fork by fork through the same `pins.spelled_arm` the
+deploy reads a route row with. Each kernel-set arm the knobs spelled is a route row under the signature of the kernel
+that fork was offered on; its schedule row is keyed under the child its stored identity names, or — for a row the
+tuner merged with the parent's split — under the one child whose enumerated rows contain it. A piece inherits nothing
+from the kernel it replaced, so a record's remaining keys are read against the piece's own offers; a key no piece
+offers, or a schedule row no kernel of the replay enumerates, is stale and is no evidence. Whether a record still
+realizes is the question the nightly `onboard-model` workflow asks with the strict decode (`golden.decode_record`),
+over the same replay: the persisted program must select exactly one kernel (a receipt selects its child by stored
+identity), a routing record's every cut key must name a seam the cut pass offers, and a schedule row must equal one
+enumerated leaf under the record's own pins. The per-commit tests do not load checked-in goldens because proving a
+row enumerates its whole fork costs record count times fork size.
 
 **Whether goldens are training data differs between the two halves of the prior.** The **online** prior never trains
 on them: a recorded golden row enters no reservoir and no checkpoint. (Benchmarks of a golden *shape* during a tune
@@ -933,10 +932,10 @@ scheduled; it remains lowering-only and is never enrolled or scheduled again.
   strictly shrink and the seen-set dedups). Enrolled kernels are evidence, never reward terms — the parent
   slice's Σ already priced them, so they stay out of `per_op` / `total_us` and out of `searched_winner()`.
 - **A structural total is a route row.** A placement cut's measured whole-slice latency belongs to the exact ordered
-  child schedule tree that ran, and the deploy reproduces that tree by applying the row whole — the `PLACE` keys
-  compose the same cut and the row's schedule keys ride to the pieces — so such a row is the measured price of that
-  kernel-set decision (Part 3). The tuner itself writes no `PLACE` parent perf row: its winner is persisted into the
-  working file as a routing row and child-identity schedule receipts, which are evidence once measured, and the
+  child schedule tree that ran; the deploy takes the same arm at the parent's fork (the measured price of that
+  kernel-set decision, Part 3) and the children, brand-new kernels, deploy from the rows of their own signatures.
+  The tuner itself writes no `PLACE` parent perf row: its winner is persisted into the working file as a routing row
+  and child-identity schedule receipts, which are evidence once measured, and the
   independently measured child kernels keep their ordinary perf rows. The reservoir keeps its `PLACE` rows for model
   training only.
 
@@ -1036,9 +1035,9 @@ cross-CTA parent becomes a tune
 winner only when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a
 parent whose pins
 name a different independently tuned child is left unpromoted. A `PLACE`-only row is a routing row: it does not claim
-the child schedules, and once measured it is a route row — the measured price of that kernel set, which the greedy
-compile applies whole (Part 3). A search number never populates `emmy_us` / `cublas_us`; promotion still requires the
-separate repeated, correct, deployable A/B gate.
+the child schedules, and once measured it is a route row — the measured price of that kernel set, the arm the greedy
+compile takes at that kernel's fork (Part 3). A search number never populates `emmy_us` / `cublas_us`; promotion
+still requires the separate repeated, correct, deployable A/B gate.
 
 Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either
 proposal set. Canonical repository goldens remain the common implicit deploy context for both runs.

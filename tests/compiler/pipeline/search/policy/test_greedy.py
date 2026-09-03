@@ -243,24 +243,29 @@ def test_measured_index_folds_golden_rows_beside_the_tune_db(monkeypatch) -> Non
     assert index.failed == {}
 
 
-def test_route_rows_become_measured_kernel_set_candidates(monkeypatch) -> None:
+def test_route_rows_become_measured_kernel_set_candidates() -> None:
     """At a placement fork, a route row of the kernel's signature is one candidate priced at its
-    measured µs: the kernel rebound with the row as its own pins, which the cut pass composes.
-    A retired source and a kernel already pinned yield nothing."""
+    measured µs: the OFFERED arm the row spells — a seam it marks ``cut``, or the fuse arm when it
+    marks none on the ballot. Nothing is installed on the kernel; the pieces a cut mints are new
+    kernels read against their own rows. A schedule fork has no route candidates."""
     sig = frozenset({("S_shape", "128.0")})
-    routes = {sig: [({"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0, "g.route")]}
-    index = _Measured({}, {}, routes, {})
     fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
     cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
     root = TileOp(op=projection(), knobs={"S_shape": 128.0})
     point = SimpleNamespace(options=[fuse, cut], node_id="node", root_op=root, ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}))
+    routes = {
+        sig: [
+            ({"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0, "g.route"),
+            ({"PLACE@map.1/map": "fuse"}, 4.0, "g.fused"),
+            ({"PLACE@map.1/twist": "cut"}, 1.0, "g.stale"),
+        ]
+    }
 
-    ((option, us, source),) = _route_candidates(point, index, frozenset())
+    got = _route_candidates(point, _Measured({}, {}, routes, {}))
 
-    assert isinstance(option, TileOp) and us == 9.0 and source == "g.route"
-    assert dict(option.pins.values) == {"PLACE@map.1/map": "cut", "WORK": "t8"} and option.pins.source == "g.route"
-    assert _route_candidates(point, index, frozenset({"g.route"})) == []
-    assert _route_candidates(SimpleNamespace(**{**vars(point), "root_op": option}), index, frozenset()) == []
+    assert got == [(cut, 9.0, "g.route"), (fuse, 4.0, "g.fused")]
+    scheduled = SimpleNamespace(**{**vars(point), "options": [SimpleNamespace(pool_id="pool", knobs={"WORK": "t8"})]})
+    assert _route_candidates(scheduled, _Measured({}, {}, routes, {})) == []
 
 
 def test_strict_evidence_refuses_a_fork_no_measurement_decides(monkeypatch) -> None:

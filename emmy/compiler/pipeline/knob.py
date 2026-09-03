@@ -25,7 +25,7 @@ features in processes that featurized without the pipeline loaded.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -449,27 +449,19 @@ def apply_knobs_env(raw: str | None = None) -> dict[str, str]:
     return applied
 
 
-def family_pins(family: str, own: Mapping[str, str] | None = None) -> tuple[tuple[str, str], ...]:
-    """Live pins for one knob family, bare first and scoped pins in key order.
-
-    ``own`` is the kernel's own pins (``TileOp.pins.values``): the measured route row the deploy's
-    evidence pick installed on that kernel. They are read beside the ambient ``EMMY_<KNOB>`` pins
-    and win per key, so a measured row narrows exactly the kernel it was recorded for."""
+def family_pins(family: str) -> tuple[tuple[str, str], ...]:
+    """Live pins for one knob family, bare first and scoped pins in key order."""
     import os  # noqa: PLC0415 — knob.py owns the ``EMMY_<KNOB>`` environment namespace
 
     family = family.upper()
     prefix = config.knob_var(family)
-    merged: dict[str, str] = {}
+    pairs = []
     if prefix in os.environ:
-        merged[family] = os.environ[prefix]
-    scoped_env = (
+        pairs.append((family, os.environ[prefix]))
+    scoped = sorted(
         (family + "@" + name[len(prefix) + 1 :].lower(), value) for name, value in os.environ.items() if name.startswith(prefix + "@")
     )
-    merged.update(scoped_env)
-    merged.update((key, str(value)) for key, value in (own or {}).items() if family_of(key) == family)
-    bare = [(key, value) for key, value in merged.items() if key == family]
-    scoped = sorted((key, value) for key, value in merged.items() if key != family)
-    return tuple((*bare, *scoped))
+    return tuple((*pairs, *scoped))
 
 
 def parse_knob_spec(raw: str) -> dict[str, str]:
@@ -542,18 +534,17 @@ def consume_kernel_row(knobs: dict) -> dict:
 _ENUMERATION_PIN_KNOBS = (*SCHEDULE_FAMILIES, "F16_MMA_F32_ACC", "FP8_MMA", "FAST_MATH")
 
 
-def schedule_pin_fingerprint(own: Mapping[str, str] | None = None) -> tuple[tuple[str, str], ...]:
+def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
     """Every live env pin the schedule enumeration can read (:data:`_ENUMERATION_PIN_KNOBS`) as
-    sorted ``(env var, raw value)`` pairs, followed by the kernel's own pins (``own``). The
-    scheduler folds this into its schedule-space stamp: a pin changes which rows enumerate, so
-    two pin states must never share a stamp. The environ scan is this module's to make — the
-    ``EMMY_<KNOB>`` namespace is knob.py-owned (the one exception to ``config.py``'s env
-    ownership), and the ``@``-keyed pins land there via the ``EMMY_KNOBS`` splat."""
+    sorted ``(env var, raw value)`` pairs. The scheduler folds this into its schedule-space stamp:
+    a pin changes which rows enumerate, so two pin states must never share a stamp. The environ
+    scan is this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one
+    exception to ``config.py``'s env ownership), and the ``@``-keyed pins land there via the
+    ``EMMY_KNOBS`` splat."""
     import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above
 
     prefixes = tuple(config.knob_var(name) for name in _ENUMERATION_PIN_KNOBS)
-    live = sorted((var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes))
-    return tuple((*live, *sorted((key, str(value)) for key, value in (own or {}).items())))
+    return tuple(sorted((var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes)))
 
 
 def knob_sort_key(name: str) -> tuple[int, str]:

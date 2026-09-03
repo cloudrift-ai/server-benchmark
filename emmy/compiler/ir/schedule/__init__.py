@@ -2,7 +2,7 @@
 
 from emmy.compiler.ir.pure.fold import ContractionView
 
-from .base import KernelPins, Schedule, ScheduleContext, ScheduleRefused, schedule
+from .base import Schedule, ScheduleContext, ScheduleRefused, schedule
 from .choices import (
     AtomKind,
     FoldMove,
@@ -30,7 +30,6 @@ __all__ = [
     "ContractionView",
     "EdgeSite",
     "FoldMove",
-    "KernelPins",
     "Level",
     "NodeId",
     "Placement",

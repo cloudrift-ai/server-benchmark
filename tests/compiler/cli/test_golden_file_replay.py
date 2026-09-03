@@ -240,9 +240,8 @@ def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_to_the_tuner(tmp_pat
 def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monkeypatch, explicit):
     """A measured routing row is the measured price of the kernel set its route spells. Selecting
     the file makes it evidence, so at the placement fork it outranks the fused arm nothing measured
-    and is installed as the kernel's own pins for the cut pass to compose: the compile splits into
-    the placed producer plus its consumers. A hand pin of the same route through ``EMMY_KNOBS``
-    lands identically."""
+    and the pass's own cut arm is taken: the compile splits into the placed producer plus its
+    consumers. A hand pin of the same route through ``EMMY_KNOBS`` lands identically."""
     path = tmp_path / "working-route.yaml"
     _working_placement_route(path)
     monkeypatch.delenv("EMMY_KNOBS", raising=False)

@@ -26,6 +26,48 @@ def parse_reduce(spec: str) -> Reduce | None:
         return None
 
 
+def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
+    """The kernel-set arm a knob row spells among a cut-pass fork's ``options``, as ``(option, its
+    knobs)`` — or ``None`` when the row decides nothing at this fork.
+
+    At a placement fork the row spells the first offered seam it marks ``cut`` (a bare
+    ``PLACE=cut`` takes the root-most offered seam), the fuse arm when its ``PLACE`` keys mark no
+    seam ``cut`` at all, and nothing when the seams it marks are not on this kernel's ballot. At a
+    split fork it spells the offered plan whose cross-CTA half equals its ``REDUCE`` value's, and
+    the unsplit arm when that value carries no such half. One reading for both consumers: the
+    deploy's evidence pick applies a measured route row through it, and the golden replay follows
+    a record's knobs through it. Nothing is installed on the kernel — the arm is the pass's own
+    offer, and the pieces it mints are brand-new kernels whose own forks consult their own rows."""
+    from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
+
+    arms = [(option, {str(key): str(value) for key, value in leaf_knobs(option).items()}) for option in options]
+    keys = {key for _, knobs in arms for key in knobs}
+    if any(family_of(key) == "PLACE" for key in keys):
+        route = {str(key): str(value) for key, value in row.items() if family_of(str(key)) == "PLACE"}
+        if not route:
+            return None
+        cuts = {key for key, value in route.items() if value == "cut"}
+        for option, knobs in arms:
+            if any(value == "cut" and (key in cuts or "PLACE" in cuts) for key, value in knobs.items()):
+                return option, knobs
+        if cuts:
+            return None  # a cut this kernel does not offer: a stale spelling, or another kernel's seam
+        return next(((option, knobs) for option, knobs in arms if knobs.get("PLACE") == "fuse"), None)
+    key = next((key for key in sorted(keys) if family_of(key) == "REDUCE"), None)
+    value = row.get(key, row.get("REDUCE")) if key is not None else None
+    want = parse_reduce(value) if value is not None else None
+    if want is None:
+        return None
+    for option, knobs in arms:
+        got = parse_reduce(knobs[key]) if knobs.get(key) else None
+        if got is None:
+            if not want.needs_split:
+                return option, knobs
+        elif want.needs_split and got.cta == want.cta and got.finalize == want.finalize:
+            return option, knobs
+    return None
+
+
 def _stampable_reduce(want: str) -> str | None:
     """The part of a ``REDUCE`` pin a kernel can still stamp, or ``None`` if it carries no
     cross-CTA stage. Read through :class:`Reduce` — the same typed reading the schedule

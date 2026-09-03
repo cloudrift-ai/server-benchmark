@@ -61,37 +61,6 @@ class ScheduleRefused(ValueError):
     """A pick cannot compose with the immutable schedule context."""
 
 
-@dataclass(frozen=True)
-class KernelPins:
-    """Knob pins one kernel carries as its own state.
-
-    ``values`` maps a knob key (``WORK``, ``REDUCE@<route>``, ``PLACE@<route>``, …) to the pinned
-    spelling; ``source`` names the measured evidence row the deploy installed them from (a golden
-    realization, or a tune-DB row), or ``None`` when a caller pinned the kernel by hand. The cut,
-    split and schedule passes read these beside the ambient ``EMMY_<KNOB>`` pins, and every piece
-    a cut or split mints inherits them minus the family that decision consumed — so one measured
-    row reaches every kernel the route it spells creates."""
-
-    values: frozendict = frozendict()
-    source: str | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.values, frozendict):
-            object.__setattr__(self, "values", frozendict(self.values))
-
-    def __repr__(self) -> str:
-        # A constructor repr over a plain dict: the graph JSON round trip re-evaluates it.
-        return f"KernelPins({dict(self.values)!r}, {self.source!r})"
-
-    def __bool__(self) -> bool:
-        return bool(self.values)
-
-    def without(self, *families: str) -> KernelPins:
-        """The pins left for a piece once ``families`` were consumed by the decision that minted it."""
-        kept = frozendict({key: value for key, value in self.values.items() if key.split("@", 1)[0] not in families})
-        return KernelPins(kept, self.source)
-
-
 class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
     """One immutable prefix of a compatible enumeration.
 

@@ -291,13 +291,9 @@ before scheduling; any pinned cut carries the consumed placement decision on bot
 splitting. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation families nor
 filters legal cuts by profitability.
 
-A kernel may carry its OWN pins (`TileOp.pins`, a `KernelPins` of knob keys to spellings plus the evidence source that
-installed them): the measured route row the greedy pick elected for it. The cut, split and schedule passes read them
-beside the ambient `EMMY_<KNOB>` pins, and the pieces a cut or split mints inherit them minus the family that decision
-consumed (a cut strips `PLACE`; a split keeps the whole `REDUCE` value because the schedule pass strips its `g` half on
-a piece that carries the partition receipt), so one measured row reaches every kernel of the route it spells. Pins are
-excluded from equality and identity — a pin narrows what the kernel may become, it does not change what it is — but a
-pinned kernel is its own offer site for structural replay and its own schedule pool.
+A kernel carries no pins of its own. Pins live in the environment (the hand-pin path), and a measured row reaches a
+kernel only as evidence at its forks: every piece a cut or split mints is a brand-new kernel that inherits nothing
+from the kernel it replaced and is decided from the rows of its own signature.
 
 A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
 when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's

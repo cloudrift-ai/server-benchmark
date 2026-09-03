@@ -34,8 +34,8 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import (
 from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
-    _candidate_rows,
     _lifted_target,
+    _replay,
     decode_record,
     kernel_identity,
     load_golden_file,
@@ -442,7 +442,7 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     fields = _receipt_fields()
     parent = GoldenRecord(knobs={}, **fields)
     lift_identity = _lifted_target(parent).identity_key(with_io=True)
-    children = {i: rows for i, rows in _candidate_rows(parent)[0].items() if i is not None and i != lift_identity}
+    children = {i: rows for i, rows in _replay(parent).rows.items() if i is not None and i != lift_identity}
     assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
     (id_a, rows_a), (id_b, rows_b) = sorted(children.items())
     row_a = next(iter(rows_a - rows_b), None)
@@ -480,9 +480,35 @@ def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target
     parent = GoldenRecord(knobs={}, **fields)
     with pytest.raises(ValueError, match="target lowers to 2 kernels"):
         _lifted_target(parent)
-    identity, rows = next((identity, rows) for identity, rows in _candidate_rows(parent)[0].items() if identity is not None)
+    identity, rows = next((identity, rows) for identity, rows in _replay(parent).rows.items() if identity is not None)
     receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=identity, **fields)
     assert decode_record(receipt) is None
+
+
+def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
+    """Golden evidence is per kernel. A routing record is a route row under the signature of the
+    kernel its cut was offered on; a child-identity receipt's schedule row is keyed under its
+    child's signature, and the ``PLACE`` pins it was measured under yield no route row — the
+    pinned compile opened no fork, and a piece inherits nothing from the kernel it replaced."""
+    from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
+
+    fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
+    route = {"PLACE@map.1/twist.1/inner": "cut"}
+    routing = GoldenRecord(knobs=route, **{**fields, "pins": ()})
+    parent = GoldenRecord(knobs={}, **fields)
+    lift_identity = _lifted_target(parent).identity_key(with_io=True)
+    replay = _replay(parent)
+    child, rows = next((identity, rows) for identity, rows in replay.rows.items() if identity is not None and identity != lift_identity)
+    receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=child, **fields)
+    parent_signature = frozenset((key, str(value)) for key, value in parent.structural_features.items())
+
+    assert _replay(routing).arms == ((parent_signature, route),)
+    with records_override([routing, receipt]):
+        got = evidence_rows("", (12, 0))
+    assert got == [
+        (parent_signature, route, 1.0, routing.name),
+        (replay.signatures[child], receipt.schedule_row, 1.0, receipt.name),
+    ]
 
 
 def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:

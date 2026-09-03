@@ -54,15 +54,12 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         domains = project_classic(tile, ctx)
     except ClassicProjectionError:
         return []
-    # A measured row installed as the kernel's own pins is a restriction to honor, never a spelling
-    # to validate: a row this enumeration cannot offer is an empty offer the deploy policy retires
-    # by source, not an addressing error.
     context = ClassicScheduleContext(tile, ctx, domains).restrict(
-        {family: family_pins(family, tile.pins.values) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")},
+        {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")},
         split_consumed=carries_partition(tile) or tile.split_consumed,
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
         allow_fp8=precision_pin(FP8_MMA) is True,
-        validate_pins=ctx.validate_pins and tile.pins.source is None,
+        validate_pins=ctx.validate_pins,
     )
     codec = ClassicScheduleCodec(context)
     pool_id = digest(
@@ -70,7 +67,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         ctx.structural_key(),
         tuple((axis.name, repr(axis.extent)) for axis in tile.place.free),
         codec.keys(),
-        schedule_pin_fingerprint(tile.pins.values),
+        schedule_pin_fingerprint(),
         tile.split_consumed,
     )
     prefix = {"S_warp_eligible": 1.0} if any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices) else {}

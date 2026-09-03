@@ -236,8 +236,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Pin** — A forced tuning choice. A hand pin comes from the environment (`EMMY_STAGE=d2/smem-async`, `EMMY_KNOBS`,
   `emmy run --ab`) and is how a row is measured rather than chosen: a pinned benchmark measures the forced configuration
-  rather than the one the compiler would have picked. A kernel can also carry its own pins — the route row the
-  evidence pick elected for it, which the cut and schedule passes apply exactly like an environment pin.
+  rather than the one the compiler would have picked. A kernel never carries pins of its own: a measured row reaches
+  it only as evidence at its forks.
 - **Schedule key** — The name a schedule choice is stored under when one kernel contains more than one step that takes
   the same kind of choice. Written plain, `TILE` refers to the kernel's main step. Where a kernel has several — the
   fused norm→linear kernel folds both its statistic and its contraction — the name carries a suffix identifying the
@@ -297,7 +297,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   database row, or a measured golden row. All three enter one index and are read by one rule.
 - **Route row** — A measured row that spells a kernel-set decision — a `PLACE` key, or a `REDUCE` value carrying a
   cross-CTA `g<n>` half. Its latency is the measured price of applying that decision to the kernel it was recorded
-  on; a compile applies it whole, as the kernel's own pins, and it outranks any arm priced by prediction.
+  on; at that kernel's fork a compile takes the offered arm the row spells, which outranks any arm priced by
+  prediction, and the pieces the arm mints are decided from rows of their own.
 - **Strict evidence** — A compile mode (`--strict-evidence`, `EMMY_STRICT_EVIDENCE`) in which a fork no measured row
   decides is an error naming the kernel, instead of a prediction the prior makes.
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the

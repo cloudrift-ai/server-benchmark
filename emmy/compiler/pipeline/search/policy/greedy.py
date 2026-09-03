@@ -39,10 +39,11 @@ no measurement decides.
 **Kernel-set forks follow the same rule.** A measured row that spells a
 placement or a cross-CTA split (a route row, :func:`_is_route_row`) is the
 measured price of applying that decision to the kernel it was recorded on;
-:func:`_route_candidates` turns it into a candidate — the kernel rebound with
-the row as its own pins, which the cut pass composes — and a measured
-candidate outranks every arm priced by nested resolution. Only with no route
-row are the arms priced against each other.
+:func:`_route_candidates` turns it into a candidate — the offered arm the row
+spells, nothing installed on the kernel — and a measured candidate outranks
+every arm priced by nested resolution. Only with no route row are the arms
+priced against each other. The pieces an arm mints are brand-new kernels,
+decided at their own forks from rows of their own signatures.
 
 **A measurement can also DISQUALIFY.** The measured sources above all RANK, and a
 ranking needs a latency — which a ``bench_fail`` row does not have, only the
@@ -226,9 +227,7 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
     return (
         getattr(getattr(rule, "pass_", None), "name", None),
         getattr(rule, "name", None),
-        pid
-        if pid is not None
-        else (fp.root_op.identity_key(with_io=True, with_knobs=True), schedule_pin_fingerprint(fp.root_op.pins.values)),
+        pid if pid is not None else (fp.root_op.identity_key(with_io=True, with_knobs=True), schedule_pin_fingerprint()),
         frozenset(node_blocked) if node_blocked else frozenset(),
     )
 
@@ -536,9 +535,9 @@ def _db_measured_index_build(db, ctx) -> _Measured:
     measured ``ok``: one surviving row means the shape is realizable and merely has bad rows.
 
     A row spelling a placement or a cross-CTA split (:func:`_is_route_row`) is the measured price
-    of applying that decision to the kernel it was recorded on, and lands in ``routes``: the
-    decision is re-applied whole (its schedule keys ride to the pieces), so the measured tree is
-    the tree that deploys.
+    of applying that decision to the kernel it was recorded on, and lands in ``routes``: at that
+    kernel's fork it names one offered arm (:func:`_route_candidates`); the pieces the arm mints
+    are brand-new kernels, decided by rows of their own signatures.
 
     Best-effort: any failure returns an empty index so deploy falls back to the prior.
     """
@@ -802,51 +801,28 @@ def _require_evidence(fp: ForkPoint, why: str) -> None:
     )
 
 
-def _route_candidates(fp: ForkPoint, index: _Measured, retired: frozenset[str]) -> list[tuple[object, float, str]]:
-    """The measured kernel-set decisions recorded for this fork's kernel — one ``(option, µs,
-    source)`` per route row of its signature that applies here: a ``PLACE`` row at a placement
-    fork whose seams resolve on this Fold tree, a split-carrying ``REDUCE`` row at a split fork
-    whose split is on the ballot. The option is the kernel rebound with the row installed as its
-    own pins (:class:`~emmy.compiler.ir.schedule.KernelPins`): the cut pass composes what the pins
-    say — a multi-seam route, the split, and the row's schedule keys riding to the pieces — so the
-    measured tree is the tree that deploys. ``retired`` names sources whose pins failed to lower
-    on an earlier attempt. A kernel already carrying pins is decided; a schedule fork has none."""
-    from dataclasses import replace  # noqa: PLC0415
-
-    from frozendict import frozendict  # noqa: PLC0415
-
-    from emmy.compiler.ir.schedule import KernelPins  # noqa: PLC0415
+def _route_candidates(fp: ForkPoint, index: _Measured) -> list[tuple[object, float, str]]:
+    """The measured kernel-set decisions recorded for this fork's kernel, as offered arms: one
+    ``(option, µs, source)`` per route row of its signature that spells an arm on the ballot
+    (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`) — a ``PLACE`` row at a placement
+    fork, a split-carrying ``REDUCE`` row at a split fork. The option is the cut pass's own offer;
+    the pieces it mints are brand-new kernels whose own forks consult their own rows. A schedule
+    fork has no route candidates."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import route_resolves  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import parse_reduce  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import spelled_arm  # noqa: PLC0415
 
     root = fp.root_op
-    if not isinstance(root, TileOp) or root.op is None or root.pins or not index.routes or _schedule_fork(fp):
+    if not isinstance(root, TileOp) or root.op is None or not index.routes or _schedule_fork(fp):
         return []
-    domain = _structural_domain(fp.options)
-    if domain not in (("PLACE",), ("REDUCE",)):
+    if _structural_domain(fp.options) not in (("PLACE",), ("REDUCE",)):
         return []
-    reduce_keys = [key for o in fp.options for key in leaf_knobs(o) if family_of(key) == "REDUCE"]
     out: list[tuple[object, float, str]] = []
     for group in _sig_groups(index.routes, _fork_signature(fp)):
-        for pins, us, source in group:
-            if source in retired:
-                continue
-            route = {k: v for k, v in pins.items() if family_of(k) == "PLACE"}
-            if domain == ("PLACE",):
-                if not route or route_resolves(root, route) is not None:
-                    continue
-            else:
-                value = pins.get(reduce_keys[0], pins.get("REDUCE")) if reduce_keys else None
-                want = parse_reduce(value) if value is not None and not route else None
-                if want is None or not want.needs_split:
-                    continue
-                offered = (parse_reduce(v) for o in fp.options if (v := leaf_knobs(o).get(reduce_keys[0])))
-                if not any(r is not None and r.cta == want.cta and r.finalize == want.finalize for r in offered):
-                    continue
-            out.append((replace(root, pins=KernelPins(frozendict(pins), source)), us, source))
+        for row, us, source in group:
+            arm = spelled_arm(fp.options, row)
+            if arm is not None:
+                out.append((arm[0], us, source))
     return out
 
 
@@ -1091,7 +1067,6 @@ def greedy_decide(
     price_structural: bool = True,
     db: object | None = None,
     decisions: dict | None = None,
-    retired_routes: set[str] | frozenset[str] | None = None,
 ) -> Callable[[ForkPoint], object]:
     """The greedy compile pick as a :meth:`Run.resolve` ``decide`` callback:
     descend directly to exact evidence when available, otherwise stream the complete rows in
@@ -1140,7 +1115,6 @@ def greedy_decide(
     # context keys): the tune DB's rows and the golden rows in scope, one index.
     # ``None`` sentinel = not built yet.
     db_state: list = [None]
-    retired = frozenset(retired_routes or ())
 
     def db_index() -> dict:
         return (db_state[0].ok if db_state[0] is not None else None) or {}
@@ -1161,8 +1135,8 @@ def greedy_decide(
                 fp.score = price
                 return found
         # Measured kernel-set decisions recorded for this kernel (route rows): priced beside the
-        # splices below, on the same µs scale, and applied by pinning the kernel with the row.
-        routes = _route_candidates(fp, index, retired) if price_structural else []
+        # splices below, on the same µs scale, each one of the offered arms.
+        routes = _route_candidates(fp, index) if price_structural else []
         if the_prior is None:
             # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
             # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback

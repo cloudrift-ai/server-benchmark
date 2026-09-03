@@ -626,7 +626,7 @@ the partial — and the deferred finalize folds every component before applying 
 Multi-channel products still have no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge
 is the anticipated
 `RoleKind` extension. `TILE` parameters match each site's own catalog through the exact codec spelling: an explicit
-`TILE@n<ordinal>` restricts one site when supporting sites need different values, while the canonical bare spelling
+`TILE@<route>` restricts one site when supporting sites need different values, while the canonical bare spelling
 restricts every site that supports its value. A value absent from every applicable factor leaves no assignment rather
 than changing a factor. Staging additionally
 requires the staged BUFFER dtypes to match the atom's operand dtypes — a slab fill byte-copies and cannot

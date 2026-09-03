@@ -238,11 +238,10 @@ class NodeSlice(Mapping):
 def node_slices(knobs: dict) -> tuple[NodeSlice, ...]:
     """Project a row into one geometry slice per classic consumer node.
 
-    ``TILE@n<N>`` and ``REDUCE@n<N>`` already name their node. Every distinct
-    ``STAGE@n<N>.e<M>`` edge stays in the slice as stored but groups under its consumer ``n<N>``;
-    this preserves edge identity while allowing tile/transport interaction features to see the
-    complete node choice. Generic non-classic ``@`` scopes retain their literal grouping for the
-    schema-agnostic feature tools. A bare group represents an analytical branch prefix; complete
+    ``TILE@<route>``, ``REDUCE@<route>`` and ``STAGE@<route>`` name their node by its route, so
+    one route groups the complete node choice — tile and transport together. Generic
+    non-classic ``@`` scopes retain their literal grouping for the schema-agnostic feature
+    tools. A bare group represents an analytical branch prefix; complete
     runtime schedule rows remain exact-site only.
     """
     groups: list[str] = []
@@ -255,8 +254,7 @@ def node_slices(knobs: dict) -> tuple[NodeSlice, ...]:
         if scope is None:
             has_bare = True
             continue
-        consumer, dot, operand = scope.partition(".e")
-        group = consumer if consumer.startswith("n") and consumer[1:].isdigit() and dot and operand.isdigit() else scope
+        group = scope
         if group not in keys_by_group:
             groups.append(group)
             keys_by_group[group] = []

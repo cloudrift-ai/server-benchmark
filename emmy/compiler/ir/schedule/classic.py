@@ -125,21 +125,23 @@ type ClassicAssignment = Schedule[KernelSchedule, NodeSchedule, EdgeSchedule]
 
 
 def classic_node_key(sites, family: str, site: NodeId) -> str:
-    """Return the canonical key for one node-scoped classic family."""
+    """Return the canonical key for one node-scoped classic family: bare when the family has one
+    applicable site on this kernel, else ``FAMILY@<route>`` — the site's route from the root in the
+    tree-path grammar (``TILE@map.1/twist.1/inner``), the spelling placement keys use too."""
     family_sites = sites.family_sites.get(family)
     if family_sites is None:
         raise ValueError(f"{family} is not a classic node family")
     if site not in family_sites:
-        raise ValueError(f"{node_id_spelling(site)} is not a {family} site")
-    return family if len(family_sites) == 1 else f"{family}@{node_id_spelling(site)}"
+        raise ValueError(f"{sites.sites[site].path} is not a {family} site")
+    return family if len(family_sites) == 1 else f"{family}@{sites.sites[site].path}"
 
 
 def classic_stage_key(sites, edge: EdgeSite) -> str:
-    """Return the canonical key for one staged consumer."""
+    """Return the canonical key for one staged consumer: bare for one consumer, else its route."""
     if edge not in sites.stage_edges:
         raise ValueError(f"{edge_site_spelling(edge)} is not a STAGE edge")
     consumers = tuple(dict.fromkeys(candidate[0] for candidate in sites.stage_edges))
-    return "STAGE" if len(consumers) == 1 else f"STAGE@{node_id_spelling(edge[0])}"
+    return "STAGE" if len(consumers) == 1 else f"STAGE@{sites.sites[edge[0]].path}"
 
 
 @dataclass(frozen=True)
@@ -1253,9 +1255,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
 class ClassicScheduleCodec:
     """Strict wire boundary for complete classic schedules.
 
-    Kernel families are bare. A node family is bare when it has one applicable site and carries a
-    :class:`NodeId` suffix only when the family is ambiguous. STAGE is one transport decision per
-    consumer node and follows the same rule. Decoding accepts no aliases, missing direct values,
+    Kernel families are bare. A node family is bare when it has one applicable site and carries
+    its site's route (``@map.1/twist.1/inner``) only when the family is ambiguous. STAGE is one
+    transport decision per consumer node and follows the same rule. Decoding accepts no aliases, missing direct values,
     or unknown fields.
     """
 

@@ -107,11 +107,11 @@ def _pin_sdpa(monkeypatch) -> None:
     _pin(
         monkeypatch,
         **{
-            "TILE@n3": "mma_m16n8k16_f16_f32/f1x2",
-            "TILE@n4": "mma_m16n8k16_f16_f32/f1x1",
+            "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x2",
+            "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x1",
             "REDUCE": "",
-            "STAGE@n3": "",
-            "STAGE@n4": "d1/smem",
+            "STAGE@map.1/twist.1/inner": "",
+            "STAGE@map.1/twist": "d1/smem",
         },
     )
 
@@ -264,17 +264,16 @@ def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkey
     _pin(
         monkeypatch,
         **{
-            "TILE@n2": "mma_m16n8k16_f16_f32/f1x2",
-            "TILE@n3": "mma_m16n8k16_f16_f32/f1x1",
-            "REDUCE@n0": "",
-            "REDUCE@n2": "",
-            "REDUCE@n3": "",
-            "STAGE@n2": "",
-            "STAGE@n3": "d1/smem",
+            "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x2",
+            "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x1",
+            "REDUCE@map": "",
+            "REDUCE@map.1/twist.1/inner": "",
+            "STAGE@map.1/twist.1/inner": "",
+            "STAGE@map.1/twist": "d1/smem",
         },
     )
     monkeypatch.setenv("EMMY_RASTER", "")
-    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@MAP.1/TWIST", "g2k")
     union_ctx = dc_replace(Context.from_target(_CC), validate_pins=False)
     out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=union_ctx).resolve(_sdpa_graph(), lambda fp: next(iter_leaves(fp.options)))
     partial = next(n.op for nid, n in out.nodes.items() if nid.endswith("__partial") and isinstance(n.op, TileOp))
@@ -316,11 +315,14 @@ def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> N
     rows = _rows(graph)
     assert rows, "the fused attention kernel must still enumerate"
     reduce_keys = {key for row in rows for key in row if key.startswith("REDUCE@")}
-    # n11, not n10: the score contraction's A and B are BOTH norm cones here, and the one walk
-    # visits a contraction's edges by ROLE (a, then each channel's b) rather than in stored order,
-    # which puts the channels first — so the two cone subtrees, and the reduce sites inside them,
-    # number the other way round.
-    assert reduce_keys == {f"REDUCE@n{i}" for i in (1, 2, 5, 6, 11, 13, 14)}
+    # Four reduce sites, each keyed by its route: the twisted carrier, the score contraction
+    # under it, and the two norm statistics under the score's Q and K cones.
+    assert reduce_keys == {
+        "REDUCE@map.1/twist",
+        "REDUCE@map.1/twist.1/inner",
+        "REDUCE@map.1/twist.1/inner.1/map.2/map.1/reduce",
+        "REDUCE@map.1/twist.1/inner.2/map.2/map.1/reduce",
+    }
 
 
 # --- a root's member reduce domain -------------------------------------------------------------- #

@@ -40,13 +40,14 @@ operand-edge sites, each site's projection or reduction view, and each contracti
 layer reads through them. The composition context publishes the schedule-facing API (`node`, `site`, `operand`,
 `producer`, `incident_edges`, the key spellings) and does not re-export the kernel's structural members under second
 names. A contraction view belongs to a node site and expresses its operand roles as edge positions, and is not
-another Fold node. A concrete codec alone translates integer and tuple sites to wire spellings.
+another Fold node. A concrete codec alone translates integer and tuple sites to wire spellings, and the route it spells is the site
+record's own.
 
 The node list is the one walk, `ir/tile/path.sites`, deduplicated by object identity. That walk yields a `Site` per
 node — the term, the axes in scope, the segment path — so the schedule's integer ids, the tree-path codec's segments,
-and the cut pass's scopes are all readings of one traversal and cannot drift. A
-contraction's edges are visited by ROLE (`a`, then each channel's `b`), not in the stored order that puts the channels
-first: the segment vocabulary spells the roles, so role order is the one order both identities can share.
+and the cut pass's scopes are all readings of one traversal and cannot drift. Operands are visited in stored order,
+which formation orients (a contraction's A first), and a route spells the stored position taken at each departure;
+an ambiguous node family spells its site by that route (`TILE@map.1/twist.1/inner`), the one grammar `PLACE` uses.
 
 **Every derivation memoizes on the ROOT, not on the wrapper**: several `TileOp`s exist over one term across a
 lowering, and a cache on the wrapper silently re-derives per wrapper. `schedule_nodes`, `schedule_views` and

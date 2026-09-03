@@ -271,7 +271,8 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
 - Kernel, node, and edge domains are projected independently. Enumeration is the compatible subset of their Cartesian
   product, so changing traversal order may change work but can never change membership.
 - `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`. A node family is bare
-  when it has one applicable site and uses `@n<N>` only when ambiguous. `STAGE` is one value per consumer node and
+  when it has one applicable site and carries the site's route (`TILE@map.1/twist.1/inner`, the same grammar as
+  `PLACE`) only when ambiguous. `STAGE` is one value per consumer node and
   follows the same rule. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
   and semantically refused assignments.
 

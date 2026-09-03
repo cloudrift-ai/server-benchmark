@@ -430,8 +430,8 @@ def test_codec_has_no_missing_unknown_or_alias_key_path() -> None:
 
     with pytest.raises(ValueError, match="missing STAGE"):
         codec.decode({key: value for key, value in row.items() if key != "STAGE"})
-    with pytest.raises(ValueError, match="unknown keys STAGE@n0"):
-        codec.decode({**row, "STAGE@n0": ""})
+    with pytest.raises(ValueError, match="unknown keys STAGE@map.1/inner"):
+        codec.decode({**row, "STAGE@map.1/inner": ""})
 
 
 def test_codec_rejects_a_noncanonical_value_spelling() -> None:

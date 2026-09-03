@@ -658,6 +658,8 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
     def choose_sync_mma(fp):
         return _prefer_mma_leaf(fp)
 
+    # Spelled on the retired ``n<id>`` site codec; re-derive as routes (``TILE@<route>``) once this
+    # program lowers again — its gather index still reads as a coordinate.
     row = {
         "WORK": "w1x1",
         "RASTER": "",

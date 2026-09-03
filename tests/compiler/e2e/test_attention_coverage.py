@@ -167,7 +167,7 @@ def _pin_classic(monkeypatch, pins: dict[str, str]) -> None:
 
 
 def _pin_sdpa_reductions(monkeypatch, value: str = "") -> None:
-    _pin_classic(monkeypatch, {f"REDUCE@n{node}": value for node in (1, 3, 4)})
+    _pin_classic(monkeypatch, {"REDUCE@map.1/twist": value, "REDUCE@map.1/twist.1/inner": value})
 
 
 def _max_diff(backend, compiled, feed: dict, ref_fn) -> float:
@@ -361,10 +361,12 @@ def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
     _pin_classic(
         monkeypatch,
         {
-            "TILE@n3": "mma_m16n8k16_f16_f32/f1x2",
-            "TILE@n4": "mma_m16n8k16_f16_f32/f1x1",
-            **{f"REDUCE@n{node}": "" for node in (1, 3, 4)},
-            **{f"STAGE@n{node}.e{edge}": "" for node in (3, 4) for edge in (0, 1)},
+            "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x2",
+            "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x1",
+            "REDUCE@map.1/twist": "",
+            "REDUCE@map.1/twist.1/inner": "",
+            "STAGE@map.1/twist.1/inner": "",
+            "STAGE@map.1/twist": "",
         },
     )
     monkeypatch.setenv("EMMY_RASTER", "")
@@ -449,8 +451,8 @@ def test_fused_causal_sdpa_sweeps_the_score_once(monkeypatch):
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     _pin_sdpa_reductions(monkeypatch)
     monkeypatch.setenv("EMMY_WORK", "w2x1")
-    monkeypatch.setenv("EMMY_TILE@N3", "mma_m16n8k16_f16_f32/f2x2/k2")
-    monkeypatch.setenv("EMMY_TILE@N4", "mma_m16n8k16_f16_f32/f2x4")
+    monkeypatch.setenv("EMMY_TILE@MAP.1/TWIST.1/INNER", "mma_m16n8k16_f16_f32/f2x2/k2")
+    monkeypatch.setenv("EMMY_TILE@MAP.1/TWIST", "mma_m16n8k16_f16_f32/f2x4")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 128, 32
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -485,11 +487,10 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     _pin_sdpa_reductions(monkeypatch)
     monkeypatch.setenv("EMMY_WORK", "w2x1")
-    monkeypatch.setenv("EMMY_TILE@N3", "mma_m16n8k16_f16_f32/f2x2")
-    monkeypatch.setenv("EMMY_TILE@N4", "mma_m16n8k16_f16_f32/f2x2")
-    for edge in (0, 1):
-        monkeypatch.setenv(f"EMMY_STAGE@N3.E{edge}", "d1/smem-async")
-        monkeypatch.setenv(f"EMMY_STAGE@N4.E{edge}", "d1/smem")
+    monkeypatch.setenv("EMMY_TILE@MAP.1/TWIST.1/INNER", "mma_m16n8k16_f16_f32/f2x2")
+    monkeypatch.setenv("EMMY_TILE@MAP.1/TWIST", "mma_m16n8k16_f16_f32/f2x2")
+    monkeypatch.setenv("EMMY_STAGE@MAP.1/TWIST.1/INNER", "d1/smem-async")
+    monkeypatch.setenv("EMMY_STAGE@MAP.1/TWIST", "d1/smem")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -514,7 +515,7 @@ def test_fused_sdpa_stages_the_nested_score(monkeypatch):
 def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
     """Each partition folds its key slice into the same state; the finalize merges those states."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")  # two cross-CTA partitions with an f32 deferred finalize
+    monkeypatch.setenv("EMMY_REDUCE@MAP.1/TWIST", "g2k")  # two cross-CTA partitions with an f32 deferred finalize
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 64, 16
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -536,7 +537,7 @@ def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
 def test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates(monkeypatch):
     """A causal partial compares absolute query/key coordinates after the Fold is sliced."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@MAP.1/TWIST", "g2k")
     torch.manual_seed(0)
     B, H, S, D = 1, 2, 128, 32
     q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
@@ -889,14 +890,9 @@ def _pin_mask_direct(monkeypatch):
     _pin_scalar_fused(monkeypatch)
     monkeypatch.setenv("EMMY_WORK", "")
     monkeypatch.setenv("EMMY_RASTER", "")
-    _pin_classic(
-        monkeypatch,
-        {
-            **{f"TILE@n{node}": "" for node in (0, 4, 6, 7)},
-            **{f"REDUCE@n{node}": "" for node in (0, 3, 4, 5, 6, 7)},
-            **{f"STAGE@n{node}.e{edge}": "" for node in (0, 4, 6, 7) for edge in (0, 1)},
-        },
-    )
+    # Bare keys restrict every site that supports the value: the direct row at every contraction,
+    # reduce and staged edge of the three-pass tree.
+    _pin_classic(monkeypatch, {"TILE": "", "REDUCE": "", "STAGE": ""})
 
 
 def _run_module_with_eager(

@@ -358,7 +358,7 @@ def test_bare_kernel_parameter_applies_when_scoped_pin_targets_another_kernel() 
     domains = project_classic(tile, target)
     pins = {family: () for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
     pins["WORK"] = (("WORK", "w1x1"),)
-    pins["TILE"] = (("TILE@n9", "mma_m16n8k16_f16_f32/f2x2/k2"),)
+    pins["TILE"] = (("TILE@map.10/inner", "mma_m16n8k16_f16_f32/f2x2/k2"),)
 
     c = _context(tile, target, domains, pins=pins)
 

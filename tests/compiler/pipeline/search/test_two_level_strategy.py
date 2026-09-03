@@ -154,12 +154,12 @@ def _fuse(graph: Graph) -> Graph:
 
 
 def test_searched_winner_requires_one_post_fusion_kernel_and_an_exact_replay_row() -> None:
-    one = OpResult(name="k", op_key="key", best_us=4.0, searched_knobs={"TILE@n0": "f2x2"}, searched_us=5.0, searched_cuda_ops=1)
-    assert InnerReward(total_us=4.0, ok=True, per_op=[one]).searched_winner() == ({"TILE@n0": "f2x2"}, 5.0)
+    one = OpResult(name="k", op_key="key", best_us=4.0, searched_knobs={"TILE@map.1/inner": "f2x2"}, searched_us=5.0, searched_cuda_ops=1)
+    assert InnerReward(total_us=4.0, ok=True, per_op=[one]).searched_winner() == ({"TILE@map.1/inner": "f2x2"}, 5.0)
     multi_cuda = OpResult(**{**one.__dict__, "searched_cuda_ops": 2})
     assert InnerReward(total_us=4.0, ok=True, per_op=[multi_cuda]).searched_winner() is None
-    split = OpResult(**{**multi_cuda.__dict__, "searched_knobs": {"REDUCE@n0": "g8k"}, "searched_structural": True})
-    assert InnerReward(total_us=4.0, ok=True, per_op=[split]).searched_winner() == ({"REDUCE@n0": "g8k"}, 5.0)
+    split = OpResult(**{**multi_cuda.__dict__, "searched_knobs": {"REDUCE@map.1/inner": "g8k"}, "searched_structural": True})
+    assert InnerReward(total_us=4.0, ok=True, per_op=[split]).searched_winner() == ({"REDUCE@map.1/inner": "g8k"}, 5.0)
     assert InnerReward(total_us=8.0, ok=True, per_op=[one, one]).searched_winner() is None
 
 
@@ -360,7 +360,7 @@ def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog)
     """A pinned cross-CTA split mints pieces inside the inner loops; the splice watcher reports
     them and the strategy enrolls each — tuned in its own slice, logged as enrolled — while the
     terminal reward keeps only the OUTER kernel (pieces are evidence, not reward terms)."""
-    monkeypatch.setenv("EMMY_REDUCE@N1", "g2k")
+    monkeypatch.setenv("EMMY_REDUCE@INNER", "g2k")
     fused = _fuse(_graph(("x", 64, 512, 48)))
     backend = _CountingBackend()
     with caplog.at_level(logging.INFO, logger="emmy.compiler.pipeline.search.strategy.two_level"):

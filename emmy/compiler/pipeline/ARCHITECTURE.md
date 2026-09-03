@@ -1286,7 +1286,8 @@ every realization. Missing, one-sided, zero, NaN, infinite measurements, and ran
 they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
 the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
 A promoted classic row is already complete: bare `WORK` and `RASTER`, with `TILE`, `REDUCE`, and `STAGE` bare when
-their family has one applicable node and `@n<N>`-qualified only when the family is ambiguous. `STAGE` records one
+their family has one applicable node and route-qualified (`TILE@map.1/inner`) only when the family is ambiguous.
+`STAGE` records one
 transport choice per consumer node, including an explicit empty direct choice. Promotion rejects incomplete rows,
 aliases, and unknown sites. It never fills or repairs a recording.
 
@@ -1675,7 +1676,8 @@ Structural choices finish before the `TileOp` indexes its Fold root. Each shared
 one preorder integer id; every consumer operand position gets a distinct `(consumer id, operand position)` tuple, even
 when two edges reach the same producer. The strict codec spells kernel choices as bare `WORK` / `RASTER`. `TILE`,
 `REDUCE`, and `STAGE` are also
-bare when their family has one applicable consumer node; only an ambiguous family uses `@n<N>`. `STAGE` is one
+bare when their family has one applicable consumer node; only an ambiguous family carries the site's route
+(`TILE@map.1/twist.1/inner`, the placement grammar). `STAGE` is one
 transport decision shared by the applicable operand edges at that consumer. Empty direct values remain explicit, so
 every leaf has the same key vocabulary.
 

@@ -104,14 +104,14 @@ def test_pinned_knobs_restores_scoped_placement_keys(monkeypatch):
     from emmy.compiler.pipeline.knob import parse_knob_spec
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,PLACE@a=fuse")
-    monkeypatch.setenv("EMMY_PLACE@A", "fuse")
-    with pinned_knobs({"PLACE@a": "cut", "TILE@dd": "f2x2"}):
-        assert os.environ["EMMY_PLACE@A"] == "cut"
-        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse,PLACE@a=cut,TILE@dd=f2x2"
-        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["PLACE@a"] == "cut"
-    assert os.environ["EMMY_PLACE@A"] == "fuse"
-    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse"
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,PLACE@inner.1/map=fuse")
+    monkeypatch.setenv("EMMY_PLACE@INNER.1/MAP", "fuse")
+    with pinned_knobs({"PLACE@inner.1/map": "cut", "TILE@dd": "f2x2"}):
+        assert os.environ["EMMY_PLACE@INNER.1/MAP"] == "cut"
+        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@inner.1/map=fuse,PLACE@inner.1/map=cut,TILE@dd=f2x2"
+        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["PLACE@inner.1/map"] == "cut"
+    assert os.environ["EMMY_PLACE@INNER.1/MAP"] == "fuse"
+    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@inner.1/map=fuse"
 
 
 def _symbolic_input_graph():

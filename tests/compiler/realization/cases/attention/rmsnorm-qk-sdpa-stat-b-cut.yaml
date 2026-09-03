@@ -1,4 +1,4 @@
-# evidence: the reduced q/k RMSNorm -> causal SDPA tree offers PLACE@b (the score contraction's
+# evidence: the reduced q/k RMSNorm -> causal SDPA tree offers PLACE@map.1/twist.1/inner.2/map (the score contraction's
 # normalized-K operand cone, corpus case rmsnorm-gqa-b-cut) and cuts it correctly. On the fused
 # single-pass tree the score is contracted once, under the flash carrier, so the K cone that two
 # score arms once shared is that one seam.
@@ -51,7 +51,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-      PLACE@b: cut
+      PLACE@map.1/twist.1/inner.2/map: cut
     knobs:
       TILE: ''
       WORK: t16

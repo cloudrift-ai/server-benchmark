@@ -36,11 +36,11 @@ configs:
     - linear
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_linear_reduce_8aa445.5e80ec3cf5a9
+  - name: k_sdpa_linear_reduce_e86f04.bb03b022b93a
     bindings: {}
     pins:
       FAST_MATH: false
-      PLACE@a7: cut
+      PLACE@map.1/twist.3/inner: cut
     knobs:
       TILE@n3: mma_m16n8k16_f16_f32/f1x2
       TILE@n4: mma_m16n8k16_f16_f32/f1x1
@@ -48,4 +48,4 @@ configs:
       WORK: w1x1
       REDUCE: ''
       RASTER: ''
-    identity: 42592f5d4a4e2cb1f7a23326d0b3900a34b5fc6f408211a8c6e7b31821fe5b46
+    identity: 28aa0e5ee53d61b1d3452089a450f39bdd842cb752e5888d3739b760f2196e85

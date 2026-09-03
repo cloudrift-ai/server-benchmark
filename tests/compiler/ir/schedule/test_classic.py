@@ -591,8 +591,8 @@ def test_tile_op_caches_the_stable_schedule_inventory() -> None:
     # the walk's labels are POSITIONS in this kernel's tree, so they belong to the TileOp and not
     # to the shared subterms it is built from: every node but the root sits under a reaching
     # segment path, and a node reached down two paths keeps the first.
-    assert all(site.depth > 1 for site in tile.sites[1:])
-    assert tile.sites[0].depth == 1
+    assert all(site.depth > 0 for site in tile.sites[1:])
+    assert tile.sites[0].depth == 0
     assert sum(site.node is shared for site in tile.sites) == 1 and tile.sites[tile.node_id(shared)].node is shared
 
 

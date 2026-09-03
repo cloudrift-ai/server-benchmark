@@ -811,13 +811,9 @@ def decode_record(record: GoldenRecord) -> str | None:
         if not record.is_receipt:
             return _remember_verdict(verdict_key, f"{type(exc).__name__}: {exc}")
     if record.is_routing:
-        from dataclasses import replace  # noqa: PLC0415
-
         from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
         from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
-        from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
 
-        tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
         seams = cuttable_seams(tile)
         seam_ids = {id(seam.node) for seam in seams}
         all_sites = sites(tile.op)

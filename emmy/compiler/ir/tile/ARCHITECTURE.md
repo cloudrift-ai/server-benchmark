@@ -255,8 +255,11 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
 - Reusable schedule views classify one Fold without target input. A contraction records consumer-relative operand
   positions; it does not mint alternate nodes or edge identities. The derivations memoize on the Fold ROOT, so every
   `TileOp` over one term shares them; the `TileOp` properties are accessors, not a second cache.
-- `path.sites` is a reading of that same walk, adding only what the codec needs: the per-site ordinal among sites
-  sharing a `(segments, axis)`. It owns spelling, resolution and ambiguity — not traversal.
+- `path.sites` is a reading of that same walk, adding only what the codec needs: the ROUTE that reaches each site,
+  `(kind departed, operand taken)` per hop. A placement key spells that route — `PLACE@map.1/twist.1/inner.2/map`,
+  each departure as `kind.index`, the arrival's kind last — so it is unique by construction, with no ordinal, no
+  shortest-unique search and no axis name; a stale key fails at the first segment whose kind is not what stands
+  there. The codec owns spelling, resolution and ambiguity — not traversal.
 - `KernelSchedule`, `ProjectionSchedule` / `ReductionSchedule`, and `EdgeSchedule` contain choices only. They do not
   cache paths, classifications, shapes, placed geometry, resolved shared-memory sizes, or codec spellings.
 - `ClassicScheduleContext` derives local support after selecting a node and its incident edges. `extend` composes it

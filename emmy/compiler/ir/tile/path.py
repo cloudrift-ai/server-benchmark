@@ -1,32 +1,39 @@
 """The structural placement path codec over the stored Fold tree.
 
-Grammar: ``PLACE@<node-path>[.<axis>][<n>] = value``. Placement addresses a stored Fold edge by
-position because it is a structural decision made before a classic problem exists. Its shortest
-unique path spelling is canonical; ambiguity and stale paths fail loudly. The retired
-``in.<operand>`` prefix and leading-``=`` value-name form remain reserved.
+Grammar: ``PLACE@<kind>.<i>/…/<kind>`` — a ROUTE from the root. Every segment but the last names a
+node stood on and the 1-based operand taken from it (``map.1``: at the root map, take operand 1);
+the last names the kind of the node arrived at, the stored Fold edge the placement decision is
+about. So ``PLACE@map.1/twist.1/inner.2/map`` reads "root map, first operand; the twist there,
+first operand; the contraction there, second operand: a map — cut it". The kinds are the term's
+derived readings (``map`` a zero-axis term, ``reduce`` a planar fold, ``inner`` a bilinear one,
+``twist`` a rescaling carrier, ``scan`` an observed fold), never a stored tag. Placement addresses
+a stored edge by position because it is a structural decision made before a classic problem
+exists.
 
-Classic choices never use this codec. A classic problem constructs sites only after every structural choice is
-consumed, and its strict codec addresses integer node ids and ``(consumer, operand)`` edge tuples.
+A spelling is unique by construction — the tree is established by the algebra, and a position in
+it moves only when the computation does — so there are no ordinals, no shortest-unique search and
+no axis names, the three ingredients that used to move a recorded key under a tree that had not
+changed. The kinds are redundant with the positions; they make a key readable and a stale one fail
+loudly, at the first segment whose kind is not what stands there. A bare ``PLACE`` is input sugar
+for the family's one site, or its primary (the unique shallowest) among several; the retired
+``in.<operand>`` prefix and leading-``=`` form stay reserved.
+
+Classic choices never use this codec. A classic problem constructs sites only after every
+structural choice is consumed, and its strict codec addresses integer node ids and
+``(consumer, operand)`` edge tuples.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from itertools import combinations
 
 from emmy.compiler.structural import instance_memo
 
 #: The only family a tree path may address. Schedule identities belong to ``schedule.classic``.
 PATH_FAMILIES = ("PLACE",)
 
-#: The path-segment vocabulary: node kinds + the contraction operand-edge role labels.
-_SEGMENT_TOKENS = frozenset({"map", "fold", "a", "b"})
-
-#: Split a final component into a literal prefix plus trailing digits. :func:`resolve` tries the
-#: unsplit literal first, then moves the split left one digit at a time. Thus ``a22`` can resolve as
-#: axis ``a2`` ordinal 2 without stealing an axis literally named ``a22``.
-_AXIS_ORDINAL_RE = re.compile(r"^(.*?)(\d+)$")
+#: The node kinds a route may name — each a derived reading of the term.
+KINDS = ("map", "reduce", "inner", "twist", "scan")
 
 
 class MissingSiteError(ValueError):
@@ -40,59 +47,71 @@ class UnknownSiteError(Exception):
     """A node outside the stored tree was used for a placement or lowering lookup."""
 
 
+def kind(node) -> str:
+    """The node's kind as a route names it — its derived reading, in the order the readings nest:
+    an observed fold is a ``scan`` whatever it folds, a rescaling carrier is a ``twist`` whatever
+    it carries, a bilinear planar fold is an ``inner``."""
+    if node.axis is None:
+        return "map"
+    if node.observe is not None:
+        return "scan"
+    view = node.as_reduction()
+    if view is not None and view.twisted:
+        return "twist"
+    return "inner" if node.as_contraction() is not None else "reduce"
+
+
 @dataclass(frozen=True)
 class Site:
-    """One structural tree position: the node, its axis (``None`` for a pointwise zero-axis fold),
-    the full segment path from the root (this node's own segment last), the 1-based ``ordinal``
-    among sites sharing the identical ``(segments, axis)`` (1 when unique — the no-collision common
-    case, where the ordinal is never spelled), and ``scope``, the axes (by name) the path binds
-    above the node. Every Fold but a slab is a site; residence choices on an enclosing edge never hide its
+    """One structural tree position: the node, its axis (``None`` for a zero-axis term), the
+    ``hops`` that reach it — ``(kind of the node departed, 1-based operand taken)`` per step from
+    the root, the root's own tuple empty — and ``scope``, the axes (by name) the route binds above
+    the node. Every Fold but a slab is a site; residence choices on an enclosing edge never hide its
     algebra."""
 
     node: object
     axis: str | None
-    segments: tuple[str, ...]
-    ordinal: int = 1
+    hops: tuple[tuple[str, int], ...]
     scope: tuple[str, ...] = ()
 
     @property
     def depth(self) -> int:
-        return len(self.segments)
+        return len(self.hops)
+
+    @property
+    def path(self) -> str:
+        """The route spelled: each departure ``kind.index``, the arrival's kind last."""
+        return "/".join((*(f"{label}.{index}" for label, index in self.hops), kind(self.node)))
+
+    def under(self, other: Site) -> bool:
+        """Whether this site lies below ``other`` — ``other``'s route is a proper prefix of this one's."""
+        return len(self.hops) > len(other.hops) and self.hops[: len(other.hops)] == other.hops
 
 
 def sites(root) -> tuple[Site, ...]:
     """Every node of ``root``'s tree that carries a schedule decision, as a :class:`Site`, preorder,
-    root first — the ONE node walk in the layer. A term's operands in stored order, each labelled
-    by its ROLE under a contraction (``a`` the shared operand, ``b`` a streamed one) and otherwise
-    ``map`` (zero-axis) or ``fold`` (reducing): the segment vocabulary every stored golden / DB key
-    is spelled in. A slab is not a site: a gmem read has no residence, partition or tile of its
-    own — the atom reads it through its parent — so it takes no path and no ordinal. The per-site
-    ordinal among sites with identical ``(segments, axis)`` is assigned in traversal order. A
+    root first — the ONE node walk in the layer. A slab is not a site: a gmem read has no residence,
+    partition or tile of its own — the atom reads it through its parent — so it takes no hop. A
     subterm reached down two paths (the epilogue's ``1/l`` cone reads the fold the root also holds)
-    is ONE site at the first position that reached it: sharing is edge reuse, and a shared value
-    has one schedule — the same rule ``TileOp.sites`` keeps."""
+    is ONE site at the first position that reached it: sharing is edge reuse, and a shared value has
+    one schedule — the same rule ``TileOp.sites`` keeps."""
     if root is None:
         return ()
-    counts: dict[tuple, int] = {}
     result: list[Site] = []
     seen: set[int] = set()
 
-    def visit(node, scope: tuple[str, ...], segments: tuple[str, ...]) -> None:
+    def visit(node, scope: tuple[str, ...], hops: tuple[tuple[str, int], ...]) -> None:
         if id(node) in seen:
             return
         seen.add(id(node))
-        key = (segments, node.axis)
-        counts[key] = counts.get(key, 0) + 1
-        result.append(Site(node=node, axis=node.axis, segments=segments, ordinal=counts[key], scope=scope))
+        result.append(Site(node=node, axis=node.axis, hops=hops, scope=scope))
         inner = scope if node.axis is None else (*scope, node.axis)
-        bilinear = node.as_contraction() is not None
-        for position, edge in enumerate(node.operands):
-            if edge.as_slab() is not None:
-                continue
-            role = ("a" if position == 0 else "b") if bilinear else ("map" if edge.axis is None else "fold")
-            visit(edge, inner, (*segments, role))
+        label = kind(node)
+        for position, edge in enumerate(node.operands, start=1):
+            if edge.as_slab() is None:
+                visit(edge, inner, (*hops, (label, position)))
 
-    visit(root, (), ("map" if root.axis is None else "fold",))
+    visit(root, (), ())
     return tuple(result)
 
 
@@ -100,7 +119,7 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     """Stored non-root Fold edges eligible for structural placement."""
     if family not in PATH_FAMILIES:
         raise ValueError(f"{family!r} is not a structural path family (have {PATH_FAMILIES})")
-    return tuple(s for s in all_sites if s.depth > 1)
+    return tuple(s for s in all_sites if s.depth > 0)
 
 
 def primary(family: str, fam_sites: tuple[Site, ...]) -> Site | None:
@@ -116,156 +135,50 @@ def primary(family: str, fam_sites: tuple[Site, ...]) -> Site | None:
 @dataclass(frozen=True)
 class _Key:
     family: str
-    segments: tuple[str, ...]
-    axis: str | None
-    ordinal: int | None
+    hops: tuple[tuple[str, int], ...]
+    target: str | None  # the arrival's kind; ``None`` for a bare key
 
     @property
     def bare(self) -> bool:
-        return not self.segments and self.axis is None and self.ordinal is None
+        return self.target is None
 
 
 def parse_key(key: str) -> _Key:
-    """Split a knob key into ``(family, path segments, axis, ordinal)``, rejecting the RESERVED
-    graph-level placement forms. Non-final components must be exact segment tokens; the final
-    component is read as an axis name unless it is a segment token (an ordinal on the final
-    component is split off at match time — see :func:`resolve` — so an axis literally named
-    ``k2`` keeps winning over an ordinal reading)."""
+    """Split a knob key into its family, its departures and the arrival's kind, rejecting the
+    RESERVED graph-level placement forms and any segment off the grammar."""
     family, at, suffix = key.partition("@")
     if not at:
-        return _Key(family=family, segments=(), axis=None, ordinal=None)
+        return _Key(family=family, hops=(), target=None)
     if suffix.startswith("=") or suffix == "in" or suffix.startswith("in."):
         raise ValueError(f"knob key {key!r} is reserved for graph-level placement")
     if not suffix:
         raise ValueError(f"knob key {key!r} has an empty @-suffix")
-    comps = suffix.split(".")
-    segments: list[str] = []
-    axis: str | None = None
-    ordinal: int | None = None
-    if len(comps) > 1 and comps[-1].isdigit():
-        # The EXPLICIT ordinal component — the collision-proof spelling :func:`_spellings` mints
-        # when the concatenated ``<axis><n>`` form would be captured by a literal axis name
-        # (``a13`` + 1 → ``a131`` beside a real ``a131`` axis). Unambiguous by construction:
-        # segment tokens and axis names are letter-led, so an all-digit component can only be an
-        # ordinal.
-        ordinal = int(comps[-1])
-        comps = comps[:-1]
-    for i, comp in enumerate(comps):
-        last = i == len(comps) - 1
-        if not comp:
-            raise ValueError(f"knob key {key!r} has an empty path component")
-        if comp in _SEGMENT_TOKENS:
-            if axis is not None:
-                raise ValueError(f"knob key {key!r}: path segment {comp!r} after the axis")
-            segments.append(comp)
-        elif last:
-            # Keep the final component literal. ``resolve`` only reinterprets a trailing digit run
-            # after the literal axis reading fails, which is what lets an axis named ``k2`` win
-            # over the old ``k`` + ordinal-2 spelling.
-            axis = comp
-        else:
-            raise ValueError(f"knob key {key!r}: unknown path segment {comp!r} (expect {sorted(_SEGMENT_TOKENS)} or a final axis)")
-    return _Key(family=family, segments=tuple(segments), axis=axis, ordinal=ordinal)
-
-
-def _admits(site: Site, segments: tuple[str, ...]) -> bool:
-    """Whether ``segments`` is an ANCHORED subsequence of the site's full path — the last key
-    segment must be the node's own segment, earlier ones may skip ancestors (``a.fold`` names the
-    stat under the cone edge without spelling the wrapper maps)."""
-    if not segments:
-        return True
-    if segments[-1] != site.segments[-1]:
-        return False
-    pos = 0
-    for want in segments[:-1]:
-        try:
-            pos = site.segments.index(want, pos, len(site.segments) - 1) + 1
-        except ValueError:
-            return False
-    return True
-
-
-def _match(key: _Key, fam_sites: tuple[Site, ...]) -> list[Site]:
-    out = [s for s in fam_sites if _admits(s, key.segments)]
-    if key.axis is not None:
-        out = [s for s in out if s.axis == key.axis]
-    if key.ordinal is not None:
-        out = [s for s in out if s.ordinal == key.ordinal]
-    return out
-
-
-def _spellings(family: str, site: Site, fam_sites: tuple[Site, ...], head: Site | None = None) -> str:
-    """The canonical (shortest unique) spelling of ``site`` under ``family`` — see :func:`spell`.
-    ``head`` is the family's primary when the caller already resolved it (the bulk table builder
-    resolves it once for every site)."""
-    if (primary(family, fam_sites) if head is None else head) is site:
-        return family
-    axis_part = f".{site.axis}" if site.axis is not None else ""
-    if site.axis is not None and sum(1 for s in fam_sites if s.axis == site.axis) == 1:
-        return f"{family}@{site.axis}"
-    identical = [s for s in fam_sites if s.segments == site.segments and s.axis == site.axis]
-    if len(identical) > 1:
-        # No subsequence can distinguish identical full paths.  Skip the exponential search and
-        # use the ordinal arm directly; this is precisely the arm ordinals exist for.
-        return _ordinal_spelling(family, site, fam_sites)
-    # Path forms: shortest anchored subsequence unique among the family's sites; among equal-length
-    # candidates prefer EDGE LABELS, then the deepest anchors (``a.fold`` over ``fold.fold`` /
-    # ``map.fold`` for the cone stat — the label names the seam a reader recognizes).
-    own = site.segments[-1]
-    ancestors = site.segments[:-1]
-    for length in range(1, len(site.segments) + 1):
-        best: tuple[tuple[int, tuple[int, ...]], tuple[str, ...]] | None = None
-        for positions in _subsequences(len(ancestors), length - 1):
-            segs = (*(ancestors[p] for p in positions), own)
-            matches = [s for s in fam_sites if _admits(s, segs) and (site.axis is None or s.axis == site.axis)]
-            if len(matches) == 1:
-                rank = (sum(1 for t in segs if t in ("a", "b")), positions)
-                if best is None or rank > best[0]:
-                    best = (rank, segs)
-        if best is not None:
-            return f"{family}@{'.'.join(best[1])}{axis_part}"
-    # True same-path collision: the full path + axis still names several sites — spell the ordinal.
-    return _ordinal_spelling(family, site, fam_sites)
-
-
-def _ordinal_spelling(family: str, site: Site, fam_sites: tuple[Site, ...]) -> str:
-    """The ordinal arm's spelling, honoring the round-trip law: the concatenated ``<axis><n>``
-    form is canonical, but ``resolve`` reads a final component as a LITERAL axis first (so an axis
-    named ``k2`` never loses to ``k`` + ordinal 2) — so when any sibling site's axis equals the
-    concatenation, the concat form would be captured (mis-resolving silently with one such site,
-    ambiguous with several) and the explicit dotted ordinal is minted instead."""
-    axis_part = f".{site.axis}" if site.axis is not None else ""
-    captured = f"{site.axis if site.axis is not None else site.segments[-1]}{site.ordinal}"
-    if any(s.axis == captured for s in fam_sites):
-        return f"{family}@{'.'.join(site.segments)}{axis_part}.{site.ordinal}"
-    return f"{family}@{'.'.join(site.segments)}{axis_part}{site.ordinal}"
-
-
-def _subsequences(n: int, k: int):
-    """All strictly-increasing index tuples of length ``k`` into ``range(n)`` (tiny trees — brute
-    force is fine)."""
-    yield from combinations(range(n), k)
+    *departures, arrival = suffix.split("/")
+    if arrival not in KINDS:
+        raise ValueError(f"knob key {key!r}: the last segment names the node arrived at by kind, one of {KINDS}, not {arrival!r}")
+    hops: list[tuple[str, int]] = []
+    for comp in departures:
+        label, dot, index = comp.partition(".")
+        if label not in KINDS:
+            raise ValueError(f"knob key {key!r}: unknown path segment {label!r} (kinds are {KINDS})")
+        if not dot or not index.isdigit() or int(index) < 1 or str(int(index)) != index:
+            raise ValueError(f"knob key {key!r}: departure {comp!r} needs a 1-based operand index, <kind>.<index>")
+        hops.append((label, int(index)))
+    return _Key(family=family, hops=tuple(hops), target=arrival)
 
 
 def spell(root, family: str, node, *, all_sites: tuple[Site, ...] | None = None) -> str:
-    """The CANONICAL key addressing ``node`` under ``family`` on ``root``'s tree — the shortest
-    spelling unique for the tree: bare for the primary, ``FAMILY@<axis>`` when the axis alone
-    discriminates, else the shortest anchored path subsequence (deepest anchors preferred), with
-    the 1-based ordinal only on a true same-path collision. Stampers and stored evidence use this
+    """The CANONICAL key addressing ``node`` under ``family`` on ``root``'s tree: bare when the
+    family has that one site, else ``FAMILY@<route>``. Stampers and stored evidence use this
     spelling and nothing else."""
     tables = instance_memo(root, "_memo_spellings")
     table = tables.get(family)
     if table is None:
         # The whole family spells as ONE derived table (an ``instance_memo`` on the immutable
-        # root): the schedule pricing loops re-spell the same sites once per candidate row, and
-        # per-call spelling repeats the primary resolution and the uniqueness scans per site.
+        # root): the schedule pricing loops re-spell the same sites once per candidate row.
         all_sites = sites(root) if all_sites is None else all_sites
         fam_sites = family_sites(family, all_sites)
-        head = primary(family, fam_sites)
-        table = {}
-        for s in fam_sites:
-            if id(s.node) not in table:  # a shared subtree keeps its FIRST site's spelling
-                table[id(s.node)] = _spellings(family, s, fam_sites, head=head)
+        table = {id(s.node): family if len(fam_sites) == 1 else f"{family}@{s.path}" for s in fam_sites}
         tables[family] = table
     spelled = table.get(id(node))
     if spelled is not None:
@@ -280,20 +193,16 @@ def spell(root, family: str, node, *, all_sites: tuple[Site, ...] | None = None)
 
 
 def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Site | None:
-    """Resolve a knob ``key`` (any sugar level) to the :class:`Site` it addresses on ``root``'s
-    tree. Total over the sugar forms and idempotent (``resolve(spell(...))`` is the same site):
+    """Resolve a knob ``key`` to the :class:`Site` it addresses on ``root``'s tree. Total over both
+    forms and idempotent (``resolve(spell(...))`` is the same site):
 
     - bare, no eligible site → ``None`` (the family doesn't apply — drop / decided-empty);
     - bare, several sites → the PRIMARY, or ``ValueError`` naming the canonical candidates;
-    - suffixed, no match → ``ValueError`` (a stored short key broken by a structural change must
-      fail loudly — never silently re-key);
-    - suffixed, several matches → ``ValueError`` naming the candidates.
-
-    A final component with trailing digits is first read as a literal axis name; only when no site
-    carries that axis is it retried as ``<axis><ordinal>`` (so an axis named ``k2`` never loses to
-    an ordinal reading)."""
+    - a route is walked segment by segment, and one whose kind is not what stands there, whose
+      index is past the node's operands, or that arrives at a slab is a :class:`MissingSiteError`
+      — a stored key broken by a structural change fails loudly, never silently re-keys.
+    """
     parsed = parse_key(key)
-    matched_key = parsed
     all_sites = sites(root) if all_sites is None else all_sites
     fam_sites = family_sites(parsed.family, all_sites)
     if parsed.bare:
@@ -304,45 +213,28 @@ def resolve(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> Sit
         head = primary(parsed.family, fam_sites)
         if head is not None:
             return head
-        cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in fam_sites))
+        shallowest = min(s.depth for s in fam_sites)
+        cands = " or ".join(sorted(f"{parsed.family}@{s.path}" for s in fam_sites if s.depth == shallowest))
         raise ValueError(f"{parsed.family} is ambiguous: use {cands}")
-    matches = _match(parsed, fam_sites)
-    if not matches and parsed.axis is not None:
-        m = _AXIS_ORDINAL_RE.match(parsed.axis)
-        if m and m.group(1):
-            digit_start = len(m.group(1))
-            # Preserve as many trailing digits as possible in the axis first: ``a22`` reads
-            # ``a2`` + ordinal 2 before ``a`` + ordinal 22.
-            for split in range(len(parsed.axis) - 1, digit_start - 1, -1):
-                prefix, suffix = parsed.axis[:split], parsed.axis[split:]
-                readings = [_Key(parsed.family, parsed.segments, prefix, int(suffix))]
-                if prefix in _SEGMENT_TOKENS:
-                    readings.append(_Key(parsed.family, (*parsed.segments, prefix), None, int(suffix)))
-                for retry in readings:
-                    matches = _match(retry, fam_sites)
-                    if matches:
-                        matched_key = retry
-                        break
-                if matches:
-                    break
-    if not matches:
-        raise MissingSiteError(f"knob key {key!r} names no site on this tree (a structural change broke a stored key?)")
-    if len({id(s.node) for s in matches}) > 1:
-        # An EXACT full-path match outranks subsequence admissions: a shallow site's full path is
-        # an anchored subsequence of every deeper same-axis path, so without this preference the
-        # canonical full-path spelling (the ordinal arm's fallback) could never name the shallow
-        # site at all. Only consulted at the ambiguity point — sugar that was unique stays unique.
-        exact = [s for s in matches if s.segments == matched_key.segments]
-        if len({id(s.node) for s in exact}) == 1:
-            return exact[0]
-        cands = " or ".join(sorted(_spellings(parsed.family, s, fam_sites) for s in matches))
-        raise ValueError(f"knob key {key!r} is ambiguous: use {cands}")
-    # Several matches that are ONE node are not ambiguous: a shared subtree is a site at each path
-    # it appears under (MoE experts under one ``Map``, a repeated fold step), and one node carries
-    # one schedule, so the key names one decision however many paths reach it. :func:`spell` keys
-    # by node identity and already gives them a single spelling; refusing it here would make that
-    # spelling unresolvable.
-    return matches[0]
+
+    def missing(why: str) -> MissingSiteError:
+        routes = ", ".join(s.path for s in fam_sites[:12]) + (", …" if len(fam_sites) > 12 else "")
+        return MissingSiteError(f"knob key {key!r} names no site on this tree: {why} (the tree's sites: {routes})")
+
+    node = root
+    for position, (label, index) in enumerate(parsed.hops, start=1):
+        stood = kind(node)
+        if stood != label:
+            raise missing(f"segment {position} stands on a {stood}, not a {label}")
+        if index > len(node.operands):
+            raise missing(f"segment {position} takes operand {index} of {len(node.operands)}")
+        node = node.operands[index - 1]
+    if kind(node) != parsed.target:
+        raise missing(f"it arrives at a {kind(node)}, not a {parsed.target}")
+    site = next((s for s in fam_sites if s.node is node), None)
+    if site is None:
+        raise missing("it arrives at a slab, which carries no placement of its own")
+    return site
 
 
 def canonical(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> str | None:
@@ -356,12 +248,14 @@ def canonical(root, key: str, *, all_sites: tuple[Site, ...] | None = None) -> s
 
 
 __all__ = [
+    "KINDS",
     "PATH_FAMILIES",
     "MissingSiteError",
     "Site",
     "UnknownSiteError",
     "canonical",
     "family_sites",
+    "kind",
     "parse_key",
     "primary",
     "resolve",

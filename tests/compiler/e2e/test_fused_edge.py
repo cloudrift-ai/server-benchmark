@@ -249,7 +249,7 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.parametrize(("rows", "place"), ((1, "PLACE@a0"), (8, "PLACE")))
+@pytest.mark.parametrize(("rows", "place"), ((1, "PLACE@inner.2/map"), (8, "PLACE")))
 def test_place_cone_cut_splits_norm_from_linear_and_matches_reference(rows, place, monkeypatch):
     """The restored placement cut covers both decode M=1 and a regular norm→linear tile."""
     monkeypatch.setenv(f"EMMY_{place.upper()}", "cut")

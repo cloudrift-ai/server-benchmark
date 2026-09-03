@@ -21,7 +21,7 @@ from emmy.compiler.pipeline.search.policy.greedy import (
 from tests.compiler.terms import projection
 
 
-@pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@a": "cut"}, {"PLACE@a": "cut", "WORK": "t32"}))
+@pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@inner.1/map": "cut"}, {"PLACE@inner.1/map": "cut", "WORK": "t32"}))
 def test_db_measured_index_excludes_placement_route_totals(route) -> None:
     signature = frozenset({("S_shape", "128")})
     rows = [

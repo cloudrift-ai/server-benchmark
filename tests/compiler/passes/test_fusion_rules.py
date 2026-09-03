@@ -306,7 +306,7 @@ def test_transcendental_is_not_duplicated_across_contraction_columns():
             acc.append(node.op.name)
         return acc
 
-    with pinned_knobs({"PLACE@a": "cut"}):
+    with pinned_knobs({"PLACE@inner.1/map": "cut"}):
         result = Pipeline.build(TILE_PASSES).run(_make_activation_linear("exp"), ctx=Context.from_target((12, 0)))
     kernels = [node for node in result.nodes.values() if isinstance(node.op, TileOp)]
     assert len(kernels) == 2

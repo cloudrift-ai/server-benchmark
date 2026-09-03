@@ -303,11 +303,7 @@ class Sched:
         """
         free = tuple(self.place.free)
         site = self.site_of(node)
-        ancestors = tuple(
-            candidate
-            for candidate in self._all_sites()
-            if len(candidate.segments) < len(site.segments) and site.segments[: len(candidate.segments)] == candidate.segments
-        )
+        ancestors = tuple(candidate for candidate in self._all_sites() if site.under(candidate))
 
         def orient(mn):
             # The first operand's own free axis leads — ``ContractionView.left``, which IS that
@@ -319,11 +315,11 @@ class Sched:
             first, second = mn
             return (second, first) if second.name == view.left and first.name != view.left else mn
 
-        if site.depth == 1 or all(getattr(candidate.node, "axis", None) is None for candidate in ancestors):
+        if all(getattr(candidate.node, "axis", None) is None for candidate in ancestors):
             return orient(self.place.root_mn)
         if len(free) < 2:
             return None
-        parent = next((s for s in self._all_sites() if s.segments == site.segments[:-1]), None)
+        parent = next((s for s in self._all_sites() if s.hops == site.hops[:-1]), None)
         ax = self.axis_of(parent.node.axis) if parent is not None and getattr(parent.node, "axis", None) is not None else None
         if ax is None:
             return None

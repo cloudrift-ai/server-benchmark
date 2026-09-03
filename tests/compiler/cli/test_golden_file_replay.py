@@ -81,7 +81,7 @@ def _working_placement_route(path):
     document = load_golden_file(path)
     realization = document["configs"][0]["realizations"][0]
     realization["name"] = "working.route"
-    realization["pins"] = {"FAST_MATH": False, "PLACE@a": "cut"}
+    realization["pins"] = {"FAST_MATH": False, "PLACE@inner.1/map": "cut"}
     dump_golden_file(document, path, overwrite=True)
     return document
 
@@ -234,7 +234,7 @@ def test_working_shared_placement_pins_select_the_exact_compile_target(run_cli, 
     monkeypatch.setenv("EMMY_READABLE", "1")
     monkeypatch.setenv("EMMY_TUNE_DB", str(tmp_path / "tune.db"))
     if explicit:
-        monkeypatch.setenv("EMMY_KNOBS", "PLACE@a=cut")
+        monkeypatch.setenv("EMMY_KNOBS", "PLACE@inner.1/map=cut")
 
     rc, stdout, stderr = run_cli(
         "compile",
@@ -261,7 +261,7 @@ def test_working_ambiguous_placement_pin_regimes_leave_the_target_unpinned(tmp_p
     from emmy.commands.compile import resolve_golden_arg
 
     path = tmp_path / "working.yaml"
-    document = _working_loop(path, pins={"FAST_MATH": False, "PLACE@a": "cut"})
+    document = _working_loop(path, pins={"FAST_MATH": False, "PLACE@inner.1/map": "cut"})
     second = copy.deepcopy(document["configs"][0]["realizations"][0])
     second["pins"]["FAST_MATH"] = True
     document["configs"][0]["realizations"].append(second)
@@ -278,7 +278,7 @@ def test_canonical_golden_does_not_select_structural_target_pins(monkeypatch, tm
     from emmy.compiler.pipeline.search import golden
 
     path = tmp_path / "canonical-like.yaml"
-    document = _working_loop(path, pins={"FAST_MATH": False, "PLACE@a": "cut"})
+    document = _working_loop(path, pins={"FAST_MATH": False, "PLACE@inner.1/map": "cut"})
     records = golden.load_golden_records(document)
     monkeypatch.setattr(golden, "goldens_for_live_gpu", lambda: records)
     monkeypatch.setattr(golden, "GOLDEN_RECORDS", records)

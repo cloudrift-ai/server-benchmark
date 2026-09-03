@@ -396,9 +396,7 @@ def test_w8a8_static_act_quant_e2e_cuda():
             "WORK": "w1x8",
             "REDUCE": "",
             "STAGE": "",
-            "PLACE": "cut",
-            "PLACE@a": "cut",
-            "PLACE@map": "cut",
+            "PLACE@map.1/map.1/inner.1/map": "cut",
         }
     ):
         compiled = backend.compile(_w8a8_graph(m, n, k))

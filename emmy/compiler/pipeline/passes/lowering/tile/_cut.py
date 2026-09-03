@@ -530,7 +530,7 @@ def realize(
                 prefix.extend(supplied)
             produced = Fold(
                 operands=(),
-                lift=Lambda.closing(tuple(name for edge in () for name in edge.exposes), Body.coerce(Body((*prefix, produced))), names),
+                lift=Lambda.closing((), Body.coerce(Body((*prefix, produced))), names),
             )
         axes = _workspace_axes(seam, produced)
         index = tuple(Var(axis.name) for axis in axes)
@@ -541,15 +541,11 @@ def realize(
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
         loads = tuple(Fold.slab(Load(name=name, input=buffer, index=index)) for name, buffer in zip(names, buffers, strict=True))
         if front is not None:
-            raw = replace(loads[0], dtype=front.dtype)
-            loads = (
-                Fold(
-                    operands=(),
-                    lift=Lambda.closing(
-                        tuple(name for edge in () for name in edge.exposes), Body.coerce(Body((raw, *front.residue))), child.lift.results
-                    ),
-                ),
-            )
+            # The raw storage read at the frontier's dtype stays INLINE under its decode residue —
+            # the storage-decode cone the operand readers recognize (a raw ``b8`` fill), not a
+            # projection over a slab.
+            raw = Load(name=names[0], input=buffers[0], index=index, dtype=front.dtype)
+            loads = (Fold(operands=(), lift=Lambda.closing((), Body.coerce(Body((raw, *front.residue))), child.lift.results)),)
         replacements = {id(child): loads}
         workspace_loads[id(child)] = loads
         for sibling, pairs in seam.siblings:

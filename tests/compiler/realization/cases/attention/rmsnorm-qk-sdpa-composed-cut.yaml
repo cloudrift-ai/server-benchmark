@@ -52,9 +52,9 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-      PLACE@a: cut
-      PLACE@b: cut
-      PLACE@b.fold.a4: cut
+      PLACE@map.1/twist.1/inner.1/map: cut
+      PLACE@map.1/twist.1/inner.2/map: cut
+      PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
     knobs:
       TILE: ''
       WORK: t16

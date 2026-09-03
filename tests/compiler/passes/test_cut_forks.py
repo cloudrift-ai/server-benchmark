@@ -258,8 +258,8 @@ def test_computed_operand_offers_fused_and_cut_and_pinned_cut_lowers(side: str) 
 def test_sdpa_score_cut_is_offered_and_pinned_cut_lowers(causal: bool) -> None:
     offered = _offered(_sdpa_graph(causal), frontend=True)
     assert {"PLACE": "fuse"} in offered
-    assert {"PLACE@a3": "cut"} in offered
-    lowered = _lower_cut(_sdpa_graph(causal), "PLACE@a3")
+    assert {"PLACE@map.1/twist.1/inner": "cut"} in offered
+    lowered = _lower_cut(_sdpa_graph(causal), "PLACE@map.1/twist.1/inner")
     cuda = [node for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2 + causal  # the two pieces of the cut; the causal mask is its own pointwise kernel
     workspace = next(node.output for node in cuda if "__place_" in node.id)
@@ -281,7 +281,7 @@ def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None
         "measurements": None,
         "ranking": None,
     }
-    assert decode_record(GoldenRecord(knobs={"PLACE@a3": "cut"}, **fields)) is None
+    assert decode_record(GoldenRecord(knobs={"PLACE@map.1/twist.1/inner": "cut"}, **fields)) is None
     reason = decode_record(GoldenRecord(knobs={"PLACE@missing": "cut"}, **fields))
     assert reason is not None and "does not resolve" in reason
 
@@ -311,7 +311,7 @@ def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:
 
 
 def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
-    fragment = _nested_attention_cut({"PLACE@b": "cut"})
+    fragment = _nested_attention_cut({"PLACE@map.1/twist.1/inner.2/map": "cut"})
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
 
     assert pieces and all(node.op.placement_decided for node in pieces)
@@ -319,7 +319,7 @@ def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
     # The pin is consumed: the rule offers nothing under PLACE again — its remaining domain (split
     # forks) or, with none pending, its skip.
-    with pinned_knobs({"PLACE@b": "cut"}):
+    with pinned_knobs({"PLACE@map.1/twist.1/inner.2/map": "cut"}):
         try:
             result = _CUT.rewrite(match, node)
         except RuleSkipped as skipped:
@@ -365,14 +365,18 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
     match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
     pins = {
-        "PLACE@a": "cut",  # the normalized-Q cone
-        "PLACE@b": "cut",  # the normalized-K cone
-        "PLACE@b.fold.a4": "cut",  # the K statistic nested inside it
-        "PLACE@map.map.map.map1": "cut",  # no such site here — another kernel's pin
+        "PLACE@map.1/twist.1/inner.1/map": "cut",  # the normalized-Q cone
+        "PLACE@map.1/twist.1/inner.2/map": "cut",  # the normalized-K cone
+        "PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce": "cut",  # the K statistic nested inside it
+        "PLACE@map.9/map": "cut",  # no such site here — another kernel's pin
     }
     with pinned_knobs(pins):
         fork = _CUT.rewrite(match, graph.nodes[tile.name])
-    assert set(fork.knobs) == {"PLACE@a", "PLACE@b", "PLACE@b.fold.a4"}
+    assert set(fork.knobs) == {
+        "PLACE@map.1/twist.1/inner.1/map",
+        "PLACE@map.1/twist.1/inner.2/map",
+        "PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce",
+    }
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     producers = [node for node in pieces if "__place_" in node.id]
@@ -384,7 +388,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
     match, graph = _composed_case_match()
-    pins = {"PLACE": "cut", "PLACE@b": "cut"}
+    pins = {"PLACE": "cut", "PLACE@map.1/twist.1/inner.2/map": "cut"}
 
     with pinned_knobs(pins):
         fork = _CUT.rewrite(match, graph.nodes[match.root_node_id])
@@ -489,7 +493,7 @@ def _receipt_fields() -> dict:
         "program_wire": graph_to_wire(_sdpa_graph(False)),
         "origins": ("out",),
         "bindings": (),
-        "pins": (("PLACE@a3", "cut"),),
+        "pins": (("PLACE@map.1/twist.1/inner", "cut"),),
         "measurements": None,
         "ranking": None,
     }
@@ -556,7 +560,9 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -
             {
                 "program": 0,
                 "target": {"origins": ["out"]},
-                "realizations": [{"name": "sdpa.child", "bindings": {}, "pins": {"PLACE@a3": "cut"}, "knobs": {"WORK": "w4x2"}}],
+                "realizations": [
+                    {"name": "sdpa.child", "bindings": {}, "pins": {"PLACE@map.1/twist.1/inner": "cut"}, "knobs": {"WORK": "w4x2"}}
+                ],
             }
         ],
     }
@@ -564,7 +570,7 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -
         validate_golden_file(document)
     document["configs"][0]["realizations"][0]["identity"] = "0" * 64
     validate_golden_file(document)
-    assert _pins_live({"PLACE@a3": "cut"}), "a receipt's routing pins are replay context, never a dead env regime"
+    assert _pins_live({"PLACE@map.1/twist.1/inner": "cut"}), "a receipt's routing pins are replay context, never a dead env regime"
 
 
 def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
@@ -614,7 +620,14 @@ def test_a_fold_held_by_a_plain_statement_still_gets_an_environment() -> None:
 def _cone_seam(providers: tuple = (), requires: tuple = ()) -> CutSite:
     """A bare seam record standing in for a clustered operand cone."""
     node = projection((), (Load(name="w", input="w", index=(Var("n"), Var("k"))),), results=("w",))
-    return CutSite(node=node, spelling="PLACE@b", axes=(Axis("n", 8), Axis("k", 8)), dtypes=(F16,), providers=providers, requires=requires)
+    return CutSite(
+        node=node,
+        spelling="PLACE@map.1/twist.1/inner.2/map",
+        axes=(Axis("n", 8), Axis("k", 8)),
+        dtypes=(F16,),
+        providers=providers,
+        requires=requires,
+    )
 
 
 def test_two_cones_that_close_over_different_sources_are_not_one_value() -> None:

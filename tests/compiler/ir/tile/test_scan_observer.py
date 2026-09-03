@@ -19,7 +19,8 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.twist import SOFTMAX
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
+from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import OutputSpec, extract_output_specs, observed_result_names
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, lift_loop_op, scan_from_loop
 
@@ -49,7 +50,7 @@ def _observed(fold: Fold, obs: str | None = None) -> Fold:
     (acc,) = fold.combine.results
     obs = obs or f"{acc}__obs"
     observe = Lambda(
-        params=(fold.axis.name, acc),
+        params=(fold.axis, acc),
         body=Body((Assign(name=obs, op="copy", args=(acc,)),)),
         results=(obs,),
     )
@@ -63,7 +64,7 @@ def test_observer_formation_gates() -> None:
     fold = _sum_fold()
     scan = _observed(fold)
     assert scan.observe is not None and fold.observe is None
-    assert scan.defines() == ("acc", "acc__obs")
+    assert scan.exposes == ("acc", "acc__obs")
 
     with pytest.raises(AssertionError, match="zero-axis"):
         Fold(lift=Lambda(params=(), body=Body(()), results=()), observe=scan.observe)
@@ -81,8 +82,12 @@ def test_observer_formation_gates() -> None:
 def test_exp_family_declines_an_observer() -> None:
     names = ("m_i", "l_i")
     combine = SOFTMAX.program(names)
-    lift = Lambda(params=("k",), body=Body((Load(name="s0", input="s", index=(Var("k"),)),)), results=("s0", 1.0))
-    fold = Fold(axis=Axis("k", 8), lift=lift, init=(float("-inf"), 0.0), combine=combine)
+    lift = Lambda(
+        params=("k",),
+        body=Body((Load(name="s0", input="s", index=(Var("k"),)), Const(name="one", value=1.0))),
+        results=("s0", "one"),
+    )
+    fold = Fold(lift=lift, init=(float("-inf"), 0.0), combine=combine)
     observe = Lambda(params=("k", *names), body=Body((Assign(name="m__obs", op="copy", args=("m_i",)),)), results=("m__obs",))
     with pytest.raises(AssertionError, match="does not support a per-step observer"):
         dataclasses.replace(fold, observe=observe)
@@ -94,11 +99,11 @@ def test_exp_family_declines_an_observer() -> None:
 def test_scan_keys_apart_from_sum_and_alpha_invariantly() -> None:
     plain = _sum_fold()
     scan = _observed(plain)
-    assert plain.structural_key() != scan.structural_key(), "a cumsum is not a sum"
+    assert plain.canonical() != scan.canonical(), "a cumsum is not a sum"
     renamed = _observed(_sum_fold(acc="total"), obs="total__obs")
-    assert scan.structural_key() == renamed.structural_key(), "SSA spelling must not enter identity"
+    assert scan.canonical() == renamed.canonical(), "SSA spelling must not enter identity"
     other_axis = _observed(_sum_fold(axis_name="j"))
-    assert scan.structural_key() == other_axis.structural_key(), "axis spelling must not enter identity"
+    assert scan.canonical() == other_axis.canonical(), "axis spelling must not enter identity"
 
 
 def test_rewrite_threads_the_observer() -> None:
@@ -106,7 +111,7 @@ def test_rewrite_threads_the_observer() -> None:
     # An SSA rename map carries SSA defines only — the iteration var and the enclosing row
     # coordinate are axis names, and they rename through ``axis_fn`` / σ, never through this.
     ssa = {"acc", "acc__obs", "x0"}
-    renamed = scan.rewrite(lambda name: f"{name}_r" if name in ssa else name)
+    renamed = rewrite(scan, lambda name: f"{name}_r" if name in ssa else name)
     assert renamed.observe is not None
     assert renamed.observe.params == ("k", "acc_r")
     assert renamed.observe.results == ("acc__obs_r",)
@@ -123,7 +128,7 @@ def test_scan_from_loop_lifts_the_per_step_store() -> None:
     with pytest.raises(ValueError, match="scan, not a pure reduction"):
         fold_from_loop(_scan_loop())
     # The derived step taps AFTER the combine: observer stmts trail the Accum.
-    kinds = [type(s).__name__ for s in fold.step_stmts()]
+    kinds = [type(s).__name__ for s in fold.step()]
     assert kinds.index("Accum") < kinds.index("Assign", kinds.index("Accum"))
 
 
@@ -139,11 +144,10 @@ def test_scan_from_loop_rejects_a_store_off_the_state() -> None:
 
 def test_streamed_store_reconstitutes_inside_the_reduce_loop() -> None:
     fold, trailing = scan_from_loop(_scan_loop())
-    stream = [fold, *trailing]
-    split = extract_output_specs(stream)
+    split = extract_output_specs(trailing)
     assert split is not None
     body, specs = split
-    assert [type(s).__name__ for s in body] == ["Fold"] and len(specs) == 1
+    assert body == () and len(specs) == 1, "the trailing store is the boundary's whole decoration"
     assert observed_result_names(fold) == frozenset({"acc__obs"})
 
     lowered = fold.lower(fold.free_axes, tuple(specs), axes=(Axis("k", 8),))

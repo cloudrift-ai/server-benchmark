@@ -75,10 +75,13 @@ class ContractionView:
     axis; whether the pair can be ORIENTED as (m, n) is the placement's question, not
     recognition's. A pair with NO output role on either side (a row's dot product with itself,
     the RMS statistic spelled as two casts of one load) is not a contraction at all: it reads as a
-    planar reduce — and so does a pair whose role-less side moves with a coordinate the other side
-    also strides (a B that changes with A's row): no tile holds it as one slab. A shared
-    coordinate that only ever composes with the reduction index (a split-K partition,
-    ``x[p·bk + k]``) partitions K rather than naming a row, and keeps the reading."""
+    planar reduce."""
+    shared_axes: frozenset[str] = frozenset()
+    """The free axes BOTH operands read besides the reduction: a batch the pair rides (attention's
+    ``b, h``), a split-K partition coordinate, a value-dead reshape residue — or, when a side
+    carries no role of its own, the row that side's every element moves with. Which of those a
+    shared axis is takes the kernel's extents to tell, so it is the tile's question
+    (:meth:`TileOp.contracts`), not the term's."""
     product: ElementwiseImpl | None = None
     """The ⊗ this contraction multiplies its operand pair with."""
     plus: ElementwiseImpl | None = None
@@ -125,15 +128,6 @@ class ReductionView:
     @property
     def twisted(self) -> bool:
         return self.ops is None
-
-
-def _partitions_the_reduction(edge: Fold, axis: str, coord: str) -> bool:
-    """Whether every read of ``coord`` under ``edge`` composes it with ``axis`` in one index
-    expression — a partition of the reduction (``x[p·bk + k]``), never a dimension of its own."""
-    reads = [edge.as_slab().load] if edge.as_slab() is not None else [stmt for stmt in edge.lift.body if isinstance(stmt, Load)]
-    if not all(axis in index.free_vars() for load in reads for index in load.index if coord in index.free_vars()):
-        return False
-    return all(_partitions_the_reduction(operand, axis, coord) for operand in edge.operands if coord in operand.free_axes)
 
 
 @dataclass(frozen=True)
@@ -289,6 +283,10 @@ class Fold:
                 object.__setattr__(self, "lift", replace(lam, params=(lam.params[0], *bound, *lam.params[1 + arity :])))
                 del self.__dict__["bindings"]  # read before the reorder; the memo is stale
         if self.observe is not None:
+            reading = self.as_reduction()
+            assert reading is not None and not reading.twisted, (
+                "a twisted carrier does not support a per-step observer: its state is rescaled, never a stream of partials"
+            )
             assert tuple(self.observe.params) == (self.axis, *self.combine.results), (
                 f"observer params {self.observe.params} must bind the iteration var then the carried state "
                 f"{(self.axis, *self.combine.results)} positionally"
@@ -425,17 +423,13 @@ class Fold:
             return None  # several own axes on BOTH sides: an outer product over batches, not an orientable pair
         if not left_only and not right_only:
             return None  # a dot product over shared axes only carries no output role to tile: a planar reduce
-        shared = (a_space & b_space) - {self.axis}
-        if shared and (not left_only or not right_only):
-            roleless = a_edge if not left_only else b_edge
-            if not all(_partitions_the_reduction(roleless, self.axis, coord) for coord in shared):
-                return None
         slab = b_edge.as_slab()
         b_trans = slab is not None and self.axis in slab.load.index[-1].free_vars()
         return ContractionView(
             axis=self.axis,
             left_axes=frozenset(left_only),
             right_axes=frozenset(right_only),
+            shared_axes=frozenset((a_space & b_space) - {self.axis}),
             product=product,
             plus=plus,
             b_trans=b_trans,

@@ -398,8 +398,8 @@ def _bind(fold, free_names):
     from emmy.compiler.ir.tile import Placement
 
     free = tuple(Axis(n, Dim(4)) for n in free_names)
-    root = TileOp(op=fold, place=Placement(free=free), axes=(*free, Axis("k", Dim(K)))).op
-    return root if root.as_contraction() is not None else None
+    tile = TileOp(op=fold, place=Placement(free=free), axes=(*free, Axis("k", Dim(K))))
+    return tile.op if tile.contracts(tile.node_id(tile.op)) else None
 
 
 def test_bilinear_batched_operand_still_binds():

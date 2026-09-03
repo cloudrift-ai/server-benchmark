@@ -43,7 +43,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_tail
+from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row
@@ -139,6 +139,17 @@ def _enforce(reason: str | None) -> None:
         raise ValueError(reason)
 
 
+def _reducing_roots(op: Fold) -> tuple[Fold, ...]:
+    """The DISTINCT reducing roots a projection's operands carry — the head fold reached through
+    its epilogue and again as a shared operand is one root, and a provider term carries none."""
+    out: list[Fold] = []
+    for edge in op.operands:
+        root = projection_root(edge)
+        if root is not None and all(root is not seen for seen in out):
+            out.append(root)
+    return tuple(out)
+
+
 def _projection_refusal(tile: TileOp, node) -> str | None:
     """Why the kernel's projection cannot survive a split of ``node`` (``None`` when it can) — the
     MIMO decomposition the realizer performs, asked at the OFFER so an unrealizable split is never
@@ -156,8 +167,12 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
         and not any(stmt is node for stmt in projection_tail(tile))
     ):
         return "the head fold is nested inside the projection's sweep loop; the split cannot strip it"
+    if any(spec.sweep is not None and spec.sweep.name in node.free_axes for spec in tile.output_specs):
+        return "the head fold is evaluated inside the boundary store's sweep loop; the split cannot strip it"
     if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
         return None
+    if len(_reducing_roots(op)) < 2:
+        return None  # one reducing root beside its providers (the chain form): the split owns the whole projection
     try:
         regions = projection_regions(op, tile.output_specs)
     except ValueError as e:
@@ -433,8 +448,8 @@ def _split_projection(tile: TileOp, root: Node, selected: Fold):
     other regions as pieces. A kernel with one root keeps its whole term as the region; an
     independent MIMO projection partitions by producing root (:func:`projection_regions`)."""
     op = tile.op
-    if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
-        return root, op, (), tuple(tile.output_specs), ()
+    if not isinstance(op, Fold) or op.axis is not None or len(_reducing_roots(op)) < 2:
+        return root, op, (), tuple(tile.output_specs), ()  # one root, its providers beside it: the whole term is the region
     pieces = []
     chosen = None
     for fold, region, body, stores in projection_regions(op, tile.output_specs):

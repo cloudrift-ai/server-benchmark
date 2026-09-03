@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
@@ -497,21 +498,77 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     return fold, renamed
 
 
+_PURE_HEAD = (Load, Assign, Init, Select)
+
+
 def _peel(body: Body) -> tuple[list, list[Stmt]]:
-    """Peel the outer parallel loop chain into placement axes."""
+    """Peel the outer parallel loop chain into placement axes. Sibling output nests (a fused
+    multi-output kernel whose outputs differ in one extent) peel the loops they ALL share, by
+    interchange: a parallel loop nest is one iteration space, so the shared coordinates become the
+    grid and each nest keeps its own residual sweep, one level deep where the lift can spell it."""
     axes = []
     prefix: list[Stmt] = []
     current = list(body)
     while True:
         index = 0
-        while index < len(current) and isinstance(current[index], (Load, Assign, Init, Select)):
+        while index < len(current) and isinstance(current[index], _PURE_HEAD):
             index += 1
         head, rest = current[:index], current[index:]
-        if len(rest) != 1 or not isinstance(rest[0], Loop) or rest[0].is_reduce:
-            return axes, prefix + current
-        prefix.extend(head)
-        axes.append(rest[0].axis)
-        current = list(rest[0].body)
+        if len(rest) == 1 and isinstance(rest[0], Loop) and not rest[0].is_reduce:
+            prefix.extend(head)
+            axes.append(rest[0].axis)
+            current = list(rest[0].body)
+            continue
+        if len(rest) >= 2 and all(isinstance(stmt, Loop) and not stmt.is_reduce for stmt in rest):
+            shared, hoisted = _shared_parallel_axes(rest)
+            if shared:
+                prefix.extend(head)
+                axes.extend(shared)
+                current = hoisted
+                continue
+        return axes, prefix + current
+
+
+def _parallel_chain(loop: Loop) -> tuple[list[tuple[Axis, list[Stmt]]], list[Stmt]]:
+    """A nest of single parallel loops as ``[(axis, the pure heads above the next loop), …]`` and
+    the innermost body."""
+    chain: list[tuple[Axis, list[Stmt]]] = []
+    node = loop
+    while True:
+        stmts = list(node.body)
+        index = 0
+        while index < len(stmts) and isinstance(stmts[index], _PURE_HEAD):
+            index += 1
+        rest = stmts[index:]
+        if len(rest) == 1 and isinstance(rest[0], Loop) and not rest[0].is_reduce:
+            chain.append((node.axis, stmts[:index]))
+            node = rest[0]
+            continue
+        chain.append((node.axis, []))
+        return chain, stmts
+
+
+def _shared_parallel_axes(nests: list[Loop]) -> tuple[list[Axis], list[Stmt]]:
+    """The parallel axes every sibling nest binds (by name and extent), in the first nest's order,
+    and the nests rebuilt without them — a level's pure heads join the level below."""
+    chains = [_parallel_chain(nest) for nest in nests]
+    keys = [{(axis.name, axis.extent) for axis, _ in chain} for chain, _ in chains]
+    shared = [axis for axis, _ in chains[0][0] if all((axis.name, axis.extent) in key for key in keys[1:])]
+    if not shared:
+        return [], list(nests)
+    names = {axis.name for axis in shared}
+    hoisted: list[Stmt] = []
+    for chain, innermost in chains:
+        rebuilt: list[Stmt] = list(innermost)
+        carried: list[Stmt] = []
+        for axis, heads in reversed(chain):
+            if axis.name in names:
+                carried = [*heads, *carried]
+                continue
+            rebuilt = [Loop(axis=axis, body=Body((*heads, *carried, *rebuilt)))]
+            carried = []
+        hoisted.extend([*carried, *rebuilt])
+    return shared, hoisted
 
 
 def _raw_loops(body: Body) -> list[Loop]:

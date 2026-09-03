@@ -38,7 +38,7 @@ from frozendict import frozendict
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
@@ -49,7 +49,7 @@ from emmy.compiler.ir.schedule.views import (
     NodeId,
     contraction_facts,
 )
-from emmy.compiler.ir.stmt import Body, Loop, OutputSpec, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Load, Loop, OutputSpec, Stmt, Write
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.path import Site, sites
@@ -216,6 +216,27 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
     if all(s.pure for s in rest) and apply_output_specs(rest, stores) == original:
         return tuple(rest), tuple(stores)
     return None
+
+
+def _index_reads(edge: Fold):
+    """Every gmem index expression read under ``edge``: its own slab or inline loads, then its operands'."""
+    reads = [edge.as_slab().load] if edge.as_slab() is not None else [stmt for stmt in edge.lift.body if isinstance(stmt, Load)]
+    yield from (index for load in reads for index in load.index)
+    for operand in edge.operands:
+        yield from _index_reads(operand)
+
+
+def _partitions_the_reduction(edge: Fold, axis: str, coord: str) -> bool:
+    """Whether every read of ``coord`` under ``edge`` composes it with ``axis`` in one index
+    expression — a partition of the reduction (``x[p·bk + k]``), never a dimension of its own."""
+    return all(axis in index.free_vars() for index in _index_reads(edge) if coord in index.free_vars())
+
+
+def _reads_move_with(edge: Fold, coord: str, ctx: SimplifyCtx) -> bool:
+    """Whether some read under ``edge`` still depends on ``coord`` once its index simplifies under
+    the kernel's extents — a merged weight's reshape residue ``((m·1024 + n) / 128 % 8) · 128 + …``
+    folds ``m`` away, a grouped address ``m·H·D + …`` does not."""
+    return any(coord in index.simplify(ctx).free_vars() for index in _index_reads(edge) if coord in index.free_vars())
 
 
 @dataclass(frozen=True)
@@ -411,9 +432,31 @@ class TileOp(Op):
         return tuple(site.node for site in self.sites)
 
     def contracts(self, site: NodeId) -> bool:
-        """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want."""
-        view = self.views[site]
-        return view.as_contraction() is not None
+        """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want.
+
+        A bilinear pair with a role-less side qualifies only while every coordinate it shares with
+        the other side is one no tile strides: a split-K partition (it only ever composes with the
+        reduction index) or a reshape residue the other side's reads are value-dead in under this
+        kernel's extents. A B that changes with the row it is contracted against — a dequant scale
+        read per row, a grouped weight addressed by the row — is no slab per tile."""
+        node = self.views[site]
+        view = node.as_contraction()
+        if view is None:
+            return False
+        if not view.shared_axes or (view.left_axes and view.right_axes):
+            return True
+        roleless, roled = (node.operands[0], node.operands[1]) if not view.left_axes else (node.operands[1], node.operands[0])
+        return all(
+            _partitions_the_reduction(roleless, view.axis, coord) or not _reads_move_with(roled, coord, self._simplify_ctx())
+            for coord in view.shared_axes
+        )
+
+    def _simplify_ctx(self) -> SimplifyCtx:
+        """This kernel's axis extents as ranges — what a value-dead index residue folds under. A
+        symbolic extent contributes non-negativity alone, which is what the residue's divisions need."""
+        return SimplifyCtx(
+            ranges={axis.name: Interval(0, axis.extent.as_static() - 1 if axis.extent.is_static else 2**31 - 1) for axis in self.axes}
+        )
 
     @cached_property
     def family_sites(self) -> frozendict[str, tuple[NodeId, ...]]:

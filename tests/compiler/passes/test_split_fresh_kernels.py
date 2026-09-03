@@ -301,13 +301,13 @@ def test_chain_split_carries_the_captured_prologue_and_strips_the_finalize(monke
     tiles = {nid: n.op for nid, n in out.nodes.items() if isinstance(n.op, TileOp)}
     partial = next(op for nid, op in tiles.items() if nid.endswith("__partial"))
     finalize = next(op for nid, op in tiles.items() if not nid.endswith("__partial"))
-    assert "c" in {load.input for load in Body.coerce(tuple(partial.op.lower())).loads}, (
+    assert "c" in {load.input for load in Body.coerce(tuple(partial.op.lower(axes=partial.axes))).loads}, (
         "the partial must carry the captured prologue's defining load"
     )
     extents = {
-        s.node.axis.extent.as_static()
+        finalize.axis_of(s.node.axis).extent.as_static()
         for s in sites(finalize.op)
-        if isinstance(s.node, Fold) and s.node.axis is not None and s.node.axis.extent.is_static
+        if s.node.axis is not None and finalize.axis_of(s.node.axis).extent.is_static
     }
     assert extents == {2}, f"the finalize may fold only the two partitions, got axis extents {sorted(extents)}"
 

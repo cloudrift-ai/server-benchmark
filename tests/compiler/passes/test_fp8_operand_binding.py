@@ -69,9 +69,9 @@ def _bind(loop, m: str = "m", n: str = "n"):
     free = (Axis(m, Dim(64)), Axis(n, Dim(64)))
     tile = TileOp(op=projection((fold,)), place=Placement(free=free), axes=(*free, loop.axis))
     root = tile.op
-    if root.as_contraction() is not None:
+    if tile.contracts(tile.node_id(root)):
         return root, ()
-    inner = [edge for edge in root.operands if edge.as_contraction() is not None]
+    inner = [edge for edge in root.operands if edge.as_contraction() is not None and tile.contracts(tile.node_id(edge))]
     if not inner:
         return None
     return inner[0], _statements(root)

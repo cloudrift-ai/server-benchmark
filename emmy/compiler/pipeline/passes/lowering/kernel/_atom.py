@@ -988,8 +988,12 @@ def _sync_operands(
     (async_ops if a_copied else sync_ops).append(a_op)
     drain.append(a_op)
 
-    for f, (bl, _) in enumerate(channels):
+    for f, (edge, _) in enumerate(channels):
         tag = "b" if f == 0 else f"b_x{f}"
+        # The channel's B is a TERM: a gmem read is a slab (one ``Load`` over its coordinates) and
+        # copies; anything else is a producer cone and compute-fills.
+        slab = edge.as_slab() if isinstance(edge, Fold) else None
+        bl = slab.load if slab is not None else edge
         if not isinstance(bl, Load):
             b_body = bl.lower(axes=axes)
 

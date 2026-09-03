@@ -1115,10 +1115,17 @@ def _packed_operands(
 
     def scale_value(k0, row, col):
         k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(block, "int")))
-        # Hygienic like the compute fill's own substitution above: nothing in a block-scale factor
-        # cone re-binds these names today, but the safe spelling costs nothing and the cone is
-        # whatever the speller wrote.
-        sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k})
+        # The slab is CTA-shared across the m rows, so the factor cone's VALUE is m-invariant — but
+        # m can still appear SYNTACTICALLY: a placement cut materializes the weight's per-tensor
+        # scale into a workspace indexed by the kernel's outer free axes, and the cone reads it back
+        # as ``ws[m]``. The kernel decodes only the tile's ``m_b`` / ``m_u`` split vars, so leaving m
+        # free emits an undefined identifier (nvfp4 Qwen3-8B's M=1 v_proj: ``identifier "_um" is
+        # undefined``, the elided unit row being the tiled m side). Bind it to the sibling block base
+        # like every other staged fill, under which an m-invariant read evaluates unchanged.
+        # The substitution is hygienic like the compute fill's own above: nothing in a block-scale
+        # factor cone re-binds these names today, but the safe spelling costs nothing and the cone
+        # is whatever the speller wrote.
+        sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k, **_sibling_sigma(m)})
         return [s.substitute(sigma) for s in factor_cone], packed.factor
 
     scale_op = SyncOperand(tag="bs", shape=(n.tile, bk_elems // block), value=scale_value)

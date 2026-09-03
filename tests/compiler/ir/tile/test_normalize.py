@@ -13,6 +13,7 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
@@ -210,11 +211,8 @@ def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -
     assert tuple(axis.name for axis in tile.place.free) == ("a0", "a1", "a6")
     assert all(spec.sweep is None for spec in tile.output_specs)
     assert reconstructed.op is tile.op
-    # The authored seam carries the lexical provider closure needed to cut the input projection
-    # without duplicating the statistic.
-    seams = {seam.spelling: seam for seam in cuttable_seams(tile)}
-    seam = seams["PLACE@map.fold.a.fold.b1"]
-    assert seam.requires
+    # The authored seam — the score's K cone — is offered on the promoted tree.
+    assert "PLACE@map.1/twist.1/inner.2/map" in {seam.spelling for seam in cuttable_seams(tile)}
 
 
 # ---- closure at formation ---------------------------------------------------------------------- #
@@ -285,14 +283,18 @@ def test_key_swept_statistic_closes_the_computed_b_operand() -> None:
 
 
 def test_key_swept_statistic_stays_when_a_sibling_reads_it() -> None:
-    """A chain the sweep's own result also reads keeps its place in the sweep's step — the B cone
-    still closes over it through an operand, and a cone that duplicates a sibling's work is no seam."""
+    """A chain the sweep's own result also reads keeps its place in the sweep's step, and the B
+    cone reads it through an operand cone of its own over the SAME statistic fold: a term is
+    closed, so the cheap rsqrt is spelled where each reader stands, while the reduce it derives
+    from is one shared object and never repeats."""
     tile = _key_swept_score(shared_reader=True)
 
     sweep, score, b = _score_and_b(tile)
-    assert any(isinstance(stmt, Assign) and stmt.name == "inv" for stmt in sweep.lift.body)
-    assert any("inv" in edge.exposes for edge in b.operands), [edge.exposes for edge in b.operands]
-    assert id(b) not in {id(seam.node) for seam in cuttable_seams(tile)}
+    assert any(isinstance(stmt, Assign) and stmt.op == ElementwiseImpl("rsqrt") for stmt in sweep.lift.body)
+    (inv,) = [edge for edge in b.operands if edge.as_slab() is None]
+    assert any(isinstance(stmt, Assign) and stmt.op == ElementwiseImpl("rsqrt") for stmt in inv.lift.body)
+    (stat,) = inv.operands
+    assert stat.axis is not None and any(stat is edge for edge in sweep.operands), "the statistic fold is shared, not copied"
 
 
 def test_normalization_shares_structurally_identical_cones() -> None:
@@ -399,7 +401,7 @@ def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
         Accum(name="acc1", value="product1", op="add", axes=("k",)),
     )
 
-    tile = _tile(projection((planar,)), K32, free=(M8, N16))
+    tile = _tile(planar, K32, free=(M8, N16))
 
     contraction = tile.op
     assert contraction.as_contraction() is not None

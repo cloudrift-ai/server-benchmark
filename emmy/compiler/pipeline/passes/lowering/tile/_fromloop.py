@@ -249,13 +249,36 @@ def _factor_products(
         else:
             groups.append([arg])
     consumed: set[int] = set()
+    arguments = tuple(dict.fromkeys(arg for product in products for arg in product.args))
     for group in groups:
         cone = plain.backward_cone(tuple(group))
         reads = tuple(term for term in terms if any(name in cone.external_reads for name in term.exposes))
         consumed.update(id(term) for term in reads)
-        operands, lift = _close((), reads, Body(cone.members), tuple(group), scope, levels)
-        edge_of.update((arg, Fold(operands=operands, lift=lift)) for arg in group)
+        # A product argument this cone READS (``x`` beside ``x · scale``) rides the cone as a
+        # pass-through result: the two arguments are ONE multi-result edge, not a term and a cone
+        # over it competing for the shared A slot.
+        passed = tuple(arg for arg in arguments if arg in exposed and arg not in edge_of and any(arg in term.exposes for term in reads))
+        results = tuple(arg for arg in arguments if arg in group or arg in passed)  # as the products read them
+        operands, lift = _close((), reads, Body(cone.members), results, scope, levels)
+        edge_of.update((arg, Fold(operands=operands, lift=lift)) for arg in results)
     pairs = [tuple(edge_of.get(arg) or exposed.get(arg) for arg in product.args) for product in products]  # raw names are exposed
+    # Alpha-equal argument edges (two loads of one slab, two spellings of one cone) are ONE edge:
+    # the first survives and the later products read its names, so the channels share A outright.
+    survivors: dict[tuple, Fold] = {}
+    renames: dict[str, str] = {}
+
+    def unified(edge):
+        if edge is None:
+            return None
+        keep = survivors.setdefault((edge.canonical(), frozenset(edge.free_axes)), edge)
+        if keep is not edge:
+            renames.update(zip(edge.exposes, keep.exposes, strict=True))
+            consumed.add(id(edge))
+        return keep
+
+    pairs = [tuple(unified(edge) for edge in pair) for pair in pairs]
+    if renames:
+        products = [replace(product, args=tuple(renames.get(name, name) for name in product.args)) for product in products]
     ordered = _orient(pairs, tuple(axis.name for axis in axes))
     split_names = {raw: arg for arg, raw in raw_names.items()}
     consumed.update(id(term) for hoist in hoists.values() for term in hoist.terms)  # a factor's slab rides the epilogue

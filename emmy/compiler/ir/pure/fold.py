@@ -65,14 +65,20 @@ class ContractionView:
     """
 
     axis: str
-    left: str | None
-    """The free axis A carries — the output role it strides. ``None`` where A brings none."""
-    right: str | None
-    """The free axis the streamed operand carries. ``None`` for a MATVEC, whose B is a vector over
-    the reduction alone: a contraction does not stop being one for want of a second output axis;
-    whether the pair can be ORIENTED as (m, n) is the placement's question, not recognition's. A
-    pair with NO output role on either side (a row's dot product with itself, the RMS statistic
-    spelled as two casts of one load) is not a contraction at all: it reads as a planar reduce."""
+    left_axes: frozenset[str]
+    """The free axes A carries and B does not — the output role it strides, plus any broadcast
+    batch coordinate riding A alone (``x[b, m, k]`` against ``w[n, k]``): which of them is the
+    row is the placement's answer, the others are grid offsets."""
+    right_axes: frozenset[str]
+    """The free axes the streamed operand carries alone. Empty for a MATVEC, whose B is a vector
+    over the reduction alone: a contraction does not stop being one for want of a second output
+    axis; whether the pair can be ORIENTED as (m, n) is the placement's question, not
+    recognition's. A pair with NO output role on either side (a row's dot product with itself,
+    the RMS statistic spelled as two casts of one load) is not a contraction at all: it reads as a
+    planar reduce — and so does a pair whose role-less side moves with a coordinate the other side
+    also strides (a B that changes with A's row): no tile holds it as one slab. A shared
+    coordinate that only ever composes with the reduction index (a split-K partition,
+    ``x[p·bk + k]``) partitions K rather than naming a row, and keeps the reading."""
     product: ElementwiseImpl | None = None
     """The ⊗ this contraction multiplies its operand pair with."""
     plus: ElementwiseImpl | None = None
@@ -85,6 +91,16 @@ class ContractionView:
     materialized slab; a computed B answers ``False``. A stored on the same side is not a
     question: ``operands[0]`` is A by canonical form, k-last, which formation guarantees by
     orienting the pair."""
+
+    @property
+    def left(self) -> str | None:
+        """A's one own axis, or ``None`` when it carries none or several (a broadcast batch)."""
+        return next(iter(self.left_axes)) if len(self.left_axes) == 1 else None
+
+    @property
+    def right(self) -> str | None:
+        """B's one own axis, or ``None`` when it carries none or several."""
+        return next(iter(self.right_axes)) if len(self.right_axes) == 1 else None
 
 
 @dataclass(frozen=True)
@@ -109,6 +125,15 @@ class ReductionView:
     @property
     def twisted(self) -> bool:
         return self.ops is None
+
+
+def _partitions_the_reduction(edge: Fold, axis: str, coord: str) -> bool:
+    """Whether every read of ``coord`` under ``edge`` composes it with ``axis`` in one index
+    expression — a partition of the reduction (``x[p·bk + k]``), never a dimension of its own."""
+    reads = [edge.as_slab().load] if edge.as_slab() is not None else [stmt for stmt in edge.lift.body if isinstance(stmt, Load)]
+    if not all(axis in index.free_vars() for load in reads for index in load.index if coord in index.free_vars()):
+        return False
+    return all(_partitions_the_reduction(operand, axis, coord) for operand in edge.operands if coord in operand.free_axes)
 
 
 @dataclass(frozen=True)
@@ -187,6 +212,36 @@ class Fold:
             # iteration var. (The projection (zero-axis) fold was exactly this, with ``fn`` for ``lift``.)
             assert self.combine is None and not self.init, "a zero-axis Fold carries no monoid"
             assert self.observe is None, "a zero-axis Fold carries no per-step state to observe"
+            # An operand that another operand is built OVER and passes through whole (the small
+            # cone beside the larger one computed from it, both bound by their own names) is that
+            # operand's shadow: the maximal one stays, its params go with it, and the body reads
+            # the pass-through by the same name.
+            slots, cursor = [], 0
+            for edge in self.operands:
+                slots.append(tuple(self.lift.params[cursor : cursor + len(edge.exposes)]))
+                cursor += len(edge.exposes)
+            shadowed = [
+                index
+                for index, edge in enumerate(self.operands)
+                if slots[index] == edge.exposes
+                and any(
+                    other is not edge
+                    and any(edge is held for held in other.operands)
+                    and set(edge.exposes) < set(other.exposes)
+                    and slots[position] == other.exposes
+                    for position, other in enumerate(self.operands)
+                )
+            ]
+            if shadowed:
+                kept, params, cursor = [], [], 0
+                for index, edge in enumerate(self.operands):
+                    width = len(edge.exposes)
+                    if index not in shadowed:
+                        kept.append(edge)
+                        params.extend(self.lift.params[cursor : cursor + width])
+                    cursor += width
+                object.__setattr__(self, "operands", tuple(kept))
+                object.__setattr__(self, "lift", replace(self.lift, params=(*params, *self.lift.params[cursor:])))
             arity = sum(len(edge.exposes) for edge in self.operands)
             assert len(self.lift.params) >= arity, f"lift binds {len(self.lift.params)} params for {arity} operand result components"
             return
@@ -366,16 +421,21 @@ class Fold:
         if self.axis not in a_space & b_space:
             return None
         left_only, right_only = a_space - b_space, b_space - a_space
-        if len(left_only) > 1 or len(right_only) > 1:
-            return None  # more than one free axis a side is not an orientable output role
+        if len(left_only) > 1 and len(right_only) > 1:
+            return None  # several own axes on BOTH sides: an outer product over batches, not an orientable pair
         if not left_only and not right_only:
             return None  # a dot product over shared axes only carries no output role to tile: a planar reduce
+        shared = (a_space & b_space) - {self.axis}
+        if shared and (not left_only or not right_only):
+            roleless = a_edge if not left_only else b_edge
+            if not all(_partitions_the_reduction(roleless, self.axis, coord) for coord in shared):
+                return None
         slab = b_edge.as_slab()
         b_trans = slab is not None and self.axis in slab.load.index[-1].free_vars()
         return ContractionView(
             axis=self.axis,
-            left=next(iter(left_only), None),
-            right=next(iter(right_only), None),
+            left_axes=frozenset(left_only),
+            right_axes=frozenset(right_only),
             product=product,
             plus=plus,
             b_trans=b_trans,

@@ -299,6 +299,7 @@
  "tests/compiler/passes/test_cut_forks.py::test_computed_operand_offers_fused_and_cut_and_pinned_cut_lowers[a]": 2.65,
  "tests/compiler/passes/test_cut_forks.py::test_computed_operand_offers_fused_and_cut_and_pinned_cut_lowers[b]": 2.15,
  "tests/compiler/passes/test_cut_forks.py::test_dependent_seam_pins_pull_their_producer_into_the_composed_cut": 0.47,
+ "tests/compiler/passes/test_cut_forks.py::test_evidence_rows_key_each_row_by_the_kernel_it_decides": 4.1,
  "tests/compiler/passes/test_cut_forks.py::test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces": 2.71,
  "tests/compiler/passes/test_cut_forks.py::test_pinned_fusion_lowers_one_computed_operand_kernel": 0.28,
  "tests/compiler/passes/test_cut_forks.py::test_pool_group_fuses_node_id_respellings_and_keys_on_pins": 0.35,

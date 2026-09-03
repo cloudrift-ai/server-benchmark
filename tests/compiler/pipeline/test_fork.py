@@ -275,3 +275,8 @@ def test_admits_reads_a_level_projection_and_a_schedule_prefix() -> None:
     assert branch.admits({"TILE": "mma/f2x2", "RASTER": "gm8"})
     assert not branch.admits({"TILE": "mma/f2x2/k2", "WORK": "w2x8"})
     assert not branch.admits({"TILE": "mma/f2x20/k2", "WORK": "w2x2"}), "an extension must start at a segment boundary"
+    sited = _ScheduleFork(
+        tree=SimpleNamespace(branch_knobs={}), context=None, row={"REDUCE@map.1/twist": "coop/r2", "REDUCE@map.1/twist.1/inner": ""}
+    )
+    assert not sited.admits({"REDUCE": "coop"}), "a bare row key prunes a site that decided another non-OFF value"
+    assert _ScheduleFork(tree=SimpleNamespace(branch_knobs={}), context=None, row={"REDUCE@map.1/twist": "coop"}).admits({"REDUCE": "coop"})

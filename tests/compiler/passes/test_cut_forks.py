@@ -497,7 +497,7 @@ def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
     routing = GoldenRecord(knobs=route, **{**fields, "pins": ()})
     parent = GoldenRecord(knobs={}, **fields)
     lift_identity = _lifted_target(parent).identity_key(with_io=True)
-    replay = _replay(parent)
+    replay = _replay(parent, exhaustive=True)
     child, rows = next((identity, rows) for identity, rows in replay.rows.items() if identity is not None and identity != lift_identity)
     receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=child, **fields)
     parent_signature = frozenset((key, str(value)) for key, value in parent.structural_features.items())

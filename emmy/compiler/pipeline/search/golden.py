@@ -1016,7 +1016,8 @@ def _replay(record: GoldenRecord, *, exhaustive: bool = False) -> _Replay:
         if isinstance(node.op, TileOp):
             identity = _identity_of(node.op)
             realized = schedule_row_key(dict(node.op.knobs or {}))
-            buckets.setdefault(identity, set()).add(realized)
+            if exhaustive:
+                buckets.setdefault(identity, set()).add(realized)
             if identity is not None:
                 kernels.add(identity)
                 if piece and evidence_row_vouches(dict(realized), piece):

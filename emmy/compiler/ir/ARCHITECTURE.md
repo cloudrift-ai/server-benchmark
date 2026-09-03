@@ -322,10 +322,10 @@ stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)
   applied, and `step` / `lower` / the projection-region reader emit that form, so a lowered body reads producer
   names throughout while a rewrite that swaps an operand touches no name at all.
 
-**`Map` and `Contraction` are DERIVED READINGS, not stored kinds.** Each is a constructor returning a
-`Fold` plus a PREDICATE answering the reading: `axis is None` for the projection, `is_contraction(x)` for the
-bilinear one. A predicate cannot be constructed, subclassed or annotated, which is the point — there is no
-type to dispatch on and no second place for a fact to live.
+**`Map` and `Contraction` are DERIVED READINGS, not stored kinds.** Each is a reading of the stored params:
+`axis is None` for the projection, `as_contraction()` (a `ContractionView`, or `None`) for the bilinear one, beside
+`as_slab()` and `as_reduction()`. A reading cannot be constructed, subclassed or annotated, which is the point —
+there is no type to dispatch on and no second place for a fact to live.
 
 - A ZERO-AXIS fold is what `Map` was: no iteration and no monoid, its `lift` IS the per-cell projection. So
   softmax's normalize and RMSNorm's are one kind composed at two depths.

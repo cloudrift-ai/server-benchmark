@@ -25,6 +25,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ReduceOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+from tests.compiler.terms import contraction
 
 
 def deep_defines(node) -> tuple[str, ...]:
@@ -67,8 +68,7 @@ def test_matmul_cell_lifts_and_canonicalizes_as_contraction() -> None:
     node = tile.op
     assert isinstance(node, Fold) and node.axis is not None
     assert node.as_contraction() is not None
-    assert isinstance(node.a, Load) and node.a.input == "x"
-    assert isinstance(node.b, Load) and node.b.input == "w"
+    assert [edge.as_slab().load.input for edge in node.operands] == ["x", "w"]
     assert len(tile.output_specs) == 1 and tile.output_specs[0].sweep is None
 
 
@@ -91,7 +91,7 @@ def test_epilogue_stays_in_the_projection_body() -> None:
     node = tile.op
     assert isinstance(node, Fold) and node.axis is None and len(node.operands) == 1
     assert node.operands[0].axis is not None
-    assert {stmt.input for stmt in node.body if isinstance(stmt, Load)} == {"b"}
+    assert {stmt.input for stmt in node.lift.body if isinstance(stmt, Load)} == {"b"}
 
 
 def test_non_distributing_lift_stays_planar() -> None:
@@ -111,16 +111,13 @@ def test_non_distributing_lift_stays_planar() -> None:
     assert node.as_contraction() is None
 
 
-def test_contraction_formation_gates_on_the_semiring() -> None:
-    import pytest
-
-    k = Axis("k", Dim(16))
+def test_the_contraction_reading_gates_on_the_semiring() -> None:
+    """Formation stores any product; the BILINEAR reading is what a ``(⊗, ⊕)`` pair that is not a
+    registered semiring never gets."""
     a = Load(name="av", input="a", index=(Var("m"), Var("k")))
     b = Load(name="bv", input="b", index=(Var("n"), Var("k")))
-    with pytest.raises(ValueError, match="semiring"):
-        Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),), product="maximum")
-    node = Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),))
-    view = node.as_contraction()
+    assert contraction("k", a, (b, "acc"), product="maximum").as_contraction() is None
+    view = contraction("k", a, (b, "acc")).as_contraction()
     assert (view.product.name, view.plus.name) == ("multiply", "add")
 
 
@@ -170,8 +167,8 @@ def test_singleton_reduce_over_an_enclosing_value_lifts_as_a_projection() -> Non
 
     assert tuple(axis.extent for axis in tile.place.free) == (Dim(4),)
     assert isinstance(tile.op, Fold) and tile.op.axis is None
-    assert not any(isinstance(member, Fold) and member.axis is not None for member in tile.op.body)
-    assert tile.op.lower(_grid(tile), tile.output_specs)[-1].value in deep_defines(tile.op)
+    assert not any(edge.axis is not None for edge in tile.op.operands)
+    assert tile.op.lower(_grid(tile), tile.output_specs, tile.axes)[-1].value in deep_defines(tile.op)
     np.testing.assert_array_equal(result, values)
 
 
@@ -266,10 +263,11 @@ def test_an_output_sweeps_epilogue_lifts_to_a_term_declaring_the_sweep_axis() ->
     epilogue = tile.op
     assert epilogue.axis is None and len(epilogue.exposes) == 1
     assert [edge.as_contraction() is not None for edge in epilogue.operands] == [True]
-    assert Dim(4) in {axis.extent for axis in epilogue.axes} and [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
+    assert Dim(4) in {axis.extent for axis in tile.axes if axis.name in epilogue.free_axes}
+    assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
     (spec,) = tile.output_specs
     assert spec.write.values == epilogue.exposes and spec.sweep is None
-    assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs)] == ["Loop", "Load", "Assign", "Write"]
+    assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs, tile.axes)] == ["Loop", "Load", "Assign", "Write"]
 
 
 # ===================================================================
@@ -281,10 +279,10 @@ def test_reduce_feeding_prologue_reaches_the_fold_step() -> None:
     """A pure prologue value the reduce body reads must reach the fold's step; an epilogue-only
     value must not.
 
-    The canonical form binds the prologue ONCE in the projection and lets the fold's lambda read it
-    as an enclosing-scope name, rather than sinking the load into the loop — same reachability, one
-    load instead of one per step. What matters, and what the miscompile below is about, is only
-    that the step can see it and that the epilogue-only value stays out of the step."""
+    The lift closes the fold over the prologue value it reads: the load arrives as the fold's own
+    slab operand, hoisted once ahead of the loop by ``Fold.lower``, rather than sunk into the step.
+    What matters, and what the miscompile below is about, is only that the step can see it and
+    that the epilogue-only value stays out of the fold."""
     m, k = Axis("m", Dim(8)), Axis("k", Dim(16))
     cell = (
         Load(name="scale", input="s", index=(Literal(0),)),
@@ -304,15 +302,12 @@ def test_reduce_feeding_prologue_reaches_the_fold_step() -> None:
     )
     node = _tile(Body((Loop(axis=m, body=Body(cell)),))).op
     assert isinstance(node, Fold) and node.axis is None
-    folds = [child for child in (*node.operands, *node.lift.body) if isinstance(child, Fold)]
+    folds = [edge for edge in node.operands if edge.axis is not None]
     assert len(folds) == 1, "the reduce did not lift to exactly one fold"
     step = folds[0]
-    scale = next(stmt.name for stmt in node.body if isinstance(stmt, Load) and stmt.input == "s")
-    bias = next(stmt.name for stmt in node.body if isinstance(stmt, Load) and stmt.input == "b")
-    reads = {name for stmt in step.lift.body for name in stmt.deps()}
-    reads.update(name for stmt in step.lift.body if isinstance(stmt, Load) for name in (stmt.input,))
-    assert "x" in reads and scale in reads, "the fold's step cannot see the prologue value it multiplies by"
-    assert bias not in reads, "an epilogue-only value must not reach the fold's step"
+    buffers = {edge.as_slab().load.input for edge in step.operands if edge.as_slab() is not None}
+    assert buffers == {"x", "s"}, "the fold's step cannot see the prologue value it multiplies by"
+    assert {stmt.input for stmt in node.lift.body if isinstance(stmt, Load)} == {"b"}, "an epilogue-only value must not reach the fold"
 
 
 def test_multi_pass_cell_defines_every_name_before_it_is_read() -> None:
@@ -346,9 +341,9 @@ def test_multi_pass_cell_defines_every_name_before_it_is_read() -> None:
                 check(list(stmt.body), set(defined) | {stmt.axis.name})
                 defined |= set(deep_defines(stmt))
                 continue
-            reads = set() if isinstance(stmt, Fold) else set(stmt.deps())
+            reads = set(stmt.deps())
             assert reads <= defined, f"{stmt} reads {sorted(reads - defined)} before definition"
-            defined |= set(deep_defines(stmt)) if isinstance(stmt, Fold) else set(stmt.defines())
+            defined |= set(stmt.defines())
 
     for tile in tiles:
-        check(list(tile.op.lower(_grid(tile), tile.output_specs)), {axis.name for axis in tile.place.free})
+        check(list(tile.op.lower(_grid(tile), tile.output_specs, tile.axes)), {axis.name for axis in tile.place.free})

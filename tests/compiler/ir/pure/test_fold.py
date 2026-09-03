@@ -20,37 +20,30 @@ from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, OutputSpec, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Loop, OutputSpec, Write
+from tests.compiler.terms import contraction, reduction, slab
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
 SCOPE = (M_AXIS, N_AXIS, K_AXIS)
 
 
-def _slab(name: str, buffer: str, *index: str) -> Fold:
-    return Fold.slab(Load(name=name, input=buffer, index=tuple(Var(v) for v in index)))
-
-
 def _reduce(operands: tuple[Fold, ...], body: tuple, acc: str, op: str = "add") -> Fold:
-    """A reducing term over ``k``: one ``⊕`` state, the lift's results its per-step value."""
-    bound = tuple(name for edge in operands for name in edge.exposes)
-    init, combine = (ElementwiseImpl(op).identity,), Lambda.componentwise((op,), (acc,))
-    lift = Lambda.closing((K_AXIS.name, *bound), Body(body), (f"{acc}__v",))
-    return Fold(operands=operands, lift=lift, init=init, combine=combine)
+    """A one-state reducing term over ``k``."""
+    return reduction(K_AXIS, operands, body, (acc,), op)
 
 
 def _matmul(a: Fold, b: Fold) -> Fold:
-    return _reduce((a, b), (Assign(name="acc__v", op="multiply", args=(a.exposes[0], b.exposes[0])),), "acc")
+    return contraction(K_AXIS, a, (b, "acc"))
 
 
 def _normalized_sum() -> tuple[Fold, Fold]:
     """``Σ_k exp(x[m,n,k] − t[m])`` over a row total ``t[m] = Σ_k y[m,k]`` — the total is an
     operand of the swept sum, evaluated over ``m`` alone."""
-    total = _reduce((_slab("y", "y", "m", "k"),), (Assign(name="tot__v", op="copy", args=("y",)),), "tot")
-    x = _slab("x", "x", "m", "n", "k")
+    total = _reduce((slab("y", "y", "m", "k"),), (Assign(name="tot__v", op="copy", args=("y",)),), "tot")
+    x = slab("x", "x", "m", "n", "k")
     body = (Assign(name="d", op="subtract", args=("x", "tot")), Assign(name="acc__v", op="exp", args=("d",)))
     return total, _reduce((x, total), body, "acc")
 
@@ -70,7 +63,7 @@ def _chain(body) -> list[str]:
 def test_a_bilinear_term_puts_its_k_last_operand_first_at_formation() -> None:
     """``operands[0]`` IS A by construction: with one product, the slab whose reduction axis is
     its last index coordinate leads, and the lift's params move with the operands."""
-    w, x = _slab("r", "w", "k", "n"), _slab("l", "x", "m", "k")
+    w, x = slab("r", "w", "k", "n"), slab("l", "x", "m", "k")
     mm = _matmul(w, x)
     assert mm.operands == (x, w) and mm.lift.params == ("k", "l", "r")
     assert mm.as_contraction() is not None and mm.as_contraction().left == "m"
@@ -78,7 +71,7 @@ def test_a_bilinear_term_puts_its_k_last_operand_first_at_formation() -> None:
 
 def test_a_multi_channel_term_puts_the_shared_operand_first_at_formation() -> None:
     """With several products A is the argument they share, whatever the slab layouts say."""
-    x, g, u = _slab("l", "x", "k", "m"), _slab("g", "wg", "n", "k"), _slab("u", "wu", "n", "k")
+    x, g, u = slab("l", "x", "k", "m"), slab("g", "wg", "n", "k"), slab("u", "wu", "n", "k")
     init, combine = (0.0, 0.0), Lambda.componentwise(("add", "add"), ("acc_g", "acc_u"))
     body = (Assign(name="acc_g__v", op="multiply", args=("g", "l")), Assign(name="acc_u__v", op="multiply", args=("u", "l")))
     lift = Lambda.closing(("k", "g", "u", "l"), Body(body), ("acc_g__v", "acc_u__v"))
@@ -93,7 +86,7 @@ def test_a_multi_channel_term_puts_the_shared_operand_first_at_formation() -> No
 def test_the_open_body_binds_every_free_coordinate() -> None:
     """``lower()`` is the body a term spells inside a scope binding all of its coordinates: the
     reduce loop alone, ``m`` and ``n`` read free."""
-    mm = _matmul(_slab("l", "x", "m", "k"), _slab("r", "w", "k", "n"))
+    mm = _matmul(slab("l", "x", "m", "k"), slab("r", "w", "k", "n"))
     assert mm.lower(axes=SCOPE) == mm.lower(mm.free_axes, axes=SCOPE)
     assert _chain(mm.lower(axes=SCOPE)) == ["k"]
 
@@ -102,12 +95,12 @@ def test_the_closed_program_opens_a_loop_per_free_coordinate_in_declaration_orde
     """Nothing bound: one plain loop per free coordinate, ordered as the tree first declares them
     when no coordinate is shared more than another, the reduce loop innermost with the whole step
     inside it."""
-    mm = _matmul(_slab("l", "x", "m", "k"), _slab("r", "w", "k", "n"))
+    mm = _matmul(slab("l", "x", "m", "k"), slab("r", "w", "k", "n"))
     assert _chain(mm.lower(frozenset(), axes=SCOPE)) == ["m", "n", "k"]
     (outer,) = mm.lower(frozenset(), axes=SCOPE)
     assert [type(stmt).__name__ for stmt in outer.body[-1].body[-1].body] == ["Load", "Load", "Assign", "Accum"]
     # The order is the TREE's: the first-declared coordinate opens first, whichever the caller's grid says.
-    swapped = _matmul(_slab("r", "w", "n", "k"), _slab("l", "x", "k", "m"))
+    swapped = _matmul(slab("r", "w", "n", "k"), slab("l", "x", "k", "m"))
     assert _chain(swapped.lower(frozenset(), axes=SCOPE)) == ["n", "m", "k"]
 
 
@@ -115,8 +108,8 @@ def test_the_closed_program_opens_a_loop_per_free_coordinate_in_declaration_orde
 
 
 def test_an_operand_that_does_not_index_the_reduce_axis_lands_ahead_of_the_loop() -> None:
-    scale = _slab("s", "scale", "m")
-    scaled = _reduce((_slab("l", "x", "m", "k"), scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), "acc")
+    scale = slab("s", "scale", "m")
+    scaled = _reduce((slab("l", "x", "m", "k"), scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), "acc")
     assert [type(stmt).__name__ for stmt in scaled.lower(axes=SCOPE)] == ["Load", "Loop"]
     assert scaled.lower(axes=SCOPE)[0].input == "scale"
 
@@ -146,7 +139,7 @@ def test_the_callers_binding_decides_what_hoists() -> None:
 def test_an_operand_hoists_past_the_term_that_reads_it() -> None:
     """The scale is read by a zero-axis cone that rides the reduce loop; the scale itself is
     evaluated over ``m`` alone, so it leaves the loop even though its reader stays inside."""
-    x, scale = _slab("l", "x", "m", "k"), _slab("s", "scale", "m")
+    x, scale = slab("l", "x", "m", "k"), slab("s", "scale", "m")
     cone = Fold(operands=(x, scale), lift=Lambda.closing(("l", "s"), Body((Assign(name="y", op="multiply", args=("l", "s")),)), ("y",)))
     mx = _reduce((cone,), (Assign(name="mx__v", op="copy", args=("y",)),), "mx", op="maximum")
     ahead, loop = mx.lower(axes=SCOPE)
@@ -160,8 +153,7 @@ def test_sweeps_no_term_shares_are_sibling_loops_and_a_reader_makes_them_a_chain
     puts them on ITS path, so what it reads is in scope: the second is recomputed inside the first."""
     q = Axis("q", Dim(2))
     scope = (M_AXIS, N_AXIS, q, K_AXIS)
-    a = Fold.slab(Load(name="a", input="x", index=(Var("m"), Var("q"), Var("k"))))
-    b = Fold.slab(Load(name="b", input="y", index=(Var("m"), Var("n"), Var("k"))))
+    a, b = slab("a", "x", "m", "q", "k"), slab("b", "y", "m", "n", "k")
     over_q = _reduce((a,), (Assign(name="sq__v", op="copy", args=("a",)),), "sq")
     over_n = _reduce((b,), (Assign(name="sn__v", op="copy", args=("b",)),), "sn")
     forest = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), Body(), ("sq", "sn")))
@@ -183,7 +175,7 @@ def test_sweeps_no_term_shares_are_sibling_loops_and_a_reader_makes_them_a_chain
 def test_a_store_follows_the_term_defining_its_value_at_that_terms_scope() -> None:
     """Closed, the ``[m, n]`` store rides the ``n`` loop after the reduce; at kernel scope, where
     the grid binds both, it is the kernel tail."""
-    mm = _matmul(_slab("l", "x", "m", "k"), _slab("r", "w", "k", "n"))
+    mm = _matmul(slab("l", "x", "m", "k"), slab("r", "w", "k", "n"))
     store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"))
     (m_loop,) = mm.lower(frozenset(), (store,), axes=SCOPE)
     (n_loop,) = m_loop.body
@@ -204,8 +196,7 @@ def test_a_sweep_store_rides_the_loop_the_term_opened() -> None:
 def test_a_store_lands_in_the_sibling_loop_of_its_term() -> None:
     q = Axis("q", Dim(2))
     scope = (M_AXIS, N_AXIS, q, K_AXIS)
-    a = Fold.slab(Load(name="a", input="x", index=(Var("m"), Var("q"), Var("k"))))
-    b = Fold.slab(Load(name="b", input="y", index=(Var("m"), Var("n"), Var("k"))))
+    a, b = slab("a", "x", "m", "q", "k"), slab("b", "y", "m", "n", "k")
     over_q = _reduce((a,), (Assign(name="sq__v", op="copy", args=("a",)),), "sq")
     over_n = _reduce((b,), (Assign(name="sn__v", op="copy", args=("b",)),), "sn")
     forest = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), Body(), ("sq", "sn")))
@@ -222,7 +213,7 @@ def test_a_broadcast_store_opens_the_sweep_axis_its_spec_names() -> None:
     """``o[m, j] = tot`` with nothing computed over ``j``: the store alone is evaluated over it, so
     the term opens a ``j`` loop under the total, from the spec's axis."""
     j = Axis("j", Dim(3))
-    total = _reduce((_slab("y", "y", "m", "k"),), (Assign(name="tot__v", op="copy", args=("y",)),), "tot")
+    total = _reduce((slab("y", "y", "m", "k"),), (Assign(name="tot__v", op="copy", args=("y",)),), "tot")
     store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="tot"), sweep=j)
     (m_loop,) = total.lower(frozenset(), (store,), axes=SCOPE)
     reduce_loop, j_loop = m_loop.body
@@ -233,7 +224,7 @@ def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
     init, combine = (0.0,), Lambda.componentwise(("add",), ("acc",))
     observe = Lambda(params=("k", "acc"), body=Body((Assign(name="acc__obs", op="copy", args=("acc",)),)), results=("acc__obs",))
     lift = Lambda.closing(("k", "y"), Body((Assign(name="acc__v", op="copy", args=("y",)),)), ("acc__v",))
-    scan = Fold(operands=(_slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine, observe=observe)
+    scan = Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine, observe=observe)
     store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("k")), value="acc__obs"))
     (loop,) = scan.lower(scan.free_axes, (store,), axes=SCOPE)
     assert [type(stmt).__name__ for stmt in loop.body] == ["Load", "Assign", "Accum", "Assign", "Write"]
@@ -246,7 +237,7 @@ def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
     """The exp-family ``(m, l)`` carrier: the softmax recipe's program over a ``(score, 1)`` singleton."""
     body = Body((Assign(name="s", op="copy", args=("y",)), Const(name="one", value=1.0)))
     lift = Lambda.closing(("k", "y"), body, ("s", "one"))
-    return Fold(operands=(_slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), combine=SOFTMAX.program(states))
+    return Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), combine=SOFTMAX.program(states))
 
 
 def test_a_twisted_state_spelling_never_reaches_the_canonical_form() -> None:
@@ -261,7 +252,7 @@ def test_a_componentwise_merge_is_one_accum_per_state() -> None:
     init, combine = (0.0, -1e30), Lambda.componentwise(("add", "maximum"), ("acc0", "acc1"))
     body = Body((Assign(name="a0", op="copy", args=("y",)), Assign(name="a1", op="negative", args=("y",))))
     lift = Lambda.closing(("k", "y"), body, ("a0", "a1"))
-    fold = Fold(operands=(_slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine)
+    fold = Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine)
     stmts = fold.merge(("acc0__p", "acc1__p"))
     assert [(s.name, s.op.name, s.value) for s in stmts] == [("acc0", "add", "acc0__p"), ("acc1", "maximum", "acc1__p")]
     assert [s.op.identity for s in stmts] == [0.0, -1e30], "the seed the identity placement will emit"
@@ -314,7 +305,7 @@ def test_the_step_is_the_merge_at_the_injected_singleton() -> None:
 
 
 def test_lowering_is_memoized_per_binding() -> None:
-    mm = _matmul(_slab("l", "x", "m", "k"), _slab("r", "w", "k", "n"))
+    mm = _matmul(slab("l", "x", "m", "k"), slab("r", "w", "k", "n"))
     assert mm.lower(axes=SCOPE) is mm.lower(axes=SCOPE)
     assert mm.lower(frozenset(), axes=SCOPE) is mm.lower(frozenset(), axes=SCOPE)
     assert mm.lower(axes=SCOPE) is not mm.lower(frozenset(), axes=SCOPE)
@@ -328,7 +319,7 @@ def test_a_consumer_names_what_it_binds_and_rendering_spells_the_operand() -> No
     only the rendered statements (``step`` / ``lower``) read the operands' spelling, and a store
     over a passed-through operand value renders with it. Two spellings of one binding are one
     term: equal canonical forms, equal lowered bodies."""
-    y = _slab("y", "y", "m", "k")
+    y = slab("y", "y", "m", "k")
     lift = Lambda.closing(("k", "value"), Body((Assign(name="acc__v", op="copy", args=("value",)),)), ("acc__v",))
     fold = Fold(operands=(y,), lift=lift, init=(0.0,), combine=Lambda.componentwise(("add",), ("acc",)))
     assert fold.bindings == (("value", y, 0),) and fold.applied.params == ("k", "y")

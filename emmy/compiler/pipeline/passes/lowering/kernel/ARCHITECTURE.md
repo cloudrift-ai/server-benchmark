@@ -57,8 +57,8 @@ A materialized Fold-edge cut reaches the term as a slab operand and lowers like 
 the same parent emission path.
 
 The output-tiled arm travels as **`(node, tile)`** — the stored `Fold` (bilinear reading) and its PLACED `Tile`
-slice. There is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "`is_contraction(op)` with a
-TILE slice over a grid with an `(m, n)` pair" and threads the two on; the slice arrives ALREADY PLACED from
+slice. There is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "`op.as_contraction()` with
+a TILE slice over a grid with an `(m, n)` pair" and threads the two on; the slice arrives ALREADY PLACED from
 `Sched.tile_of`, which binds the caller's `(m, n)` through `Tile.at`. It is
 binding-driven for both atoms, with **no per-atom subclass**, and cleanly
 splits the **placement/schedule the slice owns** (its `axes` and the `Side`

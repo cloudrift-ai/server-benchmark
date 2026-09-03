@@ -23,12 +23,13 @@ from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var
+from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
-from emmy.compiler.ir.schedule.packing import match_packed_b_node
+from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
-from emmy.compiler.ir.stmt import Assign, Body, Load
-from emmy.compiler.ir.tile import Fold
+from emmy.compiler.ir.stmt import Assign, Load
 from tests.compiler.helpers import requires_cuda
+from tests.compiler.terms import contraction, projection
 
 K16 = "mma_m16n8k16_f16_f32"
 K16_BF16 = "mma_m16n8k16_bf16_f32"
@@ -64,14 +65,15 @@ def _packed_cone(k: int, *, block: int = 16, k_last: bool = True, row: str = "n"
         Load(name=f"{q}in3", input=f"{q}w_f4_pairs", index=(CastExpr(dtype="int", expr=Var(f"{q}v1")), pair), dtype=None),
         Assign(name=f"{q}v3", op="multiply", args=(f"{q}in3", f"{q}v2")),
     )
-    return Fold.projection(body=Body(body))
+    return projection(body=body)
 
 
 def _node(*, m=512, n=4096, k=4096, block=16, a_dtype=F16, k_last=True):
     """``x[m, k] @ decode(packed w)`` — a contraction whose B is the packed decode cone."""
     axes = (Axis("m", Dim(m)), Axis("n", Dim(n)))
     a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=a_dtype)
-    node = Fold.contraction(k_axis=Axis("k", Dim(k)), a=a, channels=(Channel(b=_packed_cone(k, block=block, k_last=k_last), acc="acc"),))
+    ka = Axis("k", Dim(k))
+    node = contraction(ka, a, (_packed_cone(k, block=block, k_last=k_last), "acc"))
     inputs = {
         "x": Tensor("x", (m, k), a_dtype),
         "w_bits": Tensor("w_bits", (n, k // 2) if k_last else (k // 2, n), F4E2M1x2),
@@ -79,7 +81,12 @@ def _node(*, m=512, n=4096, k=4096, block=16, a_dtype=F16, k_last=True):
         "w_scale_2": Tensor("w_scale_2", (1, 1), F32),
         "w_f4_pairs": Tensor("w_f4_pairs", (256, 2), F16),
     }
-    return node, inputs, axes
+    return node, inputs, axes, ka
+
+
+def _packed(node, inputs) -> tuple:
+    """``(B copy, pair)`` — the node's packed readings, the memo ``TileOp.packed_reading`` holds."""
+    return packed_readings((node,), inputs)[id(node)]
 
 
 def _tile(atom: str, spec: str, work: str, axes):
@@ -92,8 +99,8 @@ def _tile(atom: str, spec: str, work: str, axes):
 
 
 def test_match_packed_b_node_reads_the_cone_off_the_contraction():
-    node, inputs, _axes = _node()
-    packed = match_packed_b_node(node, inputs)
+    node, inputs, _axes, ka = _node()
+    packed = _packed(node, inputs)[0]
     assert packed is not None
     assert packed.bits.input == "w_bits" and packed.table.input == "w_f4_pairs"
     assert packed.factor == "v2" and packed.block == 16
@@ -103,9 +110,9 @@ def test_match_packed_b_node_declines_a_materialized_b():
     """An ordinary matmul has no cone to recognize — the packed reading never applies to it."""
     a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F16)
     b = Load(name="wb", input="w", index=(Var("n"), Var("k")), dtype=F16)
-    node = Fold.contraction(k_axis=Axis("k", Dim(4096)), a=a, channels=(Channel(b=b, acc="acc"),))
+    node = contraction(Axis("k", Dim(4096)), a, (b, "acc"))
     inputs = {"x": Tensor("x", (512, 4096), F16), "w": Tensor("w", (4096, 4096), F16)}
-    assert match_packed_b_node(node, inputs) is None
+    assert _packed(node, inputs)[0] is None
 
 
 def test_match_packed_b_node_admits_a_computed_a():
@@ -114,9 +121,9 @@ def test_match_packed_b_node_admits_a_computed_a():
     A serving program fuses the input norm into its projections, so A arrives as a producer cone
     there. Declining that kept the packed weight off the whole serving path. A copies or
     compute-fills exactly as the smem fill decides (:func:`_atom._a_slab_operand`); only B differs."""
-    node, inputs, _axes = _node()
-    coned = Fold.contraction(k_axis=node.axis, a=_packed_cone(4096), channels=node.channels)
-    assert match_packed_b_node(coned, inputs) is not None
+    node, inputs, _axes, ka = _node()
+    coned = contraction(ka, _packed_cone(4096), *zip(node.operands[1:], node.combine.results, strict=True))
+    assert _packed(coned, inputs)[0] is not None
 
 
 # ===================================================================
@@ -130,11 +137,11 @@ def test_a_computed_a_still_resolves_the_byte_slab():
     Otherwise the recognizer says yes and the row still never reaches the materializer, which is
     the shape of the bug this replaced: a serving projection sits behind a fused norm, so its A is
     a cone, and the byte slab has to survive that all the way to a resolved stage."""
-    node, inputs, axes = _node()
-    coned = Fold.contraction(k_axis=node.axis, a=_packed_cone(4096), channels=node.channels)
-    assert match_packed_b_node(coned, inputs) is not None
+    node, inputs, axes, ka = _node()
+    coned = contraction(ka, _packed_cone(4096), *zip(node.operands[1:], node.combine.results, strict=True))
+    assert _packed(coned, inputs)[0] is not None
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    st = resolve_warp_stage(coned, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs)
+    st = resolve_warp_stage(coned, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka)
     assert st is not None and st.transport == "smem-async", "a computed A must not lose the byte slab"
 
 
@@ -143,10 +150,10 @@ def test_packed_b_resolves_the_cp_async_byte_slab(atom, a_dtype):
     """cp.async resolves and carries the chunk's LOGICAL K width — the byte halving is the slab's
     geometry, not the schedule's K step. Both 16-bit float fragments hold every e2m1 value
     exactly, so both resolve."""
-    node, inputs, axes = _node(a_dtype=a_dtype)
+    node, inputs, axes, ka = _node(a_dtype=a_dtype)
     tile = _tile(atom, "f2x2/k2", "w1x4", axes)
     for spec in ("d1/smem-async", "d2/smem-async", "d2/smem-async/p2"):
-        st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs)
+        st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs, k_axis=ka)
         assert st is not None, spec
         assert st.bk_elems == tile.bk * 16 and st.transport == "smem-async"
 
@@ -156,92 +163,96 @@ def test_packed_b_declines_the_compute_fill():
     the generic reading instead. (The transport ``split`` case that used to sit here went away with
     ``Stage.split``, which existed only for the warp-flash stream.)"""
 
-    node, inputs, axes = _node()
+    node, inputs, axes, ka = _node()
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     for spec in ("d1/smem",):
-        assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is None, spec
+        assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs, k_axis=ka) is None, spec
 
 
 def test_packed_b_resolves_tma_with_dense_byte_rows():
     """A TMA box deposits dense, so the byte slab carries no row pad — and the budget must size it
     that way, or the stage claims smem it does not use."""
-    node, inputs, axes = _node()
+    node, inputs, axes, ka = _node()
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     bk_elems = tile.bk * 16
     dense = tile.m.tile * bk_elems * 2 + tile.n.tile * (bk_elems // 2)
     scale = tile.n.tile * (bk_elems // 16) * 2
-    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 100 * 1024, inputs)
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 100 * 1024, inputs, k_axis=ka)
     assert st is not None and st.transport == "smem-tma" and st.bk_elems == bk_elems
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), scale + 2 * dense, inputs).depth == 2
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), scale + 2 * dense - 1, inputs).depth == 1
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), scale + 2 * dense, inputs, k_axis=ka).depth == 2
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), scale + 2 * dense - 1, inputs, k_axis=ka).depth == 1
     # The cp.async sibling needs strictly more for the same depth — that is exactly the pad.
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * dense, inputs).depth == 1
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * dense, inputs, k_axis=ka).depth == 1
 
 
 def test_packed_b_declines_tma_beyond_the_box_limit():
     """Every TMA box dim must fall inside the hardware's 256; a wide N tile does not."""
-    node, inputs, axes = _node()
+    node, inputs, axes, ka = _node()
     wide = _tile(K16, "f2x8/k2", "w1x8", axes)  # tile_n = 8*8*8 = 512
     assert wide.n.tile > 256
-    assert resolve_warp_stage(node, wide, Stage.parse("d2/smem-tma"), 400 * 1024, inputs) is None
+    assert resolve_warp_stage(node, wide, Stage.parse("d2/smem-tma"), 400 * 1024, inputs, k_axis=ka) is None
 
 
 def test_packed_b_budget_carries_the_row_pad_and_the_scale_slab():
     """The budget is the A slab plus the PADDED byte rows per ring slot, plus one single-buffer
     scale slab on top — the scale fill is compute, so ringing it buys no overlap."""
-    node, inputs, axes = _node()
+    node, inputs, axes, ka = _node()
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     bk_elems = tile.bk * 16
     slot = tile.m.tile * bk_elems * 2 + tile.n.tile * (bk_elems // 2 + BYTE_SLAB_PAD)
     scale = tile.n.tile * (bk_elems // 16) * 2
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * slot, inputs).depth == 2
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * slot - 1, inputs).depth == 1
-    assert resolve_warp_stage(node, tile, Stage.parse("d1/smem-async"), scale + slot - 1, inputs) is None
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * slot, inputs, k_axis=ka).depth == 2
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * slot - 1, inputs, k_axis=ka).depth == 1
+    assert resolve_warp_stage(node, tile, Stage.parse("d1/smem-async"), scale + slot - 1, inputs, k_axis=ka) is None
     # Sizing the slot without the pad, or forgetting the scale slab, would each admit this budget.
     dense = tile.m.tile * bk_elems * 2 + tile.n.tile * (bk_elems // 2)
-    assert resolve_warp_stage(node, tile, Stage.parse("d1/smem-async"), dense, inputs) is None
+    assert resolve_warp_stage(node, tile, Stage.parse("d1/smem-async"), dense, inputs, k_axis=ka) is None
 
 
 def test_packed_b_declines_a_k_strided_layout():
     """The drain reads N-major rows. A packed weight stored K-major has no fragment loader here."""
-    node, inputs, axes = _node(k_last=False)
+    node, inputs, axes, ka = _node(k_last=False)
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
 
 
 def test_packed_b_declines_a_block_the_drain_does_not_read():
     """The drain's scale column is ``K >> 4``; a 32-value block would read the wrong scale."""
-    node, inputs, axes = _node(block=32)
+    node, inputs, axes, ka = _node(block=32)
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    assert match_packed_b_node(node, inputs).block == 32
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    assert _packed(node, inputs)[0].block == 32
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
 
 
 def test_packed_b_declines_a_non_16_bit_atom():
     """The value table and the scale multiply are 16-bit floats. The fp8 atoms are neither."""
-    node, inputs, axes = _node()
-    assert resolve_warp_stage(node, _tile(K32, "f2x2/k2", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    node, inputs, axes, ka = _node()
+    assert (
+        resolve_warp_stage(node, _tile(K32, "f2x2/k2", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
+    )
 
 
 def test_packed_b_declines_when_a_and_the_atom_disagree():
     """A is byte-copied into the atom's own slab; a bf16 A under an f16 atom would deposit the
     wrong bits, and the two dtypes are the same width so nothing else catches it."""
-    node, inputs, axes = _node(a_dtype=BF16)
-    assert resolve_warp_stage(node, _tile(K16, "f2x2/k2", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    node, inputs, axes, ka = _node(a_dtype=BF16)
+    assert (
+        resolve_warp_stage(node, _tile(K16, "f2x2/k2", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
+    )
 
 
 def test_packed_b_declines_a_mismatched_a():
     """A is byte-copied into the atom's own slab, so it must already carry the atom's dtype."""
-    node, inputs, axes = _node(a_dtype=F32)
+    node, inputs, axes, ka = _node(a_dtype=F32)
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
 
 
 def test_packed_b_declines_a_byte_row_under_sixteen():
     """A byte row of ``bk_elems / 2`` must stay 16-divisible: the fill copies 16 B chunks and a
     chunk never straddles a row. ``k1`` leaves 8 bytes."""
-    node, inputs, axes = _node()
-    assert resolve_warp_stage(node, _tile(K16, "f2x2", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    node, inputs, axes, ka = _node()
+    assert resolve_warp_stage(node, _tile(K16, "f2x2", "w1x4", axes), Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
 
 
 # ===================================================================
@@ -249,7 +260,7 @@ def test_packed_b_declines_a_byte_row_under_sixteen():
 # ===================================================================
 
 
-def _rows(node, inputs, axes, pins=None):
+def _rows(node, inputs, axes, ka, pins=None):
     """The ``STAGE`` rows the schedule offers this node at a warp tile, as resolved spellings."""
     from emmy.compiler.context import Context
     from emmy.compiler.ir.schedule.classic import ClassicScheduleContext
@@ -259,9 +270,10 @@ def _rows(node, inputs, axes, pins=None):
 
     write = Write(output="y", index=(Var("m"), Var("n")), value="acc")
     op = TileOp(
-        op=Fold.projection(body=Body(()), operands=(node,)),
+        op=projection((node,)),
         name="y",
         place=Placement(free=axes),
+        axes=(*axes, ka),
         inputs=inputs,
         output_specs=(OutputSpec(write=write),),
     )
@@ -289,8 +301,8 @@ def _transport(row: str) -> str:
 
 def test_the_offer_puts_the_byte_slab_beside_the_compute_fill():
     """The compute-fill and byte-slab readings are independent edge-domain siblings."""
-    node, inputs, axes = _node()
-    rows = _rows(node, inputs, axes)
+    node, inputs, axes, ka = _node()
+    rows = _rows(node, inputs, axes, ka)
     assert any(_transport(r) == "smem" for r in rows), rows
     assert any(_transport(r).startswith("smem-") for r in rows), rows
 
@@ -301,21 +313,21 @@ def test_the_offer_adds_no_compute_fill_depth_the_fill_did_not_ask_for():
 
     The byte-slab rows themselves carry whatever depths fit the budget — enumerating those is the
     schedule's job, and evidence picks between them."""
-    node, inputs, axes = _node()
-    fills = {r for r in _rows(node, inputs, axes) if _transport(r) == "smem"}
+    node, inputs, axes, ka = _node()
+    fills = {r for r in _rows(node, inputs, axes, ka) if _transport(r) == "smem"}
     assert fills and all(r.startswith(("d1", "d2")) for r in fills), sorted(fills)
 
 
 def test_a_generic_cone_offers_only_the_compute_fill():
     """A cone the byte slab declines is unchanged: its rows are the compute-fill depths alone."""
-    node, inputs, axes = _node(block=32)
-    assert all(_transport(r) == "smem" for r in _rows(node, inputs, axes))
+    node, inputs, axes, ka = _node(block=32)
+    assert all(_transport(r) == "smem" for r in _rows(node, inputs, axes, ka))
 
 
 def test_a_cp_pin_names_the_byte_slab_and_a_sync_pin_the_compute_fill():
-    node, inputs, axes = _node()
-    assert _rows(node, inputs, axes, {"STAGE": "d2/smem-async"}) == ["d2/smem-async"]
-    assert all(_transport(r) == "smem" for r in _rows(node, inputs, axes, {"STAGE": "d2/smem"}))
+    node, inputs, axes, ka = _node()
+    assert _rows(node, inputs, axes, ka, {"STAGE": "d2/smem-async"}) == ["d2/smem-async"]
+    assert all(_transport(r) == "smem" for r in _rows(node, inputs, axes, ka, {"STAGE": "d2/smem"}))
 
 
 # ===================================================================
@@ -663,7 +675,8 @@ def _pair_node(*, m=512, n=4096, k=4096, block=16):
 
     axes = (Axis("m", Dim(m)), Axis("n", Dim(n)))
     a_cone = _packed_cone(k, block=block, row="m", prefix="a_")
-    node = Fold.contraction(k_axis=Axis("k", Dim(k)), a=a_cone, channels=(Channel(b=_packed_cone(k, block=block), acc="acc"),))
+    ka = Axis("k", Dim(k))
+    node = contraction(ka, a_cone, (_packed_cone(k, block=block), "acc"))
     inputs = {
         "w_bits": Tensor("w_bits", (n, k // 2), F4E2M1x2),
         "w_scale_bits": Tensor("w_scale_bits", (n, k // block), F8E4M3),
@@ -674,17 +687,15 @@ def _pair_node(*, m=512, n=4096, k=4096, block=16):
         "a_w_scale_2": Tensor("a_w_scale_2", (1, 1), F32),
         "a_w_f4_pairs": Tensor("a_w_f4_pairs", (256, 2), F16),
     }
-    return node, inputs, axes
+    return node, inputs, axes, ka
 
 
 def test_the_pair_reading_splits_each_side_into_codes_scale_and_residue():
     """What the cell takes: the packed codes, the RAW block-scale load, and the k-invariant factor
     the epilogue applies. The per-tensor scale is that residue — it is the one part of the
     operand's chain the instruction has no operand for."""
-    from emmy.compiler.ir.schedule.packing import match_packed_pair_node
-
-    node, inputs, _axes = _pair_node()
-    pair = match_packed_pair_node(node, inputs)
+    node, inputs, _axes, ka = _pair_node()
+    pair = _packed(node, inputs)[1]
     assert pair is not None and pair.block == 16
     assert len(pair.b) == 1  # one product channel, one streamed operand
     assert pair.a.bits.input == "a_w_bits" and pair.b[0].bits.input == "w_bits"
@@ -697,13 +708,12 @@ def _fused_pair_node(*, m=512, n=4096, k=4096, block=16):
     """The fused gate\u2297up shape: TWO channels over one shared packed-decode A cone, each with
     its own packed-decode weight. What a quantized SwiGLU MLP binds to."""
     axes = (Axis("m", Dim(m)), Axis("n", Dim(n)))
-    node = Fold.contraction(
-        k_axis=Axis("k", Dim(k)),
-        a=_packed_cone(k, block=block, row="m", prefix="a_"),
-        channels=(
-            Channel(b=_packed_cone(k, block=block, prefix="g_"), acc="acc0"),
-            Channel(b=_packed_cone(k, block=block, prefix="u_"), acc="acc1"),
-        ),
+    ka = Axis("k", Dim(k))
+    node = contraction(
+        ka,
+        _packed_cone(k, block=block, row="m", prefix="a_"),
+        (_packed_cone(k, block=block, prefix="g_"), "acc0"),
+        (_packed_cone(k, block=block, prefix="u_"), "acc1"),
     )
     inputs = {
         "a_w_bits": Tensor("a_w_bits", (m, k // 2), F4E2M1x2),
@@ -718,16 +728,14 @@ def _fused_pair_node(*, m=512, n=4096, k=4096, block=16):
             f"{q}w_scale_2": Tensor(f"{q}w_scale_2", (1, 1), F32),
             f"{q}w_f4_pairs": Tensor(f"{q}w_f4_pairs", (256, 2), F16),
         }
-    return node, inputs, axes
+    return node, inputs, axes, ka
 
 
 def test_the_pair_reading_takes_a_fused_two_channel_node():
     """Sharing is arity: a fused gate\u2297up edge is the two-channel case of the same reading, not a
     shape the cell declines. Refusing it kept that node off the packed path entirely."""
-    from emmy.compiler.ir.schedule.packing import match_packed_pair_node
-
-    node, inputs, _axes = _fused_pair_node()
-    pair = match_packed_pair_node(node, inputs)
+    node, inputs, _axes, ka = _fused_pair_node()
+    pair = _packed(node, inputs)[1]
     assert pair is not None and pair.block == 16
     assert pair.a.bits.input == "a_w_bits"  # ONE shared row operand
     assert [op.bits.input for op in pair.b] == ["g_w_bits", "u_w_bits"]  # one per channel, in order
@@ -740,35 +748,29 @@ def test_the_pair_reading_takes_a_fused_two_channel_node():
 def test_the_pair_reading_declines_a_fused_node_whose_channels_disagree_on_block():
     """One block extent per node: the cell applies one scale per block per side and has a single
     block size, so channels spelled at different extents keep the decode-based readings."""
-    from emmy.compiler.ir.schedule.packing import match_packed_pair_node
-
-    node, inputs, _axes = _fused_pair_node()
-    mixed = Fold.contraction(
-        k_axis=Axis("k", Dim(4096)),
-        a=_packed_cone(4096, block=16, row="m", prefix="a_"),
-        channels=(
-            Channel(b=_packed_cone(4096, block=16, prefix="g_"), acc="acc0"),
-            Channel(b=_packed_cone(4096, block=32, prefix="u_"), acc="acc1"),
-        ),
+    node, inputs, _axes, ka = _fused_pair_node()
+    mixed = contraction(
+        Axis("k", Dim(4096)),
+        _packed_cone(4096, block=16, row="m", prefix="a_"),
+        (_packed_cone(4096, block=16, prefix="g_"), "acc0"),
+        (_packed_cone(4096, block=32, prefix="u_"), "acc1"),
     )
     inputs = dict(inputs)
     inputs["u_w_scale_bits"] = Tensor("u_w_scale_bits", (4096, 4096 // 32), F8E4M3)
-    assert match_packed_pair_node(mixed, inputs) is None
+    assert _packed(mixed, inputs)[1] is None
 
 
 def test_a_packed_weight_beside_a_materialized_a_is_not_a_pair():
     """The single-sided shape answers ``None`` here and keeps its own reading — the k16 drain,
     which decodes the weight into 16-bit fragments against a 16-bit activation."""
-    from emmy.compiler.ir.schedule.packing import match_packed_pair_node
-
-    node, inputs, _axes = _node()
-    assert match_packed_pair_node(node, inputs) is None
+    node, inputs, _axes, ka = _node()
+    assert _packed(node, inputs)[1] is None
 
 
 def test_the_block_scaled_stage_resolves_four_byte_slabs_on_cp_async():
-    node, inputs, axes = _pair_node()
+    node, inputs, axes, ka = _pair_node()
     tile = _tile(K64, "f1x4/k4", "w1x4", axes)
-    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 200 * 1024, inputs)
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 200 * 1024, inputs, k_axis=ka)
     assert st is not None and st.transport == "smem-async"
     assert st.bk_elems == tile.bk * 64
 
@@ -777,11 +779,11 @@ def test_the_block_scaled_stage_declines_tma_and_a_scale_row_under_the_chunk():
     """Two refusals, both facts rather than preferences. TMA: the four-descriptor box copy is not
     written. The narrow tile: a scale row is ``bk_elems / 16`` bytes and the cp.async fill copies
     16 B chunks, so ``bk_elems`` under 256 leaves a row a chunk cannot fill."""
-    node, inputs, axes = _pair_node()
+    node, inputs, axes, ka = _pair_node()
     tile = _tile(K64, "f1x4/k4", "w1x4", axes)
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 200 * 1024, inputs) is None
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 200 * 1024, inputs, k_axis=ka) is None
     narrow = _tile(K64, "f1x4/k2", "w1x4", axes)
-    assert resolve_warp_stage(node, narrow, Stage.parse("d2/smem-async"), 200 * 1024, inputs) is None
+    assert resolve_warp_stage(node, narrow, Stage.parse("d2/smem-async"), 200 * 1024, inputs, k_axis=ka) is None
 
 
 # --- the producer band's one illegal partner ---------------------------------------------------
@@ -801,11 +803,12 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
     from emmy.compiler.ir.tile import Placement, TileOp
     from emmy.compiler.ir.tile.ir import OutputSpec
 
-    node, inputs, axes = _node()
+    node, inputs, axes, ka = _node()
     op = TileOp(
-        op=Fold.projection(body=Body(()), operands=(node,)),
+        op=projection((node,)),
         name="y",
         place=Placement(free=axes),
+        axes=(*axes, ka),
         inputs=inputs,
         output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="acc")),),
     )

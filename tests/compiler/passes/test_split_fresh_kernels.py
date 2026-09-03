@@ -314,51 +314,36 @@ def test_chain_split_carries_the_captured_prologue_and_strips_the_finalize(monke
 
 def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     """A head fold that READS the boundary store's sweep axis lands inside the sweep ``Loop``
-    ``apply_output_specs`` wraps — neither an operand nor a top-level projection member — so the
-    realization cannot strip it from the epilogue and the split declines at the offer (a pin
-    raises the recorded refusal; the catalog arm keeps the unsplit tree)."""
+    ``Fold.lower`` opens for it — the split realization cannot strip it from the epilogue, so the
+    split declines at the offer (a pin raises the recorded refusal; the catalog arm keeps the
+    unsplit tree)."""
     from types import SimpleNamespace
 
     from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.pure import Lambda
-    from emmy.compiler.ir.stmt import Assign, Body, Load, Write
+    from emmy.compiler.ir.stmt import Assign, Load, Write
     from emmy.compiler.ir.tile import OutputSpec, Placement
     from emmy.compiler.ir.tile.ops import head
     from emmy.compiler.pipeline.passes.lowering.tile._split import _projection_refusal, split_forks
+    from tests.compiler.terms import projection, reduction, slab
 
-    init, combine = (0.0,), Lambda.componentwise(("add",), ("acc",))
-    # The fold reads ``in0``, a name the projection body defines, so normalization keeps it a BODY
-    # member (a free-standing fold would be hoisted to an operand edge) — and that prologue reads
-    # the sweep axis ``j``, so the whole chain lands inside the sweep ``Loop``.
-    fold = Fold(
-        axis=Axis("k", Dim(16)),
-        lift=Lambda(
-            params=("k",),
-            body=Body(
-                (
-                    Load(name="v", input="x", index=(Var("k"), Var("j"))),
-                    Assign(name="p", op="multiply", args=("v", "in0")),
-                )
-            ),
-            results=("p",),
+    # The fold reads the prologue value ``c[j]`` as its own slab operand, and that read indexes the
+    # sweep axis ``j``, so the fold is evaluated over ``j`` and lands inside the sweep ``Loop``.
+    i, j, k = Axis("i", Dim(4)), Axis("j", Dim(8)), Axis("k", Dim(16))
+    product = (Assign(name="acc__v", op="multiply", args=("v", "in0")),)
+    fold = reduction(k, (slab("v", "x", "k", "j"), slab("in0", "c", "j")), product, ("acc",))
+    wrapper = projection(
+        (fold,),
+        (
+            Load(name="in0", input="c", index=(Var("j"),)),
+            Assign(name="y", op="multiply", args=("acc", "in0")),
         ),
-        init=init,
-        combine=combine,
-    )
-    wrapper = Fold.projection(
-        body=Body(
-            (
-                Load(name="in0", input="c", index=(Var("j"),)),
-                fold,
-                Assign(name="y", op="multiply", args=("acc", "in0")),
-            )
-        )
     )
     tile = TileOp(
         op=wrapper,
-        place=Placement(free=(Axis("i", Dim(4)),)),
-        output_specs=(OutputSpec(write=Write(output="o", index=(Var("i"), Var("j")), value="y"), sweep=Axis("j", Dim(8))),),
+        place=Placement(free=(i,)),
+        axes=(i, j, k),
+        output_specs=(OutputSpec(write=Write(output="o", index=(Var("i"), Var("j")), value="y"), sweep=j),),
     )
     node = head(tile.op)
     assert node is not None and node.axis is not None

@@ -162,7 +162,7 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
         regions = projection_regions(op, tile.output_specs)
     except ValueError as e:
         return str(e)
-    if not any(fold is node for fold, _, _ in regions):
+    if not any(fold is node for fold, *_ in regions):
         return "the split fold does not own an independent projection region"
     return None
 

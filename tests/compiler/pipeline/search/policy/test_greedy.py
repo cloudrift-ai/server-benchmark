@@ -5,8 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key, schedule_row_key
@@ -20,6 +18,7 @@ from emmy.compiler.pipeline.search.policy.greedy import (
     golden_audit,
     tile_identity,
 )
+from tests.compiler.terms import projection
 
 
 @pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@a": "cut"}, {"PLACE@a": "cut", "WORK": "t32"}))
@@ -140,7 +139,7 @@ def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) ->
     point = SimpleNamespace(
         options=[tree],
         node_id="node",
-        root_op=TileOp(op=Fold.projection(body=Body())),
+        root_op=TileOp(op=projection()),
     )
     record = SimpleNamespace(name="recorded-golden", knobs={"RASTER": "", "TILE": "recorded"}, emmy_us=1.25)
     monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
@@ -165,7 +164,7 @@ def test_verified_pick_defers_a_structural_fork(monkeypatch) -> None:
     point = SimpleNamespace(
         options=[structural],
         node_id="node",
-        root_op=TileOp(op=Fold.projection(body=Body())),
+        root_op=TileOp(op=projection()),
     )
     record = SimpleNamespace(name="recorded-golden", knobs={"TILE": "recorded"}, emmy_us=1.25)
     monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")

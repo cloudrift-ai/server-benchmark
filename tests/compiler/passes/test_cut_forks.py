@@ -25,7 +25,6 @@ from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match,
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     CutSite,
-    _environments,
     _producer_order,
     _workspace_axes,
     cuttable_seams,
@@ -46,6 +45,7 @@ from emmy.compiler.pipeline.search.golden import (
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
 from tests.compiler.helpers import direct_classic_leaf, requires_cuda
+from tests.compiler.terms import contraction, projection
 
 _CTX = Context.from_target((12, 0))
 _CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
@@ -68,8 +68,9 @@ def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
 
     graph = _computed_operand_graph("a")
     tile = graph.nodes["out"].op
-    partitioned = replace(tile.op, axis=replace(tile.op.axis, window=Window(parent=tile.op.axis, partition=True)))
-    graph.nodes["out"].op = replace(tile, op=partitioned)
+    # The partition receipt is the reduce axis's window in the kernel's axis table; the term names it only.
+    axes = tuple(replace(axis, window=Window(parent=axis, partition=True)) if axis.name == tile.op.axis else axis for axis in tile.axes)
+    graph.nodes["out"].op = replace(tile, axes=axes)
     pipeline = Pipeline.build(["lowering/tile"], select={"cut"})
     match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
     seams = cuttable_seams(match.root.op)
@@ -84,13 +85,12 @@ def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
 
 def _computed_operand_graph(side: str) -> Graph:
     m, n, k = Axis("m", 8), Axis("n", 8), Axis("k", 16)
-    computed = Fold.projection(
-        body=Body(
-            (
-                Load(name="raw", input="computed", index=(Var("m" if side == "a" else "n"), Var("k"))),
-                Assign(name="scaled", op="multiply", args=("raw", "raw")),
-            )
-        )
+    computed = projection(
+        (),
+        (
+            Load(name="raw", input="computed", index=(Var("m" if side == "a" else "n"), Var("k"))),
+            Assign(name="scaled", op="multiply", args=("raw", "raw")),
+        ),
     )
     direct = Load(
         name="direct",
@@ -98,8 +98,7 @@ def _computed_operand_graph(side: str) -> Graph:
         index=(Var("k"), Var("n")) if side == "a" else (Var("m"), Var("k")),
     )
     a, b = (computed, direct) if side == "a" else (direct, computed)
-    contraction = Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),))
-    tile = TileOp(op=contraction, name="out", place=Placement(free=(m, n)))
+    tile = TileOp(op=contraction(k, a, (b, "acc")), name="out", place=Placement(free=(m, n)), axes=(m, n, k))
     graph = Graph()
     _input(graph, "computed", (8, 16))
     _input(graph, "direct", (16, 8) if side == "a" else (8, 16))
@@ -111,19 +110,19 @@ def _computed_operand_graph(side: str) -> Graph:
 def _mimo_graph() -> Graph:
     m, n, k = Axis("m", 8), Axis("n", 8), Axis("k", 16)
 
-    def contraction(a: str, b: str, acc: str) -> Fold:
-        return Fold.contraction(
-            k_axis=k,
-            a=Load(name=f"{a}_v", input=a, index=(Var("m"), Var("k"))),
-            channels=(Channel(b=Load(name=f"{b}_v", input=b, index=(Var("k"), Var("n"))), acc=acc),),
+    def matmul(a: str, b: str, acc: str) -> Fold:
+        return contraction(
+            k,
+            Load(name=f"{a}_v", input=a, index=(Var("m"), Var("k"))),
+            (Load(name=f"{b}_v", input=b, index=(Var("k"), Var("n"))), acc),
         )
 
-    first, second = contraction("a", "b", "first"), contraction("c", "d", "second")
-    op = Fold.projection(body=Body(), operands=(first, second))
+    first, second = matmul("a", "b", "first"), matmul("c", "d", "second")
     tile = TileOp(
-        op=op,
+        op=projection((first, second), results=("first", "second")),
         name="out0",
         place=Placement(free=(m, n)),
+        axes=(m, n, k),
         output_specs=(
             OutputSpec(Write(output="out0", index=(Var("m"), Var("n")), value="first")),
             OutputSpec(Write(output="out1", index=(Var("m"), Var("n")), value="second")),
@@ -214,10 +213,7 @@ def _piece_with_seam(fragment: Graph):
 def test_cut_workspace_retains_static_unit_axes() -> None:
     """A unit seam axis remains workspace geometry even when the produced value is invariant in it."""
     unit, unused, column = Axis("batch", 1), Axis("unused", 8), Axis("n", 64)
-    produced = Fold.projection(
-        body=Body((Load(name="value", input="x", index=(Var("n"),)),)),
-        results=("value",),
-    )
+    produced = projection((), (Load(name="value", input="x", index=(Var("n"),)),), results=("value",))
     seam = CutSite(
         node=produced,
         spelling="PLACE",
@@ -232,8 +228,7 @@ def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> Non
     """Counting direct workspace reads cannot order A->C->B when A and C each read one."""
 
     def piece(name: str, source: str | None):
-        body = Body((Load(name=f"{name}_value", input=source or "input", index=()),))
-        produced = Fold.projection(body=body, results=(f"{name}_value",))
+        produced = projection((), (Load(name=f"{name}_value", input=source or "input", index=()),), results=(f"{name}_value",))
         return (None, produced, (), (), name, (f"{name}_value",), (name,))
 
     pieces = [piece("a", "c"), piece("c", "b"), piece("b", None)]
@@ -449,16 +444,14 @@ def test_statistics_route_shares_the_row_reduction_across_output_keys() -> None:
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
     key_extent = 8
 
-    def reduce_extents(op) -> list[int]:
+    def reduce_extents(tile: TileOp) -> list[int]:
         out = []
-        stack = [op]
+        stack = [tile.op]
         while stack:
             current = stack.pop()
-            if isinstance(current, Fold):
-                if current.axis is not None:
-                    out.append(current.axis.extent.as_static())
-                stack.extend(current.operands)
-                stack.extend(current.lift.body)
+            if current.axis is not None:
+                out.append(tile.axis_of(current.axis).extent.as_static())
+            stack.extend(current.operands)
         return out
 
     with pinned_knobs(_STAT_PINS):
@@ -468,16 +461,16 @@ def test_statistics_route_shares_the_row_reduction_across_output_keys() -> None:
     workspaces = {piece.id for piece in pieces if "__place_" in piece.id}
     # The two statistics pieces each run the key-extent scan ONCE, into a per-query workspace
     # (batch·head × query — no output-key axis).
-    statistics = [piece for piece in pieces if "__place_" in piece.id and reduce_extents(piece.op.op).count(key_extent) == 1]
+    statistics = [piece for piece in pieces if "__place_" in piece.id and reduce_extents(piece.op).count(key_extent) == 1]
     assert len(statistics) == 2
     assert all(len(piece.op.place.free) == 2 for piece in statistics)
     # The softmax-weight piece sweeps the output-key axis, reads those workspaces back, and keeps
     # only the per-element score contraction — the key-extent scan does not reappear beneath its
     # output-key axis, and neither does it in the consumer beyond the softmax·V contraction itself.
     weight = next(piece for piece in pieces if "__place_" in piece.id and len(piece.op.place.free) == 3 and set(piece.inputs) & workspaces)
-    assert key_extent not in reduce_extents(weight.op.op)
+    assert key_extent not in reduce_extents(weight.op)
     consumer = next(piece for piece in pieces if "__place_" not in piece.id)
-    assert reduce_extents(consumer.op.op).count(key_extent) == 1
+    assert reduce_extents(consumer.op).count(key_extent) == 1
 
 
 def _receipt_fields() -> dict:
@@ -598,11 +591,13 @@ def test_a_fold_held_by_a_plain_statement_still_gets_an_environment() -> None:
     seam. The canonical tree walk alternates node-wise and statement-wise for the same reason."""
     from emmy.compiler.ir.pure import Lambda
     from emmy.compiler.ir.tile.ir import ProjectionRegion
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _environments
 
-    cone = Fold.projection(body=Body((Assign(name="c", op="relu", args=("x",)),)), results=("c",))
+    cone = projection((), (Assign(name="c", op="relu", args=("x",)),), results=("c",))
     region = ProjectionRegion(axis=Axis("j", 4), lift=Lambda(params=("j",), body=Body((cone,)), results=("c",)))
-    root = Fold.projection(
-        body=Body((Load(name="x", input="a", index=(Var("j"),)), region, Assign(name="out", op="copy", args=("c",)))),
+    root = projection(
+        (),
+        (Load(name="x", input="a", index=(Var("j"),)), region, Assign(name="out", op="copy", args=("c",))),
         results=("out",),
     )
 
@@ -612,7 +607,7 @@ def test_a_fold_held_by_a_plain_statement_still_gets_an_environment() -> None:
 
 def _cone_seam(providers: tuple = (), requires: tuple = ()) -> CutSite:
     """A bare seam record standing in for a clustered operand cone."""
-    node = Fold.projection(body=Body((Load(name="w", input="w", index=(Var("n"), Var("k"))),)), results=("w",))
+    node = projection((), (Load(name="w", input="w", index=(Var("n"), Var("k"))),), results=("w",))
     return CutSite(node=node, spelling="PLACE@b", axes=(Axis("n", 8), Axis("k", 8)), dtypes=(F16,), providers=providers, requires=requires)
 
 
@@ -625,8 +620,8 @@ def test_two_cones_that_close_over_different_sources_are_not_one_value() -> None
     second contraction the first's value. The closure is part of the value."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
 
-    first_source = Fold.projection(body=Body((Load(name="x", input="a", index=(Var("k"),)),)), results=("x",))
-    second_source = Fold.projection(body=Body((Load(name="x", input="b", index=(Var("k"),)),)), results=("x",))
+    first_source = projection((), (Load(name="x", input="a", index=(Var("k"),)),), results=("x",))
+    second_source = projection((), (Load(name="x", input="b", index=(Var("k"),)),), results=("x",))
     consumer = object()
 
     same = [_cone_seam(requires=(("x", first_source),)), _cone_seam(requires=(("x", first_source),))]

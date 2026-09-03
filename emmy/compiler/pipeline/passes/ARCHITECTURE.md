@@ -3,8 +3,8 @@
 Rules that apply to EVERY pass in this tree (`frontend/`, `loop/`, `lowering/`). Per-dialect details live in
 [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (pass order, knob table, fork semantics). The **tile-lowering** phase
 (`lowering/tile/`) is the canonical instance of the invariant below — a **purely algebraic moveset, no
-specializations**: it dispatches on stored params of the fold (`axis is None` / `is_contraction` for the schedule
-walk; the derived `Fold.role` for the loop annotation the materializer reads), never on a named shape
+specializations**: it dispatches on the fold's derived readings (`axis is None` / `as_contraction()` for the
+schedule walk; a loop is a reduce iff its body carries an accumulator), never on a named shape
 (matmul / pointwise / attention) —
 SDPA is plain contractions plus the online-softmax `TWISTED` fold (a twisted monoid is a monoid), selected
 structurally, not a distinct kind.

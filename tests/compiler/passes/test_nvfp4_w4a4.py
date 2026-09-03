@@ -202,7 +202,6 @@ def _bound_contractions(tmp_path):
     these tests read is the bound shape a block-scaled offer would see.
     """
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.pure.fold import is_contraction
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 
@@ -210,16 +209,15 @@ def _bound_contractions(tmp_path):
     looped = Pipeline.build(LOOP_PASSES).run(g)
     tiled = Pipeline.build(["lowering/tile"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
     tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
-    return [(tile, t) for tile in tiles for t in _folds(tile.op) if is_contraction(t)]
+    return [(tile, t) for tile in tiles for t in _folds(tile.op) if t.as_contraction() is not None]
 
 
 def _edge_readings(tile, con):
     """``(activation, weight)`` — each operand edge's packed k-block reading, or ``None`` where the
     edge does not read as one."""
-    from emmy.compiler.ir.pure.fold import operand_body
     from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
-    return tuple(match_packed_kblock_b(list(operand_body(e)), con.axis.name, tile.inputs) for e in (con.a, con.channels[0].b))
+    return tuple(match_packed_kblock_b(list(e.lift.body), con.axis, tile.inputs) for e in con.operands[:2])
 
 
 def test_the_marked_matmul_binds_one_contraction_per_linear_over_plain_operand_edges(tmp_path):
@@ -231,8 +229,8 @@ def test_the_marked_matmul_binds_one_contraction_per_linear_over_plain_operand_e
     bound = _bound_contractions(tmp_path)
     assert bound, "no marked matmul bound as a contraction"
     for tile, con in bound:
-        assert len(con.channels) == 1
-        edges = (con.a, con.channels[0].b)
+        assert len(con.combine.results) == 1
+        edges = con.operands
         assert all(isinstance(e, Fold) and e.axis is None for e in edges), "both operands must be plain operand edges"
         weight = _edge_readings(tile, con)[1]
         assert weight is not None, "the weight edge must read as a packed decode chain"

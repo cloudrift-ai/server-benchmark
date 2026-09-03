@@ -18,40 +18,16 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold, Lambda
+from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from tests.compiler.terms import contraction, projection, reduction, slab
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(256)), Axis("n", Dim(256)), Axis("k", Dim(256))
 SCOPE = (M_AXIS, N_AXIS, K_AXIS)
 
 
-def _slab(name: str, buffer: str, index: tuple) -> Fold:
-    """One gmem read, as a term declaring the coordinates it indexes."""
-    return Fold.slab(Load(name=name, input=buffer, index=index))
-
-
-def _projection(operands: tuple, body: tuple, results: tuple) -> Fold:
-    """A zero-axis term — the pointwise cell. Its lift binds one param per operand result."""
-    bound = tuple(name for edge in operands for name in edge.exposes)
-    return Fold(operands=operands, lift=Lambda.closing(bound, Body(body), results))
-
-
-def _reduce(operands: tuple, body: tuple, accs: tuple[str, ...]) -> Fold:
-    """A reducing term over ``k`` — one ``⊕`` component per accumulator."""
-    bound = tuple(name for edge in operands for name in edge.exposes)
-    init, combine = (0.0,) * len(accs), Lambda.componentwise(("add",) * len(accs), accs)
-    return Fold(
-        operands=operands,
-        lift=Lambda.closing((K_AXIS.name, *bound), Body(body), tuple(f"{acc}__v" for acc in accs)),
-        init=init,
-        combine=combine,
-    )
-
-
 def _matmul() -> Fold:
-    a = _slab("l", "x", (Var("m"), Var("k")))
-    b = _slab("r", "w", (Var("k"), Var("n")))
-    return _reduce((a, b), (Assign(name="acc__v", op="multiply", args=("l", "r")),), ("acc",))
+    return contraction(K_AXIS, slab("l", "x", "m", "k"), (slab("r", "w", "k", "n"), "acc"))
 
 
 # --- a slab declares what a walk used to discover ------------------------------------------------ #
@@ -59,11 +35,10 @@ def _matmul() -> Fold:
 
 def test_a_slab_declares_the_coordinates_it_indexes() -> None:
     """The leaf binds its own coordinates, so nothing above it has to scan an index expression."""
-    slab = _slab("l", "x", (Var("m"), Var("k")))
-    assert slab.free_axes == {"m", "k"}
-    assert slab.free_axes == {"m", "k"}
-    assert slab.exposes == ("l",)
-    assert slab.as_slab() is not None
+    leaf = slab("l", "x", "m", "k")
+    assert leaf.free_axes == {"m", "k"}
+    assert leaf.exposes == ("l",)
+    assert leaf.as_slab() is not None
 
 
 def test_a_slab_lowers_to_exactly_its_load() -> None:
@@ -74,13 +49,13 @@ def test_a_slab_lowers_to_exactly_its_load() -> None:
 
 def test_a_slab_does_not_reduce() -> None:
     """``axes`` is an index space; ``combine`` is what makes an axis a REDUCTION."""
-    slab = _slab("l", "x", (Var("m"), Var("k")))
-    assert slab.free_axes and slab.axis is None
+    leaf = slab("l", "x", "m", "k")
+    assert leaf.free_axes and leaf.axis is None
 
 
 def test_a_computed_cone_is_not_a_slab() -> None:
-    cone = _projection(
-        (_slab("e", "x", (Var("m"), Var("k"))), _slab("s", "w", (Var("k"),))),
+    cone = projection(
+        (slab("e", "x", "m", "k"), slab("s", "w", "k")),
         (Assign(name="xhat", op="multiply", args=("e", "s")),),
         ("xhat",),
     )
@@ -101,16 +76,16 @@ def test_as_contraction_reads_the_shared_and_free_axes() -> None:
 
 def test_a_scale_is_not_a_contraction() -> None:
     """An operand that brings no ``k`` makes the fold a scale, not a bilinear cell."""
-    a = _slab("l", "x", (Var("m"), Var("k")))
-    scale = _slab("s", "s", (Var("m"),))
-    node = _reduce((a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",))
+    a = slab("l", "x", "m", "k")
+    scale = slab("s", "s", "m")
+    node = reduction(K_AXIS, (a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",))
     assert node.as_contraction() is None
     assert node.axis is not None
 
 
 def test_a_pointwise_term_has_no_view() -> None:
     """No axis to share, so nothing to read."""
-    assert _projection((_slab("l", "x", (Var("m"),)),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).as_contraction() is None
+    assert projection((slab("l", "x", "m"),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).as_contraction() is None
 
 
 # --- lowering ------------------------------------------------------------------------------------ #
@@ -126,9 +101,9 @@ def test_a_matmul_lowers_to_one_loop_with_both_operands_riding_the_step() -> Non
 
 def test_an_operand_that_does_not_index_the_axis_lowers_once_ahead_of_the_loop() -> None:
     """The hoist is a DECLARATION compared against an axis — no body walked for free names."""
-    a = _slab("l", "x", (Var("m"), Var("k")))
-    scale = _slab("s", "s", (Var("m"),))
-    stmts = _reduce((a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",)).lower(axes=SCOPE)
+    a = slab("l", "x", "m", "k")
+    scale = slab("s", "s", "m")
+    stmts = reduction(K_AXIS, (a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",)).lower(axes=SCOPE)
     hoisted, loop = stmts
     assert isinstance(hoisted, Load) and hoisted.input == "s"
     assert [stmt.input for stmt in loop.body if isinstance(stmt, Load)] == ["x"]
@@ -136,13 +111,14 @@ def test_an_operand_that_does_not_index_the_axis_lowers_once_ahead_of_the_loop()
 
 def test_the_combine_folds_one_accum_per_carried_component() -> None:
     """The fused gate⊗up shape: one loop, the shared A read once, an ``Accum`` per channel."""
-    shared = _projection(
-        (_slab("e", "x", (Var("m"), Var("k"))), _slab("sc", "w", (Var("k"),))),
+    shared = projection(
+        (slab("e", "x", "m", "k"), slab("sc", "w", "k")),
         (Assign(name="xhat", op="multiply", args=("e", "sc")),),
         ("xhat",),
     )
-    node = _reduce(
-        (shared, _slab("bg", "Wg", (Var("k"), Var("n"))), _slab("bu", "Wu", (Var("k"), Var("n")))),
+    node = reduction(
+        K_AXIS,
+        (shared, slab("bg", "Wg", "k", "n"), slab("bu", "Wu", "k", "n")),
         (
             Assign(name="acc_g__v", op="multiply", args=("xhat", "bg")),
             Assign(name="acc_u__v", op="multiply", args=("xhat", "bu")),
@@ -158,7 +134,7 @@ def test_the_combine_folds_one_accum_per_carried_component() -> None:
 
 def test_a_zero_axis_term_lowers_to_its_operands_then_its_body() -> None:
     """No axis, no monoid: the step IS the answer."""
-    stmts = _projection((_slab("l", "x", (Var("m"),)),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).lower(axes=SCOPE)
+    stmts = projection((slab("l", "x", "m"),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).lower(axes=SCOPE)
     assert [type(stmt).__name__ for stmt in stmts] == ["Load", "Assign"]
 
 
@@ -172,13 +148,14 @@ def test_every_buffer_the_term_touches_reaches_the_lowered_body() -> None:
             for body in stmt.nested():
                 yield from buffers(body)
 
-    shared = _projection(
-        (_slab("e", "x", (Var("m"), Var("k"))), _slab("sc", "w", (Var("k"),))),
+    shared = projection(
+        (slab("e", "x", "m", "k"), slab("sc", "w", "k")),
         (Assign(name="xhat", op="multiply", args=("e", "sc")),),
         ("xhat",),
     )
-    node = _reduce(
-        (shared, _slab("bg", "Wg", (Var("k"), Var("n")))),
+    node = reduction(
+        K_AXIS,
+        (shared, slab("bg", "Wg", "k", "n")),
         (Assign(name="acc_g__v", op="multiply", args=("xhat", "bg")),),
         ("acc_g",),
     )
@@ -192,8 +169,8 @@ def test_iteration_variables_are_not_captures() -> None:
     """The dominant names in any cone are induction variables, bound by the enclosing nest."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
 
-    cone = _projection(
-        (_slab("e", "x", (Var("m"), Var("k"))), _slab("s", "w", (Var("k"),))),
+    cone = projection(
+        (slab("e", "x", "m", "k"), slab("s", "w", "k")),
         (Assign(name="xhat", op="multiply", args=("e", "s")),),
         ("xhat",),
     )

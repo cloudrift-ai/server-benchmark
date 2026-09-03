@@ -281,7 +281,7 @@ def test_transposed_canonical_nest_orders_free_by_the_remainder_dim():
     assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
     node = tile.op
     assert node.axis is not None and node.as_contraction() is not None
-    assert isinstance(node.b, Load) and node.b.input == "w"
+    assert node.operands[1].as_slab().load.input == "w"
 
 
 def test_canonical_nest_classifies_as_contraction():
@@ -315,7 +315,7 @@ def test_canonical_nest_classifies_as_contraction():
     assert [a.extent for a in tile.place.free] == [Dim(M), Dim(H * D)]
     node = tile.op
     assert node.axis is not None and node.as_contraction() is not None
-    assert isinstance(node.b, Load) and node.b.input == "w"
+    assert node.operands[1].as_slab().load.input == "w"
 
 
 # --- the warp tier's split-store addressability --------------------------------------------------- #
@@ -371,36 +371,35 @@ def test_warp_roles_move_only_the_innermost_carrier():
 # --- operand role purity and product orientation (restored) --------------------------------------- #
 
 
-def _bilinear_fold(w_index: tuple, x_index: tuple, product: str = "multiply"):
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
+def _bilinear_fold(w_index: tuple, x_index: tuple, product: str = "multiply", swapped: bool = False):
+    """The lifted ``Σ_k w ⊗ x`` cell; ``swapped`` spells the loads and the product's arguments the other way round."""
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
+    loads = (Load(name="wv", input="w", index=w_index), Load(name="xv", input="x", index=x_index))
+    args = ("wv", "xv")
+    if swapped:
+        loads, args = loads[::-1], args[::-1]
     loop = Loop(
         axis=Axis("k", Dim(K)),
         body=Body(
             (
-                Load(name="wv", input="w", index=w_index),
-                Load(name="xv", input="x", index=x_index),
-                Assign(name="prod", op=ElementwiseImpl(product), args=("wv", "xv")),
+                *loads,
+                Assign(name="prod", op=ElementwiseImpl(product), args=args),
                 Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
             )
         ),
     )
-    return fold_from_loop(_stamp_axes(loop))
+    return fold_from_loop(loop)
 
 
 def _bind(fold, free_names):
-    """Canonicalize the lifted fold under ``free_names``; return the contraction, or ``None`` when
-    the tree keeps its PLANAR reading (the decline every negative case below asserts)."""
-    from emmy.compiler.ir.pure.fold import Fold, is_contraction
+    """The lifted fold as the term a kernel over ``free_names`` schedules; the contraction, or ``None``
+    when the term keeps its PLANAR reading (the decline every negative case below asserts)."""
     from emmy.compiler.ir.tile import Placement
 
-    tile = TileOp(op=Fold.projection(body=Body((fold,))), place=Placement(free=tuple(Axis(n, Dim(4)) for n in free_names)))
-    root = tile.op
-    if is_contraction(root):
-        return root
-    inner = [s for s in root.lift.body if isinstance(s, Fold) and is_contraction(s)]
-    inner += [o for o in root.operands if isinstance(o, Fold) and is_contraction(o)]
-    return inner[0] if inner else None
+    free = tuple(Axis(n, Dim(4)) for n in free_names)
+    root = TileOp(op=fold, place=Placement(free=free), axes=(*free, Axis("k", Dim(K)))).op
+    return root if root.as_contraction() is not None else None
 
 
 def test_bilinear_batched_operand_still_binds():
@@ -412,7 +411,7 @@ def test_bilinear_batched_operand_still_binds():
     pair with the offset still spelled in A's index."""
     con = _bind(_bilinear_fold((Var("n"), Var("k")), (Var("b"), Var("a0"), Var("k"))), ("a0", "n"))
     assert con is not None, "the batched GEMM demoted to PLANAR"
-    assert isinstance(con.a, Load) and con.a.input == "x"
+    assert con.operands[0].as_slab().load.input == "x"
 
 
 def test_bilinear_declines_composite_role_expr():
@@ -423,8 +422,8 @@ def test_bilinear_declines_composite_role_expr():
     comp = BinaryExpr("+", BinaryExpr("*", Var("a1"), Literal(D, "int")), Var("n"))
     con = _bind(_bilinear_fold((comp, Var("k")), (Var("b"), Var("a0"), Var("k"))), ("b", "a1", "a0", "n"))
     if con is not None:
-        for channel in con.channels:
-            assert not isinstance(channel.b, Load), "the impure composite must not become a direct slab load"
+        for edge in con.operands[1:]:
+            assert edge.as_slab() is None, "the impure composite must not become a direct slab load"
 
 
 def test_bilinear_binding_is_independent_of_the_product_argument_order():
@@ -441,12 +440,11 @@ def test_bilinear_binding_is_independent_of_the_product_argument_order():
 
     forward = _bind(_bilinear_fold(w_index, x_index), ("h", "m", "n"))
     assert forward is not None, "the grouped value row demoted to PLANAR"
-    assert isinstance(forward.a, Load) and forward.a.input == "x"
+    assert forward.operands[0].as_slab().load.input == "x"
 
-    swapped = _bilinear_fold(w_index, x_index)
-    reversed_products = _bind(swapped, ("h", "m", "n"))
+    reversed_products = _bind(_bilinear_fold(w_index, x_index, swapped=True), ("h", "m", "n"))
     assert reversed_products is not None
-    assert reversed_products.structural_key() == forward.structural_key()
+    assert reversed_products.canonical() == forward.canonical()
 
 
 def test_bilinear_rejects_grouped_b_that_changes_with_the_row():

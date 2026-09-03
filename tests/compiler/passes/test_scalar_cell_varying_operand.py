@@ -22,6 +22,7 @@ from emmy.compiler.ir.schedule import Tile
 from emmy.compiler.ir.stmt import Assign, Body, Load, Stmt, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
+from tests.compiler.terms import contraction, projection
 
 _M, _N, _K = Axis("m", 8), Axis("n", 8), Axis("k", 4)
 _PLAN = Tile(units=(2, 2), regs=(2, 2))  # a scalar 2×2 thread tile of 2×2 register cells
@@ -33,23 +34,26 @@ def _a_load() -> Load:
 
 
 def _b_load() -> Load:
-    return Load(name="b", input="B", index=(Var("n"), Var("k")))
+    """The ordinary B edge, ``k``-major — a ``k``-last slab beside a computed edge would be read as
+    the pair's A by formation, and these pin what the A side of the tile does with a computed A."""
+    return Load(name="b", input="B", index=(Var("k"), Var("n")))
 
 
 def _cone(name: str, buf: str, index: tuple) -> Fold:
     """A computed operand edge (an inline producer cone) whose load carries ``index`` — the o_proj
     shape's broadcast A when ``index`` mentions n."""
-    body = Body((Load(name=f"{name}_l", input=buf, index=index), Assign(name=name, op="multiply", args=(f"{name}_l", f"{name}_l"))))
-    return Fold.projection(body=body)
+    return projection(
+        (), (Load(name=f"{name}_l", input=buf, index=index), Assign(name=name, op="multiply", args=(f"{name}_l", f"{name}_l")))
+    )
 
 
 def _tile(a, b):
     """The scalar contraction ``a ⊗ b`` bound to the grid — the ``Tile`` and its ``(m, n)`` sides."""
-    c = Fold.contraction(k_axis=_K, a=a, channels=(Channel(b=b, acc="acc"),))
+    c = contraction(_K, a, (b, "acc"))
     plan = _PLAN.at(_M, _N)
     mn = plan.mn
-    state, reduce_region = reduce_codegen(c, plan)
-    epilogue = Body((Write(output="out", index=(Var("m"), Var("n")), value=c.acc),))
+    state, reduce_region = reduce_codegen(c, plan, k_axis=_K, axes=(_M, _N, _K))
+    epilogue = Body((Write(output="out", index=(Var("m"), Var("n")), value=c.combine.results[0]),))
     return grid_tile(
         unit_tile(register_tile(atomize(plan.atom.shape[:2]), mn), mn),
         mn=mn,
@@ -57,7 +61,7 @@ def _tile(a, b):
         lanes=plan.atom.lanes,
         state_decls=state,
         reduce_region=reduce_region,
-        store=store_sink(c, plan, epilogue),
+        store=store_sink(c, plan, epilogue, k_axis=_K, axes=(_M, _N, _K)),
     ), mn
 
 

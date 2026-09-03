@@ -30,7 +30,6 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp
-from emmy.compiler.ir.pure.fold import Fold, is_contraction
 from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule import classic_projection as sched
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
@@ -38,6 +37,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
 from tests.compiler.helpers import requires_cuda
+from tests.compiler.terms import contraction, projection
 
 K32 = "mma_m16n8k32_e4m3_f32"
 
@@ -53,15 +53,15 @@ def _bind(loop, m: str = "m", n: str = "n"):
 
     fold = fold_from_loop(_stamp_axes(loop))
     assert fold is not None, "the dequant loop must lift"
-    tile = TileOp(op=Fold.projection(body=Body((fold,))), place=TilePlacement(free=(Axis(m, Dim(64)), Axis(n, Dim(64)))))
+    free = (Axis(m, Dim(64)), Axis(n, Dim(64)))
+    tile = TileOp(op=projection((fold,)), place=TilePlacement(free=free), axes=(*free, loop.axis))
     root = tile.op
-    if is_contraction(root):
-        return root.a, root.b, root.acc, ()
-    inner = [s for s in root.lift.body if isinstance(s, Fold) and is_contraction(s)]
-    inner += [o for o in root.operands if isinstance(o, Fold) and is_contraction(o)]
+    if root.as_contraction() is not None:
+        return root.operands[0], root.operands[1], root.combine.results[0], ()
+    inner = [edge for edge in root.operands if edge.as_contraction() is not None]
     assert inner, "the W8A8 shape must canonicalize to a contraction, not PLANAR"
     con = inner[0]
-    return con.a, con.b, con.acc, tuple(s for s in root.lift.body if s is not con)
+    return con.operands[0], con.operands[1], con.combine.results[0], tuple(root.lift.body)
 
 
 def _w8a8_loop(*, a_scale=True, b_scale=True):
@@ -98,8 +98,8 @@ def test_a_side_decode_scale_binds_raw_with_hoist():
     """A decode-times-factor cone on the A side (B a bare decode) binds A as the RAW f8 load with
     the activation scale hoisted to the epilogue."""
     a, b, _acc, epi = _bind(_w8a8_loop(b_scale=False))
-    assert isinstance(a, Load) and a.input == "a_bits"
-    assert isinstance(b, Load) and b.input == "w_bits"
+    assert a.as_slab() is not None and a.as_slab().load.input == "a_bits"
+    assert b.as_slab() is not None and b.as_slab().load.input == "w_bits"
     tail = [s for s in epi if isinstance(s, Assign)]
     assert tail and tail[-1].op.name == "multiply", "the activation scale did not hoist"
 
@@ -108,8 +108,8 @@ def test_double_cone_hoists_both_scales():
     """The W8A8 shape: BOTH operands ride decode-times-factor cones — both bind raw, and the two
     scale factors compose into one epilogue chain on the accumulator."""
     a, b, _acc, epi = _bind(_w8a8_loop())
-    assert isinstance(a, Load) and a.input == "a_bits"
-    assert isinstance(b, Load) and b.input == "w_bits"
+    assert a.as_slab() is not None and a.as_slab().load.input == "a_bits"
+    assert b.as_slab() is not None and b.as_slab().load.input == "w_bits"
     assigns = [s for s in epi if isinstance(s, Assign)]
     assert assigns and {s.op.name for s in assigns} == {"multiply"}
     assert {s.input for s in epi if isinstance(s, Load)} == {"act_scale", "w_scale"}
@@ -118,8 +118,8 @@ def test_double_cone_hoists_both_scales():
 def test_bare_double_decode_binds_raw_without_epilogue():
     """Two bare decodes and no factors: both operands are raw f8 loads, nothing hoists."""
     a, b, _acc, epi = _bind(_w8a8_loop(a_scale=False, b_scale=False))
-    assert isinstance(a, Load) and a.input == "a_bits"
-    assert isinstance(b, Load) and b.input == "w_bits"
+    assert a.as_slab() is not None and a.as_slab().load.input == "a_bits"
+    assert b.as_slab() is not None and b.as_slab().load.input == "w_bits"
     assert not [s for s in epi if isinstance(s, Assign)]
 
 
@@ -201,19 +201,19 @@ def _f8_term(cap=(12, 0), *, a_dtype=F8E4M3, b_dtype=F8E4M3, k=512):
     ka = Axis("k", Dim(k))
     a = Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=a_dtype)
     b = Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=b_dtype)
-    node = Fold.contraction(k_axis=ka, a=a, channels=(Channel(b=b, acc="acc"),))
+    node = contraction(ka, a, (b, "acc"))
     inputs = {"a_bits": Tensor("a_bits", (32, k), a_dtype), "w_bits": Tensor("w_bits", (k, 512), b_dtype)}
-    tile = TileOp(op=node, name="lin", place=Placement(free=(Axis("m", Dim(32)), Axis("n", Dim(512)))), inputs=inputs)
+    free = (Axis("m", Dim(32)), Axis("n", Dim(512)))
+    tile = TileOp(op=node, name="lin", place=Placement(free=free), axes=(*free, ka), inputs=inputs)
     return tile, Context.from_target(cap), node
 
 
 def _offered_atoms(tile, ctx, node):
     """The tensor-core atom domain projected from the node and target static facts."""
-    from emmy.compiler.ir.schedule.packing import match_packed_b_node, match_packed_pair_node
     from emmy.compiler.ir.tile.ops import projection_tail
 
     tail = projection_tail(tile)
-    packed = (match_packed_b_node(node, tile.inputs), match_packed_pair_node(node, tile.inputs))
+    packed = tile.packed_reading(node)
     if sched._node_refusal(tile, ctx, node, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op)), packed) is not None:
         return ()
     return sched._atom_families(tile, ctx, node, tail, packed)
@@ -242,12 +242,7 @@ def test_k32_enumeration_structural_requirements(monkeypatch):
     assert _offered_atoms(*_f8_term(cap=(8, 6))) == ()
     # a symbolic K declines — no masked-K byte gather
     plan = Tile.parse(f"{K32}/f2x2/k2", Work.parse("w1x8"))
-    sym = Fold.contraction(
-        k_axis=Axis("k", Dim("seq")),
-        a=Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=F8E4M3),
-        channels=(Channel(b=Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3), acc="acc"),),
-    )
-    assert sched._kstep_refusal(sym.axis, plan) is not None
+    assert sched._kstep_refusal(Axis("k", Dim("seq")), plan) is not None
 
 
 def test_k32_never_offered_on_16bit_operands(monkeypatch):
@@ -271,7 +266,7 @@ def test_f8_atoms_offer_staged_byte_slabs():
     tile = Tile.parse(f"{K32}/f4x1/k4", Work.parse("w1x8")).at(Axis("m", Dim(512)), Axis("n", Dim(512)))
     inputs = {"a_bits": Tensor("a_bits", (512, 512), F8E4M3), "w_bits": Tensor("w_bits", (512, 512), F8E4M3)}
     for spec in ("d2/smem-async", "d2/smem-tma"):
-        assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs) is not None
+        assert resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs, k_axis=_tile.axis_of("k")) is not None
 
 
 # ===================================================================

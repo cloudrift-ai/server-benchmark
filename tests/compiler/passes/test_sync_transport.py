@@ -4,7 +4,6 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.kernel.ir import Smem, pack_smem, swizzle_fn, swizzle_xor
-from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile.ops import cone_stat
@@ -17,52 +16,34 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     slab_smem,
     software_swizzle,
 )
+from tests.compiler.terms import projection, reduction, slab
 
 
-def _sum_fold(axis: str, acc: str) -> Fold:
+def _sum_fold(axis: str, acc: str, *index: str) -> Fold:
+    """``acc = Σ_axis x[index]`` — a plain sum over one slab."""
     value = f"{acc}_value"
-    return Fold(
-        axis=Axis(axis, 4),
-        lift=Lambda(
-            params=(axis,),
-            body=Body((Load(name=value, input="x", index=(Var(axis),)),)),
-            results=(value,),
-        ),
-        init=(0.0,),
-        combine=Lambda(
-            params=(acc, f"{acc}__o"),
-            body=Body((Assign(name=acc, op="add", args=(acc, f"{acc}__o")),)),
-            results=(acc,),
-        ),
-    )
+    return reduction(axis, (slab(value, "x", *index),), (Assign(name=f"{acc}__v", op="copy", args=(value,)),), (acc,))
 
 
 def test_cone_stat_follows_the_first_top_level_reduce_in_lowering_order() -> None:
     """The stat algebra must belong to the first reduce ``Loop`` that the cone prologue lowers.
 
-    Attention can place its softmax statistic directly in a zero-axis projection body, while the
-    norm→linear form reaches its statistic through a projection operand. A reduction nested inside
-    the first top-level fold must not win merely because a recursive tree walk encounters it.
+    Attention's prologue passes its softmax statistic straight through, while the norm→linear form
+    reaches its statistic through a chain over the operand. A reduction nested inside the first
+    top-level fold — an operand of it, evaluated over its axis — must not win merely because a
+    recursive tree walk encounters it.
     """
-    nested = _sum_fold("nested", "nested_acc")
-    first = Fold(
-        axis=Axis("first", 4),
-        lift=Lambda(params=("first",), body=Body((nested,)), results=(nested.out,)),
-        init=(0.0,),
-        combine=Lambda(
-            params=("first_acc", "first_acc__o"),
-            body=Body((Assign(name="first_acc", op="add", args=("first_acc", "first_acc__o")),)),
-            results=("first_acc",),
-        ),
-    )
-    body_prologue = Fold.projection(body=Body((first,)))
-    body_cone = Fold.projection(body=Body((Assign(name="cell", op="copy", args=(first.out,)),)), operands=(body_prologue,))
-    assert cone_stat(body_cone) is first
+    nested = _sum_fold("nested", "nested_acc", "first", "nested")
+    first = reduction("first", (nested,), (Assign(name="first_acc__v", op="copy", args=("nested_acc",)),), ("first_acc",))
+    axes = (Axis("first", 4), Axis("nested", 4))
+    body_prologue = projection((first,))
+    body_cone = projection((body_prologue,), (Assign(name="cell", op="copy", args=("first_acc",)),))
+    assert cone_stat(body_cone, axes) is first
 
-    operand_stat = _sum_fold("operand", "operand_acc")
-    operand_prologue = Fold.projection(body=Body((Assign(name="scale", op="copy", args=(operand_stat.out,)),)), operands=(operand_stat,))
-    operand_cone = Fold.projection(body=Body((Assign(name="cell", op="copy", args=("scale",)),)), operands=(operand_prologue,))
-    assert cone_stat(operand_cone) is operand_stat
+    operand_stat = _sum_fold("operand", "operand_acc", "operand")
+    operand_prologue = projection((operand_stat,), (Assign(name="scale", op="copy", args=("operand_acc",)),))
+    operand_cone = projection((operand_prologue,), (Assign(name="cell", op="copy", args=("scale",)),))
+    assert cone_stat(operand_cone, (Axis("operand", 4),)) is operand_stat
 
 
 def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:

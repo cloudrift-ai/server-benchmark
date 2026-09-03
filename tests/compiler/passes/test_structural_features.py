@@ -132,6 +132,7 @@ def test_extents_split_free_vs_reduce():
 
 
 def test_extent_products_saturate_without_building_unbounded_integers():
+    # A loop is a reduce iff its body carries an ``Accum``: the two inner loops fold, the outer is free.
     body = Body(
         (
             Loop(
@@ -139,7 +140,10 @@ def test_extent_products_saturate_without_building_unbounded_integers():
                 body=(
                     Loop(
                         axis=Axis("middle", 10**200),
-                        body=(Loop(axis=Axis("inner", 10**200), body=()),),
+                        body=(
+                            Loop(axis=Axis("inner", 10**200), body=(Accum(name="acc", value="x", axes=("inner",)),)),
+                            Accum(name="tot", value="acc", axes=("middle",)),
+                        ),
                     ),
                 ),
             ),

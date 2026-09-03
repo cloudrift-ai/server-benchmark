@@ -11,14 +11,15 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import Site, _spellings, canonical, parse_key, resolve, sites, spell
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from tests.compiler.terms import contraction, projection
 
 
 def _contraction_fold(k_name: str = "k", *, a=None, n_name: str = "n", acc: str = "acc0", w: str = "W") -> Fold:
-    """A stored a bilinear ``Fold`` (1s) — pure algebra, no placement/schedule fields."""
-    return Fold.contraction(
-        k_axis=Axis(k_name, 256),
-        a=a if a is not None else Load(name="a_e", input="A", index=(Var("m"), Var(k_name))),
-        channels=(Channel(b=Load(name="b_e", input=w, index=(Var(k_name), Var(n_name))), acc=acc),),
+    """A stored bilinear ``Fold`` — pure algebra, no placement/schedule fields."""
+    return contraction(
+        k_name,
+        a if a is not None else Load(name="a_e", input="A", index=(Var("m"), Var(k_name))),
+        (Load(name="b_e", input=w, index=(Var(k_name), Var(n_name))), acc),
     )
 
 
@@ -39,23 +40,21 @@ def _planar_fold(k_name: str = "k", *, acc: str = "s0", val: str = "v1", load: s
 
 
 def _cone(stat: Fold, out: str = "xn") -> Fold:
-    """The norm→linear cone shape: ``Fold.projection(body=normalize, operands=(Fold.projection(body=sweep, operands=(stat,)),))``."""
-    pro = Fold.projection(body=Body((Assign(name="rr", op="rsqrt", args=(stat.out,)),)), operands=(stat,))
-    cell = Body(
-        (
-            Load(name="xc", input="x", index=(Var("m"), Var("k"))),
-            Assign(name=out, op="multiply", args=("xc", "rr")),
-        )
+    """The norm→linear cone shape: the normalize cell over the sweep projection over the stat."""
+    pro = projection((stat,), (Assign(name="rr", op="rsqrt", args=(stat.exposes[0],)),))
+    cell = (
+        Load(name="xc", input="x", index=(Var("m"), Var("k"))),
+        Assign(name=out, op="multiply", args=("xc", "rr")),
     )
-    return Fold.projection(body=cell, operands=(pro,))
+    return projection((pro,), cell)
 
 
 def _norm_linear_tree() -> tuple[Fold, Fold, Fold]:
-    """``Fold.projection(proj, operands=(product,))`` — the product fold's shared-A edge is the cone, whose
-    prologue wraps the stat fold; the stat reduces the SAME ``k`` name the product contracts."""
+    """A root projection over the product fold, whose shared-A edge is the cone, whose prologue
+    wraps the stat fold; the stat reduces the SAME ``k`` name the product contracts."""
     stat = _planar_fold("k")
     product = _contraction_fold("k", a=_cone(stat))
-    root = Fold.projection(operands=(product,))
+    root = projection((product,))
     return root, product, stat
 
 
@@ -107,9 +106,13 @@ def test_walker_enumerates_paths_axes_and_ordinals() -> None:
     by_node = {id(s.node): s for s in sites(root)}
     assert by_node[id(product)].segments == ("map", "fold")
     assert by_node[id(product)].axis == "k"
-    assert by_node[id(stat)].segments == ("map", "fold", "a", "map", "fold")
+    assert by_node[id(stat)].segments == ("map", "fold", "map", "map", "fold")
     assert by_node[id(stat)].axis == "k"
-    assert all(s.ordinal == 1 for s in sites(root))
+    # Every operand is a site, a slab included: the product's cone and its B slab share a path and
+    # take ordinals in stored order; the reducing sites are unique on theirs.
+    cone, b_slab = (by_node[id(edge)] for edge in product.operands)
+    assert cone.segments == b_slab.segments == ("map", "fold", "map") and (cone.ordinal, b_slab.ordinal) == (1, 2)
+    assert by_node[id(product)].ordinal == by_node[id(stat)].ordinal == 1
 
 
 def test_site_is_a_frozen_value() -> None:
@@ -125,10 +128,10 @@ def test_exact_full_path_outranks_deeper_subsequence_matches() -> None:
     shallow1 = _planar_fold("a1", acc="s0", val="v1", load="x")
     shallow2 = _planar_fold("a1", acc="t0", val="w1", load="z")
     deep_inner = _planar_fold("a1", acc="u0", val="q1", load="y")
-    deep = Fold.projection(body=Body((Assign(name="d", op="add", args=(deep_inner.out, "one")),)), operands=(deep_inner,))
-    root = Fold.projection(
-        body=Body((Assign(name="o", op="add", args=(shallow1.out, shallow2.out)), Assign(name="p", op="add", args=("o", "d")))),
-        operands=(shallow1, shallow2, deep),
+    deep = projection((deep_inner,), (Assign(name="d", op="add", args=(deep_inner.exposes[0], "one")),))
+    root = projection(
+        (shallow1, shallow2, deep),
+        (Assign(name="o", op="add", args=(shallow1.exposes[0], shallow2.exposes[0])), Assign(name="p", op="add", args=("o", "d"))),
     )
     for node in (shallow1, shallow2, deep_inner):
         key = spell(root, "PLACE", node)
@@ -153,23 +156,26 @@ def test_exact_full_path_uses_the_ordinal_reading_that_matched() -> None:
 
 
 def test_tile_axis_orientation_is_read_once_per_site(monkeypatch) -> None:
-    """Candidate plans share a site's output-axis orientation; the computed cone lowers once."""
+    """Candidate plans share a site's output-axis orientation: placement is a site fact, derived
+    once and memoized, however many plans ask."""
     from emmy.compiler.ir.tile import Placement
     from emmy.compiler.ir.tile import ops as tile_ops
 
-    root, product, _ = _norm_linear_tree()
+    root, _, _ = _norm_linear_tree()
     calls = []
-    original = tile_ops.edge_axes
+    original = tile_ops.Sched._derive_mn
 
-    def spy(edge, axes):
-        calls.append(edge)
-        return original(edge, axes)
+    def spy(sched, node):
+        calls.append(node)
+        return original(sched, node)
 
-    monkeypatch.setattr(tile_ops, "edge_axes", spy)
+    monkeypatch.setattr(tile_ops.Sched, "_derive_mn", spy)
     axes = (Axis("m", 128), Axis("n", 256))
-    sched = tile_ops.Sched(TileOp(op=root), place=Placement(free=axes, grid=axes))
+    tile = TileOp(op=root, axes=(*axes, Axis("k", 256)))
+    product = tile_ops.head(tile.op)  # the identity wrapper over the product dissolves at construction
+    sched = tile_ops.Sched(tile, place=Placement(free=axes, grid=axes))
     assert sched._mn_for(product) == axes
     assert sched._mn_for(product) == axes
-    # both output axes are answered by ONE reading of the edge, and the site memo keeps the second
+    # both output axes are answered by ONE derivation, and the site memo keeps the second
     # ``_mn_for`` from asking again
     assert len(calls) == 1

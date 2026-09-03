@@ -6,8 +6,6 @@ value."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from emmy.compiler.dim import Dim
@@ -24,11 +22,10 @@ from emmy.compiler.ir.tile.path import family_sites, sites
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-from emmy.compiler.pipeline.search.golden import _lifted_target, load_golden_file, load_golden_records
+from tests.compiler.helpers import case_target_tile
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 M8, N16, K32 = Axis("m", 8), Axis("n", 16), Axis("k", Dim(32))
-CASES = Path(__file__).parents[2] / "realization/cases"
 
 
 def _lift(body: Body) -> TileOp:
@@ -203,9 +200,7 @@ def test_matvec_recovers_an_implicit_unit_row_through_an_output_reshape() -> Non
 
 def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
     """The reduced Qwen3 target needs its promoted value-width axis to close computed B."""
-    (record,) = load_golden_records(load_golden_file(CASES / "attention/rmsnorm-gqa-b-cut.yaml"))
-
-    tile = _lifted_target(record)
+    tile = case_target_tile("attention/rmsnorm-gqa-b-cut.yaml")
     reconstructed = TileOp(op=tile.op, name=tile.name, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
 
     assert tuple(axis.name for axis in tile.place.free) == ("a0", "a1", "a6")
@@ -303,8 +298,7 @@ def test_normalization_shares_structurally_identical_cones() -> None:
     sites (attention's softmax statistics, once in the weight cone and once in the epilogue) are
     one object, so placement sees one value and a composed cut materializes it once. Severed
     sharing is the recompute class PR #679 measured at three orders of magnitude."""
-    (record,) = load_golden_records(load_golden_file(CASES / "attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml"))
-    tile = _lifted_target(record)
+    tile = case_target_tile("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
 
     by_identity = {id(site.node): site.node for site in sites(tile.op)}
     by_value: dict[tuple, list[Fold]] = {}

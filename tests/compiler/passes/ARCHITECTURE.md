@@ -47,8 +47,10 @@ tests/compiler/passes/
 ```
 
 `tests/compiler/helpers.py` exposes `matmul_graph(m, k, n)` — the shared (m,k)@(k,n)→(m,n) graph builder used by the
-lowering / backend / e2e tests — plus the `requires_cuda` skip marker. `tests/compiler/conftest.py` owns the
-`run_graph` parametrized fixture.
+lowering / backend / e2e tests — plus `case_target_tile(case)`, which lifts a realization corpus case's target for the
+tests that schedule a real attention tree, and the `requires_cuda` skip marker. A case records one entry per kernel of
+the set it realizes, so a test reads the case's target through that helper rather than asserting the file holds one
+entry. `tests/compiler/conftest.py` owns the `run_graph` parametrized fixture.
 
 ## Covered Rules
 

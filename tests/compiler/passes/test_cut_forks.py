@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from importlib import import_module
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -38,13 +37,11 @@ from emmy.compiler.pipeline.search.golden import (
     _replay,
     decode_record,
     kernel_identity,
-    load_golden_file,
-    load_golden_records,
     validate_golden_file,
 )
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
-from tests.compiler.helpers import direct_classic_leaf, requires_cuda
+from tests.compiler.helpers import case_target_tile, direct_classic_leaf, requires_cuda
 from tests.compiler.terms import contraction, projection
 
 _CTX = Context.from_target((12, 0))
@@ -190,17 +187,20 @@ def _lower_cut(graph: Graph, spelling: str) -> Graph:
     return _lower(graph, {spelling: "cut"})
 
 
-def _nested_attention_cut(pins: dict[str, str]) -> Graph:
-    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-gqa-b-cut.yaml"
-    (record,) = load_golden_records(load_golden_file(case))
-    tile = _lifted_target(record)
+def _case_match(case: str) -> tuple[Match, Graph]:
+    """A one-node match on a corpus case's lifted target — the fork point the cut pass rewrites."""
+    tile = case_target_tile(case)
     graph = Graph()
     for name, tensor in tile.inputs.items():
         graph.add_node(InputOp(), [], tensor, node_id=name)
     graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
-    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    return Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[])), graph
+
+
+def _nested_attention_cut(pins: dict[str, str]) -> Graph:
+    match, graph = _case_match("attention/rmsnorm-gqa-b-cut.yaml")
     with pinned_knobs(pins):
-        result = _CUT.rewrite(match, graph.nodes[tile.name])
+        result = _CUT.rewrite(match, graph.nodes[match.root_node_id])
     options = result if isinstance(result, list) else [result]
     cut = next(option for option in options if "cut" in option.knobs.values())
     return cut.expand()[0]
@@ -365,14 +365,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     seam and one consumer, with a producer reading another seam's workspace when its value nests
     inside it — while a pin whose site path exists on no kernel here is another kernel's and is
     skipped, never an error."""
-    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml"
-    (record,) = load_golden_records(load_golden_file(case))
-    tile = _lifted_target(record)
-    graph = Graph()
-    for name, tensor in tile.inputs.items():
-        graph.add_node(InputOp(), [], tensor, node_id=name)
-    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
-    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
     pins = {
         "PLACE@map.1/twist.1/inner.1/map": "cut",  # the normalized-Q cone
         "PLACE@map.1/twist.1/inner.2/map": "cut",  # the normalized-K cone
@@ -380,7 +373,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
         "PLACE@map.9/map": "cut",  # no such site here — another kernel's pin
     }
     with pinned_knobs(pins):
-        fork = _CUT.rewrite(match, graph.nodes[tile.name])
+        fork = _CUT.rewrite(match, graph.nodes[match.root_node_id])
     assert set(fork.knobs) == {
         "PLACE@map.1/twist.1/inner.1/map",
         "PLACE@map.1/twist.1/inner.2/map",
@@ -396,7 +389,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
-    match, graph = _composed_case_match()
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
     pins = {"PLACE": "cut", "PLACE@map.1/twist.1/inner.2/map": "cut"}
 
     with pinned_knobs(pins):
@@ -406,17 +399,6 @@ def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     assert len(pieces) == 3 and all(node.op.placement_decided for node in pieces)
-
-
-def _composed_case_match() -> tuple[Match, Graph]:
-    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml"
-    (record,) = load_golden_records(load_golden_file(case))
-    tile = _lifted_target(record)
-    graph = Graph()
-    for name, tensor in tile.inputs.items():
-        graph.add_node(InputOp(), [], tensor, node_id=name)
-    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
-    return Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[])), graph
 
 
 def _receipt_fields() -> dict:
@@ -582,7 +564,7 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
 def test_every_seam_is_an_unpinned_arm() -> None:
     """The unpinned fork offers every cuttable seam as its own structural arm, spelled by the same
     key the pin path resolves."""
-    match, graph = _composed_case_match()
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
     options = _CUT.rewrite(match, node)
     arms = [dict(option.knobs) for option in options if "cut" in option.knobs.values()]

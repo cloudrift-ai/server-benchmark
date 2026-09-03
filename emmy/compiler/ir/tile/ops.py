@@ -306,12 +306,19 @@ class Sched:
         ancestors = tuple(candidate for candidate in self._all_sites() if site.under(candidate))
 
         def orient(mn):
-            # The first operand's own free axis leads — ``ContractionView.left``, which IS that
-            # reading. Which of the pair is physically M stays the placement's answer; this only
-            # puts the shared operand's axis first.
+            # The pair is each side's own free axis, the first operand's leading — the placement
+            # binds both, and a sibling output's sweep promoted beside them (the fused q/k/v
+            # projections, N 64 beside N 32) never stands in for either. With several own axes a
+            # side the trailing one is the role and the rest ride the grid; a side without one
+            # (the unit-row matvec) leaves the trailing pair to the placement.
             view = node.as_contraction()
             if mn is None or view is None:
                 return mn
+            order = {axis.name: (position, axis) for position, axis in enumerate((*self.place.free, *self.place.grid))}
+            left = max((order[name] for name in view.left_axes if name in order), default=None)
+            right = max((order[name] for name in view.right_axes if name in order), default=None)
+            if left is not None and right is not None:
+                return (left[1], right[1])
             first, second = mn
             return (second, first) if second.name == view.left and first.name != view.left else mn
 

@@ -354,6 +354,7 @@
  "tests/compiler/passes/test_pipeline_semantics.py::test_scan_sum_lifts_and_preserves_prefix_values": 0.05,
  "tests/compiler/passes/test_placement_routing.py::test_contraction_operand_seam_takes_the_output_dtype": 17.23,
  "tests/compiler/passes/test_placement_routing.py::test_norm_linear_each_closed_cone_pin_lowers[PLACE@a1]": 0.95,
+ "tests/compiler/passes/test_placement_routing.py::test_norm_linear_each_closed_cone_pin_lowers[PLACE@inner.1/map]": 5.8,
  "tests/compiler/passes/test_placement_routing.py::test_norm_linear_each_closed_cone_pin_lowers[PLACE@map]": 0.48,
  "tests/compiler/passes/test_placement_routing.py::test_norm_linear_each_closed_cone_pin_lowers[PLACE]": 2.39,
  "tests/compiler/passes/test_placement_routing.py::test_pin_naming_no_seam_here_decides_fuse[cut]": 0.06,

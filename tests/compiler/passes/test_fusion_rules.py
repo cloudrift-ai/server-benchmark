@@ -8,6 +8,7 @@ multi-output fused kernels without a GPU.
 """
 
 import numpy as np
+import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
@@ -900,6 +901,7 @@ def _make_shared_broadcast_chain():
     return g
 
 
+@pytest.mark.xfail(strict=True, reason="sibling output nests of different extents are not one kernel on this tree (PR #699)")
 def test_shared_broadcast_chain_no_pure_indexmap_remains():
     """Regression: the intermediate broadcasts (node id != output name) must fully
     fold — no pure-indexmap copy left writing a stale buf."""

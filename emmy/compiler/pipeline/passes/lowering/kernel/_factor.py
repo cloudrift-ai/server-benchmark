@@ -174,11 +174,27 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         # carrier) lowers the root again inside itself; a root the reduce arms bind ONCE at the kernel's
         # top level drops its statements from the sibling's lowering here. A TILED root replicates its
         # cone per register row inside its K loop, where the sibling's read could not reach, so the
-        # sibling keeps its own copy of what they share (a norm statistic recomputed serially per cell).
+        # sibling keeps its own copy of what they share (a norm statistic over the root's columns,
+        # recomputed serially per cell) — under its OWN names: the tiled root's cell accumulators are
+        # spelled ``acc__c{i}_{j}`` off the same ``acc``, and a per-cell copy of the sibling's ``acc``
+        # would land on that name and overwrite the cell's own column with the sibling's last.
         axes = ctx.sched.tile.axes
-        placed = set(root.lower(axes=axes)) if ctx.sched.tile_of(root) is None else set()
-        siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes) if stmt not in placed]
-        proj = list(dict.fromkeys([*siblings, *op.step()]))
+        step = list(op.step())
+        reducing = _peeled_root(root, ctx)
+        aside_copies = False
+        if reducing is None or reducing.as_contraction() is None or ctx.sched.tile_of(reducing) is None:
+            placed = set(root.lower(axes=axes))
+            siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes) if stmt not in placed]
+        else:
+            aside_copies = True
+            # The root's results keep their names (the cell's own accumulators, the values its step
+            # defines per cell); everything else its lowering defines — the cone's statistic a
+            # sibling shares — is read through the sibling's copy, by the step too.
+            own = {name for stmt in root.lower(axes=axes) for name in stmt.defines()} - set(root.exposes)
+            aside = lambda name: f"{name}__aside" if name in own else name  # noqa: E731
+            siblings = [stmt.rename(aside) for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes)]
+            step = [stmt.rename(aside) for stmt in step]
+        proj = list(dict.fromkeys([*siblings, *step]))
         # A STREAMED store (values = an observer's results) rides the recursion down to the leaf
         # so the scalar arm can splice it into the observed fold's reduce loop — applying it here
         # would land it in the projection tail, after a loop that is not yet emitted.
@@ -197,7 +213,9 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
             return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
         if plain:
             proj = apply_output_specs(proj, plain)
-        return _factorize(root, ctx, tail=(*proj, *tail), out_val=out_val, store=store, output_specs=streamed)
+        # Two peel levels may each carry a sibling's copy of one shared cone; a statement is one value.
+        joined = tuple(dict.fromkeys((*proj, *tail))) if aside_copies else (*proj, *tail)
+        return _factorize(root, ctx, tail=joined, out_val=out_val, store=store, output_specs=streamed)
     if output_specs and isinstance(op, Fold) and op.axis is None:
         # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
         # its output specifications only after that body is emitted so an output sweep wraps every stmt
@@ -216,6 +234,21 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
             return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
         return _bind(op, ctx, (*tail, *apply_output_specs((), plain)), out_val, store, output_specs=streamed)
     return _bind(op, ctx, tail, out_val, store)
+
+
+def _peeled_root(edge, ctx: Ctx):
+    """The node :func:`_factorize`'s peel binds for ``edge`` — through each zero-axis projection to
+    the contraction root of a tiled edge, else its first non-slab operand — or ``None`` when the
+    peel reaches a slab alone."""
+    node = edge
+    while isinstance(node, Fold) and node.axis is None and node.operands:
+        tiled = [
+            e
+            for e in node.operands
+            if (r := projection_root(e)) is not None and r.as_contraction() is not None and ctx.sched.tile_of(r) is not None
+        ]
+        node = tiled[0] if tiled else next((e for e in node.operands if e.as_slab() is None), None)
+    return node
 
 
 def _swept_axis(root, specs: tuple) -> str | None:

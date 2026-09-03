@@ -12,9 +12,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 
@@ -310,6 +312,17 @@ def _orient(pairs: list[tuple], axes: tuple[str, ...]) -> tuple[Fold, ...]:
     return tuple(edges) if lead is None else (lead, *(edge for edge in edges if edge is not lead))
 
 
+def _renamed_sweep(loop: Loop, taken: set[str]) -> Loop:
+    """``loop`` under a FRESH axis name — a sibling sweep that reuses an enclosing or sibling loop's
+    name (the fused quantize kernel's byte sweep and scale sweep, both ``a1`` at different
+    extents). Loop IR binds per loop, so the reuse is legal there; a term tree names one coordinate
+    per name, so the second sweep is alpha-renamed, binder and references together."""
+    taken = taken | set(Body(loop.body).ssa_defs)
+    fresh = next(name for index in range(1, len(taken) + 2) if (name := f"{loop.axis.name}_{index}") not in taken)
+    coords = Sigma({loop.axis.name: Var(fresh)})
+    return replace(loop, axis=replace(loop.axis, name=fresh), body=Body(tuple(stmt.substitute(coords) for stmt in loop.body)))
+
+
 def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     """Lift one statement tree into ``(operand terms, statements)`` — SEPARATED, bottom up.
 
@@ -337,7 +350,12 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     level = _Level(axes)
     inner_levels = (*levels, level)
     edges: list = []
+    bound = {axis.name for axis in axes}  # one coordinate per name: a sibling sweep reusing one is renamed apart
     for stmt in Body.coerce(body):
+        if isinstance(stmt, Loop) and not stmt.is_reduce:
+            if stmt.axis.name in bound:
+                stmt = _renamed_sweep(stmt, bound)
+            bound.add(stmt.axis.name)
         if isinstance(stmt, Loop) and stmt.is_reduce:
             fold, trailing = scan_from_loop(stmt, axes, inner_levels)
             seeds = set(fold.exposes)  # the accumulators, or the epilogue's names for them once hoisted factors wrap the fold
@@ -519,6 +537,7 @@ def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
     # The kernel's axis table: the free axes and every loop the nest bound (reduce, sweep), by
     # name — the term names them, the kernel holds their extents.
     axes = {axis.name: axis for axis in (*free, *(loop.axis for loop in Body.coerce(cell).loops))}
+    axes.update((spec.sweep.name, spec.sweep) for spec in output_specs if spec.sweep is not None)  # a renamed sibling sweep
     return TileOp(
         op=Fold(operands=edges, lift=lift),
         name=name,

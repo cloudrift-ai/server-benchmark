@@ -387,15 +387,14 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # ``Fold`` was already peeled off by :func:`_factorize`).
         plan = (ctx.sched.get("REDUCE", op) or Reduce()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
-        # The streamed-store reading — a full tree walk — derived once for the degenerate arm's
-        # ``apply_output_specs``. Empty without specs, which is exactly when it is not asked.
-        observed = observed_result_names(op) if output_specs else frozenset()
         if plan is None or (plan.coop <= 1 and plan.reg <= 1):
-            body = list(dict.fromkeys([*op.lower(axes=ctx.sched.tile.axes), *tail]))
-            if output_specs:
-                # ``observed`` streams a scan store into its reduce loop; every other spec keeps
-                # its kernel-tail reconstitution.
-                body = apply_output_specs(body, output_specs, observed=observed)
+            # The TERM places its own stores (``Fold.lower``): a sweep store's loop opens around
+            # exactly the terms evaluated over that sweep, so sibling sweeps stay siblings, and a
+            # streamed store rides its observed fold's reduce loop — the one placement rule the
+            # kernel's identity (``TileOp.loop_body``) already reads.
+            axes = ctx.sched.tile.axes
+            placed = op.lower(frozenset(axis.name for axis in ctx.grid), output_specs, axes) if output_specs else op.lower(axes=axes)
+            body = list(dict.fromkeys([*placed, *tail]))
             state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
         elif plan.coop_transposed:
             # The ``coop-t`` k-major matvec partition: the innermost output axis splits into a

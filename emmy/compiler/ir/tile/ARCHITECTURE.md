@@ -147,10 +147,13 @@ A sweep axis is never bound at kernel scope: the term opens it itself (`Fold.low
 the sweep store follows the term defining its value inside that loop. A non-contraction fold that reads a sweep axis
 (attention's `Σ_k P·V` per output column, DeepSeek-V4 post16's per-column sum) is still an operand edge of the
 projection: its slabs read the sweep axis, so the placement rule puts its loop inside the sweep loop, while a
-sibling evaluated over the grid axes alone stays ahead of it. A projection stream spelled without the term (the
-materializer's tail) has no such loop, and reconstitution wraps the trailing run reading the axis into one. A
-contraction is exempt because post-init promotes a sweep its
-operands read into a real free axis right after normalization.
+sibling evaluated over the grid axes alone stays ahead of it. Two sibling sweeps are two coordinates: a loop that
+reuses an enclosing or sibling sweep's name (the fused quantize kernel's byte sweep and scale sweep, both `a1`) is
+alpha-renamed at the lift, binder and references together, since a term tree names one coordinate per name. The
+kernel binder's serial arm hands the stores to the term the same way, so the emitted kernel places them exactly as
+the identity's `loop_body` does; only a projection stream spelled without the term (the peeled root's tail, a cut
+piece) still wraps the trailing run reading the axis into one loop. A contraction is exempt because post-init
+promotes a sweep its operands read into a real free axis right after normalization.
 
 A fold FED by the body — one whose subtree captures a name a plain body member defines — is likewise never hoisted,
 no matter what kind: a projection evaluates its operands before its scalar body, so the capture would read a value

@@ -171,10 +171,12 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         if root is None:
             return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
         # A sibling that holds the peeled root among its operands (the ``1/l`` epilogue over the fused
-        # carrier) lowers the root again inside itself; the root is bound below, once and under its
-        # own partition, so its statements are dropped from the sibling's lowering here.
+        # carrier) lowers the root again inside itself; a root the reduce arms bind ONCE at the kernel's
+        # top level drops its statements from the sibling's lowering here. A TILED root replicates its
+        # cone per register row inside its K loop, where the sibling's read could not reach, so the
+        # sibling keeps its own copy of what they share (a norm statistic recomputed serially per cell).
         axes = ctx.sched.tile.axes
-        placed = set(root.lower(axes=axes))
+        placed = set(root.lower(axes=axes)) if ctx.sched.tile_of(root) is None else set()
         siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes) if stmt not in placed]
         proj = list(dict.fromkeys([*siblings, *op.step()]))
         # A STREAMED store (values = an observer's results) rides the recursion down to the leaf

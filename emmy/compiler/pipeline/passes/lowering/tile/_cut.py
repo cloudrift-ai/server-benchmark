@@ -470,7 +470,7 @@ def realize(
             mapping = dict(pairs)
             sibling_index = tuple(Var(mapping[axis.name]) for axis in axes)
             replacements[id(sibling)] = tuple(
-                Load(name=name, input=buffer, index=sibling_index) for name, buffer in zip(sibling.exposes, buffers, strict=True)
+                Fold.slab(Load(name=name, input=buffer, index=sibling_index)) for name, buffer in zip(sibling.exposes, buffers, strict=True)
             )
         pieces.append((seam, produced, axes, index, token, names, buffers, replacements))
 

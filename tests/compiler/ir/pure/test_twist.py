@@ -1,14 +1,16 @@
-"""The twist recipes' fused ⊕ (``Recipe.program``): the program a recipe instantiates over a
-fold's state names is a monoid — associative on random states, its seeds neutral — one recipe
-serves every channel count, an expectation channel joining the same pivot advance, and Welford's
-fixed carrier streams the two-pass variance in one pass."""
+"""The twist recipes, certified by their definition. A recipe IS a base componentwise monoid
+conjugated by a bijection ψ (transport of structure); what it stores beside that — the stable ⊕
+program, the channels' injections, the seeds — is checked against the conjugate here, on random
+states, so associativity, the identity and the meaning of every state follow from the definition
+rather than from a property test per recipe."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
+from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.pure.twist import RECIPES, SOFTMAX, WELFORD, Recipe
 from emmy.compiler.ir.stmt import Const
 
 
@@ -20,50 +22,55 @@ def _eval(lam, args: tuple) -> tuple:
     return tuple(env[result] for result in lam.results)
 
 
-def _softmax_state(rng, n: int) -> tuple:
-    return tuple(rng.normal(size=n))
+def _sample(recipe: Recipe, rng, arity: int) -> tuple:
+    """A random carrier state a partition could hold: Welford's needs a count of at least one."""
+    state = list(rng.normal(size=arity))
+    if recipe is WELFORD:
+        state[1] = float(rng.integers(1, 6))
+    return tuple(state)
 
 
-def _welford_state(rng, n: int) -> tuple:
-    # A non-empty partition: its sum, its count, its mean and a non-negative M2.
-    return (rng.normal(), float(rng.integers(1, 6)), rng.normal(), abs(rng.normal()))
+def _carriers(recipe: Recipe):
+    """Every arity the recipe's carrier takes — softmax with and without its expectation channel."""
+    n = len(recipe.base)
+    return [n] if recipe.combine is not None else list(range(2, n + 1))
 
 
-@pytest.mark.parametrize(
-    ("recipe", "states", "seeds", "sample"),
-    [
-        (SOFTMAX, ("m", "l"), (float("-inf"), 0.0), _softmax_state),
-        (SOFTMAX, ("m", "o", "l"), (float("-inf"), 0.0, 0.0), _softmax_state),
-        (WELFORD, ("g", "n", "m", "q"), (0.0, 0.0, 0.0, 0.0), _welford_state),
-    ],
-    ids=["softmax", "flash", "welford"],
-)
-def test_the_program_is_an_associative_monoid_with_neutral_seeds(recipe, states: tuple[str, ...], seeds: tuple, sample) -> None:
-    """The split / cooperative legality certificate: ``a ⊕ (b ⊕ c) == (a ⊕ b) ⊕ c`` on random
-    states, and the fold's seeds are its neutral element on either side."""
-    combine = recipe.program(states)
-    assert combine.params == (*states, *(f"{state}__o" for state in states)) and combine.results == states
+@pytest.mark.parametrize("recipe", RECIPES, ids=[recipe.name for recipe in RECIPES])
+def test_the_program_is_the_conjugate_of_its_base_monoid(recipe: Recipe) -> None:
+    """``program(s, t) == ψ(ψ⁻¹(s) ⊕ ψ⁻¹(t))`` with ⊕ the base's componentwise monoid — the stable
+    spelling is the transported monoid, so it is associative and its seeds are the base identities
+    under ψ⁻¹. Checked at every arity the carrier takes; an absent channel rides at its identity."""
+    ops = [ElementwiseImpl(name) for name in recipe.base]
+    identities = tuple(op.identity for op in ops)
     rng = np.random.default_rng(0)
-    for _ in range(50):
-        a, b, c = (sample(rng, len(states)) for _ in range(3))
-        lhs = _eval(combine, (*a, *_eval(combine, (*b, *c))))
-        rhs = _eval(combine, (*_eval(combine, (*a, *b)), *c))
-        np.testing.assert_allclose(lhs, rhs, rtol=1e-5, atol=1e-6)
-        np.testing.assert_allclose(_eval(combine, (*seeds, *a)), a)
-        np.testing.assert_allclose(_eval(combine, (*a, *seeds)), a)
+    for arity in _carriers(recipe):
+        states = tuple(f"s{i}" for i in range(arity))
+        program = recipe.program(states)
+        assert program.params == (*states, *(f"{s}__o" for s in states)) and program.results == states
+        seeds = (identities[0], *(channel.init for channel in recipe.channels[: arity - 1]))
+        np.testing.assert_allclose(_eval(recipe.psi_inv, (*seeds, *identities[arity:]))[:arity], identities[:arity])
+        for _ in range(50):
+            s, t = _sample(recipe, rng, arity), _sample(recipe, rng, arity)
+            base_s = _eval(recipe.psi_inv, (*s, *identities[arity:]))
+            base_t = _eval(recipe.psi_inv, (*t, *identities[arity:]))
+            merged = tuple(op(a, b) for op, a, b in zip(ops, base_s, base_t, strict=True))
+            expected = _eval(recipe.psi, merged)[:arity]
+            np.testing.assert_allclose(_eval(program, (*s, *t)), expected, rtol=1e-5, atol=1e-6)
 
 
-def test_welford_program_streams_the_two_pass_variance() -> None:
-    """Folded over a stream with the singleton injected as ``(x, 1, x, 0)``, the carrier lands on
-    the sum, the count, the mean and the sum of squared deviations from that mean — the second
-    pass's value, in one pass, with the seed ``(0, 0, 0, 0)`` a true identity."""
-    combine = WELFORD.program(("g", "n", "m", "q"))
+@pytest.mark.parametrize("recipe", RECIPES, ids=[recipe.name for recipe in RECIPES])
+def test_the_injections_are_the_lift_seen_through_psi(recipe: Recipe) -> None:
+    """What a channel injects at the singleton is ψ of one element's base contribution — softmax's
+    denominator injects ``1`` because ``eˢ·e⁻ˢ`` is ``1``, Welford's M2 injects ``0`` because one
+    element deviates from its own mean by nothing."""
     rng = np.random.default_rng(1)
-    xs = rng.normal(size=64)
-    state = (0.0, 0.0, 0.0, 0.0)
-    for x in xs:
-        state = _eval(combine, (*state, x, 1.0, x, 0.0))
-    np.testing.assert_allclose(state, (xs.sum(), 64.0, xs.mean(), ((xs - xs.mean()) ** 2).sum()), rtol=1e-9, atol=1e-9)
+    for _ in range(20):
+        values = {param: float(rng.normal()) for param in recipe.lift.params}
+        through = _eval(recipe.psi, _eval(recipe.lift, tuple(values[p] for p in recipe.lift.params)))
+        for index, channel in enumerate(recipe.channels):
+            injected = _eval(channel.injection, tuple(values[p] for p in channel.injection.params))
+            np.testing.assert_allclose(injected, (through[1 + index],), rtol=1e-9, atol=1e-9)
 
 
 def test_an_expectation_channel_joins_the_same_advance() -> None:

@@ -502,8 +502,6 @@ class Fold:
         view = self.as_reduction()
         if view is None or self.observe is not None or view.ops is None or len(view.states) != 1:
             return None
-        if view.ops[0].reduce_canon != recipe.plus:
-            return None
         for pivot in self.operands:
             pview = pivot.as_reduction()
             if pview is None or pivot.observe is not None:
@@ -562,7 +560,16 @@ class Fold:
             extras = fn.params[2:]
             if any(p not in by_param or p in pivot_params for p in extras):
                 continue
-            channel = next((c for c in recipe.channels if c.pattern is not None and fn.canonical() == c.pattern.canonical()), None)
+            # A channel whose base ⊕ is this fold's and whose pattern is what remains.
+            plus = view.ops[0].reduce_canon
+            channel = next(
+                (
+                    c
+                    for index, c in enumerate(recipe.channels)
+                    if c.pattern is not None and recipe.base[1 + index] == plus and fn.canonical() == c.pattern.canonical()
+                ),
+                None,
+            )
             if channel is None:
                 continue
             # Instantiate: every operand an extra binds joins, its axis spelled as the pivot's.

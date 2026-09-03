@@ -122,12 +122,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Closure** — The property that a term is closed over its enclosing iteration axes: it reads only those axes,
   never a data value, since values arrive through operand edges (`Fold` formation states it). Alpha-equivalent terms
   over equal axes denote one value; over different axes they are one function with distinct values.
-- **Twist recipe** — A twisted monoid stated as data (`ir/pure/twist.py`): the pivot's ⊕, one pattern per channel
-  (the per-element map a dependent reduce's lift must spell, over roles), what each channel injects at the singleton,
-  any further states the carrier keeps (Welford's count and running mean), and the fused ⊕ program — either two
-  lambdas over roles (the pivot pair's advance and the factors it puts on every carried channel; one channel pair's
-  rescale by them) or one lambda over every state pair. `Fold.twist(recipe)` finds the pivot among the term's
-  operands and matches by position and canonical form, never by a term's names.
+- **Twist recipe** — A twisted monoid stated as data (`ir/pure/twist.py`): a componentwise base monoid with its
+  per-element lift, conjugated by a bijection ψ (transport of structure — associativity is inherited), beside which
+  the recipe stores what conjugation does not give stably: one pattern per channel (the per-element map a dependent
+  reduce's lift must spell, over roles), what each state is at the singleton, any state the two-pass form never had
+  (Welford's count and running mean), and the fused ⊕ program in its stable spelling — two lambdas over roles for an
+  open channel count (softmax's pivot advance and per-channel rescale) or one lambda over every state pair. The
+  definition certifies the data. `Fold.twist(recipe)` finds the pivot among the term's operands and matches by
+  position and canonical form, never by a term's names.
 - **Structural identity / structural key** — A fingerprint based on computation and data flow rather than cosmetic
   names. It lets Emmy recognize equivalent compiler candidates.
 - **Idempotent rule** — A rule that does not keep changing its own output when applied again. Compiler rewrite rules

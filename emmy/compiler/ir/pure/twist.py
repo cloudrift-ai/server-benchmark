@@ -2,23 +2,29 @@
 
 A *dependent* reduce ``F`` reads an earlier reduce ``G`` over the same stream: ``m = max_k s_k``
 then ``l = Σ_k exp(s_k − m)``. After the lift that dependency is in the tree — ``G`` is an operand
-of ``F`` — and a recipe is what says the pair fuses into ONE fold with state ``(m, l)``: which ⊕
-the pivot folds, which per-element maps its channels recognize (over ROLES, never over any term's
-names), what each channel injects at the singleton, what further states the carrier keeps, and
-the fused ⊕ program — a twisted monoid, the base componentwise monoid conjugated by the family's
-ψ, stated in its numerically stable form. Two recipes so far: online softmax (its program spelled
-as a pivot advance and a per-channel rescale, so one recipe serves any channel count — softmax and
-flash attention alike) and Welford's variance (a fixed carrier ``(sum, count, mean, M2)``, its
-program one lambda over every state pair).
+of ``F`` — and a recipe is what says the pair fuses into ONE fold with state ``(m, l)``.
 
-A recipe is DATA. The one generic algorithm that applies any of them is :meth:`Fold.twist`,
-which finds the pivot among ``F``'s own operands: matching is alpha-invariant by construction —
-``F``'s lift binds its operands positionally, so the pivot's state is the param bound to ``G``;
-the score is whatever sub-cone of ``F``'s lift is
-alpha-equal to ``G``'s own per-element map, operand for operand; and what remains of ``F``'s lift
-with that cone cut out, its params in role order, compares with a channel's ``pattern`` by
-canonical form. A click gives the role-to-name map, and the recipe is instantiated by renaming —
-no algebra engine, no op-name table: either a recipe clicks or it does not.
+A recipe is a TWISTED MONOID stated as its mathematics — transport of structure: a componentwise
+monoid ``base`` (one ⊕ per state, with ``lift`` the per-element contribution to each) conjugated
+by a bijection ``psi`` on the carrier, ``x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))``, associative because the base
+is. Online softmax is ``(max, Σeˢ, Σeˢv)`` under ``ψ(m, D, O) = (m, De⁻ᵐ, Oe⁻ᵐ)``; Welford's variance
+is ``(Σx, Σ1, Σx, Σx²)`` under ``ψ(S, n, T, W) = (S, n, T/n, W − T²/n)``. What the tree is matched
+on and what the kernel runs are DATA beside that definition, because stability is not preserved by
+conjugation: the ``channels`` say which per-element maps a dependent's lift must spell (over ROLES,
+never over any term's names) and what each state is at the singleton, and the fused ⊕ is spelled
+in its numerically stable form (softmax's as a pivot advance and a per-channel rescale, so one
+recipe serves any channel count; Welford's as one lambda). The definition certifies the data: the
+program is the conjugate of the base on every state pair, the seeds are the base identities under
+ψ⁻¹, the injections are the lift seen through ψ (``tests/compiler/ir/pure/test_twist.py``).
+
+The one generic algorithm that applies any recipe is :meth:`Fold.twist`, which finds the pivot
+among ``F``'s own operands: matching is alpha-invariant by construction — ``F``'s lift binds its
+operands positionally, so the pivot's state is the param bound to ``G``; the score is whatever
+sub-cone of ``F``'s lift is alpha-equal to ``G``'s own per-element map, operand for operand; and
+what remains of ``F``'s lift with that cone cut out, its params in role order, compares with a
+channel's ``pattern`` by canonical form. A click gives the role-to-name map, and the recipe is
+instantiated by renaming — no algebra engine, no op-name table: either a recipe clicks or it does
+not.
 """
 
 from __future__ import annotations
@@ -49,22 +55,31 @@ class Channel:
 
 @dataclass(frozen=True)
 class Recipe:
-    """A twisted monoid as data: the pivot's ⊕ (``reduce_canon`` name), the channels' ⊕, the
-    carrier's ``channels`` — every state beyond the pivot's, matched to a dependent fold or kept by
-    the recipe — and the fused ⊕ program in one of two spellings. ``advance`` / ``rescale`` serve
-    any channel count: ``advance`` takes the pivot pair ``(g, g′)`` to the advanced pivot and the
+    """A twisted monoid as data. ``base`` names the componentwise ⊕ of every carrier state — the
+    pivot's first, then one per channel in recipe order — and ``lift`` is the base's per-element
+    contribution over ``(score, *extras)``; ``psi`` / ``psi_inv`` conjugate it onto the carrier.
+    The ``channels`` are every state beyond the pivot's, matched to a dependent fold or kept by the
+    recipe, and the fused ⊕ program takes one of two spellings. ``advance`` / ``rescale`` serve any
+    channel count: ``advance`` takes the pivot pair ``(g, g′)`` to the advanced pivot and the
     factors the move puts on every carried channel, ``rescale`` takes one channel pair and those
     factors ``(s, s′, *factors)`` to the channel's merged value. ``combine`` is one lambda over
-    every state pair in role order — pivot, then the channels in recipe order, then the same with
-    ``__o`` — for a carrier of fixed arity. Applied by the one generic algorithm, :meth:`Fold.twist`."""
+    every state pair in role order — pivot, then the channels, then the same with ``__o`` — for a
+    carrier of fixed arity. Applied by the one generic algorithm, :meth:`Fold.twist`."""
 
     name: str
-    pivot: str
-    plus: str
+    base: tuple[str, ...]
+    lift: Lambda
+    psi: Lambda
+    psi_inv: Lambda
     channels: tuple[Channel, ...]
     advance: Lambda | None = None
     rescale: Lambda | None = None
     combine: Lambda | None = None
+
+    @property
+    def pivot(self) -> str:
+        """The pivot's ⊕ — the base monoid's first component."""
+        return self.base[0]
 
     def program(self, states: tuple[str, ...]) -> Lambda:
         """The fused ⊕ over these state names — ``S × S → S``, the second operand ``<n>__o``. Temps
@@ -99,8 +114,27 @@ def _const(name: str, value: float) -> Lambda:
 
 SOFTMAX = Recipe(
     name="softmax",
-    pivot="maximum",
-    plus="add",
+    base=("maximum", "add", "add"),
+    lift=_lam(("s", "v"), (Assign("e", "exp", ("s",)), Assign("ev", "multiply", ("e", "v"))), "s", "e", "ev"),
+    psi=_lam(
+        ("m", "D", "O"),
+        (
+            Assign("nm", "negative", ("m",)),
+            Assign("f", "exp", ("nm",)),
+            Assign("d", "multiply", ("D", "f")),
+            Assign("o", "multiply", ("O", "f")),
+        ),
+        "m",
+        "d",
+        "o",
+    ),
+    psi_inv=_lam(
+        ("m", "d", "o"),
+        (Assign("f", "exp", ("m",)), Assign("D", "multiply", ("d", "f")), Assign("O", "multiply", ("o", "f"))),
+        "m",
+        "D",
+        "O",
+    ),
     channels=(
         # The denominator: one weight per element, ``exp(s − m)``; at the singleton the pivot is
         # the score, so the channel injects ``1``.
@@ -146,8 +180,24 @@ SOFTMAX = Recipe(
 # δ·n′/n``, ``M2 += M2′ + δ²·n·n′/(n + n′)``.
 WELFORD = Recipe(
     name="welford",
-    pivot="add",
-    plus="add",
+    base=("add", "add", "add", "add"),
+    lift=_lam(("s", "c"), (Const(name="one", value=1.0), Assign("sq", "multiply", ("s", "s"))), "s", "one", "s", "sq"),
+    psi=_lam(
+        ("S", "n", "T", "W"),
+        (Assign("mu", "divide", ("T", "n")), Assign("Tmu", "multiply", ("T", "mu")), Assign("M2", "subtract", ("W", "Tmu"))),
+        "S",
+        "n",
+        "mu",
+        "M2",
+    ),
+    psi_inv=_lam(
+        ("S", "n", "mu", "M2"),
+        (Assign("T", "multiply", ("n", "mu")), Assign("Tmu", "multiply", ("T", "mu")), Assign("W", "add", ("M2", "Tmu"))),
+        "S",
+        "n",
+        "T",
+        "W",
+    ),
     channels=(
         # The count and the running mean: states the two-pass form never had, one element counting
         # one and averaging to itself.

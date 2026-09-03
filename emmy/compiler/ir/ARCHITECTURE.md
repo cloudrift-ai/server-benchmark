@@ -385,15 +385,16 @@ measurement replay and the cubin cache, in exchange for a field nothing reads.
 
 **The twisted combine — a recipe, never hand-authored on a term.** Transport of structure: a monoid `(·, e)`
 conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`, associative because the base
-monoid is. A **recipe** (`ir/pure/twist.py`) states that monoid as data, in its numerically stable form: the pivot's
-⊕, one pattern per channel (the per-element map a dependent reduce's lift must spell, over ROLES — `exp(s − g)` for a
-denominator, `exp(s − g)·v` for an expectation), what each channel injects at the singleton (`1`, `v`), and the fused
-⊕ as two lambdas over roles — the pivot pair's `advance` to the new pivot and the factors the move puts on every
-carried channel (`exp(g − G)`, `exp(g′ − G)`: no `exp` argument is ever positive), and one channel pair's `rescale`
-by those factors — or, for a carrier of fixed arity, one lambda over every state pair (Welford's variance, whose
-carrier `(sum, count, mean, M2)` keeps two states the two-pass form never had, each with its own injection and
-seed). `Recipe.program(states)` instantiates either over a fold's state names by renaming, and the property tests
-pin the result's associativity. `Fold.twist(recipe)`
+monoid is. A **recipe** (`ir/pure/twist.py`) states exactly that — the base's componentwise ⊕ per state, its
+per-element lift, ψ and ψ⁻¹ — and beside the definition stores what conjugation does not give stably: one pattern per
+channel (the per-element map a dependent reduce's lift must spell, over ROLES — `exp(s − g)` for a denominator,
+`exp(s − g)·v` for an expectation, `(s − g·c)²` for Welford's deviation), what each state is at the singleton (`1`,
+`v`, `0`), any state the two-pass form never had (Welford's count and running mean), and the fused ⊕ in its stable
+spelling: two lambdas over roles for an open channel count (softmax's pivot advance and per-channel rescale, one
+recipe for softmax and flash attention alike) or one lambda over every state pair (Welford's fixed carrier
+`(sum, count, mean, M2)`). `Recipe.program(states)` instantiates either over a fold's state names by renaming, and
+the definition certifies the data: the program is the conjugate of the base on random states, the seeds are the base
+identities under ψ⁻¹, the injections are the lift seen through ψ. `Fold.twist(recipe)`
 fuses a reduce onto the reduce it reads, found among its operands: the pivot's state is the lift param bound to it,
 the score is the sub-cone of the lift alpha-equal to the pivot's own per-element map (operand for operand, through a
 projection's

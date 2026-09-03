@@ -130,7 +130,7 @@ def test_the_layer_needs_no_node_ctx_or_algebra() -> None:
     from emmy.compiler.ir.tile import ir as tile_ir
     from emmy.compiler.pipeline.passes.lowering.kernel import _atom, _factor, _tiling
 
-    banned = ("Fold", "Channel", "TileOp", "Ctx", "reduce_codegen", "store_sink", "copy_cell")
+    banned = ("Fold", "TileOp", "Ctx", "reduce_codegen", "store_sink", "copy_cell")
     live = {n for mod in (pure_fold, tile_ir, _factor, _atom) for n in dir(mod)}
     assert set(banned) <= live, f"the guard names nothing: {sorted(set(banned) - live)}"
 

@@ -196,7 +196,7 @@ def _factor_products(
 
     The step is a semiring step when every accumulated value is one product ``⊗`` of two distinct
     names, all products share the ⊗, and ⊗ distributes over the one commutative-monoid ⊕ the
-    accumulators fold through. Each product argument the step computes (the dequant ``w_bits ×
+    accumulators fold through. Each product argument the step computes (the storage decode ``w_bits ×
     scale``, the normalized ``x × rsqrt``) is then a cone over the step, hoisted into a zero-axis
     term closed like any other (:func:`_close`); arguments whose cones overlap share one term
     exposing both; a slab or a nested reduce an argument names outright rides as that edge. The
@@ -338,7 +338,7 @@ def _orient(pairs: list[tuple], axes: tuple[str, ...]) -> tuple[Fold, ...]:
 
 def _renamed_sweep(loop: Loop, taken: set[str]) -> Loop:
     """``loop`` under a FRESH axis name — a sibling sweep that reuses an enclosing or sibling loop's
-    name (the fused quantize kernel's byte sweep and scale sweep, both ``a1`` at different
+    name (the fused encode kernel's byte sweep and scale sweep, both ``a1`` at different
     extents). Loop IR binds per loop, so the reuse is legal there; a term tree names one coordinate
     per name, so the second sweep is alpha-renamed, binder and references together."""
     taken = taken | set(Body(loop.body).ssa_defs)

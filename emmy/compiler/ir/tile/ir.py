@@ -437,7 +437,7 @@ class TileOp(Op):
         A bilinear pair with a role-less side qualifies only while every coordinate it shares with
         the other side is one no tile strides: a split-K partition (it only ever composes with the
         reduction index) or a reshape residue the other side's reads are value-dead in under this
-        kernel's extents. A B that changes with the row it is contracted against — a dequant scale
+        kernel's extents. A B that changes with the row it is contracted against — a storage-decode scale
         read per row, a grouped weight addressed by the row — is no slab per tile."""
         node = self.views[site]
         view = node.as_contraction()

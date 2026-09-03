@@ -93,7 +93,7 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     is_root = any(node is root for root in roots)
     if node.observe is not None or not (is_root or any(node is member for root in roots for member in chain_members(root))):
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
-    if {spec.sweep.name for spec in tile.output_specs if spec.sweep is not None} & node.free_axes:
+    if {axis.name for spec in tile.output_specs for axis in spec.sweep} & node.free_axes:
         return (Reduce(),)
     transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
     return (

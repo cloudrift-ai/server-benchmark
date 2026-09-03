@@ -28,7 +28,7 @@ def test_trailing_write_splits_and_round_trips() -> None:
     stmts = [Assign(name="y", op="relu", args=("x",)), Write(output="o", index=(Var("m"),), value="y")]
     pure, stores = extract_output_specs(stmts)
     assert [type(s).__name__ for s in pure] == ["Assign"]
-    assert len(stores) == 1 and stores[0].sweep is None and stores[0].write is stmts[1]
+    assert len(stores) == 1 and stores[0].sweep == () and stores[0].write is stmts[1]
     assert apply_output_specs(pure, stores) == Body(stmts)
 
 
@@ -83,7 +83,7 @@ def test_sweep_loop_splits_to_a_sweep_store_and_round_trips() -> None:
     stmts = _sweep_shape()
     pure, stores = extract_output_specs(stmts)
     assert [type(s).__name__ for s in pure] == ["Assign", "Load", "Load", "Assign"]
-    assert len(stores) == 1 and stores[0].sweep is not None and stores[0].sweep.name == "n"
+    assert len(stores) == 1 and [axis.name for axis in stores[0].sweep] == ["n"]
     assert apply_output_specs(pure, stores) == Body(stmts)
 
 
@@ -104,7 +104,7 @@ def test_sweep_loop_with_multiple_writes_round_trips() -> None:
 
     pure, stores = extract_output_specs(stmts)
 
-    assert len(stores) == 2 and all(store.sweep == n for store in stores)
+    assert len(stores) == 2 and all(store.sweep == (n,) for store in stores)
     assert apply_output_specs(pure, stores) == Body(stmts)
 
 
@@ -139,8 +139,105 @@ def test_sibling_output_loops_become_sweep_specs() -> None:
     pure, specs = extract_output_specs(stmts)
 
     assert pure == ()
-    assert [spec.sweep.name for spec in specs] == ["q", "kv", "kv"]
+    assert [axis.name for spec in specs for axis in spec.sweep] == ["q", "kv", "kv"]
     assert apply_output_specs(pure, specs) == Body(stmts)
+
+
+# --- nested output sweeps (DeepSeek-V4 post4096's boundary shapes) -------------------------------- #
+
+
+def test_nested_write_only_sweep_round_trips() -> None:
+    """A write-only sweep nest with no outer store (post4096's softmax pair): the specs carry the
+    axis PATH, outermost first, and reconstitution reopens both loops."""
+    a10, a17 = _ax("a10", 4), _ax("a17", 4)
+    stmts = [
+        Loop(
+            axis=a10,
+            body=Body(
+                (
+                    Loop(
+                        axis=a17,
+                        body=Body(
+                            (
+                                Write(output="s_sum", index=(Var("m"), Var("a10"), Var("a17")), value="acc"),
+                                Write(output="s_exp", index=(Var("m"), Var("a10"), Var("a17")), value="v98"),
+                            )
+                        ),
+                    ),
+                )
+            ),
+        )
+    ]
+
+    split = extract_output_specs(stmts)
+
+    assert split is not None
+    pure, specs = split
+    assert pure == ()
+    assert [[axis.name for axis in spec.sweep] for spec in specs] == [["a10", "a17"], ["a10", "a17"]]
+    assert apply_output_specs(pure, specs) == Body(stmts)
+
+
+def test_nested_sweeps_beside_an_outer_write_round_trip() -> None:
+    """An outer sweep carrying its own store beside nested write-only sweeps (post4096's gate
+    stream: view_8 beside the mul_16 and matmul_1 nests). The outer loop is opened once, by the
+    last spec whose path carries it; the nested loops sit inside it, writes trailing."""
+    a20, a27, a27b, a35 = _ax("a20", 4), _ax("a27", 8), _ax("a27b", 4), _ax("a35", 8)
+    inner1 = Loop(axis=a27, body=Body((Write(output="mul_16", index=(Var("a20"), Var("a27")), value="v216"),)))
+    inner2 = Loop(
+        axis=a27b,
+        body=Body((Loop(axis=a35, body=Body((Write(output="matmul_1", index=(Var("a20"), Var("a27b"), Var("a35")), value="v223"),))),)),
+    )
+    outer = Loop(axis=a20, body=Body((inner1, inner2, Write(output="view_8", index=(Var("a20"),), value="v143"))))
+
+    split = extract_output_specs([outer])
+
+    assert split is not None
+    pure, specs = split
+    assert pure == ()
+    assert [[axis.name for axis in spec.sweep] for spec in specs] == [["a20", "a27"], ["a20", "a27b", "a35"], ["a20"]]
+    assert apply_output_specs(pure, specs) == Body((outer,))
+
+
+def test_sibling_nested_sweeps_share_the_outer_loop() -> None:
+    """Two write-only nests under one outer sweep with no outer store: the outer loop is still
+    opened exactly once, by the last group whose path carries it."""
+    a20, a27, a27b = _ax("a20", 4), _ax("a27", 8), _ax("a27b", 4)
+    inner1 = Loop(axis=a27, body=Body((Write(output="o1", index=(Var("a20"), Var("a27")), value="x"),)))
+    inner2 = Loop(axis=a27b, body=Body((Write(output="o2", index=(Var("a20"), Var("a27b")), value="y"),)))
+    outer = Loop(axis=a20, body=Body((inner1, inner2)))
+
+    split = extract_output_specs([outer])
+
+    assert split is not None
+    pure, specs = split
+    assert [[axis.name for axis in spec.sweep] for spec in specs] == [["a20", "a27"], ["a20", "a27b"]]
+    assert apply_output_specs(pure, specs) == Body((outer,))
+
+
+def test_nested_sweep_pure_prefix_rejoins_the_stream() -> None:
+    """A pure prefix inside a nested write-only sweep rejoins the stream, exactly as a single
+    sweep's does, and the trailing-run rule re-wraps it on reconstitution."""
+    a20, a27 = _ax("a20", 4), _ax("a27", 8)
+    inner = Loop(
+        axis=a27,
+        body=Body(
+            (
+                Load(name="x", input="src", index=(Var("a20"), Var("a27"))),
+                Assign(name="y", op="relu", args=("x",)),
+                Write(output="o", index=(Var("a20"), Var("a27")), value="y"),
+            )
+        ),
+    )
+    outer = Loop(axis=a20, body=Body((inner,)))
+
+    split = extract_output_specs([outer])
+
+    assert split is not None
+    pure, specs = split
+    assert [type(stmt).__name__ for stmt in pure] == ["Load", "Assign"]
+    assert [[axis.name for axis in spec.sweep] for spec in specs] == [["a20", "a27"]]
+    assert apply_output_specs(pure, specs) == Body((outer,))
 
 
 # --- declines (the caller keeps the computation in Loop IR) -------------------------------------- #
@@ -169,7 +266,7 @@ def test_store_repr_round_trips_through_eval() -> None:
     """``TileOp.output_specs`` serializes as constructor reprs in graph dumps — eval must rebuild it."""
     from emmy.compiler.graph import _eval_stmt
 
-    st = OutputSpec(write=Write(output="o", index=(Var("m"),), value="y"), sweep=_ax("n"))
+    st = OutputSpec(write=Write(output="o", index=(Var("m"),), value="y"), sweep=(_ax("n"),))
     assert _eval_stmt(repr(st)) == st
 
 
@@ -199,5 +296,5 @@ def test_sweep_write_of_a_captured_accumulator_extracts() -> None:
     pure, stores = split
     assert [store.write.output for store in stores] == ["o1", "o2"]
     assert [type(stmt).__name__ for stmt in pure] == ["Load", "Assign"], "the first sweep's pure prefix rejoins the stream"
-    assert [store.sweep.name for store in stores] == ["a1", "a2"]
+    assert [axis.name for store in stores for axis in store.sweep] == ["a1", "a2"]
     assert apply_output_specs(pure, stores) == Body((first, second))

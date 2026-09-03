@@ -167,7 +167,7 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
         and not any(stmt is node for stmt in projection_tail(tile))
     ):
         return "the head fold is nested inside the projection's sweep loop; the split cannot strip it"
-    if any(spec.sweep is not None and spec.sweep.name in node.free_axes for spec in tile.output_specs):
+    if any(axis.name in node.free_axes for spec in tile.output_specs for axis in spec.sweep):
         return "the head fold is evaluated inside the boundary store's sweep loop; the split cannot strip it"
     if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
         return None

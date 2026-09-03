@@ -69,7 +69,7 @@ def test_matmul_cell_lifts_and_canonicalizes_as_contraction() -> None:
     assert isinstance(node, Fold) and node.axis is not None
     assert node.as_contraction() is not None
     assert [edge.as_slab().load.input for edge in node.operands] == ["x", "w"]
-    assert len(tile.output_specs) == 1 and tile.output_specs[0].sweep is None
+    assert len(tile.output_specs) == 1 and tile.output_specs[0].sweep == ()
 
 
 def test_epilogue_stays_in_the_projection_body() -> None:
@@ -246,7 +246,7 @@ def test_sibling_q_and_kv_regions_total_lift_with_separate_outputs() -> None:
     assert tile.op.axis is None and not tile.op.lift.body
     assert [(edge.as_contraction() is not None, len(edge.exposes)) for edge in tile.op.operands] == [(True, 1), (True, 2)]
     assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4), Dim(2)]
-    assert all(spec.sweep is None for spec in tile.output_specs) and len(tile.output_specs) == 3
+    assert all(spec.sweep == () for spec in tile.output_specs) and len(tile.output_specs) == 3
     # The closed program opens the two sweeps as SIBLING loops under the row: no term is evaluated
     # over both, so neither nests in the other.
     (m_loop,) = tile.loop_body
@@ -292,7 +292,7 @@ def test_an_output_sweeps_epilogue_lifts_to_a_term_declaring_the_sweep_axis() ->
     assert Dim(4) in {axis.extent for axis in tile.axes if axis.name in epilogue.free_axes}
     assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
     (spec,) = tile.output_specs
-    assert spec.write.values == epilogue.exposes and spec.sweep is None
+    assert spec.write.values == epilogue.exposes and spec.sweep == ()
     assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs, tile.axes)] == ["Loop", "Load", "Assign", "Write"]
 
 

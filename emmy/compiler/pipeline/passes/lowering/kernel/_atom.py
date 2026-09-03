@@ -1832,17 +1832,6 @@ class _MmaOps(_AtomOps):
             for i in range(m.reg)
             for j in range(n.reg)
         ]
-        if block_scaled_atom(atom):
-            # The block-scaled cell's two scale operands are per-lane registers like the
-            # multiplicands, so they are declared here and ASSIGNED per K step. Slotted with the
-            # data fragments they ride beside: the register ring re-enters slot ``s`` every
-            # ``depth`` steps, and a load that declared its own destination redeclared it there.
-            # Named exactly as :func:`mma_leaves` spells them — A shares one name across channels,
-            # B carries the per-channel fold suffix.
-            scale = dict(role="a", shape=atom.ptx_shape, dtype=atom.operand_dtype("a"), nregs=0)
-            decls += [RegFragment(name=nm, **scale) for nm in frags(lambda i: f"_sfa{i}", m.reg)]
-            for f in range(n_folds):
-                decls += [RegFragment(name=nm, **scale) for nm in frags(lambda i, ff=f: _fold_frag(f"_sfb{i}", ff), n.reg)]
         if _f16acc(atom):
             # The f32 shadow accumulators — they keep the ``_c{i}_{j}`` names the store reads;
             # the packed f16 mma targets above are the ``_ch{i}_{j}`` family FragmentPromote folds.

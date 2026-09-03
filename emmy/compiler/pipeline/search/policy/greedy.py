@@ -1092,6 +1092,8 @@ def greedy_decide(
 
     def decide(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
+        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
         if db_state[0] is None:
             db_state[0] = _db_measured_index(db, fp.ctx)
         index: _Measured = db_state[0]
@@ -1110,7 +1112,8 @@ def greedy_decide(
         # predictions). Among measured arms the fastest wins.
         arms = _route_candidates(fp, index) if price_structural else []
         if arms:
-            best_o, best_us, source = min(arms, key=lambda c: c[1])
+            # Fastest first; a tie breaks by the arm's content, never by emission order.
+            best_o, best_us, source = min(arms, key=lambda c: (c[1], canonical_row_key(leaf_knobs(c[0]))))
             _audit_record(
                 fp.node_id, fp.root_op.identity_key(with_io=True), "MATCH", source, best_us, len(fp.options), fork=fp.match.rule.name
             )

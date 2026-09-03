@@ -37,3 +37,24 @@ configs:
       NVIDIA GeForce RTX 5090:
         emmy_us: 22.498559951782227
         tcompile_us: 8.232000283896923
+  - name: k_sdpa_5c434c.c536b10b1afd.87b2bf6c99a8
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 87b2bf6c99a847a70436bfdb1ec996d1a432a0e43f34e3dce157ca9d41e319d6
+  - name: k_sdpa_5c434c.c536b10b1afd.8b77fda293c7
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 8b77fda293c729aeb5c1178682a6b101e2a1f9c5bdfa401f3996d67a8b8b3a39

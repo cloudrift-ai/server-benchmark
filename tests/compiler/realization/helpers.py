@@ -1,11 +1,12 @@
 """Loading, regeneration and the four realization oracles for the corpus cases.
 
-A case file is a working golden document carrying exactly one config with exactly one
-realization, plus the authored ``pins`` / ``knobs`` that name the schedule the compiler is
-expected to realize. ``offered`` asks it of the pinned enumeration; ``realized``, ``built`` and
-``correct`` ask it of the compile the way a deploy would — the case's record is the compile's
-only evidence and no hand pin rides beside it (:func:`evidence_scope`). Everything here is
-GPU-free except :func:`built` and :func:`correct`.
+A case file is a working golden document carrying exactly one config whose realizations are the
+authored ``pins`` / ``knobs`` the compiler is expected to realize: one entry per kernel of the set
+the target compiles to, each addressed by the ``identity`` of the kernel it decides (the first
+entry is the target's own). ``offered`` asks each entry of the pinned enumeration; ``realized``,
+``built`` and ``correct`` ask the whole set of the compile the way a deploy would — the case's
+entries are the compile's only evidence, strict, and no hand pin rides beside them
+(:func:`evidence_scope`). Everything here is GPU-free except :func:`built` and :func:`correct`.
 """
 
 from __future__ import annotations
@@ -55,13 +56,19 @@ class CaseError(Exception):
 
 @dataclass(frozen=True)
 class Case:
-    """One corpus case: its file, its document, its single record, and its expectation."""
+    """One corpus case: its file, its document, its records (the target's own entry first, then
+    one per further kernel of the set), and its expectation."""
 
     path: Path
     document: dict
-    record: GoldenRecord
+    records: tuple[GoldenRecord, ...]
     #: The stage this case is expected to fail at, or ``None`` when every stage must pass.
     xfail_stage: str | None
+
+    @property
+    def record(self) -> GoldenRecord:
+        """The target's own entry — the one the perf lane benches by name."""
+        return self.records[0]
 
     @property
     def id(self) -> str:
@@ -74,8 +81,8 @@ class Case:
 
     @property
     def pinned(self) -> dict:
-        """The full pin the oracles publish: input pins plus the authored schedule row."""
-        return {**self.record.pin_map, **self.record.knobs}
+        """The target entry's full hand pin: input pins plus the authored schedule row."""
+        return pin_of(self.record)
 
     def context(self) -> Context:
         """The case's own context — its declared capability, never the live card's. This is what
@@ -118,15 +125,34 @@ def load_case(path: Path) -> Case:
     except ValueError as exc:
         raise CaseError(str(exc)) from exc
     configs = document["configs"]
-    if len(configs) != 1 or len(configs[0]["realizations"]) != 1:
-        raise CaseError(f"{path.name}: a case holds exactly one config with exactly one realization")
-    realization = configs[0]["realizations"][0]
-    if "knobs" not in realization:
-        raise CaseError(f"{path.name}: a case must carry a knobs mapping, empty only for a forkless kernel")
+    if len(configs) != 1 or not configs[0]["realizations"]:
+        raise CaseError(f"{path.name}: a case holds exactly one config with at least one realization")
+    for realization in configs[0]["realizations"]:
+        if "knobs" not in realization:
+            raise CaseError(f"{path.name}: every entry must carry a knobs mapping, empty only for a forkless kernel")
     stage = expectation(path)
     if stage is not None and not evidence_line(path):
         raise CaseError(f"{path.name}: an open case must carry a leading '# evidence:' comment naming why it should realize")
-    return Case(path=path, document=document, record=golden_record_from_entry(document, configs[0], realization), xfail_stage=stage)
+    records = tuple(golden_record_from_entry(document, configs[0], realization) for realization in configs[0]["realizations"])
+    return Case(path=path, document=document, records=records, xfail_stage=stage)
+
+
+def pin_of(record: GoldenRecord) -> dict:
+    """One entry as the hand pin ``offered`` publishes: its input pins plus its authored row."""
+    return {**record.pin_map, **record.knobs}
+
+
+def set_decisions(case: Case) -> dict:
+    """The kernel-set decisions the case's entries spell — every ``PLACE`` key and every ``REDUCE``
+    value carrying a cross-CTA half — as one hand pin: what mints the pieces the other entries
+    decorate."""
+    decisions: dict = {}
+    for record in case.records:
+        for key, value in pin_of(record).items():
+            family = family_of(str(key))
+            if family == "PLACE" or (family == "REDUCE" and (plan := parse_reduce(value)) is not None and plan.needs_split):
+                decisions[key] = value
+    return decisions
 
 
 def evidence_line(path: Path) -> str | None:
@@ -168,7 +194,7 @@ def regenerate(document: dict) -> dict:
     from emmy.compiler.torch_wire import graph_from_wire  # noqa: PLC0415
 
     entry = document["configs"][0]
-    realization = entry["realizations"][0]
+    realizations = entry["realizations"]
     ctx = Context.from_target(tuple(document["compute_cap"]))
     graph = graph_from_wire(document["programs"][entry["program"]])
     with tempfile.TemporaryDirectory() as directory:
@@ -179,21 +205,62 @@ def regenerate(document: dict) -> dict:
     matched = _matching_entry(fresh, entry)
     rebuilt = dict(fresh)
     rebuilt["configs"] = [matched]
-    row = dict(matched["realizations"][0])
-    row["bindings"] = dict(realization.get("bindings") or {})
-    row["pins"] = dict(realization.get("pins") or {})
-    row["knobs"] = canonical_knobs(realization["knobs"])
-    identity = kernel_identity(golden_record_from_entry(rebuilt, matched, row))
-    if identity is not None:
-        row["identity"] = identity
-    if realization.get("latency") is not None:
-        # Measured on a card, never derived from the program: a regeneration on a CPU box must
-        # not erase a 4090's recorded timings.
-        row["latency"] = dict(realization["latency"])
-    matched["realizations"] = [row]
+    template = dict(matched["realizations"][0])
+    rows = []
+    for index, realization in enumerate(realizations):
+        # The target's own entry takes the inventory writer's name; a further entry decides another
+        # kernel of the set and keeps the name and identity it was authored with.
+        row = dict(template) if index == 0 else {key: realization[key] for key in ("name",) if key in realization}
+        row["bindings"] = dict(realization.get("bindings") or {})
+        row["pins"] = dict(realization.get("pins") or {})
+        row["knobs"] = canonical_knobs(realization["knobs"])
+        identity = realization.get("identity") if index else kernel_identity(golden_record_from_entry(rebuilt, matched, row))
+        if identity is not None:
+            row["identity"] = identity
+        if realization.get("latency") is not None:
+            # Measured on a card, never derived from the program: a regeneration on a CPU box must
+            # not erase a 4090's recorded timings.
+            row["latency"] = dict(realization["latency"])
+        rows.append(row)
+    matched["realizations"] = rows
     if document.get("model") is not None:
         rebuilt["model"] = document["model"]
     return rebuilt
+
+
+def complete(document: dict) -> dict:
+    """The case with an entry for every kernel of its set no entry decides yet.
+
+    The set is replayed the way the deploy reads it (``golden._replay`` with the entries as one
+    another's siblings); a scheduled kernel no entry names by identity and no entry's row vouches
+    for gets an entry of its own: that kernel's identity, the input regime, and the schedule row
+    the replay realized on it. Strict evidence then has a row at every fork. Authoring, not
+    derivation — the added rows are enumerable schedules of those kernels, and the case pins them
+    from then on."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import _replay, lead_of, siblings_of  # noqa: PLC0415
+
+    entry = document["configs"][0]
+    records = [golden_record_from_entry(document, entry, realization) for realization in entry["realizations"]]
+    primary = records[0]
+    covered = {record.identity for record in records if record.identity is not None}
+    replays = [_replay(record, siblings=siblings_of(record, records), lead=lead_of(record, records)) for record in records]
+    for replay in replays:
+        covered |= set(replay.holders)
+    regime = {key: value for key, value in primary.pin_map.items() if family_of(str(key)) != "PLACE"}
+    added = [
+        {
+            "name": f"{primary.name}.{identity[:12]}",
+            "bindings": dict(primary.bindings),
+            "pins": dict(regime),
+            "knobs": dict(replays[0].realized.get(identity, {})),
+            "identity": identity,
+        }
+        for identity in sorted(replays[0].kernels - covered)
+    ]
+    if added:
+        entry["realizations"] = [*entry["realizations"], *added]
+    return document
 
 
 def _matching_entry(fresh: dict, entry: dict) -> dict:
@@ -235,17 +302,26 @@ def evidence_scope(case: Case):
     its input pins — the regime it was measured under, never its route or its schedule row — are
     the environment. No hand pin rides beside it: the route and the schedule reach the compile as
     measured rows of the kernels they decide, through the same evidence pick every ``compile`` /
-    ``run`` / ``serve`` uses, or they do not reach it at all. A case authors a schedule rather than
-    measuring one, and a proposal is no evidence, so the record stands in as the measured row: with
-    one record in scope the microseconds only have to exist, not rank.
+    ``run`` / ``serve`` uses, or they do not reach it at all. A case authors schedules rather than
+    measuring them, and a proposal is no evidence, so each entry stands in as a measured row: with
+    one case in scope the microseconds only have to exist, not rank. Strict: a fork no entry
+    decides is an ``EvidenceError`` naming the kernel, never a prior's guess.
     """
-    record = case.record
-    if record.measurements is None:
-        record = replace(record, measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "corpus"})
-    regime = {name: value for name, value in record.pin_map.items() if family_of(str(name)) not in KERNEL_DECISION_FAMILIES}
+    records = [
+        replace(record, measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "corpus"})
+        if record.measurements is None
+        else record
+        for record in case.records
+    ]
+    regime = {name: value for name, value in case.record.pin_map.items() if family_of(str(name)) not in KERNEL_DECISION_FAMILIES}
     with tempfile.TemporaryDirectory(prefix="emmy_corpus_") as directory:
         absent = Path(directory) / "absent-online.json"
-        with records_override([record]), config.online_file_override(absent), pinned_knobs(regime):
+        with (
+            records_override(records),
+            config.online_file_override(absent),
+            config.strict_evidence_override(True),
+            pinned_knobs(regime),
+        ):
             yield
 
 
@@ -278,24 +354,28 @@ def offered(case: Case) -> str | None:
     be offered at all would read as satisfied. Membership is asked per row, *through* the flag, so
     the structural families it already reads correctly stay correctly read here.
     """
-    pinned = case.pinned
-    try:
-        with pinned_knobs(pinned):
-            rows = enumerate_graph(case.record.target_program.copy(), case.union_context()).rows
-    except Exception as exc:  # noqa: BLE001 — a pin the enumeration refuses outright is not offered
-        return f"{type(exc).__name__}: {exc}"
-    # Site identities are problem-local, so one structural target may contain several fresh
-    # classic problems whose exact pins are realized by different kernel rows. Every schedule pin
-    # must appear somewhere in the offered kernel set; no family-wide alias is used to bridge it.
-    if rows and unreproducible_pin_flag(pinned, rows) is None:
-        return None
-    if not case.record.knobs:
-        # A FORKLESS kernel: its schedule space collapsed to one row, so it opens no fork and the
-        # enumeration has nothing to return. There is no schedule to be denied, so nothing here can
-        # fail — `realized` still proves it lowers, and the later stages still prove it runs. This
-        # mirrors how `golden._replay` reads a forkless kernel's row off the resolved op.
-        return None
-    return f"no enumerated row carries the pin ({len(rows)} rows offered at sm_{''.join(map(str, case.compute_cap))})"
+    for record in case.records:
+        # An entry's row beside the SET's kernel-set decisions: a piece exists to be enumerated
+        # only once the cuts and splits that mint it are pinned.
+        pinned = {**set_decisions(case), **pin_of(record)}
+        try:
+            with pinned_knobs(pinned):
+                rows = enumerate_graph(record.target_program.copy(), case.union_context()).rows
+        except Exception as exc:  # noqa: BLE001 — a pin the enumeration refuses outright is not offered
+            return f"{record.name}: {type(exc).__name__}: {exc}"
+        # Site identities are problem-local, so one structural target may contain several fresh
+        # classic problems whose exact pins are realized by different kernel rows. Every schedule pin
+        # must appear somewhere in the offered kernel set; no family-wide alias is used to bridge it.
+        if rows and unreproducible_pin_flag(pinned, rows) is None:
+            continue
+        if not record.knobs:
+            # A FORKLESS kernel: its schedule space collapsed to one row, so it opens no fork and the
+            # enumeration has nothing to return. There is no schedule to be denied, so nothing here can
+            # fail — `realized` still proves it lowers, and the later stages still prove it runs. This
+            # mirrors how `golden._replay` reads a forkless kernel's row off the resolved op.
+            continue
+        return f"{record.name}: no enumerated row carries the pin ({len(rows)} rows offered at sm_{''.join(map(str, case.compute_cap))})"
+    return None
 
 
 def realized(case: Case) -> str | None:
@@ -311,7 +391,6 @@ def realized(case: Case) -> str | None:
     """
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
 
-    pinned = case.pinned
     try:
         graph, taken = lowered(case, case.context())
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
@@ -319,12 +398,13 @@ def realized(case: Case) -> str | None:
     rows = [dict(node.op.knobs or {}) for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
     if not rows:
         return "lowering produced no CUDA kernel"
-    flag = unreproducible_pin_flag(pinned, rows)
-    if flag is not None:
-        return flag
-    unstamped = _unstamped_families(case.record.knobs, rows)
-    if unstamped:
-        return f"pinned but unstamped: {', '.join(sorted(unstamped))}"
+    for record in case.records:
+        flag = unreproducible_pin_flag(pin_of(record), rows)
+        if flag is not None:
+            return f"{record.name}: {flag}"
+        unstamped = _unstamped_families(record.knobs, rows)
+        if unstamped:
+            return f"{record.name}: pinned but unstamped: {', '.join(sorted(unstamped))}"
     untaken = _untaken_decisions(case, taken)
     if untaken:
         return f"kernel-set decision not taken: {', '.join(untaken)}"
@@ -336,18 +416,19 @@ def _untaken_decisions(case: Case, taken: list[dict[str, str]]) -> list[str]:
     ``PLACE`` key marked ``cut`` (a bare one is any cut), and each ``REDUCE`` value with a
     cross-CTA ``g<n>`` half (matched on that half alone — the rest is a piece's own schedule)."""
     missing: list[str] = []
-    for key, value in case.record.route.items():
-        if value != "cut":
-            continue
-        if not any(v == "cut" and (k == key or key == "PLACE") for arm in taken for k, v in arm.items() if family_of(k) == "PLACE"):
-            missing.append(f"{key}=cut")
-    for key, value in case.pinned.items():
-        want = parse_reduce(value) if family_of(str(key)) == "REDUCE" else None
-        if want is None or not want.needs_split:
-            continue
-        got = (parse_reduce(v) for arm in taken for k, v in arm.items() if family_of(k) == "REDUCE")
-        if not any(plan is not None and plan.cta == want.cta and plan.finalize == want.finalize for plan in got):
-            missing.append(f"{key}={value}")
+    for record in case.records:
+        for key, value in record.route.items():
+            if value != "cut":
+                continue
+            if not any(v == "cut" and (k == key or key == "PLACE") for arm in taken for k, v in arm.items() if family_of(k) == "PLACE"):
+                missing.append(f"{key}=cut")
+        for key, value in pin_of(record).items():
+            want = parse_reduce(value) if family_of(str(key)) == "REDUCE" else None
+            if want is None or not want.needs_split:
+                continue
+            got = (parse_reduce(v) for arm in taken for k, v in arm.items() if family_of(k) == "REDUCE")
+            if not any(plan is not None and plan.cta == want.cta and plan.finalize == want.finalize for plan in got):
+                missing.append(f"{key}={value}")
     return missing
 
 

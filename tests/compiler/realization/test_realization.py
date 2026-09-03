@@ -2,6 +2,7 @@
 
 A case is a checked-in minimized reproducer of one failure class: a schedule that should be
 realizable is not. Its expectation is its filename (see ``ARCHITECTURE.md``); there is no manifest.
+A case holds one entry per kernel of the set its target compiles to.
 
 Every case is asked four questions in order, one test node each, so an ``_xfail_<stage>`` suffix
 lands on exactly the stage it names rather than on a walker that could have failed anywhere.

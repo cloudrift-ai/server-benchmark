@@ -486,10 +486,11 @@ def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target
 
 
 def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
-    """Golden evidence is per kernel. A routing record is a route row under the signature of the
-    kernel its cut was offered on; a child-identity receipt's ``PLACE`` pin is the same route row,
-    and its schedule row is keyed under its child's signature — a piece inherits nothing from the
-    kernel it replaced."""
+    """Golden evidence is per kernel. A target's entries walk one path: the leading entry (the
+    routing record here) decides the parent's placement fork and is its route row under the
+    signature of the kernel the cut was offered on; the child-identity receipt decides only the
+    forks of the kernel it names, and its schedule row is keyed under that child's signature — a
+    piece inherits nothing from the kernel it replaced."""
     from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
 
     fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
@@ -507,7 +508,6 @@ def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
         got = evidence_rows("", (12, 0))
     assert got == [
         (parent_signature, route, 1.0, routing.name),
-        (parent_signature, route, 1.0, receipt.name),
         (replay.signatures[child], receipt.schedule_row, 1.0, receipt.name),
     ]
 

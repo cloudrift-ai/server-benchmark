@@ -312,22 +312,6 @@ def test_normalization_shares_structurally_identical_cones() -> None:
     assert not twins, "normalization left same-value cones as distinct objects"
 
 
-def test_reduced_qk_attention_offers_the_statistic_arm_b_seams_idempotently() -> None:
-    """The reduced Qwen3 q/k-norm SDPA target offers the score contractions' K operand cones."""
-    (record,) = load_golden_records(load_golden_file(CASES / "attention/rmsnorm-qk-sdpa-stat-b-cut.yaml"))
-
-    tile = _lifted_target(record)
-    seams = {seam.spelling: seam for seam in cuttable_seams(tile)}
-    seam = seams["PLACE@map.fold.a.map.fold.fold.b1"]
-    # The score contractions' K cones are one VALUE. Retaining the shared statistic at its
-    # defining scope lets normalization collapse one more duplicate, leaving one sibling whose
-    # differently named key axis is recorded by the capture correspondence.
-    assert len(seam.siblings) == 1
-    assert all(dict(pairs).keys() == dict(seam.siblings[0][1]).keys() for _, pairs in seam.siblings)
-    assert "PLACE@map.fold.a.map.fold.fold.b2" not in seams
-    assert TileOp(op=tile.op, name=tile.name, place=tile.place, axes=tile.axes, output_specs=tile.output_specs).op is tile.op
-
-
 def _statistic_under_two_binders() -> TileOp:
     """A row statistic feeding a contraction nested under a separate fold binder."""
     r, k, t = Axis("r", Dim(16)), Axis("k", Dim(16)), Axis("t", Dim(4))

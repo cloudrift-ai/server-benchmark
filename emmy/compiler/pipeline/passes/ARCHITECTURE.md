@@ -82,27 +82,19 @@ placement decision, not a site, so it resolves among the CUTTABLE seams (the roo
 codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone, a seam
 whose workspace dtypes stay undetermined).
 A contraction-operand seam stands for a VALUE, not only an object: closed cones that are alpha-equivalent up to
-their captured axis names (attention's normalized K cone, once per score contraction) fold into one seam, each
-duplicate carried as a sibling with its capture correspondence, and the cut replaces every one with workspace loads
-spelled through its own axes. Any stored fold capturing enclosing-scope names — operand edge or body member — is
-cuttable through PROVIDER CLOSURE. Each occurrence resolves captures outward through its lexical environment,
-nearest scope first; every occurrence must resolve to equal straight-line providers and the same Fold producers. A
-pure `Load`/`Assign` chain joins the produced piece verbatim, while a Fold producer makes the seam DEPENDENT: its piece
-reads the name through that producer's workspace, so cutting it composes the producer's cut in. Dtypes for capturing
-seams come from inference rooted at the Tile tree, where the enclosing bindings are visible. This is what lets row
-statistics materialize once per query row instead of being copied into a contraction's evaluation domain.
-Provider-closed and dependent seams join the UNPINNED fork as principal closures: each seam is offered with its
-transitively required producers as ONE composed structural arm, built by the same composition walk the pin path
-uses, so the evidence-driven route through a dependent seam is on the ballot (DeepSeek-V4 post4096's only working
-placement was a dependent seam's closure — the previous plain-only ballot could never elect it, however the
-evidence ranked). Two seams whose closures coincide are one arm. Bare `PLACE=cut` still resolves among the PLAIN
-seams only: it names one deterministic pinned decision and is consumed on the fresh pieces. Unpinned recursive
-placement over composed arms converges in practice — pieces collapse onto shared identities as the tree shrinks —
+their captured axis names fold into one seam, each duplicate carried as a sibling with its capture correspondence,
+and the cut replaces every one with workspace loads spelled through its own axes. A term is closed by construction —
+its values arrive through its operand edges — so every stored non-slab edge is a seam and there is no capture to
+resolve outward. A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
+components of ONE fold, so there is no statistic edge to materialize, and the score contraction and the fold itself
+are the seams that stand there. The unpinned fork offers every seam as its own structural arm. Bare `PLACE=cut`
+resolves to the root-most seam: it names one deterministic pinned decision and is consumed on the fresh pieces.
+Unpinned recursive placement converges in practice — pieces collapse onto shared identities as the tree shrinks —
 rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
-workspace when its value nests inside (attention's statistics cone contains the score dots whose operand cones are
-cut beside it) — and all pieces set `placement_decided` and proceed to scheduling. A bare pinned cut consumes its one
+workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and all
+pieces set `placement_decided` and proceed to scheduling. A bare pinned cut consumes its one
 root-most cut the same way and may join scoped cuts in that single decision. A scoped pin whose site path does
 not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
@@ -527,10 +519,9 @@ unsupported forms remain unmapped.
 Maximal Loop fusion remains canonical. Tile lowering may expose two kinds of graph-fragment siblings without changing
 that canonical input:
 
-- **`030_cut`** offers the maximal fused Fold tree and every closed stored child-Fold seam — body-member folds
-  closed at offer time by provider closure, and dependent seams offered as principal closures (see the placement
-  discussion above). A cut writes one workspace
-  per state component and replaces all occurrences of the same canonically shared Fold object with workspace loads.
+- **`030_cut`** offers the maximal fused Fold tree and every stored child-Fold seam, each as its own arm (see the
+  placement discussion above). A cut writes one workspace per state component and replaces all occurrences of the
+  same canonically shared Fold object with workspace loads.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
   are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:
   an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes

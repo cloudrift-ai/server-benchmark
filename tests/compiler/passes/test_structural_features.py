@@ -179,6 +179,83 @@ def test_symbolic_axis_counted_and_excluded_from_prod():
     assert feats["S_ext_reduce_prod"] == 64.0
 
 
+def _nested_reduce_body(ext_k1: int = 16, ext_k2: int = 32) -> Body:
+    """Free ``i`` over reduce ``k1`` whose step recomputes an inner reduce ``k2`` — the
+    recomputation nest shape: a thread serializes ``k1 * k2`` trips per output cell."""
+    return Body(
+        (
+            Loop(
+                axis=Axis("i", 8),
+                body=(
+                    Loop(
+                        axis=Axis("k1", ext_k1),
+                        body=(
+                            Loop(
+                                axis=Axis("k2", ext_k2),
+                                body=(
+                                    Load(name="x", input="a", index=(Var("i"), Var("k2"))),
+                                    Accum(name="inner", value="x", op=ElementwiseImpl("add")),
+                                ),
+                            ),
+                            Assign(name="w", op="multiply", args=("inner", "inner")),
+                            Accum(name="s", value="w", op=ElementwiseImpl("add")),
+                        ),
+                    ),
+                    Write(output="o", index=(Var("i"),), value="s"),
+                ),
+            ),
+        )
+    )
+
+
+def test_serial_cell_work_multiplies_nested_reduces_only():
+    """The stamp is the reduce-loop NEST product: a free axis never multiplies, a nested
+    reduce does — the recomputation shape ``S_ext_reduce_prod`` cannot see is priced here."""
+    assert structure_features(_rms_body(ext_i=8, ext_k=64))["S_ext_serial_cell_work"] == 64.0
+    feats = structure_features(_nested_reduce_body(ext_k1=16, ext_k2=32))
+    assert feats["S_ext_serial_cell_work"] == 16.0 * 32.0
+
+
+def test_serial_cell_work_takes_the_max_path_over_sibling_reduces():
+    """Sibling reduce loops run in sequence, not nested: the worst path is their max, while
+    the flat ``S_ext_reduce_prod`` multiplies them — the two features must disagree here."""
+    feats = structure_features(_softmax_body())
+    assert feats["S_ext_serial_cell_work"] == 64.0
+    assert feats["S_ext_reduce_prod"] == 64.0 * 64.0
+
+
+def test_serial_cell_work_saturates_and_skips_symbolic_extents():
+    huge = Body(
+        (
+            Loop(
+                axis=Axis("outer", 10**200),
+                body=(Loop(axis=Axis("inner", 10**200), body=(), role=AxisRole.PLANAR),),
+                role=AxisRole.PLANAR,
+            ),
+        )
+    )
+    assert structure_features(huge)["S_ext_serial_cell_work"] == float_info.max
+    symbolic = Body(
+        (
+            Loop(
+                axis=Axis("s", Dim("seq_len")),
+                body=(
+                    Loop(
+                        axis=Axis("k", 64),
+                        body=(
+                            Load(name="x", input="a", index=(Var("s"), Var("k"))),
+                            Accum(name="acc", value="x", op=ElementwiseImpl("add")),
+                        ),
+                    ),
+                ),
+                role=AxisRole.PLANAR,
+            ),
+        )
+    )
+    # The symbolic reduce extent contributes no factor; the static nested reduce still counts.
+    assert structure_features(symbolic)["S_ext_serial_cell_work"] == 64.0
+
+
 def test_dtype_multiset_needs_graph():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (8, 64), "f16"), node_id="a")

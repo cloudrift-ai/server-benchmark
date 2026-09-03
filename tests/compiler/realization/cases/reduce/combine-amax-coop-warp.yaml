@@ -19,7 +19,7 @@ configs:
     origins:
     - amax
   realizations:
-  - name: k_amax_reduce.bf754aa6c641
+  - name: k_amax_reduce.3024e86d746f
     bindings: {}
     pins:
       FAST_MATH: false

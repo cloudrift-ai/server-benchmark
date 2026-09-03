@@ -132,23 +132,26 @@ def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> Bo
         end = index + 1
         while end < len(stores) and stores[end].sweep == st.sweep:
             end += 1
-
-        def shared(depth: int, group_end: int = end, path: tuple = st.sweep) -> bool:
-            return any(spec.sweep[: depth + 1] == path[: depth + 1] for spec in stores[group_end:])
-
+        later = stores[end:]
         writes = tuple(store.write for store in stores[index:end])
-        if shared(len(st.sweep) - 1):
+        if _shares_prefix(later, st.sweep, len(st.sweep)):
             out.extend(writes)  # the last group with this path opens the loop and collects these
         else:
             start = _sweep_start(out, st.sweep[-1].name)
             out = [*out[:start], Loop(axis=st.sweep[-1], body=Body((*out[start:], *writes)))]
-            for depth in range(len(st.sweep) - 2, -1, -1):
-                if shared(depth):
+            for depth in range(len(st.sweep) - 1, 0, -1):
+                if _shares_prefix(later, st.sweep, depth):
                     break  # a shared prefix stays open for its last carrier (sharing is monotone)
-                start = _sweep_start(out, st.sweep[depth].name)
-                out = [*out[:start], Loop(axis=st.sweep[depth], body=Body(tuple(out[start:])))]
+                axis = st.sweep[depth - 1]
+                start = _sweep_start(out, axis.name)
+                out = [*out[:start], Loop(axis=axis, body=Body(tuple(out[start:])))]
         index = end
     return Body(tuple(out))
+
+
+def _shares_prefix(later, path: tuple, length: int) -> bool:
+    """Whether a spec in ``later`` rides the same source loops as ``path``'s first ``length``."""
+    return any(spec.sweep[:length] == path[:length] for spec in later)
 
 
 def _dense_axis_suffix(index: tuple, name: str) -> bool:
@@ -212,7 +215,9 @@ def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | No
     the source spelled, writes and nested loops interleaved as they stood — every path prefixed
     with this loop's axis. The PATH is the one fact reconstitution cannot re-derive: a write's
     index names its coordinates but not the loop nest's order, so the spec stores exactly what
-    extraction destroyed."""
+    extraction destroyed. A nested loop that rejoins a pure prefix ends the run, so a store or
+    nest ahead of it stays an impure member and the split declines — conservative, and the
+    round-trip gate would refuse the spelling anyway."""
     path = (*outer, loop.axis)
     inner = list(loop.body)
     tail: list[OutputSpec] = []
@@ -232,7 +237,7 @@ def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | No
                 break
             continue
         break
-    return (inner, tail) if all(s.pure for s in inner) else None
+    return (inner, tail) if tail and all(s.pure for s in inner) else None
 
 
 def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...]] | None:
@@ -251,13 +256,11 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
         if isinstance(last, Write):
             stores.insert(0, OutputSpec(write=rest.pop()))
             continue
-        if isinstance(last, Loop) and not last.is_reduce:
-            swept = _sweep_specs(last, ())
-            if swept is not None and swept[1]:
-                prefix, group = swept
-                stores[0:0] = group
-                rest = [*rest[:-1], *prefix]
-                continue
+        if isinstance(last, Loop) and not last.is_reduce and (swept := _sweep_specs(last, ())) is not None:
+            prefix, group = swept
+            stores[0:0] = group
+            rest = [*rest[:-1], *prefix]
+            continue
         break
     if all(s.pure for s in rest) and apply_output_specs(rest, stores) == original:
         return tuple(rest), tuple(stores)

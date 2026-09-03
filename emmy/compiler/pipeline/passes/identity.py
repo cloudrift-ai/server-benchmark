@@ -191,11 +191,40 @@ def _bounded_mul(value: float, extent: float) -> float:
     return value * extent
 
 
-def _serial_cell_work(body: Body) -> float:
-    """Worst per-cell serial trip count: the max over loop-nest paths of the product of the
-    static reduce-loop extents along the path. Nest-aware where ``S_ext_reduce_prod`` is flat —
-    sibling reduces take the max, nested reduces multiply — so a subtree re-evaluated under an
-    enclosing reduce is priced by the trips a thread actually serializes (DeepSeek-V4
+def _one_trip(_loop: Loop) -> float:
+    return 1.0
+
+
+def _trip_issues(loop: Loop) -> float:
+    """Statements ONE trip of ``loop`` re-executes: every accumulate, plus the trip-variant cone
+    seeded by the loop axis — a statement reading the axis, a counted statement's value, or a
+    trip-variant nested loop's carried state. A backend hoist can remove only what the trip
+    does not vary (the canonical body may re-spell a scalar load inside the loop), so the
+    invariant remainder is not counted. This is a STATEMENT count, not an instruction count:
+    packed issue (adjacent element loads as one vector load, paired f16 ops) and a dead
+    statement issue fewer, while dependence chains and an ``Mma`` issue more — slack the
+    per-issue constant and the enforcement guard absorb (``search/features``). A nested loop
+    contributes no count here — the nest walk multiplies its own value — only its names."""
+    variant = {loop.axis.name}
+    count = 0.0
+    for s in loop.body:
+        if isinstance(s, Loop):
+            if free_names(s) & variant:
+                variant.update(Body((s,)).ssa_defs)
+            continue
+        if isinstance(s, Accum) or free_names(s) & variant:
+            count += 1.0
+            variant.update(s.defines())
+    return count
+
+
+def _serial_cell_work(body: Body, trip=_one_trip) -> float:
+    """Worst per-cell serial work: the max over loop-nest paths of the product of the static
+    reduce-loop extents along the path, each trip priced by ``trip`` — 1 for the trip count
+    (``S_ext_serial_cell_work``), its re-executed statements for the issue count
+    (``S_ext_serial_cell_issues``, :func:`_trip_issues`). Nest-aware where ``S_ext_reduce_prod``
+    is flat — sibling reduces take the max, nested reduces multiply — so a subtree re-evaluated
+    under an enclosing reduce is priced by the trips a thread actually serializes (DeepSeek-V4
     ``post4096``'s elected consumer piece recomputed a 16384-step statistics contraction inside a
     4096-step reduce: flat product 2^36-blind, nest product the honest 2^30). Free and sweep
     loops are excluded (grid-distributed / conservative), a symbolic extent contributes no
@@ -205,53 +234,14 @@ def _serial_cell_work(body: Body) -> float:
     best = 1.0
     for s in body:
         if isinstance(s, Loop):
-            inner = _serial_cell_work(s.body)
+            inner = _serial_cell_work(s.body, trip)
             ext = s.axis.extent
             if s.is_reduce and ext.is_static:
-                inner = _bounded_mul(inner, float(ext.as_static()))
+                inner = _bounded_mul(max(inner, trip(s)), float(ext.as_static()))
             best = max(best, inner)
         else:
             for nested in s.nested():
-                best = max(best, _serial_cell_work(nested))
-    return best
-
-
-def _trip_issues(loop: Loop) -> float:
-    """Statements ONE trip of ``loop`` must issue: every accumulate, plus the trip-variant cone
-    seeded by the loop axis — a statement reading the axis, a counted statement's value, or a
-    nested loop's carried state. A backend hoist can remove only what the trip does not vary
-    (the canonical body may re-spell a scalar load inside the loop), so counting the variant
-    cone alone is what keeps the derived bound a bound. A nested loop contributes no count here
-    — the nest walk multiplies its own value — only its defined names."""
-    variant = {loop.axis.name}
-    count = 0.0
-    for s in loop.body:
-        if isinstance(s, Loop):
-            variant.update(Body((s,)).ssa_defs)
-            continue
-        if isinstance(s, Accum) or free_names(s) & variant:
-            count += 1.0
-            variant.update(s.defines())
-    return count
-
-
-def _serial_cell_issues(body: Body) -> float:
-    """Worst per-cell serial ISSUE count: :func:`_serial_cell_work`'s nest walk with each trip
-    priced at its trip-variant statement count (:func:`_trip_issues`) instead of 1. Same
-    conservatisms — sibling reduces take the max, free/sweep loops pass through unmultiplied,
-    symbolic extents and ``StridedLoop`` contribute no factor — so the value is a lower bound on
-    the instructions a thread issues per output cell; saturates at the largest finite float."""
-    best = 0.0
-    for s in body:
-        if isinstance(s, Loop):
-            inner = _serial_cell_issues(s.body)
-            ext = s.axis.extent
-            if s.is_reduce and ext.is_static:
-                inner = _bounded_mul(max(inner, _trip_issues(s)), float(ext.as_static()))
-            best = max(best, inner)
-        else:
-            for nested in s.nested():
-                best = max(best, _serial_cell_issues(nested))
+                best = max(best, _serial_cell_work(nested, trip))
     return best
 
 
@@ -285,5 +275,5 @@ def _extents(body: Body) -> dict[str, float]:
         "S_ext_reduce_max": float(max(reduce_)) if reduce_ else 0.0,
         "S_ext_n_symbolic_axis": float(n_symbolic),
         "S_ext_serial_cell_work": _serial_cell_work(body),
-        "S_ext_serial_cell_issues": _serial_cell_issues(body),
+        "S_ext_serial_cell_issues": _serial_cell_work(body, _trip_issues),
     }

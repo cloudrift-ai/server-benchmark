@@ -225,9 +225,11 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
 #: traffic legitimately dominate, and the model's ranking (however uncalibrated) must stand;
 #: above it per-thread serial work alone makes the kernel un-servable and nothing may price it
 #: lower. The lower edge is pinned by measurement: the largest legitimate ``serial_floor_us``
-#: across the qwen3emb realization corpus family is **6.55 µs** (``sdpa-s512``'s fused kernel,
-#: 2^16 serial trips — a shape whose fused election is correct and pinned by its ``realized``
-#: replay), so 1 ms stands ~150x above the biggest bound the guard must ignore.
+#: across the realization corpus (every case lowered under its pins) is **26.21 µs**
+#: (``sdpa-s512``'s fused kernel, 2^16 serial trips re-executing 4 statements each — a shape
+#: whose fused election is correct and pinned by its ``realized`` replay; next
+#: ``rmsnorm-gqa-sdpa-stat-fill`` at 16.4 µs), so 1 ms stands ~38x above the biggest bound the
+#: guard must ignore.
 _SERIAL_FLOOR_ENFORCE_US = 1e3
 
 
@@ -260,7 +262,8 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
     docstring names, and the prior's to fix by being calibrated, not this function's to paper
     over. What this Σ DOES enforce is the physical bound no calibration could relax: a summand
     whose serial-work lower bound (:func:`~..features.serial_floor_us` — the kernel's per-thread
-    serial trips at a per-trip time conservative for any GPU clock) exceeds
+    serial issues, each trip priced at the statements it re-executes, at a per-issue time
+    conservative for any GPU clock) exceeds
     :data:`_SERIAL_FLOOR_ENFORCE_US` is clamped to that bound. A measured µs is never below the
     bound, so the clamp only ever lifts model garbage: the cold proxy priced DeepSeek-V4
     ``post4096``'s fused 2^30-trip recomputation nest at 4.29e-37 µs, under every one of its

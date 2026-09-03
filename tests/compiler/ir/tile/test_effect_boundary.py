@@ -199,6 +199,22 @@ def test_nested_sweeps_beside_an_outer_write_round_trip() -> None:
     assert apply_output_specs(pure, specs) == Body((outer,))
 
 
+def test_a_store_ahead_of_a_nested_sweep_keeps_its_source_position() -> None:
+    """The outer store BEFORE the nest (the source order of post4096's gate stream): the outer
+    group carries a prefix a later spec shares, so its write is appended bare and the last group
+    carrying the outer axis wraps it together with the nest — store first, nest after, as written."""
+    a20, a27 = _ax("a20", 4), _ax("a27", 8)
+    inner = Loop(axis=a27, body=Body((Write(output="mul_16", index=(Var("a20"), Var("a27")), value="v216"),)))
+    outer = Loop(axis=a20, body=Body((Write(output="view_8", index=(Var("a20"),), value="v143"), inner)))
+
+    split = extract_output_specs([outer])
+
+    assert split is not None
+    pure, specs = split
+    assert [[axis.name for axis in spec.sweep] for spec in specs] == [["a20"], ["a20", "a27"]]
+    assert apply_output_specs(pure, specs) == Body((outer,))
+
+
 def test_sibling_nested_sweeps_share_the_outer_loop() -> None:
     """Two write-only nests under one outer sweep with no outer store: the outer loop is still
     opened exactly once, by the last group whose path carries it."""

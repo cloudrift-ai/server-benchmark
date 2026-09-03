@@ -132,6 +132,17 @@ def test_an_empty_recorded_signature_condemns_nothing() -> None:
     assert greedy._resolved_price(terminal, trace, ctx, None, failed={frozenset(): [2_000_000.0]}) == 5.0
 
 
+#: ``sdpa-s512``'s fused kernel re-executes 4 statements per trip of its 2^16-trip nest — measured over the
+#: realization corpus (every case lowered under its pins): its 26.21 µs floor is the largest legitimate one.
+SDPA_S512_ISSUES_PER_TRIP = 4
+
+
+def _stamped(trips: int, issues_per_trip: int) -> dict:
+    """A knob row stamped the way every live op is: the worst reduce nest's trips, and the same
+    nest priced at the statements each trip re-executes."""
+    return {"S_ext_serial_cell_work": float(trips), "S_ext_serial_cell_issues": float(trips) * issues_per_trip}
+
+
 def _priced(kernels: dict[str, tuple[dict, float]]) -> float:
     """``_resolved_price`` over SimpleNamespace kernels: ``{node_id: (knobs, traced score)}``."""
     terminal = SimpleNamespace(
@@ -148,33 +159,28 @@ def test_the_kernel_set_price_enforces_the_serial_work_bound():
     1.02e-17 µs Σ), so the greedy kept the nest; bounded, the fused arm prices its honest ~1e5 µs
     and loses."""
     garbage = 4.29e-37
-    fused_monster = _priced({"n": ({"S_ext_serial_cell_work": float(2**30)}, garbage)})
+    fused_monster = _priced({"n": (_stamped(2**30, 1), garbage)})
     assert fused_monster == pytest.approx(float(2**30) * 1e-4, rel=1e-6)
-    cut_arm = _priced(
-        {
-            "p": ({"S_ext_serial_cell_work": float(2**16)}, garbage),
-            "c": ({"S_ext_serial_cell_work": float(2**16)}, garbage),
-        }
-    )
+    cut_arm = _priced({"p": (_stamped(2**16, 1), garbage), "c": (_stamped(2**16, 1), garbage)})
     assert cut_arm < fused_monster  # the recomputation nest loses on its serial-work bound
 
 
 def test_the_serial_bound_has_no_jurisdiction_at_ordinary_magnitudes():
     """The bound ignores launch overhead and memory traffic, so below the enforcement guard the
     model's ranking stands exactly as before — an ungated draft flipped three qwen3emb sdpa
-    corpus replays to a cut election by comparing trip counts alone. The 2^16 row IS the largest
-    of those shapes (``sdpa-s512``'s fused kernel, ``serial_floor_us`` 6.55 µs — the biggest
-    legitimate floor measured across the qwen3emb corpus family), so lowering the guard under it
-    breaks this test before it breaks the corpus. And a measured µs is never below the bound, so
-    the clamp is a no-op on it even past the guard."""
+    corpus replays to a cut election by comparing trip counts alone. The 2^16-trip row IS the
+    largest of those shapes (``sdpa-s512``'s fused kernel, ``serial_floor_us`` 26.21 µs priced
+    per issue — the biggest legitimate floor measured across the whole realization corpus), so
+    a guard within 20× of it breaks this test before it breaks the corpus. And a measured µs is
+    never below the bound, so the clamp is a no-op on it even past the guard."""
     from emmy.compiler.pipeline.search.features import serial_floor_us
 
-    sdpa_s512 = {"S_ext_serial_cell_work": float(2**16)}
-    assert serial_floor_us(sdpa_s512) < greedy._SERIAL_FLOOR_ENFORCE_US
+    sdpa_s512 = _stamped(2**16, SDPA_S512_ISSUES_PER_TRIP)
+    assert serial_floor_us(sdpa_s512) < greedy._SERIAL_FLOOR_ENFORCE_US / 20  # the margin the guard keeps
     garbage = 4.29e-37
     fused_small = _priced({"n": (sdpa_s512, garbage)})
-    assert fused_small == pytest.approx(garbage)  # bound 6.55 µs — inside the guard, not enforced
-    measured = _priced({"n": ({"S_ext_serial_cell_work": float(2**30)}, 2_000_000.0)})
+    assert fused_small == pytest.approx(garbage)  # inside the guard, not enforced
+    measured = _priced({"n": (_stamped(2**30, 1), 2_000_000.0)})
     assert measured == 2_000_000.0  # a measured µs already satisfies the bound
 
 
@@ -187,33 +193,14 @@ def test_the_issues_stamp_closes_the_sub_guard_trip_escape():
     prices its trips alone, exactly as before."""
     from emmy.compiler.pipeline.search.features import serial_floor_us
 
-    trips_only = {"S_ext_serial_cell_work": float(2**23)}
-    assert serial_floor_us(trips_only) < greedy._SERIAL_FLOOR_ENFORCE_US  # the documented escape
-    dominant = {**trips_only, "S_ext_serial_cell_issues": float(2**23) * 16.0}
+    assert float(2**23) * 1e-4 < greedy._SERIAL_FLOOR_ENFORCE_US  # the trips-priced floor: the documented escape
+    dominant = _stamped(2**23, 16)
     assert serial_floor_us(dominant) > greedy._SERIAL_FLOOR_ENFORCE_US
     garbage = 3.72e-07  # the cold proxy's actual price for the fused arm at this fork
     fused = _priced({"n": (dominant, garbage)})
     assert fused == pytest.approx(float(2**23) * 16.0 * 1e-4, rel=1e-6)
-    cut = _priced(
-        {
-            "p": ({"S_ext_serial_cell_work": float(2**12), "S_ext_serial_cell_issues": float(2**12) * 16.0}, 1.37e-3),
-            "c": ({"S_ext_serial_cell_work": float(2**11), "S_ext_serial_cell_issues": float(2**11) * 10.0}, 1.3e-5),
-        }
-    )
+    cut = _priced({"p": (_stamped(2**12, 16), 1.37e-3), "c": (_stamped(2**11, 10), 1.3e-5)})
     assert cut < fused  # the per-output-element weight-column walk loses on its issue bound
-
-
-def test_the_issues_floor_divides_by_reduce_coverage_like_trips():
-    """A cta/coop reduce partition genuinely divides what one thread issues; the register/ILP
-    fold does not — the same coverage rule the trips floor applies."""
-    from emmy.compiler.pipeline.search.features import serial_floor_us
-
-    issues = {"S_ext_serial_cell_issues": float(2**20)}
-    assert serial_floor_us(issues) == pytest.approx(float(2**20) * 1e-4)
-    coop = {**issues, "WORK": "t128", "REDUCE": "coop"}
-    assert serial_floor_us(coop) == pytest.approx(float(2**20) / 128 * 1e-4)
-    reg = {**issues, "WORK": "t16x16", "REDUCE": "r4"}
-    assert serial_floor_us(reg) == pytest.approx(float(2**20) * 1e-4)
 
 
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:

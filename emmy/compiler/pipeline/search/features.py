@@ -428,7 +428,7 @@ def knob_features(knobs: dict) -> dict[str, float]:
         for name, val in _node_geometry(sl).items():
             feats[name] = feats.get(name, 0.0) + val
     feats.setdefault("MMA_tier", 0.0)  # scalar tier / no schedule node = no warp atom
-    work = _serial_cell_trips(knobs)
+    work = _covered_serial(knobs, "S_ext_serial_cell_work")
     if work:
         # The one feature monotone in per-thread serial work — what the pricing policy's
         # calibration bound (:func:`serial_floor_us`) rests on, and a fit signal for the priors.
@@ -436,17 +436,13 @@ def knob_features(knobs: dict) -> dict[str, float]:
     return feats
 
 
-def _serial_cell_trips(knobs: dict) -> float:
-    """The trips a thread actually serializes: the stamped worst per-cell reduce-nest product
-    (``S_ext_serial_cell_work``, ``passes/identity.py``) after the row's reduce-partition
+def _covered_serial(knobs: dict, key: str) -> float:
+    """What one thread actually serializes of a stamped per-cell serial quantity — the worst
+    reduce-nest trip count ``S_ext_serial_cell_work`` or its statement-priced twin
+    ``S_ext_serial_cell_issues`` (``passes/identity.py``) — after the row's reduce-partition
     coverage. cta (``g<n>``) and coop lanes divide; the register/ILP fold (``r<n>``) does not —
     the same thread walks every trip, just on independent accumulator chains. ``0.0`` when the
     row carries no stamp."""
-    return _covered_serial(knobs, "S_ext_serial_cell_work")
-
-
-def _covered_serial(knobs: dict, key: str) -> float:
-    """One stamped per-cell serial quantity after the row's reduce-partition coverage."""
     work = float(knobs.get(key) or 0.0)
     if not work:
         return 0.0
@@ -454,30 +450,29 @@ def _covered_serial(knobs: dict, key: str) -> float:
     return work / max(decomp.cta * decomp.coop, 1)
 
 
-#: Serial-work calibration bound, µs per per-thread serial trip. This is an ISSUE-RATE bound,
-#: not a dependency-latency one: even fully independent, perfectly pipelined trips each issue at
-#: least one instruction, and no current GPU issues a thread's instruction faster than ~0.1 ns —
-#: dependence chains, multi-statement bodies, or an ``Mma`` in the trip body only raise the true
-#: cost, never lower it. The one slack this leaves — a trip whose real cost is far above 0.1 ns —
-#: is absorbed by the enforcement guard at the consumer: the bound only ever decides where it is
-#: orders of magnitude past every legitimate kernel, so under-estimating a trip never flips an
-#: honest election.
-SERIAL_TRIP_FLOOR_US = 1e-4
+#: Serial-work calibration bound, µs per per-thread serial ISSUE — a statement a trip
+#: re-executes. This is an issue-rate bound, not a dependency-latency one: even fully
+#: independent, perfectly pipelined statements each issue, and no current GPU issues a thread's
+#: instruction faster than ~0.1 ns — dependence chains or an ``Mma`` only raise the true cost.
+#: The slack this leaves in both directions — a statement whose real cost is far above 0.1 ns,
+#: or packed issue and dead statements that cost less than one — is absorbed by the enforcement
+#: guard at the consumer: the bound only ever decides where it is orders of magnitude past every
+#: legitimate kernel, so mis-pricing a statement never flips an honest election.
+SERIAL_ISSUE_FLOOR_US = 1e-4
 
 
 def serial_floor_us(knobs: dict) -> float:
     """A physical lower bound, in µs, on one launch of the kernel the row ``knobs`` describes:
-    its per-thread serial ISSUES (``S_ext_serial_cell_issues`` — trips times each trip's
-    variant-statement count) at the per-issue bound, or its bare trips for a row stamped before
-    the issues key existed. True regardless of any model, so a kernel-set comparison may clamp an
-    estimated summand to it — and a measured µs is never below it, so clamping measurements is a
-    no-op. It is a BOUND, not an estimate: it ignores launch overhead and memory traffic, so its
-    jurisdiction is where it is decisively large (the enforcement guard lives with the clamp,
-    ``policy/greedy._resolved_price``). Pricing per issue is what catches DeepSeek-V4
-    ``post4096``'s dominant piece — 2^23 trips price 16 % inside the guard, while its ~16
-    statements per weight-column-walk trip put the honest bound decisively past it."""
-    issues = _covered_serial(knobs, "S_ext_serial_cell_issues")
-    return (issues if issues else _serial_cell_trips(knobs)) * SERIAL_TRIP_FLOOR_US
+    its per-thread serial issues (``S_ext_serial_cell_issues`` — the worst reduce nest's trips,
+    each priced at the statements it re-executes) at the per-issue bound. True regardless of any
+    model, so a kernel-set comparison may clamp an estimated summand to it — and a measured µs is
+    never below it, so clamping measurements is a no-op. It is a BOUND, not an estimate: it
+    ignores launch overhead and memory traffic, so its jurisdiction is where it is decisively
+    large (the enforcement guard lives with the clamp, ``policy/greedy._resolved_price``).
+    Pricing per issue is what catches DeepSeek-V4 ``post4096``'s dominant piece — its 2^23 trips
+    alone price 16 % inside the guard, while its ~16 statements per weight-column-walk trip put
+    the honest bound decisively past it."""
+    return _covered_serial(knobs, "S_ext_serial_cell_issues") * SERIAL_ISSUE_FLOOR_US
 
 
 def _free_slots(knobs: dict) -> tuple[int, int, int, int] | None:

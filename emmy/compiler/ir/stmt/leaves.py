@@ -1059,7 +1059,9 @@ class OutputSpec:
     reading them (``apply_output_specs`` — a prefix two paths share is one source loop, opened
     once). The path is stored because it is the one fact extraction destroys: a write's index
     names its coordinates, not the order its loops nested in the source (DeepSeek-V4 post4096's
-    gate stream nests two write-only sweeps beside the outer store)."""
+    gate stream nests two write-only sweeps beside the outer store). The term route takes only
+    the path's extents: ``Fold.lower`` places a store from its write's coordinates and orders the
+    free loops it opens itself."""
 
     write: Write
     sweep: tuple[Axis, ...] = ()

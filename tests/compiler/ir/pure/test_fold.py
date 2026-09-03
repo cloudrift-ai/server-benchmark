@@ -187,7 +187,7 @@ def test_a_sweep_store_rides_the_loop_the_term_opened() -> None:
     """At kernel scope the term opens its output sweep itself and the store follows the swept sum
     inside it; the row total, evaluated over ``m`` alone, stays ahead."""
     total, swept = _normalized_sum()
-    store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=N_AXIS)
+    store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=(N_AXIS,))
     ahead, sweep = swept.lower(frozenset({"m"}), (store,), axes=SCOPE)
     assert ahead == total.lower(axes=SCOPE)[0] and sweep.axis is N_AXIS
     assert [type(stmt).__name__ for stmt in sweep.body] == ["Loop", "Write"]
@@ -214,7 +214,7 @@ def test_a_broadcast_store_opens_the_sweep_axis_its_spec_names() -> None:
     the term opens a ``j`` loop under the total, from the spec's axis."""
     j = Axis("j", Dim(3))
     total = _reduce((slab("y", "y", "m", "k"),), (Assign(name="tot__v", op="copy", args=("y",)),), "tot")
-    store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="tot"), sweep=j)
+    store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="tot"), sweep=(j,))
     (m_loop,) = total.lower(frozenset(), (store,), axes=SCOPE)
     reduce_loop, j_loop = m_loop.body
     assert reduce_loop.axis is K_AXIS and j_loop.axis is j and tuple(j_loop.body) == (store.write,)

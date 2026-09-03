@@ -136,12 +136,16 @@ A node's own canonical forms are formation's (`Fold.__post_init__` orients a bil
 its body); `TileOp.__post_init__` applies the tree-wide ones and the legacy output-sweep-to-free-axis adjustment
 whenever a contraction operand reads the sweep axis. The contraction may be the root compute node or a later site in
 the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute output loop.
-Consecutive output specifications over one sweep axis reconstitute one loop, sibling sweeps sibling loops. The
+A specification's `sweep` is the output loop NEST the store rode in the source, as an outermost-first axis path — the
+one fact extraction destroys, since a write's index names its coordinates but not the order its loops nested in.
+Consecutive output specifications over one path reconstitute one loop nest, sibling sweeps sibling loops, and a
+prefix two paths share is one source loop, opened once by the last group carrying it (DeepSeek-V4 post4096's gate
+stream nests two write-only sweeps beside the outer store; the softmax pair rides a two-deep write-only nest). The
 extraction round-trip gate is byte-identity: a stream is representable only when reconstitution reproduces it exactly.
 The lift guarantees that by forming each sweep's per-cell projection as a term of its level before extraction sees the
-stream, so an output loop reaches the boundary holding its writes alone. A write whose stored value is captured from
-the enclosing scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) needs no term: nothing is
-evaluated over `j`, and its sweep spec alone binds the axis.
+stream, so an output loop reaches the boundary holding only its stores and nested output loops, at their source
+positions. A write whose stored value is captured from the enclosing scope unchanged (`o[j] = acc`, broadcasting an
+already-reduced accumulator) needs no term: nothing is evaluated over `j`, and its sweep spec alone binds the axis.
 
 A sweep axis is never bound at kernel scope: the term opens it itself (`Fold.lower` with the sweep left unbound), and
 the sweep store follows the term defining its value inside that loop. A non-contraction fold that reads a sweep axis

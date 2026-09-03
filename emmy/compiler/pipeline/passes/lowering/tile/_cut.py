@@ -222,7 +222,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         for edge in site.node.operands
         if isinstance(edge, Fold) and edge.as_slab() is None
     }
-    outer = tuple(axis.name for axis in (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None)))
+    outer = tuple(axis.name for axis in (*tile.place.free, *(axis for store in tile.output_specs for axis in store.sweep)))
     occurrence_axes: dict[int, list[tuple]] = {}
     for site in all_sites[1:]:
         occurrence_axes.setdefault(id(site.node), []).append((*outer, *site.scope))

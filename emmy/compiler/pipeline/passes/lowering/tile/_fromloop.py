@@ -396,7 +396,11 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
             edges.extend(inner)
             level.exposed.update((name, fold) for fold in inner for name in fold.exposes)
             writes = tuple(member for member in cell if isinstance(member, Write))
-            pure = Body(tuple(member for member in cell if not isinstance(member, Write)))
+            # A NESTED output sweep is a statement of this cell, not projection material: its own
+            # recursion already reduced it to its stores, so it stays in the retained cell — at
+            # its source position among the writes — while the projection term is formed from the
+            # pure members alone.
+            pure = Body(tuple(member for member in cell if not isinstance(member, (Write, Loop))))
             defined = {name for member in pure for name in member.defines()}
             results = tuple(dict.fromkeys(value for write in writes for value in write.values if value in defined))
             if results:
@@ -404,7 +408,7 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
                 term = Fold(operands=operands, lift=lift)
                 edges.append(term)
                 level.exposed.update((name, term) for name in term.exposes)
-                cell = Body(writes)
+                cell = Body(tuple(member for member in cell if isinstance(member, (Write, Loop))))
             level.stmts.append(replace(stmt, body=cell))
             continue
         nested = stmt.nested()
@@ -563,7 +567,7 @@ def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
     # The kernel's axis table: the free axes and every loop the nest bound (reduce, sweep), by
     # name — the term names them, the kernel holds their extents.
     axes = {axis.name: axis for axis in (*free, *(loop.axis for loop in Body.coerce(cell).loops))}
-    axes.update((spec.sweep.name, spec.sweep) for spec in output_specs if spec.sweep is not None)  # a renamed sibling sweep
+    axes.update((axis.name, axis) for spec in output_specs for axis in spec.sweep)  # a renamed sibling sweep
     return TileOp(
         op=Fold(operands=edges, lift=lift),
         name=name,

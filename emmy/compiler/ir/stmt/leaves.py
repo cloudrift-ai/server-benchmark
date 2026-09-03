@@ -1053,9 +1053,13 @@ class OutputSpec:
     flag — holding the ``Write`` whole keeps every field lossless); ``TileOp.output_specs`` owns
     the tuple. The term places its stores itself (``Fold.lower``), each after the term defining
     its value; a stream spelled without the term reconstitutes them (``apply_output_specs``).
-    ``sweep`` names the output loop the store rode in the source: the axis a store alone is
-    evaluated over when no term declares it (a broadcast, ``o[j] = acc``), and the loop a stream
-    wraps around the trailing stmts reading it."""
+    ``sweep`` names the output loop NEST the store rode in the source, outermost first (``()`` is
+    a plain kernel-tail store): the axes a store alone is evaluated over when no term declares
+    them (a broadcast, ``o[j] = acc``), and the loops a stream wraps around the trailing stmts
+    reading them (``apply_output_specs`` — a prefix two paths share is one source loop, opened
+    once). The path is stored because it is the one fact extraction destroys: a write's index
+    names its coordinates, not the order its loops nested in the source (DeepSeek-V4 post4096's
+    gate stream nests two write-only sweeps beside the outer store)."""
 
     write: Write
-    sweep: Axis | None = None
+    sweep: tuple[Axis, ...] = ()

@@ -253,7 +253,7 @@ def _peeled_root(edge, ctx: Ctx):
 
 def _swept_axis(root, specs: tuple) -> str | None:
     """The output sweep axis ``root``'s cone reads, or ``None``."""
-    return next((spec.sweep.name for spec in specs if spec.sweep is not None and spec.sweep.name in root.free_axes), None)
+    return next((axis.name for spec in specs for axis in spec.sweep if axis.name in root.free_axes), None)
 
 
 def _refuse_partitioned_sweep(root, ctx: Ctx, axis: str) -> None:

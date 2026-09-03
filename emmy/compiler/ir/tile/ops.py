@@ -181,6 +181,7 @@ class Sched:
             raise TypeError("a schedule view reads a TileOp — it is the term's site index")
         self.tile = tile
         self.root = tile.op
+        self.axis_of = tile.axis_of  # the kernel's axis table: a term names its axes, the tile holds their extents
         self.schedule = schedule
         self.materialization = materialization
         #: The kernel's free→grid :class:`~emmy.compiler.ir.schedule.Placement`. A ``TILE`` slice
@@ -322,10 +323,10 @@ class Sched:
             return orient(self.place.root_mn)
         if len(free) < 2:
             return None
-        if site.derived and node.axis is not None and node.axis.extent.is_static and node.axis.extent.as_static() == 1:
+        if site.derived and node.axis is not None and (k := self.axis_of(node.axis)).extent.is_static and k.extent.as_static() == 1:
             return orient((free[-2], free[-1]))
         parent = next((s for s in self._all_sites() if s.segments == site.segments[:-1]), None)
-        ax = getattr(parent.node, "axis", None) if parent is not None else None
+        ax = self.axis_of(parent.node.axis) if parent is not None and getattr(parent.node, "axis", None) is not None else None
         if ax is None:
             return None
         return orient((free[-2], ax.window.parent if ax.window is not None else ax))
@@ -351,6 +352,7 @@ def scheduled(
     schedule=None,
     materialization=None,
     workers=None,
+    axes: tuple = (),
 ):
     """Build a scheduled ``TileOp`` from one accepted semantic assignment.
 
@@ -372,6 +374,7 @@ def scheduled(
         workers=workers,
         knobs=knobs,
         output_specs=tuple(output_specs),
+        axes=axes,
         schedule=schedule,
         materialization=materialization,
     )
@@ -394,7 +397,7 @@ def axis_names(root) -> set[str]:
         if node.axis is None:
             out |= stmt_axis_names(node.lift.body)
         else:
-            out.add(node.axis.name)
+            out.add(node.axis)
             out |= stmt_axis_names(tuple(node.lift.body))
     return out
 
@@ -486,7 +489,7 @@ def head(op):
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 
-def cone_stat(cone) -> Fold | None:
+def cone_stat(cone, axes: tuple) -> Fold | None:
     """The per-row STATISTIC fold of a computed-A cone — the reduce its prologue (the cone's first
     operand, the row-invariant edge) materializes first: the fold whose carried state the first
     reduce ``Loop`` of the prologue's lowering folds. ``None`` for a cone without one — the
@@ -494,7 +497,7 @@ def cone_stat(cone) -> Fold | None:
     prologue = cone.operands[0] if isinstance(cone, Fold) and cone.axis is None and cone.operands else None
     if prologue is None:
         return None
-    first = next((stmt for stmt in prologue.lower() if isinstance(stmt, Loop) and stmt.is_reduce), None)
+    first = next((stmt for stmt in prologue.lower(axes=axes) if isinstance(stmt, Loop) and stmt.is_reduce), None)
     if first is None:
         return None
     carried = {stmt.name for stmt in first.body if isinstance(stmt, Accum)}
@@ -507,7 +510,7 @@ def cone_stat(cone) -> Fold | None:
     return None
 
 
-def carries_partition(op) -> bool:
+def carries_partition(tile) -> bool:
     """Whether this kernel's IR already records a realized cross-CTA split — the ``Window``
     receipt the split offer and the schedule walk's pin path read, KERNEL-scoped because that is
     the scope of the decision consumed: ``REDUCE`` is one pin and a bare one fans out to every
@@ -526,9 +529,9 @@ def carries_partition(op) -> bool:
                 yield s
                 yield from loops(s.body)
 
-    for site in sites(op):
+    for site in sites(tile.op):
         node = site.node
-        ax = getattr(node, "axis", None)
+        ax = tile.axis_of(node.axis) if getattr(node, "axis", None) is not None else None
         if ax is not None and ax.window is not None and ax.window.partition:
             return True
         bodies = [node.lift.body, *([node.lift.body] if getattr(node, "lift", None) is not None else [])]

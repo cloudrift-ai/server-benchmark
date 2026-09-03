@@ -166,7 +166,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         if len(tiled) > 1:
             return _bind_roots(op, ctx, output_specs)
         root = tiled[0] if tiled else op.operands[0]
-        siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower()]
+        siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=ctx.sched.tile.axes)]
         proj = list(dict.fromkeys([*siblings, *op.step()]))
         # A STREAMED store (values = an observer's results) rides the recursion down to the leaf
         # so the scalar arm can splice it into the observed fold's reduce loop — applying it here
@@ -275,7 +275,7 @@ def _bind_roots(op: Fold, ctx: Ctx, output_specs: tuple) -> Tile:
     for index, (root, region, body, owned_specs) in enumerate(projection_regions(op, output_specs)):
         epilogue: list[Stmt] = []
         if region is not root:
-            epilogue = [*(s for edge in region.operands if edge is not root for s in edge.lower()), *region.step()]
+            epilogue = [*(s for edge in region.operands if edge is not root for s in edge.lower(axes=ctx.sched.tile.axes)), *region.step()]
         tail = tuple(apply_output_specs([*epilogue, *body], owned_specs))
         tiles.append(_bind(root, ctx, tail, root.exposes[0], frag_ns=f"_r{index}"))
     return _merge_root_tiles(tuple(tiles))
@@ -345,7 +345,11 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             epi = with_store(epi, ctx.output, grid, c.exposes[0])
         # The cone's K seam, read straight off the inline operand node (``None`` for a gmem-``Load``
         # A — its whole body is the per-cell fill).
-        seam = cone_seam(c.operands[0], c.axis.name) if value_child is None and c.operands[0].as_slab() is None else None
+        # The node's K with its extent: the term names it, the kernel's axis table holds it.
+        k_axis = ctx.sched.axis_of(op.axis)
+        seam = (
+            cone_seam(c.operands[0], k_axis.name, ctx.sched.tile.axes) if value_child is None and c.operands[0].as_slab() is None else None
+        )
         # The leading (batch / ksplit) grid axes ride untiled below the ``(m, n)`` cell — the GRID's
         # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
         # per-cell rename's shared coordinates) from here, where the kernel grid is in hand.
@@ -362,6 +366,8 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             frag_ns,
             fold=op if value_child is not None else None,
             value_child=value_child,
+            k_axis=k_axis,
+            axes=ctx.sched.tile.axes,
             sched=ctx.sched,
             projection=projection,
             carried=carried,
@@ -371,7 +377,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         elif value_child is not None:
             sink = fold_store_sink(tile, tuple(epi), carried, frag_ns)
         else:
-            sink = store_sink(c, tile, Body(tuple(epi)), lead, frag_ns)
+            sink = store_sink(c, tile, Body(tuple(epi)), lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes)
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:
@@ -385,7 +391,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # ``apply_output_specs``. Empty without specs, which is exactly when it is not asked.
         observed = observed_result_names(op) if output_specs else frozenset()
         if plan is None or (plan.coop <= 1 and plan.reg <= 1):
-            body = list(dict.fromkeys([*op.lower(), *tail]))
+            body = list(dict.fromkeys([*op.lower(axes=ctx.sched.tile.axes), *tail]))
             if output_specs:
                 # ``observed`` streams a scan store into its reduce loop; every other spec keeps
                 # its kernel-tail reconstitution.
@@ -660,7 +666,7 @@ def _tile_reduce_axis_transposed(
     assert not (stage is not None and stage.smem), "transposed coop cannot ride shared-row staging"
     out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
 
-    *hoisted, rloop = op.lower()
+    *hoisted, rloop = op.lower(axes=ctx.sched.tile.axes)
     view = op.as_reduction()
     axis = rloop.axis
     stride = k_ways * reg
@@ -813,7 +819,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # :func:`emit_combine` machinery folds either). An operand that does not index the fold's axis
     # is hoisted ahead of the loop and leads the region; the enclosing zero-axis ``Fold``'s
     # projection is ``tail`` (already walked).
-    *hoisted, rloop = op.lower()
+    *hoisted, rloop = op.lower(axes=ctx.sched.tile.axes)
     axis = rloop.axis
 
     # The cooperative lane axis (Tile-decoded, innermost) — present only when threads

@@ -498,7 +498,7 @@ The Tile IR boundary is one structural operation:
 1. peel the outer parallel loop chain into the unmapped placement;
 2. recursively replace every remaining reduction `Loop` with a `Fold`, in the same statement position;
 3. move every `Write` to `TileOp.output_specs`, as a sweep spec over its output loop, the loop's per-cell projection
-   lifting as a zero-axis term declaring that axis;
+   lifting as a zero-axis term evaluated over that axis;
 4. reject any raw inner loop that remains;
 5. rely on each `Lambda.__post_init__` to canonicalize its local pure body;
 6. let `TileOp.__post_init__` factor maximal pure product-operand cones into canonical contractions, orient each

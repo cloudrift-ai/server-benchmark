@@ -1502,7 +1502,7 @@ comparing two fits is running the same eval against two files and diffing the re
 axes and mechanically lifts every inner reduction as a nested `Fold`; each term orients a bilinear lift A-first at
 formation, and `TileOp` construction canonicalizes the complete tree — an identity projection dissolves into its
 operand, same-value cones become one shared object. No Tile IR classifier runs. An output loop's per-cell
-projection is a zero-axis term declaring its sweep axis, while its writes live as `OutputSpec`s at the `TileOp`
+projection is a zero-axis term evaluated over its sweep axis, while its writes live as `OutputSpec`s at the `TileOp`
 boundary.
 
 `020_twisted` rewrites the exp-family composition over that canonical tree. The single `030_cut` pass reaches a

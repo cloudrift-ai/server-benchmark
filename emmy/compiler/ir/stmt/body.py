@@ -326,14 +326,10 @@ class Body(tuple[Stmt, ...]):
 
     @cached_property
     def ssa_uses(self) -> frozenset[str]:
-        """Every SSA read in this immutable subtree — VALUE names only.
-
-        Deliberately narrower than :attr:`deps_closure` and :attr:`Cone.external_reads`, which
-        report axis names beside SSA names. An index coordinate is not a value the body reads: it
-        is the space the body is evaluated over, supplied by the enclosing binder, and a ``Load``
-        index ``Var`` is the same ``Var`` a value read would be. This reading keeps the two apart,
-        which is what lets :meth:`Lambda.closing` bind values without promoting coordinates to
-        params. Ask :attr:`axis_names` for the other half.
+        """Every name a statement of this immutable subtree reads — a ``Load`` index's ``Var`` names
+        among them, since a coordinate is the same ``Var`` a gathered value read would be. The
+        immediate reads only (:attr:`deps_closure` reports the transitive ones); what
+        :meth:`Lambda.closing` binds as params, coordinates included.
         """
         out: set[str] = set()
         for stmt in self:

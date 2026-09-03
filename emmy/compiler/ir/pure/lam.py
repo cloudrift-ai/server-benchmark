@@ -107,14 +107,11 @@ class Lambda:
         missing = [r for r in self.results if r not in defined]
         if missing:
             raise ValueError(f"Lambda results {missing} are not defined by the body or params")
-        # CLOSED IN VALUES. A lambda is a function, so every VALUE its body reads is a param or one
-        # of its own defs. Asked through ``Body.ssa_uses`` — SSA reads only — so an index
-        # COORDINATE is not mistaken for a value: an axis is the space the body is evaluated over,
-        # supplied by the enclosing binder, and a ``Load``'s index ``Var`` is the same ``Var`` a
-        # value read would be. Deciding it by kind is what this reading does and what asking for
-        # every free name could not: binding coordinates as params removed the distinction rather
-        # than making it, and every downstream reader then had to resolve those unapplied trailing
-        # params itself. :meth:`closing` FORMS a closed lambda; this only refuses.
+        # CLOSED. A lambda is a function, so every name its body reads — a value or an index
+        # coordinate, the same ``Var`` either way — is a param or one of its own defs. Which params
+        # are coordinates is the binder's knowledge (a ``Fold`` reads them as its free coordinates
+        # past the operand binding); a bare lambda cannot tell. :meth:`closing` FORMS a closed
+        # lambda; this only refuses.
         free = self.body.ssa_uses - defined
         if free:
             raise ValueError(
@@ -126,12 +123,11 @@ class Lambda:
     def closing(cls, params: tuple[str, ...], body, results: tuple) -> Lambda:
         """Build a CLOSED lambda from its parts — the one former.
 
-        A term is a function, so it has no free VALUES. The caller supplies the params it knows —
-        a fold's iteration var, the names its operand edges bind — and every remaining value the
-        body reads is appended as a TRAILING param. An index coordinate is not one: it rides the
-        operand edges' index expressions and is supplied by the enclosing binder. Trailing, never interleaved: the
-        operand correspondence is the param PREFIX, so appending leaves every positional read of
-        it intact.
+        A term is a function, so it has no free names. The caller supplies the params it knows —
+        a fold's iteration var, the names its operand edges bind — and every remaining name the
+        body reads, an index coordinate included, is appended as a TRAILING param. Trailing, never
+        interleaved: the operand correspondence is the param PREFIX, so appending leaves every
+        positional read of it intact.
 
         Built in ONE step: the body is normalized here, so the residual is computed against the
         same body the lambda stores rather than against a throwaway built open and rebuilt.
@@ -142,10 +138,9 @@ class Lambda:
         bound = set(params)
         for stmt in body:
             bound |= _exposed_defines(stmt)
-        # VALUE reads the body does not define, plus any RESULT it does not define either: a write
-        # may pass an enclosing value straight through (``o[j] = acc`` over an already-reduced
+        # Reads the body does not define, plus any RESULT it does not define either: a write may
+        # pass an enclosing value straight through (``o[j] = acc`` over an already-reduced
         # accumulator), and that result has no def to name, so it binds as a param like any read.
-        # Coordinates are deliberately absent — see the closedness gate in ``__post_init__``.
         residual = set(body.ssa_uses)
         residual |= set(results)
         return cls(params=(*params, *sorted(residual - bound)), body=body, results=tuple(results))

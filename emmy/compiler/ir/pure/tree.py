@@ -34,9 +34,9 @@ from emmy.compiler.ir.pure.fold import Fold
 
 
 class Visit(NamedTuple):
-    """One node the walk reaches: the term, the node that reached it, the axes in scope where it is
-    read, the segment path addressing it from the root, and whether it lives in a derived
-    evaluation. ``parent`` is ``None`` at the root."""
+    """One node the walk reaches: the term, the node that reached it, the axes (by name) in scope
+    where it is read, the segment path addressing it from the root, and whether it lives in a
+    derived evaluation. ``parent`` is ``None`` at the root."""
 
     node: object
     parent: object

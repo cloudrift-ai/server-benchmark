@@ -31,7 +31,7 @@ SCOPE = (M_AXIS, N_AXIS, K_AXIS)
 
 
 def _slab(name: str, buffer: str, *index: str) -> Fold:
-    return Fold.slab(Load(name=name, input=buffer, index=tuple(Var(v) for v in index)), SCOPE)
+    return Fold.slab(Load(name=name, input=buffer, index=tuple(Var(v) for v in index)))
 
 
 def _reduce(operands: tuple[Fold, ...], body: tuple, acc: str, op: str = "add") -> Fold:
@@ -39,7 +39,7 @@ def _reduce(operands: tuple[Fold, ...], body: tuple, acc: str, op: str = "add") 
     bound = tuple(name for edge in operands for name in edge.exposes)
     init, combine = (ElementwiseImpl(op).identity,), Lambda.componentwise((op,), (acc,))
     lift = Lambda.closing((K_AXIS.name, *bound), Body(body), (f"{acc}__v",))
-    return Fold(axes=(K_AXIS,), operands=operands, lift=lift, init=init, combine=combine)
+    return Fold(operands=operands, lift=lift, init=init, combine=combine)
 
 
 def _matmul(a: Fold, b: Fold) -> Fold:
@@ -82,7 +82,7 @@ def test_a_multi_channel_term_puts_the_shared_operand_first_at_formation() -> No
     init, combine = (0.0, 0.0), Lambda.componentwise(("add", "add"), ("acc_g", "acc_u"))
     body = (Assign(name="acc_g__v", op="multiply", args=("g", "l")), Assign(name="acc_u__v", op="multiply", args=("u", "l")))
     lift = Lambda.closing(("k", "g", "u", "l"), Body(body), ("acc_g__v", "acc_u__v"))
-    fold = Fold(axes=(K_AXIS,), operands=(g, u, x), lift=lift, init=init, combine=combine)
+    fold = Fold(operands=(g, u, x), lift=lift, init=init, combine=combine)
     assert fold.operands == (x, g, u) and fold.lift.params == ("k", "l", "g", "u")
     assert fold.as_contraction() is not None
 
@@ -94,8 +94,8 @@ def test_the_open_body_binds_every_free_coordinate() -> None:
     """``lower()`` is the body a term spells inside a scope binding all of its coordinates: the
     reduce loop alone, ``m`` and ``n`` read free."""
     mm = _matmul(_slab("l", "x", "m", "k"), _slab("r", "w", "k", "n"))
-    assert mm.lower() == mm.lower(mm.free_axes)
-    assert _chain(mm.lower()) == ["k"]
+    assert mm.lower(axes=SCOPE) == mm.lower(mm.free_axes, axes=SCOPE)
+    assert _chain(mm.lower(axes=SCOPE)) == ["k"]
 
 
 def test_the_closed_program_opens_a_loop_per_free_coordinate_in_declaration_order() -> None:
@@ -103,12 +103,12 @@ def test_the_closed_program_opens_a_loop_per_free_coordinate_in_declaration_orde
     when no coordinate is shared more than another, the reduce loop innermost with the whole step
     inside it."""
     mm = _matmul(_slab("l", "x", "m", "k"), _slab("r", "w", "k", "n"))
-    assert _chain(mm.lower(frozenset())) == ["m", "n", "k"]
-    (outer,) = mm.lower(frozenset())
+    assert _chain(mm.lower(frozenset(), axes=SCOPE)) == ["m", "n", "k"]
+    (outer,) = mm.lower(frozenset(), axes=SCOPE)
     assert [type(stmt).__name__ for stmt in outer.body[-1].body[-1].body] == ["Load", "Load", "Assign", "Accum"]
     # The order is the TREE's: the first-declared coordinate opens first, whichever the caller's grid says.
     swapped = _matmul(_slab("r", "w", "n", "k"), _slab("l", "x", "k", "m"))
-    assert _chain(swapped.lower(frozenset())) == ["n", "m", "k"]
+    assert _chain(swapped.lower(frozenset(), axes=SCOPE)) == ["n", "m", "k"]
 
 
 # --- the placement rule, at each depth ----------------------------------------------------------- #
@@ -117,8 +117,8 @@ def test_the_closed_program_opens_a_loop_per_free_coordinate_in_declaration_orde
 def test_an_operand_that_does_not_index_the_reduce_axis_lands_ahead_of_the_loop() -> None:
     scale = _slab("s", "scale", "m")
     scaled = _reduce((_slab("l", "x", "m", "k"), scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), "acc")
-    assert [type(stmt).__name__ for stmt in scaled.lower()] == ["Load", "Loop"]
-    assert scaled.lower()[0].input == "scale"
+    assert [type(stmt).__name__ for stmt in scaled.lower(axes=SCOPE)] == ["Load", "Loop"]
+    assert scaled.lower(axes=SCOPE)[0].input == "scale"
 
 
 def test_a_term_lands_at_the_shallowest_scope_binding_its_coordinates() -> None:
@@ -126,10 +126,10 @@ def test_a_term_lands_at_the_shallowest_scope_binding_its_coordinates() -> None:
     closed program materializes it under ``m`` and ahead of the ``n`` loop — not inside ``n``
     where its reader sits."""
     total, swept = _normalized_sum()
-    (m_loop,) = swept.lower(frozenset())
+    (m_loop,) = swept.lower(frozenset(), axes=SCOPE)
     assert m_loop.axis.name == "m"
     hoisted, n_loop = m_loop.body
-    assert hoisted == total.lower(frozenset({"m"}))[0] and n_loop.axis.name == "n"
+    assert hoisted == total.lower(frozenset({"m"}), axes=SCOPE)[0] and n_loop.axis.name == "n"
     assert _chain(n_loop.body) == ["k"]
 
 
@@ -137,9 +137,9 @@ def test_the_callers_binding_decides_what_hoists() -> None:
     """The same term under two grids: binding ``m`` leaves ``n`` to open and the total ahead of
     it; binding ``n`` leaves ``m`` to open and pins the total under it, with no ``n`` loop at all."""
     total, swept = _normalized_sum()
-    ahead, n_loop = swept.lower(frozenset({"m"}))
-    assert ahead == total.lower()[0] and n_loop.axis.name == "n"
-    (m_loop,) = swept.lower(frozenset({"n"}))
+    ahead, n_loop = swept.lower(frozenset({"m"}), axes=SCOPE)
+    assert ahead == total.lower(axes=SCOPE)[0] and n_loop.axis.name == "n"
+    (m_loop,) = swept.lower(frozenset({"n"}), axes=SCOPE)
     assert m_loop.axis.name == "m" and _chain(m_loop.body) == ["k"] and len(m_loop.body) == 2
 
 
@@ -149,7 +149,7 @@ def test_an_operand_hoists_past_the_term_that_reads_it() -> None:
     x, scale = _slab("l", "x", "m", "k"), _slab("s", "scale", "m")
     cone = Fold(operands=(x, scale), lift=Lambda.closing(("l", "s"), Body((Assign(name="y", op="multiply", args=("l", "s")),)), ("y",)))
     mx = _reduce((cone,), (Assign(name="mx__v", op="copy", args=("y",)),), "mx", op="maximum")
-    ahead, loop = mx.lower()
+    ahead, loop = mx.lower(axes=SCOPE)
     assert ahead.input == "scale"
     assert [type(stmt).__name__ for stmt in loop.body] == ["Load", "Assign", "Assign", "Accum"]
 
@@ -160,18 +160,18 @@ def test_sweeps_no_term_shares_are_sibling_loops_and_a_reader_makes_them_a_chain
     puts them on ITS path, so what it reads is in scope: the second is recomputed inside the first."""
     q = Axis("q", Dim(2))
     scope = (M_AXIS, N_AXIS, q, K_AXIS)
-    a = Fold.slab(Load(name="a", input="x", index=(Var("m"), Var("q"), Var("k"))), scope)
-    b = Fold.slab(Load(name="b", input="y", index=(Var("m"), Var("n"), Var("k"))), scope)
+    a = Fold.slab(Load(name="a", input="x", index=(Var("m"), Var("q"), Var("k"))))
+    b = Fold.slab(Load(name="b", input="y", index=(Var("m"), Var("n"), Var("k"))))
     over_q = _reduce((a,), (Assign(name="sq__v", op="copy", args=("a",)),), "sq")
     over_n = _reduce((b,), (Assign(name="sn__v", op="copy", args=("b",)),), "sn")
     forest = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), Body(), ("sq", "sn")))
-    (m_loop,) = forest.lower(frozenset())
+    (m_loop,) = forest.lower(frozenset(), axes=scope)
     assert [loop.axis.name for loop in m_loop.body] == ["q", "n"]
     assert all(_chain(loop.body) == ["k"] for loop in m_loop.body)
 
     total = Body((Assign(name="t", op="add", args=("sq", "sn")),))
     reader = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), total, ("t",)))
-    (m_loop,) = reader.lower(frozenset())
+    (m_loop,) = reader.lower(frozenset(), axes=scope)
     (q_loop,) = m_loop.body
     assert q_loop.axis.name == "q" and [type(stmt).__name__ for stmt in q_loop.body] == ["Loop", "Loop"]
     assert q_loop.body[-1].axis.name == "n" and [type(stmt).__name__ for stmt in q_loop.body[-1].body] == ["Loop", "Assign"]
@@ -185,10 +185,10 @@ def test_a_store_follows_the_term_defining_its_value_at_that_terms_scope() -> No
     the grid binds both, it is the kernel tail."""
     mm = _matmul(_slab("l", "x", "m", "k"), _slab("r", "w", "k", "n"))
     store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"))
-    (m_loop,) = mm.lower(frozenset(), (store,))
+    (m_loop,) = mm.lower(frozenset(), (store,), axes=SCOPE)
     (n_loop,) = m_loop.body
     assert [type(stmt).__name__ for stmt in n_loop.body] == ["Loop", "Write"] and n_loop.body[-1] == store.write
-    assert mm.lower(mm.free_axes, (store,)) == Body((*mm.lower(), store.write))
+    assert mm.lower(mm.free_axes, (store,), axes=SCOPE) == Body((*mm.lower(axes=SCOPE), store.write))
 
 
 def test_a_sweep_store_rides_the_loop_the_term_opened() -> None:
@@ -196,16 +196,16 @@ def test_a_sweep_store_rides_the_loop_the_term_opened() -> None:
     inside it; the row total, evaluated over ``m`` alone, stays ahead."""
     total, swept = _normalized_sum()
     store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=N_AXIS)
-    ahead, sweep = swept.lower(frozenset({"m"}), (store,))
-    assert ahead == total.lower()[0] and sweep.axis is N_AXIS
+    ahead, sweep = swept.lower(frozenset({"m"}), (store,), axes=SCOPE)
+    assert ahead == total.lower(axes=SCOPE)[0] and sweep.axis is N_AXIS
     assert [type(stmt).__name__ for stmt in sweep.body] == ["Loop", "Write"]
 
 
 def test_a_store_lands_in_the_sibling_loop_of_its_term() -> None:
     q = Axis("q", Dim(2))
     scope = (M_AXIS, N_AXIS, q, K_AXIS)
-    a = Fold.slab(Load(name="a", input="x", index=(Var("m"), Var("q"), Var("k"))), scope)
-    b = Fold.slab(Load(name="b", input="y", index=(Var("m"), Var("n"), Var("k"))), scope)
+    a = Fold.slab(Load(name="a", input="x", index=(Var("m"), Var("q"), Var("k"))))
+    b = Fold.slab(Load(name="b", input="y", index=(Var("m"), Var("n"), Var("k"))))
     over_q = _reduce((a,), (Assign(name="sq__v", op="copy", args=("a",)),), "sq")
     over_n = _reduce((b,), (Assign(name="sn__v", op="copy", args=("b",)),), "sn")
     forest = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), Body(), ("sq", "sn")))
@@ -213,7 +213,7 @@ def test_a_store_lands_in_the_sibling_loop_of_its_term() -> None:
         OutputSpec(write=Write(output="oq", index=(Var("m"), Var("q")), value="sq")),
         OutputSpec(write=Write(output="on", index=(Var("m"), Var("n")), value="sn")),
     )
-    (m_loop,) = forest.lower(frozenset(), stores)
+    (m_loop,) = forest.lower(frozenset(), stores, axes=scope)
     by_axis = {loop.axis.name: loop for loop in m_loop.body}
     assert tuple(by_axis["q"].body)[-1] == stores[0].write and tuple(by_axis["n"].body)[-1] == stores[1].write
 
@@ -224,7 +224,7 @@ def test_a_broadcast_store_opens_the_sweep_axis_its_spec_names() -> None:
     j = Axis("j", Dim(3))
     total = _reduce((_slab("y", "y", "m", "k"),), (Assign(name="tot__v", op="copy", args=("y",)),), "tot")
     store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="tot"), sweep=j)
-    (m_loop,) = total.lower(frozenset(), (store,))
+    (m_loop,) = total.lower(frozenset(), (store,), axes=SCOPE)
     reduce_loop, j_loop = m_loop.body
     assert reduce_loop.axis is K_AXIS and j_loop.axis is j and tuple(j_loop.body) == (store.write,)
 
@@ -233,9 +233,9 @@ def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
     init, combine = (0.0,), Lambda.componentwise(("add",), ("acc",))
     observe = Lambda(params=("k", "acc"), body=Body((Assign(name="acc__obs", op="copy", args=("acc",)),)), results=("acc__obs",))
     lift = Lambda.closing(("k", "y"), Body((Assign(name="acc__v", op="copy", args=("y",)),)), ("acc__v",))
-    scan = Fold(axes=(K_AXIS,), operands=(_slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine, observe=observe)
+    scan = Fold(operands=(_slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine, observe=observe)
     store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("k")), value="acc__obs"))
-    (loop,) = scan.lower(scan.free_axes, (store,))
+    (loop,) = scan.lower(scan.free_axes, (store,), axes=SCOPE)
     assert [type(stmt).__name__ for stmt in loop.body] == ["Load", "Assign", "Accum", "Assign", "Write"]
 
 
@@ -246,7 +246,7 @@ def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
     """The exp-family ``(m, l)`` carrier: the softmax recipe's program over a ``(score, 1)`` singleton."""
     body = Body((Assign(name="s", op="copy", args=("y",)), Const(name="one", value=1.0)))
     lift = Lambda.closing(("k", "y"), body, ("s", "one"))
-    return Fold(axes=(K_AXIS,), operands=(_slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), combine=SOFTMAX.program(states))
+    return Fold(operands=(_slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), combine=SOFTMAX.program(states))
 
 
 def test_a_twisted_state_spelling_never_reaches_the_canonical_form() -> None:
@@ -261,7 +261,7 @@ def test_a_componentwise_merge_is_one_accum_per_state() -> None:
     init, combine = (0.0, -1e30), Lambda.componentwise(("add", "maximum"), ("acc0", "acc1"))
     body = Body((Assign(name="a0", op="copy", args=("y",)), Assign(name="a1", op="negative", args=("y",))))
     lift = Lambda.closing(("k", "y"), body, ("a0", "a1"))
-    fold = Fold(axes=(K_AXIS,), operands=(_slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine)
+    fold = Fold(operands=(_slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine)
     stmts = fold.merge(("acc0__p", "acc1__p"))
     assert [(s.name, s.op.name, s.value) for s in stmts] == [("acc0", "add", "acc0__p"), ("acc1", "maximum", "acc1__p")]
     assert [s.op.identity for s in stmts] == [0.0, -1e30], "the seed the identity placement will emit"
@@ -315,9 +315,9 @@ def test_the_step_is_the_merge_at_the_injected_singleton() -> None:
 
 def test_lowering_is_memoized_per_binding() -> None:
     mm = _matmul(_slab("l", "x", "m", "k"), _slab("r", "w", "k", "n"))
-    assert mm.lower() is mm.lower()
-    assert mm.lower(frozenset()) is mm.lower(frozenset())
-    assert mm.lower() is not mm.lower(frozenset())
+    assert mm.lower(axes=SCOPE) is mm.lower(axes=SCOPE)
+    assert mm.lower(frozenset(), axes=SCOPE) is mm.lower(frozenset(), axes=SCOPE)
+    assert mm.lower(axes=SCOPE) is not mm.lower(frozenset(), axes=SCOPE)
 
 
 # --- the binding: positional, the consumer's names; rendering spells the operands ---------------- #
@@ -330,15 +330,15 @@ def test_a_consumer_names_what_it_binds_and_rendering_spells_the_operand() -> No
     term: equal canonical forms, equal lowered bodies."""
     y = _slab("y", "y", "m", "k")
     lift = Lambda.closing(("k", "value"), Body((Assign(name="acc__v", op="copy", args=("value",)),)), ("acc__v",))
-    fold = Fold(axes=(K_AXIS,), operands=(y,), lift=lift, init=(0.0,), combine=Lambda.componentwise(("add",), ("acc",)))
+    fold = Fold(operands=(y,), lift=lift, init=(0.0,), combine=Lambda.componentwise(("add",), ("acc",)))
     assert fold.bindings == (("value", y, 0),) and fold.applied.params == ("k", "y")
-    (loop,) = fold.lower()
+    (loop,) = fold.lower(axes=SCOPE)
     assert [stmt.args for stmt in loop.body if isinstance(stmt, Assign)] == [("y",)]
     spelled = replace(fold, lift=lift.rename({"value": "y"}))
-    assert fold.canonical() == spelled.canonical() and fold.lower() == spelled.lower()
+    assert fold.canonical() == spelled.canonical() and fold.lower(axes=SCOPE) == spelled.lower(axes=SCOPE)
     # A projection passing the state through exposes the state's own name, and its store follows.
     passthrough = Fold(operands=(fold,), lift=Lambda(params=("total",), body=Body(()), results=("total",)))
     assert passthrough.exposes == ("acc",)
     store = OutputSpec(write=Write(output="o", index=(Var("m"),), value="total"))
-    (m_loop,) = passthrough.lower(frozenset(), (store,))
+    (m_loop,) = passthrough.lower(frozenset(), (store,), axes=SCOPE)
     assert m_loop.body[-1] == Write(output="o", index=(Var("m"),), value="acc")

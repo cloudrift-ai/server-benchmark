@@ -30,11 +30,6 @@ def _stamp_axes(loop: Loop) -> Loop:
     return replace(loop, body=Body(body))
 
 
-def _declaring(axes: tuple, lift: Lambda, bound: int) -> tuple:
-    """The enclosing axes a lift reads past its operand binding — the term's own ``axes``."""
-    return tuple(axis for axis in axes if axis.name in lift.params[bound:])
-
-
 @dataclass
 class _Level:
     """One statement level under construction: the axes in scope and what the level has produced
@@ -68,13 +63,13 @@ def _supply(names: set[str], levels: tuple[_Level, ...]) -> tuple[Fold, ...]:
             cone = Body(tuple(level.stmts)).backward_cone(tuple(chain))
             level.consumed.update(id(stmt) for stmt in cone.members)
             if len(cone.members) == 1 and isinstance(cone.members[0], Load):
-                extra.append(Fold.slab(cone.members[0], level.axes))
+                extra.append(Fold.slab(cone.members[0]))
             else:
                 values = set(cone.external_reads) - {axis.name for axis in level.axes}
-                operands, lift, axes = _close(
+                operands, lift = _close(
                     (), _supply(values, levels[: depth + 1]), Body(cone.members), tuple(chain), level.axes, levels[: depth + 1]
                 )
-                extra.append(Fold(axes=axes, operands=operands, lift=lift))
+                extra.append(Fold(operands=operands, lift=lift))
         for name in siblings:
             term = level.exposed[name]
             level.drained.add(id(term))
@@ -87,13 +82,13 @@ def _supply(names: set[str], levels: tuple[_Level, ...]) -> tuple[Fold, ...]:
     return tuple(extra)
 
 
-def _close(lead: tuple, operands: tuple, body, results: tuple, scope: tuple, levels: tuple) -> tuple[tuple, Lambda, tuple]:
-    """Form a lift CLOSED over its levels — ``(operands, lift, axes)``.
+def _close(lead: tuple, operands: tuple, body, results: tuple, scope: tuple, levels: tuple) -> tuple[tuple, Lambda]:
+    """Form a lift CLOSED over its levels — ``(operands, lift)``.
 
     ``Lambda.closing`` binds the operand results positionally and leaves whatever else the body
     reads as trailing params. A VALUE among those arrives as one more operand (:func:`_supply`);
-    what remains free are coordinates, and those are the term's own ``axes`` — the rule
-    :class:`Fold` states at formation.
+    what remains free are coordinates, which a term reads without binding — only the binder can
+    tell the two apart, by ``scope``.
     """
     bound = tuple(name for edge in operands for name in edge.exposes)
     lift = Lambda.closing((*lead, *bound), body, results)
@@ -102,7 +97,7 @@ def _close(lead: tuple, operands: tuple, body, results: tuple, scope: tuple, lev
         operands = (*operands, *_supply(values, levels))
         bound = tuple(name for edge in operands for name in edge.exposes)
         lift = Lambda.closing((*lead, *bound), body, results)
-    return operands, lift, _declaring(scope, lift, len(lead) + len(bound))
+    return operands, lift
 
 
 def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
@@ -117,9 +112,9 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     and its statements after, with nothing left to order by dependency.
 
     An output SWEEP lifts to terms evaluated over the sweep coordinate: a reduce under it —
-    attention's ``Σ_k P·V`` per output column — joins the enclosing level's operands with its slabs
-    declaring the sweep axis, and the sweep's own per-cell projection joins beside it as a
-    zero-axis term declaring that axis. The sweep keeps its stores alone; the boundary extracts
+    attention's ``Σ_k P·V`` per output column — joins the enclosing level's operands, its slabs
+    reading the sweep axis, and the sweep's own per-cell projection joins beside it as a
+    zero-axis term evaluated over that axis. The sweep keeps its stores alone; the boundary extracts
     them as sweep specs, and ``Fold.lower`` opens the sweep loop around exactly the terms evaluated
     over it.
 
@@ -154,8 +149,8 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
             defined = {name for member in pure for name in member.defines()}
             results = tuple(dict.fromkeys(value for write in writes for value in write.values if value in defined))
             if results:
-                operands, lift, sweep_axes = _close((), (), pure, results, (*axes, stmt.axis), inner_levels)
-                term = Fold(axes=sweep_axes, operands=operands, lift=lift)
+                operands, lift = _close((), (), pure, results, (*axes, stmt.axis), inner_levels)
+                term = Fold(operands=operands, lift=lift)
                 edges.append(term)
                 level.exposed.update((name, term) for name in term.exposes)
                 cell = Body(writes)
@@ -215,21 +210,20 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     # operand edges, so the lift body is the product alone and there is no non-canonical spelling
     # for a later pass to rewrite. The factoring pass that used to hoist these cones existed only
     # because the representation admitted the unfactored form.
-    slabs = tuple(Fold.slab(stmt, scope) for stmt in step if isinstance(stmt, Load))
+    slabs = tuple(Fold.slab(stmt) for stmt in step if isinstance(stmt, Load))
     plain = Body(stmt for stmt in step if not isinstance(stmt, Load))
     edges = (*edges, *slabs)
     names = tuple(stmt.name for stmt in accums)
-    # FORM the lift closed: a value the step reads from an enclosing level arrives as an operand,
-    # and the coordinates it reads outright (a mask's ``Select``) are axes it declares beside its
-    # own — at the construction site, which is the one that knows it is turning a Loop into a term.
-    edges, lift, coordinates = _close((loop.axis.name,), edges, plain, tuple(stmt.value for stmt in accums), axes, levels)
-    fold_axes = (*coordinates, loop.axis)
+    # FORM the lift closed: a value the step reads from an enclosing level arrives as an operand;
+    # the coordinates it reads outright (a mask's ``Select``) stay free — at the construction
+    # site, which is the one that knows it is turning a Loop into a term.
+    edges, lift = _close((loop.axis.name,), edges, plain, tuple(stmt.value for stmt in accums), axes, levels)
     ops = tuple(stmt.op for stmt in accums)
     if not all(op.has_identity for op in ops):
         raise ValueError(f"reduce loop {loop.axis.name!r}: an Accum op without an identity is not a monoid ⊕")
     init, combine = tuple(op.identity for op in ops), Lambda.componentwise(ops, names)
     if not writes:
-        return Fold(axes=fold_axes, operands=edges, lift=lift, init=init, combine=combine), ()
+        return Fold(operands=edges, lift=lift, init=init, combine=combine), ()
     stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))
     if any(value not in names for value in stored):
         raise ValueError(f"reduce loop {loop.axis.name!r}: a per-step store may only observe the carried state {names}")
@@ -238,7 +232,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
         body=Body(tuple(Assign(name=f"{value}__obs", op="copy", args=(value,)) for value in stored)),
         results=tuple(f"{value}__obs" for value in stored),
     )
-    fold = Fold(axes=fold_axes, operands=edges, lift=lift, init=init, combine=combine, observe=observe)
+    fold = Fold(operands=edges, lift=lift, init=init, combine=combine, observe=observe)
     renamed = tuple(replace(stmt, values=tuple(f"{value}__obs" for value in stmt.values)) for stmt in writes)
     return fold, renamed
 
@@ -300,16 +294,20 @@ def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
         raise ValueError(f"total lift left raw inner loops: {axes}")
     # The root term, constructed DIRECTLY: ``lift_body`` already handed back its operands and its
     # statements apart, so there is nothing for a former to separate, dedup or name. The lift binds
-    # one param per operand result component, positionally, and declares the grid axes it reads.
+    # one param per operand result component, positionally, and reads the grid axes free.
     # It exposes what the kernel stores — its body's last definition, or with no body of its own
     # the operand values the boundary writes — so a wrapper over one operand is the identity
     # projection normalization dissolves, rather than a permanent layer over every bare kernel.
     results = _root_results(Body(body)) or tuple(dict.fromkeys(value for spec in output_specs for value in spec.write.values))
-    edges, lift, axes = _close((), edges, Body(body), results, tuple(free), ())
+    edges, lift = _close((), edges, Body(body), results, tuple(free), ())
+    # The kernel's axis table: the free axes and every loop the nest bound (reduce, sweep), by
+    # name — the term names them, the kernel holds their extents.
+    axes = {axis.name: axis for axis in (*free, *(loop.axis for loop in Body.coerce(cell).loops))}
     return TileOp(
-        op=Fold(axes=axes, operands=edges, lift=lift),
+        op=Fold(operands=edges, lift=lift),
         name=name,
         place=Placement(free=tuple(free)),
+        axes=tuple(axes.values()),
         inputs=dict(op.inputs),
         output_specs=output_specs,
     )

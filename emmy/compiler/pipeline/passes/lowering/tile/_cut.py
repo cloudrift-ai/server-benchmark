@@ -155,8 +155,8 @@ def _external_reads(node: Fold) -> frozenset[str]:
 
 
 def _closed_at(node: Fold, axes: tuple) -> bool:
-    """Whether ``node`` has no capture other than axes available at its incoming edge."""
-    return _external_reads(node) <= {axis.name for axis in axes}
+    """Whether ``node`` has no capture other than the axes (by name) in scope at its incoming edge."""
+    return _external_reads(node) <= set(axes)
 
 
 def _fed_store_dtype(tile: TileOp, consumer: Fold):
@@ -235,7 +235,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         for edge in site.node.operands
         if isinstance(edge, Fold) and edge.as_slab() is None
     }
-    outer = (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None))
+    outer = tuple(axis.name for axis in (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None)))
     occurrence_axes: dict[int, list[tuple]] = {}
     for visit in islice(walk(tile.op, outer), 1, None):
         occurrence_axes.setdefault(id(visit.node), []).append(visit.axes)
@@ -269,7 +269,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         seen.add(id(node))
         # A seam is evaluated over the coordinates its term READS, not the whole ambient scope: an
         # output sweep the grid carries for a sibling's sake is not one of this workspace's axes.
-        axes = tuple(axis for axis in {axis.name: axis for scope in scopes for axis in scope}.values() if axis.name in node.free_axes)
+        axes = tuple(tile.axis_of(name) for name in dict.fromkeys(name for scope in scopes for name in scope) if name in node.free_axes)
         out.append(
             CutSite(
                 node=node,
@@ -498,7 +498,7 @@ def realize(
     cut never erases an earlier cross-CTA decision: every piece inherits the parent's explicit or
     sliced-axis split receipt."""
     tile: TileOp = root.op
-    split_consumed = tile.split_consumed or carries_partition(tile.op)
+    split_consumed = tile.split_consumed or carries_partition(tile)
     pieces = []
     workspace_loads: dict[int, tuple] = {}
     for seam in _requires_order(seams):
@@ -541,7 +541,7 @@ def realize(
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
-        loads = tuple(Fold.slab(Load(name=name, input=buffer, index=index), axes) for name, buffer in zip(names, buffers, strict=True))
+        loads = tuple(Fold.slab(Load(name=name, input=buffer, index=index)) for name, buffer in zip(names, buffers, strict=True))
         if front is not None:
             raw = replace(loads[0], dtype=front.dtype)
             loads = (
@@ -588,6 +588,7 @@ def realize(
             # different cut levels would launch one kernel twice.
             name=f"{tile.name}__place_{token}",
             place=Placement(free=axes),
+            axes=tile.axes,
             output_specs=tuple(
                 OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)
             ),
@@ -613,6 +614,7 @@ def realize(
         op=parent_fold,
         name=tile.name,
         place=tile.place,
+        axes=tile.axes,
         output_specs=parent_stores,
         placement_decided=placement_decided,
         split_consumed=split_consumed,

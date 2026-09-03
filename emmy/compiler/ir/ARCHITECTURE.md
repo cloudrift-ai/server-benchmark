@@ -306,7 +306,13 @@ structurally when it returns.
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
 
-- an OPTIONAL iteration `axis` (`None` = the zero-axis node);
+- an OPTIONAL iteration `axis` (`None` = the zero-axis node) — a NAME, derived: the lift's first param when there is a
+  combine. A term carries no extent at all: the coordinates it reads are the lift's trailing params, and the extent
+  and window of every axis, bound or read, live in the kernel's AXIS TABLE, `TileOp.axes` (the free axes, each
+  reduce axis, a split's slice and partition, a sweep). `Fold.lower` takes the table whole — a reduce loop reads its
+  axis from it, and only the closed program opens the free coordinates' loops — and every kernel-side reader asks
+  `Sched.axis_of` rather than the term. So a term is its function, whatever domain it is evaluated on; a sum over
+  128 and one over 256 are one term under two tables, like a slab under two M.
 - a pure `lift` `Lambda` `λ(k, v₁…vₙ) → S` — the element's SINGLETON state (ι is spelled in the lift;
   softmax's is `(x, 1)`);
 - the monoid's flat `(init, combine)` fields — ONE program, whose results ARE the fold's accumulator names;
@@ -658,8 +664,8 @@ remains authoritative when another hint claims a future suffix.
 Tile IR stores the complete inner loop nest as one tree of `Fold` terms. The Loop IR boundary peels the outer parallel
 axes, converts every reduction from its explicit `Accum` statements, and leaves each nested reduction in the same
 position inside its parent lambda. A root zero-axis Fold holds the per-cell statement sequence. An output loop's
-per-cell projection becomes a zero-axis term declaring the sweep axis — a sibling operand of the root — and its writes
-live in `TileOp.output_specs` as sweep specs.
+per-cell projection becomes a zero-axis term evaluated over the sweep axis — a sibling operand of the root — and its
+writes live in `TileOp.output_specs` as sweep specs.
 
 A nonzero-axis Fold exposes its combine result names through `Fold.defines()`, so later sibling statements and outer
 folds may consume its result without hoisting it to an operand edge. `Fold.loop` mechanically lowers the tree back to

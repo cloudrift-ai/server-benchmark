@@ -95,7 +95,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Lowering** — Moving from a high-level representation to a more detailed, machine-oriented one while preserving
   the program's meaning.
 - **Total lift** — The loop→tile boundary: one mechanical conversion that turns every inner reduction loop into a
-  Fold tree, turns each local output loop's projection into a zero-axis term declaring its sweep axis, peels outer
+  Fold tree, turns each local output loop's projection into a zero-axis term evaluated over its sweep axis, peels outer
   parallel loops into placement, and
   separates output specifications. Unsupported non-canonical Loop IR fails formation; Tile IR has no raw-loop escape.
 - **Classification** — Reading a Fold tree's stored algebra to derive a contraction or other scheduling-relevant

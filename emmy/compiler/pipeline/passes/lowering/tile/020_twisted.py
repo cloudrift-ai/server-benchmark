@@ -17,7 +17,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp:
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped or tile.schedule is not None:
         raise RuleSkipped("TileOp already scheduled / nothing to rewrite")
-    op = rewrite_twisted(tile.op)
+    op = rewrite_twisted(tile.op, tile.axes)
     if op == tile.op:
         raise RuleSkipped("no exp-family Fold cluster")
     return replace(tile, op=op)

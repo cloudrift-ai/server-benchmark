@@ -6,7 +6,7 @@ import functools
 
 
 class cached_method:  # noqa: N801 — a decorator, spelled like ``cached_property``
-    """A method memoized on its instance, per argument tuple — :func:`functools.cached_property`'s
+    """A method memoized on its instance, per argument list — :func:`functools.cached_property`'s
     storage (the instance ``__dict__``, which a frozen dataclass allows) under a private slot,
     while the attribute stays a call. A derived read of an immutable term is computed once per
     (hashable) argument tuple and dies with the instance — unlike a ``functools.cache`` keyed on
@@ -23,11 +23,12 @@ class cached_method:  # noqa: N801 — a decorator, spelled like ``cached_proper
         if instance is None:
             return self
 
-        def bound(*args):
+        def bound(*args, **kwargs):
             memo = instance.__dict__.setdefault(self.slot, {})
-            if args not in memo:
-                memo[args] = self.fn(instance, *args)
-            return memo[args]
+            key = (args, tuple(sorted(kwargs.items())))
+            if key not in memo:
+                memo[key] = self.fn(instance, *args, **kwargs)
+            return memo[key]
 
         return bound
 

@@ -75,7 +75,7 @@ def sites(root) -> tuple[Site, ...]:
     result: list[Site] = []
     for visit in walk(root):
         node = visit.node
-        axis = node.axis.name if isinstance(node, Fold) and node.axis is not None else None
+        axis = node.axis if isinstance(node, Fold) and node.axis is not None else None
         key = (visit.segments, axis)
         counts[key] = counts.get(key, 0) + 1
         result.append(Site(node=node, axis=axis, segments=visit.segments, ordinal=counts[key], derived=visit.derived))

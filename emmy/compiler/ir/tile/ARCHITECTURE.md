@@ -1,12 +1,15 @@
 # Tile IR — a complete Fold tree
 
 `LoopOp → TileOp` first performs a structural lift. The boundary peels the outer parallel loop chain into
-`Placement.free`, then converts every remaining reduction loop into a `Fold`. `TileOp.__post_init__` subsequently
-canonicalizes the complete Fold tree before the separate algebraic rewrite and scheduling passes.
+`Placement.free`, then converts every remaining reduction loop into a `Fold`, recording every axis the nest bound —
+free, reduce, sweep — in the kernel's axis table, `TileOp.axes`: a term names its axes and the kernel holds their
+extents and windows (`TileOp.axis_of`, `Sched.axis_of`), so a split registers its slice and partition there and
+`Fold.lower` takes the table whole. `TileOp.__post_init__` subsequently canonicalizes the complete Fold tree before
+the separate algebraic rewrite and scheduling passes.
 
 The invariant is simple: **a lifted Tile IR kernel contains no raw inner `Loop`**. A reduction nested in another
 reduction occupies the same statement position in the parent fold's `lift.body`, so source order and SSA scope are
-preserved. A non-reduction loop is an output sweep: its per-cell projection becomes a zero-axis term declaring the
+preserved. A non-reduction loop is an output sweep: its per-cell projection becomes a zero-axis term evaluated over the
 sweep axis, and each of its writes a sweep `OutputSpec` owned by the `TileOp`. Any other surviving loop is a formation
 error.
 
@@ -136,7 +139,7 @@ evaluated over `j`, and its sweep spec alone binds the axis.
 A sweep axis is never bound at kernel scope: the term opens it itself (`Fold.lower` with the sweep left unbound), and
 the sweep store follows the term defining its value inside that loop. A non-contraction fold that reads a sweep axis
 (attention's `Σ_k P·V` per output column, DeepSeek-V4 post16's per-column sum) is still an operand edge of the
-projection: its slabs declare the sweep axis, so the placement rule puts its loop inside the sweep loop, while a
+projection: its slabs read the sweep axis, so the placement rule puts its loop inside the sweep loop, while a
 sibling evaluated over the grid axes alone stays ahead of it. A projection stream spelled without the term (the
 materializer's tail) has no such loop, and reconstitution wraps the trailing run reading the axis into one. A
 contraction is exempt because post-init promotes a sweep its

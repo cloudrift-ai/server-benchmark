@@ -47,8 +47,8 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
         node, parent = record.node, record.parent
         if (
             record.derived
-            and node.axis.extent.is_static
-            and node.axis.extent.as_static() == 1
+            and owner.axis_of(node.axis).extent.is_static
+            and owner.axis_of(node.axis).extent.as_static() == 1
             and isinstance(parent, Fold)
             and parent.axis is not None
         ):
@@ -56,11 +56,11 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
             # bridges is that Fold's own leading state rather than a cone read off this node
             assert parent.combine is not None and node.combine is not None
             seam = ((), (), tuple(parent.combine.results[: -len(node.combine.results)]))
-            k_axis = parent.axis
+            k_axis = owner.axis_of(parent.axis)
         else:
             computed = tuple(edge for edge in node.operands if edge.as_slab() is None)
-            seam = cone_seam(computed[0], node.axis.name) if computed else None
-            k_axis = node.axis
+            seam = cone_seam(computed[0], node.axis, owner.axes) if computed else None
+            k_axis = owner.axis_of(node.axis)
         # The nested contraction this one consumes — sought over the operand edges, which is where
         # a term's children are. A role was a position into that same tuple, so naming one bought
         # nothing the walk does not already have.
@@ -102,7 +102,7 @@ __all__ = [
 # which the term does not know — it knows the axis it reduces over and nothing more. It sat in
 # ``ir/pure/fold`` only because the schedule layer needed it and ``ir/tile/ops`` could not be
 # imported from here; the schedule layer is where it belonged all along.
-def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
+def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[str, ...]]:
     """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
     scanning stmts: the cone is a zero-axis term over ``<the per-cell normalize>`` with ``<the row-invariant
     prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
@@ -126,8 +126,10 @@ def cone_seam(cone, k_name: str) -> tuple[tuple, tuple, tuple[str, ...]]:
     # rides the cell; the rest are row-invariant and lower once into the prologue. Same reading as
     # ``Fold.lower``'s hoist, asked of the same property.
     varying = [k_name in edge.free_axes for edge in cone.operands]
-    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower())
-    cell = tuple(stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower()) + tuple(cone.step())
+    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower(axes=axes))
+    cell = tuple(stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower(axes=axes)) + tuple(
+        cone.step()
+    )
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in edge.exposes}
     stats = tuple(sorted(pro_results & Body(cell).ssa_uses))
     return (pro, cell, stats) if stats else ((), cell, ())

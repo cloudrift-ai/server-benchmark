@@ -270,6 +270,8 @@ def _resolve_stage(
             seam=facts.seam,
             k_axis=facts.k_axis,
             producer=facts.producer,
+            producer_k=tile_op.axis_of(facts.producer.axis) if facts.producer is not None else None,
+            axes=tile_op.axes,
         )
     if plan.is_warp:
         return staging.resolve_warp_stage(
@@ -279,8 +281,9 @@ def _resolve_stage(
             target.max_dynamic_smem,
             tile_op.inputs,
             readings=packed,
+            k_axis=facts.k_axis,
         )
-    return staging.resolve_scalar_stage(node, placed, choice, tile_op.inputs, target.max_dynamic_smem)
+    return staging.resolve_scalar_stage(node, placed, choice, tile_op.inputs, target.max_dynamic_smem, facts.k_axis)
 
 
 def _fragment_agreements(

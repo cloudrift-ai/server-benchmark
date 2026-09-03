@@ -248,6 +248,10 @@ class TileOp(Op):
     op: object = None
     name: str = ""
     place: Placement = field(default_factory=Placement)
+    # The kernel's AXIS TABLE — the extent and window of every axis the term binds or reads: the
+    # free axes, each reduce axis, a split's slice and partition, a sweep. The term itself carries
+    # names only; this is the domain it is evaluated on, and ``Fold.lower`` takes it whole.
+    axes: tuple[Axis, ...] = ()
     workers: WarpSpec | None = None
     # The accepted semantic assignment and its derived lowering facts. Unscheduled Tile IR carries
     # neither; scheduling installs both together.
@@ -446,7 +450,8 @@ class TileOp(Op):
         """The complete schedule-free Loop-IR body this kernel executes, derived from the term
         — what the identity lattice digests. The closed program: ``Fold.lower`` with nothing bound
         and the boundary stores handed in, so the term binds every free coordinate with its own
-        loops and places each store after the term defining its value — the extents, the store
+        loops (their extents the placement's, handed in — a term carries none for the coordinates
+        it reads) and places each store after the term defining its value — the extents, the store
         program (index spelling, ``atomicAdd``, width, output sweeps) and a cut child's typed seam
         ``Load`` are all in the body. Schedule-free by construction: ``lower`` never reads the
         classic assignment, and ``place`` stays out entirely — which coordinates the grid binds,
@@ -461,10 +466,17 @@ class TileOp(Op):
         # evaluated over it — is the kernel's to bind: the term opens every coordinate it declares
         # and those loops wrap outside, in grid order.
         glue = tuple(axis for axis in self.place.free if axis.name not in self.op.free_axes)
-        body = self.op.lower(frozenset(axis.name for axis in glue), self.output_specs)
+        body = self.op.lower(frozenset(axis.name for axis in glue), self.output_specs, self.axes)
         for axis in reversed(glue):
             body = Body((Loop(axis=axis, body=body),))
         return body
+
+    def axis_of(self, name: str) -> Axis:
+        """The axis table's entry for ``name`` — a reduce axis's extent and window, a free axis's extent."""
+        try:
+            return next(axis for axis in self.axes if axis.name == name)
+        except StopIteration:
+            raise KeyError(f"axis {name!r} is not in this kernel's axis table {[axis.name for axis in self.axes]}") from None
 
     def _body_identity(self, *, structural: bool = True) -> str | None:
         """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s

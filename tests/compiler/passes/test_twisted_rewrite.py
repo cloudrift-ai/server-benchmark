@@ -149,12 +149,12 @@ def _plain_sum() -> Loop:
     )
 
 
-def _rewrite(*loops: Loop) -> Fold:
+def _rewrite(*loops: Loop) -> tuple[Fold, tuple]:
     """Lift the loops under one row and rewrite: the second loop's read of ``acc0`` arrives as an
-    operand edge, which is what the recipe matches on."""
+    operand edge, which is what the recipe matches on. Returns the tree and the kernel's axis table."""
     cell = (*loops, Write(output="out", index=(Var("a0"),), value="acc1"))
     tile = lift_loop_op(LoopOp(body=(Loop(axis=Axis("a0", Dim(4)), body=Body(cell)),)), name="k_pair")
-    return rewrite_twisted(tile.op)
+    return rewrite_twisted(tile.op, tile.axes), tile.axes
 
 
 @pytest.mark.parametrize(("kind", "should_pair"), [("softmax_pair", True), ("unrelated_pair", False)])
@@ -162,7 +162,7 @@ def test_rewrite_pairs_only_the_online_softmax_pair(kind: str, should_pair: bool
     """The rewrite collapses the decomposed two-pass softmax (row-max + ``sum exp(x - max)``) into
     ONE twisted fold, and is a NO-OP on an unrelated row-max + plain-sum pair."""
     second = _sum_exp_shifted() if should_pair else _plain_sum()
-    root = _rewrite(_row_max(), second)
+    root, _ = _rewrite(_row_max(), second)
     twisted = _twisted_folds(root)
     assert bool(twisted) == should_pair
     if should_pair:
@@ -173,9 +173,9 @@ def test_rewrite_pairs_only_the_online_softmax_pair(kind: str, should_pair: bool
 def test_twisted_folds_lowered_loop_is_well_formed() -> None:
     """The rewritten carrier's lowered loop defines every name before it is read — what
     materialization actually consumes."""
-    root = _rewrite(_row_max(), _sum_exp_shifted())
+    root, axes = _rewrite(_row_max(), _sum_exp_shifted())
     (pair,) = _twisted_folds(root)
-    (loop,) = pair.lower()
+    (loop,) = pair.lower(axes=axes)
     defined = {loop.axis.name, "a0", *pair.as_reduction().states}
     for stmt in loop.body:
         assert set(stmt.deps()) <= defined, f"{stmt} reads {sorted(set(stmt.deps()) - defined)} before definition"

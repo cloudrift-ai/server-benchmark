@@ -1,7 +1,7 @@
 """Operand edges — every edge is a TERM, and a term declares what a reader used to walk for.
 
 A ``Fold``'s operands are ``Fold``s, without exception: a gmem read is a :meth:`Fold.slab`, a
-wrapped ``Load`` whose index coordinates are its own :attr:`Fold.axes`. That one invariant is what
+wrapped ``Load`` evaluated over the coordinates its index reads (:attr:`Fold.free_axes`). That one invariant is what
 lets every per-edge question be an attribute rather than a helper branching on what the edge
 happens to be — its coordinates (:attr:`Fold.free_axes`), the names it binds
 (:attr:`Fold.exposes`), whether it is a leaf (:meth:`Fold.as_slab`), and whether the term above it
@@ -27,7 +27,7 @@ SCOPE = (M_AXIS, N_AXIS, K_AXIS)
 
 def _slab(name: str, buffer: str, index: tuple) -> Fold:
     """One gmem read, as a term declaring the coordinates it indexes."""
-    return Fold.slab(Load(name=name, input=buffer, index=index), SCOPE)
+    return Fold.slab(Load(name=name, input=buffer, index=index))
 
 
 def _projection(operands: tuple, body: tuple, results: tuple) -> Fold:
@@ -41,7 +41,6 @@ def _reduce(operands: tuple, body: tuple, accs: tuple[str, ...]) -> Fold:
     bound = tuple(name for edge in operands for name in edge.exposes)
     init, combine = (0.0,) * len(accs), Lambda.componentwise(("add",) * len(accs), accs)
     return Fold(
-        axes=(K_AXIS,),
         operands=operands,
         lift=Lambda.closing((K_AXIS.name, *bound), Body(body), tuple(f"{acc}__v" for acc in accs)),
         init=init,
@@ -61,7 +60,7 @@ def _matmul() -> Fold:
 def test_a_slab_declares_the_coordinates_it_indexes() -> None:
     """The leaf binds its own coordinates, so nothing above it has to scan an index expression."""
     slab = _slab("l", "x", (Var("m"), Var("k")))
-    assert tuple(axis.name for axis in slab.axes) == ("m", "k")
+    assert slab.free_axes == {"m", "k"}
     assert slab.free_axes == {"m", "k"}
     assert slab.exposes == ("l",)
     assert slab.as_slab() is not None
@@ -70,13 +69,13 @@ def test_a_slab_declares_the_coordinates_it_indexes() -> None:
 def test_a_slab_lowers_to_exactly_its_load() -> None:
     """Wrapping is a declaration, not a layer: the emitted statements are unchanged."""
     load = Load(name="l", input="x", index=(Var("m"), Var("k")))
-    assert Fold.slab(load, SCOPE).lower() == (load,)
+    assert Fold.slab(load).lower(axes=SCOPE) == (load,)
 
 
 def test_a_slab_does_not_reduce() -> None:
     """``axes`` is an index space; ``combine`` is what makes an axis a REDUCTION."""
     slab = _slab("l", "x", (Var("m"), Var("k")))
-    assert slab.axes and slab.axis is None and slab.axis is None
+    assert slab.free_axes and slab.axis is None
 
 
 def test_a_computed_cone_is_not_a_slab() -> None:
@@ -97,7 +96,7 @@ def test_as_contraction_reads_the_shared_and_free_axes() -> None:
     """``a[m,k] × b[k,n]``: the shared axis is the reduction, the difference is the output."""
     view = _matmul().as_contraction()
     assert view is not None
-    assert view.axis is K_AXIS and {view.left, view.right} == {"m", "n"}
+    assert view.axis == "k" and {view.left, view.right} == {"m", "n"}
 
 
 def test_a_scale_is_not_a_contraction() -> None:
@@ -119,7 +118,7 @@ def test_a_pointwise_term_has_no_view() -> None:
 
 def test_a_matmul_lowers_to_one_loop_with_both_operands_riding_the_step() -> None:
     """Both operands index ``k``, so both are re-read per step and nothing hoists."""
-    (loop,) = _matmul().lower()
+    (loop,) = _matmul().lower(axes=SCOPE)
     assert isinstance(loop, Loop) and loop.axis is K_AXIS
     assert [stmt.input for stmt in loop.body if isinstance(stmt, Load)] == ["x", "w"]
     assert [stmt.name for stmt in loop.body if isinstance(stmt, Accum)] == ["acc"]
@@ -129,7 +128,7 @@ def test_an_operand_that_does_not_index_the_axis_lowers_once_ahead_of_the_loop()
     """The hoist is a DECLARATION compared against an axis — no body walked for free names."""
     a = _slab("l", "x", (Var("m"), Var("k")))
     scale = _slab("s", "s", (Var("m"),))
-    stmts = _reduce((a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",)).lower()
+    stmts = _reduce((a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",)).lower(axes=SCOPE)
     hoisted, loop = stmts
     assert isinstance(hoisted, Load) and hoisted.input == "s"
     assert [stmt.input for stmt in loop.body if isinstance(stmt, Load)] == ["x"]
@@ -150,7 +149,7 @@ def test_the_combine_folds_one_accum_per_carried_component() -> None:
         ),
         ("acc_g", "acc_u"),
     )
-    (loop,) = node.lower()
+    (loop,) = node.lower(axes=SCOPE)
     body = list(loop.body)
     assert sum(1 for stmt in body if isinstance(stmt, Assign) and stmt.name == "xhat") == 1
     assert [stmt.name for stmt in body if isinstance(stmt, Accum)] == ["acc_g", "acc_u"]
@@ -159,7 +158,7 @@ def test_the_combine_folds_one_accum_per_carried_component() -> None:
 
 def test_a_zero_axis_term_lowers_to_its_operands_then_its_body() -> None:
     """No axis, no monoid: the step IS the answer."""
-    stmts = _projection((_slab("l", "x", (Var("m"),)),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).lower()
+    stmts = _projection((_slab("l", "x", (Var("m"),)),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).lower(axes=SCOPE)
     assert [type(stmt).__name__ for stmt in stmts] == ["Load", "Assign"]
 
 
@@ -183,7 +182,7 @@ def test_every_buffer_the_term_touches_reaches_the_lowered_body() -> None:
         (Assign(name="acc_g__v", op="multiply", args=("xhat", "bg")),),
         ("acc_g",),
     )
-    assert set(buffers(node.lower())) == {"x", "w", "Wg"}
+    assert set(buffers(node.lower(axes=SCOPE))) == {"x", "w", "Wg"}
 
 
 # --- closure: the predicate a placement cut asks -------------------------------------------------- #
@@ -198,7 +197,7 @@ def test_iteration_variables_are_not_captures() -> None:
         (Assign(name="xhat", op="multiply", args=("e", "s")),),
         ("xhat",),
     )
-    assert _closed_at(cone, (M_AXIS, K_AXIS)), "an ordinary cone over its own axes is closed"
+    assert _closed_at(cone, ("m", "k")), "an ordinary cone over its own axes is closed"
     assert not _closed_at(cone, ()), "unfiltered, the axes themselves read as captures"
 
 
@@ -246,6 +245,6 @@ def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_unde
     (spec,) = tile.output_specs
     assert spec.sweep is not None and spec.sweep.name in swept.free_axes
     assert any(edge.axis is not None and spec.sweep.name not in edge.free_axes for edge in swept.operands)
-    outer, loop = tile.op.lower(frozenset(axis.name for axis in tile.place.free), tile.output_specs)
+    outer, loop = tile.op.lower(frozenset(axis.name for axis in tile.place.free), tile.output_specs, tile.axes)
     assert isinstance(outer, Loop) and isinstance(loop, Loop) and loop.axis.name == spec.sweep.name
     assert [type(stmt).__name__ for stmt in loop.body] == ["Loop", "Write"]

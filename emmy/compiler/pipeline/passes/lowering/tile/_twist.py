@@ -60,10 +60,10 @@ def _replace(term: Fold, mapping: dict[int, tuple[Fold, int]]) -> Fold:
 
 def _varies(fold: Fold, name: str, bound: dict[str, Fold]) -> bool:
     """Whether ``name`` — a lift param or a body definition — changes along the fold's axis."""
-    if name == fold.axis.name:
+    if name == fold.axis:
         return True
     if name in bound:
-        return fold.axis.name in bound[name].free_axes
+        return fold.axis in bound[name].free_axes
     if name not in fold.lift.params:
         return any(_varies(fold, read, bound) for read in fold.lift.cone(name).params)
     return False
@@ -130,7 +130,7 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     operands = tuple(edge for edge in fold.operands if id(edge) in kept_edges)
     lift = Lambda(
         params=(
-            fold.axis.name,
+            fold.axis,
             *(param for param, edge, _ in fold.bindings if id(edge) in kept_edges),
             *fold.lift.params[1 + len(bound) :],
         ),
@@ -150,7 +150,7 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     return inner, projection
 
 
-def _click(root: Fold) -> dict[int, Fold] | None:
+def _click(root: Fold, axes: dict) -> dict[int, tuple[Fold, int]] | None:
     """The first fusion some recipe accepts anywhere in the tree, as the operand replacement it
     implies — the dependent and its pivot both become the fused fold (an epilogue projection
     stands in for the dependent when its invariant factors had to hoist first)."""
@@ -158,7 +158,7 @@ def _click(root: Fold) -> dict[int, Fold] | None:
         if term.axis is None or not any(edge.axis is not None for edge in term.operands):
             continue
         for recipe in RECIPES:
-            fused = term.twist(recipe)
+            fused = term.twist(recipe, axes)
             if fused is not None:
                 pivot = _pivot_of(term, fused)
                 return {id(term): (fused, len(pivot.exposes)), id(pivot): (fused, 0)}
@@ -166,7 +166,7 @@ def _click(root: Fold) -> dict[int, Fold] | None:
             if hoisted is None:
                 continue
             inner, epilogue = hoisted
-            fused = inner.twist(recipe)
+            fused = inner.twist(recipe, axes)
             if fused is not None:
                 pivot = _pivot_of(inner, fused)
                 return {id(term): (_replace(epilogue, {id(inner): (fused, len(pivot.exposes))}), 0), id(pivot): (fused, 0)}
@@ -179,7 +179,7 @@ def _pivot_of(dependent: Fold, fused: Fold) -> Fold:
     return next(edge for edge in dependent.operands if edge.axis is not None and edge.as_reduction().states == states[:-1])
 
 
-def _report(root: Fold) -> None:
+def _report(root: Fold, axes: dict) -> None:
     """Name every pivot-shaped reduce left beside a same-axis sibling once the fixpoint settles —
     the shape this pass exists for, refusing, and the demotion is otherwise invisible."""
     reduces = [term for term in _terms(root) if term.axis is not None]
@@ -188,18 +188,21 @@ def _report(root: Fold) -> None:
         view = fold.as_reduction()
         if view.ops is None or view.ops[0].reduce_canon not in pivots:
             continue
-        siblings = [other for other in reduces if other is not fold and other.axis.extent == fold.axis.extent]
+        siblings = [other for other in reduces if other is not fold and axes[other.axis].extent == axes[fold.axis].extent]
         if siblings:
             _decline("sibling cluster", f"{view.states[0]!r} keeps {len(siblings)} same-axis sibling(s) no recipe fuses onto it")
 
 
-def rewrite_twisted(root):
-    """Fuse every two-pass reduce pair a recipe recognizes into its twisted carrier, to a fixpoint."""
+def rewrite_twisted(root, axes: tuple):
+    """Fuse every two-pass reduce pair a recipe recognizes into its twisted carrier, to a fixpoint.
+    ``axes`` is the kernel's axis table: two reduces fuse only over one extent, which the terms
+    name and the table holds."""
     if not isinstance(root, Fold):
         return root
-    while (mapping := _click(root)) is not None:
+    table = {axis.name: axis for axis in axes}
+    while (mapping := _click(root, table)) is not None:
         root = _replace(mapping.get(id(root), (root, 0))[0], mapping)
-    _report(root)
+    _report(root, table)
     return root
 
 

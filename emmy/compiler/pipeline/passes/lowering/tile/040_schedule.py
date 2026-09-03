@@ -56,7 +56,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         return []
     context = ClassicScheduleContext(tile, ctx, domains).restrict(
         {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")},
-        split_consumed=carries_partition(tile.op) or tile.split_consumed,
+        split_consumed=carries_partition(tile) or tile.split_consumed,
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
         allow_fp8=precision_pin(FP8_MMA) is True,
         validate_pins=ctx.validate_pins,

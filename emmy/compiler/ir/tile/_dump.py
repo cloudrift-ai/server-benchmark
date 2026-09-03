@@ -42,6 +42,7 @@ class _Ctx:
     is measured against. ``None`` everywhere when a bare term is printed without its op."""
 
     def __init__(self, tile, root=None) -> None:
+        self.tile = tile
         self.sched = sched_of(tile) if tile is not None and tile.op is not None else None
         # The ITERATION SPACE a capture set is measured against. Only the OWNING ``TileOp`` knows
         # it in full: the term's own axes (:func:`axis_names`), the placement's free/grid axes, and
@@ -104,7 +105,8 @@ def _head(node, ctx: _Ctx) -> str:
         text = "Fold  free" + ("" if node.operands else "  ‹pointwise›")
     else:
         kind = "contraction" if node.as_contraction() is not None else "reduce"
-        text = f"Fold[{_axis_span(node.axis)}] {kind}"
+        span = _axis_span(ctx.tile.axis_of(node.axis)) if ctx.tile is not None else node.axis
+        text = f"Fold[{span}] {kind}"
     return text + ctx.note(node)
 
 

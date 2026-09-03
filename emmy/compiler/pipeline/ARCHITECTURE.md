@@ -173,7 +173,6 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — the rank metrics, the three calibration paths and the reachability ratio all resolve here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
 | `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, the derived `ShapeKey` index, and `group.py`'s `Group` — one candidate pool packed as a matrix plus one label per row. The base says nothing about what the labels mean, which is all a ranking metric needs; `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and only it can be asked which rows are the answer. `group_measured` builds base groups from benched node rows, labelled with measured µs. Nothing here imports `search/prior/`: a group carries every column it was given, and each model class narrows to the ones it wants when it asks for the matrix — `TREE_FEATURES`, the view argued entirely from what a tree can re-derive, lives with the CatBoost trainer for the same reason. |
 | `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
-| `search/audit.py` | The golden drift audit: one MATCH / DRIFT / GAP verdict per schedule fork over the golden rows of its signature, collected off a whole card's graphs under isolated evidence. Backs the `emmy eval golden --golden … --serving-config` release gate. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
 | `passes/{frontend,loop,lowering}/` | The rules themselves — documented in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); a per-pass overview table is near the end of this file. |
@@ -571,13 +570,13 @@ any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH 
 `--ab` row for its own compile — not how a golden deploys.
 
 **Auditing the golden rows.** Whether the recorded goldens still decide a deploy is the strict-evidence question
-asked of a whole serving matrix: `search/audit.py` (`audit_card`) compiles every graph with the machine-local
-evidence removed (`config.online_file_override` at a nonexistent path, a fresh in-memory tune store,
-`nvcc_flags_override("")` for the deployable regime, `golden.records_override` scoping the golden rows to one file
-or precision lane) and `--strict-evidence` on, so a fork no golden row decides is an `EvidenceError` naming the
-kernel rather than a prediction, and the answer is the same on a GPU-less box and the recording host. The strict
-decode (`golden.decode_record`) is the per-entry half: does each recorded row still equal an enumerated leaf of its
-own kernel. `eval golden --golden … --serving-config` asks both and fails on either.
+asked of a whole serving matrix. `eval golden --golden … --serving-config` compiles each precision lane's serving
+twins inside `golden.sole_evidence(records)` — the lane's rows are the golden scope, the machine-local online prior
+and its reservoir are out of the way (`config.online_file_override` at a nonexistent path), no tune DB is passed,
+and strict evidence is on — so a fork no golden row decides is an `EvidenceError` naming the kernel rather than a
+prediction, and the answer is the same on every machine that holds the same file. The strict decode
+(`golden.decode_record`) is the per-entry half: does each recorded row still equal an enumerated leaf of its own
+kernel. The gate asks both and fails on either.
 
 Three definitions the list leans on:
 
@@ -610,7 +609,8 @@ Three definitions the list leans on:
   measurement is not evidence about a deploy.
 
 **Golden scope.** `--golden PATH` scopes the golden rows to that file instead of the repository's per-card files —
-in-process through `golden.records_override(records)` (`run`, `compile`, the audit), and through `EMMY_GOLDEN_FILE`
+in-process through `golden.records_override(records)` (`run`, `compile`; the release gate and the realization
+corpus through `golden.sole_evidence`), and through `EMMY_GOLDEN_FILE`
 (`config.golden_file`) for `serve`'s vLLM child, which is another process. `golden.records_for_card` is the one loader
 either way: the capability must agree, and a record naming no card (a working golden traced off-GPU) applies to
 whichever card compiles it (`scope_explicit()` lets a card-less compile read an explicit scope). The tuner holds golden
@@ -636,8 +636,8 @@ structural cost estimate reads off the partition fork (Part 4), so the Σ compar
 
 **How to see what answered.** There is no flag that reports, per fork, which source decided it; a live compile
 does not print that. What exists today is: the loud warning for measured evidence that overlaps none of the offered
-candidates, the resolve trace (`Decision.score` carries the deciding row's µs), the golden audit's verdicts, and
-strict evidence, which turns "nothing measured decided this" into an error.
+candidates, the resolve trace (`Decision.score` carries the deciding row's µs), and strict evidence, which turns
+"nothing measured decided this" into an error.
 
 **Placement does not weaken maximal fusion.** Maximal Loop IR fusion produces the canonical combined kernel. Tile IR
 then offers that kernel beside legal `PLACE` cuts of closed stored Fold edges and `REDUCE` cross-CTA splits. These are
@@ -1379,9 +1379,9 @@ on either layout.
 
 **Provenance validation.** `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` derives model, revision,
 GPU, canonical file, precision regimes, and reachable static/symbolic widths from one pinned env, requires that exact
-file and live GPU, validates that every structural target contains every expected realization, and audits the file's
-rows as evidence (Part 3's golden audit: MATCH / DRIFT / GAP per schedule fork of the serving twins). A recorded row's
-health beyond that is its pinned measurement (`--ab` / `run --golden PATH --realization NAME --bench`, gated by the
+file and live GPU, validates that every structural target contains every expected realization, and compiles the
+serving twins with the file's rows as the only evidence under strict evidence (Part 3): a twin with a fork no row
+decides fails the gate naming the kernel. A recorded row's health beyond that is its pinned measurement (`--ab` / `run --golden PATH --realization NAME --bench`, gated by the
 A/B integrity checks below).
 
 **Live-GPU scoping.** `run` / `compile --realization NAME` (no `--golden PATH`) prefer the **live** card's goldens

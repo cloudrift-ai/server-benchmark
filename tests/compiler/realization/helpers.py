@@ -20,7 +20,6 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from emmy import config
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of, validate_family_value
 from emmy.compiler.pipeline.search.golden import (
@@ -29,7 +28,7 @@ from emmy.compiler.pipeline.search.golden import (
     golden_record_from_entry,
     kernel_identity,
     load_golden_file,
-    records_override,
+    sole_evidence,
 )
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pins import parse_reduce, pinned_knobs, unreproducible_pin_flag
@@ -298,9 +297,9 @@ def write_case(path: Path, document: dict) -> None:
 def evidence_scope(case: Case):
     """The case as a compile's ONLY evidence — how its schedule reaches a deploy.
 
-    Its record is the whole golden scope, the machine-local online prior is out of the way, and
-    its input pins — the regime it was measured under, never its route or its schedule row — are
-    the environment. No hand pin rides beside it: the route and the schedule reach the compile as
+    Its entries are the whole golden scope, strictly (``golden.sole_evidence``: the machine-local
+    online prior is out of the way), and its input pins — the regime it was measured under, never
+    its route or its schedule row — are the environment. No hand pin rides beside it: the route and the schedule reach the compile as
     measured rows of the kernels they decide, through the same evidence pick every ``compile`` /
     ``run`` / ``serve`` uses, or they do not reach it at all. A case authors schedules rather than
     measuring them, and a proposal is no evidence, so each entry stands in as a measured row: with
@@ -314,15 +313,8 @@ def evidence_scope(case: Case):
         for record in case.records
     ]
     regime = {name: value for name, value in case.record.pin_map.items() if family_of(str(name)) not in KERNEL_DECISION_FAMILIES}
-    with tempfile.TemporaryDirectory(prefix="emmy_corpus_") as directory:
-        absent = Path(directory) / "absent-online.json"
-        with (
-            records_override(records),
-            config.online_file_override(absent),
-            config.strict_evidence_override(True),
-            pinned_knobs(regime),
-        ):
-            yield
+    with sole_evidence(records), pinned_knobs(regime):
+        yield
 
 
 class _Splices(PipelineStrategy):

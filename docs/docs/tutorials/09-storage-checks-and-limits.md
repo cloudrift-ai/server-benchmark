@@ -140,11 +140,10 @@ Gathered in one place, honestly.
    The 1.8-times-faster split on [the goldens page](./07-golden-configurations.md) is only deployable because
    somebody recorded it, and that measured route row is what deploys it.
 6. **A recording that no longer realizes is simply not evidence**, and the kernel falls to the prior, which can be
-   far slower than the number the recording advertises. The audits catch it, but only when they are run — and the
-   isolated audit cannot see the pin-only case that appears solely inside a real model; `--strict-evidence` makes the
-   fall-through an error.
+   far slower than the number the recording advertises. `--strict-evidence` makes that fall-through an error, and
+   the release gate compiles the serving matrix under it; a plain deploy without the flag falls through silently.
 7. **There is no per-fork report of which row decided.** Answering "which evidence answered this fork, and did I
-   expect that one?" means correlating warnings, the resolution record and the audits.
+   expect that one?" means correlating warnings, the resolution record and the release gate.
 8. **The richest measurements are diagnostic-only.** The search-tree table is never consulted when deploying. Fitting
    the offline prior on a frozen snapshot of it is a planned path, not a current one — today `emmy fit` trains on the
    golden configurations only.

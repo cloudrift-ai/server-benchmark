@@ -160,9 +160,9 @@ correlate.
 - **The warnings.** Measured evidence for a kernel that overlaps none of the offered options is logged loudly.
 - **The record of the resolution.** Each decided fork records what was chosen and the time of whichever row decided
   it — a measured time when a measurement decided, a predicted one otherwise.
-- **The audits.** `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` re-runs the file's own-program and
-  exact serving-matrix compiles on the pinned GPU, one verdict per schedule fork. That is the subject of the next
-  page.
+- **The release gate.** `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` strictly decodes each of
+  the file's entries and compiles the exact serving matrix on the pinned GPU with the file's rows as the only
+  evidence, under strict evidence. That is the subject of the next page.
 - **Strict evidence.** `--strict-evidence` on `run`, `compile` or `serve` refuses to let the prior decide at all, so
   a compile that finishes under it was decided by measurements alone.
 

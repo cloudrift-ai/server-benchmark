@@ -1269,9 +1269,10 @@ def _file_gpu_name(path: Path) -> str | None:
 #: Optional scope override for :func:`records_for_card` — the golden rows the evidence index loads.
 #: ``None`` (the default) reads ``EMMY_GOLDEN_FILE`` when set, else the repository files. Every
 #: command that names a golden scopes the rows here: ``run`` / ``compile`` install the selected
-#: records in-process, the release gate (``search/audit.py``) one file's / one precision lane's
-#: records, and ``serve --golden`` reaches the same loader through the env var because the vLLM
-#: child is another process. Set it through :func:`records_override`, never by hand.
+#: records in-process, the release gate (``eval golden --serving-config``) one precision lane's
+#: records through :func:`sole_evidence`, and ``serve --golden`` reaches the same loader through
+#: the env var because the vLLM child is another process. Set it through :func:`records_override`,
+#: never by hand.
 RECORDS_OVERRIDE: list[GoldenRecord] | None = None
 
 
@@ -1295,6 +1296,24 @@ def records_override(records: list[GoldenRecord] | None):
         yield
     finally:
         RECORDS_OVERRIDE = prev
+
+
+@contextmanager
+def sole_evidence(records: list[GoldenRecord]):
+    """``records`` as a compile's ONLY evidence, strictly: the golden scope is these rows
+    (:func:`records_override`), the machine-local online prior and its reservoir are out of the
+    way (``EMMY_ONLINE_FILE`` at a nonexistent path) and strict evidence is on, so a fork none of
+    the rows decides is an ``EvidenceError`` naming the kernel instead of a prediction; a
+    ``Pipeline.run`` given no ``db`` consults no tune DB either. The release gate (``eval golden
+    --serving-config``) and the realization corpus ask their question inside this, which is what
+    makes the answer the same on every machine that holds the same rows."""
+    with tempfile.TemporaryDirectory(prefix="emmy-evidence-") as tmp:
+        with (
+            records_override(records),
+            config.online_file_override(Path(tmp) / "absent-online.json"),
+            config.strict_evidence_override(True),
+        ):
+            yield
 
 
 def scope_explicit() -> bool:

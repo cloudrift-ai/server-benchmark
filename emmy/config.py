@@ -219,10 +219,10 @@ def online_path() -> Path:
 def online_file_override(path: str | Path | None):
     """Temporarily point ``EMMY_ONLINE_FILE`` at ``path`` (``None`` is a no-op).
 
-    The release gate (``search/audit.py``) and the realization corpus use this with a nonexistent
-    path so a compile's evidence hierarchy sees NO machine-local online prior / reservoir — the
-    golden rows in scope are the only evidence, which is what makes their strict-evidence verdict
-    machine-independent."""
+    ``search.golden.sole_evidence`` (the release gate and the realization corpus) uses this with a
+    nonexistent path so a compile's evidence hierarchy sees NO machine-local online prior /
+    reservoir — the golden rows in scope are the only evidence, which is what makes their
+    strict-evidence verdict machine-independent."""
     if path is None:
         yield
         return

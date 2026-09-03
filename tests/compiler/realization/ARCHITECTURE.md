@@ -125,10 +125,10 @@ leading comment block is prose about where the gap came from; regeneration prese
 | `correct` | run against the reference within tolerance | yes, exact capability |
 
 **Only `offered` is a hand pin, asked of each entry.** The other three run under `helpers.evidence_scope`: the case's
-entries are the whole golden scope (`golden.records_override`, each standing in as a measured row — a case authors
-schedules rather than measuring them, and a proposal is no evidence), strict evidence is on (`--strict-evidence`: a
-fork no entry decides is an `EvidenceError` naming the kernel, never a prior's guess), the machine-local online prior
-is out of the way, the tune DB is not consulted, and the environment carries the case's input pins alone — the regime
+entries are the whole golden scope, strictly (`golden.sole_evidence`, the scope the release gate compiles under too;
+each entry standing in as a measured row — a case authors schedules rather than measuring them, and a proposal is no
+evidence), so a fork no entry decides is an `EvidenceError` naming the kernel, never a prior's guess; the machine-local
+online prior is out of the way, the tune DB is not consulted, and the environment carries the case's input pins alone — the regime
 it was measured under (`FAST_MATH` and the precision gates), never its route or its schedule row. The route and the
 row reach the compile as measured rows of the kernels they decide, through the same evidence pick every `compile` /
 `run` / `serve` uses (`golden.evidence_rows`, `greedy._route_candidates`), or they do not reach it at all. That is the

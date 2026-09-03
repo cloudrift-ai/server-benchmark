@@ -438,12 +438,13 @@ def _emit_golden_deploy_check(args) -> None:
 def handle_eval_golden(args) -> None:
     """Validate one file-scoped golden corpus against the pinned serving envelope."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.audit import audit_card  # noqa: PLC0415
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import (
         # noqa: PLC0415,
         GoldenFileValidation,
         load_golden_file,
         load_golden_records,
+        sole_evidence,
     )
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from emmy.serving.release import load_serving_config, model_matches  # noqa: PLC0415
@@ -516,16 +517,21 @@ def handle_eval_golden(args) -> None:
         logger.error("in-model audit cannot represent %s: %s", source, exc)
         sys.exit(1)
 
+    # The serving-matrix half of the gate: each lane's twins compiled with that lane's rows as
+    # the only evidence, strictly, on the live card the golden names — a fork no golden row
+    # decides is an EvidenceError naming the kernel, never a prediction the prior makes.
     failed = False
     for pins in sorted({row.pins for row in serving.realizations}, key=repr):
-        lane_records = [record for record in records if record.pins == pins]
-        with pinned_knobs(dict(pins)):
-            results = audit_card(graphs, serving.gpu_name, cap, goldens=lane_records)
         lane = _format_pins(pins)
-        broken = {name: why for name, why in results.items() if why is not None}
-        for name, why in sorted(broken.items()):
-            logger.error("%s: %s: %s", lane, name, why)
-        logger.info("%s: %d twin(s) deploy from the golden rows alone, %d do not", lane, len(results) - len(broken), len(broken))
+        broken = 0
+        with pinned_knobs(dict(pins)), sole_evidence([record for record in records if record.pins == pins]):
+            for name, graph in graphs.items():
+                try:
+                    Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
+                except Exception as exc:  # noqa: BLE001 — one twin's failure is that twin's verdict
+                    broken += 1
+                    logger.error("%s: %s: %s", lane, name, " ".join(f"{type(exc).__name__}: {exc}".split()))
+        logger.info("%s: %d twin(s) deploy from the golden rows alone, %d do not", lane, len(graphs) - broken, broken)
         failed |= bool(broken)
     if failed:
         logger.error("serving audit failed: every fork of every reachable kernel must be decided by a golden row")
@@ -935,8 +941,8 @@ def _emit_offer_audit(configs: list) -> bool:
     the spelled row compared with that kernel's enumerated leaves by exact schedule-row identity.
     An entry whose row equals no leaf is ``UNREALIZED``: it is no evidence a deploy can use, so
     the gate fails — re-record an offered row in this input regime, or close the enumeration gap.
-    This is the OWN-SNIPPET view; the serving-matrix compile (``audit_card``) closes the other
-    side, whether the fused serving graphs are decided by these rows. Returns True when any entry
+    This is the OWN-SNIPPET view; the serving-matrix compile in :func:`handle_eval_golden` closes
+    the other side, whether the fused serving graphs are decided by these rows. Returns True when any entry
     is unrealized (``eval golden`` exits 1)."""
     from emmy.compiler.pipeline.search.golden import decode_record, siblings_of  # noqa: PLC0415
 

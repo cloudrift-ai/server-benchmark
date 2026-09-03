@@ -275,10 +275,11 @@ Both halves are strict evidence, asked twice. The **offer audit** is the strict 
 (`golden.decode_record`): each record's own persisted program is replayed under its input pins, with the target's
 other entries walking the same path, and the spelled row must equal one of that kernel's enumerated leaves —
 `UNREALIZED` names the entries that do not, and any one fails the gate, since a row no leaf equals is no evidence
-a deploy can use. The **serving-matrix audit** (`compiler/pipeline/search/audit.py`, `audit_card`) then compiles
-each precision lane's serving twins with only that lane's records as golden evidence, the machine-local prior and
-tune DB out of the way, the deployable regime forced, and `--strict-evidence` on: a fork no golden row decides is an
-`EvidenceError` naming the kernel and the fork, and the gate reports it per twin. A kernel whose lowering stops
+a deploy can use. The **serving-matrix compile** then lowers each precision lane's serving twins inside
+`golden.sole_evidence` — only that lane's records as golden evidence, the machine-local prior and tune DB out of the
+way, strict evidence on — on the live card the golden names and under the regime the environment spells, the one
+`serve` deploys under: a fork no golden row decides is an `EvidenceError` naming the kernel and the fork, and the
+gate reports it per twin. A kernel whose lowering stops
 forking, or a schedule that stops being offered, therefore fails loudly here instead of silently deploying from
 the prior.
 

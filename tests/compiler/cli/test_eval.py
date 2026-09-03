@@ -130,9 +130,11 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
     import emmy.commands.eval as eval_cmd
-    import emmy.compiler.pipeline.search.audit as audit
     import emmy.serving.twins as twins
+    from emmy import config as emmy_config
     from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.pipeline.search import golden as golden_mod
 
     golden = tmp_path / "golden.yaml"
     _write_release_golden(
@@ -157,25 +159,28 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
     monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
-    captured = {}
+    captured = {"compiles": []}
+    twin = object()
 
     def fake_capture(source, **kwargs):
         captured["capture"] = (source, kwargs)
-        return {"pre1": object()}
+        return {"pre1": twin}
 
-    def fake_audit(graphs, gpu_name, compute_cap, *, goldens):
-        captured["audit"] = (graphs, gpu_name, compute_cap, goldens)
-        return {"pre1": None}
+    def fake_run(self, graph, *, ctx=None, **_kwargs):
+        # What the gate's compile sees: the lane's rows as the only golden scope, strict on, the
+        # live card's context.
+        scope = {(record.bindings, record.pins) for record in golden_mod.RECORDS_OVERRIDE}
+        captured["compiles"].append((graph, ctx, emmy_config.strict_evidence(), scope))
+        return graph
 
     monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
-    monkeypatch.setattr(audit, "audit_card", fake_audit)
+    monkeypatch.setattr(Pipeline, "run", fake_run)
 
     eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
 
     assert captured["capture"] == ("org/model", {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True})
-    _, gpu_name, compute_cap, records = captured["audit"]
-    assert (gpu_name, compute_cap) == ("NVIDIA GeForce RTX 4090", (8, 9))
-    assert {(record.bindings, record.pins) for record in records} == {((("num_tokens", 1),), (("FAST_MATH", False),))}
+    assert captured["compiles"] == [(twin, ctx, True, {((("num_tokens", 1),), (("FAST_MATH", False),))})]
+    assert golden_mod.RECORDS_OVERRIDE is None and not emmy_config.strict_evidence()
 
 
 def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path):
@@ -222,9 +227,10 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     import pytest
 
     import emmy.commands.eval as eval_cmd
-    import emmy.compiler.pipeline.search.audit as audit
     import emmy.serving.twins as twins
     from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.pipeline.search.policy.greedy import EvidenceError
 
     golden = tmp_path / "golden.yaml"
     _write_release_golden(
@@ -249,9 +255,15 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
     monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
-    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object(), "pre2": object()})
-    verdict = {"pre1": None, "pre2": "EvidenceError: strict evidence: kernel 'k_linear' (node 'n') has no measured evidence"}
-    monkeypatch.setattr(audit, "audit_card", lambda graphs, gpu_name, compute_cap, *, goldens: verdict)
+    undecided = object()
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object(), "pre2": undecided})
+
+    def fake_run(self, graph, *, ctx=None, **_kwargs):
+        if graph is undecided:
+            raise EvidenceError("strict evidence: kernel 'k_linear' (node 'n') has no measured evidence")
+        return graph
+
+    monkeypatch.setattr(Pipeline, "run", fake_run)
 
     with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
         eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))

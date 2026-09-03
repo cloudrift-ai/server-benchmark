@@ -74,8 +74,11 @@ neither defines nor filters those domains. `ir/schedule` may import other IR mod
 pipeline layer. The pipeline retains only knob/pin reads, pool identity, sampling, and the generic lazy-Fork adapter.
 
 A reduction domain is projected from node and kernel facts alone, so the shapes the kernel factorizer cannot bind are
-decided once, at the offer, and never dropped from a priced row later. An observed node, or one whose reduce reads a
-boundary store's output sweep, carries the serial fold only. The contraction per-cell tier reads that same
+decided once, at the offer, and never dropped from a priced row later. The partition catalog is offered only on the
+reduce nodes the binder builds the kernel around — the roots it peels from the root projection (`ops.kernel_roots`: a
+tiled contraction's root, every one of them for a multi-output kernel, else the first operand); a reduce nested under
+a root or beside it lowers serially inside its reader, so it carries the serial fold only, as does an observed node
+and one whose reduce reads a boundary store's output sweep. The contraction per-cell tier reads that same
 projection, so a contraction inherits those readings rather than restating them.
 
 A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and

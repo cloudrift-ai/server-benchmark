@@ -70,7 +70,9 @@ class ContractionView:
     right: str | None
     """The free axis the streamed operand carries. ``None`` for a MATVEC, whose B is a vector over
     the reduction alone: a contraction does not stop being one for want of a second output axis;
-    whether the pair can be ORIENTED as (m, n) is the placement's question, not recognition's."""
+    whether the pair can be ORIENTED as (m, n) is the placement's question, not recognition's. A
+    pair with NO output role on either side (a row's dot product with itself, the RMS statistic
+    spelled as two casts of one load) is not a contraction at all: it reads as a planar reduce."""
     product: ElementwiseImpl | None = None
     """The ⊗ this contraction multiplies its operand pair with."""
     plus: ElementwiseImpl | None = None
@@ -362,6 +364,8 @@ class Fold:
         left_only, right_only = a_space - b_space, b_space - a_space
         if len(left_only) > 1 or len(right_only) > 1:
             return None  # more than one free axis a side is not an orientable output role
+        if not left_only and not right_only:
+            return None  # a dot product over shared axes only carries no output role to tile: a planar reduce
         slab = b_edge.as_slab()
         b_trans = slab is not None and self.axis in slab.load.index[-1].free_vars()
         return ContractionView(

@@ -487,6 +487,22 @@ def head(op):
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 
+def kernel_roots(op) -> tuple[Fold, ...]:
+    """The reduce nodes the kernel binder builds the kernel AROUND — the ones whose ``REDUCE``
+    partition it realizes. The binder peels each zero-axis projection to one operand: the
+    contraction root of a tiled edge (every such root at once for a multi-output kernel), else the
+    first operand; every other reduce in the tree lowers serially inside its reader, so a partition
+    offered on it would price a kernel the binder never builds. This is that peel, read off the
+    term alone, so the schedule projection offers the partition catalog only where it is realized."""
+    node = op
+    while isinstance(node, Fold) and node.axis is None and node.operands:
+        tiled = [root for edge in node.operands if (root := projection_root(edge)) is not None and root.as_contraction() is not None]
+        if len(tiled) > 1:
+            return tuple(tiled)
+        node = tiled[0] if tiled else node.operands[0]
+    return (node,) if isinstance(node, Fold) else ()
+
+
 def cone_stat(cone, axes: tuple) -> Fold | None:
     """The per-row STATISTIC fold of a computed-A cone — the reduce its prologue (the cone's first
     operand, the row-invariant edge) materializes first: the fold whose carried state the first
@@ -562,6 +578,7 @@ __all__ = [
     "cone_stat_dtypes",
     "edge_dtypes",
     "head",
+    "kernel_roots",
     "make_cone",
     "projection_regions",
     "projection_tail",

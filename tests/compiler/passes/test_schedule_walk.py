@@ -392,14 +392,17 @@ def test_a_fold_nested_under_a_chain_member_offers_only_the_serial_reduce(unpinn
     assert _classic._reduction_domain(_tile_stub(root), inner) == (Reduce(),)
 
 
-def test_a_sweep_carrying_store_keeps_chain_members_serial(unpinned) -> None:
-    """A boundary store carrying an output sweep keeps every direct member serial — even one the
-    sweep axis never enters — because the sweep loop encloses the whole kernel tail and a
-    partitioned member's lane-distributed close cannot re-run per swept cell. A KERNEL-level fact,
-    unlike the per-node sweep-reading gate above it."""
+def test_a_sweep_carrying_store_keeps_a_member_serial_only_when_the_member_reads_it(unpinned) -> None:
+    """A boundary store carrying an output sweep the member is evaluated over keeps it serial: the
+    sweep loop must wrap the reduce loop, which only the serial fold spells. A sweep the member
+    never reads wraps the projection tail alone, after the member's lane-distributed close, so the
+    catalog stands — the binder realizes exactly that (``_factorize``'s sweep gate reads the root's
+    free axes)."""
     red = _chain_member("acc", "k", "x", _provider())
     spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
-    assert _classic._reduction_domain(_tile_stub(_chain_root(red), (spec,)), red) == (Reduce(),)
+    assert _classic._reduction_domain(_tile_stub(_chain_root(red), (spec,)), red) == _member_catalog()
+    over = OutputSpec(write=Write(output="o", index=(Var("m"),), value="v"), sweep=Axis("m", 4))
+    assert _classic._reduction_domain(_tile_stub(_chain_root(red), (over,)), red) == (Reduce(),)
 
 
 def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
@@ -458,7 +461,7 @@ def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None
     root = _chain_root(con)
     assert _per_cell_reductions(root) == set(_member_catalog())
 
-    swept = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
+    swept = OutputSpec(write=Write(output="o", index=(Var("m"),), value="v"), sweep=Axis("m", 4))
     assert _per_cell_reductions(root, (swept,)) == {Reduce()}
 
 
@@ -499,7 +502,10 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
             return [dict(leaf.knobs) for leaf in iter_leaves(_SCHEDULE_RULE.classic_forks(tile, tile.name, {}, ctx))]
 
     unpinned_rows = rows({})
-    assert {str(row[member_key]) for row in unpinned_rows} == {choice.spell() for choice in _member_catalog()}
+    # The member is the kernel's peeled root, so its rows are exactly its projected domain — the
+    # transposed band included, which only a root may carry.
+    assert {str(row[member_key]) for row in unpinned_rows} == {choice.spell() for choice in _classic._reduction_domain(tile, member)}
+    assert any(choice.coop_transposed for choice in _classic._reduction_domain(tile, member))
     assert {str(row[nested_key]) for row in unpinned_rows} == {""}, "the nested fold is serial-only"
 
     assert rows({nested_key: "coop"}) == [], "a partition scoped to a serial-only site must enumerate nothing"

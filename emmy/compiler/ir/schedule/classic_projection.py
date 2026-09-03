@@ -57,7 +57,7 @@ from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import Sched, edge_dtypes, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, edge_dtypes, kernel_roots, projection_tail, scheduled
 
 
 class ClassicProjectionError(RuntimeError):
@@ -89,8 +89,8 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     deliberately so: a contraction is a monoid with a ⊗ lift, so it inherits the same swept /
     streamed serial-only exclusions and the same transposed exclusion, with no carve-out of its own.
     """
-    if node.observe is not None:
-        return (Reduce(),)
+    if node.observe is not None or all(node is not root for root in kernel_roots(tile.op)):
+        return (Reduce(),)  # the binder partitions only the roots it peels; a nested or sibling reduce lowers serially
     if {spec.sweep.name for spec in tile.output_specs if spec.sweep is not None} & node.free_axes:
         return (Reduce(),)
     transposed_ok = _transposed_reduction_ok(tile)

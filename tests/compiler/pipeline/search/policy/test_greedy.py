@@ -6,8 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key, schedule_row_key
@@ -22,6 +20,7 @@ from emmy.compiler.pipeline.search.policy.greedy import (
     golden_audit,
     tile_identity,
 )
+from tests.compiler.terms import projection
 
 
 def _record(name: str, knobs: dict, *, emmy_us: float = 1.25) -> GoldenRecord:
@@ -43,7 +42,7 @@ def _record(name: str, knobs: dict, *, emmy_us: float = 1.25) -> GoldenRecord:
     )
 
 
-@pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@a": "cut"}, {"PLACE@a": "cut", "WORK": "t32"}))
+@pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@inner.1/map": "cut"}, {"PLACE@inner.1/map": "cut", "WORK": "t32"}))
 def test_db_measured_index_excludes_placement_route_totals(route) -> None:
     signature = frozenset({("S_shape", "128")})
     rows = [
@@ -121,6 +120,91 @@ def test_a_disqualification_condemns_only_the_shape_that_was_measured() -> None:
     assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}).us == 5.0
 
 
+def test_a_disqualification_survives_featurizer_vocabulary_growth() -> None:
+    """A stored failure signature is exact AT ITS OWN VOCABULARY: a candidate that agrees on every
+    recorded fact and only ADDS stamps the featurizer has since gained is the same measured shape
+    (the stamp derives from the same body the failure was measured on). Without this, one added
+    ``S_*`` feature silently disables the whole disqualification tier — measured live when the
+    ``S_ext_serial_cell_work`` stamp landed and the DeepSeek-V4 ``post4096`` election fell back to
+    the 2^38-trip serial route its recorded ``bench_fail`` rows exist to eliminate. The mirror
+    direction (a candidate MISSING a recorded key) stays refused: what was measured is not known
+    to describe that shape."""
+    recorded = frozenset({("S_shape", "4096"), ("S_dtype_f16", "1.0")})
+    grown = SimpleNamespace(knobs={"S_shape": 4096, "S_dtype_f16": 1.0, "S_ext_serial_cell_work": 64.0}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=grown)})
+    trace = [SimpleNamespace(node_id="n", score=5.0)]
+    ctx = SimpleNamespace(features=lambda: {})
+
+    condemned = greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]})
+    assert (condemned.us, condemned.measured) == (math.inf, True), "a failure row is a recording of a run"
+    shrunk = SimpleNamespace(knobs={"S_shape": 4096}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=shrunk)})
+    assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}).us == 5.0
+
+
+def test_an_empty_recorded_signature_condemns_nothing() -> None:
+    """``frozenset() <= sig`` holds for EVERY signature, so one degenerate stored failure (an op
+    that stamped nothing) would silently disqualify every kernel in every arm — an all-``inf``
+    fork decides by option order and logs nothing. An empty signature identifies no shape, so it
+    binds no shape (only its own exact empty-signature echo, which is the recorded fact)."""
+    stamped = SimpleNamespace(knobs={"S_shape": 4096}, identity_key=lambda **_kw: "k")
+    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=stamped)})
+    trace = [SimpleNamespace(node_id="n", score=5.0)]
+    ctx = SimpleNamespace(features=lambda: {})
+
+    assert greedy._resolved_price(terminal, trace, ctx, None, failed={frozenset(): [2_000_000.0]}).us == 5.0
+
+
+def _priced(kernels: dict[str, tuple[dict, float]]) -> greedy.Price:
+    """``_resolved_price`` over SimpleNamespace kernels: ``{node_id: (knobs, traced score)}``."""
+    terminal = SimpleNamespace(
+        nodes={nid: SimpleNamespace(op=SimpleNamespace(knobs=knobs, identity_key=lambda **_kw: "k")) for nid, (knobs, _) in kernels.items()}
+    )
+    trace = [SimpleNamespace(node_id=nid, score=score) for nid, (_, score) in kernels.items()]
+    return greedy._resolved_price(terminal, trace, SimpleNamespace(features=lambda: {}), None)
+
+
+def test_the_kernel_set_price_enforces_the_serial_work_bound():
+    """A summand whose serial-work lower bound is past the enforcement guard prices at least that
+    bound. Measured live on DeepSeek-V4 ``post4096``: the cold proxy priced the fused 2^30-trip
+    recomputation nest at 4.29e-37 µs, UNDER its recomputation-free composed-cut arms (best
+    1.02e-17 µs Σ), so the greedy kept the nest; bounded, the fused arm prices its honest ~1e5 µs
+    and loses."""
+    garbage = 4.29e-37
+    fused_monster = _priced({"n": ({"S_ext_serial_cell_work": float(2**30)}, garbage)})
+    assert fused_monster.us == pytest.approx(float(2**30) * 1e-4, rel=1e-6)
+    assert fused_monster.bound and not fused_monster.measured, "the clamp is a floor, neither a measurement nor the proxy"
+    cut_arm = _priced(
+        {
+            "p": ({"S_ext_serial_cell_work": float(2**16)}, garbage),
+            "c": ({"S_ext_serial_cell_work": float(2**16)}, garbage),
+        }
+    )
+    assert cut_arm.us < fused_monster.us  # the recomputation nest loses on its serial-work bound
+    # A condemned keep-fused side may lose whatever the winner's provenance: withdrawing the mixed
+    # comparison here (an untrustworthy prior, measured fragments) would deploy the nest.
+    assert greedy._may_change_kernel_set(SimpleNamespace(trustworthy=False), greedy.Price(1.0, True), fused_monster)
+
+
+def test_the_serial_bound_has_no_jurisdiction_at_ordinary_magnitudes():
+    """The bound ignores launch overhead and memory traffic, so below the enforcement guard the
+    model's ranking stands exactly as before — an ungated draft flipped three qwen3emb sdpa
+    corpus replays to a cut election by comparing trip counts alone. The 2^16 row IS the largest
+    of those shapes (``sdpa-s512``'s fused kernel, ``serial_floor_us`` 6.55 µs — the biggest
+    legitimate floor measured across the qwen3emb corpus family), so lowering the guard under it
+    breaks this test before it breaks the corpus. And a measured µs is never below the bound, so
+    the clamp is a no-op on it even past the guard."""
+    from emmy.compiler.pipeline.search.features import serial_floor_us
+
+    sdpa_s512 = {"S_ext_serial_cell_work": float(2**16)}
+    assert serial_floor_us(sdpa_s512) < greedy._SERIAL_FLOOR_ENFORCE_US
+    garbage = 4.29e-37
+    fused_small = _priced({"n": (sdpa_s512, garbage)})
+    assert fused_small.us == pytest.approx(garbage) and not fused_small.bound  # 6.55 µs — inside the guard
+    measured = _priced({"n": ({"S_ext_serial_cell_work": float(2**30)}, 2_000_000.0)})
+    assert measured.us == 2_000_000.0 and not measured.bound  # a measured µs already satisfies the bound
+
+
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     materialized = []
     rows = [{"TILE": str(tile), "STAGE": str(stage)} for tile in range(100) for stage in range(100)]
@@ -151,7 +235,7 @@ def _fork_point(options, *, rule: str, node_id: str = "node") -> ForkPoint:
     return ForkPoint(
         match=SimpleNamespace(root_node_id=node_id, rule=SimpleNamespace(name=rule, pass_=None)),
         options=options,
-        root_op=TileOp(op=Fold.projection(body=Body())),
+        root_op=TileOp(op=projection()),
         ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
     )
 
@@ -189,18 +273,30 @@ def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) ->
     assert audit[0]["verdict"] == "MATCH"
 
 
-@pytest.mark.parametrize("with_fuse_arm", [False, True])
-def test_verified_pick_defers_a_structural_fork(monkeypatch, caplog, with_fuse_arm) -> None:
-    """A kernel-SET fork is not this tier's question, whichever shape it takes: the bare structural
-    offer, or a placement fork's non-structural FUSE arm beside its structural cut arms
-    (``030_cut``). Every arm spells ``PLACE``, so all of them canonicalize to the all-OFF schedule
-    row — comparing a recorded schedule row there let an all-OFF recording bind the fuse arm and
-    decide a placement off schedule evidence, and made every other recording read as drift on a
-    fork it was never about. The tier declines the whole fork, silently, so a drift warning keeps
-    meaning "this recording no longer realizes"."""
-    cut = DeferredFork(materialize=lambda: None, knobs={"a3": "cut"}, structural=True)
-    fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"}, structural=False)
-    point = _fork_point([fuse, cut] if with_fuse_arm else [cut], rule="030_cut")
+#: The two kernel-SET forks a recorded SCHEDULE row must not decide, spelled as their passes spell
+#: them: the placement fork (``030_cut`` — a non-structural FUSE arm beside one structural cut arm
+#: per offered seam route) and the cross-CTA split (``_split.split_forks``, family ``REDUCE``).
+_KERNEL_SET_FORKS = {
+    "placement": [
+        DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"}, structural=False),
+        DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/inner": "cut"}, structural=True),
+    ],
+    "split": [
+        DeferredFork(materialize=lambda: None, knobs={"REDUCE": ""}, structural=False),
+        DeferredFork(materialize=lambda: None, knobs={"REDUCE": "g4a"}, structural=True),
+    ],
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_KERNEL_SET_FORKS))
+def test_verified_pick_defers_a_structural_fork(monkeypatch, caplog, shape) -> None:
+    """A kernel-SET fork is not the SCHEDULE tier's question, whichever shape it takes. Every arm of
+    either fork spells a structural family, so all of them canonicalize to the all-OFF schedule row
+    — comparing a recorded schedule row there let an all-OFF recording bind the fuse arm and decide
+    a placement off schedule evidence, and made every other recording read as drift on a fork it was
+    never about. The tier declines the whole fork, silently, so a drift warning keeps meaning "this
+    recording no longer realizes"."""
+    point = _fork_point(_KERNEL_SET_FORKS[shape], rule="030_cut")
     monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
 
     all_off = _record("all-off-golden", dict.fromkeys(("WORK", "TILE", "REDUCE", "STAGE", "RASTER"), ""))

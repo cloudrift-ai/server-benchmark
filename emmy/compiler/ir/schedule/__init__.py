@@ -1,5 +1,7 @@
 """Schedule interfaces and reusable choices."""
 
+from emmy.compiler.ir.pure.fold import ContractionView
+
 from .base import Schedule, ScheduleContext, ScheduleRefused, schedule
 from .choices import (
     AtomKind,
@@ -20,33 +22,21 @@ from .choices import (
     derive_workers,
     resolve_site_tile,
 )
-from .views import (
-    Contraction,
-    ContractionFacts,
-    EdgeSite,
-    NodeId,
-    NodeView,
-    Projection,
-    Reduction,
-    node_view,
-)
+from .views import ContractionFacts, EdgeSite, NodeId
 
 __all__ = [
     "AtomKind",
     "ContractionFacts",
-    "Contraction",
+    "ContractionView",
     "EdgeSite",
     "FoldMove",
     "Level",
     "NodeId",
-    "NodeView",
     "Placement",
     "PlacedTile",
-    "Projection",
     "Raster",
     "Reduce",
     "ReduceStage",
-    "Reduction",
     "ResolvedStage",
     "Schedule",
     "ScheduleContext",
@@ -58,7 +48,6 @@ __all__ = [
     "Work",
     "derive_inventory",
     "derive_workers",
-    "node_view",
     "resolve_site_tile",
     "schedule",
 ]

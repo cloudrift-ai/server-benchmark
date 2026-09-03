@@ -125,6 +125,7 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.sigma import Sigma
+    from emmy.compiler.ir.stmt.passes import rewrite
     from emmy.compiler.ir.tile.ir import TileOp
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 
@@ -144,8 +145,8 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     def ren(ax):
         return replace(ax, name=new) if ax.name == old else ax
 
-    twin_op = tile.op.rewrite(lambda n: n, Sigma({old: Var(new)}), ren)
-    twin = TileOp(op=twin_op, place=tile.place, output_specs=tile.output_specs)
+    twin_op = rewrite(tile.op, lambda n: n, Sigma({old: Var(new)}), ren)
+    twin = TileOp(op=twin_op, place=tile.place, output_specs=tile.output_specs, axes=tuple(ren(axis) for axis in tile.axes))
     twin = replace(twin, knobs=dict(tile.knobs), inputs=dict(tile.inputs), outputs=dict(tile.outputs))
     twin_row = dict(next(iter_leaves(classic_forks(twin, "t", twin.knobs, ctx))).knobs)
     assert spelled in twin_row

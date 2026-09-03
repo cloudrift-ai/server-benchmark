@@ -316,7 +316,7 @@ def _stmt_eval_scope() -> dict:
 
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import DataType
-    from emmy.compiler.ir.axis import Axis, AxisRole, Window
+    from emmy.compiler.ir.axis import Axis, Window
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import (
         BinaryExpr,
@@ -332,6 +332,7 @@ def _stmt_eval_scope() -> dict:
         Accum,
         Assign,
         Cond,
+        Const,
         Init,
         Load,
         Loop,
@@ -360,13 +361,13 @@ def _stmt_eval_scope() -> dict:
         "Assign": Assign,
         "Accum": Accum,
         "Init": Init,
+        "Const": Const,
         "Write": Write,
         "Select": Select,
         "SelectBranch": SelectBranch,
         "Loop": Loop,
         "StridedLoop": StridedLoop,
         "Cond": Cond,
-        "AxisRole": AxisRole,
         # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
         # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
         "Window": Window,
@@ -434,7 +435,8 @@ def _serialize_op_fields(op: Op) -> dict:
 
     if not isinstance(op, TileOp) or op.schedule is None:
         return fields
-    from emmy.compiler.ir.schedule.classic import (  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.classic import (
+        # noqa: PLC0415,
         ClassicScheduleCodec,
         ClassicScheduleContext,
         edge_site_spelling,
@@ -472,7 +474,8 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
             raise ValueError("schedule materialization requires a schedule")
         return op_cls(**fields) if fields else op_cls()
     from emmy.compiler.ir.schedule import PlacedTile, ResolvedStage  # noqa: PLC0415
-    from emmy.compiler.ir.schedule.classic import (  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.classic import (
+        # noqa: PLC0415,
         ClassicMaterialization,
         ClassicScheduleCodec,
         ClassicScheduleContext,
@@ -1222,13 +1225,12 @@ class Graph:
                 from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
                 def _field_key(o: object, name: str) -> str:
-                    # A ``TileOp``'s term digests α-invariantly (``Fold.structural_key`` — the
-                    # exact-flavor digest of its lowered body); a nested ``Graph`` field
-                    # (``ConstantOp.source_graph``) digests by its own structural key
-                    # (its default repr carries the object address); every other field
-                    # keeps its repr.
+                    # A ``TileOp`` keys on the Loop IR its term lowers to, like every kernel-bearing
+                    # op (``Op.identity_key`` — the canonical body digest); a nested ``Graph`` field
+                    # (``ConstantOp.source_graph``) digests by its own structural key (its default
+                    # repr carries the object address); every other field keeps its repr.
                     if name == "op" and isinstance(o, TileOp):
-                        return o.op.structural_key() if o.op is not None else ""
+                        return o.identity_key() or ""
                     val = getattr(o, name)
                     if isinstance(val, Graph):
                         return val.structural_key()

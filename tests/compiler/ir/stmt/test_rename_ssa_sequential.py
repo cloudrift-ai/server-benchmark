@@ -16,7 +16,7 @@ gather to the wrong row.
 from __future__ import annotations
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
@@ -64,15 +64,15 @@ def test_gather_index_survives_rename_chain_collision() -> None:
 
 
 def test_fold_combine_tracks_accum_rename() -> None:
-    # The algebra lives on the ``Fold`` NODE — its stored combine/lift must track the body's SSA
-    # renames in lockstep (the Fold rewrite handler's ``rename_combine``), or the cooperative
-    # combine reads a state name the renamed body no longer defines (the M=1 cut-consumer's
-    # ``acc1``-undefined miscompile).
-    from emmy.compiler.ir.pure.fold import Fold
+    # The algebra lives on the ``Fold`` TERM — its stored combine/lift must track an SSA rename in
+    # lockstep (the Fold rewrite handler renames the combine through ``Lambda.rename``), or the
+    # cooperative combine reads a state name the renamed lift no longer defines (the M=1
+    # cut-consumer's ``acc1``-undefined miscompile). A term is never a ``Body`` member, so the
+    # rename reaches it through the rewrite registry directly.
+    from emmy.compiler.ir.stmt.passes import rewrite
 
     loop = Loop(
         axis=Axis(name="k0", extent=Dim(8)),
-        role=AxisRole.PLANAR,
         body=Body(
             (
                 Load(name="v9", input="a", index=(Var("k0"),)),
@@ -83,10 +83,9 @@ def test_fold_combine_tracks_accum_rename() -> None:
     fold = fold_from_loop(loop)
     assert fold is not None
 
-    out = rename_ssa_sequential(Body((fold,)))
+    renamed = rewrite(fold, lambda name: f"{name}_r")
 
-    renamed = next(s for s in Body.coerce(out).iter() if isinstance(s, Fold))
-    accum = next(s for s in renamed.loop.body.iter() if isinstance(s, Accum))
-    load = next(s for s in renamed.loop.body.iter() if isinstance(s, Load))
-    assert renamed.combine.results == (accum.name,), (renamed.combine.results, accum.name)
-    assert renamed.lift.results[0] == load.names[0], renamed.lift.results
+    assert renamed.combine.results == ("acc1_r",), renamed.combine.results
+    assert renamed.exposes == ("acc1_r",)
+    (load,) = (stmt for edge in renamed.operands for stmt in edge.lift.body if isinstance(stmt, Load))
+    assert load.names == ("v9_r",) and renamed.applied.results == ("v9_r",), (load.names, renamed.applied.results)

@@ -7,7 +7,7 @@ derived role, reduce ``Axis``, and operand edges — comes directly from the tre
 facts off a synthesized nest is the inversion this module exists to prevent; :meth:`Fold.lower`
 is for callers that consume a body.
 
-This module holds the structural reads over a node tree — the cone seam (:func:`~emmy.compiler.ir.pure.fold.cone_seam`), the
+This module holds the structural reads over a node tree — the cone seam (:func:`~emmy.compiler.ir.schedule.views.cone_seam`), the
 iteration-space names (:func:`axis_names`) — plus the typed schedule accessor (:class:`Sched`). Lowering itself
 has ONE spelling and it lives on the node: :meth:`Fold.lower` (a fold flattens through
 :attr:`Fold.loop`, a wrapping projection appends its operand nests). Stored trees are already
@@ -16,25 +16,20 @@ ahead of a lowering walk."""
 
 from __future__ import annotations
 
-from emmy.compiler.dtype import F32
+from dataclasses import replace
+
 from emmy.compiler.dtype import get as get_dtype
-from emmy.compiler.ir.pure.algebra import product_spine
 from emmy.compiler.ir.pure.fold import (
     Fold,
-    _operand_result_names,
-    deep_reads,
-    edge_free_axes,
-    is_contraction,
-    refs_axis,
-    stmt_axis_names,
 )
+from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import PlacedTile, Reduce
 from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
     classic_node_key,
     classic_stage_key,
 )
-from emmy.compiler.ir.stmt import Assign, Body, Init, Load, Loop, Select
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, refs_axis, stmt_axis_names
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
@@ -66,50 +61,40 @@ def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, ob
     return {nm: dt for nm in stats if (dt := env.get(nm)) is not None}
 
 
-def _dtype_key(edge, scope: dict | None) -> tuple:
-    """An edge's cache key: its identity plus the dtypes its CAPTURES resolve to at this
-    occurrence. Captures are what make the answer occurrence-dependent; an edge with none keys the
-    same with or without a scope, so the unscoped and scoped walks share their entries."""
-    # Identity keying is only valid while the tree is alive — which it is for every caller, who
-    # holds the root across the walk.
-    captures = sorted(edge.deps()) if isinstance(edge, Fold) else ()
-    if not captures or not scope:
-        return (id(edge), ())
-    return (id(edge), tuple((name, getattr(scope.get(name), "name", None)) for name in captures))
-
-
 def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict | None = None) -> tuple:
     """Infer an edge's result dtypes in the lexical scope where the edge occurs.
 
-    A capturing Fold cannot be typed in an empty environment. Starting this walk at the root and
-    threading each enclosing environment produces one dtype table for every stored edge. The
-    ``cache`` is keyed by object identity, so a SHARED node keeps the dtypes of the first
-    environment reached — sound for placement's consumers because provider closure only offers a
-    capturing seam whose occurrences resolve to equal providers, and equal providers type equally.
+    A term is closed, so an edge types the same wherever it occurs: its values arrive positionally
+    through its own operand edges, never from the scope around it. The ``cache`` is therefore keyed
+    by object identity alone, and a shared node is typed once.
     """
     cache = {} if cache is None else cache
-    key = _dtype_key(edge, scope)
+    # Identity alone: a term is CLOSED, so it captures nothing and its dtypes cannot depend on the
+    # occurrence. Keying is valid while the tree is alive, which it is for every caller — each
+    # holds the root across the walk.
+    key = id(edge)
     if key in cache:
         return cache[key]
-    if isinstance(edge, Load):
-        tensor = inputs.get(edge.input) if inputs else None
-        result = (tensor.dtype if tensor is not None else None,) * len(edge.names)
+    if edge.as_slab() is not None:
+        load = edge.as_slab().load
+        tensor = inputs.get(load.input) if inputs else None
+        result = (tensor.dtype if tensor is not None else None,) * len(load.names)
         cache[key] = result
         return result
     if not isinstance(edge, Fold):
-        result = (None,) * len(_operand_result_names(edge))
+        result = (None,) * len(edge.exposes)
         cache[key] = result
         return result
 
     env = dict(scope or {})
-    for operand in edge.operands:
-        env.update(zip(_operand_result_names(operand), edge_dtypes(operand, inputs, cache, env), strict=True))
+    for param, operand, index in edge.bindings:
+        env[param] = edge_dtypes(operand, inputs, cache, env)[index]
     for stmt in edge.lift.body:
         if isinstance(stmt, Load):
             tensor = inputs.get(stmt.input) if inputs else None
             env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
         elif isinstance(stmt, Fold):
-            env.update(zip(_operand_result_names(stmt), edge_dtypes(stmt, inputs, cache, env), strict=True))
+            env.update(zip(stmt.exposes, edge_dtypes(stmt, inputs, cache, env), strict=True))
         elif isinstance(stmt, Assign):
             args = [env.get(name) for name in stmt.args]
             env[stmt.name] = stmt.dtype or (get_dtype(dtype_promote(stmt.op.name, [dtype.name for dtype in args])) if all(args) else None)
@@ -121,12 +106,12 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
         else:
             env.update((name, None) for name in stmt.defines())
 
-    lifted = tuple(env.get(result) if isinstance(result, str) else F32 for result in edge.lift.results)
+    lifted = tuple(env.get(result) for result in edge.lift.results)
     if edge.axis is None:
         result = lifted
     else:
         carried = lifted[: len(edge.combine.results)]
-        result = carried + tuple(env.get(name) for name in _operand_result_names(edge)[len(carried) :])
+        result = carried + tuple(env.get(name) for name in edge.exposes[len(carried) :])
     cache[key] = result
     return result
 
@@ -159,49 +144,28 @@ def make_cone(cell: list, k_name: str, stat=None, sweep=()) -> Fold:
     # seam is a dependency question, not only an index question. Without this, attention's
     # ``exp(s − m)`` chain — which names the score rather than the KV axis — hoists into the
     # row-invariant prologue, where the per-cell score it reads is not yet defined.
-    varying = {nm for n in nodes if k_name in edge_free_axes(n) for nm in _operand_result_names(n)}
+    varying = {nm for n in nodes if k_name in n.free_axes for nm in n.exposes}
     pro: list = []
     rest = list(cell)
     while rest and not refs_axis(rest[0], k_name) and not (set(rest[0].deps()) & varying):
         pro.append(rest.pop(0))
     pro_body = Body((*sweep, *pro))
     pro_ops = () if stat is None else (stat,)
-    prologue = Fold.projection(body=pro_body, operands=pro_ops)
-    cell_reads = deep_reads(rest)
-    bound = (*(n for e in pro_ops for n in _operand_result_names(e)), *(n for s in pro_body for n in s.defines()))
+    # The projection's result is its body's last definition — the value a consumer reads back.
+    pro_bound = tuple(name for edge in pro_ops for name in edge.exposes)
+    pro_results = next((stmt.defines()[-1:] for stmt in reversed(tuple(pro_body)) if stmt.defines()), ())
+    prologue = Fold(operands=pro_ops, lift=Lambda.closing(pro_bound, pro_body, pro_results))
+    cell_reads = Body(rest).ssa_uses
+    bound = (*(n for e in pro_ops for n in e.exposes), *(n for s in pro_body for n in s.defines()))
     bridged = tuple(n for n in dict.fromkeys(bound) if n in cell_reads and n not in prologue.lift.results)
     if bridged:
-        prologue = Fold.projection(body=pro_body, operands=pro_ops, results=(*prologue.lift.results, *bridged))
+        prologue = Fold(operands=pro_ops, lift=Lambda.closing(pro_bound, pro_body, (*prologue.lift.results, *bridged)))
     src = (prologue,) if (pro or sweep or stat is not None) else ()
-    return Fold.projection(body=Body(tuple(rest)), operands=(*src, *nodes))
-
-
-def split_invariant_factors(body: list, value: str, axis_name: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
-    """The general additive-fold factor split ``Σₖ c·xₖ = c·Σₖ xₖ``: flatten the two-arg
-    ``multiply`` spine defining ``value`` over a reduce-loop body and split the leaf factor
-    names into ``(c — the loop-invariant factors, names defined outside the body; the
-    loop-varying leaves)``, left-to-right. The loop axis itself counts as loop-varying. The
-    spine must be private to the product — a spine temp read by any other body stmt (or a
-    non-binary multiply) returns ``None``, and the caller keeps the loop's current reading.
-    A bare leaf is the degenerate product: ``((), (value,))``.
-
-    The ALGEBRAIC LICENSE is a semiring fact: a factor constant along the fold axis commutes out
-    of the fold because ⊗ is associative + commutative and distributes over the fold's ⊕ — the
-    same reassociation category as split-K and the mul-hoist. The one registered ⊗ today is
-    ``multiply`` (``ElementwiseImpl._SEMIRING``), which this helper spells directly."""
-    defs: dict[str, object] = {n: s for s in body for n in s.defines()}
-    flattened = product_spine(defs, value)
-    if flattened is None:
-        return None
-    leaf_names, spine_stmts = flattened
-    leaves = list(leaf_names)
-    spine = [stmt.name for stmt in spine_stmts]
-    spine_reads = {n for n in spine if n != value}
-    for s in body:
-        if not (isinstance(s, Assign) and s.name in spine) and set(s.deps()) & spine_reads:
-            return None
-    inv = tuple(n for n in leaves if n not in defs and n != axis_name)
-    return inv, tuple(n for n in leaves if n in defs or n == axis_name)
+    cell_body = Body(tuple(rest))
+    cell_ops = (*src, *nodes)
+    cell_bound = tuple(name for edge in cell_ops for name in edge.exposes)
+    cell_results = next((stmt.defines()[-1:] for stmt in reversed(tuple(cell_body)) if stmt.defines()), ())
+    return Fold(operands=cell_ops, lift=Lambda.closing(cell_bound, cell_body, cell_results))
 
 
 class Sched:
@@ -217,6 +181,7 @@ class Sched:
             raise TypeError("a schedule view reads a TileOp — it is the term's site index")
         self.tile = tile
         self.root = tile.op
+        self.axis_of = tile.axis_of  # the kernel's axis table: a term names its axes, the tile holds their extents
         self.schedule = schedule
         self.materialization = materialization
         #: The kernel's free→grid :class:`~emmy.compiler.ir.schedule.Placement`. A ``TILE`` slice
@@ -338,27 +303,31 @@ class Sched:
         """
         free = tuple(self.place.free)
         site = self.site_of(node)
-        ancestors = tuple(
-            candidate
-            for candidate in self._all_sites()
-            if len(candidate.segments) < len(site.segments) and site.segments[: len(candidate.segments)] == candidate.segments
-        )
+        ancestors = tuple(candidate for candidate in self._all_sites() if site.under(candidate))
 
         def orient(mn):
-            if mn is None or not is_contraction(node):
+            # The pair is each side's own free axis, the first operand's leading — the placement
+            # binds both, and a sibling output's sweep promoted beside them (the fused q/k/v
+            # projections, N 64 beside N 32) never stands in for either. With several own axes a
+            # side the trailing one is the role and the rest ride the grid; a side without one
+            # (the unit-row matvec) leaves the trailing pair to the placement.
+            view = node.as_contraction()
+            if mn is None or view is None:
                 return mn
+            order = {axis.name: (position, axis) for position, axis in enumerate((*self.place.free, *self.place.grid))}
+            left = max((order[name] for name in view.left_axes if name in order), default=None)
+            right = max((order[name] for name in view.right_axes if name in order), default=None)
+            if left is not None and right is not None:
+                return (left[1], right[1])
             first, second = mn
-            free = edge_free_axes(node.a)
-            return (second, first) if second.name in free and first.name not in free else mn
+            return (second, first) if second.name == view.left and first.name != view.left else mn
 
-        if site.depth == 1 or all(getattr(candidate.node, "axis", None) is None for candidate in ancestors):
+        if all(getattr(candidate.node, "axis", None) is None for candidate in ancestors):
             return orient(self.place.root_mn)
         if len(free) < 2:
             return None
-        if site.derived and node.axis is not None and node.axis.extent.is_static and node.axis.extent.as_static() == 1:
-            return orient((free[-2], free[-1]))
-        parent = next((s for s in self._all_sites() if s.segments == site.segments[:-1]), None)
-        ax = getattr(parent.node, "axis", None) if parent is not None else None
+        parent = next((s for s in self._all_sites() if s.hops == site.hops[:-1]), None)
+        ax = self.axis_of(parent.node.axis) if parent is not None and getattr(parent.node, "axis", None) is not None else None
         if ax is None:
             return None
         return orient((free[-2], ax.window.parent if ax.window is not None else ax))
@@ -384,6 +353,7 @@ def scheduled(
     schedule=None,
     materialization=None,
     workers=None,
+    axes: tuple = (),
 ):
     """Build a scheduled ``TileOp`` from one accepted semantic assignment.
 
@@ -405,6 +375,7 @@ def scheduled(
         workers=workers,
         knobs=knobs,
         output_specs=tuple(output_specs),
+        axes=axes,
         schedule=schedule,
         materialization=materialization,
     )
@@ -425,10 +396,10 @@ def axis_names(root) -> set[str]:
         if not isinstance(node, Fold):
             continue
         if node.axis is None:
-            out |= stmt_axis_names(node.body)
+            out |= stmt_axis_names(node.lift.body)
         else:
-            out.add(node.axis.name)
-            out |= stmt_axis_names(node.step_stmts())
+            out.add(node.axis)
+            out |= stmt_axis_names(tuple(node.lift.body))
     return out
 
 
@@ -439,7 +410,7 @@ def projection_tail(tile) -> list[Stmt]:
     ``coop-t`` band's no-sweep-``Loop`` condition keeps excluding rms/softmax rows after their
     sweep moved to an ``OutputSpec`` decoration."""
     op = tile.op
-    body = list(op.body) if isinstance(op, Fold) and op.axis is None else []
+    body = list(op.lift.body) if isinstance(op, Fold) and op.axis is None else []
     return apply_output_specs(body, tile.output_specs)
 
 
@@ -451,21 +422,38 @@ class UnbindableProjection(ValueError):
     ``ValueError``."""
 
 
-def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tuple], ...]:
-    """Partition an independent projection's pure body and output specifications by producing Fold.
+def projection_root(edge: Fold) -> Fold | None:
+    """The reducing term a root projection's operand is ABOUT: the operand itself, or the one
+    reducing operand of a zero-axis projection over it — an output sweep's epilogue, evaluated
+    over the sweep coordinate. ``None`` when the projection reads several reduces or none."""
+    if edge.axis is not None:
+        return edge
+    reducing = [operand for operand in edge.operands if operand.axis is not None]
+    return reducing[0] if len(reducing) == 1 else None
 
-    Each output specification must read exactly one root, the roots' backward cones must be disjoint,
-    and together those cones must cover the projection body. This is the structural ownership
-    rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh pieces.
-    Refusals raise :class:`UnbindableProjection`.
+
+def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold, Body, tuple], ...]:
+    """Partition an independent projection by producing root — ``(root, region, tail, stores)`` per
+    operand of ``op``: the reducing root (:func:`projection_root`), the operand term that carries
+    it (the root itself, or its epilogue projection), the root-body statements only that operand's
+    outputs read, and those output specifications.
+
+    Each output specification must read exactly one region, the regions' backward cones over the
+    root body must be disjoint, and together those cones must cover it. This is the structural
+    ownership rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh
+    pieces. Refusals raise :class:`UnbindableProjection`.
     """
-    roots = tuple(edge for edge in op.operands if isinstance(edge, Fold))
-    by_name = {name: root for root in roots for name in root.defines()}
-    members: dict[int, set] = {id(root): set() for root in roots}
-    grouped: dict[int, list] = {id(root): [] for root in roots}
+    # Rendered: the tail and the stores in the operands' spelling, the form every consumer emits.
+    lift = op.applied
+    spelled = dict(zip(op.lift.params, lift.params, strict=True))
+    output_specs = tuple(replace(spec, write=spec.write.rewrite(lambda name: spelled.get(name, name))) for spec in output_specs)
+    regions = op.operands
+    by_name = {name: region for region in regions for name in region.exposes}
+    members: dict[int, set] = {id(region): set() for region in regions}
+    grouped: dict[int, list] = {id(region): [] for region in regions}
     for spec in output_specs:
-        cone = op.body.backward_cone((spec.write.value,))
-        used = {id(by_name[name]) for name in cone.external_reads if name in by_name}
+        cone = lift.body.backward_cone(tuple(spec.write.values))
+        used = {id(by_name[name]) for name in (*cone.external_reads, *spec.write.values) if name in by_name}
         if len(used) != 1:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
         owner = used.pop()
@@ -473,11 +461,17 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body,
         grouped[owner].append(spec)
 
     claimed: set = set().union(*members.values()) if members else set()
-    if claimed != set(op.body) or any(not grouped[id(root)] for root in roots):
+    if claimed != set(lift.body) or any(not grouped[id(region)] for region in regions):
         raise UnbindableProjection("an output-tiled root forest must cover the complete projection")
-    if any(members[id(left)] & members[id(right)] for i, left in enumerate(roots) for right in roots[i + 1 :]):
+    if any(members[id(left)] & members[id(right)] for i, left in enumerate(regions) for right in regions[i + 1 :]):
         raise UnbindableProjection("output-tiled root projections may not share tail statements")
-    return tuple((root, Body(stmt for stmt in op.body if stmt in members[id(root)]), tuple(grouped[id(root)])) for root in roots)
+    out = []
+    for region in regions:
+        root = projection_root(region)
+        if root is None:
+            raise UnbindableProjection("an output-tiled root must own each output specification independently")
+        out.append((root, region, Body(stmt for stmt in lift.body if stmt in members[id(region)]), tuple(grouped[id(region)])))
+    return tuple(out)
 
 
 def head(op):
@@ -486,21 +480,97 @@ def head(op):
 
     The ONE accessor for "which node is this kernel about", replacing the hand-spelled
     ``op.operands[0] if op.axis is None and op.operands else op`` ternary at every reader. Every
-    node-level fact the scheduler dispatches on — the :class:`~emmy.compiler.ir.axis.AxisRole`, the
+    node-level fact the scheduler dispatches on — the views, the
     reduce ``Axis``, the operand edges — is a STORED param on what this returns."""
     node = op
-    if isinstance(op, Fold) and op.axis is None:
-        if op.operands:
-            node = op.operands[0]
-        else:
-            # The chain form's sweep case: the column fold reads the boundary store's sweep axis,
-            # so root formation keeps it as the projection's one fold BODY member.
-            members = [s for s in op.body if isinstance(s, Fold)]
-            node = members[0] if len(members) == 1 else op
+    # A term composes through operands, so a projection's node is its first edge — through every
+    # zero-axis wrapper on the way (an output sweep's projection over its reduce).
+    while isinstance(node, Fold) and node.axis is None and node.operands:
+        node = node.operands[0]
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 
-def carries_partition(op) -> bool:
+def kernel_roots(op) -> tuple[Fold, ...]:
+    """The reduce nodes the kernel binder builds the kernel AROUND — the ones whose ``REDUCE``
+    partition it realizes. The binder peels each zero-axis projection to one operand: the
+    contraction root of a tiled edge (every such root at once for a multi-output kernel), else the
+    first operand; every other reduce in the tree lowers serially inside its reader, so a partition
+    offered on it would price a kernel the binder never builds. This is that peel, read off the
+    term alone, so the schedule projection offers the partition catalog only where it is realized."""
+    node = op
+    while isinstance(node, Fold) and node.axis is None and node.operands:
+        tiled = [root for edge in node.operands if (root := projection_root(edge)) is not None and root.as_contraction() is not None]
+        if len(tiled) > 1:
+            return tuple(tiled)
+        node = tiled[0] if tiled else node.operands[0]
+    return (node,) if isinstance(node, Fold) else ()
+
+
+def chain_members(root: Fold) -> tuple[Fold, ...]:
+    """The reduce folds a kernel root's cones close over — reached from ``root`` through zero-axis
+    operand edges and the axis-invariant (hoisted) reduce operands of members, deepest first, so a
+    member another member's cone reads comes ahead of it. This is the CHAIN the binder emits in
+    body order around one shared lane axis. A reduce read per step of another (the score inside
+    the twist) lowers inside that reduce's loop and is no member, and a contraction root has no
+    chain: its cone's statistic is the tiled fill's business, not a fold beside the root's."""
+    out: list[Fold] = []
+    if not isinstance(root, Fold) or root.axis is None or root.as_contraction() is not None:
+        return ()
+
+    def visit(node: Fold, hoisted_from: str | None) -> None:
+        for edge in node.operands:
+            if edge.as_slab() is not None:
+                continue
+            if edge.axis is None:
+                visit(edge, hoisted_from)
+            elif hoisted_from is None or hoisted_from not in edge.free_axes:
+                visit(edge, edge.axis)
+                if all(edge is not member for member in out):
+                    out.append(edge)
+
+    visit(root, root.axis)
+    return tuple(out)
+
+
+def chain_form(root: Fold) -> bool:
+    """Whether a reduce root binds as a CHAIN — its members, or a computed provider cone hoisted
+    ahead of its loop (a workspace row and its rsqrt), sit beside its own fold. The transposed
+    band's σ-substitution and guarded close assume the fold stands alone at the kernel root, so a
+    chain root takes no transposed band."""
+    if not isinstance(root, Fold) or root.axis is None:
+        return False
+    if chain_members(root):
+        return True
+    return any(
+        edge.axis is None
+        and root.axis not in edge.free_axes
+        and any(not isinstance(stmt, Load) for stmt in edge.lift.body)  # a computed provider, not a slab or a constant read
+        for edge in root.operands
+    )
+
+
+def cone_stat(cone, axes: tuple) -> Fold | None:
+    """The per-row STATISTIC fold of a computed-A cone — the reduce its prologue (the cone's first
+    operand, the row-invariant edge) materializes first: the fold whose carried state the first
+    reduce ``Loop`` of the prologue's lowering folds. ``None`` for a cone without one — the
+    caller's serial fallback."""
+    prologue = cone.operands[0] if isinstance(cone, Fold) and cone.axis is None and cone.operands else None
+    if prologue is None:
+        return None
+    first = next((stmt for stmt in prologue.lower(axes=axes) if isinstance(stmt, Loop) and stmt.is_reduce), None)
+    if first is None:
+        return None
+    carried = {stmt.name for stmt in first.body if isinstance(stmt, Accum)}
+    pending = [prologue]
+    while pending:
+        term = pending.pop()
+        if term.axis is not None and set(term.combine.results) <= carried:
+            return term
+        pending.extend(reversed(term.operands))
+    return None
+
+
+def carries_partition(tile) -> bool:
     """Whether this kernel's IR already records a realized cross-CTA split — the ``Window``
     receipt the split offer and the schedule walk's pin path read, KERNEL-scoped because that is
     the scope of the decision consumed: ``REDUCE`` is one pin and a bare one fans out to every
@@ -519,12 +589,12 @@ def carries_partition(op) -> bool:
                 yield s
                 yield from loops(s.body)
 
-    for site in sites(op):
+    for site in sites(tile.op):
         node = site.node
-        ax = getattr(node, "axis", None)
+        ax = tile.axis_of(node.axis) if getattr(node, "axis", None) is not None else None
         if ax is not None and ax.window is not None and ax.window.partition:
             return True
-        bodies = [node.body, *([node.lift.body] if getattr(node, "lift", None) is not None else [])]
+        bodies = [node.lift.body, *([node.lift.body] if getattr(node, "lift", None) is not None else [])]
         if any(lp.axis.window is not None and lp.axis.window.partition for b in bodies for lp in loops(b)):
             return True
     return False
@@ -543,10 +613,9 @@ def reduce_plan(tile):
     return plan if plan is not None else Reduce()
 
 
-# Kernel identity lives in its own module (``tile/_key.py``) — it is not a compute read — and its
-# ONE public name is the ``Structural`` method, ``Fold.structural_key()`` / ``TileOp.structural_key()``
-# (``identity_key(with_io=True, with_knobs=True)`` / ``Graph.structural_key`` reach it there). The structural dump is NOT re-exported:
-# it has no consumer outside ``_dump`` itself, so a shim here would serve nothing.
+# Kernel identity is the Loop IR a term lowers to (``TileOp.identity_key``); a term has no key of
+# its own. The structural dump is NOT re-exported: it has no consumer outside ``_dump`` itself, so
+# a shim here would serve nothing.
 
 __all__ = [
     "Sched",
@@ -555,10 +624,12 @@ __all__ = [
     "cone_stat_dtypes",
     "edge_dtypes",
     "head",
+    "chain_form",
+    "chain_members",
+    "kernel_roots",
     "make_cone",
     "projection_regions",
     "projection_tail",
     "reduce_plan",
     "sched_of",
-    "split_invariant_factors",
 ]

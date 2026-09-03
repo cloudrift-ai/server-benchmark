@@ -35,43 +35,30 @@ it seals through the one `grid_tile` finalizer (the article's "schedule separate
   `Reduce` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
   (its unit level) and `reg` ILP chains across per-thread accumulators (its register level), then a REG-tree fold, the
   cross-thread combine (`emit_combine`), and the projection. It reads the reduce straight off the `Fold` node (no
-  `lower`-then-refind) and builds its per-cell body via the recursion (`_emit`, below); the output stays one cell per
+  `lower`-then-refind) and takes its per-cell body from the term (`Fold.lower`); the output stays one cell per
   thread (the 1×1 `atomize`, the grid riding `lead_axes` untiled).
-- **CHAIN members** (`_tile_chain_members`) — a chain-form root (a zero-axis `Fold` with no operand edge, so nothing
-  was peeled) carries its reduces as direct body members, and the partition rides THEM. Only a DIRECT member binds
-  partitioned; a fold nested deeper under one stays serial, emitted per cell by the body recursion (`_emit`) like any
-  other nested reduce — the offer decides this, not the bind. The members emit in body order: a plain segment runs
-  per cell on every lane (the provider chain the partitioned member reads), each partitioned member becomes its own
-  strided fold + merge (the combine broadcasts in place, so a later segment reads the merged carrier), and the
-  trailing segment closes lane-distributed. Every cooperating member shares ONE lane axis. A swept output spec has no
-  lane-distributed close, and a streamed spec must splice into its own observed fold's reduce loop — unreachable once
-  that loop already sits in an earlier segment — so a root carrying either stays fully serial, decided at the offer.
-- **Degenerate** — nothing tiled: one thread per output cell (`_emit(op)` + an output-store glue).
+- **Degenerate** — nothing tiled: one thread per output cell (`op.lower()` + an output-store glue).
 
-### The recursive node walk (`_emit`) — one hierarchical emitter
+### One emitter: the term's lowering
 
-Two recursions cooperate. The **root** recursion `_factorize(op, ctx, tail, out_val)` binds a node to the grid: a
-zero-axis `Fold` recurses through its operand roots (projection → `tail`), and each leaf binds via the one `_bind`
-pipeline. The
-**body** recursion `_emit(op, ctx) -> Frag` builds the per-cell Loop IR over the Fold tree, threading a `Ctx` **down**
-(the ambient cell environment: the grid axes, operand
-`inputs`, `stage`, output buffer) and returning a `Frag` **up** (the per-cell `body` this node contributes, the produced
-`Handle` wire). The reduce binder drives `_emit` off the `Fold` node to
-build its per-cell reduce loop, so a **nested** contraction (a composed fold's inner contraction) is reached AS A
-NODE. This is the
-tile-IR-rebuild mandate's *one hierarchical emitter, no divergent codegen path*: `_emit(node).body` is byte-identical to
-`node.lower()` for a scalar-nested (block=1) node today. `Handle` carries `name` + `residence` (a scalar
-register value); the **tensor-core seam** is the view arm in `_bind` — an output-warp-tiled contraction (an mma
-`Tile`) emits through the register-tile pipeline + the accumulator→operand fragment recast there, where the rebuild
-extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)` and `_emit`'s `Ctx` grows the warp binding +
-the inbound `wires`.
+One recursion binds, and nothing walks the tree for statements. The **root** recursion `_factorize(op, ctx, tail,
+out_val)` binds a node to the grid: a zero-axis `Fold` recurses through its operand roots (projection → `tail`), and
+each leaf binds via the one `_bind` pipeline. The per-cell Loop IR of any node — the degenerate fold's whole body, the
+reduce binder's loop, a sibling operand emitted ahead of the root — is `Fold.lower()`, the term's ONE lowering
+spelling, so a **nested** contraction (a composed fold's inner contraction) is reached as a node of that term and a
+scalar-nested (block=1) body is byte-identical to what identity digests. `Ctx` is the ambient cell environment (the
+grid axes, operand `inputs`, `stage`, output buffer); `Handle` (`_wire`) is the produced value a parent wires to,
+`name` + `residence` (a scalar register value). The **tensor-core seam** is the view arm in `_bind` — an
+output-warp-tiled contraction (an mma `Tile`) emits through the register-tile pipeline + the accumulator→operand
+fragment recast there, where the rebuild extends `Handle` with the mma fragment descriptor `(mma_role, shape, dtype)`
+and `Ctx` grows the warp binding + the inbound `wires`.
 
-A materialized Fold-edge cut reaches this walk as an ordinary `Load` operand. `_emit` preserves that load and returns
-its bound value as the wire, so cut and fused trees use the same parent emission path.
+A materialized Fold-edge cut reaches the term as a slab operand and lowers like any other, so cut and fused trees use
+the same parent emission path.
 
 The output-tiled arm travels as **`(node, tile)`** — the stored `Fold` (bilinear reading) and its PLACED `Tile`
-slice. There is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "`is_contraction(op)` with a
-TILE slice over a grid with an `(m, n)` pair" and threads the two on; the slice arrives ALREADY PLACED from
+slice. There is no fused view object in `_bind` / `_atom`: `_factor._bind` dispatches on "`op.as_contraction()` with
+a TILE slice over a grid with an `(m, n)` pair" and threads the two on; the slice arrives ALREADY PLACED from
 `Sched.tile_of`, which binds the caller's `(m, n)` through `Tile.at`. It is
 binding-driven for both atoms, with **no per-atom subclass**, and cleanly
 splits the **placement/schedule the slice owns** (its `axes` and the `Side`
@@ -95,21 +82,28 @@ dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `
 
 `_factor.factorize(tile, root)` is the **entry** every `TileOp` root lowers through: it builds the ambient `Ctx` and
 dispatches `tile.op` into the recursion `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a
-zero-axis `Fold` with an operand recurses (its projection body is walked via `_emit_body` into the `tail`), and each
+zero-axis `Fold` with an operand recurses (its projection body and sibling operands lower into the `tail`), and each
 leaf binds to the grid via the **ONE** root-binding pipeline, `_bind` — a single pipeline that reads WHICH AXES the
 schedule tiles off the node
 and seals through the one `grid_tile` finalizer. A tiled contraction tiles its OUTPUT `(m, n)` axes (register / warp
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
-BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the algebra merge — read off the
-fold node's `Reduction` view — closing the fold),
-its per-cell reduce loop built via `_emit` off the node; each ILP copy suffixes only its per-copy SSA temps (`__r{r}`)
+BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the algebra merge — the fold's
+own `merge` — closing the fold),
+its per-cell reduce loop taken from the node's own lowering; a planar root whose cones close over other reduces
+(its CHAIN MEMBERS, `ops.chain_members`: reached through zero-axis operand edges and the axis-invariant reduce
+operands members hoist ahead of their loops) binds through the chain arm (`_tile_chain_members`) when a member
+carries a partition — every partitioned member's hoisted loop and the root's own stride around ONE lane axis in
+body order, the segments between them per cell on every lane, and a stamped transposed band on such a root falls
+to the serial fold; each ILP copy suffixes only its per-copy SSA temps
+(`__r{r}`)
 — the shared iteration coordinates, **including any nested contraction's own reduce-axis var** (whose `for`
 declaration `copy_cell` does not rename), stay shared, so each copy re-declares its own nested
 loop under the one name; anything else tiles nothing and folds serially one thread per
-output cell (the degenerate `_emit(op)` + `with_store`) — there is **no** separate "scalar tier" branch, and no
+output cell (the degenerate `op.lower()` + `with_store`) — there is **no** separate "scalar tier" branch, and no
 per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
 (`out_val`, the root node's produced `Handle`) are threaded down the recursion, so `with_store` is node-agnostic. The
-kernel-boundary `TileOp.output_specs` are reconstituted at their owning projection region or the zero-axis Fold peel
+kernel-boundary `TileOp.output_specs` are reconstituted at the zero-axis Fold peel — an output-tiled root's region
+being its epilogue term over it —
 (a STREAMED store — one whose values are an observed fold's observer results — rides the recursion down to the leaf
 instead and splices into the reduce loop after the observer stmts), so everything below the peel — the sinks,
 cooperative loop distribution, and split realizers — consumes the identical statement stream that entered total

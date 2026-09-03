@@ -177,17 +177,17 @@ def test_is_warp_and_mma_atom_tier_discriminator():
     warp fragment (and names the atom); a scalar ``f..`` codec beside thread ``WORK``, empty value,
     or absent value is the scalar tier (no atom)."""
     assert not is_warp({}) and mma_atom({}) is None
-    assert not is_warp({"TILE@n0": ""}) and mma_atom({"TILE@n0": ""}) is None
-    assert not is_warp({"TILE@n0": "f2x4", "WORK": "t32x8"})  # scalar fragment names no atom
-    assert is_warp({"TILE@n0": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2"})
-    assert mma_atom({"TILE@n0": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2"}) == "mma_m16n8k16_f16_f32"
+    assert not is_warp({"TILE@map.1/inner": ""}) and mma_atom({"TILE@map.1/inner": ""}) is None
+    assert not is_warp({"TILE@map.1/inner": "f2x4", "WORK": "t32x8"})  # scalar fragment names no atom
+    assert is_warp({"TILE@map.1/inner": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2"})
+    assert mma_atom({"TILE@map.1/inner": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2"}) == "mma_m16n8k16_f16_f32"
 
 
 def test_scalar_tile_features_from_thread_tile():
     """``knob_features`` emits the ``D_*`` occupancy family for a scalar row from its
     ``TILE`` codec free split (``par_n·par_m`` threads, ``par_m·reg_m × par_n·reg_n``
     output) — ``n32x8`` parallel thread-tile, ``f2x4`` register sub-tile."""
-    sf = knob_features({"TILE@n0": "f2x4", "WORK": "t32x8"})
+    sf = knob_features({"TILE@map.1/inner": "f2x4", "WORK": "t32x8"})
     assert any(k.startswith("D_") for k in sf)
     assert sf["D_threads"] == 32 * 8
     assert sf["D_tile_m"] == 8 * 4 and sf["D_tile_n"] == 32 * 2
@@ -199,12 +199,12 @@ def test_warp_tile_features_from_warp_tile():
     ``m16n8k16``) are read off the parsed atom. A scalar ``TILE`` value → empty."""
     from emmy.compiler.pipeline.search.features import _warp_tile_features  # noqa: PLC0415
 
-    wf = _warp_tile_features({"TILE@n0": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "S_ext_free_prod": 2048 * 2048})
+    wf = _warp_tile_features({"TILE@map.1/inner": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "S_ext_free_prod": 2048 * 2048})
     assert wf["D_threads"] == 128.0  # WM·WN·32
     assert wf["D_tile_m"] == 2 * 2 * 16  # WM·FM·atom_m
     assert wf["D_tile_n"] == 2 * 2 * 8  # WN·FN·atom_n
     assert "D_log2_ctas" in wf and "D_log2_waves" in wf  # occupancy present (free_prod given)
-    assert _warp_tile_features({"TILE@n0": "f2x4", "WORK": "t32x8"}) == {}  # scalar fragment → empty
+    assert _warp_tile_features({"TILE@map.1/inner": "f2x4", "WORK": "t32x8"}) == {}  # scalar fragment → empty
 
 
 # ---------------------------------------------------------------------------
@@ -327,20 +327,51 @@ def test_knob_features_typed_knobs(monkeypatch):
     assert feats["MASK_frac"] == 2 / 3
 
 
+def test_knob_features_serial_cell_work_divides_by_reduce_coverage():
+    """``D_serial_cell_work``: log2 of the stamped worst per-cell serial trips after the row's
+    reduce-partition coverage — the trips a thread actually serializes. cta (``g<n>``) and coop
+    lanes divide; the register/ILP fold (``r<n>``) does NOT (the same thread walks every trip);
+    a serial row divides by 1; no stamp → no key (an absent feature, not a fabricated zero)."""
+    import math
+
+    work = float(2**20)
+    serial = knob_features({"S_ext_serial_cell_work": work})
+    assert serial["D_serial_cell_work"] == pytest.approx(math.log2(1 + work))
+    coop = knob_features({"S_ext_serial_cell_work": work, "WORK": "t128", "REDUCE": "coop"})
+    assert coop["D_serial_cell_work"] == pytest.approx(math.log2(1 + work / 128))
+    cta = knob_features({"S_ext_serial_cell_work": work, "WORK": "t64", "REDUCE": "g4k"})
+    assert cta["D_serial_cell_work"] == pytest.approx(math.log2(1 + work / 4))
+    reg = knob_features({"S_ext_serial_cell_work": work, "WORK": "t16x16", "REDUCE": "r4"})
+    assert reg["D_serial_cell_work"] == pytest.approx(math.log2(1 + work))
+    assert "D_serial_cell_work" not in knob_features({"S_n_load": 3.0})
+
+
+def test_serial_floor_is_the_covered_trips_at_the_per_trip_bound():
+    """``serial_floor_us``: a physical lower bound on one kernel-launch — the row's per-thread
+    serial trips (stamp ÷ reduce-partition coverage) at the per-trip bound; zero with no stamp."""
+    from emmy.compiler.pipeline.search.features import SERIAL_TRIP_FLOOR_US, serial_floor_us
+
+    work = float(2**20)
+    assert serial_floor_us({"S_ext_serial_cell_work": work}) == pytest.approx(work * SERIAL_TRIP_FLOOR_US)
+    coop = serial_floor_us({"S_ext_serial_cell_work": work, "WORK": "t128", "REDUCE": "coop"})
+    assert coop == pytest.approx(work / 128 * SERIAL_TRIP_FLOOR_US)
+    assert serial_floor_us({}) == 0.0
+
+
 def test_knob_features_stage_codec():
     """The ``STAGE`` codec (``d<depth>/copy|reg|cp|tma[/p<reg_depth>]``) featurizes to the
     ``D_stage_*`` family; an absent / gmem-direct stage contributes nothing."""
-    feats = knob_features({"STAGE@n0.e0": "d3/smem-tma"})
+    feats = knob_features({"STAGE@map.1/inner": "d3/smem-tma"})
     assert feats["D_stage_depth"] == 3.0
     assert feats["D_stage_async"] == 1.0
     assert feats["D_stage_tma"] == 1.0
     assert feats["D_stage_reg_depth"] == 1.0  # no /p<n> ⇒ register pipeline OFF
-    sync = knob_features({"STAGE@n0.e0": "d2/smem-async"})
+    sync = knob_features({"STAGE@map.1/inner": "d2/smem-async"})
     assert sync["D_stage_depth"] == 2.0 and sync["D_stage_async"] == 1.0 and sync["D_stage_tma"] == 0.0
     # The smem→register double-buffer (``p<n>``) featurizes orthogonally to the gmem→smem ring.
-    pp = knob_features({"STAGE@n0.e0": "d3/smem-async/p2"})
+    pp = knob_features({"STAGE@map.1/inner": "d3/smem-async/p2"})
     assert pp["D_stage_depth"] == 3.0 and pp["D_stage_reg_depth"] == 2.0
-    assert not any(k.startswith("D_stage_") for k in knob_features({"STAGE@n0.e0": ""}))
+    assert not any(k.startswith("D_stage_") for k in knob_features({"STAGE@map.1/inner": ""}))
 
 
 def test_stage_codec_reg_depth_roundtrip():
@@ -356,13 +387,13 @@ def test_stage_codec_reg_depth_roundtrip():
     # reg_depth is perf-only — NOT part of the structural signature (golden-match stability).
     from emmy.compiler.pipeline.search.features import _stage_sig  # noqa: PLC0415
 
-    assert _stage_sig({"STAGE@n0.e0": "d2/smem-async/p2"}) == _stage_sig({"STAGE@n0.e0": "d2/smem-async"})
+    assert _stage_sig({"STAGE@map.1/inner": "d2/smem-async/p2"}) == _stage_sig({"STAGE@map.1/inner": "d2/smem-async"})
 
 
 def test_knob_features_mma_expansion():
     # The warp fragment names its atom on the ``TILE`` codec; ``knob_features``
     # expands its physical cell / dtype properties into the ``MMA_*`` family.
-    feats = knob_features({"TILE@n0": "mma_m16n8k16_f16_f32/f1x1", "WORK": "w1x1"})
+    feats = knob_features({"TILE@map.1/inner": "mma_m16n8k16_f16_f32/f1x1", "WORK": "w1x1"})
     assert feats["MMA_tier"] == 1.0
     assert (feats["MMA_atom_m"], feats["MMA_atom_n"], feats["MMA_atom_k"]) == (16.0, 8.0, 16.0)
     assert feats["MMA_a_bits"] == 16.0  # f16 operand
@@ -427,10 +458,10 @@ def test_family_value_reads_bare_or_suffixed():
 def test_pin_key_matches():
     """A global pin covers every site; a site pin matches only that exact site."""
     assert pin_key_matches("TILE", "TILE")
-    assert pin_key_matches("TILE@n2", "TILE@n2")
-    assert pin_key_matches("TILE", "TILE@n2")
-    assert not pin_key_matches("TILE@n2", "TILE")
-    assert not pin_key_matches("TILE@n2", "TILE@n3")
+    assert pin_key_matches("TILE@map.3/inner", "TILE@map.3/inner")
+    assert pin_key_matches("TILE", "TILE@map.3/inner")
+    assert not pin_key_matches("TILE@map.3/inner", "TILE")
+    assert not pin_key_matches("TILE@map.3/inner", "TILE@map.4/inner")
 
 
 def _pin_registry(monkeypatch):
@@ -481,16 +512,15 @@ def test_is_off_value(monkeypatch):
 
 def test_exact_site_featurizes_consistently():
     row = {
-        "TILE@n0": "mma_m16n8k16_f16_f32/f2x2/k2",
+        "TILE@map.1/inner": "mma_m16n8k16_f16_f32/f2x2/k2",
         "WORK": "w2x2",
-        "STAGE@n0.e0": "d2/smem-async",
-        "STAGE@n0.e1": "d2/smem-async",
+        "STAGE@map.1/inner": "d2/smem-async",
         "S_ext_free_prod": 4096.0,
     }
     from emmy.compiler.pipeline.search.features import node_slices
 
     (node,) = node_slices(row)
-    assert {key for key in node if "@" in key} == {"TILE@n0", "STAGE@n0.e0", "STAGE@n0.e1"}
+    assert {key for key in node if "@" in key} == {"TILE@map.1/inner", "STAGE@map.1/inner"}
     assert knob_features(row)["D_stage_depth"] == 2.0
     assert tile_signature(row)
     assert is_warp(row) is True
@@ -501,8 +531,8 @@ def test_display_renders_keys_as_stored():
     """The view renders keys as stored without collapsing distinct exact sites."""
     one = dict(tuning_knob_items({"TILE": "f2", "REDUCE": "coop", "STAGE": "d2/smem-async"}))
     assert set(one) == {"TILE", "REDUCE", "STAGE"}
-    exact = dict(tuning_knob_items({"TILE@n0": "f2", "TILE@n1": "f4", "REDUCE@n1": "coop"}))
-    assert set(exact) == {"TILE@n0", "TILE@n1", "REDUCE@n1"}
+    exact = dict(tuning_knob_items({"TILE@map.1/inner": "f2", "TILE@map.2/inner": "f4", "REDUCE@map.2/inner": "coop"}))
+    assert set(exact) == {"TILE@map.1/inner", "TILE@map.2/inner", "REDUCE@map.2/inner"}
 
 
 # --- Per-node featurizer (multi-node pool) -----------------------------------
@@ -515,19 +545,19 @@ def test_multinode_flash_keys_apart_and_pools_per_node():
     qk_tile = "mma_m16n8k16_f16_f32/f2x2/k2"  # over the shared w4x1 inventory: 128 threads
     pv_tile = "mma_m16n8k16_f16_f32/f4x1/k2"  # the same inventory, its own register tile
     knobs = {
-        "TILE@n0": qk_tile,
-        "STAGE@n0.e0": "d2/smem-async",
-        "REDUCE@n1": "",
-        "TILE@n1": pv_tile,
-        "STAGE@n1.e0": "d2/smem-async",
+        "TILE@map.1/inner": qk_tile,
+        "STAGE@map.1/inner": "d2/smem-async",
+        "REDUCE@map.2/inner": "",
+        "TILE@map.2/inner": pv_tile,
+        "STAGE@map.2/inner": "d2/smem-async",
         "WORK": "w4x1",  # one kernel, one inventory — both nodes share the warp map
         "S_ext_free_prod": 4096.0,
     }
-    assert knobs["TILE@n0"] != knobs["TILE@n1"]
+    assert knobs["TILE@map.1/inner"] != knobs["TILE@map.2/inner"]
     slices = node_slices(knobs)
     assert [sorted(k for k in sl if "@" in k) for sl in slices] == [
-        ["STAGE@n0.e0", "TILE@n0"],
-        ["REDUCE@n1", "STAGE@n1.e0", "TILE@n1"],
+        ["STAGE@map.1/inner", "TILE@map.1/inner"],
+        ["REDUCE@map.2/inner", "STAGE@map.2/inner", "TILE@map.2/inner"],
     ]
     qk = _schedule_node_features(slices[0])
     pv = _schedule_node_features(slices[1])
@@ -560,10 +590,10 @@ def test_precision_pin_precedence(monkeypatch):
 def test_values_equal_requires_exact_classic_spelling():
     from emmy.compiler.pipeline.knob import values_equal
 
-    assert values_equal("TILE@n0", "mma_m16n8k16_f16_f32/f2x2/k2", "mma_m16n8k16_f16_f32/f2x2/k2")
+    assert values_equal("TILE@map.1/inner", "mma_m16n8k16_f16_f32/f2x2/k2", "mma_m16n8k16_f16_f32/f2x2/k2")
     assert not values_equal("TILE", "mma_m16n8k16_f16_f32/f2x2/k2", "mma_m16n8k16_f16_f16/f2x2/k2")
-    assert not values_equal("STAGE@n0.e0", "smem-async/d2", "d2/smem-async")
-    assert not values_equal("STAGE@n0.e0", "d2/smem-async", " d2/smem-async")
+    assert not values_equal("STAGE@map.1/inner", "smem-async/d2", "d2/smem-async")
+    assert not values_equal("STAGE@map.1/inner", "d2/smem-async", " d2/smem-async")
     assert not values_equal("STAGE", "d2/smem-async", "d3/smem-async")
 
 
@@ -628,7 +658,7 @@ def test_complete_kernel_row_requires_the_emitted_exact_schedule():
     with pytest.raises(ValueError, match="not canonical"):
         complete_kernel_row({"WORK": "", "RASTER": "", "REDUCE@row": ""})
     with pytest.raises(ValueError, match="must be bare"):
-        complete_kernel_row({"WORK@n0": "", "WORK": "", "RASTER": "", "REDUCE": ""})
+        complete_kernel_row({"WORK@map.1/inner": "", "WORK": "", "RASTER": "", "REDUCE": ""})
     with pytest.raises(ValueError, match="no node assignment"):
         complete_kernel_row({"WORK": "", "RASTER": "", "STAGE": ""})
 
@@ -649,7 +679,14 @@ def test_knob_features_geometry_memo_is_invisible():
         {"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "S_ext_free_prod": 2048.0 * 2048.0, "H_sm_count": 128.0},
         {"TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "coop", "STAGE": "d2/smem-async", "WORK": "w4x2"},
         {"STAGE": "d3/smem-tma"},
-        {"TILE@n0": "f2", "TILE@n1": "f4", "REDUCE": "coop", "WORK": "t32x8", "S_ext_free_prod": 64.0, "H_sm_count": 128.0},
+        {
+            "TILE@map.1/inner": "f2",
+            "TILE@map.2/inner": "f4",
+            "REDUCE": "coop",
+            "WORK": "t32x8",
+            "S_ext_free_prod": 64.0,
+            "H_sm_count": 128.0,
+        },
         {"TILE": "f2x4", "WORK": "t32x8", "BN": 64, "unrelated": 3},
         {"S_n_load": 3.0, "S_ext_free_prod": 512.0},
     ]

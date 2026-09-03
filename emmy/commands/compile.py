@@ -727,7 +727,8 @@ def _trace_model(
         # quantization metadata; only generic tensor algebra enters decomposition.
         # Each speller is a no-op on the other family's checkpoints.
         if quant_dir is not None:
-            from emmy.compiler.loader.quant import (  # noqa: PLC0415
+            from emmy.compiler.loader.quant import (
+                # noqa: PLC0415,
                 spell_dynamic_fp8_activations,
                 spell_quantized_constants,
                 spell_static_fp4_activations,

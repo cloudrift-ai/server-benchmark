@@ -28,13 +28,13 @@ configs:
     - o
     - xr
   realizations:
-  - name: k_matmul_349297.b3421cc46700
+  - name: k_matmul_366f16.b1726c09c66c
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       STAGE: d2/smem-async
-    identity: a4de7b59622a60093837963131dedcf5d34bc48adc03b5a5194b47138c94a95b
+    identity: 4633153dddc61c090e7bbf0ac54085058e4533dff9f6f7dcfa23d59caad52294
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.8456087781054509

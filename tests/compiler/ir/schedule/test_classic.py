@@ -12,9 +12,8 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Channel, Fold, Lambda, M
+from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule import (
     PlacedTile,
     Placement,
@@ -46,49 +45,43 @@ from emmy.compiler.ir.schedule.classic import (
     parse_edge_site,
     parse_node_id,
 )
-from emmy.compiler.ir.schedule.views import (
-    Contraction,
-    Projection,
-    Reduction,
-    node_view,
-)
-from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from tests.compiler.helpers import classic_cartesian_assignments, enumerate_classic_reference
+from tests.compiler.terms import contraction, projection
+
+_K = Axis("k", 8)
 
 
 def _sum(name: str = "sum") -> Fold:
-    init, combine = M(ElementwiseImpl("add"), names=(name,))
-    return Fold(
-        axis=Axis("k", 8),
-        operands=(Load(name="x", input="x", index=(Var("k"),)),),
-        lift=Lambda(params=("k", "x"), body=Body(), results=("x",)),
-        init=init,
-        combine=combine,
-    )
+    """``name = Σ_k x[k]`` — lifted from its Loop IR, so the term is the compiler's own spelling."""
+    load = Load(name="x", input="x", index=(Var("k"),))
+    return fold_from_loop(Loop(axis=_K, body=Body((load, Accum(name=name, value="x", op="add", axes=("k",))))))
 
 
-def _contraction(k_extent: int = 8) -> Fold:
-    init, combine = M(ElementwiseImpl("add"), names=("acc",))
-    return Fold.contraction(
-        k_axis=Axis("k", k_extent),
-        a=Load(name="a", input="a", index=(Var("m"), Var("k"))),
-        channels=(Channel(Load(name="b", input="b", index=(Var("k"), Var("n"))), "acc"),),
+def _contraction() -> Fold:
+    return contraction(
+        _K, Load(name="a", input="a", index=(Var("m"), Var("k"))), (Load(name="b", input="b", index=(Var("k"), Var("n"))), "acc")
     )
 
 
 def _problem(root: Fold, target=None) -> tuple[TileOp, object]:
     """The ``(tile, target)`` problem the schedule model tests compose over."""
-    tile = TileOp(op=root, place=Placement(free=(Axis("m", 8), Axis("n", 8))))
+    m, n = Axis("m", 8), Axis("n", 8)
+    tile = TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, _K))
     return tile, Context.from_target((12, 0)) if target is None else target
 
 
+def _leaf_nodes(tile: TileOp) -> dict:
+    """The one schedule every zero-axis site takes — a slab is a site of its own, so a hand-built
+    assignment covers it beside the reduce site it feeds."""
+    return {site: ProjectionSchedule(Tile()) for site, view in enumerate(tile.views) if view.axis is None}
+
+
 def _direct(context: ClassicScheduleContext) -> ClassicAssignment:
-    nodes = {
-        site: ProjectionSchedule(Tile()) if isinstance(view, Projection) else ReductionSchedule(Tile(), Reduce())
-        for site, view in enumerate(context.tile_op.views)
-    }
+    nodes = {**_leaf_nodes(context.tile_op), **{site: ReductionSchedule(Tile(), Reduce()) for site in _reduce_sites(context.tile_op)}}
     return Schedule(
         kernel=KernelSchedule(work=Work(), raster=Raster()),
         nodes=nodes,
@@ -96,30 +89,39 @@ def _direct(context: ClassicScheduleContext) -> ClassicAssignment:
     )
 
 
+def _reduce_sites(tile: TileOp) -> tuple[int, ...]:
+    return tuple(site for site, view in enumerate(tile.views) if view.axis is not None)
+
+
 def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
     shared = _sum()
-    left = Fold.projection(operands=(shared,), body=Body((Assign("left", "add", ("sum", "sum")),)), results=("left",))
-    right = Fold.projection(operands=(shared,), body=Body((Assign("right", "add", ("sum", "sum")),)), results=("right",))
-    root = Fold.projection(operands=(left, right), body=Body(), results=("left", "right"))
-    inventory = TileOp(op=root)
+    left = projection((shared,), (Assign("left", "add", ("sum", "sum")),), ("left",))
+    right = projection((shared,), (Assign("right", "add", ("sum", "sum")),), ("right",))
+    root = projection((left, right), (), ("left", "right"))
+    inventory = TileOp(op=root, axes=(_K,))
 
-    assert len(inventory.sites) == 4
+    assert len(inventory.sites) == 4  # root, left, right, the shared sum — the slab it reads is no site
     assert inventory.node_id(shared) == inventory.node_id(shared)  # one site, however many uses
     uses = tuple(edge for edge in inventory.edge_sites if inventory.sites[edge[0]].node.operands[edge[1]] is shared)
     assert uses == ((inventory.node_id(left), 0), (inventory.node_id(right), 0))
 
 
 def test_classification_binds_contraction_roles_to_consumer_operands() -> None:
-    contraction = _contraction()
-    inventory = TileOp(op=contraction)
+    """A site's classification is the term itself: its bilinear reading names the pair, and the
+    roles are the consumer's operand positions — A at ``operands[0]``, the channel's B after it."""
+    inventory = TileOp(op=_contraction(), axes=(_K,))
 
-    view = node_view(inventory.sites[0].node)
-    assert view == Reduction(Contraction(a=1, channels=(0,)))
+    view = inventory.views[0]
+    assert view.as_contraction() is not None and view.axis == "k"
+    a, b = (edge.as_slab().load.input for edge in view.operands)
+    assert (a, b) == ("a", "b") and inventory.edge_sites == ((0, 0), (0, 1))
+    assert inventory.node_sites == (0,)  # the two slabs carry no schedule of their own: no sites
 
 
 def test_classification_does_not_read_the_target() -> None:
-    root = Fold.projection(body=Body((Assign("y", "add", ("x", "x")),)))
-    assert node_view(root) == Projection()
+    root = projection((), (Load(name="x", input="x", index=(Var("n"),)), Assign("y", "add", ("x", "x"))))
+    assert root.axis is None and root.as_contraction() is None
+    assert TileOp(op=root, axes=(Axis("n", 8),)).views == (root,)
 
 
 def test_context_requires_complete_node_and_edge_coverage() -> None:
@@ -140,7 +142,7 @@ def test_context_rejects_a_node_schedule_from_the_wrong_sum_arm() -> None:
     context = ClassicScheduleContext(*_problem(_sum()))
     schedule = _direct(context)
     site = context.tile_op.node_sites[0]
-    wrong = Schedule(schedule.kernel, {site: ProjectionSchedule(Tile())}, schedule.edges)
+    wrong = Schedule(schedule.kernel, {**schedule.nodes, site: ProjectionSchedule(Tile())}, schedule.edges)
 
     with pytest.raises(ScheduleRefused, match="reduction site requires a reduction schedule"):
         context.extend(wrong)
@@ -160,7 +162,7 @@ def test_context_owns_worker_and_transport_compatibility() -> None:
     edges[context.tile_op.edge_sites[0]] = EdgeSchedule(Stage())
     mixed_transport = Schedule(
         KernelSchedule(Work.parse("t2"), Raster()),
-        {site: ReductionSchedule(tiled, Reduce())},
+        {**direct.nodes, site: ReductionSchedule(tiled, Reduce())},
         edges,
     )
     with pytest.raises(ScheduleRefused, match="one contraction currently requires one transport choice across its operands"):
@@ -170,18 +172,11 @@ def test_context_owns_worker_and_transport_compatibility() -> None:
 def test_independent_nodes_compose_only_at_matching_physical_axis_geometry() -> None:
     """Algebraically reversed axes compose only when their physical widths still agree."""
     m, n = Axis("m", 8), Axis("n", 8)
-    first = Fold.contraction(
-        k_axis=Axis("k1", 8),
-        a=Load("a1", "a1", (Var("m"), Var("k1"))),
-        channels=(Channel(Load("b1", "b1", (Var("k1"), Var("n"))), "left"),),
-    )
-    second = Fold.contraction(
-        k_axis=Axis("k2", 8),
-        a=Load("a2", "a2", (Var("n"), Var("k2"))),
-        channels=(Channel(Load("b2", "b2", (Var("k2"), Var("m"))), "right"),),
-    )
-    root = Fold.projection(operands=(first, second), body=Body(), results=("left", "right"))
-    problem = (TileOp(op=root, place=Placement(free=(m, n))), Context.from_target((12, 0)))
+    k1, k2 = Axis("k1", 8), Axis("k2", 8)
+    first = contraction(k1, Load("a1", "a1", (Var("m"), Var("k1"))), (Load("b1", "b1", (Var("k1"), Var("n"))), "left"))
+    second = contraction(k2, Load("a2", "a2", (Var("n"), Var("k2"))), (Load("b2", "b2", (Var("k2"), Var("m"))), "right"))
+    root = projection((first, second), (), ("left", "right"))
+    problem = (TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k1, k2)), Context.from_target((12, 0)))
 
     def pick(context, node, choice):
         site = context.site(node)
@@ -191,10 +186,14 @@ def test_independent_nodes_compose_only_at_matching_physical_axis_geometry() -> 
             {edge: EdgeSchedule(Stage.direct()) for edge in context.incident_edges(site)},
         )
 
+    def contract(context, node, choice):
+        """Pick ``node``'s reduction — its slabs are no sites, so nothing else is left to pick under it."""
+        return context.extend(pick(context, node, choice))
+
     context = ClassicScheduleContext(*problem)
     context = context.extend(pick(context, root, ProjectionSchedule(Tile())))
-    context = context.extend(pick(context, first, ReductionSchedule(Tile(regs=(1, 2)), Reduce())))
-    assert context.extend(pick(context, second, ReductionSchedule(Tile(regs=(2, 1)), Reduce())))
+    context = contract(context, first, ReductionSchedule(Tile(regs=(1, 2)), Reduce()))
+    assert contract(context, second, ReductionSchedule(Tile(regs=(2, 1)), Reduce()))
     with pytest.raises(ScheduleRefused, match="pick disagrees on physical-axis geometry"):
         context.extend(pick(context, second, ReductionSchedule(Tile(regs=(1, 2)), Reduce())))
 
@@ -212,7 +211,7 @@ def _finite_domains(problem: tuple[TileOp, object]) -> ClassicDomains:
             KernelSchedule(Work.parse("t2"), Raster()),
             KernelSchedule(Work.parse("t2"), Raster("m", 8)),
         ),
-        nodes={site: (direct_node, tiled_node)},
+        nodes={site: (direct_node, tiled_node), **{leaf: (choice,) for leaf, choice in _leaf_nodes(context.tile_op).items()}},
         edges={edge: (direct_edges[edge], staged_edges[edge]) for edge in context.tile_op.edge_sites},
     )
 
@@ -325,11 +324,12 @@ def test_context_rejects_incomplete_or_duplicate_composition_orders() -> None:
 
 
 def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
-    root = _contraction(16)
+    root = _contraction()
     m, n = Axis("m", 8), Axis("n", 8)
     source = TileOp(
         op=root,
         place=Placement(free=(m, n)),
+        axes=(m, n, Axis("k", 16)),
         inputs={"a": Tensor("a", (8, 16), "f16"), "b": Tensor("b", (16, 8), "f16")},
         outputs={"out": Tensor("out", (8, 8), "f16")},
     )
@@ -338,13 +338,14 @@ def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
     site = base.tile_op.node_sites[0]
     tile = Tile(atom=ATOM_REGISTRY["mma_m16n8k16_f16_f16"], units=(1, 4), regs=(2, 2))
     node = ReductionSchedule(tile, Reduce())
+    nodes = {**_leaf_nodes(base.tile_op), site: node}
     edges = {edge: EdgeSchedule(Stage.direct()) for edge in base.tile_op.edge_sites}
     domains = ClassicDomains(
         kernel=(KernelSchedule(Work.parse("w1x4"), Raster()),),
-        nodes={site: (node,)},
+        nodes={site: (choice,) for site, choice in nodes.items()},
         edges={edge: (choice,) for edge, choice in edges.items()},
     )
-    schedule = Schedule(domains.kernel[0], {site: node}, edges)
+    schedule = Schedule(domains.kernel[0], nodes, edges)
 
     policy_only = ClassicScheduleContext(*problem, domains).restrict({}, allow_f16_accumulate=False)
     with pytest.raises(ScheduleRefused, match="precision restriction"):
@@ -429,8 +430,8 @@ def test_codec_has_no_missing_unknown_or_alias_key_path() -> None:
 
     with pytest.raises(ValueError, match="missing STAGE"):
         codec.decode({key: value for key, value in row.items() if key != "STAGE"})
-    with pytest.raises(ValueError, match="unknown keys STAGE@n0"):
-        codec.decode({**row, "STAGE@n0": ""})
+    with pytest.raises(ValueError, match="unknown keys STAGE@map.1/inner"):
+        codec.decode({**row, "STAGE@map.1/inner": ""})
 
 
 def test_codec_rejects_a_noncanonical_value_spelling() -> None:
@@ -449,7 +450,7 @@ def test_context_enforces_kernel_resource_and_producer_band_invariants() -> None
 
     oversized = Schedule(
         KernelSchedule(Work.parse("w33x1"), Raster()),
-        {site: ReductionSchedule(Tile(atom=atom, units=(33, 1)), Reduce())},
+        {**direct.nodes, site: ReductionSchedule(Tile(atom=atom, units=(33, 1)), Reduce())},
         direct.edges,
     )
     with pytest.raises(ScheduleRefused, match="worker inventory exceeds the target thread limit"):
@@ -457,7 +458,7 @@ def test_context_enforces_kernel_resource_and_producer_band_invariants() -> None
 
     too_many_producers = Schedule(
         KernelSchedule(Work.parse("w1x1+p2"), Raster()),
-        {site: ReductionSchedule(Tile(atom=atom), Reduce())},
+        {**direct.nodes, site: ReductionSchedule(Tile(atom=atom), Reduce())},
         direct.edges,
     )
     with pytest.raises(ScheduleRefused, match="producer band cannot outnumber the compute band"):
@@ -465,7 +466,7 @@ def test_context_enforces_kernel_resource_and_producer_band_invariants() -> None
 
     no_tma = Schedule(
         KernelSchedule(Work.parse("w1x1+p1"), Raster()),
-        {site: ReductionSchedule(Tile(atom=atom), Reduce())},
+        {**direct.nodes, site: ReductionSchedule(Tile(atom=atom), Reduce())},
         direct.edges,
     )
     with pytest.raises(ScheduleRefused, match="a producer band requires TMA transport at every tiled consumer"):
@@ -576,10 +577,10 @@ def test_schedule_and_materialization_reject_untyped_entries() -> None:
 
 def test_tile_op_caches_the_stable_schedule_inventory() -> None:
     shared = _sum()
-    left = Fold.projection(operands=(shared,), body=Body(), results=("sum",))
-    right = Fold.projection(operands=(shared,), body=Body(), results=("sum",))
-    root = Fold.projection(operands=(left, right), body=Body(), results=("sum", "sum"))
-    tile = TileOp(op=root)
+    left = projection((shared,), (), ("sum",))
+    right = projection((shared,), (), ("sum",))
+    root = projection((left, right), (), ("sum", "sum"))
+    tile = TileOp(op=root, axes=(_K,))
 
     # one walk per kernel, and every structural reading is a field of its site records
     assert tile.sites is tile.sites
@@ -588,11 +589,11 @@ def test_tile_op_caches_the_stable_schedule_inventory() -> None:
     assert tuple(tile.node_id(s.node) for s in tile.sites) == tuple(range(len(tile.sites)))
 
     # the walk's labels are POSITIONS in this kernel's tree, so they belong to the TileOp and not
-    # to the shared subterms it is built from: every node but the root has a reaching parent, and
-    # a node reached down two paths keeps the first.
-    assert all(site.parent is not None for site in tile.sites[1:])
-    assert tile.sites[0].parent is None
-    assert not any(site.derived for site in tile.sites)
+    # to the shared subterms it is built from: every node but the root sits under a reaching
+    # segment path, and a node reached down two paths keeps the first.
+    assert all(site.depth > 0 for site in tile.sites[1:])
+    assert tile.sites[0].depth == 0
+    assert sum(site.node is shared for site in tile.sites) == 1 and tile.sites[tile.node_id(shared)].node is shared
 
 
 def test_tile_requires_complete_materialization() -> None:
@@ -603,7 +604,7 @@ def test_tile_requires_complete_materialization() -> None:
     plan = Tile(units=(1, 2))
     schedule = Schedule(
         KernelSchedule(Work.parse("t2"), Raster()),
-        {site: ReductionSchedule(plan, Reduce())},
+        {**_leaf_nodes(context.tile_op), site: ReductionSchedule(plan, Reduce())},
         {edge: EdgeSchedule(Stage.direct()) for edge in context.tile_op.edge_sites},
     )
 
@@ -611,6 +612,7 @@ def test_tile_requires_complete_materialization() -> None:
         TileOp(
             op=root,
             place=Placement(free=(m, n)),
+            axes=(m, n, _K),
             schedule=schedule,
             materialization=ClassicMaterialization({}, {}),
         )
@@ -619,6 +621,7 @@ def test_tile_requires_complete_materialization() -> None:
         TileOp(
             op=root,
             place=Placement(free=(m, n)),
+            axes=(m, n, _K),
             schedule=schedule,
             materialization=ClassicMaterialization({site: placed, site + 1: placed}, {}),
         )
@@ -634,13 +637,14 @@ def test_tile_graph_round_trip_uses_the_strict_schedule_codec() -> None:
     plan = Tile(units=(1, 2))
     schedule = Schedule(
         KernelSchedule(Work.parse("t2"), Raster()),
-        {site: ReductionSchedule(plan, Reduce())},
+        {**_leaf_nodes(context.tile_op), site: ReductionSchedule(plan, Reduce())},
         {edge: EdgeSchedule(Stage.direct()) for edge in context.tile_op.edge_sites},
     )
     tile = TileOp(
         op=root,
         name="classic",
         place=Placement(free=(m, n), grid=(m, n), mapped=True),
+        axes=(m, n, _K),
         schedule=schedule,
         materialization=ClassicMaterialization({site: plan.at(m, n)}, {}),
     )

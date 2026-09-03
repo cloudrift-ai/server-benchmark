@@ -27,7 +27,7 @@ def _tile(body: Body):
     return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
 
 
-def _matmul_tile(epilogue_op: str | None = None, k_extent: int = 128):
+def _matmul_tile(epilogue_op: str | None = None, k_extent: int = 128, n_outer: bool = False):
     m, n, k = Axis("m", Dim(32)), Axis("n", Dim(64)), Axis("k", Dim(k_extent))
     inner = Body(
         (
@@ -43,7 +43,8 @@ def _matmul_tile(epilogue_op: str | None = None, k_extent: int = 128):
         epilogue = (Assign(name="outv", op=ElementwiseImpl(epilogue_op), args=("acc",)),)
         result = "outv"
     cell = (Loop(axis=k, body=inner), *epilogue, Write(output="out", index=(Var("m"), Var("n")), value=result))
-    return _tile(Body((Loop(axis=m, body=Body((Loop(axis=n, body=Body(cell)),))),)))
+    outer, inner_axis = (n, m) if n_outer else (m, n)
+    return _tile(Body((Loop(axis=outer, body=Body((Loop(axis=inner_axis, body=Body(cell)),))),)))
 
 
 def test_cluster_sibling_epilogues_share_the_structural_key_but_not_the_exact_one() -> None:
@@ -57,6 +58,14 @@ def test_cluster_sibling_epilogues_share_the_structural_key_but_not_the_exact_on
 
 def test_cross_cluster_epilogues_key_apart() -> None:
     assert _matmul_tile("relu").identity_key(with_io=True) != _matmul_tile("abs").identity_key(with_io=True)
+
+
+def test_the_key_is_the_terms_not_the_source_nests() -> None:
+    """The derived body binds the free coordinates with the term's own loops, in the order the
+    tree declares them, so the source nest's spelling of its parallel loops does not reach the
+    key: ``for m: for n`` and ``for n: for m`` lift to one term and one identity."""
+    assert _matmul_tile().loop_body == _matmul_tile(n_outer=True).loop_body
+    assert _matmul_tile().identity_key(with_io=True) == _matmul_tile(n_outer=True).identity_key(with_io=True)
 
 
 def test_extent_moves_the_key() -> None:

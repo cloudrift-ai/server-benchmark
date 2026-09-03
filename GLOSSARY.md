@@ -82,10 +82,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
   kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
   fold only.
-- **Monoid family** — One registered fold algebra: a componentwise monoid, or its conjugation by a bijection (a
-  twist) such as the exp/LSE family behind online softmax. A family claims a stored combine only when its generator
-  would have emitted exactly that program, and it carries the algebra's legality properties (commutative,
-  observable). Registered in `ir/pure/algebra.py`.
+- **Componentwise / twisted combine** — The two shapes a stored fold combine takes: one independent ⊕ per state (a
+  planar fold — sum, max — built by `Lambda.componentwise` and read back by `Lambda.components`), or a componentwise
+  monoid conjugated by a bijection (a twist) such as the exp/LSE family behind online softmax, stated by a twist
+  recipe. Read off the program, never annotated.
 - **Broadcasting** — Reusing a smaller tensor across a larger shape. For example, one weight per column can be
   reused for every row.
 - **Index map** — A description of how output coordinates correspond to input coordinates. Emmy uses index maps for
@@ -95,7 +95,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Lowering** — Moving from a high-level representation to a more detailed, machine-oriented one while preserving
   the program's meaning.
 - **Total lift** — The loop→tile boundary: one mechanical conversion that turns every inner reduction loop into a
-  Fold tree, turns local output loops into pure projection regions, peels outer parallel loops into placement, and
+  Fold tree, turns each local output loop's projection into a zero-axis term evaluated over its sweep axis, peels outer
+  parallel loops into placement, and
   separates output specifications. Unsupported non-canonical Loop IR fails formation; Tile IR has no raw-loop escape.
 - **Classification** — Reading a Fold tree's stored algebra to derive a contraction or other scheduling-relevant
   structure. Context-independent Lambda normalization and contraction canonicalization happen during Tile IR
@@ -118,10 +119,21 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   earlier compiler pass wrote onto the operation.
 - **Mutable / immutable** — A mutable object can be changed after creation. An immutable object cannot; code creates
   a replacement instead. Emmy's graph is mutable, while many nested compiler statements are immutable.
-- **Closure** — A pure lambda paired with the enclosing iteration axes it may read. In Emmy the environment is an
-  index space: a normalized term captures only iteration axes, never data values, which arrive through operand
-  edges. Alpha-equivalent closures with equal captures denote one value; under different captures they are one
-  function with distinct values. Defined in `ir/pure/closure.py`.
+- **Closure** — The property that a term is closed over its enclosing iteration axes: it reads only those axes,
+  never a data value, since values arrive through operand edges (`Fold` formation states it). Alpha-equivalent terms
+  over equal axes denote one value; over different axes they are one function with distinct values.
+- **Route** — The spelling a structural knob key addresses a node of the fold tree by: from the root, each departure
+  names the node stood on and the 1-based stored operand taken (`map.1`), and the last segment names the kind of the
+  node arrived at — `PLACE@map.1/twist.1/inner.2/map`, `TILE@map.1/twist.1/inner`. Kinds are the term's derived
+  readings (`map`, `reduce`, `inner`, `twist`, `scan`); a bare family name is sugar for its one site.
+- **Twist recipe** — A twisted monoid stated as data (`ir/pure/twist.py`): a componentwise base monoid with its
+  per-element lift, conjugated by a bijection ψ (transport of structure — associativity is inherited), beside which
+  the recipe stores what conjugation does not give stably: one pattern per channel (the per-element map a dependent
+  reduce's lift must spell, over roles), what each state is at the singleton, any state the two-pass form never had
+  (Welford's count and running mean), and the fused ⊕ program in its stable spelling — two lambdas over roles for an
+  open channel count (softmax's pivot advance and per-channel rescale) or one lambda over every state pair. The
+  definition certifies the data. `Fold.twist(recipe)` finds the pivot among the term's operands and matches by
+  position and canonical form, never by a term's names.
 - **Structural identity / structural key** — A fingerprint based on computation and data flow rather than cosmetic
   names. It lets Emmy recognize equivalent compiler candidates.
 - **Idempotent rule** — A rule that does not keep changing its own output when applied again. Compiler rewrite rules

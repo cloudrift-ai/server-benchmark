@@ -6,11 +6,10 @@ reads made ``ops`` half presentation."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.pure.fold import Fold, _operand_result_names
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
-from emmy.compiler.ir.stmt import Body, Load
+from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.tile.ir import ProjectionRegion
 from emmy.compiler.ir.tile.ops import axis_names, sched_of
 
 # --------------------------------------------------------------------------- #
@@ -43,6 +42,7 @@ class _Ctx:
     is measured against. ``None`` everywhere when a bare term is printed without its op."""
 
     def __init__(self, tile, root=None) -> None:
+        self.tile = tile
         self.sched = sched_of(tile) if tile is not None and tile.op is not None else None
         # The ITERATION SPACE a capture set is measured against. Only the OWNING ``TileOp`` knows
         # it in full: the term's own axes (:func:`axis_names`), the placement's free/grid axes, and
@@ -61,7 +61,7 @@ class _Ctx:
         cone binds the statistic's ``m`` positionally — ``ops.make_cone``), so an annotation marks
         a hand-built tree. Empty when the iteration space is unknown (no owning ``TileOp``) — an
         unanswered question prints as no annotation, never as "closed"."""
-        return () if self.axes is None else tuple(sorted(lam.free_names() - self.axes))
+        return ()  # nothing captures: a Lambda binds everything it reads (Lambda.__post_init__)
 
     def note(self, node) -> str:
         """The schedule annotation for ``node`` — every slice the kernel keys against it, spelled
@@ -83,7 +83,7 @@ def _lam_sig(lam, ctx: _Ctx | None = None) -> str:
     A non-empty CAPTURE set is spelled between the params and the results — without it a λ that
     reads an enclosing value would print as though it were closed, which is the one property the
     reader most needs (an unclosed subtree can never become an operand edge)."""
-    rs = ", ".join(r if isinstance(r, str) else format(r, "g") for r in lam.results)
+    rs = ", ".join(lam.results)
     cap = ctx.captures(lam) if ctx is not None else ()
     free = f" [captures {', '.join(cap)}]" if cap else ""
     return f"λ({', '.join(lam.params)}){free} -> ({rs})"
@@ -104,7 +104,9 @@ def _head(node, ctx: _Ctx) -> str:
     if node.axis is None:
         text = "Fold  free" + ("" if node.operands else "  ‹pointwise›")
     else:
-        text = f"Fold[{_axis_span(node.axis)}] {node.role.name.lower()}" + (" unroll" if node.unroll else "")
+        kind = "contraction" if node.as_contraction() is not None else "reduce"
+        span = _axis_span(ctx.tile.axis_of(node.axis)) if ctx.tile is not None else node.axis
+        text = f"Fold[{span}] {kind}"
     return text + ctx.note(node)
 
 
@@ -120,10 +122,6 @@ def _stmts(stmts, ctx: _Ctx):
             if isinstance(s, Fold):
                 out.append(f"{cont}  {_head(s, ctx)}")
                 out.extend(_branch(_items(s, ctx), cont + "  "))
-            elif isinstance(s, ProjectionRegion):
-                out.append(f"{cont}  project[{_axis_span(s.axis)}]{' unroll' if s.unroll else ''}")
-                out.append(f"{cont}    {_lam_sig(s.lift, ctx)}")
-                out.extend(_stmts(s.body, ctx)(cont + "    "))
             else:
                 out.extend(pretty_body(Body((s,)), cont + "  "))
         return out
@@ -137,13 +135,12 @@ def _subtree(node, ctx: _Ctx):
 
 def _edge(edge, ctx: _Ctx, result: str | None = None) -> tuple[str, object]:
     """One operand edge and the lift params it binds — a ``Load`` is a leaf spelled inline, a
-    computed edge recurses into the node stored on it. The binding is explicit because the
-    bilinear view prints edges in A/B role order, which can differ from the lift's positional
-    parameter order."""
-    names = _operand_result_names(edge)
+    computed edge recurses into the node stored on it."""
+    names = edge.exposes
     head = f"operand[{', '.join(names)}]" + (f" -> {result}" if result is not None else "")
-    if isinstance(edge, Load):
-        load = edge.pretty()[0].strip().removeprefix(f"{edge.name} = ")
+    if edge.as_slab() is not None:
+        load = edge.as_slab().load
+        load = load.pretty()[0].strip().removeprefix(f"{load.name} = ")
         return f"{head}: {load}   ‹materialized›", lambda cont: []
     return f"{head}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)
 
@@ -155,17 +152,9 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     items: list[tuple[str, object]] = []
     if not isinstance(node, Fold):
         return items
-    con = node._contraction
-    if con is not None:
-        # The bilinear reading presents A before its B channels even though its stored operand
-        # order is ``(b₀, a, b₁…)``. Each edge's bracket names the positional lift param, so
-        # the presentation order cannot be mistaken for the binding order.
-        a, chans = con
-        items.append(_edge(a, ctx))
-        one = len(chans) == 1
-        items += [_edge(ch.b, ctx, None if one else ch.acc) for ch in chans]
-    else:
-        items += [_edge(e, ctx) for e in node.operands]
+    # Stored operand order IS the presentation: a contraction's A is ``operands[0]`` by canonical
+    # form, and each edge's bracket names the positional lift param it binds.
+    items += [_edge(e, ctx) for e in node.operands]
     if node.axis is not None:
         init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
         items.append((f"init: ({init})", lambda cont: []))

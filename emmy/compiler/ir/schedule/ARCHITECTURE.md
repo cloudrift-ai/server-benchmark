@@ -32,7 +32,12 @@ independent domain, and is not inspected by the generic traversal. Restriction-f
 indexes are immutable caches over those domains, not alternate definitions of membership.
 
 Reusable leaf choices such as `Work`, `Tile`, `Reduce`, `Stage`, and `Raster` contain neither sites nor target facts.
-The `TileOp` **is** the site index — there is no second object over the same term. It derives stable node ids,
+The `TileOp` **is** the site index — there is no second object over the same term. Whether a bilinear site takes
+`TILE` and `STAGE` at all (`contracts`) is the tile's question, since it needs the kernel's extents: a pair whose
+role-less side shares a coordinate with the other side qualifies only while that coordinate partitions the reduction
+(it composes with the reduction index) or the role-bearing side's reads are value-dead in it (a merged weight's
+reshape residue); a B that changes with the row it is contracted against is no slab per tile. It derives stable
+node ids,
 operand-edge sites, each site's projection or reduction view, and each contraction's schedule-independent
 `ContractionFacts` — its effective K axis, computed-A cone seam, nested producer, and fragment need.
 `ir/schedule/views` supplies the vocabulary (`node_view`, `Projection`, `Reduction`, `Contraction`,
@@ -40,13 +45,14 @@ operand-edge sites, each site's projection or reduction view, and each contracti
 layer reads through them. The composition context publishes the schedule-facing API (`node`, `site`, `operand`,
 `producer`, `incident_edges`, the key spellings) and does not re-export the kernel's structural members under second
 names. A contraction view belongs to a node site and expresses its operand roles as edge positions, and is not
-another Fold node. A concrete codec alone translates integer and tuple sites to wire spellings.
+another Fold node. A concrete codec alone translates integer and tuple sites to wire spellings, and the route it spells is the site
+record's own.
 
-The node list is the one walk in `ir/pure/tree.py`, deduplicated by object identity. That walk yields a `Visit` per
-node — the term, the axes in scope, the segment path, and whether it is derived evaluation — so the schedule's integer
-ids, the tree-path codec's segments, and the cut pass's scopes are all readings of one traversal and cannot drift. A
-contraction's edges are visited by ROLE (`a`, then each channel's `b`), not in the stored order that puts the channels
-first: the segment vocabulary spells the roles, so role order is the one order both identities can share.
+The node list is the one walk, `ir/tile/path.sites`, deduplicated by object identity. That walk yields a `Site` per
+node — the term, the axes in scope, the segment path — so the schedule's integer ids, the tree-path codec's segments,
+and the cut pass's scopes are all readings of one traversal and cannot drift. Operands are visited in stored order,
+which formation orients (a contraction's A first), and a route spells the stored position taken at each departure;
+an ambiguous node family spells its site by that route (`TILE@map.1/twist.1/inner`), the one grammar `PLACE` uses.
 
 **Every derivation memoizes on the ROOT, not on the wrapper**: several `TileOp`s exist over one term across a
 lowering, and a cache on the wrapper silently re-derives per wrapper. `schedule_nodes`, `schedule_views` and
@@ -74,14 +80,12 @@ neither defines nor filters those domains. `ir/schedule` may import other IR mod
 pipeline layer. The pipeline retains only knob/pin reads, pool identity, sampling, and the generic lazy-Fork adapter.
 
 A reduction domain is projected from node and kernel facts alone, so the shapes the kernel factorizer cannot bind are
-decided once, at the offer, and never dropped from a priced row later. Under a chain-form root — a zero-axis `Fold`
-with no operand edge, the shape every composed-cut and split piece binds through — a DIRECT body member carries the
-cooperative and ILP catalog minus the transposed band, while a node nested deeper, or any node of a kernel whose
-boundary store carries an output sweep or streams into a sibling observed member, carries the serial fold only. The
-contraction per-cell tier reads that same projection, so a contraction inherits every one of those readings rather
-than restating them — a stated decision rather than live behavior, since the normalize hoist absorbs a contraction's
-body feed and moves it onto an operand edge, which ends the chain form, so no tree built today reaches that arm
-carrying one.
+decided once, at the offer, and never dropped from a priced row later. The partition catalog is offered only on the
+reduce nodes the binder builds the kernel around — the roots it peels from the root projection (`ops.kernel_roots`: a
+tiled contraction's root, every one of them for a multi-output kernel, else the first operand); a reduce nested under
+a root or beside it lowers serially inside its reader, so it carries the serial fold only, as does an observed node
+and one whose reduce reads a boundary store's output sweep. The contraction per-cell tier reads that same
+projection, so a contraction inherits those readings rather than restating them.
 
 A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and
 cannot manufacture a value the projection withheld. A value scoped to a site that does not offer it empties that

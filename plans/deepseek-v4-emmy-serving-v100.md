@@ -110,11 +110,12 @@ cannot adjudicate a Loop-IR fragment either way (no Torch twin and no independen
 "same-input greedy reference is unavailable"), so real correctness evidence comes from the CPU seam equivalence test
 today and from real-weight parity at Stage 3.
 
-Two environment notes for later stages: the host venv's torch pulls NVRTC 13, which cannot target sm_70 — the main
-process works around it with `LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12`, but an isolated **bench worker**
-does not inherit the workaround and dies with "invalid value for --gpu-architecture", so any `--bench` / `tune` work
-must run inside the 1Cat image (NVRTC 12.9 native, verified) or in a venv without the NVRTC-13 pin. The inventory is
-untuned (no knobs or timings) and is therefore NOT promoted to the canonical path; it regenerates in ~60 s.
+Two environment notes for later stages — the first CORRECTED 2026-09-01: the old NVRTC-13 bench-worker constraint
+no longer applies (workers inherit the full environment, and the nvcc path dropped its NVRTC fallback). The real
+sm_70 trap is torch cu130 shipping no sm_70 kernels at all; `torch==2.13.0+cu126` fixes it, and `--bench` / `tune`
+then run fine in the plain host venv — no 1Cat image needed. The inventory is untuned (no knobs or timings) and is
+therefore NOT promoted to the canonical path; it regenerates in minutes (post-#691 rewrite: 12 graphs, 152 distinct
+kernels, 3 m 44 s on the host).
 
 ### Round two — fusion rewritten under the twins (2026-08-28/29) — CLOSED
 
@@ -159,22 +160,59 @@ on its own — 52 kernels, worst 2³⁷ (was 2⁵⁵), placement terminating in 
 trips is hours per launch (the 2³⁰ two-cut variant ran 2.6 h without completing before being killed). Two named
 gaps stand between here and a boot that serves, both follow-ups to #692:
 
-1. **Partition the monster — LANDED.** A chain-form root's DIRECT body members (the piece's workspace-rsqrt
-   captures feeding the retained reduce, exactly the monster's shape) now offer and realize cooperative/ILP
-   partitions: the reduce tier binds a provider chain ahead of a strided cooperative/ILP fold sharing one lane
-   axis, closing lane-distributed. A fold nested deeper, and any member of a sweep- or streamed-store-carrying
-   kernel, still keep the serial fold — an offer-side decision, not a remaining capability gap. Realization is
-   corpus-ratcheted (a cooperative reduce row on a composed-cut chain-form piece). Still owed on the V100 host: an
-   unpinned `post4096` compile with this ballot available, to see whether the greedy actually elects a partitioned
-   row for the monster kernel, or still elects serial (see gap 2).
-2. **Let evidence elect the deeper route** — a tune pass over the ballot, now including the monster's own
-   cooperative/ILP rows, so composed arms and partitioned members alike carry measured latencies (today the
-   2³⁷-vs-2³⁰ cut choice, and any partitioned row's win margin, is prior-guessed) — or the monotone serial-work
-   prior feature. This is the critical path still blocking serving latency.
+1. **Partition the monster — LANDED (#693/#694).** A chain-form root's DIRECT body members (the piece's
+   workspace-rsqrt captures feeding the retained reduce, exactly the monster's shape) now offer and realize
+   cooperative/ILP partitions: the reduce tier binds a provider chain ahead of a strided cooperative/ILP fold
+   sharing one lane axis, closing lane-distributed. A fold nested deeper, and any member of a sweep- or
+   streamed-store-carrying kernel, still keep the serial fold — an offer-side decision, not a remaining capability
+   gap. Realization is corpus-ratcheted (a cooperative reduce row on a composed-cut chain-form piece).
+2. **Evidence electing the route — MECHANISM PROVEN on the host (2026-09-01), measurement still owed.** The first
+   tune pass over the new ballot could not measure the monster (below), but its 9 attributed `bench_fail` rows
+   alone flipped the greedy: the worst piece dropped 2³⁸ → 2³⁰ per-thread serial trips (256×) and three
+   partitioned reduces were elected (placement 857 s vs 616 s baseline). The elected consumer piece then failed nvcc — an
+   order-blind seam-capture accounting bug in the composed cut (a deeper occurrence of the same workspace `Load`
+   masked the shallower read, so the piece read the name before any definition); fixed by resolving seam captures
+   in program order with a realize-time no-read-before-definition guardrail (PR #700; all 12 pieces of the real
+   plan now compile, plan name-identical). What still blocks a MEASURED election: the tune's hardcoded compile
+   budget (12 s/74 s) is far under the >160 s these variants need, the monster exposes 45 site-local `REDUCE@`
+   knobs, and `--dump-dir` crashes on these targets — so no successful measurement exists yet, only
+   disqualifications, and no online prior was written. The monotone serial-work prior feature remains the
+   cold-start answer. NOTE: the host's tune DB now carries those 9 rows, so any unpinned compile there elects the
+   partitioned route — intended, now that #700 makes it build.
+3. **Price the recomputation so the statistics piece gets elected — LANDED (#702), and the elected statistics
+   piece measures 8.6 ms on the host.** Even the elected 2³⁰ route ran past the 60 s bench watchdog
+   per launch: the dominant cost was re-evaluating the mHC statistics subtree 16,384× (4096 carrier positions × 4
+   streams) inside the consumer piece's sum-of-squares reduce. Characterized GPU-free: the materializing seam
+   (`PLACE@a8`, the gate's fn-projection) was OFFERED and priced away — the offline cold-start proxy gave the
+   fused 2³⁰-trip nest 4.29e-37 µs against the cut arm's 1.02e-17, with zero weights on any structural feature.
+   The landed fix is pricing: the nest-aware `S_ext_serial_cell_work` stamp, the coverage-adjusted
+   `D_serial_cell_work` feature, and a guarded clamp at the kernel-set Σ (`policy/greedy._resolved_price`) — a
+   kernel whose serial-work lower bound exceeds 1 ms prices at least that bound; below the guard elections stand
+   untouched, so a future recomputation nest under ~2²³ per-thread trips is still adjudicated by the uncalibrated
+   proxy. (Plus: disqualification signatures survive featurizer vocabulary growth — the stamp alone had silenced
+   the host DB's 9 `bench_fail` rows — and `SearchDB` schema v4 drops stale `lowering` chains keyed pre-stamp.)
+   Replayed on the pinned twins + host-DB copy, the greedy elects the same 12-piece plan plus exactly the
+   `PLACE@a8` statistics piece — 13 kernels, the consumer drops 2³⁰ → 2¹⁶ and the route's worst piece is 2¹⁹
+   per-thread trips (the unaided fused monster was 2³⁸).
+4. **Make the elected pieces fast — OPEN, the current critical path (measured on the host 2026-09-02).** The
+   elected route was benched completely for the first time (every earlier attempt died on the 60 s watchdog; the
+   clean run needed `--warmup 3 --iters 10` plus `EMMY_BENCH_RUN_TIMEOUT_S` — a third budget knob beside the two
+   the tune report named): the live election reproduces the replay exactly (13 kernels, deterministic resolve in
+   284 s) and the whole `post4096` forward measures **23.24 s** — not servable, so gate (c) was not attempted.
+   The statistics piece itself costs 8.6 ms; the cost moved. One piece (`__place_8a9a1fe058`, 13.2 s, 57 %) runs
+   eight serial 4096-trip hidden-dim reductions per thread with two stride-2048 fp16 weight-column walks per trip
+   — an uncoalesced re-read of both FFN weight matrices per output element, at 25 % occupancy — and two
+   16384-grid sweep pieces add 9.3 s; everything else totals ~0.7 s. #702's bound elected the best plan on the
+   ballot (five orders of magnitude past the fused monster); the ballot holds no fast lowering for these pieces
+   yet. Two moves, in order: a measured tune pass over the dominant pieces with the raised bench budgets (also
+   the measured-election evidence gap 2 always wanted), and — if the fork space has no fast row — materializing
+   the matmul contributions as their own mma pieces, the way `PLACE@a8` materialized the statistics.
 
-**Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot compiles
-but stalls in the first `post4096` prefill forward. Stage 4 cannot warm or bake until gap 2 lands and gate (c) is
-re-run on the host, and the golden re-record should follow it, not precede it.
+**Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
+compiles end to end and the elected route is a measured 23.2 s per `post4096` prefill forward (no longer a
+watchdog unknown) — the boot's roofline audit runs each program 4×, so serving needs roughly an order of
+magnitude off the dominant pieces first. Stage 4 cannot warm or bake until that lands and gate (c) is re-run on
+the host, and the golden re-record should follow it, not precede it.
 
 ## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
 
@@ -384,10 +422,12 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 Stage −1: DONE (~2 h). Stage 0 round one: DONE (fixed upstream by #602). Stage 1: DONE (#651). Stage 2: DONE (#656).
 Stage 3 in-repo: DONE (#662); gate (c) passed once at `ab1ad4592`, gate (d)'s token-ID half with it.
 
-**Stage 0 round three's runtime gap is the critical path.** All three twins compile (`expert16` #671, `post16` #676,
-`pre16` #682/#688, `post4096`'s placement #692 — merge #692, and close #686 as superseded by it). What holds
-everything behind it now is partitioning `post4096`'s composed-cut consumer: the reduce tier emitting a
-sibling-provider chain ahead of a cooperative/ILP loop — a scoped codegen capability, call it 2–5 days — plus a tune
-pass over the new placement ballot so evidence, not the prior, elects the route. Then Stage 4: 2–4 days on-host
-(re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days. Adding stage 6 (MXFP4 + tuning) is a
-further 1–3 weeks. The compiler, not the fork ABI, remains the dominant uncertainty.
+**Stage 0 round three remains the critical path — now as kernel speed, not election.** Partitioning (#693/#694),
+the compiling composed cut (#700) and the serial-work pricing (#702) all landed, and the elected route is
+measured: 23.2 s per `post4096` forward, ~97 % of it in three pieces. What holds everything now: making those
+pieces fast — a measured tune pass over the elected route first (the bench completes with the raised budgets),
+then, if the fork space has no fast row, materializing the matmul contributions (open-ended placement work) —
+with the tune-harness fixes (the three budget knobs, the 45-knob site space, `--dump-dir`) as the supporting
+lane. Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days.
+Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The compiler, not the fork ABI, remains the dominant
+uncertainty.

@@ -52,7 +52,8 @@ from pathlib import Path
 
 import numpy as np
 
-from emmy.compiler.dtype import (  # noqa: F401 — re-exported; the LUTs' home is the dtype layer
+from emmy.compiler.dtype import (
+    # noqa: F401 — re-exported; the LUTs' home is the dtype layer,
     F4_VALUES,
     F8E4M3,
     F4E2M1x2,

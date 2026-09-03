@@ -108,7 +108,8 @@ def capture_twin_graphs(
         strip_engine_quant_config,
     )
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
-    from emmy.compiler.trace.huggingface import (  # noqa: PLC0415
+    from emmy.compiler.trace.huggingface import (
+        # noqa: PLC0415,
         build_attention_split_wrapper,
         build_moe_split_wrapper,
         hyper_connection_seam,

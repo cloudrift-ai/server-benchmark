@@ -14,7 +14,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, ProjectionRegion, apply_output_specs, extract_output_specs
+from emmy.compiler.ir.tile import OutputSpec, apply_output_specs, extract_output_specs
 
 
 def _ax(name: str, n: int = 64) -> Axis:
@@ -29,7 +29,7 @@ def test_trailing_write_splits_and_round_trips() -> None:
     pure, stores = extract_output_specs(stmts)
     assert [type(s).__name__ for s in pure] == ["Assign"]
     assert len(stores) == 1 and stores[0].sweep is None and stores[0].write is stmts[1]
-    assert apply_output_specs(pure, stores) == stmts
+    assert apply_output_specs(pure, stores) == Body(stmts)
 
 
 def test_trailing_write_run_keeps_order() -> None:
@@ -44,7 +44,7 @@ def test_trailing_write_run_keeps_order() -> None:
     ]
     pure, stores = extract_output_specs(stmts)
     assert len(pure) == 4 and len(stores) == 2
-    assert apply_output_specs(pure, stores) == stmts
+    assert apply_output_specs(pure, stores) == Body(stmts)
 
 
 def test_atomic_and_vector_write_fields_survive() -> None:
@@ -54,7 +54,7 @@ def test_atomic_and_vector_write_fields_survive() -> None:
     for write in (w, aw):
         pure, stores = extract_output_specs([write])
         assert pure == () and stores[0].write == write
-        assert apply_output_specs(pure, stores) == [write]
+        assert apply_output_specs(pure, stores) == Body((write,))
 
 
 # --- the output-sweep Loop (rms/softmax projection) ----------------------------------------------- #
@@ -84,7 +84,7 @@ def test_sweep_loop_splits_to_a_sweep_store_and_round_trips() -> None:
     pure, stores = extract_output_specs(stmts)
     assert [type(s).__name__ for s in pure] == ["Assign", "Load", "Load", "Assign"]
     assert len(stores) == 1 and stores[0].sweep is not None and stores[0].sweep.name == "n"
-    assert apply_output_specs(pure, stores) == stmts
+    assert apply_output_specs(pure, stores) == Body(stmts)
 
 
 def test_sweep_loop_with_multiple_writes_round_trips() -> None:
@@ -105,7 +105,7 @@ def test_sweep_loop_with_multiple_writes_round_trips() -> None:
     pure, stores = extract_output_specs(stmts)
 
     assert len(stores) == 2 and all(store.sweep == n for store in stores)
-    assert apply_output_specs(pure, stores) == stmts
+    assert apply_output_specs(pure, stores) == Body(stmts)
 
 
 def test_sweep_membership_is_the_trailing_axis_reading_run() -> None:
@@ -118,32 +118,17 @@ def test_sweep_membership_is_the_trailing_axis_reading_run() -> None:
     assert isinstance(rebuilt[1], Loop) and len(rebuilt) == 2
 
 
-def test_sweep_unroll_flag_survives() -> None:
-    n = _ax("n")
-    loop = Loop(axis=n, body=Body((Write(output="o", index=(Var("n"),), value="v"),)), unroll=True)
-    pure, stores = extract_output_specs([loop])
-    assert stores[0].unroll is True
-    assert apply_output_specs(pure, stores) == [loop]
-
-
-def test_sibling_output_loops_become_pure_projection_regions() -> None:
-    """Different local output extents remain separate maps while writes stay at the boundary."""
+def test_sibling_output_loops_become_sweep_specs() -> None:
+    """Different local output extents are sibling sweeps: one spec per write, each over its own
+    axis, reconstituting the loops in order. Their per-cell projections are not the boundary's —
+    the lift forms them as terms declaring the sweep axis before extraction sees the stream."""
     q, kv = _ax("q", 4), _ax("kv", 2)
     stmts = [
-        Loop(
-            axis=q,
-            body=Body(
-                (
-                    Assign(name="qv", op="copy", args=("x",)),
-                    Write(output="q_out", index=(Var("m"), Var("q")), value="qv"),
-                )
-            ),
-        ),
+        Loop(axis=q, body=Body((Write(output="q_out", index=(Var("m"), Var("q")), value="qv"),))),
         Loop(
             axis=kv,
             body=Body(
                 (
-                    Assign(name="kvv", op="copy", args=("x",)),
                     Write(output="k_out", index=(Var("m"), Var("kv")), value="kvv"),
                     Write(output="v_out", index=(Var("m"), Var("kv")), value="kvv"),
                 )
@@ -153,10 +138,9 @@ def test_sibling_output_loops_become_pure_projection_regions() -> None:
 
     pure, specs = extract_output_specs(stmts)
 
-    assert [member.axis.extent for member in pure if isinstance(member, ProjectionRegion)] == [Dim(4), Dim(2)]
-    assert len(specs) == 3 and all(spec.sweep is None for spec in specs)
-    assert all(member.pure for member in pure)
-    assert apply_output_specs(pure, specs) == stmts
+    assert pure == ()
+    assert [spec.sweep.name for spec in specs] == ["q", "kv", "kv"]
+    assert apply_output_specs(pure, specs) == Body(stmts)
 
 
 # --- declines (the caller keeps the computation in Loop IR) -------------------------------------- #
@@ -185,61 +169,17 @@ def test_store_repr_round_trips_through_eval() -> None:
     """``TileOp.output_specs`` serializes as constructor reprs in graph dumps — eval must rebuild it."""
     from emmy.compiler.graph import _eval_stmt
 
-    st = OutputSpec(write=Write(output="o", index=(Var("m"),), value="y"), sweep=_ax("n"), unroll=True)
+    st = OutputSpec(write=Write(output="o", index=(Var("m"),), value="y"), sweep=_ax("n"))
     assert _eval_stmt(repr(st)) == st
 
 
 # --- the gate compares under construction normalization ------------------------------------------ #
 
 
-def test_sweep_body_out_of_canonical_order_still_extracts() -> None:
-    """A free sweep whose pure prefix is not in canonical statement order must still extract.
-
-    ``ProjectionRegion`` stores its body in a ``Lambda``, whose construction canonicalizes
-    statement order — so reconstitution returns the NORMALIZED spelling. Gating on byte-identity
-    with the RAW stream rejected any sweep the normalization reorders (two independent computes
-    given in reverse-canonical order below), and the reject surfaced as a hard "cannot be
-    represented" compile failure on DeepSeek-V4's fused post block. The gate's target is the
-    stream as reconstitution will spell it.
-    """
-    first = Loop(
-        axis=_ax("a2", 8),
-        body=Body(
-            (
-                Load(name="x", input="src", index=(Var("a2"),)),
-                Assign(name="y", op="relu", args=("x",)),
-                Write(output="o1", index=(Var("a2"),), value="y"),
-            )
-        ),
-    )
-    second = Loop(
-        axis=_ax("a3", 4),
-        body=Body(
-            (
-                Load(name="w", input="src2", index=(Var("a3"),)),
-                # reverse-canonical: "sigmoid" orders after "negative", yet the stmts are independent
-                Assign(name="s", op="sigmoid", args=("w",)),
-                Assign(name="n", op="negative", args=("w",)),
-                Assign(name="z", op="add", args=("s", "n")),
-                Write(output="o2", index=(Var("a3"),), value="z"),
-            )
-        ),
-    )
-    split = extract_output_specs([first, second])
-    assert split is not None, "a semantics-preserving reorder must not make the stream unrepresentable"
-    pure, stores = split
-    assert [type(stmt).__name__ for stmt in pure] == ["ProjectionRegion", "ProjectionRegion"]
-    assert [store.write.output for store in stores] == ["o1", "o2"]
-    # The round trip agrees with itself: reconstitution of the extraction is a fixpoint.
-    rebuilt = apply_output_specs(pure, stores)
-    assert extract_output_specs(rebuilt) is not None
-
-
 def test_sweep_write_of_a_captured_accumulator_extracts() -> None:
     """A sweep may store an enclosing scope's value unchanged — ``o[j] = acc`` broadcasting an
-    already-reduced accumulator. The result is not a body def, so the region's Lambda must bind
-    it as a captured param; building the capture probe WITH results raised the formation error
-    instead ("Lambda results ['acc'] are not defined"), a crash on a legitimate stream."""
+    already-reduced accumulator. Nothing computes over ``j``, so no term opens it: the store's
+    sweep spec is what binds the axis, wrapped around the writes alone."""
     first = Loop(
         axis=_ax("a1", 8),
         body=Body(
@@ -258,6 +198,6 @@ def test_sweep_write_of_a_captured_accumulator_extracts() -> None:
     assert split is not None
     pure, stores = split
     assert [store.write.output for store in stores] == ["o1", "o2"]
-    region = pure[-1]
-    assert isinstance(region, ProjectionRegion) and "acc" in region.lift.params
-    assert extract_output_specs(apply_output_specs(pure, stores)) is not None
+    assert [type(stmt).__name__ for stmt in pure] == ["Load", "Assign"], "the first sweep's pure prefix rejoins the stream"
+    assert [store.sweep.name for store in stores] == ["a1", "a2"]
+    assert apply_output_specs(pure, stores) == Body((first, second))

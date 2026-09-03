@@ -30,7 +30,7 @@ from dataclasses import dataclass, field, replace
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F32, U32
+from emmy.compiler.dtype import F32
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.atom import AtomKind
 from emmy.compiler.ir.axis import Axis
@@ -53,14 +53,13 @@ from emmy.compiler.ir.kernel.ir import (
     frag_layout,
 )
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Channel, Fold, is_contraction, operand_body, operand_name, subst_free
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Side, Stage, Tile
-from emmy.compiler.ir.schedule.packing import block_scaled_atom, match_packed_b_node, match_packed_pair_node
+from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.passes import rename_free
-from emmy.compiler.ir.tile.ops import cone_stat_dtypes, make_cone
-from emmy.compiler.pipeline.passes.lowering._reduction import Reduction
+from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes, make_cone
 from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -96,23 +95,24 @@ class _ScheduledContraction:
 
     child: Fold
     axis: Axis
-    channels: tuple[Channel, ...]
+    channels: tuple[tuple[Fold, str], ...]  # each streamed operand edge with the accumulator it feeds
 
     @property
     def a(self):
-        return self.child.a
+        return self.child.operands[0]
 
     @property
     def b(self):
-        return self.channels[0].b
+        return self.child.operands[1]
 
     @property
     def acc(self) -> str:
-        return self.channels[0].acc
+        return self.child.exposes[0]
 
     @property
     def semiring(self):
-        return self.child.semiring
+        view = self.child.as_contraction()
+        return None if view is None else (view.product, view.plus)
 
     @property
     def b_trans(self) -> bool:
@@ -128,17 +128,17 @@ def scheduled_fold_contraction(fold: Fold, sched):
     """
 
     states = set(fold.combine.results) if fold.combine is not None else set()
-    steps = fold.step_stmts()
-    for child in (stmt for stmt in steps if is_contraction(stmt)):
+    steps = tuple(fold.lift.body)
+    for child in (stmt for stmt in steps if isinstance(stmt, Fold) and stmt.as_contraction() is not None):
         tile = sched.tile_of(child)
-        consumers = tuple(stmt for stmt in steps if isinstance(stmt, Accum) and stmt.name in states and stmt.value == child.out)
+        consumers = tuple(stmt for stmt in steps if isinstance(stmt, Accum) and stmt.name in states and stmt.value == child.exposes[0])
         stage = sched.get("STAGE", child) if tile is not None else None
         if tile is None or not tile.is_warp or stage is None or stage.transport != "smem" or not consumers:
             continue
-        if len(child.channels) != len(consumers):
+        if len(child.operands) - 1 != len(consumers):
             return None
-        channels = tuple(Channel(channel.b, consumer.name) for channel, consumer in zip(child.channels, consumers, strict=True))
-        return _ScheduledContraction(child=child, axis=fold.axis, channels=channels), child, tile, stage
+        channels = tuple(zip(child.operands[1:], (consumer.name for consumer in consumers), strict=True))
+        return _ScheduledContraction(child=child, axis=sched.axis_of(fold.axis), channels=channels), child, tile, stage
     return None
 
 
@@ -723,7 +723,7 @@ def _k_masked(stmts: list[Stmt], value: str, k: Expr, k_ext: Expr | None) -> tup
 _INVARIANT_TAG, _STREAM_TAG = "s_a", "s_b"
 
 
-def _child_stream_operand(*, c: Fold, child: Fold, atom, m_name: str, cols: int) -> Operand | None:
+def _child_stream_operand(*, c: Fold, child: Fold, atom, m_name: str, cols: int, k_axis: Axis, child_k: Axis) -> Operand | None:
     """A nested contraction's streamed operand, staged once per CTA instead of
     re-read per warp through the gmem fragment loaders, or ``None`` where the geometry does not.
 
@@ -737,21 +737,21 @@ def _child_stream_operand(*, c: Fold, child: Fold, atom, m_name: str, cols: int)
     of ``cp.async`` chunks, a K-major streamed layout (the copy would stride, not run), an operand that
     indexes the invariant tile (the slab is CTA-shared across it), and a symbolic stream extent (whose
     last chunk overhangs, and only the gmem-direct read carries that guard)."""
-    b = child.b
-    if not (isinstance(b, Load) and child.b_trans and child.axis.extent.is_static and c.axis.extent.is_static):
+    b = child.operands[1]
+    if not (isinstance(b, Load) and child.as_contraction().b_trans and child_k.extent.is_static and k_axis.extent.is_static):
         return None
-    k_ext = child.axis.extent.as_static()
+    k_ext = child_k.extent.as_static()
     if (k_ext * atom.operand_dtype("b").nbytes) % 16 or Body.coerce(()).depends_on(b, m_name):
         return None
 
     def index(k0):
         def gmem(row, col):
-            return tuple(Sigma({c.axis.name: BinaryExpr("+", k0, row), child.axis.name: col}).apply(e) for e in b.index)
+            return tuple(Sigma({k_axis.name: BinaryExpr("+", k0, row), child_k.name: col}).apply(e) for e in b.index)
 
         return gmem
 
     def coords(k0):
-        return tuple(Sigma({c.axis.name: k0, child.axis.name: Literal(0, "int")}).apply(e) for e in b.index)
+        return tuple(Sigma({k_axis.name: k0, child_k.name: Literal(0, "int")}).apply(e) for e in b.index)
 
     return Operand(
         tag=_STREAM_TAG,
@@ -764,7 +764,7 @@ def _child_stream_operand(*, c: Fold, child: Fold, atom, m_name: str, cols: int)
     )
 
 
-def _child_invariant_operand(*, child: Fold, atom, m: Side, k_name: str) -> Operand | None:
+def _child_invariant_operand(*, child: Fold, atom, m: Side, k_name: str, child_k: Axis) -> Operand | None:
     """A nested contraction's invariant operand, staged once ahead of the chunk loop.
 
     Unlike the streamed operand, this edge does not advance with the chunk: the same ``tile_m × <child K>`` tile
@@ -774,10 +774,10 @@ def _child_invariant_operand(*, child: Fold, atom, m: Side, k_name: str) -> Oper
     read back by the ordinary staged ``LdmatrixLoad``. ``None`` where the geometry does not stage:
     a symbolic or non-chunk-aligned inner extent, a source whose K is not gmem-contiguous, or a
     masked invariant tile (whose overhang the slab fill would have to clamp)."""
-    a = child.a
-    if not (isinstance(a, Load) and child.axis.extent.is_static) or m.mask:
+    a = child.operands[0]
+    if not (isinstance(a, Load) and child_k.extent.is_static) or m.mask:
         return None
-    k_ext = child.axis.extent.as_static()
+    k_ext = child_k.extent.as_static()
     if (k_ext * atom.operand_dtype("a").nbytes) % 16 or k_name not in a.index[-1].free_vars():
         return None
     row_base = _side_base(m)
@@ -822,6 +822,8 @@ def _child_contraction_block(
     ns: str,
     epilogue=None,
     slabs: tuple = (None, None),
+    child_k: Axis,
+    axes: tuple = (),
 ):
     """One scheduled contraction block producing fragments for an enclosing Fold.
 
@@ -838,7 +840,7 @@ def _child_contraction_block(
     enclosing block. Returns ``(ops, cells, offset, mn, stmts, frags)`` with ``frags[i]`` the
     register row ``i``'s column fragments in column order."""
     m, n = tile.mn
-    ops = _atom_ops(child, tile, epilogue=epilogue, lead=lead, frag_ns=ns, slabs=slabs)
+    ops = _atom_ops(child, tile, epilogue=epilogue, lead=lead, frag_ns=ns, slabs=slabs, k_axis=child_k, axes=axes)
     offset = (
         AxisOffset(atom_dim=tile.atom.atom_m, reg=m.reg, block_var=m.block, unit_var=m.unit, unit_count=m.units),
         _BlockCols(atom_dim=tile.atom.atom_n, k0=k0),
@@ -850,7 +852,9 @@ def _child_contraction_block(
     return ops, cells, offset, tile.mn, [*decls, *region], frags
 
 
-def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_coord, k_coord, k_ext, inputs=None):
+def _a_slab_operand(
+    c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_coord, k_coord, k_ext, inputs=None, k_axis: Axis, axes: tuple = ()
+):
     """The A slab's operand, plus any statistic prologue it needs.
 
     A is COPIED when it is a materialized ``Load`` and COMPUTE-FILLED when it is a producer cone —
@@ -862,12 +866,12 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
 
     Returns ``(operand, copied, prologue)``."""
     pro, cell, stats = seam
-    m_name, k_name = mn[0].axis.name, c.axis.name
-    if isinstance(c.a, Load):
+    m_name, k_name = mn[0].axis.name, k_axis.name
+    if c.operands[0].as_slab() is not None:
         shape = (mn[0].tile, bk_elems)
         op = Operand(
             tag="a",
-            buf=c.a.input,
+            buf=c.operands[0].as_slab().load.input,
             shape=shape,
             # A >2-D operand boxes as rank-N with leading extent-1 dims — the convention
             # ``_slab_operands`` applies. ``_box_origin`` already yields the FULL-RANK origin, so
@@ -875,34 +879,36 @@ def _a_slab_operand(c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_co
             # descriptor's encoded rank, and TMA treats that as an invalid tensor map (measured
             # on a leading unit batch axis: UTMALDG.4D over a rank-3 map raises ILLEGAL
             # INSTRUCTION from the first thread).
-            box=(1,) * (len(c.a.index) - 2) + shape if len(c.a.index) > 2 else None,
-            coords=_box_origin(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, sibling=mn[1]),
-            index=_slab_index(c.a.index, tile=mn[0], tile_base=row_base, k_axis=c.axis, tile_is_row=True, sibling=mn[1]),
+            box=(1,) * (len(c.operands[0].as_slab().load.index) - 2) + shape if len(c.operands[0].as_slab().load.index) > 2 else None,
+            coords=_box_origin(c.operands[0].as_slab().load.index, tile=mn[0], tile_base=row_base, k_axis=k_axis, sibling=mn[1]),
+            index=_slab_index(
+                c.operands[0].as_slab().load.index, tile=mn[0], tile_base=row_base, k_axis=k_axis, tile_is_row=True, sibling=mn[1]
+            ),
             swizzle=swizzle,
         )
         return op, True, []
 
     def a_value(k0, row, col):
         k = BinaryExpr("+", k0, col)
-        # σ is hygienic (:func:`subst_free`): a cone statistic re-binding the contraction axis
+        # σ is hygienic (:meth:`Stmt.substitute`): a cone statistic re-binding the contraction axis
         # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
         stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
-        stmts += [subst_free(s, sigma) for s in cell]
-        return _k_masked(stmts, operand_name(c.a), k, k_ext)
+        stmts += [s.substitute(sigma) for s in cell]
+        return _k_masked(stmts, c.operands[0].exposes[-1], k, k_ext)
 
     prologue: list[Stmt] = []
     if stats:
         row_axis = Axis(name="_sr", extent=mn[0].tile)
         sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
-        row_body = [subst_free(s, sigma) for s in pro]
+        row_body = [s.substitute(sigma) for s in pro]
         prologue = sync_stat_fill(
             stats=stats,
             slab_of=_stat_slab,
             row_axis=row_axis,
             row_body=row_body,
             cta=cta,
-            stat=Reduction.of_cone_stat(c.a),
+            stat=cone_stat(c.operands[0], axes),
             dtypes={nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(pro, stats, inputs).items()},
         )
     return SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzle), False, prologue
@@ -917,6 +923,9 @@ def _sync_operands(
     channels=(),
     seam: tuple = ((), (), ()),
     inputs=None,
+    *,
+    k_axis: Axis,
+    axes: tuple = (),
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The ``smem`` compute fill's drain-ordered, computed, copied, and prologue operands.
 
@@ -930,7 +939,7 @@ def _sync_operands(
     A computed A cone with a
     row-invariant prologue (the fused
     norm→linear per-row statistic — its reduce ``Loop`` + scalar sweep) arrives already split at the
-    K seam (``fold.cone_seam`` reads the cone NODE's boundary; the scheduler sizes the stat rows off
+    K seam (``views.cone_seam`` reads the cone NODE's boundary; the scheduler sizes the stat rows off
     the same read): the prologue runs ONCE per tile row (:func:`sync_stat_fill`, returned as the transport
     prologue) and the per-cell fill reads the bridged values back from the stat smem rows. The
     schedule's eligibility guarantees exact cover on N; a masked / symbolic **M**
@@ -939,9 +948,9 @@ def _sync_operands(
     contract the copy transports follow). A symbolic **K** is the same discipline applied to the
     contraction axis: :func:`_k_masked` clamps the cone's own reads and stores the fold identity
     into every slab lane past the runtime extent, so the drain still reads the whole chunk."""
-    n_name, k_name = mn[1].axis.name, c.axis.name
+    n_name, k_name = mn[1].axis.name, k_axis.name
     row_base, col_base = _tile_base(mn)
-    k_ext = c.axis.extent_expr() if not c.axis.extent.is_static else None
+    k_ext = k_axis.extent_expr() if not k_axis.extent.is_static else None
 
     def m_coord(row) -> Expr:
         t = BinaryExpr("+", row_base, row)
@@ -966,6 +975,8 @@ def _sync_operands(
         k_coord=k_coord,
         k_ext=k_ext,
         inputs=inputs,
+        k_axis=k_axis,
+        axes=axes,
     )
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
@@ -975,7 +986,7 @@ def _sync_operands(
     # the ldmatrix drain reads each slab back through its own mode. Unswizzled these slabs drain
     # 4-way (64 B A rows) / 8-way (128 B B rows) bank-conflicted — the measured megakernel residual
     # (294.9 M ld conflicts / 82.5 M LSU inst on the gemma-shape fused edge, 5090).
-    channels = channels or ((c.b, c.acc),)
+    channels = channels or ((c.operands[1], c.exposes[0]),)
     drain: list = []
     sync_ops: list[SyncOperand] = []
     async_ops: list[Operand] = []
@@ -983,15 +994,19 @@ def _sync_operands(
     (async_ops if a_copied else sync_ops).append(a_op)
     drain.append(a_op)
 
-    for f, (bl, _) in enumerate(channels):
+    for f, (edge, _) in enumerate(channels):
         tag = "b" if f == 0 else f"b_x{f}"
+        # The channel's B is a TERM: a gmem read is a slab (one ``Load`` over its coordinates) and
+        # copies; anything else is a producer cone and compute-fills.
+        slab = edge.as_slab() if isinstance(edge, Fold) else None
+        bl = slab.load if slab is not None else edge
         if not isinstance(bl, Load):
-            b_body = operand_body(bl)
+            b_body = bl.lower(axes=axes)
 
             def b_value(k0, row, col, *, body=b_body, edge=bl):
                 k = BinaryExpr("+", k0, row)
                 sigma = Sigma({k_name: k_coord(k), n_name: n_coord(col)})
-                return _k_masked([subst_free(s, sigma) for s in body], operand_name(edge), k, k_ext)
+                return _k_masked([s.substitute(sigma) for s in body], edge.exposes[-1], k, k_ext)
 
             op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value, swizzle=swizzles[1])
             sync_ops.append(op)
@@ -1000,15 +1015,17 @@ def _sync_operands(
         # A transposed B stages N-major (``tile_n × bk`` — its own gmem orientation, K stride-1 in
         # gmem and smem alike), so its cp.async chunks are contiguous exactly like the canonical
         # K-major slab's (row-base alignment holds: B's row stride K is a multiple of ``bk_elems``).
-        shape = (mn[1].tile, bk_elems) if c.b_trans else (bk_elems, mn[1].tile)
+        shape = (mn[1].tile, bk_elems) if c.as_contraction().b_trans else (bk_elems, mn[1].tile)
         op = Operand(
             tag=tag,
             buf=bl.input,
             shape=shape,
-            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, sibling=mn[0]),
-            index=_slab_index(bl.index, tile=mn[1], tile_base=col_base, k_axis=c.axis, tile_is_row=c.b_trans, sibling=mn[0]),
+            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=k_axis, sibling=mn[0]),
+            index=_slab_index(
+                bl.index, tile=mn[1], tile_base=col_base, k_axis=k_axis, tile_is_row=c.as_contraction().b_trans, sibling=mn[0]
+            ),
             swizzle=swizzles[1],
-            trans=c.b_trans,
+            trans=c.as_contraction().b_trans,
         )
         async_ops.append(op)
         drain.append(op)
@@ -1027,6 +1044,8 @@ def _packed_operands(
     cta: CtaTile,
     seam: tuple = ((), (), ()),
     inputs=None,
+    k_axis: Axis,
+    axes: tuple = (),
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The staged operands of a PACKED-PAIR B contraction — the NVFP4 weight's byte-slab form.
 
@@ -1056,7 +1075,7 @@ def _packed_operands(
     """
     m, n = mn
     row_base, col_base = _tile_base(mn)
-    k_axis, block = c.axis, packed.block
+    block = packed.block
     two = Literal(2, "int")
 
     def n_coord(row) -> Expr:
@@ -1086,11 +1105,13 @@ def _packed_operands(
         k_coord=k_coord,
         k_ext=k_ext,
         inputs=inputs,
+        k_axis=k_axis,
+        axes=axes,
     )
 
     # Just the scale factor's own stmts, not the whole decode cone: the bits copy verbatim, so the
     # compute fill evaluates only what feeds the factor.
-    factor_cone = list(Body(tuple(operand_body(c.b))).backward_cone([packed.factor]).members)
+    factor_cone = list(Body(tuple(c.operands[1].lower(axes=axes))).backward_cone([packed.factor]).members)
 
     def scale_value(k0, row, col):
         k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(block, "int")))
@@ -1098,7 +1119,7 @@ def _packed_operands(
         # cone re-binds these names today, but the safe spelling costs nothing and the cone is
         # whatever the speller wrote.
         sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k})
-        return [subst_free(s, sigma) for s in factor_cone], packed.factor
+        return [s.substitute(sigma) for s in factor_cone], packed.factor
 
     scale_op = SyncOperand(tag="bs", shape=(n.tile, bk_elems // block), value=scale_value)
 
@@ -1142,7 +1163,7 @@ def _packed_operands(
 
 
 def _block_scaled_operands(
-    c: Fold, pair, bk_elems: int, mn: tuple[Side, Side], bits_dtype, scale_dtype, *, pad: int
+    c: Fold, pair, bk_elems: int, mn: tuple[Side, Side], bits_dtype, scale_dtype, *, pad: int, k_axis: Axis
 ) -> tuple[tuple, tuple[Operand, ...], tuple[SyncOperand, ...]]:
     """The staged operands of a BLOCK-SCALED packed pair — the native fp4 cell's ``2 + 2N`` slabs.
 
@@ -1167,7 +1188,7 @@ def _block_scaled_operands(
     """
     m, n = mn
     row_base, col_base = _tile_base(mn)
-    k_axis, block = c.axis, pair.block
+    block = pair.block
     k_ext = k_axis.extent_expr() if not k_axis.extent.is_static else None
 
     def filled(side: Side, sibling: Side, base, codes, cone, tag: str, *, scale):
@@ -1180,7 +1201,7 @@ def _block_scaled_operands(
             k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(2, "int")))
             t = BinaryExpr("+", base, row)
             sigma = Sigma({side.axis.name: clamp_last(t, side.ext) if side.mask else t, k_axis.name: k, **_sibling_sigma(sibling)})
-            return [st.rewrite(lambda nm: nm, sigma) for st in cone], codes
+            return [st.substitute(sigma) for st in cone], codes
 
         return SyncOperand(tag=tag, shape=(side.tile, bk_elems // 2), value=value, scale=scale)
 
@@ -1249,7 +1270,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     M / N overhang is fill-side clamped (cp.async) or box zero-filled (TMA); the discard stays with
     the store guard."""
     c, stage, tile = ops.c, ops.stage, ops.tile
-    k_axis = c.axis
+    k_axis = ops.k_axis
     # The chunk stream. A static K unrolls a literal chunk count; a SYMBOLIC one hands the skeleton
     # its ``Dim`` and the runtime ``ceil(K / bk)`` — the fill masks the last chunk's tail to the
     # fold identity (:func:`_k_masked`), so the drain still reads whole chunks.
@@ -1262,10 +1283,9 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     # The BLOCK-SCALED pair, keyed on the ATOM: both operands packed under a 16-bit atom is still
     # the single-sided shape, whose drain decodes each into 16-bit fragments. cp.async only; the
     # four-descriptor TMA box copy is not built.
-    native = stage.transport == "smem-async" and block_scaled_atom(tile.atom)
-    bs_pair = match_packed_pair_node(c, ops.inputs) if native else None
-    copy_transport = stage.transport in ("smem-async", "smem-tma")
-    packed = None if bs_pair is not None else (match_packed_b_node(c, ops.inputs) if copy_transport else None)
+    single, pair = packed_readings((c,), ops.inputs)[id(c)]
+    bs_pair = pair if stage.transport == "smem-async" and block_scaled_atom(tile.atom) else None
+    packed = single if bs_pair is None and stage.transport in ("smem-async", "smem-tma") else None
     if bs_pair is not None:
         operands, copies, fills = _block_scaled_operands(
             c,
@@ -1275,6 +1295,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             ops.inputs[bs_pair.b[0].bits.input].dtype,
             ops.inputs[bs_pair.a.scale.input].dtype,
             pad=BYTE_SLAB_PAD,
+            k_axis=k_axis,
         )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         # Pure copies when both operands' codes are stored; a fill underneath them when this
@@ -1335,6 +1356,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             cta=cta,
             seam=ops.cone,
             inputs=ops.inputs,
+            k_axis=k_axis,
+            axes=ops.axes,
         )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         if tma:
@@ -1363,7 +1386,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # that work — with ``cp.async``, or with the blocking vector copy on an atom whose target
         # has none. A term with no inline edge at all lands here too: then it is only the copy.
         operands, sync_ops, copy_ops, stat_pro = _sync_operands(
-            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone, ops.inputs
+            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone, ops.inputs, k_axis=k_axis, axes=ops.axes
         )
         transport = SyncTransport(
             operands=sync_ops,
@@ -1382,15 +1405,15 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         elems = ops.slab_elems()
         pads = tuple(BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "smem-async" else 0 for e in elems)
         operands = _slab_operands(
-            index_srcs=(c.a.index, c.b.index),
-            bufs=(c.a.input, c.b.input),
+            index_srcs=(c.operands[0].as_slab().load.index, c.operands[1].as_slab().load.index),
+            bufs=(c.operands[0].as_slab().load.input, c.operands[1].as_slab().load.input),
             mn=mn,
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
             base=_tile_base(mn),
             swizzles=ops.slab_swizzles(mn, elem.nbytes),
             elems=elems,
-            b_trans=c.b_trans,
+            b_trans=c.as_contraction().b_trans,
             pads=pads,
         )
         common = dict(
@@ -1528,14 +1551,14 @@ def _scalar_bound(mn, offset, i: int, j: int):
     return cond
 
 
-def _scalar_protected(c: Fold, tile: Tile, lead: tuple = (), *, body: Body | tuple = ()) -> frozenset[str]:
+def _scalar_protected(c: Fold, tile: Tile, lead: tuple = (), *, body: Body | tuple = (), k_axis: Axis) -> frozenset[str]:
     """The shared iteration coordinates — the block / unit / loop / extent vars excluded from the
     per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names).
     ``lead`` is the kernel's leading (batch / ksplit) grid axes: one coordinate for the whole cell
     block, so renaming one would emit a reference no enclosing loop defines. ``body`` contributes
     projection-local loop coordinates, notably an output sweep that remains bound inside every
     replicated cell."""
-    m, n, k_axis = tile.m, tile.n, c.axis
+    m, n = tile.m, tile.n
     prot = {k_axis.name}
     for s in (m, n):
         prot |= {s.block, s.unit}
@@ -1563,11 +1586,11 @@ def _scalar_drain(
     seam the mma drain rides."""
     (a_slab, b_slab), (row_base, col_base) = slabs, base
     off_a, off_b = offs
-    b_name, a_name = operand_name(c.b), operand_name(c.a)
+    b_name, a_name = c.operands[1].exposes[-1], c.operands[0].exposes[-1]
     body: list[Stmt] = []
     for i, j in cells:
         sfx = f"__c{i}_{j}"
-        bn, an, vn, cn = f"{b_name}{sfx}", f"{a_name}{sfx}", f"{c.acc}__v{sfx}", f"{c.acc}{sfx}"
+        bn, an, vn, cn = f"{b_name}{sfx}", f"{a_name}{sfx}", f"{c.exposes[0]}__v{sfx}", f"{c.exposes[0]}{sfx}"
         m_local = BinaryExpr("-", offset[0].base(i), row_base)
         n_local = BinaryExpr("-", offset[1].base(j), col_base)
         k_row = Var(ki) if off_b is None else BinaryExpr("+", off_b, Var(ki))
@@ -1610,7 +1633,7 @@ class _AtomOps:
     # the zero-axis ``Fold`` wrapper, and the store sink is where it lands.
     epilogue: Body = field(default_factory=Body)
     # The computed-A cone's ``(prologue, cell, stats)`` K seam, read off the NODE BOUNDARY
-    # (``fold.cone_seam``). ``None`` for a
+    # (``views.cone_seam``). ``None`` for a
     # plain gmem-``Load`` A — its whole body is the per-cell fill.
     seam: tuple | None = None
     # The register-fragment NAMESPACE. Empty for the kernel's own contraction; a nested producer
@@ -1626,6 +1649,10 @@ class _AtomOps:
     # slab with (:func:`~._stage.software_swizzle` on the child's K span) — the drain applies the matching
     # XOR, exactly like the enclosing contraction's own operands. ``None`` = gmem-direct.
     slabs: tuple[tuple[str, int, str] | None, tuple[str, int, str] | None] = (None, None)
+    # The contraction's K with its extent and the kernel's axis table: the term names its axes,
+    # the kernel holds them, and every open-body lowering of an operand here takes the table.
+    k_axis: Axis | None = None
+    axes: tuple = ()
 
     def frag(self, name: str) -> str:
         """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
@@ -1635,13 +1662,14 @@ class _AtomOps:
     def channels(self) -> tuple:
         """The ``(b, acc)`` pairs this emission folds — the node's product channels (one A
         fragment, N mma chains, one C fragment per channel at arity N)."""
-        return tuple((ch.b, ch.acc) for ch in self.c.channels)
+        # Each streamed operand paired with the accumulator it feeds — a channel WAS this zip.
+        return tuple(zip(self.c.operands[1:], self.c.combine.results, strict=True))
 
     @property
     def cone(self) -> tuple:
         """The A cone's ``(row-invariant prologue, per-cell body, bridged stats)`` — the node
         boundary, or the whole operand body when there is no cone to split."""
-        return self.seam if self.seam is not None else ((), operand_body(self.c.a), ())
+        return self.seam if self.seam is not None else ((), self.c.operands[0].lower(axes=self.axes), ())
 
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
@@ -1684,9 +1712,9 @@ class _MmaOps(_AtomOps):
         legality (``schedule.staging.resolve_warp_stage``), so a mismatch that staged would already
         have declined there."""
         out = []
-        for edge, role in ((self.c.a, "a"), (self.c.b, "b")):
+        for edge, role in ((self.c.operands[0], "a"), (self.c.operands[1], "b")):
             dt = self.tile.atom.operand_dtype(role)
-            t = self.inputs.get(edge.input) if self.inputs and isinstance(edge, Load) else None
+            t = self.inputs.get(edge.as_slab().load.input) if self.inputs and edge.as_slab() is not None else None
             out.append(t.dtype if t is not None and t.dtype.nbytes == 1 else dt)
         return tuple(out)
 
@@ -1743,7 +1771,7 @@ class _MmaOps(_AtomOps):
         b16-indexed); the cp.async byte slab's bank spread is the row pad instead."""
         if self.tile.atom.fragment_layout == "m8n8k4":
             return ("NONE", "NONE")
-        b_inner = self.stage.bk_elems if self.c.b_trans else mn[1].tile
+        b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile
         # A TMA slab keeps the hardware spelling (the copy engine fixes its permutation, and the
         # descriptor splits its box down to the atom); every other transport writes the slab in
         # software, so its XOR reads the row index at the slab's OWN stride.
@@ -1791,6 +1819,13 @@ class _MmaOps(_AtomOps):
                 )
                 for nm in frags(lambda i, ff=f: _fold_frag(self.frag(f"_b{i}"), ff), n.reg)
             ]
+        if block_scaled_atom(atom):
+            # The block-scale fragments — one 32-bit register per operand fragment, reloaded per
+            # k-step into the same name (``BlockScaleLoad`` assigns), so they are declared here once.
+            scale = dict(role="a", shape=atom.ptx_shape, dtype=atom.operand_dtype("a"), nregs=0)
+            decls += [RegFragment(name=nm, **scale) for nm in frags(lambda i: f"_sfa{i}", m.reg)]
+            for f in range(n_folds):
+                decls += [RegFragment(name=nm, **scale) for nm in frags(lambda i, ff=f: _fold_frag(f"_sfb{i}", ff), n.reg)]
         decls += [
             RegFragment(
                 name=_fold_frag(self.frag(_mma_c_base(atom, i, j)), f),
@@ -1803,21 +1838,6 @@ class _MmaOps(_AtomOps):
             for i in range(m.reg)
             for j in range(n.reg)
         ]
-        if block_scaled_atom(atom):
-            # The block-scaled cell's two scale operands are per-lane registers like the
-            # multiplicands, so they are declared here and ASSIGNED per K step. Slotted with the
-            # data fragments they ride beside: the register ring re-enters slot ``s`` every
-            # ``depth`` steps, and a load that declared its own destination redeclared it there.
-            # Named exactly as :func:`mma_leaves` spells them — A shares one name across channels,
-            # B carries the per-channel fold suffix.
-            decls += [
-                RegFragment(name=nm, role="sf", shape=atom.ptx_shape, dtype=U32, nregs=1) for nm in frags(lambda i: f"_sfa{i}", m.reg)
-            ]
-            for f in range(n_folds):
-                decls += [
-                    RegFragment(name=nm, role="sf", shape=atom.ptx_shape, dtype=U32, nregs=1)
-                    for nm in frags(lambda i, ff=f: _fold_frag(f"_sfb{i}", ff), n.reg)
-                ]
         if _f16acc(atom):
             # The f32 shadow accumulators — they keep the ``_c{i}_{j}`` names the store reads;
             # the packed f16 mma targets above are the ``_ch{i}_{j}`` family FragmentPromote folds.
@@ -1836,10 +1856,17 @@ class _MmaOps(_AtomOps):
         and transposed-B both have gmem-direct K zero-fill helpers)."""
         c = self.c
         atom, (m, n) = self.tile.atom, mn
-        k_axis = c.axis
-        assert isinstance(c.a, Load), "mma matmul arm: a register-resident (computed) A operand has no gmem-direct fragment loader here"
+        k_axis = self.k_axis
+        assert c.operands[0].as_slab() is not None, (
+            "mma matmul arm: a register-resident (computed) A operand has no gmem-direct fragment loader here"
+        )
         assert len(self.channels) == 1, "gmem-direct mma is single-fold — a multi-B node rides the smem compute fill"
-        a_load, b_load, b_trans = c.a, c.b, c.b_trans
+        # A materialized edge answers with its own ``Load`` — the shape this code reads an index
+        # and a buffer off; a computed cone stays the term, as it was when an edge could be either.
+        a_edge, b_edge = c.operands[0], c.operands[1]
+        a_load = a_edge.as_slab().load if a_edge.as_slab() is not None else a_edge
+        b_load = b_edge.as_slab().load if b_edge.as_slab() is not None else b_edge
+        b_trans = c.as_contraction().b_trans
         # The loop's final step overhangs K whenever ``atom_k`` does not tile it — a SYMBOLIC K
         # (unknown at compile time) or a static K with a remainder. Both mask the same way: the
         # loaders zero-fill the fragment halves past ``k_zero``'s bound, so the summed reduction
@@ -1994,12 +2021,12 @@ class _ScalarOps(_AtomOps):
 
     def slab_elem(self):
         """The slab element dtype — the gmem operand's own dtype (fp32 SGEMM stages fp32)."""
-        return self.inputs[self.c.a.input].dtype
+        return self.inputs[self.c.operands[0].as_slab().load.input].dtype
 
     def slab_elems(self) -> tuple:
         """Each gmem operand's OWN dtype — A and B may differ on the scalar tier (fp32 split
         partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
-        return (self.inputs[self.c.a.input].dtype, self.inputs[self.c.b.input].dtype)
+        return (self.inputs[self.c.operands[0].as_slab().load.input].dtype, self.inputs[self.c.operands[1].as_slab().load.input].dtype)
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The scalar slab drain — the plain-``Load`` fma leaf (:func:`_scalar_drain`), reading by
@@ -2019,7 +2046,7 @@ class _ScalarOps(_AtomOps):
         c = self.c
         if self.stage is None:
             return []
-        return [Init(name=f"{c.acc}__c{i}_{j}", identity=_ADD.identity, dtype=F32) for i, j in cells]
+        return [Init(name=f"{c.exposes[0]}__c{i}_{j}", identity=_ADD.identity, dtype=F32) for i, j in cells]
 
     def gmem_leaves(self, offset, mn):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a
@@ -2032,15 +2059,17 @@ class _ScalarOps(_AtomOps):
         CELL instead — the row / column reuse is a property of the operand, not of the tier."""
         c = self.c
         assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp smem compute fill"
-        k_axis = c.axis
+        k_axis = self.k_axis
         m, n = mn
         # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
         # fold axes): a replicated read of such a coordinate must keep its name — the loop that
         # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
         # emitted references no scope defines.
-        prot = _scalar_protected(c, self.tile, self.lead, body=(*operand_body(c.a), *operand_body(c.b)))
-        b_name, a_name = operand_name(c.b), operand_name(c.a)
-        a_body, b_body = operand_body(c.a), operand_body(c.b)
+        prot = _scalar_protected(
+            c, self.tile, self.lead, body=(*c.operands[0].lower(axes=self.axes), *c.operands[1].lower(axes=self.axes)), k_axis=self.k_axis
+        )
+        b_name, a_name = c.operands[1].exposes[-1], c.operands[0].exposes[-1]
+        a_body, b_body = c.operands[0].lower(axes=self.axes), c.operands[1].lower(axes=self.axes)
         a_cell, b_cell = _cell_varying(a_body, n), _cell_varying(b_body, m)
 
         def at_m(i):  # register row ``i``'s m coordinate (a 1-D output has no m side)
@@ -2070,11 +2099,11 @@ class _ScalarOps(_AtomOps):
                 *(copy_cell(a_body, cell, a_sfx, prot) if a_cell else ()),
                 *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
             ]
-            v = f"{c.acc}__v__c{i}_{j}"
+            v = f"{c.exposes[0]}__v__c{i}_{j}"
             return [
                 *reads,
                 Assign(name=v, op=_MUL, args=(f"{b_name}{b_sfx}", f"{a_name}{a_sfx}")),
-                Accum(name=f"{c.acc}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
+                Accum(name=f"{c.exposes[0]}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
             ]
 
         def wrap(body):
@@ -2087,7 +2116,9 @@ class _ScalarOps(_AtomOps):
         the (overhanging) write, dedup shared operand loads."""
         c = self.c
         sigma = _scalar_sigma(mn, offset, i, j)
-        cell = copy_cell(self.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c, self.tile, self.lead, body=self.epilogue))
+        cell = copy_cell(
+            self.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c, self.tile, self.lead, body=self.epilogue, k_axis=self.k_axis)
+        )
         cell = _guard_writes(cell, _scalar_bound(mn, offset, i, j))
         return _dedup_loads(cell)
 
@@ -2103,6 +2134,8 @@ def _atom_ops(
     lead: tuple = (),
     frag_ns: str = "",
     slabs: tuple = (None, None),
+    k_axis: Axis | None = None,
+    axes: tuple = (),
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
     stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from.
@@ -2111,20 +2144,24 @@ def _atom_ops(
     atom's — is normalized to its one-``Load`` cone HERE, at the decode boundary: the synchronous
     fill then evaluates the load per slab cell and the typed slab store performs the conversion
     (the scheduler resolved the fill for exactly this edge; the tree itself is never rewritten)."""
+    k_axis = k_axis if k_axis is not None else c.axis  # a scheduled wrapper already carries the resolved axis
+    assert isinstance(k_axis, Axis), "the atom needs the contraction's K with its extent — the kernel's axis table names it"
+    a_edge = c.operands[0] if c.operands else None
+    a_load = a_edge.lift.body[0] if a_edge is not None and a_edge.as_slab() is not None else None
     if (
         stage is not None
         and stage.transport == "smem"
         and isinstance(tile.atom, AtomKind)
-        and isinstance(c.a, Load)
+        and a_load is not None
         and inputs is not None
-        and (t := inputs.get(c.a.input)) is not None
+        and (t := inputs.get(a_load.input)) is not None
         and t.dtype != tile.atom.operand_dtype("a")
     ):
-        # Rebuilds thread the node's OWN semiring — never the constructor default.
-        mul, plus = c.semiring
-        c = Fold.contraction(k_axis=c.axis, a=make_cone([c.a], c.axis.name), channels=c.channels, product=mul, fold_op=plus)
+        # Only the A edge is replaced; the term keeps its own lift, monoid and seeds, so there is
+        # no semiring to re-thread and no former to go through.
+        c = replace(c, operands=(make_cone([a_load], k_axis.name), *c.operands[1:]))
     cls = _MmaOps if isinstance(tile.atom, AtomKind) else _ScalarOps
-    return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs)
+    return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs, k_axis, axes)
 
 
 def _row_value(value: Value, op: ElementwiseImpl, names: tuple[tuple[str, str], ...], group: int) -> tuple[list[Stmt], Value]:
@@ -2139,7 +2176,7 @@ def _row_value(value: Value, op: ElementwiseImpl, names: tuple[tuple[str, str], 
 def _carrier_values(fold: Fold, ops: _AtomOps, cells) -> tuple[list[Stmt], dict[str, Value]]:
     """Declare a Fold carrier at the residence selected by its scheduled child edges."""
     lay = frag_layout(ops.tile.atom.atom_m, ops.tile.atom.atom_n)
-    fragment_states = {channel.acc: index for index, channel in enumerate(ops.c.channels)}
+    fragment_states = {acc: index for index, acc in enumerate(ops.c.combine.results)}
     values: dict[str, Value] = {}
     decls = list(ops.state(cells))
     for name, identity in zip(fold.combine.results, fold.init, strict=True):
@@ -2197,9 +2234,14 @@ def _fold_staged(
         raise ValueError(f"fragment Fold evaluation requires a scheduled synchronous MMA stage, got {stage!r}")
     if len(c.channels) != 1:
         raise ValueError("fragment Fold evaluation currently requires one fragment-resident carrier channel")
-    steps = fold.step_stmts()
+    steps = tuple(fold.lift.body)
+    fold_k = sched.axis_of(fold.axis)  # the carrier's K with its extent
     producer = next(
-        (stmt for stmt in steps if is_contraction(stmt) and stmt is not value_child and sched.tile_of(stmt) is not None),
+        (
+            stmt
+            for stmt in steps
+            if isinstance(stmt, Fold) and stmt.as_contraction() is not None and stmt is not value_child and sched.tile_of(stmt) is not None
+        ),
         None,
     )
     producer_tile = sched.tile_of(producer) if producer is not None else None
@@ -2213,24 +2255,32 @@ def _fold_staged(
     row_base, col_base = _tile_base(mn)
 
     producer_stage = sched.get("STAGE", producer) if producer is not None else None
-    stream_op = _child_stream_operand(c=c, child=producer, atom=producer_tile.atom, m_name=m.axis.name, cols=bk) if producer_stage else None
+    stream_op = (
+        _child_stream_operand(
+            c=c, child=producer, atom=producer_tile.atom, m_name=m.axis.name, cols=bk, k_axis=c.axis, child_k=sched.axis_of(producer.axis)
+        )
+        if producer_stage
+        else None
+    )
     invariant_op = (
-        _child_invariant_operand(child=producer, atom=producer_tile.atom, m=producer_tile.m, k_name=producer.axis.name)
+        _child_invariant_operand(
+            child=producer, atom=producer_tile.atom, m=producer_tile.m, k_name=producer.axis, child_k=sched.axis_of(producer.axis)
+        )
         if producer_stage
         else None
     )
 
-    b = c.b
+    b = c.operands[1]
     assert isinstance(b, Load), "a fragment Fold child currently requires a materialized streamed operand"
-    b_shape = (n.tile, bk) if c.b_trans else (bk, n.tile)
+    b_shape = (n.tile, bk) if c.as_contraction().b_trans else (bk, n.tile)
     b_op = Operand(
         tag="b",
         buf=b.input,
         shape=b_shape,
         coords=_box_origin(b.index, tile=n, tile_base=col_base, k_axis=c.axis, sibling=m),
-        index=_slab_index(b.index, tile=n, tile_base=col_base, k_axis=c.axis, tile_is_row=c.b_trans, sibling=m),
+        index=_slab_index(b.index, tile=n, tile_base=col_base, k_axis=c.axis, tile_is_row=c.as_contraction().b_trans, sibling=m),
         swizzle=swizzles[1],
-        trans=c.b_trans,
+        trans=c.as_contraction().b_trans,
     )
 
     k0 = Var("_ks")
@@ -2239,7 +2289,7 @@ def _fold_staged(
     # computes a duplicate of the last valid row and its store is discarded by the ``RegStore``
     # guard, the same contract the copy transports follow.
     bounds: tuple[tuple[str, Expr, float | None], ...] = (
-        () if fold.axis.extent.is_static else ((fold.axis.name, fold.axis.extent.expr, float(fold.init[0])),)
+        () if fold_k.extent.is_static else ((fold.axis, fold_k.extent.expr, float(fold.init[0])),)
     )
     if m.mask:
         bounds += ((m.axis.name, m.ext, None),)
@@ -2255,6 +2305,8 @@ def _fold_staged(
             lead=ops.lead,
             ns=f"{ops.frag_ns}_fold",
             slabs=producer_slabs,
+            child_k=sched.axis_of(producer.axis),
+            axes=sched.tile.axes,
         )
         producer_value = Value.frag(producer_frags)
     else:
@@ -2300,13 +2352,13 @@ def _fold_staged(
                 env,
                 child=child,
                 bases=bases,
-                axes=(m.axis.name, fold.axis.name),
+                axes=(m.axis.name, fold.axis),
                 bounds=bounds,
             )
             return body, results
         raise ValueError("only scheduled contraction children may execute inside a fragment Fold")
 
-    bindings = {fold.axis.name: Value.uniform(fold.axis.name)}
+    bindings = {fold.axis: Value.uniform(fold.axis)}
     for param in fold.lift.params[1:]:
         bindings[param] = Value.uniform(param)
     prelude: list[Stmt] = []
@@ -2320,7 +2372,7 @@ def _fold_staged(
         bindings,
         child=child,
         bases=bases,
-        axes=(m.axis.name, fold.axis.name),
+        axes=(m.axis.name, fold.axis),
         bounds=bounds,
     )
     pivot_accum = next(stmt for stmt in steps if isinstance(stmt, Accum) and stmt.name == fold.combine.results[0])
@@ -2344,7 +2396,7 @@ def _fold_staged(
     prefix = [stmt for stmt in steps[:value_at] if isinstance(stmt, (Assign, Select)) and stmt.defines()[0] not in env]
     if prefix:
         lam = Lambda(params=tuple(env), body=Body(tuple(prefix)), results=tuple(stmt.defines()[0] for stmt in prefix))
-        prefix_body, _, env = evaluate(lam, env, bases=bases, axes=(m.axis.name, fold.axis.name), bounds=bounds)
+        prefix_body, _, env = evaluate(lam, env, bases=bases, axes=(m.axis.name, fold.axis), bounds=bounds)
     else:
         prefix_body = []
     weight_body, (weight,), env = evaluate(
@@ -2352,7 +2404,7 @@ def _fold_staged(
         env,
         child=child,
         bases=bases,
-        axes=(m.axis.name, fold.axis.name),
+        axes=(m.axis.name, fold.axis),
         bounds=bounds,
     )
     if weight.kind != FRAG:
@@ -2405,7 +2457,7 @@ def _fold_staged(
     stream = CpAsyncTransport(operands=(stream_op,), slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta) if stream_op else None
     lead_segment = LeadSegment(build=lambda: producer_body, transport=stream)
     block_ops = replace(ops, frag_ns=f"{ops.frag_ns}_partial")
-    fragment_state = next(channel.acc for channel in c.channels)
+    fragment_state = next(acc for _, acc in c.channels)
 
     def drain(slot):
         block = Value.frag(tuple(tuple(block_ops.frag(f"_c{i}_{j}") for j in range(n.reg)) for i in range(m.reg)))
@@ -2417,7 +2469,7 @@ def _fold_staged(
         merged, _, _ = evaluate(fold.combine, bindings, targets=carried)
         return [*block_ops.state(cells), *block_ops.staged_drain(operands, slot, cells, offset, mn), *merged]
 
-    extent = fold.axis.extent.as_static() if fold.axis.extent.is_static else fold.axis.extent
+    extent = fold_k.extent.as_static() if fold_k.extent.is_static else fold_k.extent
     n_chunks = (
         extent // bk
         if isinstance(extent, int)
@@ -2453,6 +2505,8 @@ def reduce_codegen(
     sched=None,
     projection: tuple = (),
     carried: dict[str, Value] | None = None,
+    k_axis: Axis | None = None,
+    axes: tuple = (),
 ):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
@@ -2460,7 +2514,7 @@ def reduce_codegen(
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns)
+    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes)
     if fold is None:
         return ops.state, ops.reduce
     if value_child is None or sched is None:
@@ -2487,7 +2541,9 @@ def fold_store_tail(tail: tuple, fold: Fold, c: _ScheduledContraction) -> tuple:
     """
     states = set(fold.combine.results)
     return tuple(
-        replace(stmt, values=tuple(value if value in states else c.acc for value in stmt.values)) if isinstance(stmt, Write) else stmt
+        replace(stmt, values=tuple(value if value in states else c.exposes[0] for value in stmt.values))
+        if isinstance(stmt, Write)
+        else stmt
         for stmt in tail
         if not stmt.pure
     )
@@ -2546,9 +2602,11 @@ def fold_store_sink(
     return store
 
 
-def store_sink(c: Fold, tile: Tile, epilogue: Body | None = None, lead: tuple = (), frag_ns: str = ""):
+def store_sink(
+    c: Fold, tile: Tile, epilogue: Body | None = None, lead: tuple = (), frag_ns: str = "", *, k_axis: Axis | None = None, axes: tuple = ()
+):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's zero-axis ``Fold`` wrapper + the store glue). A caller may replace
     the sink while reusing the shared ``reduce`` emission."""
-    return _atom_ops(c, tile, epilogue=epilogue, lead=lead, frag_ns=frag_ns).store
+    return _atom_ops(c, tile, epilogue=epilogue, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes).store

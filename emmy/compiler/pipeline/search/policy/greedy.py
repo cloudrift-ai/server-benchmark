@@ -72,6 +72,26 @@ A disqualification is itself a measurement, so the two rules above compose: the
 ``inf`` price is :attr:`Price.measured`, and a disqualified keep-fused side is
 allowed to lose whatever the winner's provenance, because an elimination has no
 magnitude for the proxy to corrupt.
+
+**One physical bound, and it is not a preference.** The kernel-set Σ
+(:func:`_resolved_price`) clamps a summand to its serial-work lower bound where
+that bound is decisively large (:data:`_SERIAL_FLOOR_ENFORCE_US`). This is the
+one exception to "no hand-written tier", and it is an exception in the same
+sense the disqualification is: not a ranking opinion but a fact no measurement
+can overrule — no thread retires 2^30 dependent-nest trips in microseconds, and
+no measurement can even EXIST at such magnitudes (the bench watchdog fires
+first), so "fix it by measuring" is unavailable exactly where the bound binds.
+A measured µs is never below the bound, so evidence always wins where evidence
+can exist.
+
+The bound composes with the competence check the same way the disqualification
+does, and for the same reason: a clamp only ever LIFTS a price, so a side
+carrying one (:attr:`Price.bound`) lost to a fact rather than to a proxy score,
+and it is allowed to lose whatever the winner's provenance. The shape that needs
+this is DeepSeek-V4 ``post4096``'s fused recomputation nest priced at its
+serial-work floor against composed-cut fragments the tune measured: mixed
+provenance, and withdrawing on that would deploy the un-servable kernel the
+bound exists to reject.
 """
 
 from __future__ import annotations
@@ -87,6 +107,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves, iter_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
+from emmy.compiler.pipeline.search.features import serial_floor_us
 
 logger = logging.getLogger(__name__)
 
@@ -239,10 +260,11 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
 
 @dataclass(frozen=True)
 class Price:
-    """One priced kernel set: its estimated µs and whether EVERY kernel in it was priced from a
-    measurement rather than a prediction.
+    """One priced kernel set: its estimated µs, whether EVERY kernel in it was priced from a
+    measurement rather than a prediction, and whether any summand was clamped to its enforced
+    serial-work bound.
 
-    The two travel together on purpose. A kernel-set comparison sums µs across different kernels,
+    The three travel together on purpose. A kernel-set comparison sums µs across different kernels,
     so it is only a latency comparison when both sides are the same quantity, and a bare ``float``
     lets a measured Σ and a predicted one meet without anything noticing — the defect the module
     docstring's competence check exists for. This type has no ``__float__`` and no ordering:
@@ -250,12 +272,30 @@ class Price:
 
     us: float
     measured: bool
+    #: Whether the Σ holds a summand :func:`_resolved_price` lifted to its serial-work lower bound
+    #: past :data:`_SERIAL_FLOOR_ENFORCE_US`. A separate fact from ``measured``: the number is not a
+    #: measurement, but it is not the proxy's opinion either — it is a floor no evidence can go
+    #: under, so it is sound wherever the side carrying it LOSES (:func:`_may_change_kernel_set`).
+    bound: bool = False
 
     @staticmethod
     def total(prices: list[Price]) -> Price:
         """Σ of a kernel set. Measured only when every summand is — one prediction anywhere makes
-        the whole sum a prediction, because it is the sum that gets compared."""
-        return Price(sum(p.us for p in prices), all(p.measured for p in prices))
+        the whole sum a prediction, because it is the sum that gets compared. Bound when ANY summand
+        is, in the same direction: one clamped kernel already puts the whole set past the floor."""
+        return Price(sum(p.us for p in prices), all(p.measured for p in prices), any(p.bound for p in prices))
+
+
+#: Enforcement guard for the serial-work bound (µs): the clamp in :func:`_resolved_price` applies
+#: only to a kernel whose bound exceeds this — 1 ms, three orders above launch overhead and three
+#: below the bench watchdog. Below it the bound sits inside the range launch overhead and memory
+#: traffic legitimately dominate, and the model's ranking (however uncalibrated) must stand;
+#: above it per-thread serial work alone makes the kernel un-servable and nothing may price it
+#: lower. The lower edge is pinned by measurement: the largest legitimate ``serial_floor_us``
+#: across the qwen3emb realization corpus family is **6.55 µs** (``sdpa-s512``'s fused kernel,
+#: 2^16 serial trips — a shape whose fused election is correct and pinned by its ``realized``
+#: replay), so 1 ms stands ~150x above the biggest bound the guard must ignore.
+_SERIAL_FLOOR_ENFORCE_US = 1e3
 
 
 def _measured_row(row: dict, ctx: Context, prior, db: object | None) -> bool:
@@ -309,7 +349,27 @@ def _resolved_price(
     measured µs, one the model decided contributes the model's ranking score. That is why the
     return carries :attr:`Price.measured` beside the Σ — the mix is not hidden any more, and the
     kernel-set comparison can refuse to run on a Σ that is part prediction rather than trusting the
-    prior to be calibrated."""
+    prior to be calibrated.
+
+    What this Σ enforces on top of that is the physical bound no calibration could relax: a summand
+    whose serial-work lower bound (:func:`~..features.serial_floor_us` — the kernel's per-thread
+    serial trips at a per-trip time conservative for any GPU clock) exceeds
+    :data:`_SERIAL_FLOOR_ENFORCE_US` is clamped to that bound. A measured µs is never below the
+    bound, so the clamp only ever lifts model garbage: the cold proxy priced DeepSeek-V4
+    ``post4096``'s fused 2^30-trip recomputation nest at 4.29e-37 µs, under every one of its
+    recomputation-free composed-cut arms, and no fitted weight can guarantee the bound at
+    magnitudes no measurement can reach. The guard is jurisdiction, not tuning: the bound ignores
+    launch overhead and memory traffic, so at ordinary magnitudes it must not adjudicate a
+    fused-vs-cut µs delta (an ungated draft flipped three qwen3emb sdpa corpus replays to a cut
+    election by comparing trip counts alone) — while a bound past the guard is un-servable
+    whatever those effects are. The guard's honest escape: a nest under ~2^23 per-thread trips
+    (bound < 1 ms; several ms real) is still adjudicated by the uncalibrated proxy, so a
+    2^23-class recomputation defect stays electable — smaller than the 2^30 class this bound
+    exists for, but not free. Sibling ranking within one kernel is decided upstream and never
+    reads this Σ, which is what makes the clamp safe here and NOT on the prior's scoring
+    surfaces (there any µs bound collapses live-range deltas — the plateau failure
+    ``latency_proxy``'s history warns about). A clamped summand marks the Σ :attr:`Price.bound`, so
+    the kernel-set comparison can tell a floor apart from both a measurement and a proxy score."""
     scored: dict[str, float | None] = {d.node_id: d.score for d in trace}
     prices: list[Price] = []
     for nid, node in terminal.nodes.items():
@@ -326,14 +386,23 @@ def _resolved_price(
             # happens not to contradict one recorded failure — measured on DeepSeek-V4's post
             # block, where it priced all 17 leaves of a fork ``inf`` and thereby decided nothing.
             # An elimination must fail safe: a failure condemns the shape that was measured.
-            if sig in failed:
+            # Exact AT THE RECORDED VOCABULARY: a candidate that agrees on every recorded fact and
+            # only ADDS stamps the featurizer has since gained is that same measured shape (the
+            # stamp derives from the same body), so a stored signature also binds as a subset —
+            # or one added ``S_*`` feature silently disables this whole tier (measured live when
+            # ``S_ext_serial_cell_work`` landed). The mirror direction stays refused, and so is
+            # an EMPTY stored signature: it is a subset of everything, so one degenerate row
+            # (an op that stamped nothing) would silently condemn every kernel in every arm.
+            if sig in failed or any(stored and stored <= sig for stored in failed):
                 return Price(math.inf, True)
         us = scored.get(nid)
         if us is None:
             us = prior.mean_scores([row])[0] if prior is not None else None
         if us is None:
             return None
-        prices.append(Price(us, _measured_row(row, ctx, prior, db)))
+        floor = serial_floor_us(knobs)
+        clamped = floor > _SERIAL_FLOOR_ENFORCE_US and floor > us
+        prices.append(Price(floor if clamped else us, _measured_row(row, ctx, prior, db), clamped))
     return Price.total(prices) if prices else Price(0.0, False)
 
 
@@ -424,17 +493,19 @@ def _may_change_kernel_set(prior, winner: Price, fused: Price | None) -> bool:
     the whole policy already degenerates to, not a µs claim, and withholding there would withhold
     the cut a fused kernel needs precisely where nothing has ever been measured.
 
-    A DISQUALIFIED keep-fused side (a measured ``inf`` — the tune watched every variant of one of
-    its kernels fail) passes on its own, whatever the other side's provenance. Nothing is being
-    arbitrated there: an elimination has no magnitude for a proxy score to corrupt, and any finite
-    alternative beats it. Withdrawing on the proxy rule would deploy the kernel the measurement
-    condemned.
+    A CONDEMNED keep-fused side passes on its own, whatever the other side's provenance, because
+    nothing is being arbitrated there — the side lost to a fact, not to a proxy score, and any
+    alternative beats it. Two facts condemn: a measured ``inf`` (the tune watched every variant of
+    one of its kernels fail), and a serial-work bound past the enforcement guard
+    (:attr:`Price.bound` — the clamp only ever lifts a price, so a side carrying one really is at
+    least that slow, whatever the proxy underneath it said). Withdrawing on the mix rule in either
+    case would deploy exactly the kernel the fact rejects.
 
     A prior with no ``trustworthy`` surface — a bare ``mean_scores`` double — is taken at its
     word."""
     if getattr(prior, "trustworthy", True) or fused is None:
         return True
-    if fused.measured and fused.us == math.inf:
+    if fused.bound or (fused.measured and fused.us == math.inf):
         return True
     return winner.measured == fused.measured
 
@@ -494,7 +565,6 @@ def _priced_pick(
     if _may_change_kernel_set(prior, best_price, min(fused, key=lambda p: p.us) if fused else None):
         return best
     return WITHDRAWN
-    return None
 
 
 # Process-wide memo for the built DB index, keyed on (db path, mtime, context key).
@@ -806,12 +876,13 @@ def _verified_index(ctx: Context) -> dict:
 
 def _is_placement_fork(fp: ForkPoint) -> bool:
     """Whether this fork decides a kernel PLACEMENT — read off the OFFER, whose arms spell the
-    family they decide: ``030_cut`` spells ``PLACE`` (``PLACE=fuse`` and one ``PLACE@<site>=cut``
+    family they decide: ``030_cut`` spells ``PLACE`` (``PLACE=fuse`` and one ``PLACE@<route>=cut``
     per offered seam), a cross-CTA split spells ``REDUCE``, a schedule fork the schedule families.
-    Not the same question as ``fp.structural``: a kernel whose every seam is provider-closed or
-    dependent offers only the FUSE arm — those seams are reachable by scoped pin alone — so the
-    fork carries no structural offer and is still a placement decision, and it is exactly the shape
-    the fused NVFP4 linears take."""
+    Not the same question as ``fp.structural``, in both directions. A cross-CTA split IS structural
+    and decides no placement, so this tier must not consult routing rows for it. And a placement
+    already restricted to FUSE by a live pin (``030_cut._placement_restriction``) offers one
+    non-structural arm still spelled ``PLACE@<route>``, which is a placement decision whose answer
+    happens to be "do not cut"."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
     return any(family_of(str(key)) == "PLACE" for option in fp.options for key in leaf_knobs(option))
@@ -820,7 +891,7 @@ def _is_placement_fork(fp: ForkPoint) -> bool:
 def _routing_pick(fp: ForkPoint, recs: list) -> tuple[object, float, dict | None] | None:
     """The verified tier's decision at a PLACEMENT fork — the card's recorded ROUTING rows.
 
-    A routing row records a whole placement: the scoped ``PLACE@<site>=cut`` pins that cut one
+    A routing row records a whole placement: the scoped ``PLACE@<route>=cut`` pins that cut one
     fused kernel into the fragment set its measurement was taken on. It names the PRE-cut kernel,
     which is exactly the identity this fork's root carries, so the ordinary join selects it.
 
@@ -833,13 +904,14 @@ def _routing_pick(fp: ForkPoint, recs: list) -> tuple[object, float, dict | None
 
     Fail-closed, and reviewed evidence only: the rows come from the repository goldens, never from
     the reservoir or the tune DB, and the composed decision is checked back against the row before
-    it is taken — every recorded ``PLACE@<site>`` must come out of the composition on the side it
+    it is taken — every recorded ``PLACE@<route>`` must come out of the composition on the side it
     was recorded on. A stale seam spelling addresses no site on this kernel, which the cut machinery
     reads as "that pin names another kernel" and quietly drops; here it means the recorded route is
     not the route being deployed, so the row warns in the drift style and decides nothing, leaving
-    the fork to pricing. The composition may add seams the row does not name — a dependent seam
-    pulls in the producers it reads — which is structural, deterministic from the recorded pins, and
-    was equally true of the run that recorded them."""
+    the fork to pricing. The check-back is one-directional on purpose: every seam the row recorded
+    must come out on its recorded side, while a seam the composition adds and the row never named is
+    accepted — it is structural, deterministic from the recorded pins, and was equally true of the
+    run that recorded them."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
     from emmy.compiler.pipeline.search.candidate import _build_rewrite_kwargs  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415

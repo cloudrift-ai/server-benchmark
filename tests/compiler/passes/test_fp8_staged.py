@@ -22,12 +22,12 @@ from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.catalog import stage_moves
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Load
 from tests.compiler.helpers import requires_cuda
+from tests.compiler.terms import contraction
 
 K16 = "mma_m16n8k16_f16_f32"
 K32 = "mma_m16n8k32_e4m3_f32"
@@ -47,10 +47,10 @@ def _node(*, a_dtype: DataType = F16, b_dtype: DataType = F8E4M3, m=512, n=4096,
     a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=a_dtype)
     b_index = (Var("n"), Var("k")) if b_trans else (Var("k"), Var("n"))
     b = Load(name="wb", input="w_bits", index=b_index, dtype=b_dtype)
-    node = Fold.contraction(k_axis=ka, a=a, channels=(Channel(b=b, acc="acc"),))
+    node = contraction(ka, a, (b, "acc"))
     b_shape = (n, k) if b_trans else (k, n)
     inputs = {"x": Tensor("x", (m, k), a_dtype), "w_bits": Tensor("w_bits", b_shape, b_dtype)}
-    return node, inputs, (Axis("m", Dim(m)), Axis("n", Dim(n)))
+    return node, inputs, (Axis("m", Dim(m)), Axis("n", Dim(n))), ka
 
 
 def _tile(atom: str, spec: str, work: str, mn):
@@ -66,10 +66,10 @@ def test_fp8_b_under_k16_atom_resolves_every_transport():
     """The W8A16 byte-B slab: cp.async AND TMA resolve for both B orientations, carrying the
     resolved ``bk_elems`` (the fp8-off spelling contract)."""
     for b_trans in (False, True):
-        node, inputs, mn = _node(b_trans=b_trans)
+        node, inputs, mn, ka = _node(b_trans=b_trans)
         tile = _tile(K16, "f4x1/k4", "w1x8", mn)
         for spec in ("d1/smem-async", "d2/smem-async", "d2/smem-tma", "d2/smem-async/p2"):
-            st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs)
+            st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs, k_axis=ka)
             assert st is not None, (b_trans, spec)
             assert st.bk_elems == tile.bk * 16
 
@@ -77,14 +77,14 @@ def test_fp8_b_under_k16_atom_resolves_every_transport():
 def test_fp8_b_slot_bytes_include_the_row_pad():
     """The cp.async byte slab budgets its padded rows: a budget that fits the dense slot but not
     the padded one must clamp the depth (the resolver and the materializer size with ONE rule)."""
-    node, inputs, mn = _node(b_trans=True)
+    node, inputs, mn, ka = _node(b_trans=True)
     tile = _tile(K16, "f4x1/k4", "w1x8", mn)
     bk = tile.bk * 16
     a_slot = tile.m.tile * bk * 2
     b_slot_padded = tile.n.tile * (bk + BYTE_SLAB_PAD)
-    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 2 * (a_slot + b_slot_padded), inputs)
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 2 * (a_slot + b_slot_padded), inputs, k_axis=ka)
     assert st is not None and st.depth == 2
-    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 2 * (a_slot + b_slot_padded) - 1, inputs)
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 2 * (a_slot + b_slot_padded) - 1, inputs, k_axis=ka)
     assert st is not None and st.depth == 1
 
 
@@ -92,45 +92,45 @@ def test_byte_staging_declines_what_it_cannot_fill():
     """The stated refusals: a non-f8 dtype mismatch, an fp8 A under a 16-bit atom, a canonical
     byte-B whose tile_n or N is not 16-divisible (the 16 B chunk / row-pad rule)."""
     # f32-stored B under a 16-bit atom: not a byte slab, not the atom dtype — decline
-    node, inputs, mn = _node(b_dtype=F32)
-    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    node, inputs, mn, ka = _node(b_dtype=F32)
+    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
     # fp8-stored A under a 16-bit atom: only B has the convert drain — decline
-    node, inputs, mn = _node(a_dtype=F8E4M3, b_dtype=F16)
-    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    node, inputs, mn, ka = _node(a_dtype=F8E4M3, b_dtype=F16)
+    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
     # canonical byte-B, tile_n = 8 (w1x1/f1x1): 16 does not divide the inner span — decline
-    node, inputs, mn = _node(n=4096)
-    assert resolve_warp_stage(node, _tile(K16, "f1x1/k4", "w1x1", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    node, inputs, mn, ka = _node(n=4096)
+    assert resolve_warp_stage(node, _tile(K16, "f1x1/k4", "w1x1", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
     # canonical byte-B whose gmem row stride N is 16-indivisible — decline
-    node, inputs, mn = _node(n=4104)
-    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    node, inputs, mn, ka = _node(n=4104)
+    assert resolve_warp_stage(node, _tile(K16, "f4x1/k4", "w1x8", mn), Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
 
 
 def test_k32_atoms_resolve_staged_byte_slabs():
     """The fp8 (k32) atoms stage both operands as byte slabs — cp.async and TMA resolve; a
     symbolic K still declines (no masked-K byte fill)."""
-    node, inputs, mn = _node(a_dtype=F8E4M3, b_dtype=F8E4M3, m=512, n=512, k=512)
+    node, inputs, mn, ka = _node(a_dtype=F8E4M3, b_dtype=F8E4M3, m=512, n=512, k=512)
     tile = _tile(K32, "f4x1/k4", "w1x8", mn)
     for spec in ("d2/smem-async", "d2/smem-tma"):
-        st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs)
+        st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs, k_axis=ka)
         assert st is not None and st.bk_elems == tile.bk * 32
     ka = Axis("k", Dim("seq"))
-    sym = Fold.contraction(
-        k_axis=ka,
-        a=Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F8E4M3),
-        channels=(Channel(b=Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3), acc="acc"),),
+    sym = contraction(
+        ka,
+        Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F8E4M3),
+        (Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3), "acc"),
     )
-    assert resolve_warp_stage(sym, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs) is None
+    assert resolve_warp_stage(sym, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
 
 
 def test_16bit_operands_resolve_exactly_as_without_dtype_info():
     """The fp8-off enumeration is unchanged: for 16-bit operands every catalog move resolves to
     the same spelling with and without the dtype info (the byte arm engages only at nbytes==1),
     so no new forks appear for the 16-bit family."""
-    node, inputs, mn = _node(b_dtype=F16)
+    node, inputs, mn, ka = _node(b_dtype=F16)
     tile = _tile(K16, "f4x1/k4", "w1x8", mn)
     for move in stage_moves(warp=True):
-        with_info = resolve_warp_stage(node, tile, move, 100 * 1024, inputs)
-        without = resolve_warp_stage(node, tile, move, 100 * 1024, None)
+        with_info = resolve_warp_stage(node, tile, move, 100 * 1024, inputs, k_axis=ka)
+        without = resolve_warp_stage(node, tile, move, 100 * 1024, None, k_axis=ka)
         assert (with_info is None) == (without is None)
         if with_info is not None:
             assert with_info.spell() == without.spell()

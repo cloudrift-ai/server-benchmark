@@ -445,7 +445,8 @@ def handle_eval_golden(args) -> None:
     """Validate one file-scoped golden corpus against the pinned serving envelope."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, consultation_counts, gap_keys, summarize  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import (  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import (
+        # noqa: PLC0415,
         GoldenFileValidation,
         load_golden_file,
         load_golden_records,

@@ -38,11 +38,8 @@ from frozendict import frozendict
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold, deep_defines, edge_free_axes, is_contraction, operand_body
-from emmy.compiler.ir.pure.normalize import normalize_lambda_body
-from emmy.compiler.ir.pure.tree import Visit, walk
+from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.packing import packed_readings
@@ -50,100 +47,21 @@ from emmy.compiler.ir.schedule.views import (
     ContractionFacts,
     EdgeSite,
     NodeId,
-    NodeView,
-    Projection,
-    Reduction,
     contraction_facts,
-    node_view,
 )
-from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Loop, Stmt, Write, pretty_body
-from emmy.compiler.ir.stmt.base import _axis_identity
-from emmy.compiler.ir.stmt.body import _member_reads
+from emmy.compiler.ir.stmt import Body, Load, Loop, OutputSpec, Stmt, Write
+from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
-from emmy.compiler.ir.tile.path import sites
-
-
-@dataclass(frozen=True)
-class OutputSpec:
-    """One output write specification at the kernel boundary — the effect the stored term no
-    longer carries. ``write`` is the store verbatim (target buffer, index template, stored value
-    names, the atomic flag — holding the ``Write`` whole keeps every field lossless), and it is
-    NOT part of the term: ``TileOp.output_specs`` owns the tuple, and consumers reconstitute the
-    effectful stmt stream via :func:`apply_output_specs`. Consecutive ``sweep`` stores on one axis ride
-    one per-cell output ``Loop`` (rms/softmax's normalize sweep, ``unroll`` preserved); the swept
-    members are the trailing projection stmts reading the axis (:func:`_sweep_start`). Conversion sites go
-    through :func:`extract_output_specs`, whose reconstitution round-trip gate is what keeps kernel
-    sources byte-identical to the stored-``Write`` era."""
-
-    write: Write
-    sweep: Axis | None = None
-    unroll: bool = False
-
-
-@dataclass(frozen=True)
-class ProjectionRegion:
-    """A pure output projection repeated over one local free axis.
-
-    A maximally fused kernel may have several sibling output loops with different extents.  Their
-    computation remains in pure lambdas while :class:`OutputSpec` owns the writes.  The region is
-    therefore structural map material, not a reduction and not an effectful Loop IR fallback.
-    """
-
-    axis: Axis
-    lift: Lambda
-    unroll: bool = False
-    pure = True
-
-    @property
-    def body(self) -> Body:
-        return self.lift.body
-
-    @property
-    def results(self) -> tuple[str, ...]:
-        """Values observed by this region's output specifications."""
-        return tuple(result for result in self.lift.results if isinstance(result, str))
-
-    def defines(self) -> tuple[str, ...]:
-        """A projection loop does not expose its per-iteration values to the enclosing scope."""
-        return ()
-
-    def deps(self) -> tuple[str, ...]:
-        return self.lift.params[1:]
-
-    def exprs(self) -> tuple:
-        return ()
-
-    def nested(self) -> tuple[Body, ...]:
-        return (self.lift.body,)
-
-    def with_bodies(self, bodies: tuple[Body, ...]) -> ProjectionRegion:
-        (body,) = bodies
-        return replace(self, lift=Lambda(self.lift.params, body, self.lift.results))
-
-    def binds_axes(self) -> frozenset[str]:
-        return frozenset({self.axis.name})
-
-    def rewrite(self, rename_ssa, sigma=None, axis_fn=None):
-        """Rename the pure region through the shared statement rewrite."""
-        return _rewrite(
-            self,
-            rename_ssa,
-            Sigma.IDENTITY if sigma is None else sigma,
-            _axis_identity if axis_fn is None else axis_fn,
-        )
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}project {self.axis.name} in 0..{self.axis.extent}", *pretty_body(self.body, indent + "    ")]
+from emmy.compiler.ir.tile.path import Site, sites
 
 
 def _sweep_start(stmts, axis_name: str) -> int:
     """The first index of the trailing projection run a ``sweep`` store's output ``Loop``
-    wraps — the earliest stmt reading the sweep axis (SSA deps + Expr free vars, deep). The
-    trailing-RUN rule (everything from that stmt on is swept) is deliberately simple; the
-    :func:`extract_output_specs` round-trip gate is what proves it reproduces the captured loop."""
+    wraps — the earliest stmt reading the sweep axis. The trailing-RUN rule (everything from that
+    stmt on is swept) is deliberately simple; the :func:`extract_output_specs` round-trip gate is
+    what proves it reproduces the captured loop."""
     for i, s in enumerate(stmts):
-        if axis_name in _member_reads(s):
+        if axis_name in free_names(s):
             return i
     return len(stmts)
 
@@ -179,66 +97,40 @@ def _splice_streamed(stmts: list, write: Write) -> bool:
         if _splice_streamed(inner, write):
             stmts[i] = stmt.with_bodies((Body(tuple(inner)),))
             return True
-        if stmt.is_reduce and values <= set().union(*(deep_defines(s) for s in inner)):
+        if stmt.is_reduce and values <= set().union(*(Body((s,)).ssa_defs for s in inner)):
             stmts[i] = stmt.with_bodies((Body((*inner, write)),))
             return True
     return False
 
 
-def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> list[Stmt]:
-    """Reassemble the EFFECTFUL projection stmt stream from a pure projection body + the
-    kernel-boundary output specifications — the ONE reconstitution rule the scheduler's tail gates, the
-    materializer's zero-axis ``Fold`` peel and ``030_cut`` share, so the lowered kernels stay
-    byte-identical to the stored-``Write`` era. A plain store appends its ``Write``; consecutive
-    ``sweep`` stores on one axis wrap the trailing run of stmts reading that axis
-    (:func:`_sweep_start`) into one per-cell output ``Loop``, with the ``Write`` run last."""
-    specs = tuple(specs)
-    claimed: set[int] = set()
-
-    def expand(body) -> list:
-        out = []
-        for stmt in body:
-            if not isinstance(stmt, ProjectionRegion):
-                out.append(stmt)
-                continue
-            inner = expand(stmt.body)
-            results = set(stmt.results)
-            owned = [spec for spec in specs if set(spec.write.values) <= results]
-            claimed.update(id(spec) for spec in owned)
-            inner.extend(spec.write for spec in owned)
-            out.append(Loop(axis=stmt.axis, body=Body(inner), unroll=stmt.unroll))
-        return out
-
-    out = expand(stmts)
-    stores = [spec for spec in specs if id(spec) not in claimed]
+def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> Body:
+    """Reassemble the EFFECTFUL stmt stream from a pure statement STREAM + the kernel-boundary
+    output specifications — the materializer's spelling, where the grid binds every free axis
+    and nothing is a term: a store appends as the kernel tail, consecutive ``sweep`` stores on one
+    axis wrap the trailing run of stmts reading that axis (:func:`_sweep_start`) into one per-cell
+    output ``Loop``, and a store over OBSERVED values streams into its reduce loop when that loop
+    is present. The ONE reconstitution rule the scheduler's tail gates, the materializer's
+    zero-axis ``Fold`` peel and ``030_cut`` share, so the lowered kernels stay byte-identical to
+    the stored-``Write`` era. A TERM places its stores itself (:meth:`Fold.lower`)."""
+    out = list(stmts)
+    stores = list(specs)
     index = 0
     while index < len(stores):
         st = stores[index]
         if st.sweep is None:
-            # A store over OBSERVED values streams into its reduce loop when the loop is present
-            # (a lowered kernel body); at term level — the fold not yet a ``Loop`` — it keeps its
-            # post-node position, which is also where extraction's round-trip gate expects it.
+            # At term level — the fold not yet a ``Loop`` — an observed store keeps its post-node
+            # position, which is also where extraction's round-trip gate expects it.
             if not (observed and set(st.write.values) <= observed and _splice_streamed(out, st.write)):
                 out.append(st.write)
             index += 1
             continue
         end = index + 1
-        while end < len(stores) and stores[end].sweep == st.sweep and stores[end].unroll == st.unroll:
+        while end < len(stores) and stores[end].sweep == st.sweep:
             end += 1
         start = _sweep_start(out, st.sweep.name)
-        writes = tuple(store.write for store in stores[index:end])
-        out = [*out[:start], Loop(axis=st.sweep, body=Body((*out[start:], *writes)), unroll=st.unroll)]
+        out = [*out[:start], Loop(axis=st.sweep, body=Body((*out[start:], *(store.write for store in stores[index:end]))))]
         index = end
-    return out
-
-
-def _projection_results(body) -> set[str]:
-    out = set()
-    for member in body:
-        if isinstance(member, ProjectionRegion):
-            out.update(member.results)
-            out.update(_projection_results(member.body))
-    return out
+    return Body(tuple(out))
 
 
 def _dense_axis_suffix(index: tuple, name: str) -> bool:
@@ -295,120 +187,56 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
     return Axis("_um", Dim(1))
 
 
-def lower_with_output_specs(op, specs) -> list[Stmt]:
-    """Lower one pure Tile term and attach every output specification at its owning scope."""
-    specs = tuple(specs)
-
-    def lower_body(body) -> list[Stmt]:
-        out = []
-        for member in body:
-            if isinstance(member, Fold):
-                out.extend(member.lower())
-                continue
-            if isinstance(member, ProjectionRegion):
-                inner = lower_body(member.body)
-                results = set(member.results)
-                inner.extend(spec.write for spec in specs if set(spec.write.values) <= results)
-                out.append(Loop(axis=member.axis, body=Body(inner), unroll=member.unroll))
-                continue
-            out.append(member)
-        return out
-
-    if isinstance(op, Fold) and op.axis is None:
-        body = [*(stmt for edge in op.operands for stmt in operand_body(edge)), *lower_body(op.body)]
-        root_specs = tuple(spec for spec in specs if not set(spec.write.values) <= _projection_results(op.body))
-        return apply_output_specs(body, root_specs, observed=observed_result_names(op))
-    return apply_output_specs(op.lower(), specs, observed=observed_result_names(op))
-
-
 def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...]] | None:
     """Split an effectful projection stmt stream into ``(pure stmts, OutputSpec decorations)`` — the
     conversion-side inverse of :func:`apply_output_specs`, valid ONLY when the reconstitution
-    round-trips byte-identically (checked here; ``None`` otherwise). It handles flat root writes, the
-    legacy single output sweep, and recursively nested sibling output loops. Each sibling loop becomes a
-    pure :class:`ProjectionRegion`; every write becomes an :class:`OutputSpec`. An already-pure stream
-    returns ``(stmts, ())``."""
-    original = list(stmts)
+    round-trips byte-identically (checked here; ``None`` otherwise). The trailing run of root
+    ``Write`` stmts and output loops splits off: a write is a plain spec, an output loop (a non-reduce
+    ``Loop`` whose writes end its body — sibling sweeps included) gives one ``sweep`` spec per write
+    over its axis, its pure prefix rejoining the stream. An already-pure stream returns
+    ``(stmts, ())``."""
+    original = tuple(stmts)
     rest = list(stmts)
     stores: list[OutputSpec] = []
-    while rest and isinstance(rest[-1], Write):
-        stores.insert(0, OutputSpec(write=rest.pop()))
-    if not stores and rest and isinstance(rest[-1], Loop) and not rest[-1].is_reduce:
-        loop = rest[-1]
-        inner = list(loop.body)
-        writes = []
-        while inner and isinstance(inner[-1], Write):
-            writes.insert(0, inner.pop())
-        if writes and all(s.pure for s in inner):
-            stores.extend(OutputSpec(write=write, sweep=loop.axis, unroll=loop.unroll) for write in writes)
-            rest = [*rest[:-1], *inner]
+    while rest:
+        last = rest[-1]
+        if isinstance(last, Write):
+            stores.insert(0, OutputSpec(write=rest.pop()))
+            continue
+        if isinstance(last, Loop) and not last.is_reduce:
+            inner = list(last.body)
+            writes: list[Write] = []
+            while inner and isinstance(inner[-1], Write):
+                writes.insert(0, inner.pop())
+            if writes and all(s.pure for s in inner):
+                stores[0:0] = [OutputSpec(write=write, sweep=last.axis) for write in writes]
+                rest = [*rest[:-1], *inner]
+                continue
+        break
     if all(s.pure for s in rest) and apply_output_specs(rest, stores) == original:
         return tuple(rest), tuple(stores)
-
-    def extract(body: Body) -> tuple[Body, list[OutputSpec], list[OutputSpec]] | None:
-        pure = []
-        outputs: list[OutputSpec] = []
-        direct: list[OutputSpec] = []
-        for stmt in body:
-            if isinstance(stmt, Write):
-                spec = OutputSpec(write=stmt)
-                outputs.append(spec)
-                direct.append(spec)
-                continue
-            if isinstance(stmt, Loop) and not stmt.is_reduce:
-                child = extract(stmt.body)
-                if child is None:
-                    return None
-                child_body, child_outputs, child_direct = child
-                results = tuple(dict.fromkeys(value for spec in child_direct for value in spec.write.values))
-                # A write may store a value captured from the enclosing scope unchanged (a sweep
-                # broadcasting an already-reduced accumulator, ``o[j] = acc``). Such a result is
-                # not a body def, so probe free names with results left off, then bind captured
-                # results as params alongside the body's own free reads.
-                probe = Lambda(params=(stmt.axis.name,), body=child_body, results=())
-                captured_results = tuple(value for value in results if value not in probe.defined)
-                captures = tuple(sorted(probe.free_names() | set(captured_results)))
-                region = ProjectionRegion(
-                    axis=stmt.axis,
-                    lift=Lambda(params=(stmt.axis.name, *captures), body=child_body, results=results),
-                    unroll=stmt.unroll,
-                )
-                pure.append(region)
-                outputs.extend(child_outputs)
-                continue
-            if not stmt.pure:
-                return None
-            pure.append(stmt)
-        return Body(pure), outputs, direct
-
-    extracted = extract(Body.coerce(stmts))
-    if extracted is None:
-        return None
-    body, outputs, _ = extracted
-    if _construction_normalized(apply_output_specs(body, outputs)) != _construction_normalized(original):
-        return None
-    return tuple(body), tuple(outputs)
+    return None
 
 
-def _construction_normalized(stmts) -> list[Stmt]:
-    """Both sides of the round-trip gate, under the construction canonicalization — a COMPARATOR.
+def _index_reads(edge: Fold):
+    """Every gmem index expression read under ``edge``: its own slab or inline loads, then its operands'."""
+    reads = [edge.as_slab().load] if edge.as_slab() is not None else [stmt for stmt in edge.lift.body if isinstance(stmt, Load)]
+    yield from (index for load in reads for index in load.index)
+    for operand in edge.operands:
+        yield from _index_reads(operand)
 
-    A :class:`ProjectionRegion` stores its body in a ``Lambda``, whose construction canonicalizes
-    statement order and commutative arguments (``normalize_lambda_body``), so reconstitution
-    returns the canonical spelling while the captured stream is raw. Gating on byte-identity with
-    the raw stream rejected any input the canonicalization reorders — a semantics-preserving
-    reorder, surfacing as a hard "cannot be represented" compile failure. The gate instead maps
-    BOTH streams through the same canonicalization, recursively into every loop body: the order
-    is dependency-respecting and canonical (not input-stable), so two spellings of one stream
-    converge, and two genuinely different streams still differ. A stream already in canonical
-    form maps to itself, so byte-identity holds exactly where it held before."""
-    out: list[Stmt] = []
-    for stmt in normalize_lambda_body(Body.coerce(tuple(stmts))):
-        bodies = stmt.nested()
-        if bodies and isinstance(stmt, Loop):
-            stmt = replace(stmt, body=Body(tuple(_construction_normalized(stmt.body))))
-        out.append(stmt)
-    return out
+
+def _partitions_the_reduction(edge: Fold, axis: str, coord: str) -> bool:
+    """Whether every read of ``coord`` under ``edge`` composes it with ``axis`` in one index
+    expression — a partition of the reduction (``x[p·bk + k]``), never a dimension of its own."""
+    return all(axis in index.free_vars() for index in _index_reads(edge) if coord in index.free_vars())
+
+
+def _reads_move_with(edge: Fold, coord: str, ctx: SimplifyCtx) -> bool:
+    """Whether some read under ``edge`` still depends on ``coord`` once its index simplifies under
+    the kernel's extents — a merged weight's reshape residue ``((m·1024 + n) / 128 % 8) · 128 + …``
+    folds ``m`` away, a grouped address ``m·H·D + …`` does not."""
+    return any(coord in index.simplify(ctx).free_vars() for index in _index_reads(edge) if coord in index.free_vars())
 
 
 @dataclass(frozen=True)
@@ -440,6 +268,10 @@ class TileOp(Op):
     op: object = None
     name: str = ""
     place: Placement = field(default_factory=Placement)
+    # The kernel's AXIS TABLE — the extent and window of every axis the term binds or reads: the
+    # free axes, each reduce axis, a split's slice and partition, a sweep. The term itself carries
+    # names only; this is the domain it is evaluated on, and ``Fold.lower`` takes it whole.
+    axes: tuple[Axis, ...] = ()
     workers: WarpSpec | None = None
     # The accepted semantic assignment and its derived lowering facts. Unscheduled Tile IR carries
     # neither; scheduling installs both together.
@@ -466,33 +298,24 @@ class TileOp(Op):
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)
-        scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
-        axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
-        free_names = {axis.name for axis in self.place.free}
-        sweep_axes = frozenset(name for name in axes if name not in free_names)
-        normalized = normalize_fold_tree(self.op, axes, sweep_axes=sweep_axes)
+        normalized = normalize_fold_tree(self.op)
+        # A matrix row Loop IR elided at extent one is restored as a free axis when the stores
+        # prove it and the tree holds a contraction to orient on it (:func:`_implicit_unit_row`).
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
-        if unit_row is not None:
-            candidate_free = (unit_row, *self.place.free)
-            candidate_scope = (*candidate_free, *(store.sweep for store in self.output_specs if store.sweep is not None))
-            candidate_axes = tuple(dict.fromkeys(axis.name for axis in candidate_scope))
-            candidate_sweeps = frozenset(name for name in candidate_axes if name not in {axis.name for axis in candidate_free})
-            candidate = normalize_fold_tree(self.op, candidate_axes, implicit_axes=(unit_row.name,), sweep_axes=candidate_sweeps)
-            if any(is_contraction(site.node) for site in sites(candidate)):
-                normalized = candidate
-                object.__setattr__(self, "place", replace(self.place, free=candidate_free))
+        if unit_row is not None and any(site.node.as_contraction() is not None for site in sites(normalized)):
+            object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
         if self.schedule is not None and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
-        contractions = tuple(site.node for site in sites(normalized) if is_contraction(site.node))
+        contractions = tuple(site.node for site in sites(normalized) if site.node.as_contraction() is not None)
         promoted = {
             store.sweep.name
             for store in self.output_specs
-            if store.sweep is not None
-            and any(any(store.sweep.name in edge_free_axes(edge) for edge in con.operands) for con in contractions)
+            if store.sweep is not None and any(any(store.sweep.name in edge.free_axes for edge in con.operands) for con in contractions)
         }
         if not promoted:
+            self._own_axes()
             self._validate_schedule()
             return
         free_names = {axis.name for axis in self.place.free}
@@ -518,17 +341,28 @@ class TileOp(Op):
                 for store in self.output_specs
             ),
         )
-        # Promotion changes the enclosing-axis context that closes computed contraction operands.
-        # Normalize once under the final scope so reconstructing this TileOp cannot expose a
-        # different Fold tree or placement seam.
-        scope_axes = (*self.place.free, *(store.sweep for store in self.output_specs if store.sweep is not None))
-        final_axes = tuple(dict.fromkeys(axis.name for axis in scope_axes))
-        final_sweeps = frozenset(name for name in final_axes if name not in {axis.name for axis in self.place.free})
-        renormalized = normalize_fold_tree(self.op, final_axes, sweep_axes=final_sweeps)
-        if self.schedule is not None and renormalized != self.op:
-            raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
-        object.__setattr__(self, "op", renormalized)
+        self._own_axes()
         self._validate_schedule()
+
+    def _own_axes(self) -> None:
+        """The kernel owns its axis table, COMPLETE by construction: the free axes' extents are the
+        placement's and join the table here; every reduce axis the term binds and every store
+        sweep must already be in it. The term carries names only, so a reader resolving a name the
+        table lacks would fail long after the site that dropped it — the cut piece that forgot a
+        traced reduce axis surfaced as ``lower: no extent`` under the greedy's pricing."""
+        if self.op is None:
+            return
+        table = {axis.name: axis for axis in self.axes}
+        for axis in self.place.free:
+            table.setdefault(axis.name, axis)
+        needed = {site.node.axis for site in sites(self.op) if site.node.axis is not None}
+        needed |= {spec.sweep.name for spec in self.output_specs if spec.sweep is not None}
+        if missing := needed - table.keys():
+            raise ValueError(
+                f"TileOp {self.name!r}: the axis table has no extent for {sorted(missing)} — "
+                "every reduce axis the term binds and every store sweep is the kernel's to hold"
+            )
+        object.__setattr__(self, "axes", tuple(table.values()))
 
     def _validate_schedule(self) -> None:
         """Enforce the schedule/materialization boundary on construction."""
@@ -542,21 +376,20 @@ class TileOp(Op):
         validate(self.schedule, self, place=self.place, workers=self.workers)
 
     @cached_property
-    def sites(self) -> tuple[Visit, ...]:
+    def sites(self) -> tuple[Site, ...]:
         """The ONE walk over this kernel's term, one record per node identity, indexed by node id.
 
-        Every structural reading is a FIELD of these records — the node, the parent that reached
-        it, the axes in scope there, its segment path, whether it is derived evaluation — so the
-        walk runs once per kernel and nothing re-derives a label it already carries. Those labels
-        are POSITIONS in this kernel's tree, which is why they live here and never on the shared
-        subterms the tree is built from: one Fold reached down two paths has two parents, and keeps
-        the first that reached it.
+        Every structural reading is a FIELD of these records — the node, the axes in scope there,
+        its segment path — so the walk runs once per kernel and nothing re-derives a label it
+        already carries. Those labels are POSITIONS in this kernel's tree, which is why they live
+        here and never on the shared subterms the tree is built from: one Fold reached down two
+        paths keeps the first position that reached it.
         """
         out, seen = [], set()
-        for visit in walk(self.op) if isinstance(self.op, Fold) else ():
-            if id(visit.node) not in seen:
-                seen.add(id(visit.node))
-                out.append(visit)
+        for site in sites(self.op) if isinstance(self.op, Fold) else ():
+            if id(site.node) not in seen:
+                seen.add(id(site.node))
+                out.append(site)
         return tuple(out)
 
     @cached_property
@@ -589,18 +422,41 @@ class TileOp(Op):
         return frozendict({site: tuple(edges) for site, edges in out.items()})
 
     @cached_property
-    def views(self) -> tuple[NodeView, ...]:
-        """Each node site classified as a projection or a reduction, without target input.
+    def views(self) -> tuple[Fold, ...]:
+        """The TERM at each node site — a term is its own classification.
 
-        Indexed BY node id, which is a dense ordinal — a tuple, not a map keyed by the integers it
-        is already ordered by.
+        ``axis is None`` is the projection reading, :meth:`Fold.as_contraction` the bilinear one,
+        so a wrapper kind restating them bought nothing. Indexed BY node id, which is a dense
+        ordinal — a tuple, not a map keyed by the integers it is already ordered by.
         """
-        return tuple(node_view(site.node) for site in self.sites)
+        return tuple(site.node for site in self.sites)
 
     def contracts(self, site: NodeId) -> bool:
-        """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want."""
-        view = self.views[site]
-        return isinstance(view, Reduction) and view.contraction is not None
+        """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want.
+
+        A bilinear pair with a role-less side qualifies only while every coordinate it shares with
+        the other side is one no tile strides: a split-K partition (it only ever composes with the
+        reduction index) or a reshape residue the other side's reads are value-dead in under this
+        kernel's extents. A B that changes with the row it is contracted against — a storage-decode scale
+        read per row, a grouped weight addressed by the row — is no slab per tile."""
+        node = self.views[site]
+        view = node.as_contraction()
+        if view is None:
+            return False
+        if not view.shared_axes or (view.left_axes and view.right_axes):
+            return True
+        roleless, roled = (node.operands[0], node.operands[1]) if not view.left_axes else (node.operands[1], node.operands[0])
+        return all(
+            _partitions_the_reduction(roleless, view.axis, coord) or not _reads_move_with(roled, coord, self._simplify_ctx())
+            for coord in view.shared_axes
+        )
+
+    def _simplify_ctx(self) -> SimplifyCtx:
+        """This kernel's axis extents as ranges — what a value-dead index residue folds under. A
+        symbolic extent contributes non-negativity alone, which is what the residue's divisions need."""
+        return SimplifyCtx(
+            ranges={axis.name: Interval(0, axis.extent.as_static() - 1 if axis.extent.is_static else 2**31 - 1) for axis in self.axes}
+        )
 
     @cached_property
     def family_sites(self) -> frozendict[str, tuple[NodeId, ...]]:
@@ -614,10 +470,9 @@ class TileOp(Op):
                 "TILE": tuple(
                     site
                     for site in self.node_sites
-                    if self.contracts(site)
-                    or (isinstance(self.views[site], Projection) and site == 0 and not self.sites[site].node.operands)
+                    if self.contracts(site) or (self.views[site].axis is None and site == 0 and not self.sites[site].node.operands)
                 ),
-                "REDUCE": tuple(site for site in self.node_sites if isinstance(self.views[site], Reduction)),
+                "REDUCE": tuple(site for site in self.node_sites if self.views[site].axis is not None),
             }
         )
 
@@ -628,7 +483,7 @@ class TileOp(Op):
 
     @cached_property
     def _packed_readings(self) -> frozendict:
-        return packed_readings(tuple(site.node for site in self.sites if is_contraction(site.node)), self.inputs)
+        return packed_readings(tuple(site.node for site in self.sites if site.node.as_contraction() is not None), self.inputs)
 
     def packed_reading(self, node) -> tuple:
         """One node's ``(B copy, pair)`` packed-operand readings.
@@ -656,22 +511,35 @@ class TileOp(Op):
     @cached_property
     def loop_body(self) -> Body | None:
         """The complete schedule-free Loop-IR body this kernel executes, derived from the term
-        — what the identity lattice digests. The free grid axes wrap back
-        as plain loops around the ONE lowering spelling (:func:`lower_with_output_specs` —
-        ``Fold.lower()`` with every output specification attached at its owning scope), so the
-        extents, the store program (index spelling, ``atomicAdd``, width, output sweeps) and a
-        cut child's typed seam ``Load`` are all in the body. Schedule-free by construction:
-        ``lower`` never reads the classic assignment, and ``place``'s grid BINDING stays out (an
-        axis's launch coordinate is execution choice, not identity). A bare reduction carries no
-        ``Write`` — its grid-cell store is materializer glue derived from ``place.grid``, so the
-        empty store stream is itself derivable. Cached: the term and the kernel-boundary fields
-        are immutable across the schedule search. ``None`` for a placeholder."""
+        — what the identity lattice digests. The closed program: ``Fold.lower`` with nothing bound
+        and the boundary stores handed in, so the term binds every free coordinate with its own
+        loops (their extents the placement's, handed in — a term carries none for the coordinates
+        it reads) and places each store after the term defining its value — the extents, the store
+        program (index spelling, ``atomicAdd``, width, output sweeps) and a cut child's typed seam
+        ``Load`` are all in the body. Schedule-free by construction: ``lower`` never reads the
+        classic assignment, and ``place`` stays out entirely — which coordinates the grid binds,
+        and in what order the source nest spelled them, is execution choice, not identity. A bare
+        reduction carries no ``Write`` — its grid-cell store is materializer glue derived from
+        ``place.grid``, so the empty store stream is itself derivable. Cached: the term and the
+        kernel-boundary fields are immutable across the schedule search. ``None`` for a
+        placeholder."""
         if self.op is None:
             return None
-        stmts: list = lower_with_output_specs(self.op, self.output_specs)
-        for axis in reversed(self.place.free):
-            stmts = [Loop(axis=axis, body=Body(stmts))]
-        return Body.coerce(stmts)
+        # A grid axis only the stores read — a pointwise cell indexed by its coordinate, nothing
+        # evaluated over it — is the kernel's to bind: the term opens every coordinate it declares
+        # and those loops wrap outside, in grid order.
+        glue = tuple(axis for axis in self.place.free if axis.name not in self.op.free_axes)
+        body = self.op.lower(frozenset(axis.name for axis in glue), self.output_specs, self.axes)
+        for axis in reversed(glue):
+            body = Body((Loop(axis=axis, body=body),))
+        return body
+
+    def axis_of(self, name: str) -> Axis:
+        """The axis table's entry for ``name`` — a reduce axis's extent and window, a free axis's extent."""
+        try:
+            return next(axis for axis in self.axes if axis.name == name)
+        except StopIteration:
+            raise KeyError(f"axis {name!r} is not in this kernel's axis table {[axis.name for axis in self.axes]}") from None
 
     def _body_identity(self, *, structural: bool = True) -> str | None:
         """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s
@@ -684,24 +552,8 @@ class TileOp(Op):
 
 __all__ = [
     "OutputSpec",
-    "ProjectionRegion",
     "TileOp",
     "apply_output_specs",
     "extract_output_specs",
-    "lower_with_output_specs",
     "observed_result_names",
 ]
-
-
-from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
-
-
-@_rewrite.register
-def _(region: ProjectionRegion, rename, sigma, axis_fn):
-    axis = axis_fn(region.axis)
-    lift = Lambda(
-        params=(axis.name, *(rename(param) for param in region.lift.params[1:])),
-        body=Body(_rewrite(stmt, rename, sigma, axis_fn) for stmt in region.body),
-        results=tuple(rename(result) if isinstance(result, str) else result for result in region.lift.results),
-    )
-    return replace(region, axis=axis, lift=lift)

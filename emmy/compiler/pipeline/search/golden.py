@@ -14,7 +14,7 @@ import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import cached_property
 from numbers import Real
@@ -773,8 +773,12 @@ def _target_kernel_nodes(record: GoldenRecord):
 
 
 def _lifted_target(record: GoldenRecord):
-    """Lift the record's single selected kernel to Tile IR."""
+    """Lift the record's single selected kernel to Tile IR — the tree the cut pass schedules: the
+    lift, then the twist rewrite, exactly as ``lowering/tile`` runs them. A placement key is
+    spelled on that tree, so decoding it against the lift alone would name sites the fused
+    single-pass carrier no longer has."""
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
 
     lowered, nodes = _target_kernel_nodes(record)
     if len(nodes) != 1:
@@ -782,10 +786,13 @@ def _lifted_target(record: GoldenRecord):
     node = nodes[0]
     node.op = node.op.with_io(lowered, node)
     tile = lift_loop_op(node.op, name=node.id)
+    tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
     # A fork's root op is always matcher-refreshed (``_match_at`` runs ``with_io`` on every matched
     # node before the rule that offers the fork), so the record side mirrors the io through that
     # same call rather than a hand-rolled map: a multi-output kernel — an NVFP4 re-encode emits
-    # packed codes beside their block scales — is bound to every one of the node's output buffers.
+    # packed codes beside their block scales — is bound to every one of the node's output buffers,
+    # and the dtype half of the deploy identity (``identity_key(with_io=True)``) reads the same
+    # output fingerprint on both sides.
     return tile.with_io(lowered, node)
 
 
@@ -812,15 +819,9 @@ def decode_record(record: GoldenRecord) -> str | None:
         if not record.is_receipt:
             return _remember_verdict(verdict_key, f"{type(exc).__name__}: {exc}")
     if record.is_routing:
-        from dataclasses import replace  # noqa: PLC0415
-
         from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
         from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
-        from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
 
-        axes = [axis.name for axis in tile.place.free]
-        axes.extend(store.sweep.name for store in tile.output_specs if store.sweep is not None)
-        tile = replace(tile, op=rewrite_twisted(tile.op, axes))
         seams = cuttable_seams(tile)
         seam_ids = {id(seam.node) for seam in seams}
         all_sites = sites(tile.op)

@@ -637,7 +637,7 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
 
     Exact coverage is problem-dependent and is enforced by :class:`ClassicScheduleCodec` at leaf
     construction. This recording boundary enforces the context-free half: kernel families are
-    bare, node families may be bare or use canonical node sites, and at least one node assignment
+    bare, node families may be bare or carry their site's route, and at least one node assignment
     is present.
     """
     out = dict(tuning_knob_items(knobs))
@@ -648,7 +648,7 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
             raise ValueError(
                 f"complete classic schedule row is missing {', '.join(sorted(missing))}; present keys: {', '.join(out) or '<none>'}"
             )
-        from emmy.compiler.ir.schedule.classic import parse_node_id  # noqa: PLC0415
+        from emmy.compiler.ir.tile.path import parse_key  # noqa: PLC0415
 
         node_keys = []
         for key in out:
@@ -661,9 +661,9 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
                 continue
             if separator:
                 try:
-                    parse_node_id(site)
+                    parse_key(key)
                 except ValueError:
-                    raise ValueError(f"classic schedule key {key!r} is not canonical; expected {family}@n<ordinal>") from None
+                    raise ValueError(f"classic schedule key {key!r} is not canonical; expected {family}@<route>") from None
             if family in {"TILE", "REDUCE"}:
                 node_keys.append(key)
         if not node_keys:

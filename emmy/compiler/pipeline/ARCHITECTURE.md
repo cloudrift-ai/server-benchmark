@@ -404,6 +404,19 @@ is reached only by pointing `EMMY_OFFLINE_FILE` (or `--offline-file`) at it. Eac
 `provenance.scope`; read that before drawing conclusions from one, because a scoped artifact has no reason to beat
 the shipped weights outside the slice it was fit on.
 
+The proxy stays uncalibrated, and the one consumer that needs absolute µs enforces a physical bound instead: in
+the kernel-set Σ (`policy/greedy._resolved_price`), a summand whose serial-work lower bound
+(`features.serial_floor_us` — the row's per-thread serial trips, i.e. the nest-aware `S_ext_serial_cell_work`
+stamp after its reduce-partition coverage, at a per-trip constant conservative for any GPU clock) exceeds the
+enforcement guard (`_SERIAL_FLOOR_ENFORCE_US`, 1 ms) is clamped to that bound. No fitted weight can guarantee the bound at magnitudes no measurement
+can reach: DeepSeek-V4 `post4096`'s fused 2^30-trip recomputation nest priced 4.29e-37 µs and beat every
+recomputation-free composed-cut arm until the bound priced it honestly. The guard is jurisdiction, not tuning —
+the bound ignores launch overhead and memory traffic, so at ordinary magnitudes the model's ranking stands
+untouched, while a bound past the guard is un-servable whatever those effects are. A measured µs is never below
+the bound, so the clamp only ever lifts model garbage; the prior's own scoring surfaces are untouched, because
+any µs bound there collapses live-range sibling deltas — the plateau failure `latency_proxy`'s history warns
+about. (`D_serial_cell_work`, the same quantity log-scaled, rides the featurization as an ordinary fit signal.)
+
 What a newcomer needs to know about the fit:
 
 - **The fit optimizes the deployed score itself, not a linear stand-in for it.** Both sides go through one
@@ -522,8 +535,8 @@ prior, never a preference written into a pass or into this policy.
    routing rows (`_routing_pick`). A routing row names the PRE-CUT kernel, which is the identity the fork's root
    carries, and it is APPLIED the way `compile --golden` applies `golden_target_pins`: its pins are published and the
    fork's own rule re-asked, so `030_cut._pin` composes the multi-seam route itself. The tier never re-derives which
-   offered arms add up to a recorded route — the arms are per-seam, the route is a set, and the fused NVFP4 linears
-   route through seams no unpinned arm even offers (a provider-closed seam is scoped-pin-only). Reviewed evidence
+   offered arms add up to a recorded route: the arms are per-seam and a route is a set of them, so re-deriving one
+   means guessing which subset was measured — the fuzzy acceptance this tier exists to avoid. Reviewed evidence
    only: reservoir and tune-DB placement rows never deploy. Fail-closed: the composed decision is checked back
    against the row and every recorded seam must come out of it on the side it was recorded on, so a stale spelling —
    which the cut machinery would otherwise drop as naming another kernel — warns and leaves the fork to pricing.
@@ -1319,7 +1332,8 @@ every realization. Missing, one-sided, zero, NaN, infinite measurements, and ran
 they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
 the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
 A promoted classic row is already complete: bare `WORK` and `RASTER`, with `TILE`, `REDUCE`, and `STAGE` bare when
-their family has one applicable node and `@n<N>`-qualified only when the family is ambiguous. `STAGE` records one
+their family has one applicable node and route-qualified (`TILE@map.1/inner`) only when the family is ambiguous.
+`STAGE` records one
 transport choice per consumer node, including an explicit empty direct choice. Promotion rejects incomplete rows,
 aliases, and unknown sites. It never fills or repairs a recording.
 
@@ -1532,10 +1546,11 @@ comparing two fits is running the same eval against two files and diffing the re
 ## Part 9: Tile lowering at the pipeline level
 
 `lowering/tile/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer parallel
-axes and mechanically lifts every inner reduction as a nested `Fold`; `TileOp` construction then canonicalizes the
-complete tree, including maximal pure operand-cone factoring for semiring contractions, canonical shared-argument
-orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. Pure projection regions remain
-in the term, while their writes live as `OutputSpec`s at the `TileOp` boundary.
+axes and mechanically lifts every inner reduction as a nested `Fold`; each term orients a bilinear lift A-first at
+formation, and `TileOp` construction canonicalizes the complete tree — an identity projection dissolves into its
+operand, same-value cones become one shared object. No Tile IR classifier runs. An output loop's per-cell
+projection is a zero-axis term evaluated over its sweep axis, while its writes live as `OutputSpec`s at the `TileOp`
+boundary.
 
 `020_twisted` rewrites the exp-family composition over that canonical tree. The single `030_cut` pass reaches a
 fixpoint over two ordered domains: it offers the maximal tree and every semantically closed stored child-Fold seam
@@ -1707,7 +1722,8 @@ Structural choices finish before the `TileOp` indexes its Fold root. Each shared
 one preorder integer id; every consumer operand position gets a distinct `(consumer id, operand position)` tuple, even
 when two edges reach the same producer. The strict codec spells kernel choices as bare `WORK` / `RASTER`. `TILE`,
 `REDUCE`, and `STAGE` are also
-bare when their family has one applicable consumer node; only an ambiguous family uses `@n<N>`. `STAGE` is one
+bare when their family has one applicable consumer node; only an ambiguous family carries the site's route
+(`TILE@map.1/twist.1/inner`, the placement grammar). `STAGE` is one
 transport decision shared by the applicable operand edges at that consumer. Empty direct values remain explicit, so
 every leaf has the same key vocabulary.
 

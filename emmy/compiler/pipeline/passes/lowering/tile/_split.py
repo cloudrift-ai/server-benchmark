@@ -36,23 +36,14 @@ from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.algebra import component_ops
-from emmy.compiler.ir.pure.fold import Fold, deep_defines, deep_reads, edge_free_axes, is_contraction
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
-from emmy.compiler.ir.tile import (
-    OutputSpec,
-    Placement,
-    TileOp,
-    extract_output_specs,
-    lower_with_output_specs,
-)
-from emmy.compiler.ir.tile.ir import apply_output_specs
-from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_tail
-from emmy.compiler.ir.tile.path import sites
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row
@@ -120,13 +111,13 @@ def atomic_finalize(node: Fold, tail, outputs) -> str | None:
     possible divergence is OVER-refusal at the offer (a sibling region's non-distributive stmt
     refusing an atomic the owned region could carry) — safe, since a withheld atomic row leaves
     the deferred finalize, never a crash past an offer the realizer cannot honor."""
-    states = tuple(node.combine.results)
+    states = node.combine.results
     if len(states) != 1:
         return (
             f"atomic REDUCE folds ONE additive state component; this carrier has {len(states)} "
             f"({', '.join(states)}) — use the deferred f32 workspace finalize (REDUCE=g<n>k)"
         )
-    ops = component_ops(node.combine)
+    ops = node.as_reduction().ops
     if ops is None or ops[0].name != "add":
         plus = "a twisted combine" if ops is None else f"⊕ = {ops[0].name}"
         return f"atomic REDUCE emits atomicAdd, which folds only an ADDITIVE carrier; this one has {plus} — use REDUCE=g<n>k"
@@ -148,6 +139,17 @@ def _enforce(reason: str | None) -> None:
         raise ValueError(reason)
 
 
+def _reducing_roots(op: Fold) -> tuple[Fold, ...]:
+    """The DISTINCT reducing roots a projection's operands carry — the head fold reached through
+    its epilogue and again as a shared operand is one root, and a provider term carries none."""
+    out: list[Fold] = []
+    for edge in op.operands:
+        root = projection_root(edge)
+        if root is not None and all(root is not seen for seen in out):
+            out.append(root)
+    return tuple(out)
+
+
 def _projection_refusal(tile: TileOp, node) -> str | None:
     """Why the kernel's projection cannot survive a split of ``node`` (``None`` when it can) — the
     MIMO decomposition the realizer performs, asked at the OFFER so an unrealizable split is never
@@ -165,13 +167,17 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
         and not any(stmt is node for stmt in projection_tail(tile))
     ):
         return "the head fold is nested inside the projection's sweep loop; the split cannot strip it"
+    if any(spec.sweep is not None and spec.sweep.name in node.free_axes for spec in tile.output_specs):
+        return "the head fold is evaluated inside the boundary store's sweep loop; the split cannot strip it"
     if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
         return None
+    if len(_reducing_roots(op)) < 2:
+        return None  # one reducing root beside its providers (the chain form): the split owns the whole projection
     try:
         regions = projection_regions(op, tile.output_specs)
     except ValueError as e:
         return str(e)
-    if not any(fold is node for fold, _, _ in regions):
+    if not any(fold is node for fold, *_ in regions):
         return "the split fold does not own an independent projection region"
     return None
 
@@ -186,8 +192,8 @@ def split_pending(tile: TileOp) -> bool:
         node is not None
         and node.axis is not None
         and node.combine is not None
-        and not node.observed
-        and not carries_partition(tile.op)
+        and node.observe is None
+        and not carries_partition(tile)
         and not tile.split_consumed
     )
 
@@ -210,6 +216,7 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
         return None
     node = head(tile.op)
     assert node is not None and node.axis is not None
+    k_axis = tile.axis_of(node.axis)  # the node names its K; the kernel's axis table holds its extent
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
     element = axis_of(key)
@@ -219,7 +226,7 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
         plan = Reduce.parse(pin, Work.parse(WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
-        _enforce(splitk_width(node.axis, plan.cta))
+        _enforce(splitk_width(k_axis, plan.cta))
         _enforce(_projection_refusal(tile, node))
         if plan.finalize == "atomic":
             _enforce(atomic_finalize(node, tail, tile.outputs))
@@ -231,7 +238,7 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     options: list[DeferredFork] = [unsplit]
     atomic_why = atomic_finalize(node, tail, tile.outputs)
     for plan in splitk_moves():
-        why = splitk_width(node.axis, plan.cta) or (atomic_why if plan.finalize == "atomic" else None)
+        why = splitk_width(k_axis, plan.cta) or (atomic_why if plan.finalize == "atomic" else None)
         if why is not None:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("split g%d%s not offered: %s", plan.cta, plan.finalize[0], why)
@@ -248,19 +255,19 @@ def _split_fork(match: Match, root: Node, key: str, cta: int, finalize: str) -> 
 # ---- slicing the head fold -------------------------------------------------------------------- #
 
 
-def _slice_fold(fold: Fold, b: int) -> Fold:
-    """The same monoid Fold over one CTA's absolute contiguous slice — the generic
-    (non-contraction) slicer: the whole fold rides ``Fold.rewrite`` under the σ-offset."""
-    axis = fold.axis
-    assert axis is not None
+def _slice_fold(fold: Fold, axis: Axis, b: int, split: Axis) -> tuple[Axis, Fold]:
+    """``(the sliced axis, the same monoid Fold over one CTA's absolute contiguous slice)`` — the
+    generic (non-contraction) slicer: the whole fold rides ``Fold.rewrite`` under the σ-offset."""
     offset = BinaryExpr("+", Var(axis.name), BinaryExpr("*", Var(_SPLIT), Literal(b, "int")))
     sigma = Sigma({axis.name: offset})
     sliced_axis = replace(axis, extent=Dim(b), window=Window(parent=axis.source_axis or axis, partition=True))
-    return fold.rewrite(
-        lambda name: name,
-        sigma,
-        lambda candidate: sliced_axis if candidate.name == axis.name else candidate,
-    )
+    # RE-DERIVED over a narrower axis, not renamed and not substituted-through: the fold keeps its
+    # own binder (same name, sliced extent) while its operands' coordinates take the σ-offset. A
+    # blanket σ would be refused as capture — this fold BINDS the name σ maps — and rightly so;
+    # what changes here is the axis itself, which only the caller can say.
+    operands = tuple(_sliced_edge(edge, sigma, axis.name, sliced_axis, split) for edge in fold.operands)
+    body = Body(tuple(stmt.substitute(sigma) for stmt in fold.lift.body))
+    return sliced_axis, replace(fold, operands=operands, lift=replace(fold.lift, body=body))
 
 
 def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
@@ -278,7 +285,7 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     return ksplit, kslice, sigma
 
 
-def _sliced_edge(edge, sigma: Sigma, k_name: str):
+def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | None = None):
     """An operand edge σ-reindexed to absolute k for a split partition — the SAME rule on either
     edge. A MATERIALIZED edge rewrites its gmem index; a COMPUTED cone rewrites its per-cell BODY
     and every K-VARYING producer edge it composes (attention's per-cell score contraction — the
@@ -289,46 +296,41 @@ def _sliced_edge(edge, sigma: Sigma, k_name: str):
     the split trades for parallelism; whether it pays on a given shape is evidence's decision."""
     if isinstance(edge, Load):
         return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
-    ops = tuple(e.rewrite(lambda nm: nm, sigma) if k_name in edge_free_axes(e) else e for e in edge.operands)
-    return replace(edge, operands=ops).with_bodies((Body(tuple(s.rewrite(lambda nm: nm, sigma) for s in edge.body)),))
+
+    def images(name: str) -> tuple[str, ...]:
+        # A coordinate a term takes as a value rides a trailing param, so a σ-reindex re-spells it
+        # with the body. σ is not a rename: a split maps one coordinate onto an EXPRESSION over two
+        # (slice and partition), so a param's image is the free names of that expression, in order.
+        mapped = sigma.get(name)
+        return (name,) if mapped is None else tuple(dict.fromkeys(mapped.free_vars()))
+
+    ops = tuple(_sliced_edge(e, sigma, k_name, kslice, ksplit) if k_name in e.free_axes else e for e in edge.operands)
+    body = Body(tuple(s.substitute(sigma) for s in edge.lift.body))
+    params = tuple(dict.fromkeys(name for param in edge.lift.params for name in images(param)))
+    return replace(edge, operands=ops, lift=replace(edge.lift, params=params, body=body))
 
 
-def _sliced_contraction(node: Fold, w: int) -> tuple[Axis, Fold]:
-    """``(ksplit, sliced)`` for a contraction head: the SAME bilinear node a non-split matmul
+def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, Fold]:
+    """``(ksplit, kslice, sliced)`` for a contraction head: the SAME bilinear node a non-split matmul
     builds, over ``kslice`` with operands σ-reindexed to absolute k, threading the node's OWN
     semiring (the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}`` is licensed by that
     ⊕-monoid's associativity). ``Fold.contraction`` regenerates the componentwise ⊕ over the same
     accumulator names, so the finalize folds the workspace states through the same monoid."""
-    ksplit, kslice, sigma = _factor_k(node.axis, w)
-    mul, plus = node.semiring
-    sliced = Fold.contraction(
-        k_axis=kslice,
-        a=_sliced_edge(node.a, sigma, node.axis.name),
-        channels=tuple(replace(ch, b=_sliced_edge(ch.b, sigma, node.axis.name)) for ch in node.channels),
-        product=mul,
-        fold_op=plus,
-    )
-    return ksplit, sliced
+    ksplit, kslice, sigma = _factor_k(k_axis, w)
+    # Rebuilt DIRECTLY over the σ-reindexed operands, in stored order: the slice is the same term
+    # with a narrower axis, so its lift, monoid and seeds are the node's own — there is nothing for
+    # a former to re-derive, and no role to re-name.
+    operands = tuple(_sliced_edge(edge, sigma, node.axis, kslice, ksplit) for edge in node.operands)
+    return ksplit, kslice, replace(node, operands=operands)
 
 
 # ---- the piece / fragment builders ------------------------------------------------------------ #
 
 
-def _boundary(stmts) -> tuple[tuple, tuple]:
-    """Split a projection into a pure body and output specifications."""
-    split = extract_output_specs(tuple(stmts))
-    if split is None:
-        return tuple(stmts), ()
-    return split
-
-
-def _cell_index(stmts, free) -> tuple:
+def _cell_index(stores: tuple, free) -> tuple:
     """The output-cell index the original kernel writes (the projection ``Write``'s index,
     or — for a bare carrier whose grid-cell store is glue — the free-axis vars)."""
-    for s in stmts:
-        if isinstance(s, Write):
-            return s.index
-    return tuple(Var(ax.name) for ax in free)
+    return stores[0].write.index if stores else tuple(Var(ax.name) for ax in free)
 
 
 def _frag(match: Match, root: Node) -> Graph:
@@ -343,9 +345,7 @@ def _frag(match: Match, root: Node) -> Graph:
 def _piece_inputs(root: Node, body, *first: str) -> list[str]:
     """Return fragment buffers followed by external inputs actually read by a piece."""
     if isinstance(body, TileOp):
-        body = lower_with_output_specs(body.op, body.output_specs)
-    elif isinstance(body, Fold):
-        body = body.lower()
+        body = body.op.lower(axes=body.axes)
     reads = {load.input for load in Body.coerce(body).loads}
     return [*first, *(inp for inp in root.inputs if inp in reads)]
 
@@ -382,10 +382,22 @@ def _one(match: Match, frag: Graph, root: Node, piece: TileOp) -> Graph:
     return _add_output_piece(match, frag, root, piece, list(root.inputs))
 
 
-def _piece(body, free, *, output_specs: tuple = ()) -> TileOp:
-    """One fresh unscheduled Tile kernel preserving its Fold algebra verbatim."""
-    op = body if isinstance(body, Fold) else Fold.projection(body=Body.coerce(body))
-    piece = TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs)
+def _wrap(body: Body, operands: tuple) -> Fold:
+    """A zero-axis term over ``body``, exposing its last definition — what a projection returns."""
+    bound = tuple(name for edge in operands for name in edge.exposes)
+    results = next((stmt.defines()[-1:] for stmt in reversed(tuple(body)) if stmt.defines()), ())
+    lift = Lambda.closing(bound, body, results)
+    return Fold(operands=operands, lift=lift)
+
+
+def _with_axes(axes: tuple, *new: Axis) -> tuple:
+    """The axis table with ``new`` entries replacing same-named ones — a slice keeps its axis's name."""
+    return tuple({**{axis.name: axis for axis in axes}, **{axis.name: axis for axis in new}}.values())
+
+
+def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple) -> TileOp:
+    """One fresh unscheduled Tile kernel preserving its Fold algebra verbatim, over the axis table ``axes``."""
+    piece = TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes)
     # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
     # identity. Built fresh here, so this states the contract rather than doing work — and the rule
     # that mints a kernel is where that has to be said.
@@ -396,18 +408,29 @@ def _state_fold(axis: Axis, algebra: Fold, loads: tuple[Load, ...]) -> Fold:
     """Fold already-reduced state tuples through ``algebra``'s unchanged monoid."""
     values = tuple(name for load in loads for name in load.defines())
     return Fold(
-        axis=axis,
-        operands=loads,
+        # The workspace reads are slabs like any other gmem read, over the split axis and the
+        # output coordinates the enclosing placement binds.
+        operands=tuple(Fold.slab(load) for load in loads),
         lift=Lambda(params=(axis.name, *values), body=Body(), results=values),
         init=algebra.init,
         combine=algebra.combine,
     )
 
 
-def _project(fold: Fold, body) -> Fold:
+def _project(fold: Fold, body, axes: tuple) -> Fold:
     """Attach a pure projection body to one Fold, dropping the empty wrapper."""
     body = Body.coerce(body)
-    return Fold.projection(operands=(fold,), body=body) if body else fold
+    return _wrap(body, (fold,)) if body else fold
+
+
+def _rebind(term: Fold, node: Fold, replacement: Fold) -> Fold:
+    """``term`` over ``replacement`` wherever it read ``node`` — a split piece keeps the projection
+    whole and swaps the fold it is about. The replacement exposes the node's own state names, so
+    every positional binding above it is unchanged."""
+    if term is node:
+        return replacement
+    operands = tuple(_rebind(edge, node, replacement) for edge in term.operands)
+    return term if operands == term.operands else replace(term, operands=operands)
 
 
 def _output_root(root: Node, outputs: set[str]) -> Node:
@@ -421,24 +444,24 @@ def _output_root(root: Node, outputs: set[str]) -> Node:
 
 
 def _split_projection(tile: TileOp, root: Node, selected: Fold):
-    """Separate an independent MIMO projection into output-owning Fold pieces."""
+    """The region the split node owns — ``(graph node, region term, tail stmts, stores)`` — and the
+    other regions as pieces. A kernel with one root keeps its whole term as the region; an
+    independent MIMO projection partitions by producing root (:func:`projection_regions`)."""
     op = tile.op
-    if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
-        return root, tuple(projection_tail(tile)), ()
-
+    if not isinstance(op, Fold) or op.axis is not None or len(_reducing_roots(op)) < 2:
+        return root, op, (), tuple(tile.output_specs), ()  # one root, its providers beside it: the whole term is the region
     pieces = []
     chosen = None
-    for fold, body, stores in projection_regions(op, tile.output_specs):
+    for fold, region, body, stores in projection_regions(op, tile.output_specs):
         node = _output_root(root, {store.write.output for store in stores})
-        entry = (node, fold, body, stores)
+        entry = (node, region, body, stores)
         if fold is selected:
             chosen = entry
         else:
             pieces.append(entry)
     if chosen is None:
         raise ValueError("the split Fold does not own an independent projection region")
-    node, _, body, stores = chosen
-    return node, tuple(apply_output_specs(body, stores)), tuple(pieces)
+    return (*chosen, tuple(pieces))
 
 
 def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple) -> Graph:
@@ -447,26 +470,10 @@ def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple
     one pinned split means one split — so it carries the consumed-split receipt
     (``split_consumed``): a ``REDUCE`` pin's ``g`` half strips on it instead of splitting the
     sibling region again (or raising)."""
-    for root, fold, body, stores in pieces:
-        tile = replace(_piece(_project(fold, body), free, output_specs=stores), split_consumed=True)
+    for root, region, body, stores in pieces:
+        tile = replace(_piece(_project(region, body, tuple(free)), free, output_specs=stores, axes=root.op.axes), split_consumed=True)
         _add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
     return frag
-
-
-def _captured_prologue(partial_fold: Fold, pre: tuple, split: Axis, free: tuple) -> tuple:
-    """The projection-prologue stmts the sliced fold still CAPTURES — their backward cone, carried
-    into the partial. The chain form keeps the head fold as a BODY member of its projection
-    wrapper (:func:`~emmy.compiler.ir.tile.ops.head`), so a prologue stmt evaluated once per cell
-    (a scalar scale load) can define a name the fold's lift reads; slicing the fold alone would
-    leave that capture dangling in the partial."""
-    lowered = tuple(partial_fold.lower())
-    defined = set().union(*(deep_defines(stmt) for stmt in lowered)) if lowered else set()
-    axes = {split.name, *(a.name for a in free)}
-    axes.update(site.node.axis.name for site in sites(partial_fold) if isinstance(site.node, Fold) and site.node.axis is not None)
-    captures = deep_reads(list(lowered)) - defined - axes
-    if not captures:
-        return ()
-    return Body(pre).backward_cone(captures).members
 
 
 # ---- the realization -------------------------------------------------------------------------- #
@@ -485,28 +492,22 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # its output specifications reconstituted, and retarget its root ``Write`` below.
     node = head(tile.op)
     assert node is not None, "the split offer fires on node-form kernels only"
-    root, projection, projection_pieces = _split_projection(tile, root, node)
+    root, region, body, stores, projection_pieces = _split_projection(tile, root, node)
     free = tuple(tile.place.free)
-    if is_contraction(node):
-        split, partial_fold = _sliced_contraction(node, cta)
+    k_axis = tile.axis_of(node.axis)
+    if node.as_contraction() is not None:
+        split, kslice, partial_fold = _sliced_contraction(node, k_axis, cta)
     else:
-        _enforce(splitk_width(node.axis, cta))
+        _enforce(splitk_width(k_axis, cta))
         split = Axis(name=_SPLIT, extent=Dim(cta))
-        partial_fold = _slice_fold(node, node.axis.extent.as_static() // cta)
-    states = tuple(partial_fold.combine.results)
+        kslice, partial_fold = _slice_fold(node, k_axis, k_axis.extent.as_static() // cta, split)
+    axes = _with_axes(tile.axes, split, kslice)  # the pieces' axis table: the slice under its own name
+    states = partial_fold.combine.results
     n_comp = len(states)
     out = root.output
-    cell = _cell_index(projection, free)
-    # The chain form keeps the head fold as a BODY member of its projection wrapper (``head``'s
-    # sweep case), so ``projection`` still contains it. Strip it — the epilogue's states come from
-    # the workspace combine (or the atomic partial), and keeping the fold would re-run the whole
-    # reduction per cell AND shadow those states — and carry the prologue cone the sliced fold
-    # still captures into the partial (:func:`_captured_prologue`).
-    fold_at = next((i for i, stmt in enumerate(projection) if stmt is node), None)
-    prologue: tuple = ()
-    if fold_at is not None:
-        prologue = _captured_prologue(partial_fold, projection[:fold_at], split, free)
-        projection = (*projection[:fold_at], *projection[fold_at + 1 :])
+    cell = _cell_index(stores, free)
+    # The epilogue the atomic arm would apply per partition: the region's projection and its stores.
+    projection = (*(region.step() if region.axis is None else ()), *body, *(store.write for store in stores))
     frag = _frag(match, root)
 
     if finalize == "atomic":
@@ -517,21 +518,13 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         # same predicate the offer and the pin applied, re-asked here over the SELECTED region's
         # projection (the offer read the whole tail, a conservative superset — see its docstring).
         _enforce(atomic_finalize(partial_fold, projection, tile.outputs))
-        if projection:
-            atomic_proj = tuple(replace(s, atomic=True) if isinstance(s, Write) else s for s in projection)
+        if stores:
+            p_stores = tuple(replace(store, write=replace(store.write, atomic=True)) for store in stores)
         else:
-            atomic_proj = (Write(output=out.name, index=cell, values=states, atomic=True),)
-        p_body, p_stores = _boundary(atomic_proj)
-        if fold_at is not None:
-            # Body-resident form: keep the wrapper's own shape — prologue, the sliced fold in
-            # place, then the per-partition epilogue (operand edges evaluate before the body, so
-            # ``_project`` would put a captured prologue AFTER the fold that reads it).
-            # ``fold_at`` indexes the PRE-strip ``projection``, and it stays valid against
-            # ``p_body`` because the strip removed exactly the stmt AT that index and
-            # ``_boundary`` only extracts trailing ``Write``s, which sit after the fold.
-            piece = _piece((*p_body[:fold_at], partial_fold, *p_body[fold_at:]), (split, *free), output_specs=p_stores)
-        else:
-            piece = _piece(_project(partial_fold, p_body), (split, *free), output_specs=p_stores)
+            p_stores = (OutputSpec(write=Write(output=out.name, index=cell, values=states, atomic=True)),)
+        piece = _piece(
+            _project(_rebind(region, node, partial_fold), body, (split, *free)), (split, *free), output_specs=p_stores, axes=axes
+        )
         result = _one(match, frag, root, piece)
         return _add_projection_pieces(match, result, projection_pieces, free)
 
@@ -558,8 +551,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # split axis joins as a lead grid axis via the partial tile's OWN placement — the view derives
     # lead axes from the placement, so nothing is restamped on the node.
     ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
-    partial_body = (*prologue, partial_fold) if prologue else partial_fold
-    partial_tile = _piece(partial_body, (split, *free), output_specs=ws_stores)
+    partial_tile = _piece(partial_fold, (split, *free), output_specs=ws_stores, axes=axes)
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the
@@ -570,17 +562,19 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     other = tuple(f"{nm}__p" for nm in states)
     loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i)) for i in range(n_comp))
     fin_fold = _state_fold(fin_axis, partial_fold, loads)
-    fin_proj, fin_stores = _boundary(projection)
-    if not fin_stores and not Body(tuple(fin_proj)).writes:
-        # The projected value is the LAST defining stmt's name — the epilogue tail may end with
-        # non-defining stmts, so scan backward instead of indexing [-1].
-        out_val = next((s.defines()[-1] for s in reversed(fin_proj) if s.defines()), states[0])
+    fin_stores = stores
+    if not fin_stores:
+        # A bare carrier's grid-cell store is materializer glue; the finalize spells it over the
+        # value the region exposes, or the carrier's primary state.
+        out_val = region.exposes[0] if region.exposes else states[0]
         fin_stores = (OutputSpec(write=Write(output=out.name, index=cell, value=out_val)),)
     # The finalize is stamped AFTER the workspace joins the fragment: it reads that buffer, and a
     # kernel's structural features fold in its operands' dtypes, which only resolve once the
     # buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
-    fin_tile = _piece(_project(fin_fold, fin_proj), free, output_specs=fin_stores)
+    fin_tile = _piece(
+        _project(_rebind(region, node, fin_fold), body, tuple(free)), free, output_specs=fin_stores, axes=_with_axes(tile.axes, fin_axis)
+    )
     result = _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
     return _add_projection_pieces(match, result, projection_pieces, free)
 

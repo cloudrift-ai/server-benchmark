@@ -88,13 +88,13 @@ def test_pinned_knobs_merges_scoped_keys_into_aggregate_and_restores(monkeypatch
 
     monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,STAGE@a=d1/smem")
     monkeypatch.setenv("EMMY_STAGE@A", "d1/smem")
-    with pinned_knobs({"STAGE@n1.e0": "d2/smem", "TILE@n2": "f2x2"}):
-        assert os.environ["EMMY_STAGE@N1.E0"] == "d2/smem"
-        assert os.environ["EMMY_TILE@N2"] == "f2x2"
-        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,STAGE@a=d1/smem,STAGE@n1.e0=d2/smem,TILE@n2=f2x2"
-        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["STAGE@n1.e0"] == "d2/smem"
+    with pinned_knobs({"STAGE@map.2/inner": "d2/smem", "TILE@map.3/inner": "f2x2"}):
+        assert os.environ["EMMY_STAGE@MAP.2/INNER"] == "d2/smem"
+        assert os.environ["EMMY_TILE@MAP.3/INNER"] == "f2x2"
+        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,STAGE@a=d1/smem,STAGE@map.2/inner=d2/smem,TILE@map.3/inner=f2x2"
+        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["STAGE@map.2/inner"] == "d2/smem"
     assert os.environ["EMMY_STAGE@A"] == "d1/smem"
-    assert "EMMY_TILE@N2" not in os.environ
+    assert "EMMY_TILE@MAP.3/INNER" not in os.environ
     assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,STAGE@a=d1/smem"
 
 
@@ -104,14 +104,14 @@ def test_pinned_knobs_restores_scoped_placement_keys(monkeypatch):
     from emmy.compiler.pipeline.knob import parse_knob_spec
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,PLACE@a=fuse")
-    monkeypatch.setenv("EMMY_PLACE@A", "fuse")
-    with pinned_knobs({"PLACE@a": "cut", "TILE@dd": "f2x2"}):
-        assert os.environ["EMMY_PLACE@A"] == "cut"
-        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse,PLACE@a=cut,TILE@dd=f2x2"
-        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["PLACE@a"] == "cut"
-    assert os.environ["EMMY_PLACE@A"] == "fuse"
-    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@a=fuse"
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=true,PLACE@inner.1/map=fuse")
+    monkeypatch.setenv("EMMY_PLACE@INNER.1/MAP", "fuse")
+    with pinned_knobs({"PLACE@inner.1/map": "cut", "TILE@dd": "f2x2"}):
+        assert os.environ["EMMY_PLACE@INNER.1/MAP"] == "cut"
+        assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@inner.1/map=fuse,PLACE@inner.1/map=cut,TILE@dd=f2x2"
+        assert parse_knob_spec(os.environ["EMMY_KNOBS"])["PLACE@inner.1/map"] == "cut"
+    assert os.environ["EMMY_PLACE@INNER.1/MAP"] == "fuse"
+    assert os.environ["EMMY_KNOBS"] == "FAST_MATH=true,PLACE@inner.1/map=fuse"
 
 
 def _symbolic_input_graph():
@@ -489,17 +489,17 @@ def test_unreproducible_pin_flag(monkeypatch):
     # Multi-kernel lowering (split main + finalize): honored on the second kernel.
     assert unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}, {"STAGE": "k8"}]) is None
     # A global parameter matches a realized site in the same family; exact parameters remain exact.
-    assert unreproducible_pin_flag({"TILE@n2": "f2x2"}, [{"TILE@n2": "f2x2"}]) is None
-    assert unreproducible_pin_flag({"TILE": "f2x2"}, [{"TILE@n2": "f2x2"}]) is None
+    assert unreproducible_pin_flag({"TILE@map.3/inner": "f2x2"}, [{"TILE@map.3/inner": "f2x2"}]) is None
+    assert unreproducible_pin_flag({"TILE": "f2x2"}, [{"TILE@map.3/inner": "f2x2"}]) is None
     # A keyed pin whose site differs: a genuine miss, but the
     # diagnostic names the family's realized value instead of (unset).
-    flag = unreproducible_pin_flag({"TILE@n2": "mma_m16n8k16_f16_f32/f1x16"}, [{"TILE@n3": "mma_m16n8k16_f16_f32/f1x8"}])
-    assert "TILE@n3=mma_m16n8k16_f16_f32/f1x8" in flag and "(unset)" not in flag
+    flag = unreproducible_pin_flag({"TILE@map.3/inner": "mma_m16n8k16_f16_f32/f1x16"}, [{"TILE@map.4/inner": "mma_m16n8k16_f16_f32/f1x8"}])
+    assert "TILE@map.4/inner=mma_m16n8k16_f16_f32/f1x8" in flag and "(unset)" not in flag
     # Registry-canonical value compare (bool knob pinned via the string grammar).
     assert unreproducible_pin_flag({"FAST_EXP": "true"}, [{"FAST_EXP": True}]) is None
     # OFF values are "declined", not conflicts: the honored axis wins, the off-stamped
     # sibling never pollutes the diagnostic...
-    assert unreproducible_pin_flag({"TILE@n2": "w2x1"}, [{"TILE@n1": ""}, {"TILE@n2": "w2x1"}]) is None
+    assert unreproducible_pin_flag({"TILE@map.3/inner": "w2x1"}, [{"TILE@map.2/inner": ""}, {"TILE@map.3/inner": "w2x1"}]) is None
     # ...and a family realized ONLY as off reports (off), not the empty string.
     assert "realized (off)" in unreproducible_pin_flag({"STAGE": "d2/smem-tma"}, [{"STAGE": ""}])
     # No kernel knobs → ungateable, not a flag — [] and all-empty dicts alike.

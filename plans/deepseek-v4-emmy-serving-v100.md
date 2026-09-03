@@ -218,9 +218,17 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    contributions is a pure staged mma with no serial hidden-dim walk — the shape this item asked for — but the
    contribution producer now carries the mHC statistics recompute per (row, a28) cell (~2^20 trips per lane
    after its 1024-way cta×coop coverage, 2^53 total), and that per-thread floor is honestly 839 µs: the piece is
-   un-servable through grid-TOTAL serial work, which a per-thread bound cannot see. Open, as a design decision
-   for the next round: a launch-total bound (per-cell issues × output cells at a machine-width constant), or
-   measured evidence for the statistics seams on this piece. The host measurement of this route is still owed.
+   un-servable through grid-TOTAL serial work, which a per-thread bound cannot see. **Landed next (the stacked
+   PR): a launch-total floor beside the per-thread one** — every block evaluates the worst nest at least once,
+   so `blocks × per-cell issues` at an issue rate no GPU reaches (1e5 issues/ns) bounds the launch, with blocks read
+   off the terminal placement's grid over the row's per-CTA output tile. It separates the producer tie 2000×
+   (2^23 blocks vs 4096), keeps the corpus ~8.9× inside the guard (largest legitimate launch total 112.7 µs,
+   `gated-mlp-s512`), and needs no stamp or restamp. Counting per output cell × cells was rejected as not a
+   bound: on the measured 13.21 s piece it priced 22.5 s (the tile shares the operand cone across 64 output
+   columns per block). The tighter follow-up, not taken: per-nest evaluations — blocks × the block's cells
+   projected onto the coordinates the worst nest READS × per-evaluation issues — which needs a structural stamp
+   of the nest's read free axes plus the codec's m/n slot mapping (`_free_slots` canonicalizes wide-is-n; the
+   warp fragment keeps codec axes), the error-prone part. The host measurement of this route is still owed.
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
 compiles end to end and the elected route is a measured 23.2 s per `post4096` prefill forward (no longer a

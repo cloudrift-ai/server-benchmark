@@ -475,6 +475,66 @@ def serial_floor_us(knobs: dict) -> float:
     return _covered_serial(knobs, "S_ext_serial_cell_issues") * SERIAL_ISSUE_FLOOR_US
 
 
+#: Launch-total calibration bound, µs per serial issue summed over a launch's blocks: 1e5 issues
+#: per ns (1e8 per µs) is a rate no GPU reaches across all its schedulers (a V100 issues ~500 per
+#: ns; the largest current part ~2000), so it is a bound, not a model. Its jurisdiction is the
+#: same enforcement guard as the per-thread floor. The calibration line: at ~1e4 per ns the
+#: qwen3emb ``gated-mlp-s512`` corpus kernel (1,572,864 blocks × 7168 issues, the largest
+#: legitimate launch total) would cross the guard — that is the rate not to cross.
+LAUNCH_ISSUE_FLOOR_US = 1e-8
+
+#: The most output cells one block can hold when the row spells no output tile: every cell takes
+#: at least one thread, and no block has more threads than this.
+_MAX_BLOCK_THREADS = 1024
+
+
+def _launch_blocks(knobs: dict, cells: float) -> float:
+    """A lower bound on the blocks one launch of the row's kernel runs over ``cells`` output
+    cells: the cells divided by the most cells one block covers — the widest per-CTA output tile
+    (``tile_m × tile_n``) among the row's ``TILE`` sites when it spells one (the pooled family
+    read is diagnostic; the widest site is the safe one whichever is the root's), else one cell
+    per thread over the largest block a GPU runs (:data:`_MAX_BLOCK_THREADS`). Over-counting a
+    block's cells only under-counts blocks, the safe direction; a spelled tile that does not
+    resolve bounds nothing (``0.0``) rather than borrowing the per-cell cap. A cross-CTA split
+    multiplies the blocks and divides each block's nest by the same factor, so neither side
+    applies it."""
+    if not cells:
+        return 0.0
+    work, _tile, _stage, reduce = _row_values(knobs)
+    spelled = [str(value) for name, value in knobs.items() if (name == "TILE" or name.startswith("TILE@")) and value]
+    tiles = [_resolved_tile(work, value, reduce) for value in spelled]
+    if any(tile is None for tile in tiles):
+        return 0.0
+    tiled = [tile.tile_m * tile.tile_n for tile in tiles if tile.is_tiled]
+    return math.ceil(cells / float(max(tiled) if tiled else _MAX_BLOCK_THREADS))
+
+
+def launch_floor_us(knobs: dict, cells: float) -> float:
+    """A physical lower bound, in µs, on one launch of the row's kernel from its LAUNCH-TOTAL
+    serial issues: every block evaluates the kernel's worst serial nest at least once, so the
+    launch retires at least ``blocks × S_ext_serial_cell_issues`` issues, at an issue rate no GPU
+    reaches (:data:`LAUNCH_ISSUE_FLOOR_US`). ``cells`` is the launch's output cells — the
+    placement's grid extents, sweeps excluded (a sweep is a loop a thread walks, not grid
+    parallelism). No reduce-partition coverage divide: partitioning moves a nest's trips between
+    threads, not out of the launch. The one assumption past the per-thread floor's: every block
+    runs the worst nest — a nest under a data-dependent ``Cond`` counts toward it, so a block that
+    skips it is over-priced; slack the guard's margin absorbs. Beside the per-thread floor
+    (:func:`serial_floor_us`) this is what separates a kernel that recomputes a statistic once
+    per block from one that computes it once per row — the two tie per thread (DeepSeek-V4
+    ``post4096``'s contribution producer against its statistics cut: 2^23 blocks against 4096,
+    priced at ≥ 2^13 against ≥ 4 — the untiled cap over-states a coop block's cells 1024×, the
+    safe direction, and the 2000× ratio survives).
+
+    Counting per OUTPUT CELL instead of per block — cells × per-cell issues — was rejected because
+    it is not a bound: a serial nest that is an operand cone of an outer contraction is shared
+    across every cell of a block that does not read its coordinates, and the tile chooses how
+    many. On post4096's measured dominant piece (13.21 s) it charged 2^24 cells × 2^27 issues =
+    2^51 → 22.5 s at this rate, above the measurement; per block the same kernel prices 0.67 µs
+    (its per-thread floor is what catches it). A bound a measurement refutes must not be
+    tightened back."""
+    return _launch_blocks(knobs, cells) * float(knobs.get("S_ext_serial_cell_issues") or 0.0) * LAUNCH_ISSUE_FLOOR_US
+
+
 def _free_slots(knobs: dict) -> tuple[int, int, int, int] | None:
     """The ``(par_n, reg_n, par_m, reg_m)`` slot widths for the (≤2) tiled free axes.
 

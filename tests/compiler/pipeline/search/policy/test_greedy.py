@@ -143,10 +143,22 @@ def _stamped(trips: int, issues_per_trip: int) -> dict:
     return {"S_ext_serial_cell_work": float(trips), "S_ext_serial_cell_issues": float(trips) * issues_per_trip}
 
 
-def _priced(kernels: dict[str, tuple[dict, float]]) -> float:
-    """``_resolved_price`` over SimpleNamespace kernels: ``{node_id: (knobs, traced score)}``."""
+def _grid(*extents: int):
+    """A mapped placement over static grid axes — what ``_grid_cells`` reads off a terminal op."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.axis import Axis
+
+    return SimpleNamespace(grid=tuple(Axis(f"g{i}", Dim(extent)) for i, extent in enumerate(extents)))
+
+
+def _priced(kernels: dict[str, tuple[dict, float]], grids: dict[str, object] | None = None) -> float:
+    """``_resolved_price`` over SimpleNamespace kernels: ``{node_id: (knobs, traced score)}``;
+    ``grids`` maps a node to its placement (none → no launch-total bound)."""
     terminal = SimpleNamespace(
-        nodes={nid: SimpleNamespace(op=SimpleNamespace(knobs=knobs, identity_key=lambda **_kw: "k")) for nid, (knobs, _) in kernels.items()}
+        nodes={
+            nid: SimpleNamespace(op=SimpleNamespace(knobs=knobs, identity_key=lambda **_kw: "k", place=(grids or {}).get(nid)))
+            for nid, (knobs, _) in kernels.items()
+        }
     )
     trace = [SimpleNamespace(node_id=nid, score=score) for nid, (_, score) in kernels.items()]
     return greedy._resolved_price(terminal, trace, SimpleNamespace(features=lambda: {}), None)
@@ -201,6 +213,36 @@ def test_the_issues_stamp_closes_the_sub_guard_trip_escape():
     assert fused == pytest.approx(float(2**23) * 16.0 * 1e-4, rel=1e-6)
     cut = _priced({"p": (_stamped(2**12, 16), 1.37e-3), "c": (_stamped(2**11, 10), 1.3e-5)})
     assert cut < fused  # the per-output-element weight-column walk loses on its issue bound
+
+
+def test_the_launch_total_bound_separates_a_per_block_recompute_from_a_per_row_one():
+    """The tie the per-thread floor cannot break, measured on post4096's contribution producer:
+    the fused producer recomputes the mHC statistics once per (row, a28) block — 2^23 blocks over
+    a 2^33-issue nest — while the statistics cut computes them once per row (4096 blocks) and
+    leaves the consumer its own carrier nest. Per thread both arms floor at the same nest (the
+    fused arm's coverage divides it the same way); per launch they are 2000× apart — priced at
+    ≥ 2^13 blocks against ≥ 4, the untiled cap over-stating a coop block's cells 1024× in the safe
+    direction — so the Σ elects the cut."""
+    from emmy.compiler.pipeline.search.features import LAUNCH_ISSUE_FLOOR_US
+
+    coop = {"WORK": "t256", "REDUCE": "coop"}  # 256 lanes share one cell's nest: the per-thread divide
+    fused_row, cut_stat, cut_consumer = {**_stamped(2**30, 8), **coop}, {**_stamped(2**30, 8), **coop}, _stamped(2**22, 8)
+    fused = _priced({"n": (fused_row, 2516.58)}, {"n": _grid(4096, 2048)})
+    cut = _priced({"p": (cut_stat, 2516.58), "c": (cut_consumer, 20.0)}, {"p": _grid(4096), "c": _grid(4096, 2048)})
+    assert fused == pytest.approx(2**13 * 2**33 * LAUNCH_ISSUE_FLOOR_US)  # ≥ 2^13 blocks × 2^33 issues
+    assert cut < fused / 50
+
+
+def test_the_launch_total_guard_margin_is_pinned_by_the_corpus():
+    """The largest legitimate launch total across the realization corpus (every case lowered
+    under its pins, blocks from the emitted launch grid): ``gated-mlp-s512``'s fused kernel,
+    1,572,864 blocks × 7168 issues — 112.7 µs, ~8.9× inside the guard. Lowering the guard or
+    raising the rate within that margin breaks this test before it breaks the corpus."""
+    from emmy.compiler.pipeline.search.features import LAUNCH_ISSUE_FLOOR_US
+
+    gated_mlp_s512 = 1_572_864 * 7168 * LAUNCH_ISSUE_FLOOR_US
+    assert gated_mlp_s512 == pytest.approx(112.7, rel=0.01)
+    assert gated_mlp_s512 < greedy._SERIAL_FLOOR_ENFORCE_US / 8
 
 
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:

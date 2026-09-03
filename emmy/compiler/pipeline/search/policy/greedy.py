@@ -44,7 +44,7 @@ therefore no evidence at all, and falls through to the prior as though nothing
 were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
 every benched variant hung.
 
-**One physical bound, and it is not a preference.** The kernel-set Σ
+**The physical bound, and it is not a preference.** The kernel-set Σ
 (:func:`_resolved_price`) clamps a summand to its serial-work lower bound where
 that bound is decisively large (:data:`_SERIAL_FLOOR_ENFORCE_US`). This is the
 one exception to "no hand-written tier", and it is an exception in the same
@@ -68,7 +68,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves, iter_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
-from emmy.compiler.pipeline.search.features import serial_floor_us
+from emmy.compiler.pipeline.search.features import launch_floor_us, serial_floor_us
 
 logger = logging.getLogger(__name__)
 
@@ -261,9 +261,11 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
     the known cost of comparing kernel SETS with a per-kernel ranker — the exposure the module
     docstring names, and the prior's to fix by being calibrated, not this function's to paper
     over. What this Σ DOES enforce is the physical bound no calibration could relax: a summand
-    whose serial-work lower bound (:func:`~..features.serial_floor_us` — the kernel's per-thread
-    serial issues, each trip priced at the statements it re-executes, at a per-issue time
-    conservative for any GPU clock) exceeds
+    whose serial-work lower bound — the larger of its per-thread floor
+    (:func:`~..features.serial_floor_us`: the kernel's per-thread serial issues, each trip priced
+    at the statements it re-executes, at a per-issue time conservative for any GPU clock) and its
+    launch-total floor (:func:`~..features.launch_floor_us`: every block evaluates the worst nest
+    at least once, at an issue rate no GPU reaches across all its schedulers) — exceeds
     :data:`_SERIAL_FLOOR_ENFORCE_US` is clamped to that bound. A measured µs is never below the
     bound, so the clamp only ever lifts model garbage: the cold proxy priced DeepSeek-V4
     ``post4096``'s fused 2^30-trip recomputation nest at 4.29e-37 µs, under every one of its
@@ -309,9 +311,21 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
             us = prior.mean_scores(rows)[0] if prior is not None else None
         if us is None:
             return None
-        floor = serial_floor_us(knobs)
+        floor = max(serial_floor_us(knobs), launch_floor_us(knobs, _grid_cells(node.op)))
         total += max(us, floor) if floor > _SERIAL_FLOOR_ENFORCE_US else us
     return total
+
+
+def _grid_cells(op) -> float:
+    """The output cells one launch of ``op`` runs: its placement's static grid extents, or ``0.0``
+    (no launch-total bound) when the op carries no grid or a symbolic extent."""
+    grid = getattr(getattr(op, "place", None), "grid", None)
+    if not grid or any(not axis.extent.is_static for axis in grid):
+        return 0.0
+    cells = 1.0
+    for axis in grid:
+        cells *= float(axis.extent.as_static())
+    return cells
 
 
 def _price_kernel(

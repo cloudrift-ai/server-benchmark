@@ -346,6 +346,40 @@ def test_knob_features_serial_cell_work_divides_by_reduce_coverage():
     assert "D_serial_cell_work" not in knob_features({"S_n_load": 3.0})
 
 
+def test_launch_floor_counts_blocks_not_cells_and_ignores_reduce_coverage():
+    """``launch_floor_us``: blocks × the per-cell issues stamp at a rate no GPU reaches. Blocks
+    are the launch's cells over the most cells a block covers — the widest output tile among the
+    row's ``TILE`` sites when it spells one, else one cell per thread over the largest block a
+    GPU runs — and a coop/cta reduce partition moves trips between threads, never out of the
+    launch, so it does not divide. A spelled tile that does not resolve bounds nothing."""
+    from emmy.compiler.pipeline.search.features import LAUNCH_ISSUE_FLOOR_US, _launch_blocks, launch_floor_us
+
+    untiled = {"S_ext_serial_cell_issues": float(2**33)}
+    assert _launch_blocks(untiled, 2.0**23) == 2**13  # 1024 cells per block at most
+    assert launch_floor_us(untiled, 2.0**23) == pytest.approx(2**13 * 2**33 * LAUNCH_ISSUE_FLOOR_US)
+    assert launch_floor_us({**untiled, "WORK": "t256", "REDUCE": "coop"}, 2.0**23) == launch_floor_us(untiled, 2.0**23)
+    assert launch_floor_us({**untiled, "WORK": "t64", "REDUCE": "g4k"}, 2.0**23) == launch_floor_us(untiled, 2.0**23)
+    assert launch_floor_us(untiled, 0.0) == 0.0  # no grid, no launch-total bound
+    # The measured dominant piece's row: its codec tile is 256 × 64 output cells per block, so a
+    # 4096 × 4096 output launches exactly the 1024 blocks its emitted kernel decodes.
+    tiled = {**untiled, "WORK": "w4x4", "TILE": "mma_m8n8k4_f16_f32/f4x1/k8"}
+    assert _launch_blocks(tiled, 2.0**24) == 1024
+    two_sites = {**tiled, "TILE@map.1/inner": "f4x4"}  # the widest site bounds the blocks
+    assert _launch_blocks(two_sites, 2.0**24) == 1024
+    assert _launch_blocks({**untiled, "WORK": "w4x4", "TILE": "not-a-tile"}, 2.0**24) == 0.0
+
+
+def test_launch_floor_stays_below_the_measured_dominant_piece():
+    """The refutation, pinned: post4096's dominant piece (measured 13.21 s) runs 1024 blocks over
+    a 2^16-issue nest, so its launch floor is 0.67 µs — below the measurement, as a bound must
+    be. Counting per output cell (2^24 cells × 2^27 issues) priced 22.5 s and was rejected."""
+    from emmy.compiler.pipeline.search.features import LAUNCH_ISSUE_FLOOR_US
+
+    assert 1024 * 2**16 * LAUNCH_ISSUE_FLOOR_US == pytest.approx(0.671, rel=0.01)
+    assert 1024 * 2**16 * LAUNCH_ISSUE_FLOOR_US < 13_210_000.0
+    assert 2**24 * 2**27 * LAUNCH_ISSUE_FLOOR_US > 13_210_000.0  # what the rejected count would claim
+
+
 def test_serial_floor_is_the_covered_issues_at_the_per_issue_bound():
     """``serial_floor_us``: a physical lower bound on one kernel-launch — the row's per-thread
     serial issues (the issues stamp ÷ reduce-partition coverage, the same rule as the trips

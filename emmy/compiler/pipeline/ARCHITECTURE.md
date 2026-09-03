@@ -409,7 +409,14 @@ reduce-partition coverage, at a per-issue constant conservative for any GPU cloc
 `post4096`'s fused 2^30-trip recomputation nest priced 4.29e-37 µs and beat every recomputation-free
 composed-cut arm until the bound priced it honestly — and its successor dominant piece (2^23 trips, 839 µs on
 trips alone, 16 % inside the guard, 13.21 s measured) rode that escape until the issue count priced its
-~16-statement weight-column-walk trips honestly. The guard is jurisdiction, not tuning —
+~16-statement weight-column-walk trips honestly. The same summand also carries a LAUNCH-TOTAL floor
+(`features.launch_floor_us`): every block evaluates the kernel's worst nest at least once, so a launch retires at
+least `blocks × S_ext_serial_cell_issues` issues — blocks read off the terminal placement's grid over the row's
+per-CTA output tile (or one cell per thread over the largest block a GPU runs) — at an issue rate no GPU reaches
+across all its schedulers (1e5 issues/ns). It is what separates two arms whose per-thread floors tie:
+`post4096`'s contribution producer recomputing the mHC statistics once per (row, a28) block against its
+statistics cut computing them once per row — 2000× apart per launch. Counting per output cell instead of per
+block was rejected as not a bound; `launch_floor_us` carries the record. The guard is jurisdiction, not tuning —
 the bound ignores launch overhead and memory traffic, so at ordinary magnitudes the model's ranking stands
 untouched, while a bound past the guard is un-servable whatever those effects are. A measured µs is never below
 the bound, so the clamp only ever lifts model garbage; the prior's own scoring surfaces are untouched, because

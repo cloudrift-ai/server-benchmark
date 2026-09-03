@@ -1,26 +1,25 @@
-"""``loaded_buffers`` — every buffer a stored term reads, operand edges included."""
+"""The gmem buffers a stored term reads — ``_cut._buffer_reads``, read off the tree through its
+operand edges, never off a lowered view."""
 
 from __future__ import annotations
 
-from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.pure.fold import loaded_buffers
-from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.ir.stmt import Assign, Load
+from emmy.compiler.pipeline.passes.lowering.tile._cut import _buffer_reads
+from tests.compiler.terms import contraction, projection, slab
 
 
-def _root_holding_a_cone() -> Fold:
+def _root_holding_a_cone():
     """A cone whose OPERAND edge loads ``ws``, held as an operand of the root.
 
     This is DeepSeek-V4 ``post4096``'s shape, minimized: repeated placement leaves the fused root
     holding its cut cones, and each cone reads its workspace through an operand edge. The cone is
     an EDGE and not a body member — a term composes through ``operands``, and a body holds
-    statements — but the reading the buffer walk has to do is unchanged: an edge is not a nested
-    statement, so the lowered view cannot see beneath it."""
-    source = Fold.projection(body=Body((Load(name="w", input="ws", index=(Var("j"),)),)), results=("w",))
-    cone = Fold.projection(operands=(source,), body=Body((Assign(name="c", op="relu", args=("w",)),)), results=("c",))
-    return Fold.projection(operands=(cone,), body=Body((Assign(name="out", op="copy", args=("c",)),)), results=("out",))
+    statements — so a reader that walks statements alone cannot see beneath it."""
+    source = projection(body=(Load(name="w", input="ws", index=(Var("j"),)),), results=("w",))
+    cone = projection((source,), (Assign(name="c", op="relu", args=("w",)),), ("c",))
+    return projection((cone,), (Assign(name="out", op="copy", args=("c",)),), ("out",))
 
 
 def test_a_cone_held_as_an_edge_still_reports_its_operand_buffers() -> None:
@@ -34,17 +33,14 @@ def test_a_cone_held_as_an_edge_still_reports_its_operand_buffers() -> None:
     (``KeyError: '<node>__place_<token>_0'`` on DeepSeek-V4's TP8xPP2 boot)."""
     root = _root_holding_a_cone()
 
-    assert loaded_buffers(root) == {"ws"}
+    assert not root.lift.body.loads, "the root's own body loads nothing — every buffer is beneath an edge"
+    assert _buffer_reads(root) == {"ws"}
 
 
-def test_loaded_buffers_reads_a_contraction_through_its_edges() -> None:
-    """A contraction's ``nested()`` is empty by design — its algebra IS its operand edges."""
+def test_buffer_reads_see_a_contraction_through_its_edges() -> None:
+    """A contraction's lift is its products alone — its algebra IS its operand edges, and the slabs
+    are where the buffers are read."""
+    node = contraction(Axis("k", 8), slab("av", "x", "m", "k"), (slab("bv", "w", "n", "k"), "acc"))
 
-    contraction = Fold.contraction(
-        k_axis=Axis("k", Dim(8)),
-        a=Load(name="av", input="x", index=(Var("m"), Var("k"))),
-        channels=(Channel(b=Load(name="bv", input="w", index=(Var("n"), Var("k"))), acc="acc"),),
-    )
-
-    assert contraction.nested() == ()
-    assert loaded_buffers(contraction) == {"x", "w"}
+    assert not node.lift.body.loads
+    assert _buffer_reads(node) == {"x", "w"}

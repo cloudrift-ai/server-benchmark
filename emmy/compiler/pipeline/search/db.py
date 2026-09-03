@@ -336,7 +336,10 @@ class SearchDB:
     #       ``S_*`` feature, so ``identity_key(with_io=True, with_knobs=True)`` shifts for every
     #       TileOp/KernelOp (the realization corpus's 211 restamped identities are the same
     #       shift); stale ``lowering`` rows would silently never match.
-    _SCHEMA_VERSION = 4
+    #   5: the ``S_ext_serial_cell_issues`` structural stamp — the same shift as 4, for the
+    #       issue-count refinement of the serial-work floor (each trip priced at its
+    #       variant-statement count); the corpus restamp is again the same shift.
+    _SCHEMA_VERSION = 5
 
     _SCHEMA = [
         """

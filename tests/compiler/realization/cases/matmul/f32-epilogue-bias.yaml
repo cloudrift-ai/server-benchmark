@@ -31,7 +31,7 @@ configs:
     - ab
     - o
   realizations:
-  - name: k_matmul_51919b.3635ae97333f
+  - name: k_matmul_51919b.e279a65bc62e
     bindings: {}
     pins:
       FAST_MATH: false

@@ -40,7 +40,7 @@ configs:
     - ws
     - xs
   realizations:
-  - name: k_linear_c43cc0.0a9a9184960b
+  - name: k_linear_c43cc0.69069fdf88dc
     bindings: {}
     pins:
       FAST_MATH: false

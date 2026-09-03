@@ -402,11 +402,15 @@ the shipped weights outside the slice it was fit on.
 
 The proxy stays uncalibrated, and the one consumer that needs absolute µs enforces a physical bound instead: in
 the kernel-set Σ (`policy/greedy._resolved_price`), a summand whose serial-work lower bound
-(`features.serial_floor_us` — the row's per-thread serial trips, i.e. the nest-aware `S_ext_serial_cell_work`
-stamp after its reduce-partition coverage, at a per-trip constant conservative for any GPU clock) exceeds the
-enforcement guard (`_SERIAL_FLOOR_ENFORCE_US`, 1 ms) is clamped to that bound. No fitted weight can guarantee the bound at magnitudes no measurement
-can reach: DeepSeek-V4 `post4096`'s fused 2^30-trip recomputation nest priced 4.29e-37 µs and beat every
-recomputation-free composed-cut arm until the bound priced it honestly. The guard is jurisdiction, not tuning —
+(`features.serial_floor_us` — the row's per-thread serial ISSUES, i.e. the nest-aware
+`S_ext_serial_cell_issues` stamp — each trip priced at its trip-variant statement count — after its
+reduce-partition coverage, at a per-issue constant conservative for any GPU clock; bare trips for rows stamped
+before the issues key) exceeds the enforcement guard (`_SERIAL_FLOOR_ENFORCE_US`, 1 ms) is clamped to that
+bound. No fitted weight can guarantee the bound at magnitudes no measurement can reach: DeepSeek-V4
+`post4096`'s fused 2^30-trip recomputation nest priced 4.29e-37 µs and beat every recomputation-free
+composed-cut arm until the bound priced it honestly — and its successor dominant piece (2^23 trips, 839 µs on
+trips alone, 16 % inside the guard, 13.21 s measured) rode that escape until the issue count priced its
+~16-statement weight-column-walk trips honestly. The guard is jurisdiction, not tuning —
 the bound ignores launch overhead and memory traffic, so at ordinary magnitudes the model's ranking stands
 untouched, while a bound past the guard is un-servable whatever those effects are. A measured µs is never below
 the bound, so the clamp only ever lifts model garbage; the prior's own scoring surfaces are untouched, because

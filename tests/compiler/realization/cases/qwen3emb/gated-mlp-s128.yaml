@@ -43,7 +43,7 @@ configs:
     - sg
     - up
   realizations:
-  - name: k_matmul_reduce_75bfc3.81a2377145da
+  - name: k_matmul_reduce_75bfc3.a6faabec55bb
     bindings: {}
     pins:
       FAST_MATH: false

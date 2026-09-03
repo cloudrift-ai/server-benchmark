@@ -35,7 +35,8 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
-from emmy.compiler.ir.stmt.leaves import Assign, Mma
+from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Mma
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.strategy import PassEndEvent, PipelineStrategy, RunStartEvent, SpliceEvent
@@ -215,6 +216,45 @@ def _serial_cell_work(body: Body) -> float:
     return best
 
 
+def _trip_issues(loop: Loop) -> float:
+    """Statements ONE trip of ``loop`` must issue: every accumulate, plus the trip-variant cone
+    seeded by the loop axis — a statement reading the axis, a counted statement's value, or a
+    nested loop's carried state. A backend hoist can remove only what the trip does not vary
+    (the canonical body may re-spell a scalar load inside the loop), so counting the variant
+    cone alone is what keeps the derived bound a bound. A nested loop contributes no count here
+    — the nest walk multiplies its own value — only its defined names."""
+    variant = {loop.axis.name}
+    count = 0.0
+    for s in loop.body:
+        if isinstance(s, Loop):
+            variant.update(Body((s,)).ssa_defs)
+            continue
+        if isinstance(s, Accum) or free_names(s) & variant:
+            count += 1.0
+            variant.update(s.defines())
+    return count
+
+
+def _serial_cell_issues(body: Body) -> float:
+    """Worst per-cell serial ISSUE count: :func:`_serial_cell_work`'s nest walk with each trip
+    priced at its trip-variant statement count (:func:`_trip_issues`) instead of 1. Same
+    conservatisms — sibling reduces take the max, free/sweep loops pass through unmultiplied,
+    symbolic extents and ``StridedLoop`` contribute no factor — so the value is a lower bound on
+    the instructions a thread issues per output cell; saturates at the largest finite float."""
+    best = 0.0
+    for s in body:
+        if isinstance(s, Loop):
+            inner = _serial_cell_issues(s.body)
+            ext = s.axis.extent
+            if s.is_reduce and ext.is_static:
+                inner = _bounded_mul(max(inner, _trip_issues(s)), float(ext.as_static()))
+            best = max(best, inner)
+        else:
+            for nested in s.nested():
+                best = max(best, _serial_cell_issues(nested))
+    return best
+
+
 def _extents(body: Body) -> dict[str, float]:
     """Continuous ``S_ext_*`` loop extents, split by free vs reduce axis
     (``Loop.is_reduce``). Symbolic axes (non-static extent) are excluded from
@@ -245,4 +285,5 @@ def _extents(body: Body) -> dict[str, float]:
         "S_ext_reduce_max": float(max(reduce_)) if reduce_ else 0.0,
         "S_ext_n_symbolic_axis": float(n_symbolic),
         "S_ext_serial_cell_work": _serial_cell_work(body),
+        "S_ext_serial_cell_issues": _serial_cell_issues(body),
     }

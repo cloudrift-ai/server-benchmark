@@ -28,7 +28,7 @@ configs:
     - c
     - kt
   realizations:
-  - name: k_matmul_1f9439.9b8b1a07cc6b
+  - name: k_matmul_1f9439.d2d048823091
     bindings: {}
     pins:
       FAST_MATH: false

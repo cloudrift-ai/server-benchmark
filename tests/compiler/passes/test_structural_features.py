@@ -227,6 +227,43 @@ def test_serial_cell_work_takes_the_max_path_over_sibling_reduces():
     assert feats["S_ext_reduce_prod"] == 64.0 * 64.0
 
 
+def test_serial_cell_issues_price_each_trip_at_its_variant_statement_count():
+    """``S_ext_serial_cell_issues`` is the trips stamp with each trip priced at the statements
+    the trip actually issues — the trip-variant cone seeded by the loop axis, plus every
+    accumulate. RMS's step is (load, square, accumulate) → 3 issues per trip."""
+    feats = structure_features(_rms_body(ext_i=8, ext_k=64))
+    assert feats["S_ext_serial_cell_issues"] == 3.0 * 64.0
+
+
+def test_serial_cell_issues_multiply_through_a_nest_and_max_over_siblings():
+    """A nested reduce re-issues its whole inner nest per outer trip; sibling reduces take the
+    max path, mirroring the trips stamp's conservatism toward reduce partitioning."""
+    feats = structure_features(_nested_reduce_body(ext_k1=16, ext_k2=32))
+    # inner: (load, accumulate) × 32; outer: max(inner, its own 2 variant stmts) × 16.
+    assert feats["S_ext_serial_cell_issues"] == 16.0 * (32.0 * 2.0)
+    assert structure_features(_softmax_body())["S_ext_serial_cell_issues"] == 2.0 * 64.0
+
+
+def test_serial_cell_issues_exclude_trip_invariant_statements():
+    """A statement the trip does not vary — a scalar load re-spelled inside the loop — can be
+    hoisted by the backend compiler, so a strict bound must not count it."""
+    body = Body(
+        (
+            Loop(
+                axis=Axis("k", 64),
+                body=(
+                    Load(name="eps", input="c", index=(Var("z"),)),  # trip-invariant re-spell
+                    Load(name="x", input="a", index=(Var("k"),)),
+                    Assign(name="y", op="add", args=("x", "eps")),
+                    Accum(name="s", value="y", op=ElementwiseImpl("add")),
+                ),
+            ),
+        )
+    )
+    # eps is hoistable; load-x, add (reads x), and the accumulate issue per trip.
+    assert structure_features(body)["S_ext_serial_cell_issues"] == 3.0 * 64.0
+
+
 def test_serial_cell_work_saturates_and_skips_symbolic_extents():
     # A reduce loop is one that accumulates: the nested pair folds a load through ``acc``.
     huge = Body(

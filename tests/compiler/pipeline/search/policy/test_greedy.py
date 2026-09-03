@@ -178,6 +178,44 @@ def test_the_serial_bound_has_no_jurisdiction_at_ordinary_magnitudes():
     assert measured == 2_000_000.0  # a measured µs already satisfies the bound
 
 
+def test_the_issues_stamp_closes_the_sub_guard_trip_escape():
+    """The escape the trips-only floor documents, measured live on DeepSeek-V4 ``post4096``'s
+    dominant piece: 2^23 per-cell trips price a floor of 839 µs — 16 % inside the guard — while
+    each a29 trip issues ~16 statements and the launch measured 13.21 s. Priced per ISSUE
+    (``S_ext_serial_cell_issues``), the same nest's floor is decisively past the guard, so the
+    fused arm loses to the materializing cut arms; a row stamped before the issues key exists
+    prices its trips alone, exactly as before."""
+    from emmy.compiler.pipeline.search.features import serial_floor_us
+
+    trips_only = {"S_ext_serial_cell_work": float(2**23)}
+    assert serial_floor_us(trips_only) < greedy._SERIAL_FLOOR_ENFORCE_US  # the documented escape
+    dominant = {**trips_only, "S_ext_serial_cell_issues": float(2**23) * 16.0}
+    assert serial_floor_us(dominant) > greedy._SERIAL_FLOOR_ENFORCE_US
+    garbage = 3.72e-07  # the cold proxy's actual price for the fused arm at this fork
+    fused = _priced({"n": (dominant, garbage)})
+    assert fused == pytest.approx(float(2**23) * 16.0 * 1e-4, rel=1e-6)
+    cut = _priced(
+        {
+            "p": ({"S_ext_serial_cell_work": float(2**12), "S_ext_serial_cell_issues": float(2**12) * 16.0}, 1.37e-3),
+            "c": ({"S_ext_serial_cell_work": float(2**11), "S_ext_serial_cell_issues": float(2**11) * 10.0}, 1.3e-5),
+        }
+    )
+    assert cut < fused  # the per-output-element weight-column walk loses on its issue bound
+
+
+def test_the_issues_floor_divides_by_reduce_coverage_like_trips():
+    """A cta/coop reduce partition genuinely divides what one thread issues; the register/ILP
+    fold does not — the same coverage rule the trips floor applies."""
+    from emmy.compiler.pipeline.search.features import serial_floor_us
+
+    issues = {"S_ext_serial_cell_issues": float(2**20)}
+    assert serial_floor_us(issues) == pytest.approx(float(2**20) * 1e-4)
+    coop = {**issues, "WORK": "t128", "REDUCE": "coop"}
+    assert serial_floor_us(coop) == pytest.approx(float(2**20) / 128 * 1e-4)
+    reg = {**issues, "WORK": "t16x16", "REDUCE": "r4"}
+    assert serial_floor_us(reg) == pytest.approx(float(2**20) * 1e-4)
+
+
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     materialized = []
     rows = [{"TILE": str(tile), "STAGE": str(stage)} for tile in range(100) for stage in range(100)]

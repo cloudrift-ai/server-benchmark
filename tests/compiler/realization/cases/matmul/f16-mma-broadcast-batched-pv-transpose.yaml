@@ -58,7 +58,7 @@ configs:
     - matmul
     - transpose
   realizations:
-  - name: k_matmul_35c81e.c2e180387a3e
+  - name: k_matmul_35c81e.913303c02fbc
     bindings: {}
     pins:
       FAST_MATH: false

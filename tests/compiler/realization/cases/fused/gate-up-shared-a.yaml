@@ -43,7 +43,7 @@ configs:
     - sg
     - up
   realizations:
-  - name: k_linear_reduce_24a246.d52689fe2270
+  - name: k_linear_reduce_24a246.10149f98ce3d
     bindings: {}
     pins:
       FAST_MATH: false

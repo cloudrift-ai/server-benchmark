@@ -40,7 +40,7 @@ configs:
     - out
     - sum
   realizations:
-  - name: k_out_reduce.1df4ede1d671
+  - name: k_out_reduce.5985139c387a
     bindings: {}
     pins:
       FAST_MATH: false

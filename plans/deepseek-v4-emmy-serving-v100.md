@@ -204,9 +204,23 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    — an uncoalesced re-read of both FFN weight matrices per output element, at 25 % occupancy — and two
    16384-grid sweep pieces add 9.3 s; everything else totals ~0.7 s. #702's bound elected the best plan on the
    ballot (five orders of magnitude past the fused monster); the ballot holds no fast lowering for these pieces
-   yet. Two moves, in order: a measured tune pass over the dominant pieces with the raised bench budgets (also
-   the measured-election evidence gap 2 always wanted), and — if the fork space has no fast row — materializing
-   the matmul contributions as their own mma pieces, the way `PLACE@a8` materialized the statistics.
+   yet. The measured tune pass (2026-09-03, three passes, 58 ok rows) found no faster row for the dominant
+   pieces — every arm hung the watchdog — so materialization it is. Characterized GPU-free on the pinned twins +
+   host-DB copy: the materializing seams (`PLACE@a29`, the linear_2/linear_3 contraction itself, and `PLACE` on
+   the whole activation cone) ARE on the dominant piece's ballot and realize fine; the fused side won at
+   3.72e-07 µs because the piece's serial-work floor is 839 µs — 2^23 per-cell trips — 16 % inside #702's 1 ms
+   guard, the documented escape. **Landed: the floor prices each trip at its trip-variant statement count**
+   (`S_ext_serial_cell_issues`; the a29 walk issues ~16 per trip), which puts that piece's honest bound
+   decisively past the guard while the qwen3emb corpus family stays ~25× inside it. Landed beside it, because
+   main could not lower the twin at all after #699 (nested output sweeps had no boundary spelling): `OutputSpec`
+   stores the output loop NEST as an axis path, and the lift keeps nested write-only sweeps in the retained cell.
+   Replayed on post-#699 main the election is a different tree (10 kernels): the consumer of the FFN
+   contributions is a pure staged mma with no serial hidden-dim walk — the shape this item asked for — but the
+   contribution producer now carries the mHC statistics recompute per (row, a28) cell (~2^20 trips per lane
+   after its 1024-way cta×coop coverage, 2^53 total), and that per-thread floor is honestly 839 µs: the piece is
+   un-servable through grid-TOTAL serial work, which a per-thread bound cannot see. Open, as a design decision
+   for the next round: a launch-total bound (per-cell issues × output cells at a machine-width constant), or
+   measured evidence for the statistics seams on this piece. The host measurement of this route is still owed.
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
 compiles end to end and the elected route is a measured 23.2 s per `post4096` prefill forward (no longer a

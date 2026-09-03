@@ -44,7 +44,7 @@ configs:
     - o
     - xr
   realizations:
-  - name: k_matmul_fd2d7b.8a65e8fc7027
+  - name: k_matmul_fd2d7b.90d5dcc35f6f
     bindings: {}
     pins:
       FAST_MATH: false

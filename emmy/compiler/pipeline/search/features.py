@@ -442,7 +442,12 @@ def _serial_cell_trips(knobs: dict) -> float:
     coverage. cta (``g<n>``) and coop lanes divide; the register/ILP fold (``r<n>``) does not —
     the same thread walks every trip, just on independent accumulator chains. ``0.0`` when the
     row carries no stamp."""
-    work = float(knobs.get("S_ext_serial_cell_work") or 0.0)
+    return _covered_serial(knobs, "S_ext_serial_cell_work")
+
+
+def _covered_serial(knobs: dict, key: str) -> float:
+    """One stamped per-cell serial quantity after the row's reduce-partition coverage."""
+    work = float(knobs.get(key) or 0.0)
     if not work:
         return 0.0
     decomp = _reduce_decomp(knobs)
@@ -462,12 +467,17 @@ SERIAL_TRIP_FLOOR_US = 1e-4
 
 def serial_floor_us(knobs: dict) -> float:
     """A physical lower bound, in µs, on one launch of the kernel the row ``knobs`` describes:
-    its per-thread serial trips at the per-trip bound. True regardless of any model, so a
-    kernel-set comparison may clamp an estimated summand to it — and a measured µs is never below
-    it, so clamping measurements is a no-op. It is a BOUND, not an estimate: it ignores launch
-    overhead and memory traffic, so its jurisdiction is where it is decisively large (the
-    enforcement guard lives with the clamp, ``policy/greedy._resolved_price``)."""
-    return _serial_cell_trips(knobs) * SERIAL_TRIP_FLOOR_US
+    its per-thread serial ISSUES (``S_ext_serial_cell_issues`` — trips times each trip's
+    variant-statement count) at the per-issue bound, or its bare trips for a row stamped before
+    the issues key existed. True regardless of any model, so a kernel-set comparison may clamp an
+    estimated summand to it — and a measured µs is never below it, so clamping measurements is a
+    no-op. It is a BOUND, not an estimate: it ignores launch overhead and memory traffic, so its
+    jurisdiction is where it is decisively large (the enforcement guard lives with the clamp,
+    ``policy/greedy._resolved_price``). Pricing per issue is what catches DeepSeek-V4
+    ``post4096``'s dominant piece — 2^23 trips price 16 % inside the guard, while its ~16
+    statements per weight-column-walk trip put the honest bound decisively past it."""
+    issues = _covered_serial(knobs, "S_ext_serial_cell_issues")
+    return (issues if issues else _serial_cell_trips(knobs)) * SERIAL_TRIP_FLOOR_US
 
 
 def _free_slots(knobs: dict) -> tuple[int, int, int, int] | None:

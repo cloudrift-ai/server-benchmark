@@ -41,7 +41,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_sdpa_8b9832.0d55c11c27e7
+  - name: k_sdpa_8b9832.53ee81ca794b
     bindings: {}
     pins:
       FAST_MATH: false

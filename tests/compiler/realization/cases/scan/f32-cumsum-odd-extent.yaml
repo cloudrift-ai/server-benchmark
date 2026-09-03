@@ -19,7 +19,7 @@ configs:
     origins:
     - cumsum
   realizations:
-  - name: k_cumsum_reduce.4fc751611f0e
+  - name: k_cumsum_reduce.af8d6449fb55
     bindings: {}
     pins:
       FAST_MATH: false

@@ -25,7 +25,7 @@ configs:
     origins:
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_5c434c.c536b10b1afd
+  - name: k_sdpa_5c434c.1282efc2c7ea
     bindings: {}
     pins:
       FAST_MATH: false

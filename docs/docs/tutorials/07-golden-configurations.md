@@ -15,10 +15,11 @@ deploying on a guess.
 
 They do three jobs at once:
 
-1. **The first tier of the deploy evidence hierarchy** — joined by exact structural identity (the record's own
-   persisted program, lowered and recognized through the same code the live compile uses) and decoded by exact row
-   equality; see [the hierarchy page](./06-deploy-evidence-hierarchy.md). The same record also replays exactly as
-   pins (`run --golden NAME`, `--ab`) — the schedule codec fully encodes how the row replays.
+1. **Measured evidence for the deploy.** Every measured realization is one more row in the measured-evidence index
+   the greedy pick reads — keyed by the recorded kernel's structural signature, beside the rows a tune measured on
+   this machine; see [the hierarchy page](./06-deploy-evidence-hierarchy.md). A golden is a preference among
+   measured rows, never a forced pin. The same row also replays under a hand pin for a measurement
+   (`run --golden PATH --realization NAME --bench`) — the schedule codec fully encodes how it replays.
 2. **The training data** for the offline prior, which is fitted on them.
 3. **A regression reference** — if today's compiler produces something slower than the recording, that is a defect
    with a number attached.
@@ -56,29 +57,34 @@ all realizations below one target makes it explicit which input dimension change
 same program from drifting apart.
 
 Names repeat across files — every GPU has its own `matmul.square.512` — with different shapes, different data types
-and different measured times. So `--golden NAME` replay prefers the live card's file. Pooling them would mean
-replaying one card's configuration on another.
+and different measured times. So `--realization NAME` without `--golden PATH` resolves inside the live card's file.
+Pooling them would mean replaying one card's configuration on another.
 
 ## Recording one
 
 A golden is recorded from a side-by-side comparison run:
 
 ```bash
-emmy run --golden matmul.square.512 --bench --ab "WORK=w2x2,TILE=f2x8,STAGE=d2/smem-async"
+emmy run --realization matmul.square.512 --bench --ab "WORK=w2x2,TILE=f2x8,STAGE=d2/smem-async"
 ```
 
-To verify a target still living in a working YAML—including an exact Loop IR fallback—select both the file and row:
+To verify a realization still living in a working YAML—including an exact Loop IR fallback—select both the file and
+the row. The same two flags spell it on every command (`run`, `compile`, `tune`, `serve`):
 
 ```bash
-emmy compile --golden-file _tune/model/working.yaml --golden target.name --ir cuda
-emmy run --golden-file _tune/model/working.yaml --golden target.name --bench --ab "WORK=w2x2,TILE=f2x8"
+emmy compile --golden _tune/model/working.yaml --realization target.name --ir cuda
+emmy run --golden _tune/model/working.yaml --realization target.name --bench
 ```
 
-The working row supplies the graph regardless of state. Only rows with verified paired timings are auto-pinned;
-inventory and proposal knobs run only when supplied explicitly through `--ab`.
+The realization supplies the graph regardless of state. A realization named explicitly is always benched as a pinned
+row, measurement state notwithstanding; `run --golden PATH` alone walks every name and benches only the rows with
+verified paired timings or a valid tune winner, leaving proposals to the tuner. `--ab` is a hand pin for one extra
+bench row — a way to try a row, not a way to replay a golden.
 
 That compiles the shape the way the compiler would on its own, then compiles it again with the given knob values
-pinned, and prints both. Two rules about which number to copy:
+pinned, and prints both. Whatever it measured cleanly is written into the tuning database by default — per-kernel
+rows the next compile deploys from, plus the training rows of the offline prior — which is how a replayed golden or
+a hand-pinned row becomes what the compiler chooses. Two rules about which number to copy:
 
 - **Record from a pinned row, never from the ordinary comparison row.** The ordinary row is measured interleaved with
   the PyTorch baselines, so the allocator state and cache contents of another framework are resident while it runs. It
@@ -120,32 +126,34 @@ own process, is reported as a failure, and the remaining rows continue.
     measurements: {emmy_us: 16.0, reference_us: 19.0, reference_backend: cublas}
   ```
 
-  It stores the split and nothing else. Replayed, the placement pin cuts the kernel and each resulting piece is
-  recognized on its own afterwards, finding its own schedule through the hierarchy. In this case the split is 1.8
-  times faster than keeping the work fused.
+  It stores the split and nothing else. As evidence it is the measured price of that kernel set: at the placement
+  fork it outranks any arm the prior would have to price and is applied by installing the route as the kernel's own
+  pins for the cut pass to compose; each resulting piece is recognized on its own afterwards, finding its own
+  schedule through the hierarchy. In this case the split is 1.8 times faster than keeping the work fused.
 
-- **A recording is a pinned measurement, and replay is exact.** The knobs are decoded against the kernel's recognized
-  structure — there is no fuzzy matching between a recording and a live compile, so a row either replays into exactly
-  the measured kernel or fails loudly. Nightly model onboarding gates that contract: it repository-validates and
-  strictly decodes every checked-in record for the model, then audits and replays the file on its exact GPU. A
-  structural change that invalidates a row fails that nightly job with the reason instead of silently unkeying it.
+- **A recording is a pinned measurement, and its decode is exact.** The knobs are decoded against the kernel's
+  recognized structure — a row either decodes into exactly the measured kernel or fails loudly. Nightly model
+  onboarding gates that contract: it repository-validates and strictly decodes every checked-in record for the
+  model, then audits and replays the file on its exact GPU. A structural change that invalidates a row fails that
+  nightly job with the reason instead of silently unkeying it. At deploy the same row is ordinary evidence, matched
+  the way every measured row is: by the kernel's structural signature and agreement on every decided knob.
 
 ## Validating a file
 
 One command checks a corpus against its pinned serving envelope:
 
 ```bash
-emmy eval golden <canonical-golden.yaml> --serving-config <models/slug.env>
+emmy eval golden --golden <canonical-golden.yaml> --serving-config <models/slug.env>
 ```
 
 The serving config names that exact file and supplies the model, revision, GPU, and reachable realization matrix.
 The command must run on that GPU. It validates the schema and provenance and proves every structural target contains
 every expected static/symbolic precision realization. It then compiles — first each record's own program, then the
-freshly traced serving twins of every precision lane — and reports, per consultation, whether a record still decided
-the fork (a match), whether the records for that kernel no longer equal anything the compiler offers (drift), or
-whether no record covers it at all (a gap). Drift, a gap, or a compile failure fails the release. Beyond that, a
-recorded row's health is its exact pinned replay — `run --golden NAME --bench` reproduces it under the A/B integrity
-gates above.
+freshly traced serving twins of every precision lane — and reports, per schedule fork, whether a golden row of that
+kernel still agrees with an offered option (a match), whether the rows for that kernel no longer agree with anything
+the compiler offers (drift), or whether no row covers it at all (a gap). Drift, a gap, or a compile failure fails the
+release. Beyond that, a recorded row's health is its pinned replay — `run --golden PATH --realization NAME --bench`
+reproduces it under the A/B integrity gates above.
 
 ## Two smaller rules
 
@@ -171,7 +179,7 @@ Then run the file-scoped validation on the GPU named by the serving config. It n
 allocation metadata, but no weight payload:
 
 ```bash
-emmy eval golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
+emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
 

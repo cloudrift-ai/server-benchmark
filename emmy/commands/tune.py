@@ -53,17 +53,18 @@ def register_tune_command(subparsers):
     )
     add_input_args(parser)
     parser.add_argument(
-        "--kernel",
-        help="With --golden-file, tune only entries whose target name contains this substring.",
-    )
-    parser.add_argument(
-        "--golden-file",
+        "--golden",
         metavar="PATH",
         help=(
             "Tune every target in a working golden YAML file. Each target is reconstructed from embedded stable "
             "Torch IR plus provenance, or from its Loop IR fallback. Entries with a knobs mapping are measured before MCTS and ranking "
             "results are written back to the working file."
         ),
+    )
+    parser.add_argument(
+        "--realization",
+        metavar="NAME",
+        help="With --golden PATH, tune only the realizations whose name contains this substring.",
     )
     parser.add_argument("--output", "-o", help="Output path for the tuned CUDA IR")
     parser.add_argument(
@@ -427,8 +428,8 @@ def _exit_flushed(code: int) -> None:
 def _tune_targets(args) -> list[tuple[str, str | None, str | None, list[str] | None]]:
     """The one direct ``(label, code, input, dynamic)`` tune target.
 
-    Multi-target inventory and candidate seeding belong exclusively to a mutable
-    ``--golden-file``; the old dataset/canonical-golden target shims are gone.
+    Multi-target inventory and candidate seeding belong exclusively to a mutable working golden
+    (``--golden PATH``); the old dataset/canonical-golden target shims are gone.
     """
     if args.code and args.input:
         logger.error("--code and positional input are mutually exclusive")
@@ -533,7 +534,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                 run_id=run_id,
             )
             if target.proposals:
-                persist_proposal_rankings(args.golden_file, document, target, rankings)
+                persist_proposal_rankings(args.golden, document, target, rankings)
 
         slots: asyncio.Queue = asyncio.Queue()
         for backend in backends:
@@ -592,7 +593,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                         device_id=backends[0].device_id,
                     )
             winner = result.best_reward.searched_winner() if result.best_reward is not None else None
-            persist_tune_winner(args.golden_file, document, target, winner, compile_flags=config.nvcc_flags())
+            persist_tune_winner(args.golden, document, target, winner, compile_flags=config.nvcc_flags())
         for block in results[0].prior_summaries if results else []:
             sys.stderr.write(block + "\n")
         sys.stderr.write(f"\n[tune] done: {len(results)}/{len(targets)} working-golden target(s)\n")
@@ -606,27 +607,27 @@ def handle_tune(args):
     if getattr(args, "max_candidates", None) is not None and args.max_candidates < 1:
         logger.error("--max-candidates must be >= 1")
         sys.exit(2)
-    if getattr(args, "kernel", None) and not getattr(args, "golden_file", None):
-        logger.error("--kernel requires --golden-file")
+    if getattr(args, "realization", None) and not getattr(args, "golden", None):
+        logger.error("--realization requires --golden PATH")
         sys.exit(2)
-    if not args.code and not args.input and not getattr(args, "golden_file", None):
+    if not args.code and not args.input and not getattr(args, "golden", None):
         # No op to tune → offline mode: refit the online prior on its persisted
         # dataset and print what that dataset covers.
         _tune_offline(args)
         return
 
     working_document = None
-    if getattr(args, "golden_file", None):
+    if getattr(args, "golden", None):
         conflicts = []
         if args.code or args.input:
             conflicts.append("--code / positional input")
         if getattr(args, "dynamic", None):
             conflicts.append("--dynamic")
         if conflicts:
-            logger.error("--golden-file is mutually exclusive with %s", " / ".join(conflicts))
+            logger.error("--golden is mutually exclusive with %s", " / ".join(conflicts))
             sys.exit(2)
         try:
-            working_document, targets = load_working_targets(args.golden_file, kernel=args.kernel)
+            working_document, targets = load_working_targets(args.golden, kernel=args.realization)
         except ValueError as exc:
             logger.error(str(exc))
             sys.exit(2)
@@ -730,7 +731,7 @@ def handle_tune(args):
                     run_id=run_id,
                     proposals=target.proposals,
                     proposal_ranking_callback=(
-                        (lambda measured, target=target: persist_proposal_rankings(args.golden_file, working_document, target, measured))
+                        (lambda measured, target=target: persist_proposal_rankings(args.golden, working_document, target, measured))
                         if working_document is not None and target.proposals
                         else None
                     ),
@@ -776,13 +777,13 @@ def handle_tune(args):
             if working_document is not None:
                 winner = result.best_reward.searched_winner() if result.best_reward is not None else None
                 persist_tune_winner(
-                    args.golden_file,
+                    args.golden,
                     working_document,
                     target,
                     winner,
                     compile_flags=config.nvcc_flags(),
                 )
-                sys.stderr.write(f"[tune] updated working golden rankings: {args.golden_file}\n")
+                sys.stderr.write(f"[tune] updated working golden rankings: {args.golden}\n")
             done += 1
         finally:
             _cleanup_temp_dump(tmp_dump)

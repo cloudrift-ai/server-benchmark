@@ -22,7 +22,7 @@ help:
 	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
 	@echo "  serve-models    - List the models with a pinned release config"
 	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
-	@echo "  test-corpus-regen - Restamp the realization corpus after an identity / codec change"
+	@echo "  test-corpus-regen - Restamp the realization corpus after an identity / codec change (COMPLETE=1 adds entries)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
@@ -73,15 +73,18 @@ format: setup
 # blowup it rested on. See AGENTS.md for the measurement.
 # --durations: the slowest tests are printed on every run (CI included), so a new long
 # pole is visible in the log the moment it lands rather than after someone profiles.
+# `EMMY_GOLDEN_FILE=` (set, empty) deploys no repository golden in this lane: the correctness lane never asks how
+# fast a pick is, and importing a card's goldens is work every worker process would repeat. Tests that need golden
+# evidence scope it themselves (`--golden PATH`, `records_override`), which takes precedence.
 test: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=25
+	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=25
 
 # Restamp the realization corpus's derived half (program wire, name, identity, canonical knobs)
 # after a kernel-identity or schedule-codec change. `make test` DETECTS staleness on any machine,
 # GPU or not; this applies the fix. It refuses to write a case whose verdict also changed — that
 # is a realization regression to review, not a mechanical restamp.
 test-corpus-regen: setup
-	./venv/bin/python -m tests.compiler.realization.regen
+	./venv/bin/python -m tests.compiler.realization.regen $(if $(COMPLETE),--complete,)
 
 # Regenerate tests/durations.json — the checked-in per-test timings the conftest
 # LPT-buckets on, so CI's first (cache-less) run is balanced. Runs through one xdist
@@ -89,7 +92,7 @@ test-corpus-regen: setup
 # looks up, without concurrent workers inflating the measurements. Commit the result
 # when the balance has drifted (a new heavy test, a big pass-cost change).
 test-durations: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" ./venv/bin/pytest tests/ -q -p no:randomly -n 1 --dist=loadgroup --write-durations
+	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -q -p no:randomly -n 1 --dist=loadgroup --write-durations
 
 # The name the docs reference; the stock (no tune DB) lane is the default.
 bench-kernels: bench-kernels-clean
@@ -212,7 +215,7 @@ serve-config-guard:
 # config-derived realization matrix on the target GPU before warming; the pinned config owns
 # model, revision, GPU, canonical file, widths, and precision regimes together.
 serve-goldens: serve-config-guard
-	./venv/bin/emmy eval golden "$(SERVE_GOLDEN_FILE)" --serving-config "$(SERVE_CONFIG)"
+	./venv/bin/emmy eval golden --golden "$(SERVE_GOLDEN_FILE)" --serving-config "$(SERVE_CONFIG)"
 
 serve-warm: serve-goldens
 	BASE_IMAGE=$(VLLM_EMMY_TAG) MODEL="$(MODEL)" $(SERVE_DIR)/warm.sh

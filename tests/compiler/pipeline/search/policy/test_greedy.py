@@ -7,31 +7,41 @@ import pytest
 
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
-from emmy.compiler.pipeline.knob import canonical_row_key, schedule_row_key
+from emmy.compiler.pipeline.knob import canonical_row_key
 from emmy.compiler.pipeline.pipeline import NO_OPTION
 from emmy.compiler.pipeline.search.policy import greedy
 from emmy.compiler.pipeline.search.policy.greedy import (
+    EvidenceError,
     _db_measured_index_build,
     _direct_measured_pick,
+    _Measured,
+    _require_evidence,
+    _route_candidates,
     _stream_tiers,
-    _verified_pick,
-    golden_audit,
     tile_identity,
 )
 from tests.compiler.terms import projection
 
 
 @pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@inner.1/map": "cut"}, {"PLACE@inner.1/map": "cut", "WORK": "t32"}))
-def test_db_measured_index_excludes_placement_route_totals(route) -> None:
+def test_db_measured_index_files_placement_rows_as_kernel_set_prices(route, monkeypatch) -> None:
+    """A measured row that spells a placement is not a schedule for the kernel it names — its µs
+    belongs to the kernel set the route mints — so it prices that kernel-set decision (``routes``)
+    and never ranks a schedule fork (``ok``)."""
+    from emmy.compiler.pipeline.search import golden
+
+    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: [])
     signature = frozenset({("S_shape", "128")})
     rows = [
-        SimpleNamespace(status="ok", stats=SimpleNamespace(median=1.0), knobs={"S_shape": 128, **route}),
-        SimpleNamespace(status="ok", stats=SimpleNamespace(median=7.0), knobs={"S_shape": 128, "WORK": "t64"}),
+        SimpleNamespace(status="ok", stats=SimpleNamespace(median=1.0), knobs={"S_shape": 128, **route}, op_key="k" * 16),
+        SimpleNamespace(status="ok", stats=SimpleNamespace(median=7.0), knobs={"S_shape": 128, "WORK": "t64"}, op_key="k" * 16),
     ]
     db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
-    ctx = SimpleNamespace(structural_key=lambda: "ctx")
+    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name="card", compute_capability=(8, 9), features=lambda: {"H_opt": 3.0})
 
-    assert _db_measured_index_build(db, ctx).ok == {signature: [({"WORK": "t64"}, 7.0)]}
+    index = _db_measured_index_build(db, ctx)
+    assert index.ok == {signature: [({"WORK": "t64"}, 7.0)]}
+    assert index.routes == {signature: [({k: str(v) for k, v in route.items()}, 1.0)]}
 
 
 def test_db_measured_index_collects_shapes_whose_every_measured_variant_failed() -> None:
@@ -51,7 +61,7 @@ def test_db_measured_index_collects_shapes_whose_every_measured_variant_failed()
         SimpleNamespace(status="ok", stats=SimpleNamespace(median=7.0), knobs={"S_shape": 128, "WORK": "t64"}),
     ]
     db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
-    ctx = SimpleNamespace(structural_key=lambda: "ctx")
+    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name=None, compute_capability=(8, 9), features=lambda: {"H_opt": 3.0})
 
     measured = _db_measured_index_build(db, ctx)
     assert doomed in measured.failed, "every measured variant of this shape hit the watchdog"
@@ -78,23 +88,21 @@ def test_a_shape_whose_every_variant_failed_prices_as_infeasible() -> None:
 
 
 def test_a_disqualification_condemns_only_the_shape_that_was_measured() -> None:
-    """Elimination matches the signature EXACTLY, unlike the ranking tier's drift-tolerant
-    :func:`_sig_groups`. There a loose match only widens the candidate pool and a second filter
-    still has to agree on the tunable knobs; here nothing follows the match, so condemning every
-    shape that merely does not contradict a recorded failure disqualifies the whole program.
-    Measured: on DeepSeek-V4's post block the tolerant form priced all 17 leaves of one fork
-    ``inf``, which decides nothing at all."""
+    """A recorded signature describes a candidate only when the candidate carries EVERY recorded
+    key with the recorded value — for ranking (:func:`_sig_groups`) and elimination alike. A
+    candidate that merely agrees on the keys the two share is a different shape: the op
+    histogram is stamped only where it is non-zero, so a recorded key the candidate lacks is a
+    zero, not an unknown. Measured: on DeepSeek-V4's post block a shared-key match priced all 17
+    leaves of one fork ``inf``, which decides nothing at all; and a cut's piece agrees with its
+    parent on every key they share."""
     recorded = frozenset({("S_shape", "4096"), ("S_dtype_f16", "1.0")})
-    # Agrees on every SHARED key, so the drift-tolerant matcher would call it a hit; it is a
-    # different shape and must still be priced.
     other = SimpleNamespace(knobs={"S_shape": 4096, "S_n_loop": 9}, identity_key=lambda **_kw: "k")
     terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=other)})
     trace = [SimpleNamespace(node_id="n", score=5.0)]
     ctx = SimpleNamespace(features=lambda: {})
 
-    assert greedy._sig_groups({recorded: [1.0]}, frozenset({("S_shape", "4096"), ("S_n_loop", "9")})), (
-        "the tolerant matcher does hit here — which is exactly why elimination must not use it"
-    )
+    assert greedy._sig_groups({recorded: [1.0]}, frozenset({("S_shape", "4096"), ("S_n_loop", "9")})) == []
+    assert greedy._sig_groups({recorded: [1.0]}, frozenset({("S_shape", "4096"), ("S_dtype_f16", "1.0"), ("S_n_loop", "9")})) == [[1.0]]
     assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}) == 5.0
 
 
@@ -202,54 +210,65 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     assert materialized == []
 
 
-def test_verified_pick_ignores_feature_keys_in_schedule_branches(monkeypatch) -> None:
+def _golden_row(sig: frozenset, tun: dict, us: float, name: str):
+    return (sig, tun, us, name)
+
+
+def test_measured_index_folds_golden_rows_beside_the_tune_db(monkeypatch) -> None:
+    """Golden rows enter the ONE evidence index the greedy pick reads, in the tune DB rows' shape: a
+    schedule row ranks under its signature (and is remembered by name for the audit), a row that
+    spells a placement or a cross-CTA split is a measured price for that kernel-set decision."""
+    from emmy.compiler.pipeline.search import golden
+
+    sig = frozenset({("S_shape", "128.0")})
     rows = [
-        {"S_warp_eligible": 1.0, "RASTER": "", "TILE": "slow"},
-        {"S_warp_eligible": 1.0, "RASTER": "", "TILE": "recorded"},
-        {"S_warp_eligible": 1.0, "RASTER": "gm8", "TILE": "other"},
+        _golden_row(sig, {"WORK": "t32", "TILE": "f2"}, 4.0, "g.row"),
+        _golden_row(sig, {"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0, "g.route"),
+        _golden_row(sig, {"REDUCE": "g2k/coop", "WORK": "w1x1"}, 7.0, "g.split"),
     ]
-    tree = build_fork_tree(
-        params=rows,
-        levels=(
-            Level(("S_warp_eligible", "RASTER"), lambda row: (row["S_warp_eligible"], row["RASTER"])),
-            Level(("TILE",), lambda row: (row["TILE"],)),
-        ),
-        materialize=lambda _row: None,
-    )
+    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: rows)
+    monkeypatch.setattr(golden, "scope_explicit", lambda: True)
+    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name="", compute_capability=(8, 9), features=lambda: {"H_opt": 3.0})
+
+    index = _db_measured_index_build(None, ctx)
+
+    assert index.ok == {sig: [({"WORK": "t32", "TILE": "f2"}, 4.0)]}
+    assert index.routes == {sig: [({"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0), ({"REDUCE": "g2k/coop", "WORK": "w1x1"}, 7.0)]}
+    assert index.failed == {}
+
+
+def test_route_rows_become_measured_kernel_set_candidates() -> None:
+    """At a placement fork, every measured row of the kernel's signature is one candidate priced at
+    its µs: the OFFERED arm the row spells — a seam it marks ``cut``, the fuse arm when it marks
+    none (a schedule row says the kernel ran fused), nothing when the seam it marks is not on the
+    ballot. Nothing is installed on the kernel; the pieces a cut mints are new kernels read against
+    their own rows. A schedule fork has no such candidates."""
+    sig = frozenset({("S_shape", "128.0")})
+    fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
+    cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
+    root = TileOp(op=projection(), knobs={"S_shape": 128.0})
+    point = SimpleNamespace(options=[fuse, cut], node_id="node", root_op=root, ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}))
+    routes = {
+        sig: [({"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0), ({"PLACE@map.1/map": "fuse"}, 4.0), ({"PLACE@map.1/twist": "cut"}, 1.0)]
+    }
+    index = _Measured({sig: [({"WORK": "t32"}, 3.0)]}, {}, routes)
+
+    got = _route_candidates(point, index)
+
+    assert got == [(fuse, 3.0), (cut, 9.0), (fuse, 4.0)]
+    scheduled = SimpleNamespace(**{**vars(point), "options": [SimpleNamespace(pool_id="pool", knobs={"WORK": "t8"})]})
+    assert _route_candidates(scheduled, index) == []
+
+
+def test_strict_evidence_refuses_a_fork_no_measurement_decides(monkeypatch) -> None:
     point = SimpleNamespace(
-        options=[tree],
-        node_id="node",
-        root_op=TileOp(op=projection()),
+        node_id="node", root_op=SimpleNamespace(name="k_linear"), match=SimpleNamespace(rule=SimpleNamespace(name="040_schedule"))
     )
-    record = SimpleNamespace(name="recorded-golden", knobs={"RASTER": "", "TILE": "recorded"}, emmy_us=1.25)
-    monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
-
-    leaf, price, knobs = _verified_pick(point, {"identity": [record]}, None)
-
-    assert schedule_row_key(leaf_knobs(leaf)) == schedule_row_key(record.knobs)
-    assert price == 1.25
-    assert schedule_row_key(knobs) == schedule_row_key(record.knobs)
-
-    audit = []
-    with golden_audit(audit):
-        audited_leaf, audited_price, audited_knobs = _verified_pick(point, {"identity": [record]}, None)
-    assert schedule_row_key(leaf_knobs(audited_leaf)) == schedule_row_key(record.knobs)
-    assert audited_price == 1.25
-    assert schedule_row_key(audited_knobs) == schedule_row_key(record.knobs)
-    assert audit[0]["verdict"] == "MATCH"
-
-
-def test_verified_pick_defers_a_structural_fork(monkeypatch) -> None:
-    structural = DeferredFork(materialize=lambda: None, structural=True)
-    point = SimpleNamespace(
-        options=[structural],
-        node_id="node",
-        root_op=TileOp(op=projection()),
-    )
-    record = SimpleNamespace(name="recorded-golden", knobs={"TILE": "recorded"}, emmy_us=1.25)
-    monkeypatch.setattr(TileOp, "identity_key", lambda _op, **_kw: "identity")
-
-    assert _verified_pick(point, {"identity": [record]}, None) is None
+    monkeypatch.delenv("EMMY_STRICT_EVIDENCE", raising=False)
+    _require_evidence(point, "nothing measured")  # permissive by default
+    monkeypatch.setenv("EMMY_STRICT_EVIDENCE", "1")
+    with pytest.raises(EvidenceError, match="k_linear"):
+        _require_evidence(point, "nothing measured")
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +331,7 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     point = _point(_rows())
     got = _stream_tiers(point, _BarePrior(), None, {})
     assert got is not None
-    leaf, knobs, price = got
+    leaf, knobs, price, _tier = got
 
     base = {"H_opt": 3.0, "S_shape": 128}
     flat = [(o, leaf_knobs(o)) for o in flatten_leaves(point.options)]
@@ -331,7 +350,7 @@ def test_streamed_evidence_beats_model_and_crosses_chunks(monkeypatch) -> None:
     prior = _EvidencePrior({("1", "2"): 9.0, ("15", "4"): 2.5})
     got = _stream_tiers(_point(_rows()), prior, None, {})
     assert got is not None
-    leaf, knobs, price = got
+    leaf, knobs, price, _tier = got
     assert knobs == {"TILE": "15", "STAGE": "4"}
     assert price == 2.5
 
@@ -348,7 +367,7 @@ def test_streamed_db_tier_outranks_the_model(monkeypatch) -> None:
     db_idx = {frozenset({("S_shape", "128")}): [({"TILE": "7", "STAGE": "3"}, 2.0)]}
     got = _stream_tiers(_point(_rows()), _NoEvidence({}), None, db_idx)
     assert got is not None
-    leaf, knobs, price = got
+    leaf, knobs, price, _tier = got
     assert knobs == {"TILE": "7", "STAGE": "3"}
     assert price == 2.0
 
@@ -356,14 +375,14 @@ def test_streamed_db_tier_outranks_the_model(monkeypatch) -> None:
 def test_streamed_degenerate_pools() -> None:
     # Single-leaf pool: plain (unscored) return of that leaf.
     point = _point([{"TILE": "0", "STAGE": "0"}])
-    leaf, knobs, price = _stream_tiers(point, _BarePrior(), None, {})
+    leaf, knobs, price, _tier = _stream_tiers(point, _BarePrior(), None, {})
     assert knobs is None and price is None
     assert leaf_knobs(leaf) == {"TILE": "0", "STAGE": "0"}
     # Every leaf blocklisted: plain return of the first leaf.
     rows = _rows(3, 2)
     point = _point(rows)
     blocked = {tile_identity(dict(r)) for r in rows}
-    leaf, knobs, price = _stream_tiers(point, _BarePrior(), blocked, {})
+    leaf, knobs, price, _tier = _stream_tiers(point, _BarePrior(), blocked, {})
     assert knobs is None and price is None
     assert leaf_knobs(leaf) == rows[0]
 
@@ -412,7 +431,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     prior = _CountingPrior()
     got = _stream_tiers(point, prior, None, {})
     assert got is not None
-    leaf, knobs, price = got
+    leaf, knobs, price, _tier = got
     assert (knobs["TILE"], knobs["STAGE"]) in all_rows  # a legal complete row off the real tree
     assert prior.scored <= 64  # the draw, never the pool
     prior2 = _CountingPrior()
@@ -436,7 +455,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     wrapper = _BoundedFork(inner=blocked_point.options[0])
     blocked_point.options = [wrapper]
     blocked = {tile_identity(dict(row)) for row in rows}
-    assert _stream_tiers(blocked_point, _CountingPrior(), blocked, {}) == (NO_OPTION, None, None)
+    assert _stream_tiers(blocked_point, _CountingPrior(), blocked, {}) == (NO_OPTION, None, None, None)
     assert len(wrapper.expansions) == 1  # no retry and no exhaustive fallback
 
 

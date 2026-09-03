@@ -61,8 +61,8 @@ head -50 experiments/<model>/<name>/recipe.yaml   # the header states its lanes,
 ```
 
 Not every article is backed by an `experiments/` recipe — a kernel-level article may be backed by a `scripts/`
-benchmark helper, a `tests/perf` case, or a golden-set filter instead. Follow the same rule wherever it lands: find
-the thing that claims the article, and read it.
+benchmark helper, a `tests/perf` case, or a golden replay (`emmy run --golden PATH [--realization NAME] --bench`)
+instead. Follow the same rule wherever it lands: find the thing that claims the article, and read it.
 
 **Also look for prior canonical runs.** An experiment directory often keeps committed result directories plus a
 `RESULTS.md` / `report.md` naming which run backs which of the article's tables, and recording the stack it ran on

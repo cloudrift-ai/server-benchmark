@@ -15,11 +15,13 @@ structurally, not a distinct kind.
 Every semantically legal alternative is exposed as a fork option, an enumerated row, or a knob value, and the
 choice among them is made in exactly two places, neither of which is a pass:
 
-- a **deployed model** answers every choice from measured evidence — the box-local reservoir / tune-DB rows a
-  local `emmy tune` produced, or a recorded golden row replayed exactly through its pins;
-- everything else answers through the deploy evidence hierarchy, whose last learned tier is the fitted prior — on
+- a **deployed model** answers every choice from measured evidence — one index holding the box-local reservoir
+  and tune-DB rows a local `emmy tune` or `run --bench` produced and the golden rows in scope, every one a
+  recording of something that ran;
+- everything else answers through the deploy evidence hierarchy, whose last learned step is the fitted prior — on
   a fresh machine, the offline model. Unmeasured-deploy quality is the prior's responsibility, and the way to
-  improve it is to fit it better or to measure the shape.
+  improve it is to fit it better or to measure the shape; a compile that would rather fail than guess runs under
+  strict evidence and raises on a kernel nothing measured.
 
 Legality is the ONLY thing a pass may narrow by. A candidate is dropped because this term cannot realize it — the
 dtype the atom binds, a K-step that must divide a static extent, an smem budget, an epilogue the emitter cannot
@@ -37,8 +39,9 @@ Concretely:
   whose leading value is its safe default, and no leaf withheld because nothing could price it.
 - **A bad unmeasured pick is an accepted outcome.** With no golden, no measurement and no useful prior, a compile
   takes whatever the walk emitted first; that kernel may be far off the best one the space contains. It is not a
-  regression and not a reason to reintroduce a rule. The path back to a good kernel is the pinned one: a golden
-  replays exactly, and a `tune` turns it into evidence the hierarchy can use.
+  regression and not a reason to reintroduce a rule. The path back to a good kernel is a measurement: a benched
+  golden row or a `tune` is evidence the hierarchy deploys, and a hand pin (`--ab`, `EMMY_KNOBS`) is how a row is
+  measured in the first place.
 - A pass refusal states a semantic reason (correctness, SSA/region ownership, a resource impossibility) or a
   boundedness reason. Schedule spaces are recursive and lazy, so a large legal Cartesian product is not itself a
   refusal reason. "Measured slower",
@@ -99,11 +102,14 @@ root-most cut the same way and may join scoped cuts in that single decision. A s
 not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Only unpinned cuts leave the pieces undecided, so search can explore their smaller
-seams before scheduling.
+seams before scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
+never becomes a pin — the deploy's evidence pick takes one of the pass's own offered arms with it
+(`pins.spelled_arm`), and every piece the arm mints is a brand-new kernel whose own forks consult its own rows.
 `040_schedule` is the classic assignment boundary. The model under `ir/schedule` projects direct, plain-reduction,
 scalar-contraction, precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem
 compute-fill, and kernel-global raster domains. `ClassicScheduleContext` alone composes their compatibility. The pass
-reads pins, mints the search-pool identity, and adapts accepted typed assignments to generic lazy Forks. A cross-CTA
+reads the environment's pins, mints the search-pool identity, and adapts accepted typed assignments to generic lazy
+Forks. A cross-CTA
 split
 piece with several contraction schedule sites uses the same boundary. A split piece's partition receipt consumes the
 GRID stage

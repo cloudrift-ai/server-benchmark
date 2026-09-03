@@ -778,7 +778,7 @@ class Run:
             # other's choice.
             domain = _structural_domain(options) if structural else None
             if structural and (chosen := _replay_structural_decision(cand.structural_decisions, match.root.op, options)) is not None:
-                cand.apply(match, chosen)
+                cand.apply(match, chosen, knobs=_choice_knobs(chosen, chosen, match.root.op))
                 if match.rule.fixpoint:
                     return None
                 continue
@@ -793,7 +793,7 @@ class Run:
                 if option is None:
                     raise ValueError(f"decide returned a branch Fork at {match.rule.name!r} — return a concrete option or a leaf Fork")
                 knob_delta = _choice_knobs(choice, option, root_op)
-                cand.apply(match, option)
+                cand.apply(match, option, knobs=knob_delta)
                 if domain is not None:
                     _remember_structural_decision(cand.structural_decisions, root_op, domain, knob_delta)
                 assert trace is not None

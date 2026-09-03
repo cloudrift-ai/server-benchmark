@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import functools
 from itertools import product
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -40,6 +41,18 @@ def enumerate_classic_reference(context):
     for assignment, accepted in classic_cartesian_assignments(context):
         if accepted:
             yield assignment
+
+
+def case_target_tile(case: str):
+    """Lift the target of a realization corpus case, named by its path under ``realization/cases``.
+
+    A case records one entry per kernel of the set it realizes and every entry decorates the same
+    target, so the first entry names it."""
+    from emmy.compiler.pipeline.search.golden import _lifted_target, load_golden_file, load_golden_records
+
+    path = Path(__file__).parent / "realization/cases" / case
+    record, *_ = load_golden_records(load_golden_file(path))
+    return _lifted_target(record)
 
 
 def has_cuda_gpu() -> bool:

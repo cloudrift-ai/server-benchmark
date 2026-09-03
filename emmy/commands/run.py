@@ -18,6 +18,7 @@ from collections import namedtuple
 from pathlib import Path
 
 from emmy import config
+from emmy.commands.compile import add_golden_arg
 from emmy.compiler.pipeline.search.pins import pinned_knobs, unreproducible_pin_flag
 
 logger = logging.getLogger(__name__)
@@ -65,29 +66,13 @@ def register_run_command(subparsers):
             "Equivalent to passing the same .json path as the positional input."
         ),
     )
-    parser.add_argument(
-        "--golden",
-        metavar="NAME",
-        help=(
-            "Run the embedded Torch IR program for a golden record. NAME is an exact golden name OR a name "
-            "substring, resolved against --golden-file when given and against the live card's corpus otherwise. "
-            "Mutually exclusive with --code / positional input / --ir."
-        ),
-    )
-    parser.add_argument(
-        "--golden-file",
-        metavar="PATH",
-        help=(
-            "Resolve --golden NAME from this explicit working YAML instead of the canonical live-GPU corpus. "
-            "Alone, without --golden, runs every target in the file."
-        ),
-    )
+    add_golden_arg(parser)  # --golden PATH / --realization NAME; alone, --golden PATH walks every realization
     parser.add_argument(
         "--record",
         action="store_true",
         help=(
-            "With --golden-file --bench, write each benched target's emmy and torch.compile timings back into the "
-            "file as a `latency:` entry keyed by this card's hardware id. Recording is always deliberate: nothing "
+            "With --golden PATH --bench, write each benched realization's emmy and torch.compile timings back into "
+            "the file as a `latency:` entry keyed by this card's hardware id. Recording is always deliberate: nothing "
             "else writes that block, so a suite run can never quietly rewrite checked-in data."
         ),
     )
@@ -134,9 +119,9 @@ def register_run_command(subparsers):
         metavar="KNOBS",
         help=(
             "Compile + bench an extra variant with these knobs pinned (``K1=V1,K2=V2`` — the "
-            "``EMMY_KNOBS`` grammar) and show it as a live A/B row beneath the matching greedy "
-            "kernel in the --bench kernel table, knob diffs red. Repeatable. Requires --bench and a "
-            "re-lowerable input (--code / --golden / --ir)."
+            "``EMMY_KNOBS`` grammar — a hand pin, published to the environment for that one compile) and show it "
+            "as a live A/B row beneath the matching greedy kernel in the --bench kernel table, knob diffs red. "
+            "Repeatable. Requires --bench and a re-lowerable input (--code / --realization / --ir)."
         ),
     )
     parser.add_argument(
@@ -156,11 +141,11 @@ def register_run_command(subparsers):
         metavar="PATH",
         default=None,
         help=(
-            "With --bench: also write the whole comparison as machine-readable JSON to PATH. When --golden "
-            "runs multiple targets, PATH is an output directory containing one JSON file per target. Records include the "
+            "With --bench: also write the whole comparison as machine-readable JSON to PATH. When --golden PATH "
+            "walks multiple realizations, PATH is an output directory containing one JSON file per realization. Records include the "
             "backend table (eager / torch.compile / emmy), the per-kernel greedy rows (plus, when "
             "pinned rows benched, the ``greedy.isolated`` emmy-only re-bench — the pinned-comparable "
-            "greedy baseline), and every --golden / --ab A/B row with its integrity flags "
+            "greedy baseline), and every golden / --ab pinned row with its integrity flags "
             "(realized-vs-pinned knob check, arithmetic-intensity floor, wrong-answer check). "
             "Each pinned row and the greedy block carry a ``lane`` (fm/std) so the sweep filters to "
             "the greedy's lane — comparing a pinned [fm] latency against a std greedy is a phantom "
@@ -180,7 +165,7 @@ def register_run_command(subparsers):
         "--no-record-nodes",
         action="store_true",
         help=(
-            "Skip the default bench-to-node recording. When pinned rows bench (--golden / --ab) at tune-standard "
+            "Skip the default bench-to-node recording. When pinned rows bench (golden / --ab) at tune-standard "
             "quality (warmup >= 5, iters >= 20), each clean row AND the greedy pick's isolated re-bench are recorded "
             "as leaf rows in the tune DB's node store — the training-data feed for the offline prior. Flagged rows "
             "(pin mismatch, wrong answer, intensity floor) and the --ir path never record."
@@ -223,14 +208,14 @@ def handle_run(args):
     else:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if args.record and not (args.golden_file and args.bench):
-        logger.error("--record requires --golden-file and --bench")
+    if args.record and not (args.golden and args.bench):
+        logger.error("--record requires --golden PATH and --bench")
         sys.exit(2)
-    if args.golden_file and not args.golden:
-        _run_golden_targets(args)
-        return
-
-    _handle_run_once(args)
+    with config.strict_evidence_override(True if getattr(args, "strict_evidence", False) else None):
+        if args.golden and not args.realization:
+            _run_golden_targets(args)
+            return
+        _handle_run_once(args)
 
 
 def _handle_run_once(args):
@@ -244,7 +229,7 @@ def _handle_run_once(args):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.dump import CompilerDump
 
-    if args.golden_file or args.golden:
+    if args.golden or args.realization:
         resolve_golden_arg(args)
     else:
         args.golden_configs = []
@@ -263,7 +248,7 @@ def _handle_run_once(args):
             logger.error("--ab requires --bench (the A/B rows render in the kernel table)")
             sys.exit(2)
         if args.code is None and ir_path is None and not hasattr(args, "_golden_graph"):
-            logger.error("--ab requires a re-lowerable input: --code, --golden, or --ir (each config re-lowers a fresh graph)")
+            logger.error("--ab requires a re-lowerable input: --code, --realization, or --ir (each config re-lowers a fresh graph)")
             sys.exit(2)
         try:
             _ab_samples(args.ab)  # fail fast on a malformed KNOBS spec
@@ -287,7 +272,7 @@ def _handle_run_once(args):
         return
 
     if args.input is None and args.code is None:
-        logger.error("Either a model ID / .json input, --code, --golden PATH, or --ir is required")
+        logger.error("Either a model ID / .json input, --code, --golden PATH / --realization NAME, or --ir is required")
         sys.exit(1)
 
     # Model ID or --code: trace to a frontend graph + keep the runnable module
@@ -474,7 +459,7 @@ def _handle_run_once(args):
         )
     for error in strict_errors or []:
         logger.error("strict: %s", error)
-    _record_bench_nodes(args, golden_benches, greedy_iso)
+    _record_bench_evidence(args, golden_benches, greedy_iso)
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (
@@ -520,20 +505,20 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
     tcompile_us = results.get("torch.compile")
     if not emmy_us:
-        logger.error("--record measured no Emmy timing for %s", args.golden)
+        logger.error("--record measured no Emmy timing for %s", args.realization)
         sys.exit(2)
     if not tcompile_us:
         # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
-        logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", args.golden)
+        logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", args.realization)
     document = getattr(args, "_golden_document", None)
     if document is None:
         from emmy.compiler.pipeline.search.golden import load_golden_file  # noqa: PLC0415
 
-        document = load_golden_file(args.golden_file)
+        document = load_golden_file(args.golden)
     record_latency(
-        args.golden_file,
-        document,
         args.golden,
+        document,
+        args.realization,
         hardware_id=Context.probe().hardware_id(),
         emmy_us=emmy_us,
         tcompile_us=tcompile_us,
@@ -542,7 +527,7 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     )
     logger.info(
         "recorded %s: emmy %.2f us (%s)%s",
-        args.golden,
+        args.realization,
         emmy_us,
         "pinned row" if measured else "greedy pick",
         f", torch.compile {tcompile_us:.2f} us" if tcompile_us else "",
@@ -550,27 +535,29 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
 
 
 def _run_golden_targets(args) -> None:
-    """Run every target of a working golden sequentially in this process.
+    """Run every realization of a golden file sequentially in this process.
 
-    Reached only by a bare ``--golden-file``; naming one target with ``--golden NAME`` goes
-    straight down the single-run path, which already thinks in the (file, name) pair.
+    Reached only by a bare ``--golden PATH``; naming one realization with ``--realization NAME``
+    goes straight down the single-run path, which already thinks in the (file, name) pair. The
+    walk benches each name's verified rows or tune winner (``_explicit_realization`` false), so a
+    tuner's proposals are not benched as if they were recorded truths.
     """
     from copy import copy  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
-        logger.error("--golden-file is mutually exclusive with positional input / --code / --ir")
+        logger.error("--golden is mutually exclusive with positional input / --code / --ir")
         sys.exit(2)
     try:
-        document = load_golden_file(args.golden_file)
+        document = load_golden_file(args.golden)
         records = load_golden_records(document)
     except (OSError, ValueError) as exc:
-        logger.error("cannot load --golden-file %s: %s", args.golden_file, exc)
+        logger.error("cannot load --golden %s: %s", args.golden, exc)
         sys.exit(2)
     names = list(dict.fromkeys(record.name for record in records))
     if not names:
-        logger.error("--golden-file contains no targets: %s", args.golden_file)
+        logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
 
     output_dir = None
@@ -584,7 +571,8 @@ def _run_golden_targets(args) -> None:
     for index, name in enumerate(names):
         target_args = copy(args)
         target_args._golden_document = document
-        target_args.golden = name
+        target_args.realization = name
+        target_args._explicit_realization = False
         if output_dir is not None:
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._") or "target"
             target_args.json = str(output_dir / f"{index:03d}-{safe_name}.json")
@@ -612,17 +600,19 @@ def _recordable_bench_leaves(golden_benches, greedy_iso) -> list:
     return leaves
 
 
-def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
-    """Default-on bench-to-node recording (``--no-record-nodes`` opts out): the pinned
-    A/B rows and the greedy isolated re-bench become node-store leaves — the training
-    data the tune-only write path let every manual sweep evaporate from. Records only
-    at tune-standard measurement quality; ``record_nodes``' plausibility gate and
-    quality-aware leaf replacement still judge every row."""
+def _record_bench_evidence(args, golden_benches, greedy_iso) -> None:
+    """Default-on bench-to-DB recording (``--no-record-nodes`` opts out): every clean pinned row
+    and the greedy isolated re-bench become (1) per-kernel ``perf`` rows in the tune DB — the
+    measured evidence the next compile's greedy pick deploys, which is how a replayed golden or a
+    hand-pinned ``--ab`` row becomes what ``compile`` / ``run`` / ``serve`` choose — and (2)
+    node-store leaves, the offline prior's training data. Records only at tune-standard
+    measurement quality; ``record_nodes``' plausibility gate and quality-aware leaf replacement
+    still judge every node row, and ``record_perf`` keeps the best measurement per kernel."""
     if getattr(args, "no_record_nodes", False) or (greedy_iso is None and not golden_benches):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves, record_bench_perf  # noqa: PLC0415
 
     # print, not logger.info: `emmy run` gates the root logger to WARNING at default
     # verbosity, and a default-on WRITE to the user's tune DB must announce itself
@@ -637,8 +627,21 @@ def _record_bench_nodes(args, golden_benches, greedy_iso) -> None:
     if not leaves:
         return
     db_path = resolve_tune_db()
-    n = record_bench_leaves(db_path, Context.probe(), leaves)
-    print(f"[record-nodes] {n} bench row(s) recorded into the node store ({db_path}) — opt out with --no-record-nodes")
+    ctx = Context.probe()
+    # Deploy evidence is deployable-regime truth: a run compiled at another optimization level (the
+    # test suite's ``-Xcicc -O1`` lane) measures a kernel no deploy compiles, so it records node
+    # rows only — the store is censored to the -O3 lane downstream — and never a perf row.
+    n_perf = 0
+    if float(ctx.features().get("H_opt", 3.0)) == 3.0:
+        clean = [
+            gb for gb in ([greedy_iso] if greedy_iso is not None else []) + list(golden_benches or []) if gb.status == "ok" and not gb.flags
+        ]
+        n_perf = sum(record_bench_perf(db_path, ctx, gb.graph, gb.bench) for gb in clean if gb.graph is not None and gb.bench is not None)
+    n = record_bench_leaves(db_path, ctx, leaves)
+    print(
+        f"[record-nodes] {n_perf} kernel perf row(s) (deploy evidence) and {n} node row(s) recorded into {db_path} — "
+        "opt out with --no-record-nodes"
+    )
 
 
 def _reset_persisting_l2_cache() -> None:
@@ -1000,14 +1003,15 @@ async def _bench_golden_variants(
 ):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
-    row beside the greedy pick. ``golden_configs`` are
-    :class:`~emmy.compiler.pipeline.search.data.Sample`s, whose ``pins`` hold the
-    input regime and whose ``knobs`` hold the tunable-only measured winner
-    (``S_*`` / ``H_*`` features are not knobs) —
-    or the shapeless ``--ab`` pseudo-samples from :func:`_ab_samples` (same duck
-    type). Each config re-traces a **fresh** graph from ``code`` — a frontend graph
-    can't be re-compiled (the first lowering mutates it in place, so a reused graph
-    would yield the first config's kernel every time). A sample carrying ``dynamic``
+    row beside the greedy pick. ``golden_configs`` are the duck-typed rows
+    :func:`~emmy.commands.compile.golden_row` builds from golden records (``pins`` hold the
+    input regime, ``knobs`` the tunable-only row — ``S_*`` / ``H_*`` features are not knobs)
+    or the shapeless ``--ab`` pseudo-samples from :func:`_ab_samples` (same duck type). Both are
+    MEASURED under a hand pin published to the environment for that one compile: the pin forces
+    the row so its latency can be taken; deploying it is the evidence pick's business once the
+    measurement is a row in the tune DB (:func:`_record_bench_evidence`). Each config re-traces a
+    **fresh** graph from ``code`` — a frontend graph can't be re-compiled (the first lowering
+    mutates it in place, so a reused graph would yield the first config's kernel every time). A sample carrying ``dynamic``
     specs (a dynamic golden, or an ``--ab`` row of a ``--dynamic`` run) re-traces
     symbolically, so the pinned kernel is the same masked-tile artifact the greedy
     run deployed and benches at the same hint. A config that fails to compile / bench
@@ -1471,7 +1475,7 @@ def _write_ab_json(
 
     payload = {
         "input": args.code or args.input or getattr(args, "ir", None),
-        "golden": getattr(args, "golden", None),
+        "golden": getattr(args, "realization", None),
         "dynamic": list(args.dynamic) if getattr(args, "dynamic", None) else [],
         "gpu": gpu.live_name(),
         "warmup": args.warmup,
@@ -1624,10 +1628,11 @@ def _run_ncu_profile(args, *, dump_dir=None):
         "emmy.emmy",
         "run",
     ]
-    if args.golden_file or args.golden:
-        cmd.extend(["--golden", args.golden])
-        if args.golden_file:
-            cmd.extend(["--golden-file", args.golden_file])
+    if args.golden or args.realization:
+        if args.golden:
+            cmd.extend(["--golden", args.golden])
+        if args.realization:
+            cmd.extend(["--realization", args.realization])
     elif args.code is not None:
         cmd.extend(["--code", args.code])
     elif args.ir is not None:
@@ -2259,8 +2264,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # prior (uniform PUCT → emission-order, option-0) and does not replay tuned
         # variants from the DB; ``db=`` is kept for perf recording only. Wiring a
         # warm-started prior into single-shot compile is a deferred follow-up.
-        with pinned_knobs(getattr(args, "golden_target_pins", None) or {}):
-            graph = Pipeline.build(tail).run(graph, db=db, dump=dump)
+        graph = Pipeline.build(tail).run(graph, db=db, dump=dump)
 
     if not args.bench:
         # No bench: one in-process run + non-fatal accuracy vs the torch reference

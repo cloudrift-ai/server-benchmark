@@ -196,9 +196,11 @@ def freeze_path() -> Path:
 
 
 def golden_identity_cache_path() -> Path:
-    """The derived golden-identity store — ``~/.cache/emmy/golden_identity.json``. Purely a
-    memo of ``kernel_identity`` derivations (keyed by a compiler fingerprint + per-record
-    content digests); safe to delete at any time."""
+    """The derived golden store — ``~/.cache/emmy/golden_identity.json``. Purely a memo, keyed by a
+    compiler fingerprint + per-record content digests, of what the golden import derives from a
+    record: its kernel identity (``kernel_identity``), its strict-decode verdict, and its evidence
+    replay (``golden._replay`` — the rows a record files under which kernels, about two seconds per
+    multi-kernel record to derive); safe to delete at any time."""
     return _CACHE_ROOT / "golden_identity.json"
 
 
@@ -235,14 +237,20 @@ def online_file_override(path: str | Path | None):
             os.environ[ONLINE_FILE] = prev
 
 
-def golden_file() -> Path | None:
-    """The golden file a compile replays authoritatively: ``EMMY_GOLDEN_FILE`` → ``None``.
+def golden_scope() -> str | None:
+    """The golden evidence scope ``EMMY_GOLDEN_FILE`` names: ``None`` when unset (the repository's
+    per-card goldens), a path (that file's measured rows instead), or ``""`` — set but empty — for
+    NO golden evidence at all. The empty form mirrors ``EMMY_NVCC_FLAGS=``: ``make test`` sets it,
+    because the correctness lane never asks how fast a pick is and importing a card's goldens is
+    work every worker process would repeat. Set by ``emmy serve --golden PATH`` for the vLLM child
+    it spawns; ``run`` / ``compile`` scope the same evidence in-process through
+    ``search.golden.records_override``, which takes precedence."""
+    return os.environ.get(GOLDEN_FILE)
 
-    Set by ``emmy serve --golden PATH`` for the vLLM child it spawns; ``run`` / ``compile`` scope
-    the same golden evidence in-process through ``search.golden.records_override``. When set, the
-    measured rows of that file — not the repository goldens — join the tune DB's rows in the one
-    evidence index the greedy pick reads."""
-    override = os.environ.get(GOLDEN_FILE)
+
+def golden_file() -> Path | None:
+    """The golden file ``EMMY_GOLDEN_FILE`` names, or ``None`` (see :func:`golden_scope`)."""
+    override = golden_scope()
     return Path(override) if override else None
 
 

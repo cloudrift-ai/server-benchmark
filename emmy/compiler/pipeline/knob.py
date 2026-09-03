@@ -622,7 +622,10 @@ def schedule_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
 def evidence_row_vouches(cand_tun: dict, row_tun: dict, *, exact_families: frozenset[str] = frozenset()) -> bool:
     """Whether a measured evidence row can vouch for a candidate under value-of-position
     semantics: every tunable knob the candidate specifies must match the row, a key absent
-    from the ROW reading as free (a later pass decides it). Families in
+    from the ROW reading as free (a later pass decides it). A bare row key against a candidate
+    that spells the family per site reads as a bare pin does (:func:`pin_key_matches`,
+    ``unreproducible_pin_flag``): some site carries the value and every other site is OFF — so an
+    authored row spelled plain reads the same as the pin it was measured under. Families in
     ``exact_families`` instead require the candidate and row to carry the same
     complete family subset."""
     if exact_families:
@@ -630,7 +633,21 @@ def evidence_row_vouches(cand_tun: dict, row_tun: dict, *, exact_families: froze
         row_exact = {k: v for k, v in row_tun.items() if family_of(k) in exact_families}
         if candidate_exact != row_exact:
             return False
-    return not any(k in row_tun and row_tun[k] != v for k, v in cand_tun.items() if family_of(k) not in exact_families)
+    sites: dict[str, list] = {}
+    for key, value in cand_tun.items():
+        family = family_of(key)
+        if family in exact_families:
+            continue
+        if key in row_tun:
+            if row_tun[key] != value:
+                return False
+        elif key != family and family in row_tun:
+            sites.setdefault(family, []).append(value)
+    for family, values in sites.items():
+        want = row_tun[family]
+        if want not in values or any(value != want and not is_off_value(family, value) for value in values):
+            return False
+    return True
 
 
 def complete_kernel_row(knobs: dict) -> dict[str, str]:

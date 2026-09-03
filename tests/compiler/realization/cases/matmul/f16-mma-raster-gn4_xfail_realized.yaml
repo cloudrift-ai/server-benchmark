@@ -1,3 +1,6 @@
+# evidence: `offered` passes under the pin — the pinned enumeration realizes this row — but the unpinned
+# enumeration offers no `RASTER=gn4` leaf for this kernel at all (0 of 30407), so the row can never be selected
+# as evidence: an offer gate on the raster, not a schedule the compiler cannot build.
 compute_cap:
 - 12
 - 0

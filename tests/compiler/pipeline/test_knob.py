@@ -709,3 +709,16 @@ def test_knob_features_geometry_memo_is_invisible():
     a = knob_features({"TILE": "f2x4", "WORK": "t32x8", "S_ext_free_prod": 512.0, "H_sm_count": 128.0})
     b = knob_features({"TILE": "f2x4", "WORK": "t32x8", "S_ext_free_prod": 2048.0, "H_sm_count": 128.0})
     assert any(a.get(k) != b.get(k) for k in a if k.startswith("D_"))
+
+
+def test_evidence_row_vouches_reads_a_bare_row_key_like_a_bare_pin() -> None:
+    """A bare row key against a candidate that spells the family per site reads as the bare pin it
+    was measured under: some site carries the value and every other site is OFF."""
+    from emmy.compiler.pipeline.knob import evidence_row_vouches
+
+    row = {"WORK": "t32", "REDUCE": "coop"}
+    assert evidence_row_vouches({"WORK": "t32", "REDUCE@map.1/twist": "coop", "REDUCE@map.1/twist.1/inner": ""}, row)
+    assert not evidence_row_vouches({"WORK": "t32", "REDUCE@map.1/twist": "coop/r2", "REDUCE@map.1/twist.1/inner": ""}, row)
+    assert not evidence_row_vouches({"WORK": "t32", "REDUCE@map.1/twist": "", "REDUCE@map.1/twist.1/inner": ""}, row), "no site carries it"
+    assert evidence_row_vouches({"WORK": "t32", "REDUCE": "coop", "TILE": "f1"}, row), "an exact key compares exactly; TILE is free"
+    assert not evidence_row_vouches({"WORK": "t32", "REDUCE": "r4"}, row)

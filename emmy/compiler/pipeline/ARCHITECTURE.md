@@ -535,14 +535,18 @@ At a **schedule fork** (one kernel's row):
    of the same op that was measured at `-O3` (`H_opt=3`);
 2. the **evidence index** (`greedy._db_measured_index`): the fastest row of the same op that agrees with an offered
    leaf, whether it came from the tune DB or from a golden file — `_direct_measured_pick` descends the lazy tree
-   straight to it. The index is built once per compile and memoized per process on the DB path and mtime, the
-   context key and the golden scope. It holds the tune DB's CUDA `perf` rows for this compile's context key (one
-   lane, because a sweep measures in the regime a deploy compiles in; rows from a deliberately non-deployable
-   `--nvcc-flags` run key elsewhere and are simply never consulted) and the **golden rows** in scope
-   (`golden.evidence_rows`): every MEASURED record in the live input regime (`golden.regime_live`), keyed by its
-   `S_*` signature — a plain schedule row by the kernel its target lifts to, a child-identity schedule receipt's row
-   by the child kernel its stored identity names, read off the record's own pinned resolve. An unmeasured record (a
-   proposal, a corpus case) is not evidence: `run --golden PATH --bench` measures it under a hand pin and writes the
+   straight to it, asking each branch whether it admits the row (`Fork.admits`: a schedule branch spells a prefix of
+   what its leaves will spell, a level branch a projection of it, and a knob the row leaves undecided is free), so a
+   partial row reaches its leaf whatever the pool size. The index is built once per compile and memoized per process on
+   the DB path and mtime, the context key and the golden scope. It holds the tune DB's CUDA `perf` rows for this
+   compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows from a
+   deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) and the **golden rows**
+   in scope (`golden.evidence_rows`): every MEASURED record in the live input regime (`golden.regime_live`), keyed by
+   its fork-time `S_*` signature — a record that decorates one kernel under the kernel its target lifts to; any other
+   record through its replay (`golden._replay`), which files each kernel-set arm the record spelled under the kernel
+   that fork was offered on and its schedule row under the kernel its stored identity names, or, for a row that
+   speaks for a kernel set collectively, under every piece whose enumerated rows it vouches for. An unmeasured
+   record (a proposal) is not evidence: `run --golden PATH --bench` measures it under a hand pin and writes the
    measurement as `perf` rows, after which it deploys like any other;
 3. the prior's `mean_scores` argmin — only when no candidate has any evidence at all. Score ties break by
    `knob.canonical_row_key`, never by the order options were emitted in.
@@ -551,16 +555,16 @@ At a **kernel-set fork** (the cut pass's placement fork and its cross-CTA split 
 first — over a different kind of row. A **route row** is a measured row whose keys spell a kernel-set decision: a
 `PLACE@…` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half (`greedy._is_route_row`); its µs is the measured
 price of applying that decision to the kernel it was recorded on, and the index files it under `routes` rather than
-`ok`. `greedy._route_candidates` turns the route rows of the kernel's signature into measured candidates, each one
-of the pass's OWN offered arms: the arm a row spells (`pins.spelled_arm` — the first offered seam the row marks
-`cut`, the fuse arm when its `PLACE` keys mark none, the offered plan whose `g<n>` half its `REDUCE` value carries;
-a row whose cut seams are not on this ballot decides nothing). A route candidate outranks every arm priced by nested
-resolution (a Σ that may hold predictions); the fused arm competes only when a measured row decided it; among
-measured candidates the fastest wins. With no route row the arms are priced exactly as Part 4 describes
-(`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is installed on the kernel:
-a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every decision family and every
-feature), its own forks consult the rows of its own signature, and a piece that fails to lower is handled the way any
-structural pick's is (`Pipeline.run`'s retry with the splices withdrawn).
+`ok`. `greedy._route_candidates` turns EVERY measured row of the kernel's signature into a candidate, each one of the
+pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused / unsplit arm, since
+the kernel it decorates ran that way; a route row the first offered seam it marks `cut`, or the offered plan whose
+`g<n>` half its `REDUCE` value carries; a row whose cut seams are not on this ballot decides nothing). A measured arm
+outranks every arm priced by nested resolution (a Σ that may hold predictions); among measured arms the fastest wins;
+strict evidence refuses a kernel-set fork no measured arm decides. With no measured arm the arms are priced exactly as
+Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
+installed on the kernel: a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every
+decision family and every feature), its own forks consult the rows of its own signature, and a piece that fails to
+lower is handled the way any structural pick's is (`Pipeline.run`'s retry with the splices withdrawn).
 
 Env pins sit ABOVE the whole list: a hand pin (`--ab`, `EMMY_KNOBS`, `EMMY_<KNOB>`) settles the pinned families before
 any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH --bench` pins each golden row and each
@@ -570,8 +574,9 @@ any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH 
 `greedy.golden_audit(records)` installs a verdict sink that every schedule fork's evidence decision appends to,
 judged over the golden rows of the fork's signature — `MATCH` (a golden row vouches for an offered leaf: the deployed
 one, or the fastest offered when a faster measured row won the pick), `DRIFT` (golden rows carry the signature but
-no offered leaf agrees with any of them), `GAP` (no golden row carries it); a kernel-set decision a golden route row
-won records a `MATCH` too, with the cut rule's name in its `fork` field. Unset, the sink costs nothing.
+no offered leaf agrees with any of them), `GAP` (no golden row carries it); a kernel-set decision a measured row won
+records a `MATCH` too, with the cut rule's name in its `fork` field, which the offer audit and the consultation
+ratchet leave aside. Unset, the sink costs nothing.
 `search/audit.py` drives it over a whole card's graphs with the machine-local evidence removed
 (`config.online_file_override` at a nonexistent path, `nvcc_flags_override("")` for the deployable regime,
 `golden.records_override` scoping the golden rows to one file or precision lane), so the verdicts are the same on a
@@ -586,8 +591,9 @@ Three definitions the list leans on:
   index): a measured row counts as evidence for a candidate when every tuning knob the candidate has decided so far
   has the same value in that row. Knobs the candidate has not decided yet are free — a later pass will decide them.
   That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided.
-  Rows are matched to a candidate by its `S_*` signature through `Prior.sig_groups`, drift-tolerant across feature
-  vocabulary changes; there is no identity join at deploy.
+  Rows are matched to a candidate by its `S_*` signature through `Prior.sig_groups`: a row describes the candidate
+  when the candidate carries every key the row has, with the same value (a stamp the row predates is free; a
+  recorded key the candidate lacks is a different kernel); there is no identity join at deploy.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its rows are all `H_opt=3` — `Prior.add_rows` admits no other regime — and they double as
@@ -791,8 +797,8 @@ Greedy benches nothing, so it can only *use* a prior, never train one.
 factory call — one compile attempt; never shared ambient state, which would hand MCTS cached picks): the memo
 keys on the minted pool identity (`Fork.pool_id` — the deploy identity plus the knob / hint / pin
 discriminators it excludes) plus the node's blocklist content, so N same-shape kernels score once and the rest replay
-by descending the lazy tree's level keys to the one matching leaf (`_find_decided_leaf` — the O(path) descent
-`build_fork_tree` was built for),
+by descending the lazy tree to the one matching leaf (`_find_decided_leaf`, through the same `Fork.admits` — the
+O(path) descent `build_fork_tree` was built for),
 while a validate-retry with a blocked tile is a different key and re-decides.
 
 **Every deploy pick breaks ties by candidate content, never enumeration order.** The model can score many
@@ -826,12 +832,16 @@ which is not about speed: it is how `GreedyStrategy` retires a structural pick w
 (the splice minted fresh node ids, so it cannot be blocklisted at the fork site), and how a nested price probe
 avoids re-splitting the slice it is pricing.
 
-**Evidence joins are drift-tolerant.** `Prior.sig_groups` is one contract for the reservoir and the evidence index
-(tune DB rows and golden rows alike): a candidate's fork-time `S_*` base may carry scheduler stamps the persisted
-perf rows predate (#311's `S_warp_eligible` is on no row recorded before it), and a strict-equality signature join
-would let one added feature silently disable every measured read against every existing DB — the ninth-4090-sweep
-`mlp_gate_up` misdeploy (the
-model's `g2k` pick beating the measured-faster fused config it was never allowed to see). The index spans three
+**Evidence joins tolerate stamps a row predates, and nothing else.** `Prior.sig_groups` is one contract for the
+reservoir, the evidence index (tune DB rows and golden rows alike) and the disqualification tier: a row describes a
+candidate when the candidate carries every key the row has, with the same value. A candidate's fork-time `S_*`
+base (`fork.fork_signature`: the offer op's stamp plus the stamps the enumeration minted on its options) may carry
+scheduler stamps the persisted perf rows predate (#311's `S_warp_eligible` is on no row recorded before it), and a
+strict-equality signature join would let one added feature silently disable every measured read against every
+existing DB — the ninth-4090-sweep `mlp_gate_up` misdeploy (the model's `g2k` pick beating the measured-faster
+fused config it was never allowed to see). The mirror direction is refused: the op histogram is stamped only where
+it is non-zero, so a recorded key the candidate lacks is a zero, not an unknown — a piece a cut mints agrees with
+its parent on every key the two share, and must not read the parent's rows. The index spans three
 the deploy's own context key — one regime, one key, one lane — and the pick is the plain argmin over the
 matching measured rows.
 
@@ -1338,15 +1348,16 @@ aliases, and unknown sites. It never fills or repairs a recording.
 **A split's children persist as child-identity schedule receipts.** One flat `knobs` map decorates exactly one
 kernel, so a route whose cut splits the target into several kernels cannot record conflicting per-child schedules in
 one realization. Each child instead gets its own sibling realization — a *receipt*: the route's cut(s) frozen in
-`pins` (the route the strict decode composes to reach the children), the child's schedule row in `knobs`, and the
-child kernel's deploy identity stored in `identity`. The stored identity is the strict decode's kernel selector
+`pins` (the route the replay follows fork by fork to reach the children), the child's schedule row in `knobs`, and
+the child kernel's deploy identity stored in `identity`. The stored identity is the strict decode's kernel selector
 (`kernel_identity` returns it as-is — the target's own lift stops at the pre-cut kernel and cannot name a child): the
 stored identity must equal one kernel resolved under the record's pins, and the spelled row must equal one of THAT
 kernel's enumerated rows, so a sibling child's row never vouches. Ordinary records must still select exactly one
 pre-cut kernel, but a receipt may outlive target-boundary drift that makes its regenerated target lower to several:
 the stored identity selects one bucket from the kernels resolved under its pins, without first requiring the legacy
-one-kernel lift. As evidence a receipt is two rows: its route under the parent kernel's `S_*` signature and its
-schedule row under the child's (read off that same pinned resolve, `golden._child_signature`). The regime check
+one-kernel lift. As evidence a receipt is two rows: its route under the signature of the kernel the cut was offered
+on and its schedule row under the child's (both read off the record's replay, `golden._replay`, whose evidence half
+persists in the derived golden store beside identities and verdicts). The regime check
 (`golden.regime_live`) skips PLACE pins — the route is the record's kernel-set decision, not an input regime — and
 validation rejects a realization that schedules behind pinned cuts without a stored identity. A stored identity equal
 to the target's own lift is the corpus's derived stamp, not a receipt, and keeps the pooled decode.

@@ -2,7 +2,8 @@
 
 A data-driven regression lane for one failure class: **a schedule that should be realizable is not**. Each case is a
 checked-in minimized reproducer — one program, one authored schedule — and the lane replays it against the compiler in
-front of you.
+front of you: once as a hand pin, to ask whether the schedule can be offered at all, and then as the compile's only
+evidence, to ask whether the compiler realizes, builds and runs it the way a deploy would.
 
 This directory is kind-organized in the sense `tests/ARCHITECTURE.md` sanctions: its cases span lowering, the CUDA
 backend, the pin machinery and the golden loader, and they share one workflow.
@@ -22,8 +23,9 @@ Only a realization gap: a schedule family that is never offered, a pin that refu
 runs wrong. Two neighbouring failure classes deliberately do **not** earn one, because admitting them would make the
 ratchet meaningless:
 
-- **search shortfall** — the schedule realizes and the prior simply does not pick it. Fix it by measuring, or report it
-  as a prior finding.
+- **search shortfall** — the schedule realizes and the prior simply does not pick it when nothing measured is in
+  scope. Fix it by measuring, or report it as a prior finding. (A row that *is* in scope and still is not picked is
+  not a shortfall: it is the replay contract failing, and `realized` reports it.)
 - **code generation quality** — the right tier is present and still loses. Report it; do not record it.
 
 A schedule the compiler *correctly refuses* is not a gap either. A slab that does not fit, a byte transport with no
@@ -111,9 +113,22 @@ leading comment block is prose about where the gap came from; regeneration prese
 | Stage | Assertion | GPU |
 | --- | --- | --- |
 | `offered` | under `pinned_knobs(pins + knobs)`, `enumerate_graph` at the declared capability returns at least one row satisfying the pin | no |
-| `realized` | the graph lowers through `CUDA_PASSES` at that capability, `unreproducible_pin_flag` is `None`, and every authored family is stamped | no |
-| `built` | lower under the pin, then build a `CompiledProgram` — nvcc accepts it | yes, exact capability |
+| `realized` | with the case as the compile's only evidence, the graph lowers through `CUDA_PASSES` at that capability, `unreproducible_pin_flag` is `None`, every authored family is stamped, and every kernel-set decision the case spells was taken | no |
+| `built` | lower the same way on the live card, then build a `CompiledProgram` — nvcc accepts it | yes, exact capability |
 | `correct` | run against the reference within tolerance | yes, exact capability |
+
+**Only `offered` is a hand pin.** The other three run under `helpers.evidence_scope`: the case's record is the whole
+golden scope (`golden.records_override`, standing in as a measured row — a case authors a schedule rather than
+measuring one, and a proposal is no evidence), the machine-local online prior is out of the way, the tune DB is not
+consulted, and the environment carries the case's input pins alone — the regime it was measured under (`FAST_MATH`
+and the precision gates), never its route or its schedule row. The route and the row reach the compile as measured
+rows of the kernels they decide, through the same evidence pick every `compile` / `run` / `serve` uses
+(`golden.evidence_rows`, `greedy._route_candidates`), or they do not reach it at all. That is the deploy contract,
+asked of every case on every commit: a row the compiler can honour under a pin but does not select when it is the
+evidence — a stale spelling, a route key no offered seam carries, a schedule that equals no leaf of the kernel that
+deploys — fails `realized`, and the failure names what was lost. A kernel-set decision is checked through the engine's
+own splice events (`PipelineStrategy.on_splice`), because no stamp on the resulting kernels can show a placement cut
+or a cross-CTA split that was not taken.
 
 Each is its own test node, so an `_xfail_<stage>` suffix lands on exactly the stage it names; the stages past a
 declared gap are skipped, because a schedule that never realizes has nothing to run.
@@ -129,13 +144,15 @@ against the same-input greedy execution of the same program.
 `offered` asks whether the pin *can be honoured*, not whether the tier would be offered to an **unpinned** search.
 Those differ, and the difference is load-bearing: a pin narrows the candidate grid authoritatively, so a schedule the
 cold search never enumerates can still be offered here. A tier the search will not reach on its own is a search
-shortfall, and the corpus does not express it.
+shortfall, and the corpus does not express it. `realized` then asks the complementary question of the same schedule:
+given as evidence rather than as a pin, is it what the compiler picks.
 
 **Pinned-enumeration membership is the primary oracle, not `unreproducible_pin_flag` alone.** The flag answers `None`
 for a registered family that nothing stamped — serialized IR can omit knob stamps — so a pin that cannot be offered at
 all would read as satisfied. Membership is asked per row *through* the flag, so the families it already reads correctly
-(a `PLACE` consumed by a splice, the structural `g<n>` half of a cross-CTA `REDUCE` split) stay correctly read; and
-`realized` closes the flag's hole with an explicit stamping check over the authored knobs.
+(a `PLACE` consumed by a splice, the structural `g<n>` half of a cross-CTA `REDUCE` split) stay correctly read;
+`realized` closes the flag's hole with an explicit stamping check over the authored knobs, and asks the splice events
+whether those two structural decisions were taken.
 
 ## Latency
 

@@ -249,3 +249,29 @@ def test_fork_point_partitions_offers_and_carries_pool_identity():
     assert fp.structural  # derived from the partition, not a second classification
     assert fp.variants == (tree,)
     assert tree.pool_id is None  # build_fork_tree mints no pool identity — only the scheduler does
+
+
+def test_admits_reads_a_level_projection_and_a_schedule_prefix() -> None:
+    """``Fork.admits`` is the one descent rule for a row that names a leaf. A level tree's branch
+    admits a row when the level projects the row onto the branch's key, a row lacking the level's
+    knob being undecided there; a schedule branch spells each decided knob as a prefix of what its
+    leaves will spell, so the row's value must extend it at a segment boundary."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.fork import Level, _ScheduleFork, build_fork_tree
+
+    rows = [{"TILE": "f2x4/k2", "WORK": "w2x2"}, {"TILE": "f2x4/k8", "WORK": "w2x2"}, {"TILE": "f1x1/k4", "WORK": "w1x1"}]
+    root = build_fork_tree(params=rows, levels=(Level(("TILE",), lambda row: (row["TILE"].split("/")[0],)),), materialize=lambda row: row)
+    by_key = {branch.knobs["TILE"]: branch for branch in root.expand()}
+
+    assert by_key["f2x4"].admits({"TILE": "f2x4/k8", "WORK": "w2x2"})
+    assert not by_key["f1x1"].admits({"TILE": "f2x4/k8", "WORK": "w2x2"})
+    assert by_key["f1x1"].admits({"WORK": "w2x2"}), "a row that leaves the level's knob undecided is admitted"
+
+    branch = _ScheduleFork(
+        tree=SimpleNamespace(branch_knobs={"S_warp_eligible": 1.0, "STAGE": ""}), context=None, row={"TILE": "mma/f2x2", "WORK": "w2x2"}
+    )
+    assert branch.admits({"TILE": "mma/f2x2/k2", "WORK": "w2x2+p1", "STAGE": "d2/smem-tma"})
+    assert branch.admits({"TILE": "mma/f2x2", "RASTER": "gm8"})
+    assert not branch.admits({"TILE": "mma/f2x2/k2", "WORK": "w2x8"})
+    assert not branch.admits({"TILE": "mma/f2x20/k2", "WORK": "w2x2"}), "an extension must start at a segment boundary"

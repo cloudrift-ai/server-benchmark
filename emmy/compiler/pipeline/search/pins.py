@@ -31,21 +31,22 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     knobs)`` — or ``None`` when the row decides nothing at this fork.
 
     At a placement fork the row spells the first offered seam it marks ``cut`` (a bare
-    ``PLACE=cut`` takes the root-most offered seam), the fuse arm when its ``PLACE`` keys mark no
-    seam ``cut`` at all, and nothing when the seams it marks are not on this kernel's ballot. At a
-    split fork it spells the offered plan whose cross-CTA half equals its ``REDUCE`` value's, and
-    the unsplit arm when that value carries no such half. One reading for both consumers: the
-    deploy's evidence pick applies a measured route row through it, and the golden replay follows
-    a record's knobs through it. Nothing is installed on the kernel — the arm is the pass's own
-    offer, and the pieces it mints are brand-new kernels whose own forks consult their own rows."""
+    ``PLACE=cut`` takes the root-most offered seam), the fuse arm when it marks no seam ``cut`` —
+    a schedule row with no ``PLACE`` key says the kernel it decorates ran fused — and nothing when
+    the seams it marks are not on this kernel's ballot. At a split fork it spells the offered plan
+    whose cross-CTA half equals its ``REDUCE`` value's, and the unsplit arm when that value carries
+    no such half or the row carries no ``REDUCE`` at all — a schedule row measured the kernel
+    whole. One reading for both consumers:
+    the deploy's evidence pick reads every measured row of the kernel through it, and the golden
+    replay follows a record's route and knobs through it. Nothing is installed on the kernel — the
+    arm is the pass's own offer, and the pieces it mints are brand-new kernels whose own forks
+    consult their own rows."""
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
 
     arms = [(option, {str(key): str(value) for key, value in leaf_knobs(option).items()}) for option in options]
     keys = {key for _, knobs in arms for key in knobs}
     if any(family_of(key) == "PLACE" for key in keys):
         route = {str(key): str(value) for key, value in row.items() if family_of(str(key)) == "PLACE"}
-        if not route:
-            return None
         cuts = {key for key, value in route.items() if value == "cut"}
         for option, knobs in arms:
             if any(value == "cut" and (key in cuts or "PLACE" in cuts) for key, value in knobs.items()):
@@ -54,21 +55,23 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
             return None  # a cut this kernel does not offer: a stale spelling, or another kernel's seam
         return next(((option, knobs) for option, knobs in arms if knobs.get("PLACE") == "fuse"), None)
     key = next((key for key in sorted(keys) if family_of(key) == "REDUCE"), None)
-    value = row.get(key, row.get("REDUCE")) if key is not None else None
+    if key is None:
+        return None
+    value = row.get(key, row.get("REDUCE"))
     want = parse_reduce(value) if value is not None else None
-    if want is None:
+    if value is not None and want is None:
         return None
     for option, knobs in arms:
         got = parse_reduce(knobs[key]) if knobs.get(key) else None
         if got is None:
-            if not want.needs_split:
-                return option, knobs
-        elif want.needs_split and got.cta == want.cta and got.finalize == want.finalize:
+            if want is None or not want.needs_split:
+                return option, knobs  # the row measured the kernel whole: no cross-CTA split
+        elif want is not None and want.needs_split and got.cta == want.cta and got.finalize == want.finalize:
             return option, knobs
     return None
 
 
-def _stampable_reduce(want: str) -> str | None:
+def stampable_reduce(want: str) -> str | None:
     """The part of a ``REDUCE`` pin a kernel can still stamp, or ``None`` if it carries no
     cross-CTA stage. Read through :class:`Reduce` — the same typed reading the schedule
     walk's pin path consumes the ``g`` half with — so the rule has one statement; a value the
@@ -113,7 +116,7 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_co
         if fam == "REDUCE":
             # Likewise a realized cross-CTA split — but only its ``g<n>`` stage is structural,
             # so gate whatever the pieces still stamp.
-            rest = _stampable_reduce(want)
+            rest = stampable_reduce(want)
             if rest is not None:
                 if not rest:
                     continue

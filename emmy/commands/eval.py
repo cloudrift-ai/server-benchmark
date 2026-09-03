@@ -1096,7 +1096,9 @@ def _emit_offer_audit(configs: list) -> bool:
                     n_targets += 1
                     n_entries += len(sub)
                     identities = {kernel_identity(g) for g in sub} - {None}
-                    hits = [r for r in recs if r["key"] in identities]
+                    # Schedule verdicts only: a kernel-set MATCH (the fused arm a schedule row spelled at
+                    # the placement fork) says nothing about whether the row equals an enumerated leaf.
+                    hits = [r for r in recs if r["key"] in identities and r.get("fork", "schedule") == "schedule"]
                     if not hits:
                         logger.warning(
                             "  %-44s  NO-FORK  no fork of its own snippet carries its structural identity — the "

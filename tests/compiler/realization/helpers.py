@@ -2,29 +2,37 @@
 
 A case file is a working golden document carrying exactly one config with exactly one
 realization, plus the authored ``pins`` / ``knobs`` that name the schedule the compiler is
-expected to realize. Everything here is GPU-free except :func:`built` and :func:`correct`.
+expected to realize. ``offered`` asks it of the pinned enumeration; ``realized``, ``built`` and
+``correct`` ask it of the compile the way a deploy would — the case's record is the compile's
+only evidence and no hand pin rides beside it (:func:`evidence_scope`). Everything here is
+GPU-free except :func:`built` and :func:`correct`.
 """
 
 from __future__ import annotations
 
 import re
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import yaml
 
+from emmy import config
 from emmy.compiler.context import Context
-from emmy.compiler.pipeline.knob import family_of, validate_family_value
+from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of, validate_family_value
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
     dump_golden_file,
     golden_record_from_entry,
     kernel_identity,
     load_golden_file,
+    records_override,
 )
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
-from emmy.compiler.pipeline.search.pins import pinned_knobs, unreproducible_pin_flag
+from emmy.compiler.pipeline.search.pins import parse_reduce, pinned_knobs, unreproducible_pin_flag
+from emmy.compiler.pipeline.strategy import PipelineStrategy
 
 CASES_DIR = Path(__file__).parent / "cases"
 
@@ -75,11 +83,11 @@ class Case:
         return Context.from_target(self.compute_cap)
 
     def union_context(self) -> Context:
-        """The case context for applying its kernel row across structural alternatives.
+        """The case context for enumerating under its pin across structural alternatives.
 
         Site identities are local to one classic problem.  A corpus row therefore prunes a peer
-        kernel whose coincident identity cannot realize its exact pin, while the collective
-        oracle below still requires every pin to occur in the resolved kernel set.
+        kernel whose coincident identity cannot realize its exact pin, while :func:`offered` still
+        requires every pin to occur somewhere in the offered kernel set.
         """
         return replace(self.context(), validate_pins=False)
 
@@ -156,8 +164,6 @@ def regenerate(document: dict) -> dict:
     through ``emmy trace``, which stamps ``gpu_name`` from the live card and needs torch. The
     result is machine-independent, so this check fires and its fix works on any box.
     """
-    import tempfile  # noqa: PLC0415
-
     from emmy.compiler.pipeline.search.working_golden import write_trace_inventory  # noqa: PLC0415
     from emmy.compiler.torch_wire import graph_from_wire  # noqa: PLC0415
 
@@ -221,6 +227,49 @@ def write_case(path: Path, document: dict) -> None:
 # --- the four oracles -------------------------------------------------------------------------
 
 
+@contextmanager
+def evidence_scope(case: Case):
+    """The case as a compile's ONLY evidence — how its schedule reaches a deploy.
+
+    Its record is the whole golden scope, the machine-local online prior is out of the way, and
+    its input pins — the regime it was measured under, never its route or its schedule row — are
+    the environment. No hand pin rides beside it: the route and the schedule reach the compile as
+    measured rows of the kernels they decide, through the same evidence pick every ``compile`` /
+    ``run`` / ``serve`` uses, or they do not reach it at all. A case authors a schedule rather than
+    measuring one, and a proposal is no evidence, so the record stands in as the measured row: with
+    one record in scope the microseconds only have to exist, not rank.
+    """
+    record = case.record
+    if record.measurements is None:
+        record = replace(record, measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "corpus"})
+    regime = {name: value for name, value in record.pin_map.items() if family_of(str(name)) not in KERNEL_DECISION_FAMILIES}
+    with tempfile.TemporaryDirectory(prefix="emmy_corpus_") as directory:
+        absent = Path(directory) / "absent-online.json"
+        with records_override([record]), config.online_file_override(absent), pinned_knobs(regime):
+            yield
+
+
+class _Splices(PipelineStrategy):
+    """Every kernel-set decision a compile took, as the arm knobs each splice carried."""
+
+    def __init__(self) -> None:
+        self.taken: list[dict[str, str]] = []
+
+    def on_splice(self, e) -> None:
+        self.taken.append({str(key): str(value) for key, value in e.knobs.items()})
+
+
+def lowered(case: Case, ctx: Context):
+    """The case's target lowered through ``CUDA_PASSES`` at ``ctx`` with the case as its only
+    evidence. Returns ``(graph, kernel-set decisions taken)``; the tune DB is not consulted."""
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+
+    splices = _Splices()
+    with evidence_scope(case):
+        graph = Pipeline.build(CUDA_PASSES).with_strategies(splices).run(case.record.target_program.copy(), ctx=ctx, db=None)
+    return graph, splices.taken
+
+
 def offered(case: Case) -> str | None:
     """Stage 1 — under the case's pin, does the planner still enumerate its schedule?
 
@@ -244,28 +293,30 @@ def offered(case: Case) -> str | None:
         # A FORKLESS kernel: its schedule space collapsed to one row, so it opens no fork and the
         # enumeration has nothing to return. There is no schedule to be denied, so nothing here can
         # fail — `realized` still proves it lowers, and the later stages still prove it runs. This
-        # mirrors how `_candidate_rows` reads a forkless kernel's row off the resolved op.
+        # mirrors how `golden._replay` reads a forkless kernel's row off the resolved op.
         return None
     return f"no enumerated row carries the pin ({len(rows)} rows offered at sm_{''.join(map(str, case.compute_cap))})"
 
 
 def realized(case: Case) -> str | None:
-    """Stage 2 — does the graph lower to CUDA under the pin, with the pin actually realized?
+    """Stage 2 — with the case as its only evidence, does the compile realize its schedule?
 
-    Three questions, because each catches a different way a pin is lost: the lowering itself may
-    refuse; a kernel may realize a *different* value; or the pinned family may reach no kernel at
-    all, which ``unreproducible_pin_flag`` deliberately treats as ungateable.
+    The deploy contract, asked of the case: no hand pin, the record as the whole golden scope
+    (:func:`evidence_scope`), and the same lowering ``compile`` runs. Four questions, because each
+    catches a different way the row is lost: the lowering itself may refuse; a kernel may realize
+    a *different* value; the pinned family may reach no kernel at all, which
+    ``unreproducible_pin_flag`` deliberately treats as ungateable; and a kernel-set decision the
+    case spells — a placement cut, a cross-CTA split — may not have been taken, which no stamp
+    on the resulting kernels can show.
     """
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
 
     pinned = case.pinned
     try:
-        with pinned_knobs(pinned):
-            lowered = Pipeline.build(CUDA_PASSES).run(case.record.target_program.copy(), ctx=case.union_context())
+        graph, taken = lowered(case, case.context())
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         return f"{type(exc).__name__}: {exc}"
-    rows = [dict(node.op.knobs or {}) for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+    rows = [dict(node.op.knobs or {}) for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
     if not rows:
         return "lowering produced no CUDA kernel"
     flag = unreproducible_pin_flag(pinned, rows)
@@ -274,7 +325,30 @@ def realized(case: Case) -> str | None:
     unstamped = _unstamped_families(case.record.knobs, rows)
     if unstamped:
         return f"pinned but unstamped: {', '.join(sorted(unstamped))}"
+    untaken = _untaken_decisions(case, taken)
+    if untaken:
+        return f"kernel-set decision not taken: {', '.join(untaken)}"
     return None
+
+
+def _untaken_decisions(case: Case, taken: list[dict[str, str]]) -> list[str]:
+    """The kernel-set decisions the case spells that no splice of the compile carried: each
+    ``PLACE`` key marked ``cut`` (a bare one is any cut), and each ``REDUCE`` value with a
+    cross-CTA ``g<n>`` half (matched on that half alone — the rest is a piece's own schedule)."""
+    missing: list[str] = []
+    for key, value in case.record.route.items():
+        if value != "cut":
+            continue
+        if not any(v == "cut" and (k == key or key == "PLACE") for arm in taken for k, v in arm.items() if family_of(k) == "PLACE"):
+            missing.append(f"{key}=cut")
+    for key, value in case.pinned.items():
+        want = parse_reduce(value) if family_of(str(key)) == "REDUCE" else None
+        if want is None or not want.needs_split:
+            continue
+        got = (parse_reduce(v) for arm in taken for k, v in arm.items() if family_of(k) == "REDUCE")
+        if not any(plan is not None and plan.cta == want.cta and plan.finalize == want.finalize for plan in got):
+            missing.append(f"{key}={value}")
+    return missing
 
 
 def _unstamped_families(knobs: dict, rows: list[dict]) -> set[str]:
@@ -289,21 +363,19 @@ def _unstamped_families(knobs: dict, rows: list[dict]) -> set[str]:
 
 
 def built(case: Case):
-    """Stage 3 — nvcc accepts the pinned kernel. Returns the compiled graph, raising on refusal."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+    """Stage 3 — nvcc accepts the kernel the evidence picks. Returns the compiled graph, raising
+    on refusal."""
     from emmy.compiler.backend.cuda.program import CompiledProgram  # noqa: PLC0415
     from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
 
-    with pinned_knobs(case.pinned):
-        live = replace(Context.probe(), validate_pins=False)
-        lowered = CudaBackend().compile(case.record.target_program.copy(), ctx=live)
-        with gpu_lock():
-            CompiledProgram.build(lowered, seeded_inputs(case.record.target_program))
-    return lowered
+    graph, _taken = lowered(case, Context.probe())
+    with gpu_lock():
+        CompiledProgram.build(graph, seeded_inputs(case.record.target_program))
+    return graph
 
 
 def correct(case: Case, compiled) -> None:
-    """Stage 4 — the pinned kernel computes the reference answer.
+    """Stage 4 — the kernel the evidence picks computes the reference answer.
 
     The reference is derived from the target, the way ``emmy run`` already derives it: a frontend
     program (``target: {origins: …}``) has a numpy twin; an exact Loop target has none, so it
@@ -314,8 +386,7 @@ def correct(case: Case, compiled) -> None:
 
     program = case.record.target_program
     feed = seeded_inputs(program)
-    with pinned_knobs(case.pinned):
-        result, _ = CudaBackend().run(compiled, input_data=dict(feed))
+    result, _ = CudaBackend().run(compiled, input_data=dict(feed))
     if case.record.loop_wire is None:
         reference = NumpyBackend()
         want, _ = reference.run(reference.compile(program.copy()), input_data=dict(feed))

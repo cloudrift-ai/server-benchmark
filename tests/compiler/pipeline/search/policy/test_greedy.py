@@ -88,23 +88,21 @@ def test_a_shape_whose_every_variant_failed_prices_as_infeasible() -> None:
 
 
 def test_a_disqualification_condemns_only_the_shape_that_was_measured() -> None:
-    """Elimination matches the signature EXACTLY, unlike the ranking tier's drift-tolerant
-    :func:`_sig_groups`. There a loose match only widens the candidate pool and a second filter
-    still has to agree on the tunable knobs; here nothing follows the match, so condemning every
-    shape that merely does not contradict a recorded failure disqualifies the whole program.
-    Measured: on DeepSeek-V4's post block the tolerant form priced all 17 leaves of one fork
-    ``inf``, which decides nothing at all."""
+    """A recorded signature describes a candidate only when the candidate carries EVERY recorded
+    key with the recorded value — for ranking (:func:`_sig_groups`) and elimination alike. A
+    candidate that merely agrees on the keys the two share is a different shape: the op
+    histogram is stamped only where it is non-zero, so a recorded key the candidate lacks is a
+    zero, not an unknown. Measured: on DeepSeek-V4's post block a shared-key match priced all 17
+    leaves of one fork ``inf``, which decides nothing at all; and a cut's piece agrees with its
+    parent on every key they share."""
     recorded = frozenset({("S_shape", "4096"), ("S_dtype_f16", "1.0")})
-    # Agrees on every SHARED key, so the drift-tolerant matcher would call it a hit; it is a
-    # different shape and must still be priced.
     other = SimpleNamespace(knobs={"S_shape": 4096, "S_n_loop": 9}, identity_key=lambda **_kw: "k")
     terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=other)})
     trace = [SimpleNamespace(node_id="n", score=5.0)]
     ctx = SimpleNamespace(features=lambda: {})
 
-    assert greedy._sig_groups({recorded: [1.0]}, frozenset({("S_shape", "4096"), ("S_n_loop", "9")})), (
-        "the tolerant matcher does hit here — which is exactly why elimination must not use it"
-    )
+    assert greedy._sig_groups({recorded: [1.0]}, frozenset({("S_shape", "4096"), ("S_n_loop", "9")})) == []
+    assert greedy._sig_groups({recorded: [1.0]}, frozenset({("S_shape", "4096"), ("S_dtype_f16", "1.0"), ("S_n_loop", "9")})) == [[1.0]]
     assert greedy._resolved_price(terminal, trace, ctx, None, failed={recorded: [2_000_000.0]}) == 5.0
 
 
@@ -244,10 +242,11 @@ def test_measured_index_folds_golden_rows_beside_the_tune_db(monkeypatch) -> Non
 
 
 def test_route_rows_become_measured_kernel_set_candidates() -> None:
-    """At a placement fork, a route row of the kernel's signature is one candidate priced at its
-    measured µs: the OFFERED arm the row spells — a seam it marks ``cut``, or the fuse arm when it
-    marks none on the ballot. Nothing is installed on the kernel; the pieces a cut mints are new
-    kernels read against their own rows. A schedule fork has no route candidates."""
+    """At a placement fork, every measured row of the kernel's signature is one candidate priced at
+    its µs: the OFFERED arm the row spells — a seam it marks ``cut``, the fuse arm when it marks
+    none (a schedule row says the kernel ran fused), nothing when the seam it marks is not on the
+    ballot. Nothing is installed on the kernel; the pieces a cut mints are new kernels read against
+    their own rows. A schedule fork has no such candidates."""
     sig = frozenset({("S_shape", "128.0")})
     fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
     cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
@@ -260,12 +259,13 @@ def test_route_rows_become_measured_kernel_set_candidates() -> None:
             ({"PLACE@map.1/twist": "cut"}, 1.0, "g.stale"),
         ]
     }
+    index = _Measured({sig: [({"WORK": "t32"}, 3.0)]}, {}, routes, {sig: [({"WORK": "t32"}, "g.row", 3.0)]})
 
-    got = _route_candidates(point, _Measured({}, {}, routes, {}))
+    got = _route_candidates(point, index)
 
-    assert got == [(cut, 9.0, "g.route"), (fuse, 4.0, "g.fused")]
+    assert got == [(fuse, 3.0, "g.row"), (cut, 9.0, "g.route"), (fuse, 4.0, "g.fused")]
     scheduled = SimpleNamespace(**{**vars(point), "options": [SimpleNamespace(pool_id="pool", knobs={"WORK": "t8"})]})
-    assert _route_candidates(scheduled, _Measured({}, {}, routes, {})) == []
+    assert _route_candidates(scheduled, index) == []
 
 
 def test_strict_evidence_refuses_a_fork_no_measurement_decides(monkeypatch) -> None:

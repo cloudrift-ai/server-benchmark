@@ -365,7 +365,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     seam and one consumer, with a producer reading another seam's workspace when its value nests
     inside it — while a pin whose site path exists on no kernel here is another kernel's and is
     skipped, never an error."""
-    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
+    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml"
     (record,) = load_golden_records(load_golden_file(case))
     tile = _lifted_target(record)
     graph = Graph()
@@ -409,7 +409,7 @@ def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
 
 
 def _composed_case_match() -> tuple[Match, Graph]:
-    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
+    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml"
     (record,) = load_golden_records(load_golden_file(case))
     tile = _lifted_target(record)
     graph = Graph()
@@ -442,7 +442,7 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     fields = _receipt_fields()
     parent = GoldenRecord(knobs={}, **fields)
     lift_identity = _lifted_target(parent).identity_key(with_io=True)
-    children = {i: rows for i, rows in _replay(parent).rows.items() if i is not None and i != lift_identity}
+    children = {i: rows for i, rows in _replay(parent, exhaustive=True).rows.items() if i is not None and i != lift_identity}
     assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
     (id_a, rows_a), (id_b, rows_b) = sorted(children.items())
     row_a = next(iter(rows_a - rows_b), None)
@@ -480,16 +480,16 @@ def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target
     parent = GoldenRecord(knobs={}, **fields)
     with pytest.raises(ValueError, match="target lowers to 2 kernels"):
         _lifted_target(parent)
-    identity, rows = next((identity, rows) for identity, rows in _replay(parent).rows.items() if identity is not None)
+    identity, rows = next((identity, rows) for identity, rows in _replay(parent, exhaustive=True).rows.items() if identity is not None)
     receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=identity, **fields)
     assert decode_record(receipt) is None
 
 
 def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
     """Golden evidence is per kernel. A routing record is a route row under the signature of the
-    kernel its cut was offered on; a child-identity receipt's schedule row is keyed under its
-    child's signature, and the ``PLACE`` pins it was measured under yield no route row — the
-    pinned compile opened no fork, and a piece inherits nothing from the kernel it replaced."""
+    kernel its cut was offered on; a child-identity receipt's ``PLACE`` pin is the same route row,
+    and its schedule row is keyed under its child's signature — a piece inherits nothing from the
+    kernel it replaced."""
     from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
 
     fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
@@ -507,6 +507,7 @@ def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
         got = evidence_rows("", (12, 0))
     assert got == [
         (parent_signature, route, 1.0, routing.name),
+        (parent_signature, route, 1.0, receipt.name),
         (replay.signatures[child], receipt.schedule_row, 1.0, receipt.name),
     ]
 

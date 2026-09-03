@@ -116,6 +116,7 @@ def _advance(g, g_o):
     gn = maximum(g, g_o)
     return gn, exp(g - gn), exp(g_o - gn)
 
+
 SOFTMAX = Recipe(
     name="softmax",
     base=("maximum", "add", "add"),

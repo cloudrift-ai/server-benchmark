@@ -28,7 +28,7 @@ from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
-from emmy.compiler.ir.schedule.packing import block_scaled_atom
+from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.schedule.views import cone_seam
 
 # TMA hardware: every box dim must fall in 1..256, and the swizzle-split box caps the operand rank
@@ -286,7 +286,7 @@ def resolve_warp_stage(
     # ``readings`` is the caller's memo of the two packed questions, both pure functions of the
     # node. Recomputing them here costs a backward cone per side PER CANDIDATE, and a warp site
     # has hundreds; the prescan asks once and hands the answer down (``_SiteFacts.packed``).
-    single, pair = readings if readings is not None else (None, None)
+    single, pair = readings if readings is not None else packed_readings((c,), inputs)[id(c)]
     if pair is not None and block_scaled_atom(tile.atom):
         return _block_scaled_warp_stage(c, tile, stage, budget, pair, inputs, k_axis)
     if single is not None:

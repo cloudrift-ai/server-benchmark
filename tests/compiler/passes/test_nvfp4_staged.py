@@ -122,7 +122,7 @@ def test_match_packed_b_node_admits_a_computed_a():
     there. Declining that kept the packed weight off the whole serving path. A copies or
     compute-fills exactly as the smem fill decides (:func:`_atom._a_slab_operand`); only B differs."""
     node, inputs, _axes, ka = _node()
-    coned = contraction(ka, _packed_cone(4096), *zip(node.operands[1:], node.combine.results, strict=True))
+    coned = contraction(ka, _packed_cone(4096, row="m", prefix="a_"), *zip(node.operands[1:], node.combine.results, strict=True))
     assert _packed(coned, inputs)[0] is not None
 
 
@@ -138,7 +138,7 @@ def test_a_computed_a_still_resolves_the_byte_slab():
     the shape of the bug this replaced: a serving projection sits behind a fused norm, so its A is
     a cone, and the byte slab has to survive that all the way to a resolved stage."""
     node, inputs, axes, ka = _node()
-    coned = contraction(ka, _packed_cone(4096), *zip(node.operands[1:], node.combine.results, strict=True))
+    coned = contraction(ka, _packed_cone(4096, row="m", prefix="a_"), *zip(node.operands[1:], node.combine.results, strict=True))
     assert _packed(coned, inputs)[0] is not None
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     st = resolve_warp_stage(coned, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka)

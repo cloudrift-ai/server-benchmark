@@ -249,6 +249,72 @@ def block_scaled_atom(atom) -> bool:
     return dtype_of is not None and dtype_of("a").logical_elems == 2
 
 
+def operand_statements(edge) -> list | None:
+    """A COMPUTED operand's statements as one flat list — its slab operands as their loads ahead
+    of its body, the statement defining its result last — the spelling the shape readers above
+    walk. That is the open body of a zero-axis term (:meth:`Fold.lower` with nothing bound); a
+    term that reduces, is a bare slab, or holds a reduce among its operands is not a scalar cone
+    and answers ``None``."""
+    if edge.axis is not None or edge.as_slab() is not None:
+        return None
+    pending = list(edge.operands)
+    while pending:
+        term = pending.pop()
+        if term.axis is not None:
+            return None
+        pending.extend(term.operands)
+    result = edge.exposes[0]
+    stmts = list(edge.lower(axes=()))
+    root = next((stmt for stmt in stmts if result in stmt.defines()), None)
+    return None if root is None else [*(stmt for stmt in stmts if stmt is not root), root]
+
+
+def match_packed_b_node(node, inputs) -> PackedKBlockB | None:
+    """The contraction ``node``'s packed-pair k-block B operand, or ``None``.
+
+    The whole node shape the packed byte-slab stage stands on: one channel and a computed B whose
+    cone is :func:`match_packed_kblock_b`'s. A may be materialized OR a producer cone — it rides
+    whichever side the compute fill gives it — so only B decides this. Asked here rather than
+    spelled at each consumer, so the schedule's offer, the stage resolver and the materializer
+    recognize one set of nodes and cannot drift apart. Everything else answers ``None`` and keeps
+    the generic computed-B reading, which computes the same values through the smem compute fill.
+    """
+    if inputs is None or node.as_contraction() is None or len(node.combine.results) != 1 or len(node.operands) != 2:
+        return None
+    cone = operand_statements(node.operands[1])
+    return None if cone is None else match_packed_kblock_b(cone, node.axis, inputs)
+
+
+def match_packed_pair_node(node, inputs) -> BlockScaledPair | None:
+    """The contraction ``node`` read as a BLOCK-SCALED packed pair, or ``None``.
+
+    The instruction's own node shape: every operand edge a scalar cone, each a
+    :func:`match_packed_kblock_b` decode chain that splits into (packed codes, raw block-scale
+    load, k-invariant residue), and all over the SAME block extent — the cell applies one scale
+    per block per side and has one block size. A packed weight beside a 16-bit activation answers
+    ``None`` here and keeps the single-sided reading (:func:`match_packed_b_node`), whose drain
+    decodes into 16-bit fragments.
+
+    ANY channel arity reads: A (``operands[0]``) is matched once and each channel's B in turn, so
+    a fused gate⊗up MLP edge is the two-channel case of the same shape rather than a form the cell
+    declines.
+    """
+    if inputs is None or node.as_contraction() is None:
+        return None
+    k_name = node.axis
+    sides = []
+    for edge in node.operands:
+        cone = operand_statements(edge)
+        read = match_packed_kblock_b(cone, k_name, inputs, codes_may_compute=True) if cone is not None else None
+        split = _split_block_scale(read, cone, k_name, inputs) if read is not None else None
+        if split is None:
+            return None
+        sides.append((read, split))
+    if len({read.block for read, _ in sides}) != 1:
+        return None
+    return BlockScaledPair(a=sides[0][1], b=tuple(split for _, split in sides[1:]), block=sides[0][0].block)
+
+
 def packed_readings(nodes, inputs) -> frozendict:
     """Each node's ``(B copy, pair)`` packed readings, by object identity.
 
@@ -256,7 +322,7 @@ def packed_readings(nodes, inputs) -> frozendict:
     :meth:`~emmy.compiler.ir.tile.TileOp.packed_reading` — read there, never re-matched at a
     call site and never carried through a schedule choice.
     """
-    return frozendict({id(node): (None, None) for node in nodes})
+    return frozendict({id(node): (match_packed_b_node(node, inputs), match_packed_pair_node(node, inputs)) for node in nodes})
 
 
 __all__ = [
@@ -264,6 +330,9 @@ __all__ = [
     "block_scaled_atom",
     "BlockScaledPair",
     "PackedKBlockB",
+    "match_packed_b_node",
     "match_packed_kblock_b",
+    "match_packed_pair_node",
+    "operand_statements",
     "packed_readings",
 ]

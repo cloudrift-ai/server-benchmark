@@ -68,13 +68,15 @@ placement then derives the corresponding physical M/N orientation from the opera
 remains a placement fact rather than part of the Fold algebra.
 
 The bilinear form is CANONICAL BY CONSTRUCTION: formation (`lowering/tile/_fromloop`) turns every load of a reduce
-step into a slab operand and, when the step is a semiring step — every accumulated value one `⊗` of two distinct
-names, all products sharing the `⊗`, and `⊗` distributing over the one commutative-monoid `⊕` — hoists each product
-argument the step computes into a zero-axis operand cone, so the lift is the products alone and `as_contraction()` is
-a reading of the stored term. Overlapping argument cones become one multi-result operand edge so shared computation
-remains single; a step that is not a semiring step (a square `x × x`, a member no product reads) lifts as it came and
-reads as a planar fold. `normalize.py` keeps only the tree-wide rule that needs the whole tree: hash-consing
-alpha-equal cones back onto one object, so a value the frontend inlined twice is one edge again.
+step over coordinates into a slab operand (a data-dependent gather, the packed-pair table read by a decoded code,
+stays a statement of its cone: the value it indexes is not an axis) and, when the step is a semiring step — every
+accumulated value one `⊗` of two distinct names, all products sharing the `⊗`, and `⊗` distributing over the one
+commutative-monoid `⊕` — hoists each product argument the step computes into a zero-axis operand cone, so the lift is
+the products alone and `as_contraction()` is a reading of the stored term. Overlapping argument cones become one
+multi-result operand edge so shared computation remains single; a step that is not a semiring step (a square `x × x`,
+a member no product reads) lifts as it came and reads as a planar fold. `normalize.py` keeps only the tree-wide rule
+that needs the whole tree: hash-consing alpha-equal cones back onto one object, so a value the frontend inlined twice
+is one edge again.
 
 A term is CLOSED: its values arrive through its operand edges, and the only names its lift reads from outside are the
 iteration axes its ancestors bind. That is a fact of construction, not of a rewrite — the lift makes a statement a

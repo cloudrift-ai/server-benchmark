@@ -55,7 +55,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Side, Stage, Tile
-from emmy.compiler.ir.schedule.packing import block_scaled_atom
+from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.passes import rename_free
@@ -1273,9 +1273,9 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     # The BLOCK-SCALED pair, keyed on the ATOM: both operands packed under a 16-bit atom is still
     # the single-sided shape, whose drain decodes each into 16-bit fragments. cp.async only; the
     # four-descriptor TMA box copy is not built.
-    stage.transport == "smem-async" and block_scaled_atom(tile.atom)
-    bs_pair = None  # the two-sided packed recognizer is deleted; see the packing module
-    packed = None
+    single, pair = packed_readings((c,), ops.inputs)[id(c)]
+    bs_pair = pair if stage.transport == "smem-async" and block_scaled_atom(tile.atom) else None
+    packed = single if bs_pair is None and stage.transport in ("smem-async", "smem-tma") else None
     if bs_pair is not None:
         operands, copies, fills = _block_scaled_operands(
             c,

@@ -32,7 +32,12 @@ independent domain, and is not inspected by the generic traversal. Restriction-f
 indexes are immutable caches over those domains, not alternate definitions of membership.
 
 Reusable leaf choices such as `Work`, `Tile`, `Reduce`, `Stage`, and `Raster` contain neither sites nor target facts.
-The `TileOp` **is** the site index — there is no second object over the same term. It derives stable node ids,
+The `TileOp` **is** the site index — there is no second object over the same term. Whether a bilinear site takes
+`TILE` and `STAGE` at all (`contracts`) is the tile's question, since it needs the kernel's extents: a pair whose
+role-less side shares a coordinate with the other side qualifies only while that coordinate partitions the reduction
+(it composes with the reduction index) or the role-bearing side's reads are value-dead in it (a merged weight's
+reshape residue); a B that changes with the row it is contracted against is no slab per tile. It derives stable
+node ids,
 operand-edge sites, each site's projection or reduction view, and each contraction's schedule-independent
 `ContractionFacts` — its effective K axis, computed-A cone seam, nested producer, and fragment need.
 `ir/schedule/views` supplies the vocabulary (`node_view`, `Projection`, `Reduction`, `Contraction`,

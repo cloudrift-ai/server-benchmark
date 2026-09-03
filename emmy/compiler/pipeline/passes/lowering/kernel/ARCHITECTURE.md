@@ -89,7 +89,12 @@ and seals through the one `grid_tile` finalizer. A tiled contraction tiles its O
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
 BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the algebra merge — the fold's
 own `merge` — closing the fold),
-its per-cell reduce loop taken from the node's own lowering; each ILP copy suffixes only its per-copy SSA temps
+its per-cell reduce loop taken from the node's own lowering; a planar root whose cones close over other reduces
+(its CHAIN MEMBERS, `ops.chain_members`: reached through zero-axis operand edges and the axis-invariant reduce
+operands members hoist ahead of their loops) binds through the chain arm (`_tile_chain_members`) when a member
+carries a partition — every partitioned member's hoisted loop and the root's own stride around ONE lane axis in
+body order, the segments between them per cell on every lane, and a stamped transposed band on such a root falls
+to the serial fold; each ILP copy suffixes only its per-copy SSA temps
 (`__r{r}`)
 — the shared iteration coordinates, **including any nested contraction's own reduce-axis var** (whose `for`
 declaration `copy_cell` does not rename), stay shared, so each copy re-declares its own nested

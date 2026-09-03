@@ -1,7 +1,9 @@
 # Tile IR — a complete Fold tree
 
 `LoopOp → TileOp` first performs a structural lift. The boundary peels the outer parallel loop chain into
-`Placement.free`, then converts every remaining reduction loop into a `Fold`, recording every axis the nest bound —
+`Placement.free` — sibling output nests (a fused multi-output kernel whose outputs differ in one extent) peel the
+loops they ALL share, by interchange, each keeping its own one-level residual sweep — then converts every remaining
+reduction loop into a `Fold`, recording every axis the nest bound —
 free, reduce, sweep — in the kernel's axis table, `TileOp.axes`: a term names its axes and the kernel holds their
 extents and windows (`TileOp.axis_of`, `Sched.axis_of`), so a split registers its slice and partition there and
 `Fold.lower` takes the table whole. The kernel OWNS that table, complete by construction: `TileOp.__post_init__`

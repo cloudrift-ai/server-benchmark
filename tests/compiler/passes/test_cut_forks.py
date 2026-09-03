@@ -31,7 +31,7 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     output_map,
     realize,
 )
-from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
+from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
     _candidate_rows,
@@ -261,7 +261,7 @@ def test_sdpa_score_cut_is_offered_and_pinned_cut_lowers(causal: bool) -> None:
     assert {"PLACE@a3": "cut"} in offered
     lowered = _lower_cut(_sdpa_graph(causal), "PLACE@a3")
     cuda = [node for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"]
-    assert len(cuda) == 2
+    assert len(cuda) == 2 + causal  # the two pieces of the cut; the causal mask is its own pointwise kernel
     workspace = next(node.output for node in cuda if "__place_" in node.id)
     assert workspace.dtype.name == "f32"
 
@@ -311,14 +311,20 @@ def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:
 
 
 def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
-    fragment = _nested_attention_cut({"PLACE@map.fold.a.fold.b1": "cut"})
+    fragment = _nested_attention_cut({"PLACE@b": "cut"})
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
 
     assert pieces and all(node.op.placement_decided for node in pieces)
     node = _piece_with_seam(fragment)
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
-    with pinned_knobs({"PLACE@map.fold.a.fold.b1": "cut"}):
-        result = _CUT.rewrite(match, node)
+    # The pin is consumed: the rule offers nothing under PLACE again — its remaining domain (split
+    # forks) or, with none pending, its skip.
+    with pinned_knobs({"PLACE@b": "cut"}):
+        try:
+            result = _CUT.rewrite(match, node)
+        except RuleSkipped as skipped:
+            assert "no pending kernel-set cut" in str(skipped)
+            return
     options = result if isinstance(result, list) else [result]
     assert options and all(not any(name.startswith("PLACE") for name in option.knobs) for option in options)
 
@@ -359,14 +365,14 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
     match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
     pins = {
-        "PLACE@map.fold.a21": "cut",
-        "PLACE@map.fold.a.map.fold.fold.b1": "cut",
-        "PLACE@map.fold.a.map.fold.fold.a1": "cut",
+        "PLACE@a": "cut",  # the normalized-Q cone
+        "PLACE@b": "cut",  # the normalized-K cone
+        "PLACE@b.fold.a4": "cut",  # the K statistic nested inside it
         "PLACE@map.map.map.map1": "cut",  # no such site here — another kernel's pin
     }
     with pinned_knobs(pins):
         fork = _CUT.rewrite(match, graph.nodes[tile.name])
-    assert set(fork.knobs) == {"PLACE@map.fold.a21", "PLACE@map.fold.a.map.fold.fold.b1", "PLACE@map.fold.a.map.fold.fold.a1"}
+    assert set(fork.knobs) == {"PLACE@a", "PLACE@b", "PLACE@b.fold.a4"}
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     producers = [node for node in pieces if "__place_" in node.id]
@@ -378,7 +384,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
     match, graph = _composed_case_match()
-    pins = {"PLACE": "cut", "PLACE@map.fold.a.map.fold.fold.b1": "cut"}
+    pins = {"PLACE": "cut", "PLACE@b": "cut"}
 
     with pinned_knobs(pins):
         fork = _CUT.rewrite(match, graph.nodes[match.root_node_id])

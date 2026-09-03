@@ -67,15 +67,20 @@ def sites(root) -> tuple[Site, ...]:
     ``map`` (zero-axis) or ``fold`` (reducing): the segment vocabulary every stored golden / DB key
     is spelled in. A slab is not a site: a gmem read has no residence, partition or tile of its
     own — the atom reads it through its parent — so it takes no path and no ordinal. The per-site
-    ordinal among sites with identical ``(segments, axis)`` is assigned in traversal order, and a
-    subterm reached down two paths is two sites — the positions are the kernel's, the term's own
-    identity is not."""
+    ordinal among sites with identical ``(segments, axis)`` is assigned in traversal order. A
+    subterm reached down two paths (the epilogue's ``1/l`` cone reads the fold the root also holds)
+    is ONE site at the first position that reached it: sharing is edge reuse, and a shared value
+    has one schedule — the same rule ``TileOp.sites`` keeps."""
     if root is None:
         return ()
     counts: dict[tuple, int] = {}
     result: list[Site] = []
+    seen: set[int] = set()
 
     def visit(node, scope: tuple[str, ...], segments: tuple[str, ...]) -> None:
+        if id(node) in seen:
+            return
+        seen.add(id(node))
         key = (segments, node.axis)
         counts[key] = counts.get(key, 0) + 1
         result.append(Site(node=node, axis=node.axis, segments=segments, ordinal=counts[key], scope=scope))

@@ -323,8 +323,6 @@ class Sched:
             return orient(self.place.root_mn)
         if len(free) < 2:
             return None
-        if site.derived and node.axis is not None and (k := self.axis_of(node.axis)).extent.is_static and k.extent.as_static() == 1:
-            return orient((free[-2], free[-1]))
         parent = next((s for s in self._all_sites() if s.segments == site.segments[:-1]), None)
         ax = self.axis_of(parent.node.axis) if parent is not None and getattr(parent.node, "axis", None) is not None else None
         if ax is None:

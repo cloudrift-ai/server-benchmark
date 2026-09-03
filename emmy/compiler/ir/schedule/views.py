@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import ContractionView, Fold
-from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.ir.stmt import Body
 
 type NodeId = int
@@ -43,33 +42,19 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
         view = owner.views[site]
         if view.as_contraction() is None:
             continue
-        record = owner.sites[site]
-        node, parent = record.node, record.parent
-        if (
-            record.derived
-            and owner.axis_of(node.axis).extent.is_static
-            and owner.axis_of(node.axis).extent.as_static() == 1
-            and isinstance(parent, Fold)
-            and parent.axis is not None
-        ):
-            # a derived singleton marker: the enclosing Fold owns the K sweep, and the seam it
-            # bridges is that Fold's own leading state rather than a cone read off this node
-            assert parent.combine is not None and node.combine is not None
-            seam = ((), (), tuple(parent.combine.results[: -len(node.combine.results)]))
-            k_axis = owner.axis_of(parent.axis)
-        else:
-            computed = tuple(edge for edge in node.operands if edge.as_slab() is None)
-            seam = cone_seam(computed[0], node.axis, owner.axes) if computed else None
-            k_axis = owner.axis_of(node.axis)
+        node = owner.sites[site].node
+        computed = tuple(edge for edge in node.operands if edge.as_slab() is None)
+        seam = cone_seam(computed[0], node.axis, owner.axes) if computed else None
+        k_axis = owner.axis_of(node.axis)
         # The nested contraction this one consumes — sought over the operand edges, which is where
         # a term's children are. A role was a position into that same tuple, so naming one bought
         # nothing the walk does not already have.
         nested = tuple(
-            visit.node
+            term
             for edge in node.operands
             if edge.as_slab() is None
-            for visit in walk(edge)
-            if visit.node.as_contraction() is not None and k_axis.name in visit.node.free_axes
+            for term in _terms(edge)
+            if term.as_contraction() is not None and k_axis.name in term.free_axes
         )
         producer = nested[0] if len(nested) == 1 else None
         facts[site] = ContractionFacts(
@@ -79,6 +64,13 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
             need=owner.node_id(producer) if producer is not None else None,
         )
     return frozendict(facts)
+
+
+def _terms(term: Fold):
+    """``term`` and every term under it, preorder — the operand tree, which is all a term has."""
+    yield term
+    for edge in term.operands:
+        yield from _terms(edge)
 
 
 def _operand_position(node: Fold, wanted) -> int:

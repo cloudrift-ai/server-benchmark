@@ -259,9 +259,7 @@ into the consumer's synchronous slab, but an untiled sibling-step result cannot 
 A TILED producer produces fragments, so it composes only with a warp consumer over an smem compute fill whose atom
 family matches and whose slab chunk the producer's single-unit N tile fills exactly. The paired producer/consumer
 register bound is NOT cross-site — the producer's
-fragment block is a function of the consumer's own stage — so it filters at option construction. Derived sites (the
-synthesized PV) join the one walk in `ir/pure/tree.py`; a derived unit-marker contraction inherits its enclosing fold's
-reduction domain, a prescan fact, never a rewritten tree.
+fragment block is a function of the consumer's own stage — so it filters at option construction.
 
 **The producer band is inventory a stage can drive.** `+p<n>` rides `WORK`: an option whose resolved stage is TMA also
 offers band variants (the band arms the box-copy mbarrier ring; cp.async's wait-group is issuing-thread-scoped and a

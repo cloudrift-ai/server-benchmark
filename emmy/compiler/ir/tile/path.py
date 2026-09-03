@@ -15,8 +15,6 @@ import re
 from dataclasses import dataclass
 from itertools import combinations
 
-from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.structural import instance_memo
 
 #: The only family a tree path may address. Schedule identities belong to ``schedule.classic``.
@@ -45,17 +43,17 @@ class UnknownSiteError(Exception):
 @dataclass(frozen=True)
 class Site:
     """One structural tree position: the node, its axis (``None`` for a pointwise zero-axis fold),
-    the full segment path from the root (this node's own segment last), and the
-    1-based ``ordinal`` among sites sharing the identical ``(segments, axis)`` (1 when unique —
-    the no-collision common case, where the ordinal is never spelled). ``derived`` marks a site
-    living in a λ-spelled fold's derived evaluation (flash's synthesized PV contraction). Every
-    Fold remains a site; residence choices on an enclosing edge never hide its algebra."""
+    the full segment path from the root (this node's own segment last), the 1-based ``ordinal``
+    among sites sharing the identical ``(segments, axis)`` (1 when unique — the no-collision common
+    case, where the ordinal is never spelled), and ``scope``, the axes (by name) the path binds
+    above the node. Every Fold is a site; residence choices on an enclosing edge never hide its
+    algebra."""
 
     node: object
     axis: str | None
     segments: tuple[str, ...]
     ordinal: int = 1
-    derived: bool = False
+    scope: tuple[str, ...] = ()
 
     @property
     def depth(self) -> int:
@@ -63,22 +61,26 @@ class Site:
 
 
 def sites(root) -> tuple[Site, ...]:
-    """Every structural node in ``root``'s tree as a :class:`Site`, root first — the ONE node walk
-    in the layer — a reading of the ONE walk (:func:`~emmy.compiler.ir.pure.tree.walk`), which owns
-    the traversal rules and the segment vocabulary. This adds only what the CODEC needs: the
-    per-site ordinal among sites with identical ``(segments, axis)``, assigned in traversal order.
-    An operand subtree has exactly one home (its edge), so the tree stays a tree and no visited set
-    is needed."""
+    """Every node of ``root``'s tree as a :class:`Site`, preorder, root first — the ONE node walk in
+    the layer. A term's operands in stored order, each labelled ``map`` (zero-axis) or ``fold``
+    (reducing): the segment vocabulary every stored golden / DB key is spelled in. The per-site
+    ordinal among sites with identical ``(segments, axis)`` is assigned in traversal order, and a
+    subterm reached down two paths is two sites — the positions are the kernel's, the term's own
+    identity is not."""
     if root is None:
         return ()
     counts: dict[tuple, int] = {}
     result: list[Site] = []
-    for visit in walk(root):
-        node = visit.node
-        axis = node.axis if isinstance(node, Fold) and node.axis is not None else None
-        key = (visit.segments, axis)
+
+    def visit(node, scope: tuple[str, ...], segments: tuple[str, ...]) -> None:
+        key = (segments, node.axis)
         counts[key] = counts.get(key, 0) + 1
-        result.append(Site(node=node, axis=axis, segments=visit.segments, ordinal=counts[key], derived=visit.derived))
+        result.append(Site(node=node, axis=node.axis, segments=segments, ordinal=counts[key], scope=scope))
+        inner = scope if node.axis is None else (*scope, node.axis)
+        for edge in node.operands:
+            visit(edge, inner, (*segments, "map" if edge.axis is None else "fold"))
+
+    visit(root, (), ("map" if root.axis is None else "fold",))
     return tuple(result)
 
 
@@ -86,7 +88,7 @@ def family_sites(family: str, all_sites: tuple[Site, ...]) -> tuple[Site, ...]:
     """Stored non-root Fold edges eligible for structural placement."""
     if family not in PATH_FAMILIES:
         raise ValueError(f"{family!r} is not a structural path family (have {PATH_FAMILIES})")
-    return tuple(s for s in all_sites if s.depth > 1 and not s.derived)
+    return tuple(s for s in all_sites if s.depth > 1)
 
 
 def primary(family: str, fam_sites: tuple[Site, ...]) -> Site | None:

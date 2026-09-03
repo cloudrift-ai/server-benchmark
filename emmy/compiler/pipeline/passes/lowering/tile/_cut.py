@@ -12,7 +12,6 @@ decode-plus-factors residue.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from itertools import islice
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
@@ -23,7 +22,6 @@ from emmy.compiler.ir.pure.fold import (
     Fold,
 )
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.pure.tree import walk
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
@@ -237,8 +235,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     }
     outer = tuple(axis.name for axis in (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None)))
     occurrence_axes: dict[int, list[tuple]] = {}
-    for visit in islice(walk(tile.op, outer), 1, None):
-        occurrence_axes.setdefault(id(visit.node), []).append(visit.axes)
+    for site in all_sites[1:]:
+        occurrence_axes.setdefault(id(site.node), []).append((*outer, *site.scope))
     dtype_table: dict[int, tuple] = {}
     if isinstance(tile.op, Fold):
         dtype_table = _dtype_table(tile)

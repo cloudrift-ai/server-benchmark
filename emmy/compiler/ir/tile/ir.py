@@ -40,7 +40,6 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.pure.tree import Visit, walk
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.packing import packed_readings
@@ -53,7 +52,7 @@ from emmy.compiler.ir.schedule.views import (
 from emmy.compiler.ir.stmt import Body, Loop, OutputSpec, Stmt, Write
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
-from emmy.compiler.ir.tile.path import sites
+from emmy.compiler.ir.tile.path import Site, sites
 
 
 def _sweep_start(stmts, axis_name: str) -> int:
@@ -334,21 +333,20 @@ class TileOp(Op):
         validate(self.schedule, self, place=self.place, workers=self.workers)
 
     @cached_property
-    def sites(self) -> tuple[Visit, ...]:
+    def sites(self) -> tuple[Site, ...]:
         """The ONE walk over this kernel's term, one record per node identity, indexed by node id.
 
-        Every structural reading is a FIELD of these records — the node, the parent that reached
-        it, the axes in scope there, its segment path, whether it is derived evaluation — so the
-        walk runs once per kernel and nothing re-derives a label it already carries. Those labels
-        are POSITIONS in this kernel's tree, which is why they live here and never on the shared
-        subterms the tree is built from: one Fold reached down two paths has two parents, and keeps
-        the first that reached it.
+        Every structural reading is a FIELD of these records — the node, the axes in scope there,
+        its segment path — so the walk runs once per kernel and nothing re-derives a label it
+        already carries. Those labels are POSITIONS in this kernel's tree, which is why they live
+        here and never on the shared subterms the tree is built from: one Fold reached down two
+        paths keeps the first position that reached it.
         """
         out, seen = [], set()
-        for visit in walk(self.op) if isinstance(self.op, Fold) else ():
-            if id(visit.node) not in seen:
-                seen.add(id(visit.node))
-                out.append(visit)
+        for site in sites(self.op) if isinstance(self.op, Fold) else ():
+            if id(site.node) not in seen:
+                seen.add(id(site.node))
+                out.append(site)
         return tuple(out)
 
     @cached_property

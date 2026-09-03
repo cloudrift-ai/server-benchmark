@@ -75,7 +75,7 @@ def _make_tune_db(path: Path, variants: list[tuple[str, str, dict, float]]) -> N
 def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
     rc, stdout, stderr = run_cli("eval", "golden")
     assert rc == 2
-    assert "GOLDEN_YAML" in stdout + stderr
+    assert "--golden" in stdout + stderr
 
     golden = tmp_path / "given.yaml"
     configured = tmp_path / "configured.yaml"
@@ -84,7 +84,7 @@ def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
         f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={configured}\n"
         "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=8\n"
     )
-    rc, stdout, stderr = run_cli("eval", "golden", str(golden), "--serving-config", str(config))
+    rc, stdout, stderr = run_cli("eval", "golden", "--golden", str(golden), "--serving-config", str(config))
     assert rc == 2
     assert "serving config names" in stdout + stderr
 
@@ -175,7 +175,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     monkeypatch.setattr(audit, "summarize", lambda _results: {"MATCH": 1, "DRIFT": 0, "GAP": 0, audit.COMPILE_FAIL: 0})
     monkeypatch.setattr(audit, "gap_keys", lambda _results: set())
 
-    eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config), update_consult_baseline=False))
+    eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config), update_consult_baseline=False))
 
     assert captured["capture"] == ("org/model", {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True})
     _, gpu_name, compute_cap, records = captured["audit"]
@@ -214,7 +214,7 @@ def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path)
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
 
     with pytest.raises(SystemExit) as exc:
-        eval_cmd.handle_eval_golden(SimpleNamespace(golden_file=str(golden), serving_config=str(config), update_consult_baseline=False))
+        eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config), update_consult_baseline=False))
     assert exc.value.code == 1
 
 
@@ -269,16 +269,16 @@ def _static_release_audit(monkeypatch, tmp_path, *, records: list[dict], extra_e
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object()})
     monkeypatch.setattr(audit, "audit_card", lambda graphs, gpu_name, compute_cap, *, goldens: {"pre1": list(records)})
-    return eval_cmd, SimpleNamespace(golden_file=str(golden), serving_config=str(config), update_consult_baseline=False)
+    return eval_cmd, SimpleNamespace(golden=str(golden), serving_config=str(config), update_consult_baseline=False)
 
 
-# Two verified-tier consultations on the audited twin; key=None keeps the GAP out of the
+# Two golden consultations on the audited twin; key=None keeps the GAP out of the
 # gap-ratchet failure set so only the consultation count is under test.
 _TWO_CONSULTATIONS = [{"verdict": "MATCH", "key": None}, {"verdict": "GAP", "key": None}]
 
 
 def test_eval_golden_consultation_drop_fails_naming_the_twin(monkeypatch, tmp_path, caplog):
-    """A twin whose verified-tier consultation count falls below the checked-in baseline — or
+    """A twin whose golden consultation count falls below the checked-in baseline — or
     that vanishes from the audit entirely — is a gate failure naming the twin, even with zero
     DRIFT: a kernel that stops forking consults nothing, so its MATCHes silently vanish (the
     regression class the verdicts cannot see)."""
@@ -786,7 +786,7 @@ def test_bare_families_aggregates_exact_sites_for_summary():
 def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, caplog):
     """``eval golden``'s offer audit, over the strict-identity tier: an entry whose spelled row
     equals no enumerated leaf is UNREALIZED (tolerable while an offered sibling floors the
-    target); a target whose entries are ALL unrealized FALLS THROUGH the verified tier and the
+    target); a target whose entries are ALL unrealized supplies no usable golden evidence and the
     audit returns True (the command exits 1) — the 4090 ``attention.hd512.s4096`` class, caught
     at record time instead of in production benches. The guaranteed-unrealizable row here is a
     fabricated ``TILE`` fragment: no enumeration offers it, so no leaf can equal the row."""

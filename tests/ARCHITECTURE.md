@@ -232,8 +232,9 @@ transform) — gating its GPU cases on `requires_sm90` / `_supports_tma()` (≥ 
 run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`). The same
 gate applies to TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin refuses rather than selecting a
 different transport, so `test_attention_coverage.py`'s TMA-staged flash cases carry `requires_sm90` (their `cp`
-siblings run on sm_80+). Golden-scoped CLI tests are the other environment trap: `--golden` / `eval --dataset golden`
-resolve against the
+siblings run on sm_80+). Golden-scoped CLI tests are the other environment trap: `--realization` without `--golden
+PATH` and
+`eval --dataset golden` resolve against the
 **live card's** recordings, so tests asserting specific golden names (or monkeypatching `GOLDEN_RECORDS` with card-less
 fakes) must pin themselves off-GPU (`torch.cuda.is_available → False` in-process, `CUDA_VISIBLE_DEVICES=""` for
 `run_cli` subprocesses) to take the multi-card-union path — otherwise they pass or fail depending on which shapes the

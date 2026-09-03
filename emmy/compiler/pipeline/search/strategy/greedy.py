@@ -66,12 +66,23 @@ class GreedyStrategy(SearchStrategy):
         t_start = time.monotonic()
 
         blocked: dict[str, set[frozenset]] = {}
+        retired_routes: set[str] = set()
         allow_structural = True
         for _attempt in range(_MAX_GREEDY_RETRIES):
             rejections: list[tuple[str, str, str]] = []
             run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-            decide = greedy_decide(blocked=blocked, price_structural=allow_structural, db=db)
+            decide = greedy_decide(blocked=blocked, price_structural=allow_structural, db=db, retired_routes=retired_routes)
             terminal, trace = run.resolve(graph.copy(), decide)
+            stale = _stale_route_pins(terminal, rejections)
+            if stale:
+                # A measured route row the evidence pick installed as a kernel's pins left that
+                # kernel un-lowered: the row no longer realizes on this compiler. It retires for
+                # this compile and the resolve repeats without it — the same role ``blocked`` plays
+                # for a tile the prior ranked first.
+                report = "; ".join(f"{name}: {why}" for name, why in sorted(stale.items()))
+                logger.warning("deploy: measured route row(s) no longer realize; retiring and re-resolving — %s", report)
+                retired_routes |= set(stale)
+                continue
             failed = _unlowered_tiles(terminal, rejections)
             if not failed:
                 break
@@ -97,6 +108,22 @@ class GreedyStrategy(SearchStrategy):
         _raise_on_unlowered(terminal, rejections, ctx)
         logger.info("compile: total %.2fs (deterministic resolve)", time.monotonic() - t_start)
         return terminal
+
+
+def _stale_route_pins(graph: Graph, rejections: list[tuple[str, str, str]]) -> dict[str, str]:
+    """``{evidence source: reason}`` for every kernel a measured route row pinned that did not
+    lower: a rejection recorded against it, or a ``TileOp`` still unmapped at the terminal — the
+    schedule pass declines an empty pinned enumeration silently, so the pins are the tripwire."""
+    reasons = {nid: reason for nid, _label, reason in rejections}
+    stale: dict[str, str] = {}
+    for nid, node in graph.nodes.items():
+        op = node.op
+        if not isinstance(op, TileOp) or op.pins.source is None:
+            continue
+        if nid in reasons or (op.op is not None and not op.place.is_mapped):
+            why = reasons.get(nid, "the pinned schedule enumerates no row on this kernel")
+            stale[op.pins.source] = f"{why} (node {nid!r}, pins {dict(op.pins.values)})"
+    return stale
 
 
 def _unlowered_tiles(graph: Graph, rejections: list[tuple[str, str, str]]) -> dict[str, frozenset]:

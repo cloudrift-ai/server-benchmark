@@ -11,6 +11,7 @@ decode-plus-factors residue.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from emmy.compiler.dtype import F32
@@ -25,7 +26,7 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
-from emmy.compiler.ir.tile.path import family_sites, sites, spell
+from emmy.compiler.ir.tile.path import MissingSiteError, family_sites, resolve, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
 from emmy.compiler.structural import digest
@@ -267,6 +268,34 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     return _cluster_value_seams(out, {id(seam.node): seam.frontier is None and store_dtype_consumers.get(id(seam.node)) for seam in out})
 
 
+def route_resolves(tile: TileOp, route: Mapping[str, str]) -> str | None:
+    """Why a recorded placement ``route`` cannot be applied to ``tile``, or ``None`` when it can.
+
+    A route is the ``PLACE`` half of a golden record — one ``fuse`` / ``cut`` per spelled seam,
+    plus the bare decision. It applies when every scoped key that resolves on this kernel's Fold
+    tree names a cuttable seam; a key that resolves to no site at all addresses another kernel of
+    the same target and is skipped, exactly as the cut pass reads an ambient pin. This is asked
+    BEFORE a route is installed as the kernel's pins, so a stale spelling is reported as drift
+    instead of raising out of the pass."""
+    seams = cuttable_seams(tile)
+    cuttable = {id(node) for seam in seams for node in (seam.node, *(sibling for sibling, _ in seam.siblings))}
+    all_sites = sites(tile.op)
+    for key, value in route.items():
+        if str(value) not in {"cut", "fuse"}:
+            return f"routing value {key}={value!r} is not 'cut' or 'fuse'"
+        if key == "PLACE":
+            continue
+        try:
+            site = resolve(tile.op, str(key), all_sites=all_sites)
+        except MissingSiteError:
+            continue  # addresses a seam of another kernel in the graph
+        except ValueError as exc:
+            return f"routing key {key!r} does not resolve: {exc}"
+        if site is None or id(site.node) not in cuttable:
+            return f"routing key {key!r} names no legal cut seam on the Fold tree"
+    return None
+
+
 def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) -> tuple[CutSite, ...]:
     """Fold duplicate operand cones — alpha-equivalent up to captured axis names — into ONE seam per value.
 
@@ -439,6 +468,9 @@ def realize(
     sliced-axis split receipt."""
     tile: TileOp = root.op
     split_consumed = tile.split_consumed or carries_partition(tile)
+    # The pieces inherit the parent's own pins minus the placement they consume: a recorded row's
+    # schedule families reach every kernel the route mints, each taking what applies to it.
+    inherited = tile.pins.without("PLACE")
     pieces = []
     for seam in seams:
         child = seam.node
@@ -504,6 +536,7 @@ def realize(
             ),
             placement_decided=placement_decided,
             split_consumed=split_consumed,
+            pins=inherited,
         )
         producer = replace(producer, knobs=consume_kernel_row(producer.knobs))
         shape = tuple(axis.extent for axis in axes)
@@ -528,6 +561,7 @@ def realize(
         output_specs=parent_stores,
         placement_decided=placement_decided,
         split_consumed=split_consumed,
+        pins=inherited,
     )
     consumer = replace(consumer, knobs=consume_kernel_row(consumer.knobs))
     output_tensors = (

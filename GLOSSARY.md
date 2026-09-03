@@ -234,9 +234,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   chooses its own settings from scratch, exactly like any newly lifted kernel. Nothing
   downstream can tell the two apart.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
-- **Pin** — To force a tuning choice by hand instead of letting the compiler make it, either by setting an environment
-  variable (`EMMY_STAGE=d2/smem-async`) or by re-running a recorded configuration exactly. A pinned benchmark measures the
-  forced configuration rather than the one the compiler would have chosen on its own.
+- **Pin** — A forced tuning choice. A hand pin comes from the environment (`EMMY_STAGE=d2/smem-async`, `EMMY_KNOBS`,
+  `emmy run --ab`) and is how a row is measured rather than chosen: a pinned benchmark measures the forced configuration
+  rather than the one the compiler would have picked. A kernel can also carry its own pins — the route row the
+  evidence pick elected for it, which the cut and schedule passes apply exactly like an environment pin.
 - **Schedule key** — The name a schedule choice is stored under when one kernel contains more than one step that takes
   the same kind of choice. Written plain, `TILE` refers to the kernel's main step. Where a kernel has several — the
   fused norm→linear kernel folds both its statistic and its contraction — the name carries a suffix identifying the
@@ -274,20 +275,31 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   from two different pools are not comparable, because they are different kernels. A pool may hold more than one
   verified answer: a shape recorded twice, or under two names, contributes several.
 - **Golden configuration** — One persisted symbolic program target. Its `realizations` array holds the concrete
-  dimension bindings and input pin regimes that were tuned for that target.
+  dimension bindings and input pin regimes that were tuned for that target. `--golden PATH` names the file such
+  targets live in; `--realization NAME` selects one realization inside it.
 - **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,
-  input knob pins, the selected schedule knobs, and (after verification) paired measurements.
+  input knob pins, the selected schedule knobs, and (after verification) paired measurements. A measured realization
+  is a row of evidence; an unmeasured one becomes evidence once `emmy run --golden PATH --bench` has measured it.
 - **Child-identity schedule receipt** — A realization that records one split child's schedule: the route's cut(s)
   frozen in its input pins, the child's schedule row in its knobs, and the child kernel's deploy identity stored as
-  its identity. The stored identity is the verified-tier join key and the strict decode's kernel selector — one flat
-  knobs map decorates exactly one kernel, so conflicting per-child schedules persist as sibling receipts.
+  its identity. The stored identity is the strict decode's kernel selector — one flat knobs map decorates exactly
+  one kernel, so conflicting per-child schedules persist as sibling receipts. As evidence a receipt is two rows: its
+  route for the parent kernel and its schedule row for the child.
 - **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
-  realizations, proposed knob rows, and tune ranking feedback. It is search state, not trusted deployment evidence.
+  realizations, proposed knob rows, and tune ranking feedback. It is search state; only its measured rows are
+  evidence, and only when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at
   `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; model-agnostic hardware goldens remain under
   `emmy/compiler/pipeline/search/goldens/`. Every realization contains verified deployable measurements; `emmy tune`
-  refuses to mutate these files directly.
-- **Evidence** — A compatible recorded measurement used to select between schedule candidates.
+  refuses to mutate these files directly. The files for the live card are the golden evidence an ordinary compile
+  reads.
+- **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row, a tune
+  database row, or a measured golden row. All three enter one index and are read by one rule.
+- **Route row** — A measured row that spells a kernel-set decision — a `PLACE` key, or a `REDUCE` value carrying a
+  cross-CTA `g<n>` half. Its latency is the measured price of applying that decision to the kernel it was recorded
+  on; a compile applies it whole, as the kernel's own pins, and it outranks any arm priced by prediction.
+- **Strict evidence** — A compile mode (`--strict-evidence`, `EMMY_STRICT_EVIDENCE`) in which a fork no measured row
+  decides is an error naming the kernel, instead of a prediction the prior makes.
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
   data that model trains on, and the measurements in it that were taken at deployable settings are also read directly
   when compiling.
@@ -297,10 +309,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   checked by anyone else. A freeze is identical wherever it is read, which is what makes two models' scores a fair
   comparison and a reported score something a reader can reproduce. One is kept with the repository and is what the
   prior is evaluated against by default.
-- **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: the
-  verified golden configurations for that GPU first (joined by exact structural identity and decoded by exact row
-  equality), then measurements recorded on the machine, then the prior's prediction, and last the rule's own first
-  option. Each step in that order is called a tier.
+- **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
+  evidence first — the reservoir, then the tune database's rows and the golden rows in scope, the fastest compatible
+  row winning — then the prior's prediction, and last the rule's own first option. A structural fork follows the
+  same order over route rows, priced alternatives standing in for the prior.
 - **Calibration** — A check of whether a learned model ranks measured candidates well enough to influence
   compilation.
 - **Regret** — What choosing by prediction costs, as a ratio to the best measured option: 1.00 means the choice was

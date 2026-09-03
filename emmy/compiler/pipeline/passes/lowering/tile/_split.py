@@ -37,7 +37,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.schedule import Reduce, Work
+from emmy.compiler.ir.schedule import KernelPins, Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
@@ -46,8 +46,7 @@ from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
-from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row
-from emmy.compiler.pipeline.search.space import REDUCE, WORK
+from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, family_pins
 
 logger = logging.getLogger(__name__)
 
@@ -219,11 +218,14 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     k_axis = tile.axis_of(node.axis)  # the node names its K; the kernel's axis table holds its extent
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
-    element = axis_of(key)
-    pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
+    # The exact site pin first, then the bare family pin — the kernel's own pins beside the env.
+    reduce_pins = dict(family_pins("REDUCE", tile.pins.values))
+    pin = reduce_pins.get(key) if axis_of(key) else None
+    if pin is None:
+        pin = reduce_pins.get("REDUCE")
     tail = projection_tail(tile)
     if pin is not None:
-        plan = Reduce.parse(pin, Work.parse(WORK.raw()))
+        plan = Reduce.parse(pin, Work.parse(dict(family_pins("WORK", tile.pins.values)).get("WORK")))
         if not plan.needs_split:
             return [unsplit]
         _enforce(splitk_width(k_axis, plan.cta))
@@ -395,9 +397,11 @@ def _with_axes(axes: tuple, *new: Axis) -> tuple:
     return tuple({**{axis.name: axis for axis in axes}, **{axis.name: axis for axis in new}}.values())
 
 
-def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple) -> TileOp:
-    """One fresh unscheduled Tile kernel preserving its Fold algebra verbatim, over the axis table ``axes``."""
-    piece = TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes)
+def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple, pins: KernelPins | None = None) -> TileOp:
+    """One fresh unscheduled Tile kernel preserving its Fold algebra verbatim, over the axis table
+    ``axes``. ``pins`` are the parent's own pins, inherited whole: the split consumed only the
+    ``g<n>`` half of ``REDUCE``, and the schedule pass strips that half off a piece on its own."""
+    piece = TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes, pins=pins or KernelPins())
     # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
     # identity. Built fresh here, so this states the contract rather than doing work — and the rule
     # that mints a kernel is where that has to be said.
@@ -464,14 +468,16 @@ def _split_projection(tile: TileOp, root: Node, selected: Fold):
     return (*chosen, tuple(pieces))
 
 
-def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple) -> Graph:
+def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple, pins: KernelPins) -> Graph:
     """Add the unsplit independent projection Folds as fresh schedulable kernels. Each is a piece
     of the REALIZED split — the kernel-set decision was consumed by the kernel it addressed, and
     one pinned split means one split — so it carries the consumed-split receipt
     (``split_consumed``): a ``REDUCE`` pin's ``g`` half strips on it instead of splitting the
     sibling region again (or raising)."""
     for root, region, body, stores in pieces:
-        tile = replace(_piece(_project(region, body, tuple(free)), free, output_specs=stores, axes=root.op.axes), split_consumed=True)
+        tile = replace(
+            _piece(_project(region, body, tuple(free)), free, output_specs=stores, axes=root.op.axes, pins=pins), split_consumed=True
+        )
         _add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
     return frag
 
@@ -523,10 +529,14 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         else:
             p_stores = (OutputSpec(write=Write(output=out.name, index=cell, values=states, atomic=True)),)
         piece = _piece(
-            _project(_rebind(region, node, partial_fold), body, (split, *free)), (split, *free), output_specs=p_stores, axes=axes
+            _project(_rebind(region, node, partial_fold), body, (split, *free)),
+            (split, *free),
+            output_specs=p_stores,
+            axes=axes,
+            pins=tile.pins,
         )
         result = _one(match, frag, root, piece)
-        return _add_projection_pieces(match, result, projection_pieces, free)
+        return _add_projection_pieces(match, result, projection_pieces, free, tile.pins)
 
     # Deferred finalize: write every raw component to ``ws[(comp,) ksplit, *cell]``. The workspace
     # shape MUST match the rank of the index the writes/loads use — or ``render_index``'s
@@ -551,7 +561,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # split axis joins as a lead grid axis via the partial tile's OWN placement — the view derives
     # lead axes from the placement, so nothing is restamped on the node.
     ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
-    partial_tile = _piece(partial_fold, (split, *free), output_specs=ws_stores, axes=axes)
+    partial_tile = _piece(partial_fold, (split, *free), output_specs=ws_stores, axes=axes, pins=tile.pins)
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the
@@ -573,10 +583,14 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(
-        _project(_rebind(region, node, fin_fold), body, tuple(free)), free, output_specs=fin_stores, axes=_with_axes(tile.axes, fin_axis)
+        _project(_rebind(region, node, fin_fold), body, tuple(free)),
+        free,
+        output_specs=fin_stores,
+        axes=_with_axes(tile.axes, fin_axis),
+        pins=tile.pins,
     )
     result = _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
-    return _add_projection_pieces(match, result, projection_pieces, free)
+    return _add_projection_pieces(match, result, projection_pieces, free, tile.pins)
 
 
 __all__ = ["atomic_finalize", "realize_split", "split_forks", "splitk_width"]

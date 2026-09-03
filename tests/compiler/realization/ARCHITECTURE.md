@@ -148,7 +148,7 @@ the stored number — one bench, both answers. See `tests/perf/ARCHITECTURE.md`.
 A slower case **reports** rather than fails: enforcement belongs in a human reviewing the
 timing-refresh pull request, not in a red test a legitimate correctness fix could pin red forever.
 Nothing auto-updates a stored number — an automatic ratchet ends up pinned to the luckiest noise
-excursion ever observed. `emmy run --golden-file FILE --bench --record` is the only writer.
+excursion ever observed. `emmy run --golden FILE --realization NAME --bench --record` is the only writer.
 
 The band is 5%, measured rather than guessed: ten cases spanning 1.5 us to 579 us, four estimates
 each on an idle RTX 5090, put the best-of-three estimator's own spread at a median of 0.17% and a
@@ -165,10 +165,10 @@ answer it and nowhere else. That asymmetry is deliberate: the derived-half check
 fires everywhere and its fix works everywhere, while a timing can only be produced on the machine
 holding the card.
 
-The perf command repeats both the realization's input `pins` and schedule `knobs` in its explicit
-A/B row. The working-file target context selects the ordinary compile; each A/B variant re-lowers
-under its own pin context, so a placement cut omitted from the row would silently benchmark a
-different kernel set and reject the child schedule.
+The perf command names the case's realization (`run --golden <case> --realization <name>`), which
+benches it as a pinned row whatever its measurement state: the row's input `pins` and schedule
+`knobs` — a placement cut included — are published as a hand pin for that one compile, so the
+schedule the case authors is the one measured, never the planner's own pick under its name.
 
 ## Staleness: regeneration, not stamps
 

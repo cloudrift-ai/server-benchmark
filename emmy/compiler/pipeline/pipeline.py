@@ -998,9 +998,17 @@ def _structural_domain(options: list) -> tuple[str, ...] | None:
     return tuple(sorted(families)) or None
 
 
+def _offer_site_key(root_op) -> tuple | None:
+    """The identity a structural decision replays on: the kernel's variant key plus its own pins —
+    a pinned kernel and its unpinned twin are offered different cut sets, so neither may replay
+    the other's choice."""
+    key = root_op.identity_key(with_io=True, with_knobs=True)
+    return None if key is None else (key, getattr(root_op, "pins", None))
+
+
 def _remember_structural_decision(decisions: list, root_op, domain: tuple[str, ...], receipt: dict) -> None:
     """Record the first exact structural choice for an identical offer in one cut domain."""
-    key = root_op.identity_key(with_io=True, with_knobs=True)
+    key = _offer_site_key(root_op)
     receipt = decision_view(receipt)
     if key is None or not receipt or any(prior_key == key and prior_domain == domain for prior_key, prior_domain, _ in decisions):
         return
@@ -1015,7 +1023,7 @@ def _replay_structural_decision(decisions: list, root_op, options: list) -> obje
     Replay therefore preserves the old one-decision-per-identical-kernel bound without inferring a
     semantic decision from its output count. If the earlier receipt is not an exact option here,
     this site remains a real fork."""
-    key = root_op.identity_key(with_io=True, with_knobs=True)
+    key = _offer_site_key(root_op)
     domain = _structural_domain(options)
     if key is None or domain is None:
         return None

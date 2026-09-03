@@ -129,7 +129,9 @@ and Emmy always rebuild the same module and example inputs. Inductor compiles wi
 `fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness supplies the shared outer CUDA graph so every backend
 has identical captured timing semantics. Inductor output must match eager on the same inputs at `rtol=atol=1e-3`
 before its latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
-Emmy-vs-eager proof authoritative. BF16 inputs and constants bind through the compiler's raw `uint16` carrier, and
+Emmy-vs-eager proof authoritative. `--strict-evidence` (`run`, `compile`, `serve`; `EMMY_STRICT_EVIDENCE`) is the
+deploy-side strictness: a fork no measured row decides raises `EvidenceError` naming the kernel instead of deploying
+a prediction. BF16 inputs and constants bind through the compiler's raw `uint16` carrier, and
 backend output bits are decoded to numeric values before every command-layer correctness check. The command records
 max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
@@ -170,18 +172,27 @@ warm shapes, symbolic fallbacks, and standard/precision-trading input pin regime
 `realizations` array with those named bindings and explicit registered input pins; trace no longer accepts an
 independent serving-shape surface. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
-directly by `tune --golden-file` and verified by `run --golden PATH [--target NAME]`.
+directly by `tune --golden PATH` and verified by `run --golden PATH [--realization NAME]`.
 
-`run --golden PATH` without `--target` replays every embedded target in one process. It parses and validates the
-document once and hands that object to each target's resolution step, because a whole-model inventory is large
+**One golden flag pair on every command.** `--golden PATH` names a golden YAML (working or canonical) on `run`,
+`compile`, `tune`, `serve` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
+instead of the repository's per-card goldens, joining the tune DB's rows in the one measured-evidence index the
+greedy pick reads (`search.golden.records_override` in-process; `EMMY_GOLDEN_FILE` for the vLLM child `serve`
+spawns). `--realization NAME` (`run`, `compile`, `tune`) selects one realization by exact name or an unambiguous
+substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens.
+There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`.
+
+`run --golden PATH` without `--realization` walks every realization name in one process, benching each name's
+verified rows or its one valid direct tune winner (proposals stay the tuner's). It parses and validates the
+document once and hands that object to each name's resolution step, because a whole-model inventory is large
 enough that re-reading it per target dominates the replay: the 279-target DeepSeek V4 Flash golden costs about
 15 s per load, so reloading turned a four-minute replay into more than an hour of redundant parsing. Only this
-read-only replay path shares a document; `tune --golden-file` still loads its own mutable copy to write back into.
+read-only replay path shares a document; `tune --golden PATH` still loads its own mutable copy to write back into.
 
 The in-model audit uses those serving twins for every architecture, DeepSeek V4 included (its layers take the
 attention-sublayer seam; see `emmy/serving/ARCHITECTURE.md`).
 
-`emmy tune --golden-file PATH` consumes embedded programs directly. Realizations sharing one symbolic target are
+`emmy tune --golden PATH` consumes embedded programs directly. Realizations sharing one symbolic target are
 specialized from their named bindings and grouped by target, bindings, and input pins. Knob-bearing
 realizations are measured in file order before MCTS and written back as working-only `ranking` metadata.
 `--max-candidates N`
@@ -202,31 +213,33 @@ flags and never writes the trusted
 event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace entries can use every selected GPU.
 When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
 rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
-rejects any `--golden-file` inside a canonical repository tree — recipe-local `golden/` or model-agnostic
+rejects any `--golden PATH` inside a canonical repository tree — recipe-local `golden/` or model-agnostic
 `search/goldens/` — including symlink aliases.
 With `--bench`, each target's `62_kernel_bench.json` records whether an eager reference was available and the
 non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
 reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.
 
-`emmy compile --golden-file PATH --golden NAME` and `emmy run --golden PATH [--target NAME]` are the verification
-counterparts. They resolve targets only in the explicit working YAML and compile its exact provenance or Loop IR,
-without canonical-corpus or live-card filtering. `run` visits every distinct target sequentially in the current
-process unless `--target` narrows the file to one exact or unambiguous substring match. With several targets,
-`--json DIR` writes one readable JSON record per target; there is no repeat or child-process orchestration layer.
-Invoke `emmy run` again when independent process observations are required. Inventory and proposal rows select the
-graph but are not trusted as automatic A/B pins; only verified rows with paired measurements auto-pin, while a
-proposal is tested explicitly with `run --bench --ab 'KNOBS…'`. One explicit working target whose matching
-realizations share an identical input-pin regime containing `PLACE` also applies the placement pins from that regime
-to the ordinary compile: the structural target is part of the requested working slice, while its other input pins and
-unverified schedule knobs remain free for the normal deploy evidence hierarchy. Different input-pin regimes under the
-same name leave the ordinary target unpinned rather than choosing one. Canonical selection never gets this
-working-file behavior. Embedded Loop IR stores stable algebra rather than derived structural stamps. Registered
+`emmy compile --golden PATH --realization NAME` and `emmy run --golden PATH [--realization NAME]` are the
+verification counterparts. They resolve targets only in the explicit golden YAML and compile its exact provenance or
+Loop IR, without canonical-corpus or live-card filtering; `compile` requires the name (it prints one program), `run`
+visits every realization name sequentially in the current process unless `--realization` narrows the file to one
+exact or unambiguous substring match. With several names, `--json DIR` writes one readable JSON record per name;
+there is no repeat or child-process orchestration layer. Invoke `emmy run` again when independent process
+observations are required. Which rows bench as pinned rows: a realization named explicitly is always benched,
+measurement state notwithstanding — the realization corpus and the perf lane replay unmeasured cases this way — while
+the whole-file walk benches a name's verified rows or its one valid direct tune winner and leaves proposals to the
+tuner. Every pinned row (a golden row and an `--ab` hand row alike) is MEASURED under a hand pin published to the
+environment for that one compile, then recorded (see `--record` and the bench-to-DB recording below); deploying it
+is the evidence pick's business, never the pin's. The selected target's records are also the compile's golden
+evidence for the greedy row, and their shared input regime is published so the rows read as live measurements; a
+schedule row or a route in them deploys only where it is the fastest measured row for its kernel. Embedded Loop IR
+stores stable algebra rather than derived structural stamps. Registered
 Boolean values in an explicit `--ab` row remain input pins, so false values are not dropped with kernel pass markers
 and the JSON record identifies the inputs that were compiled. A scoped schedule-key OFF beside a non-OFF bare family
 pin also remains explicit as the exact-site exception to that bare pin. A failed row with
 no realized graph reports the precision lane requested by those parsed input pins, including explicit false
-overrides, rather than defaulting every failure to the standard lane. `run --golden` replays it through the full
-compiler pipeline. When that replay has
+overrides, rather than defaulting every failure to the standard lane. `run --golden PATH` replays it through the
+full compiler pipeline. When that replay has
 pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
 check; strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
 for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still
@@ -239,28 +252,36 @@ Repeated names that resolve to different embedded targets remain ambiguous;
 qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
 stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel
 rows, so promotion compares aggregate execution rather than a sum of isolated launch windows.
-`--record` attributes that latency to the measured realization by exact name, pins, and knobs; a repeated name alone
-is never enough to choose a row. Newly appended tune winners start without copied latency because the seed row's
-measurement describes a different schedule.
+`--record` (with `--golden PATH --bench`) attributes that latency to the measured realization by exact name, pins,
+and knobs; a repeated name alone is never enough to choose a row. Newly appended tune winners start without copied
+latency because the seed row's measurement describes a different schedule. Independently of `--record`, every clean
+pinned row and the greedy isolated re-bench are written into the tune DB by default at tune-standard measurement
+quality: per-kernel `perf` rows through the tuner's own writer — the deploy evidence the next `compile` / `run` /
+`serve` picks from, which is how a replayed golden or a hand-pinned `--ab` row becomes what the compiler chooses — and
+node-store leaves for the offline prior's training data. `--no-record-nodes` opts out of both.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.
 
-`emmy eval golden GOLDEN_YAML --serving-config PATH` is the release audit. The env must name that exact canonical
-file. The command validates the nested schema and model provenance, requires the live GPU to match both the config
+`emmy eval golden --golden GOLDEN_YAML --serving-config PATH` is the release audit. The env must name that exact
+canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
+config
 and YAML, proves that every structural target has every config-derived realization, reproduces the recorded rows,
 and re-traces the exact static/symbolic precision matrix. Any missing realization, DRIFT, GAP, or compile failure is
 a non-zero release failure. Model, revision, GPU, and serving widths therefore have no independent audit flags.
 
-Both audits read the verified tier through `compiler/pipeline/search/audit.py`, one verdict per consultation. The
-**offer audit** compiles each record's OWN persisted program and reports the entries no enumerated leaf equals
+Both audits read the golden verdicts through `compiler/pipeline/search/audit.py`, one verdict per schedule fork,
+asked of the golden rows whose structural signature is the fork's: `MATCH` when a golden row vouches for an offered
+leaf (the deployed one, or the fastest offered when a faster measured row won the pick), `DRIFT` when golden rows
+carry the signature but no offered leaf agrees with any of them, `GAP` when the fork has no golden row. The
+**offer audit** compiles each record's OWN persisted program and reports the entries no offered leaf agrees with
 (`UNREALIZED`, tolerable only while an offered sibling still floors the target) and the targets where none does
-(`FALL-THROUGH` — the deploy would fall past the tier entirely). The **serving-matrix audit** then compiles each
-precision lane's serving twins with only that lane's records as evidence: `DRIFT` means the identity still matches but
-the recording no longer equals any offered row, and `GAP` means no record carries a fork's identity at all.
+(`FALL-THROUGH` — none of the target's rows is evidence a deploy can use). The **serving-matrix audit** then compiles
+each precision lane's serving twins with only that lane's records as golden evidence.
 
-When the serving config names a `SERVE_CONSULT_BASELINE` JSON, the audit also ratchets each twin's verified-tier
-consultation count (per precision lane) against that checked-in baseline. This catches the regression the verdicts
+When the serving config names a `SERVE_CONSULT_BASELINE` JSON, the audit also ratchets each twin's golden
+consultation count (per precision lane, schedule verdicts only) against that checked-in baseline. This catches the
+regression the verdicts
 cannot: a pass change that removes a kernel's schedule fork deploys it single-option with no consultation, so its
 recorded MATCHes vanish without a DRIFT. A count below baseline — or a recorded twin no longer audited — fails
 the gate naming the twin; counts above baseline only log that the baseline is stale. `--update-consult-baseline`

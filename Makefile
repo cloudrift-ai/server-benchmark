@@ -212,7 +212,7 @@ serve-config-guard:
 # config-derived realization matrix on the target GPU before warming; the pinned config owns
 # model, revision, GPU, canonical file, widths, and precision regimes together.
 serve-goldens: serve-config-guard
-	./venv/bin/emmy eval golden "$(SERVE_GOLDEN_FILE)" --serving-config "$(SERVE_CONFIG)"
+	./venv/bin/emmy eval golden --golden "$(SERVE_GOLDEN_FILE)" --serving-config "$(SERVE_CONFIG)"
 
 serve-warm: serve-goldens
 	BASE_IMAGE=$(VLLM_EMMY_TAG) MODEL="$(MODEL)" $(SERVE_DIR)/warm.sh

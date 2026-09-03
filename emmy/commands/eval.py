@@ -129,7 +129,7 @@ def register_eval_command(subparsers) -> None:
         "golden",
         help="Validate one golden YAML against its pinned serving configuration and the live target GPU",
     )
-    pg.add_argument("golden_file", metavar="GOLDEN_YAML", help="The exact canonical golden YAML to validate.")
+    pg.add_argument("--golden", required=True, metavar="PATH", help="The exact canonical golden YAML to validate.")
     pg.add_argument(
         "--serving-config",
         required=True,
@@ -139,7 +139,7 @@ def register_eval_command(subparsers) -> None:
     pg.add_argument(
         "--update-consult-baseline",
         action="store_true",
-        help="Re-record the SERVE_CONSULT_BASELINE per-twin verified-tier consultation counts from this audit "
+        help="Re-record the SERVE_CONSULT_BASELINE per-twin golden consultation counts from this audit "
         "(only when the audit itself passes) instead of ratcheting against them.",
     )
     pg.set_defaults(func=handle_eval_golden)
@@ -457,7 +457,7 @@ def handle_eval_golden(args) -> None:
 
     try:
         serving = load_serving_config(args.serving_config)
-        golden_path = Path(args.golden_file).resolve()
+        golden_path = Path(args.golden).resolve()
         if golden_path != serving.golden_file:
             raise ValueError(f"serving config names {serving.golden_file}, not {golden_path}")
         document = load_golden_file(golden_path, validation=GoldenFileValidation.REPOSITORY)
@@ -555,7 +555,7 @@ def handle_eval_golden(args) -> None:
 
 
 def _check_consult_baseline(serving, consultations: dict[str, dict[str, int]]) -> bool:
-    """Ratchet the per-twin verified-tier consultation counts against the serving config's
+    """Ratchet the per-twin golden consultation counts against the serving config's
     checked-in baseline. The verdict audit above cannot see a kernel that stops forking: it
     deploys single-option with no consultation, so its recorded MATCHes vanish without a DRIFT.
     A count below baseline — or a twin/lane gone entirely — fails the gate naming the twin;
@@ -579,7 +579,7 @@ def _check_consult_baseline(serving, consultations: dict[str, dict[str, int]]) -
             got = consultations.get(lane, {}).get(twin)
             if got is None:
                 logger.error(
-                    "consultation ratchet: %s [%s] vanished — baseline records %d verified-tier consultations but the twin was not audited",
+                    "consultation ratchet: %s [%s] vanished — baseline records %d golden consultations but the twin was not audited",
                     twin,
                     lane,
                     expected,
@@ -587,7 +587,7 @@ def _check_consult_baseline(serving, consultations: dict[str, dict[str, int]]) -
                 failed = True
             elif got < expected:
                 logger.error(
-                    "consultation ratchet: %s [%s] dropped %d -> %d verified-tier consultations — kernels stopped "
+                    "consultation ratchet: %s [%s] dropped %d -> %d golden consultations — kernels stopped "
                     "consulting the tier (they now deploy without a schedule fork), so their recorded goldens silently no-op",
                     twin,
                     lane,
@@ -617,7 +617,7 @@ def _record_consult_baseline(serving, consultations: dict[str, dict[str, int]]) 
         logger.error("--update-consult-baseline needs SERVE_CONSULT_BASELINE in the serving config")
         sys.exit(2)
     path.write_text(json.dumps(consultations, indent=2, sort_keys=True) + "\n")
-    logger.info("recorded verified-tier consultation baseline: %s", path)
+    logger.info("recorded golden consultation baseline: %s", path)
 
 
 def handle_eval_variants(args) -> None:
@@ -1044,6 +1044,7 @@ def _emit_offer_audit(configs: list) -> bool:
     falls through (``eval golden`` exits 1)."""
     import logging as _logging  # noqa: PLC0415
 
+    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import kernel_identity  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
@@ -1099,13 +1100,13 @@ def _emit_offer_audit(configs: list) -> bool:
                     if not hits:
                         logger.warning(
                             "  %-44s  NO-FORK  no fork of its own snippet carries its structural identity — the "
-                            "verified tier was never consulted there (the serving-matrix audit is the deploy-side authority)",
+                            "evidence pick was never asked there (the serving-matrix audit is the deploy-side authority)",
                             _realization_label(name, pins),
                         )
                         continue
                     floor = next((r for r in hits if r["verdict"] == "MATCH"), None)
                     for g in sub:
-                        if any(g not in (r["unrealized"] or ()) for r in hits):
+                        if any((g.name, canonical_row_key(g.schedule_row)) not in (r["unrealized"] or ()) for r in hits):
                             continue  # an enumerated leaf equals this entry's row somewhere
                         n_unrealized += 1
                         via = f"deploy floor: {floor['golden']} @ {floor['us']:g}us" if floor else "NO offered sibling"
@@ -1120,8 +1121,8 @@ def _emit_offer_audit(configs: list) -> bool:
                         fell.append(_realization_label(name, pins))
                         logger.error(
                             "  %-44s  FALL-THROUGH  none of the target's %d recorded entr%s equals an enumerated leaf in its "
-                            'input regime — a deploy logs "none equals an enumerated row" and falls past the verified tier; '
-                            "re-record an offered row or fix the enumeration",
+                            "input regime — no offered leaf agrees with any of them, so none of them is evidence a deploy can "
+                            "use; re-record an offered row or fix the enumeration",
                             _realization_label(name, pins),
                             len(sub),
                             "y" if len(sub) == 1 else "ies",
@@ -1132,7 +1133,7 @@ def _emit_offer_audit(configs: list) -> bool:
     logger.info("")
     if fell:
         logger.info(
-            "  offer audit: %d target(s) FALL THROUGH the verified tier (%s); %d/%d entries unrealized",
+            "  offer audit: %d target(s) supply NO usable golden evidence (%s); %d/%d entries unrealized",
             len(fell),
             ", ".join(fell),
             n_unrealized,

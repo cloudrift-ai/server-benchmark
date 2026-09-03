@@ -30,10 +30,13 @@ relevant `ARCHITECTURE.md` before answering.
   The freeze's payload YAML is tracked in **git LFS**; its manifest is plain git so provenance stays diffable.
   Re-freeze with `scripts/freeze_node_store.py`.
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
-  (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run`
-  resolve forks through the deploy evidence hierarchy — the live card's recorded goldens first (the repo-shipped
-  verified tier; consulted, never trained on), then measured reservoir/DB evidence, then the global `Prior` (the
-  online prior with its offline cold-start fallback; the old `_best_fork` DB→fork replay was removed). The online prior
+  (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run` /
+  `serve` resolve forks through ONE measured-evidence pick — the reservoir, this DB's `perf` rows and the golden rows
+  in scope (the live card's repository goldens, or the file `--golden PATH` names) rank fastest-first, a row spelling
+  a placement or a cross-CTA split prices that kernel-set decision, and the global `Prior` (the online prior with its
+  offline cold-start fallback) decides only where nothing was measured; `--strict-evidence` turns that fall-through
+  into an error. `run --golden PATH --bench` writes what it measures back into this DB, which is how a golden row
+  becomes what the next compile picks. The online prior
   is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`; legacy `EMMY_PRIOR_FILE` still
   accepted) that `tune` writes and `compile` / `run` read. Use the README architecture index for the prior and
   two-level autotune design.
@@ -100,7 +103,7 @@ filename: no suffix means every stage must pass, `_xfail_<stage>` means it is a 
 - **Latency is measured in `tests/perf/`, whose case list IS the corpus.** `make test` compiles at `-O1` and never
   measures; `make bench-kernels` benches every closed case the card can run, prints the comparison against eager and
   `torch.compile`, and reports a case slower than its stored number. A regression there is a finding, not a failure.
-- **Never write a benchmark script.** `emmy run --golden-file FILE --bench --record` benches a golden and writes its
+- **Never write a benchmark script.** `emmy run --golden FILE --bench --record` benches a golden and writes its
   timings back. If it cannot express what you need, that is a missing flag to add, not a script to write.
 
 Before adding a case, read `tests/compiler/realization/ARCHITECTURE.md` — it owns what earns a case, the knob spelling
@@ -154,7 +157,7 @@ Quick test models / scripts (for local iteration):
   usage;
   the skills that drive them document the flows.
 - **Never write a benchmark script.** `emmy run --bench --json PATH` is the machine-readable record every consumer
-  reads; `--golden-file FILE` benches every target in a working golden and `--golden NAME` selects one. If the CLI
+  reads; `--golden FILE` benches every realization in a golden and `--realization NAME` selects one. If the CLI
   cannot express what you need, that is a missing flag to add, not a script to write — the two scripts that
   re-implemented it (one parsing stdout with a regex, one diffing perf snapshots) had silently stopped working before
   anyone noticed.

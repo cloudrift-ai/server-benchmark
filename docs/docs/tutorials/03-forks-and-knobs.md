@@ -115,7 +115,7 @@ Any knob can be **pinned** from the environment, which makes the rule emit that 
 ```bash
 EMMY_STAGE=d2/smem-async emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0 --target sm_89
 
-EMMY_KNOBS="WORK=w2x2,TILE=f2x8,STAGE=d2/smem-async" emmy run --golden matmul.square.512 --bench
+EMMY_KNOBS="WORK=w2x2,TILE=f2x8,STAGE=d2/smem-async" emmy run --realization matmul.square.512 --bench
 ```
 
 Two properties of pinning are easy to get wrong:

@@ -87,95 +87,13 @@ class TerminalBench:
 
         return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
 
-    @classmethod
-    def _stats_from_launch(cls, lt):
-
-        if lt.samples and len(lt.samples) >= 1:
-            us = [s * 1000.0 for s in lt.samples]
-            return PerfStats(
-                median=statistics.median(us),
-                min=min(us),
-                max=max(us),
-                mean=statistics.fmean(us),
-                variance=statistics.pvariance(us) if len(us) > 1 else 0.0,
-                n_samples=len(us),
-            )
-        return cls._point_stats(lt.time_ms * 1000.0)
-
     @staticmethod
-    def _body_json(op, dialect: str) -> str:
-
-        return json.dumps(
-            {
-                "dialect": dialect,
-                "name": getattr(op, "name", None) or getattr(op, "kernel_name", None) or "?",
-                "body_repr": repr(op.body),
-            },
-            default=str,
-        )
-
-    def _record_op_inventory(self, op) -> None:
-
-        key = op.identity_key(with_io=True, with_knobs=True)
-        if key is None:
-            return
-        if isinstance(op, CudaOp):
-            self.db.record_cuda_op(
-                key,
-                kernel_source=op.kernel_source,
-                arg_order=list(op.arg_order),
-                grid=list(op.grid),
-                block=list(op.block),
-                smem_bytes=op.smem_bytes,
-                pretty=op.kernel_source,
-            )
-        elif isinstance(op, KernelOp):
-            self.db.record_kernel_op(key, self._body_json(op, "kernel"), op.pretty_body())
-        elif isinstance(op, LoopOp):
-            self.db.record_loop_op(key, self._body_json(op, "loop"), op.pretty_body())
+    def _stats_from_launch(lt):
+        return stats_from_launch(lt)
 
     def _persist(self, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None) -> None:
-        cuda_key = cuda_op.identity_key(with_io=True, with_knobs=True)
-        if cuda_key is None:
-            return
-        chain = [op for op in cuda_op.source_chain() if op.dialect is not None]
-        for op in chain:
-            self._record_op_inventory(op)
-        for parent_op, child_op in zip(chain[1:], chain[:-1], strict=False):
-            p_dialect = parent_op.dialect
-            c_dialect = child_op.dialect
-            if p_dialect is None or c_dialect is None:
-                continue
-            if p_dialect == c_dialect == "loop":
-                # loop→loop source hops are structural/decision hops, not
-                # lowering rewrites: the splice attribution stamped by the
-                # identity strategy (a decomposition's kernels → the
-                # pre-split op), the keep-vs-split rebind, name stamps.
-                # A ``lowering`` row holds ONE best child per parent, so
-                # recording a multi-kernel decomposition's hops would let
-                # ``best_per_op_time``'s chain walk resolve the pre-split
-                # op to a single fragment kernel's median — half the work
-                # masquerading as the whole op. The decomposition's cost
-                # is a Σ, owned by the two-level tuner, never this table.
-                continue
-            p_key = parent_op.identity_key(with_io=True, with_knobs=True)
-            c_key = child_op.identity_key(with_io=True, with_knobs=True)
-            if p_key is None or c_key is None:
-                continue
-            p_knobs = getattr(parent_op, "knobs", None) or {}
-            c_knobs = getattr(child_op, "knobs", None) or {}
-            knobs_delta = {k: v for k, v in c_knobs.items() if p_knobs.get(k) != v}
-            self.db.record_lowering(
-                p_key,
-                p_dialect,
-                c_key,
-                c_dialect,
-                knobs=knobs_delta,
-                measured_median_us=stats.median if status == "ok" else None,
-            )
-        knobs = getattr(cuda_op, "knobs", None) or {}
-        self.db.record_perf(
-            self.context_key, cuda_key, backend=self.backend_name, status=status, stats=stats, knobs=knobs, captured=captured, error=error
+        persist_kernel_perf(
+            self.db, self.context_key, self.backend_name, cuda_op, stats=stats, status=status, captured=captured, error=error
         )
         logger.info("[tune]   %s @ %.2f us  (%s)", getattr(cuda_op, "kernel_name", "?"), stats.median, status)
 
@@ -334,3 +252,107 @@ async def bench_terminal_async(cand, *, backend, db):
     except Exception as exc:  # noqa: BLE001
         return *b.finalize_exc(exc), True, b.per_kernel
     return *b.finalize_result(result), True, b.per_kernel
+
+
+def point_stats(us: float) -> PerfStats:
+    """A single-sample ``PerfStats`` — the shape a whole-graph time takes when no per-launch samples exist."""
+    return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
+
+
+def stats_from_launch(lt) -> PerfStats:
+    """``PerfStats`` for one benched launch: over its samples when it carries them, else the point time."""
+    if lt.samples and len(lt.samples) >= 1:
+        us = [s * 1000.0 for s in lt.samples]
+        return PerfStats(
+            median=statistics.median(us),
+            min=min(us),
+            max=max(us),
+            mean=statistics.fmean(us),
+            variance=statistics.pvariance(us) if len(us) > 1 else 0.0,
+            n_samples=len(us),
+        )
+    return point_stats(lt.time_ms * 1000.0)
+
+
+def record_op_inventory(db, op) -> None:
+    """Upsert one op's inventory row (``cuda_op`` / ``kernel_op`` / ``loop_op``) by its variant key."""
+    key = op.identity_key(with_io=True, with_knobs=True)
+    if key is None:
+        return
+    if isinstance(op, CudaOp):
+        db.record_cuda_op(
+            key,
+            kernel_source=op.kernel_source,
+            arg_order=list(op.arg_order),
+            grid=list(op.grid),
+            block=list(op.block),
+            smem_bytes=op.smem_bytes,
+            pretty=op.kernel_source,
+        )
+    elif isinstance(op, KernelOp):
+        db.record_kernel_op(key, _body_json(op, "kernel"), op.pretty_body())
+    elif isinstance(op, LoopOp):
+        db.record_loop_op(key, _body_json(op, "loop"), op.pretty_body())
+
+
+def _body_json(op, dialect: str) -> str:
+    return json.dumps(
+        {
+            "dialect": dialect,
+            "name": getattr(op, "name", None) or getattr(op, "kernel_name", None) or "?",
+            "body_repr": repr(op.body),
+        },
+        default=str,
+    )
+
+
+def persist_kernel_perf(
+    db, context_key: str, backend_name: str, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None
+) -> bool:
+    """Persist one measured kernel as deploy evidence: its ``perf`` row under ``context_key``
+    (keep-best policy, see :meth:`SearchDB.record_perf`), the inventory rows of every op on its
+    source chain, and the ``lowering`` hops between them. The ONE writer for a kernel
+    measurement — the tuner's terminal bench and ``run --bench``'s pinned rows both come here, so
+    a replayed golden and a searched candidate are indistinguishable to the evidence pick.
+    Returns whether a row was written (a kernel with no variant key persists nothing)."""
+    cuda_key = cuda_op.identity_key(with_io=True, with_knobs=True)
+    if cuda_key is None:
+        return False
+    chain = [op for op in cuda_op.source_chain() if op.dialect is not None]
+    for op in chain:
+        record_op_inventory(db, op)
+    for parent_op, child_op in zip(chain[1:], chain[:-1], strict=False):
+        p_dialect = parent_op.dialect
+        c_dialect = child_op.dialect
+        if p_dialect is None or c_dialect is None:
+            continue
+        if p_dialect == c_dialect == "loop":
+            # loop→loop source hops are structural/decision hops, not
+            # lowering rewrites: the splice attribution stamped by the
+            # identity strategy (a decomposition's kernels → the
+            # pre-split op), the keep-vs-split rebind, name stamps.
+            # A ``lowering`` row holds ONE best child per parent, so
+            # recording a multi-kernel decomposition's hops would let
+            # ``best_per_op_time``'s chain walk resolve the pre-split
+            # op to a single fragment kernel's median — half the work
+            # masquerading as the whole op. The decomposition's cost
+            # is a Σ, owned by the two-level tuner, never this table.
+            continue
+        p_key = parent_op.identity_key(with_io=True, with_knobs=True)
+        c_key = child_op.identity_key(with_io=True, with_knobs=True)
+        if p_key is None or c_key is None:
+            continue
+        p_knobs = getattr(parent_op, "knobs", None) or {}
+        c_knobs = getattr(child_op, "knobs", None) or {}
+        knobs_delta = {k: v for k, v in c_knobs.items() if p_knobs.get(k) != v}
+        db.record_lowering(
+            p_key,
+            p_dialect,
+            c_key,
+            c_dialect,
+            knobs=knobs_delta,
+            measured_median_us=stats.median if status == "ok" else None,
+        )
+    knobs = getattr(cuda_op, "knobs", None) or {}
+    db.record_perf(context_key, cuda_key, backend=backend_name, status=status, stats=stats, knobs=knobs, captured=captured, error=error)
+    return True

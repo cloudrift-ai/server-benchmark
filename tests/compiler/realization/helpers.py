@@ -427,31 +427,27 @@ def recorded_latency(case: Case, hardware_id: str) -> dict | None:
 
 
 def bench_command(case: Case, output: Path) -> list[str]:
-    """The one way to bench a case: `emmy run`, pinned to the schedule the case authors.
+    """The one way to bench a case: `emmy run`, replaying the realization the case authors.
 
-    A corpus case is deliberately not `VERIFIED` — filling `measurements` would auto-pin it in
-    `emmy run --golden` and fold test data into the replay tooling's trusted evidence — so the
-    authored row is pinned with `--ab`, which is exactly "bench this row beside the greedy pick".
-    Include the input pins in that explicit row: the golden target context selects the ordinary
-    compile, while each A/B variant re-lowers independently under its own pin context.
+    Naming the realization makes the case's record the deploy tier's whole scope for that compile,
+    measurement state notwithstanding — a corpus case is deliberately not `VERIFIED`, so it never
+    enters the replay tooling's trusted evidence, and it still benches as a pinned row beside the
+    greedy pick because it was asked for by name.
     """
     import sys  # noqa: PLC0415
 
-    row = ",".join(f"{name}={value}" for name, value in case.pinned.items())
     return [
         sys.executable,
         "-m",
         "emmy.emmy",
         "run",
-        "--golden-file",
-        str(case.path),
         "--golden",
+        str(case.path),
+        "--realization",
         case.record.name,
         "--bench",
         "--bench-backends",
         "eager,tcompile,emmy",
-        "--ab",
-        row,
         "--json",
         str(output),
     ]

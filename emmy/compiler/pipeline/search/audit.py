@@ -1,28 +1,27 @@
-"""Verified-tier drift audit — do the recorded goldens still decide against a set of graphs?
+"""Golden drift audit — do the recorded goldens still realize, and are they the evidence a deploy uses?
 
-Compiles each graph greedily with the verified tier as the ONLY evidence — no tune DB, the
-online-prior file pointed at a nonexistent path (``config.online_file_override``), the
-repo-shipped offline prior resolving whatever the records don't — and collects one verdict per
-verified-tier consultation through the :func:`~.policy.greedy.golden_audit` seam:
+Compiles each graph greedily with the golden rows as the ONLY golden evidence in scope — no tune
+DB rows from this machine's history are relied on for the verdict, the online-prior file is
+pointed at a nonexistent path (``config.online_file_override``), and the repo-shipped offline
+prior resolves whatever the goldens don't — and collects one verdict per schedule fork through the
+:func:`~.policy.greedy.golden_audit` seam:
 
-  MATCH — a record carrying the fork's the deploy identity (``identity_key(with_io=True)``) decided it: the record's spelled row
-          (``knob.schedule_row_key``) equalled exactly one enumerated leaf
-  DRIFT — records carry that identity but NO offered leaf equals any of their rows (a graph /
-          enumeration change invalidated the recording; the tier is fail-closed and the deploy
-          falls through)
-  GAP   — no record carries the fork's identity (coverage information, not a defect)
+  MATCH — a golden row of the fork's ``S_*`` signature vouches for an offered leaf (the deployed
+          one, or the fastest offered when a faster measured row won the pick)
+  DRIFT — golden rows carry that signature but NO offered leaf agrees with any of them (a graph /
+          enumeration change invalidated the recording; nothing of it is evidence any more)
+  GAP   — no golden row carries the fork's signature (coverage information, not a defect)
 
 DRIFT is always a defect: the recorded config claims a µs the deploy can no longer produce. The
-join is strict structural identity and the decode is exact row equality — there is no shape
-classification and no prefix acceptance anywhere in the verdicts, so a MATCH means the deploy
-really did realize that recording.
+join is the evidence pick's own — the ``S_*`` signature plus value-of-position agreement on every
+decided knob — so a MATCH means a deploy really can realize that recording.
 
 The audit is machine-independent by construction — it forces the deployable nvcc regime (records
-are deployable truth; under ``make test``'s ``-Xcicc -O1`` lane the tier is not consulted at all) and
-targets the golden file's own card via ``Context.from_target``, so it runs identically on a
+are deployable truth; under ``make test``'s ``-Xcicc -O1`` lane goldens are not evidence at all)
+and targets the golden file's own card via ``Context.from_target``, so it runs identically on a
 GPU-less CI box and the 5090 host.
 
-Consumer: ``emmy eval golden GOLDEN_YAML --serving-config PATH`` — the release gate, which
+Consumer: ``emmy eval golden --golden GOLDEN_YAML --serving-config PATH`` — the release gate, which
 re-traces the pinned model's serving twins weight-free, audits the exact file-scoped realization
 matrix, and ratchets :func:`consultation_counts` against the serving config's checked-in
 ``SERVE_CONSULT_BASELINE``.
@@ -49,7 +48,7 @@ COMPILE_FAIL = "COMPILE_FAIL"
 
 def audit_graph(graph: Graph, ctx=None) -> list[dict]:
     """One greedy compile of ``graph`` under ``ctx`` (``None`` probes the live device),
-    returning the verified-tier verdict records. This is the primitive — it does NOT isolate
+    returning the golden verdict records. This is the primitive — it does NOT isolate
     evidence or force the deployable regime; use :func:`audit_card` for the reproducible
     whole-card audit."""
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
@@ -110,14 +109,19 @@ def summarize(records_by_graph: dict[str, list[dict]]) -> Counter:
 
 
 def consultation_counts(records_by_graph: dict[str, list[dict]]) -> dict[str, int]:
-    """Verified-tier consultations per graph — every MATCH/DRIFT/GAP record (:data:`COMPILE_FAIL`
-    is not a consultation). This count is the signal the verdicts cannot carry: a pass change that
+    """Verified-tier SCHEDULE consultations per graph — every MATCH/DRIFT/GAP record of a schedule
+    fork (:data:`COMPILE_FAIL` is not a consultation, and a kernel-set verdict — a record deciding
+    a placement or a split — is a different signal, asked only where a record exists). This count
+    is the signal the verdicts cannot carry: a pass change that
     removes a kernel's schedule fork entirely (e.g. a merged kernel whose lowering stops
     enumerating candidates) deploys it single-option with NO consultation, so its recorded MATCHes
     silently vanish instead of turning DRIFT. ``emmy eval golden`` ratchets these counts per twin
     and lane against the serving config's checked-in baseline (``SERVE_CONSULT_BASELINE``); a drop
     is a gate failure naming the twin."""
-    return {name: sum(r["verdict"] != COMPILE_FAIL for r in records) for name, records in records_by_graph.items()}
+    return {
+        name: sum(r["verdict"] != COMPILE_FAIL and r.get("fork", "schedule") == "schedule" for r in records)
+        for name, records in records_by_graph.items()
+    }
 
 
 def gap_keys(records_by_graph: dict[str, list[dict]]) -> set:

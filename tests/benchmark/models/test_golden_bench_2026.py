@@ -54,7 +54,7 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy tune" in run
     assert "./venv/bin/emmy run" in run
     assert "for repeat in 0 1 2 3 4" in run
-    assert "--golden-file $task_dir/working.yaml --bench --strict" in run
+    assert "--golden $task_dir/working.yaml --bench --strict" in run
     assert "--bench-backends eager,tcompile" in run
     assert "--bench-backends eager,emmy" in run
     assert "--bench-backends eager,tcompile,emmy" not in run
@@ -224,7 +224,7 @@ def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None
             build_substitution_map(task.variant, list(range(8)), "/repo", "/task"),
         )
         assert "--loop-targets" not in command
-        assert "--golden-file /task/working.yaml --bench --strict" in command
+        assert "--golden /task/working.yaml --bench --strict" in command
         assert "--bench-backends eager,tcompile" in command
         assert "--bench-backends eager,emmy" in command
 
@@ -252,7 +252,7 @@ def test_search_ablation_is_executable(project_root) -> None:
         (12, 4),
         (48, 12),
     }
-    assert all("--golden-file $task_dir/working.yaml --bench --strict" in task.recipe.command.run for task in tasks)
+    assert all("--golden $task_dir/working.yaml --bench --strict" in task.recipe.command.run for task in tasks)
     assert all(task.recipe.deploy.gpu == "NVIDIA H200 141GB" for task in tasks)
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
 
@@ -383,8 +383,8 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert emmy_runner_path.stat().st_mode & 0o111
     emmy_runner = emmy_runner_path.read_text()
     assert "operators.sh" in emmy_runner
-    assert '"$emmy" run --golden-file "$golden" --bench --bench-backends emmy' in emmy_runner
-    assert 'run --golden-file "$golden" --bench --strict' not in emmy_runner
+    assert '"$emmy" run --golden "$golden" --bench --bench-backends emmy' in emmy_runner
+    assert 'run --golden "$golden" --bench --strict' not in emmy_runner
     assert '"$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy' in emmy_runner
     assert "emmy tune" not in emmy_runner
     assert "timeout --signal=TERM --kill-after=30s 600s" in emmy_runner
@@ -418,7 +418,7 @@ def test_neptune_emmy_runner_fails_when_one_setup_is_incomplete(project_root, tm
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     emmy = fake_bin / "emmy"
-    emmy.write_text('#!/usr/bin/env bash\nif [[ " $* " == *" --golden-file "*"s32768.golden.yaml"* ]]; then\n  exit 1\nfi\n')
+    emmy.write_text('#!/usr/bin/env bash\nif [[ " $* " == *" --golden "*"s32768.golden.yaml"* ]]; then\n  exit 1\nfi\n')
     emmy.chmod(0o755)
     python = fake_bin / "python"
     python.write_text("#!/usr/bin/env bash\nexit 0\n")

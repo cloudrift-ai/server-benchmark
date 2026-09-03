@@ -438,11 +438,11 @@ def _receipt_fields() -> dict:
 def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() -> None:
     """Conflicting per-child schedules behind one pinned cut persist as sibling receipts: each
     stored child identity selects its own kernel's rows, a sibling child's row does not vouch for
-    it, and the verified-tier join reads the stored identity instead of the pre-cut lift."""
+    it, and the strict decode joins by the stored identity instead of the pre-cut lift."""
     fields = _receipt_fields()
     parent = GoldenRecord(knobs={}, **fields)
     lift_identity = _lifted_target(parent).identity_key(with_io=True)
-    children = {i: rows for i, rows in _candidate_rows(parent).items() if i is not None and i != lift_identity}
+    children = {i: rows for i, rows in _candidate_rows(parent)[0].items() if i is not None and i != lift_identity}
     assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
     (id_a, rows_a), (id_b, rows_b) = sorted(children.items())
     row_a = next(iter(rows_a - rows_b), None)
@@ -480,13 +480,15 @@ def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target
     parent = GoldenRecord(knobs={}, **fields)
     with pytest.raises(ValueError, match="target lowers to 2 kernels"):
         _lifted_target(parent)
-    identity, rows = next((identity, rows) for identity, rows in _candidate_rows(parent).items() if identity is not None)
+    identity, rows = next((identity, rows) for identity, rows in _candidate_rows(parent)[0].items() if identity is not None)
     receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=identity, **fields)
     assert decode_record(receipt) is None
 
 
 def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:
-    from emmy.compiler.pipeline.search.policy.greedy import _pins_live
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.search.golden import regime_live
 
     fields = _receipt_fields()
     document = {
@@ -506,7 +508,8 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -
         validate_golden_file(document)
     document["configs"][0]["realizations"][0]["identity"] = "0" * 64
     validate_golden_file(document)
-    assert _pins_live({"PLACE@map.1/twist.1/inner": "cut"}), "a receipt's routing pins are replay context, never a dead env regime"
+    receipt = SimpleNamespace(pin_map={"PLACE@map.1/twist.1/inner": "cut"})
+    assert regime_live(receipt), "a receipt's routing pins are its route, never a dead env regime"
 
 
 def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:

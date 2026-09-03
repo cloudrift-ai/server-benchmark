@@ -40,7 +40,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.schedule import Placement, WarpSpec
+from emmy.compiler.ir.schedule import KernelPins, Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.views import (
@@ -295,6 +295,11 @@ class TileOp(Op):
     # flag past "declined" is safe because the partition receipt is an explicit pool-key term of
     # the schedule memo — a receipt-bearing twin can never serve a receipt-free one.
     split_consumed: bool = False
+    # The kernel's own knob pins (:class:`KernelPins`): the measured route row the deploy elected
+    # for it. The cut, split and schedule passes read them beside the ambient ``EMMY_<KNOB>`` pins,
+    # and the pieces a cut or split mints inherit them minus the consumed family. Not part of the
+    # kernel's identity — a pin narrows what the kernel may become, it does not change what it is.
+    pins: KernelPins = field(default_factory=KernelPins, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)

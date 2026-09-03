@@ -15,11 +15,13 @@ structurally, not a distinct kind.
 Every semantically legal alternative is exposed as a fork option, an enumerated row, or a knob value, and the
 choice among them is made in exactly two places, neither of which is a pass:
 
-- a **deployed model** answers every choice from measured evidence — the box-local reservoir / tune-DB rows a
-  local `emmy tune` produced, or a recorded golden row replayed exactly through its pins;
-- everything else answers through the deploy evidence hierarchy, whose last learned tier is the fitted prior — on
+- a **deployed model** answers every choice from measured evidence — one index holding the box-local reservoir
+  and tune-DB rows a local `emmy tune` or `run --bench` produced and the golden rows in scope, every one a
+  recording of something that ran;
+- everything else answers through the deploy evidence hierarchy, whose last learned step is the fitted prior — on
   a fresh machine, the offline model. Unmeasured-deploy quality is the prior's responsibility, and the way to
-  improve it is to fit it better or to measure the shape.
+  improve it is to fit it better or to measure the shape; a compile that would rather fail than guess runs under
+  strict evidence and raises on a kernel nothing measured.
 
 Legality is the ONLY thing a pass may narrow by. A candidate is dropped because this term cannot realize it — the
 dtype the atom binds, a K-step that must divide a static extent, an smem budget, an epilogue the emitter cannot
@@ -37,8 +39,9 @@ Concretely:
   whose leading value is its safe default, and no leaf withheld because nothing could price it.
 - **A bad unmeasured pick is an accepted outcome.** With no golden, no measurement and no useful prior, a compile
   takes whatever the walk emitted first; that kernel may be far off the best one the space contains. It is not a
-  regression and not a reason to reintroduce a rule. The path back to a good kernel is the pinned one: a golden
-  replays exactly, and a `tune` turns it into evidence the hierarchy can use.
+  regression and not a reason to reintroduce a rule. The path back to a good kernel is a measurement: a benched
+  golden row or a `tune` is evidence the hierarchy deploys, and a hand pin (`--ab`, `EMMY_KNOBS`) is how a row is
+  measured in the first place.
 - A pass refusal states a semantic reason (correctness, SSA/region ownership, a resource impossibility) or a
   boundedness reason. Schedule spaces are recursive and lazy, so a large legal Cartesian product is not itself a
   refusal reason. "Measured slower",
@@ -99,11 +102,19 @@ root-most cut the same way and may join scoped cuts in that single decision. A s
 not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Only unpinned cuts leave the pieces undecided, so search can explore their smaller
-seams before scheduling.
+seams before scheduling. The pass reads two pin sources through one call (`knob.family_pins(family, own)`): the
+ambient `EMMY_<KNOB>` environment, and the kernel's OWN pins (`TileOp.pins`) — a measured route row the greedy pick
+installed on the kernel when that row won its placement or split fork, the deploy's way of applying a recorded
+kernel-set decision whole. Every piece a cut mints inherits the kernel's own pins minus `PLACE`, a split's pieces
+inherit them whole, so the row's schedule keys reach the kernels the route creates; the kernel's identity never
+reads them. A route whose pins leave a piece un-lowered is not an error here — the deploy policy retires that row
+and resolves again.
 `040_schedule` is the classic assignment boundary. The model under `ir/schedule` projects direct, plain-reduction,
 scalar-contraction, precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem
 compute-fill, and kernel-global raster domains. `ClassicScheduleContext` alone composes their compatibility. The pass
-reads pins, mints the search-pool identity, and adapts accepted typed assignments to generic lazy Forks. A cross-CTA
+reads pins (the environment's and the kernel's own), mints the search-pool identity — the kernel's own pins are part
+of it, so a pinned kernel and its unpinned twin never share a pool — and adapts accepted typed assignments to
+generic lazy Forks. A cross-CTA
 split
 piece with several contraction schedule sites uses the same boundary. A split piece's partition receipt consumes the
 GRID stage
@@ -194,7 +205,9 @@ compare their exact canonical values with the applicable factors in Algorithm 1.
 value the static catalog did not project. Precision gates are restrictions of the same enumeration: their atom choices
 remain in the fixed node domain, and the immutable `c` excludes them when it evaluates a complete assignment. A
 malformed or unavailable exact value therefore names no member of `D(p, t)` and is refused; pinning cannot manufacture
-a worker inventory, tile, transport, or raster value. A bare pin must be supported by at least one factor in a strict
+a worker inventory, tile, transport, or raster value. A kernel's own pins are the same restriction with validation
+off: a measured row this enumeration cannot offer is an empty offer the deploy policy retires by source, never an
+addressing error raised out of the pass. A bare pin must be supported by at least one factor in a strict
 kernel and restricts every factor that supports its value; non-supporting sibling sites are not silently given another
 meaning. Under union probing, a kernel that supports the value nowhere ignores the bare pin so a sibling kernel may
 carry it. Once the parameter set contains scoped schedule pins, its bare kernel values travel with that partial row:

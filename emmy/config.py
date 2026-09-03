@@ -36,6 +36,8 @@ TUNE_DB = "EMMY_TUNE_DB"
 FREEZE_DIR = "EMMY_FREEZE_DIR"
 ONLINE_FILE = "EMMY_ONLINE_FILE"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
+GOLDEN_FILE = "EMMY_GOLDEN_FILE"
+STRICT_EVIDENCE = "EMMY_STRICT_EVIDENCE"
 NVCC_FLAGS = "EMMY_NVCC_FLAGS"
 DEBUG = "EMMY_DEBUG"
 DUMP_DIR = "EMMY_DUMP_DIR"
@@ -215,7 +217,7 @@ def online_path() -> Path:
 def online_file_override(path: str | Path | None):
     """Temporarily point ``EMMY_ONLINE_FILE`` at ``path`` (``None`` is a no-op).
 
-    The verified-tier drift audit (``search/audit.py``) uses this with a nonexistent path so a
+    The golden drift audit (``search/audit.py``) uses this with a nonexistent path so a
     compile's evidence hierarchy sees NO machine-local online prior / reservoir — the verified
     goldens plus the repo-shipped offline prior are the only inputs, making the MATCH / DRIFT /
     GAP verdicts machine-independent."""
@@ -231,6 +233,59 @@ def online_file_override(path: str | Path | None):
             os.environ.pop(ONLINE_FILE, None)
         else:
             os.environ[ONLINE_FILE] = prev
+
+
+def golden_file() -> Path | None:
+    """The golden file a compile replays authoritatively: ``EMMY_GOLDEN_FILE`` → ``None``.
+
+    Set by ``emmy serve --golden PATH`` for the vLLM child it spawns; ``run`` / ``compile`` scope
+    the same golden evidence in-process through ``search.golden.records_override``. When set, the
+    measured rows of that file — not the repository goldens — join the tune DB's rows in the one
+    evidence index the greedy pick reads."""
+    override = os.environ.get(GOLDEN_FILE)
+    return Path(override) if override else None
+
+
+@contextmanager
+def golden_file_override(path: str | Path | None):
+    """Temporarily point ``EMMY_GOLDEN_FILE`` at ``path`` (``None`` is a no-op)."""
+    if path is None:
+        yield
+        return
+    prev = os.environ.get(GOLDEN_FILE)
+    os.environ[GOLDEN_FILE] = str(path)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(GOLDEN_FILE, None)
+        else:
+            os.environ[GOLDEN_FILE] = prev
+
+
+def strict_evidence() -> bool:
+    """``EMMY_STRICT_EVIDENCE`` — whether a compile may decide a fork by the prior at all. On,
+    a kernel with no measured evidence (reservoir, tune DB or golden row) for one of its forks
+    fails the compile with ``EvidenceError`` instead of deploying a prediction. ``run`` /
+    ``compile`` / ``serve`` set it from ``--strict-evidence``; the vLLM child inherits it."""
+    return _bool(STRICT_EVIDENCE)
+
+
+@contextmanager
+def strict_evidence_override(flag: bool | None):
+    """Temporarily set ``EMMY_STRICT_EVIDENCE`` (``None`` is a no-op)."""
+    if flag is None:
+        yield
+        return
+    prev = os.environ.get(STRICT_EVIDENCE)
+    os.environ[STRICT_EVIDENCE] = "1" if flag else ""
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(STRICT_EVIDENCE, None)
+        else:
+            os.environ[STRICT_EVIDENCE] = prev
 
 
 def offline_path() -> Path | None:

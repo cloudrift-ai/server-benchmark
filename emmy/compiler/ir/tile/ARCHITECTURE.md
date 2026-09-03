@@ -218,7 +218,9 @@ greedy decision memo and the budgeted descent seed, not a cache key: nothing sto
 
 Identity has two flavors: the default `structural=True` is schedule-equivalent (compute-unit op
 clusters collapse — `relu` and `tanh` epilogues share a key because their schedule evidence
-transfers, which is what golden records join on), while `structural=False` names the exact kernel.
+transfers; it is the strict golden decode's and the drift audit's key), while `structural=False`
+names the exact kernel. Measured evidence itself joins a kernel by its `S_*` signature, not by
+this key.
 
 The design lesson the interface encodes: a fact a schedule reads must be in the body or the io
 fingerprint, never re-derived beside a caller. The pool digest once shipped without per-axis extents,
@@ -288,6 +290,14 @@ ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. 
 before scheduling; any pinned cut carries the consumed placement decision on both pieces and proceeds to reduction
 splitting. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation families nor
 filters legal cuts by profitability.
+
+A kernel may carry its OWN pins (`TileOp.pins`, a `KernelPins` of knob keys to spellings plus the evidence source that
+installed them): the measured route row the greedy pick elected for it. The cut, split and schedule passes read them
+beside the ambient `EMMY_<KNOB>` pins, and the pieces a cut or split mints inherit them minus the family that decision
+consumed (a cut strips `PLACE`; a split keeps the whole `REDUCE` value because the schedule pass strips its `g` half on
+a piece that carries the partition receipt), so one measured row reaches every kernel of the route it spells. Pins are
+excluded from equality and identity — a pin narrows what the kernel may become, it does not change what it is — but a
+pinned kernel is its own offer site for structural replay and its own schedule pool.
 
 A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
 when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's

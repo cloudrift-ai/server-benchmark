@@ -22,6 +22,7 @@ from pathlib import Path
 
 import yaml
 
+from emmy import config
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
@@ -186,12 +187,13 @@ class GoldenRecord:
     ranking: dict | None
     loop_index: int | None = None
     loop_wire: dict | None = None
-    #: The record's stored the deploy identity (``identity_key(with_io=True)``) (see :func:`kernel_identity`), when the file keeps
-    #: one. Model inventories mostly do not; the realization corpus does, because a new fingerprint
-    #: fact must show up as a diff there rather than silently re-key a checked-in reproducer. A
-    #: stored identity is authoritative for the deploy join, and it is how a **child-identity
-    #: schedule receipt** names its kernel: a record whose pins freeze a cut lowers to several
-    #: kernels, and only the stored identity says which child this row's schedule decorates.
+    #: The record's stored deploy identity (``identity_key(with_io=True)``, see :func:`kernel_identity`), when the
+    #: file keeps one. Model inventories mostly do not; the realization corpus does, because a new
+    #: fingerprint fact must show up as a diff there rather than silently re-key a checked-in
+    #: reproducer. A stored identity is the strict decode's kernel selector, and it is how a
+    #: **child-identity schedule receipt** names its kernel: a record whose pins freeze a cut lowers
+    #: to several kernels, and only the stored identity says which child this row's schedule
+    #: decorates (and so which kernel's ``S_*`` signature its row is evidence under).
     identity: str | None = None
     #: Measured microseconds per ``Context.hardware_id``: ``{card: {emmy_us, tcompile_us}}``. A
     #: model golden is one file per card and uses the flat ``measurements`` block instead; a corpus
@@ -208,6 +210,24 @@ class GoldenRecord:
         """Whether this row is a child-identity schedule receipt: a schedule row recorded behind
         pinned cut(s), whose stored ``identity`` names the child kernel the row decorates."""
         return self.identity is not None and not self.is_routing and pins_freeze_cut(dict(self.pins))
+
+    @property
+    def route(self) -> dict[str, str]:
+        """The placement this record carries — every ``PLACE`` key of its pins and knobs, spelled
+        as recorded. A routing row keeps it in ``knobs``; a receipt, a corpus case or an ``--ab``
+        row freezes it in ``pins``. Empty for a plain schedule row, which says the kernel it
+        decorates ran fused."""
+        route = {str(key): str(value) for key, value in self.pins if str(key).split("@", 1)[0] == "PLACE"}
+        route.update((str(key), str(value)) for key, value in self.knobs.items() if str(key).split("@", 1)[0] == "PLACE")
+        return route
+
+    @property
+    def schedule_row(self) -> dict[str, str]:
+        """The schedule half of the record — its decided tuning knobs minus the route, as the evidence
+        index carries them (an OFF ``''`` is a decided value and stays)."""
+        from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
+
+        return {key: value for key, value in tuning_knob_items(self.knobs) if key.split("@", 1)[0] != "PLACE"}
 
     @cached_property
     def pool_group(self) -> tuple:
@@ -610,20 +630,20 @@ def load_golden_records(document: Mapping) -> list[GoldenRecord]:
     ]
 
 
-def shared_placement_pins(matches: list[GoldenRecord]) -> dict:
-    """The placement pins every matching working-file realization shares, or ``{}``.
+def regime_pins(record: GoldenRecord) -> dict:
+    """The record's INPUT pin regime — its pins minus the route: the precision knobs (``FAST_MATH``
+    and friends) a replay publishes to the environment so the record reads as live evidence
+    (:func:`regime_live`). The schedule row and the route never travel this way; they are
+    measured rows the evidence pick joins to the kernel they were recorded for."""
+    return {str(key): value for key, value in record.pins if str(key).split("@", 1)[0] != "PLACE"}
 
-    An explicit working target's shared placement regime is part of the target, not unverified
-    schedule evidence: the ordinary compile applies it while the remaining schedule families stay
-    free for the normal deploy evidence hierarchy. When same-name realizations disagree on any
-    input pin the target stays unpinned — choosing one regime would silently change which
-    realization was requested."""
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
-    regimes = {match.pins for match in matches}
-    if len(regimes) != 1:
-        return {}
-    return {key: value for key, value in regimes.pop() if family_of(key) == "PLACE"}
+def shared_regime_pins(records: Sequence[GoldenRecord]) -> dict:
+    """The one input regime every record shares, or ``{}`` when they disagree — a compile publishes
+    a regime only when the records it replays agree on it, because choosing one would silently
+    change which realization was requested."""
+    regimes = {tuple(sorted(regime_pins(record).items())) for record in records}
+    return dict(regimes.pop()) if len(regimes) == 1 else {}
 
 
 _STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
@@ -811,23 +831,10 @@ def decode_record(record: GoldenRecord) -> str | None:
         if not record.is_receipt:
             return _remember_verdict(verdict_key, f"{type(exc).__name__}: {exc}")
     if record.is_routing:
-        from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
-        from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.lowering.tile._cut import route_resolves  # noqa: PLC0415
 
-        seams = cuttable_seams(tile)
-        seam_ids = {id(seam.node) for seam in seams}
-        all_sites = sites(tile.op)
-        for key, value in record.knobs.items():
-            if str(value) != "cut":
-                return _remember_verdict(verdict_key, f"routing value {key}={value!r} is not a cut")
-            try:
-                site = resolve(tile.op, str(key), all_sites=all_sites)
-            except ValueError as exc:
-                return _remember_verdict(verdict_key, f"routing key {key!r} does not resolve: {exc}")
-            if site is None or id(site.node) not in seam_ids:
-                return _remember_verdict(verdict_key, f"routing key {key!r} names no legal cut seam on the Fold tree")
-        return _remember_verdict(verdict_key, None)
-    candidates = _candidate_rows(record)
+        return _remember_verdict(verdict_key, route_resolves(tile, record.route))
+    candidates, _signatures = _candidate_rows(record)
     row = schedule_row_key(record.knobs)
     if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
         child_rows = candidates.get(record.identity)
@@ -853,14 +860,15 @@ def _remember_verdict(key: str, reason: str | None) -> str | None:
     return reason
 
 
-def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
+def _candidate_rows(record: GoldenRecord) -> tuple[dict[str | None, frozenset], dict[str, frozenset]]:
     """Every schedule-row identity the record's target can realize under its pins, bucketed by the
     the deploy identity (``identity_key(with_io=True)``) of the kernel that offers it (``None`` for forks whose root is not a
     recognized ``TileOp``): the fork leaves' rows, PLUS each resolved kernel's own realized row — a
     forkless kernel (the schedule space collapsed to one row, often the all-OFF anchor) never opens
     a fork, so its one row is read off the resolved op instead. Under pinned cuts the buckets are
     exactly the split children, which is what lets a child-identity receipt decode against its own
-    kernel only."""
+    kernel only. The second map is each resolved kernel's ``S_*`` signature by identity — how a
+    receipt's row is keyed as evidence for the child it decorates."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
@@ -878,14 +886,21 @@ def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
     if ctx is None:
         ctx = _DECODE_CTX_CACHE.setdefault(ctx_key, Context.from_target(ctx_key[0], gpu_name=ctx_key[1]))
     buckets: dict[str | None, set] = {}
+    signatures: dict[str, frozenset] = {}
 
     def _identity_of(op) -> str | None:
         return op.identity_key(with_io=True) if isinstance(op, TileOp) else None
+
+    def _note_signature(op) -> None:
+        identity = _identity_of(op)
+        if identity is not None:
+            signatures[identity] = frozenset((k, str(v)) for k, v in (op.knobs or {}).items() if k.startswith("S_"))
 
     def decide(fp):
         leaves = flatten_leaves(fp.options)
         ops = [o for o in leaves if not _is_structural_option(o)]
         identity = _identity_of(fp.root_op)
+        _note_signature(fp.root_op)
         for leaf in ops:
             row = leaf_knobs(leaf)
             if row:
@@ -897,22 +912,24 @@ def _candidate_rows(record: GoldenRecord) -> dict[str | None, frozenset]:
     for node in out.nodes.values():
         if isinstance(node.op, TileOp):
             buckets.setdefault(_identity_of(node.op), set()).add(schedule_row_key(dict(node.op.knobs or {})))
-    result = {identity: frozenset(rows) for identity, rows in buckets.items()}
+            _note_signature(node.op)
+    result = ({identity: frozenset(rows) for identity, rows in buckets.items()}, signatures)
     _DECODE_ROWS_CACHE[cache_key] = result
     return result
 
 
 def kernel_identity(record: GoldenRecord) -> str | None:
-    """The record's kernel identity under the CURRENT compiler — the verified-tier join key
-    (``identity_key(with_io=True)``). A STORED identity is authoritative and returned as-is: it is
-    how a child-identity receipt names the one split child its schedule decorates (the target's own
-    lift stops at the pre-cut kernel and cannot say), and the deploy join is fail-closed, so a
-    stale stored identity matches no live fork and decides nothing — the strict decode is where it
-    fails loudly. Without one, the identity is derived as the lift of the record's ONE target
-    kernel, through the exact total lift the live compile uses (``_fromloop.lift_loop_op``).
-    ``None`` when the record cannot carry a deploy identity: the target lowers to several kernels
-    (a schedule row decorates exactly one), or selection/lifting fails — best-effort here
-    (a corpus row must never break a compile); nightly strict decoding is where failure is loud."""
+    """The record's kernel identity under the CURRENT compiler — the strict decode's and the drift
+    audit's key (``identity_key(with_io=True)``). A STORED identity is returned as-is: it is how a
+    child-identity receipt names the one split child its schedule decorates (the target's own lift
+    stops at the pre-cut kernel and cannot say), and a stale stored identity selects nothing — the
+    strict decode is where that fails loudly. Without one, the identity is derived as the lift of the
+    record's ONE target kernel, through the exact total lift the live compile uses
+    (``_fromloop.lift_loop_op``). ``None`` when the record cannot carry a deploy identity: the target
+    lowers to several kernels (a schedule row decorates exactly one), or selection/lifting fails —
+    best-effort here (a corpus row must never break a compile); nightly strict decoding is where
+    failure is loud. Deploy never joins on this key: a record deploys as measured rows, matched by
+    ``S_*`` signature (:func:`evidence_rows`)."""
     global _IDENTITY_STORE_DIRTY
     if record.identity is not None:
         return record.identity
@@ -1066,19 +1083,21 @@ def _file_gpu_name(path: Path) -> str | None:
     return None
 
 
-#: Optional scope override for :func:`records_for_card` — the corpus the deploy tier reads.
-#: ``None`` (the default, and the only value a real deploy ever sees) reads the repository files.
-#: The drift audit (``search/audit.py``) installs one file's / one precision lane's records here so
-#: its verdicts judge exactly that set, the way the release gate needs them scoped. Set it through
-#: :func:`records_override`, never by hand.
+#: Optional scope override for :func:`records_for_card` — the golden rows the evidence index loads.
+#: ``None`` (the default) reads ``EMMY_GOLDEN_FILE`` when set, else the repository files. Every
+#: command that names a golden scopes the rows here: ``run`` / ``compile`` install the selected
+#: records in-process, the drift audit (``search/audit.py``) one file's / one precision lane's
+#: records, and ``serve --golden`` reaches the same loader through the env var because the vLLM
+#: child is another process. Set it through :func:`records_override`, never by hand.
 RECORDS_OVERRIDE: list[GoldenRecord] | None = None
 
 
 @contextmanager
 def records_override(records: list[GoldenRecord] | None):
-    """Scope the corpus :func:`records_for_card` reads, restoring the previous scope after.
-    ``[]`` hides every record — how a caller that must not consult the verified tier says so;
-    ``None`` is a no-op, leaving whatever scope is already installed.
+    """Scope the golden rows :func:`records_for_card` supplies to the evidence index, restoring
+    the previous scope after. ``[]`` hides every record — how a caller that must measure without
+    golden evidence (the tuner) says so; ``None`` is a no-op, leaving whatever scope is already
+    installed.
 
     **The body must not ``await``.** This swaps a module global, so it is only atomic with respect
     to other coroutines while the block stays synchronous — and it is used inside concurrently
@@ -1095,13 +1114,35 @@ def records_override(records: list[GoldenRecord] | None):
         RECORDS_OVERRIDE = prev
 
 
-def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
-    """The repository records for ONE card, loading only that card's files (header sniff) — the
-    deploy tier's loader. ``GOLDEN_RECORDS`` stays the full corpus for the eval / fit consumers;
-    both share the per-path document memo so nothing parses twice. :data:`RECORDS_OVERRIDE`
-    replaces the repository corpus when the audit has scoped it."""
+def scope_explicit() -> bool:
+    """Whether a caller scoped the golden evidence to records of its own choosing — an in-process
+    override or ``EMMY_GOLDEN_FILE`` — rather than the repository corpus."""
+    return RECORDS_OVERRIDE is not None or config.golden_file() is not None
+
+
+def scope_token() -> object:
+    """A hashable stamp of the installed golden scope, for the evidence index's process memo."""
     if RECORDS_OVERRIDE is not None:
-        return [r for r in RECORDS_OVERRIDE if r.gpu_name == gpu_name and tuple(r.compute_cap) == tuple(compute_cap)]
+        return ("override", id(RECORDS_OVERRIDE), len(RECORDS_OVERRIDE))
+    path = config.golden_file()
+    return ("file", str(path)) if path is not None else ("repository",)
+
+
+def _scoped(records: Sequence[GoldenRecord], gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
+    """An explicit scope's records for one card: the capability must agree; a record that names
+    no card (a working golden traced off-GPU) applies to whichever card compiles it."""
+    return [r for r in records if tuple(r.compute_cap) == tuple(compute_cap) and (not r.gpu_name or r.gpu_name == gpu_name)]
+
+
+def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
+    """The golden records the evidence index loads for ONE card: the installed scope when one is set
+    (:data:`RECORDS_OVERRIDE`, else ``EMMY_GOLDEN_FILE``), otherwise the repository files, loading
+    only that card's (header sniff). ``GOLDEN_RECORDS`` stays the full corpus for the eval / fit
+    consumers; both share the per-path document memo so nothing parses twice."""
+    if RECORDS_OVERRIDE is not None:
+        return _scoped(RECORDS_OVERRIDE, gpu_name, compute_cap)
+    if (path := config.golden_file()) is not None:
+        return _scoped(_records_of(path, validation=GoldenFileValidation.WORKING), gpu_name, compute_cap)
     records: list[GoldenRecord] = []
     with _repository_golden_paths() as paths:
         for path in paths:
@@ -1112,13 +1153,93 @@ def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[Golden
     return records
 
 
+#: The precision-trading pin universe the regime check covers in BOTH directions — a record
+#: that omits one of these was measured with it OFF, and must not deploy when it is live-ON.
+_PRECISION_PINS = ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")
+
+
+def regime_live(record: GoldenRecord) -> bool:
+    """Whether the record's input-pin regime IS the live one — exact per pin: a BOOL pin compares
+    against the live env pin (unset = the knob's off state), anything else against the raw env
+    string. Strict BOTH ways: a record measured under FAST_MATH is no evidence for a standard
+    deploy, and a standard record none under a live precision-trading pin — the precision universe
+    (:data:`_PRECISION_PINS`, umbrella semantics per ``space.precision_pin``) is compared even for
+    pins the record omits (omitted = measured OFF). ``PLACE`` pins are the record's route, not a
+    regime."""
+    from emmy.compiler.pipeline.knob import KnobType, family_of, registry  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import precision_pin  # noqa: PLC0415
+
+    knobs = registry()
+    pins = record.pin_map
+    for name, value in pins.items():
+        if family_of(str(name)) == "PLACE":
+            continue
+        kn = knobs.get(str(name))
+        raw = kn.raw() if kn is not None else config.knob_raw(str(name))
+        if kn is not None and kn.type is KnobType.BOOL:
+            live = kn.parse(raw) if raw is not None else False
+            if bool(value) != live:
+                return False
+        elif (raw or "") != str(value):
+            return False
+    umbrella = bool(pins.get("FAST_MATH", False))
+    for name in _PRECISION_PINS:
+        recorded = bool(pins.get(name, umbrella))
+        kn = knobs.get(name)
+        live = bool(precision_pin(kn)) if kn is not None else False
+        if recorded != live:
+            return False
+    return True
+
+
+def evidence_rows(gpu_name: str, compute_cap: tuple[int, int]) -> list[tuple[frozenset, dict, float, str]]:
+    """The golden rows in scope as measured-evidence rows for one card: ``(S_* signature, tuning
+    knobs, µs, record name)``, the same shape the tune DB's ``perf`` rows take in the deploy's
+    evidence index. Only a MEASURED record in the live input regime (:func:`regime_live`) is
+    evidence; a proposal has no µs to rank with and deploys once ``run --golden PATH --bench``
+    has measured it. A record's route rides in its knobs (the ``PLACE`` keys of its pins), so a
+    receipt, a corpus case or a routing row is the measured price of the whole kernel set it
+    spells, keyed by the kernel it was recorded on; a receipt's schedule row is keyed by the child
+    kernel its stored identity names. Best-effort per record: a record the current compiler cannot
+    lower is skipped, since the strict decode is where that is loud."""
+    rows: list[tuple[frozenset, dict, float, str]] = []
+    for record in records_for_card(gpu_name, compute_cap):
+        if record.measurements is None or record.emmy_us <= 0 or not regime_live(record):
+            continue
+        try:
+            parent = frozenset((key, str(value)) for key, value in record.structural_features.items())
+        except Exception:  # noqa: BLE001 — a stale record is no evidence, not an error
+            continue
+        route, row = record.route, record.schedule_row
+        if route:
+            rows.append((parent, {**route, **(row if record.identity is None else {})}, record.emmy_us, record.name))
+        if row and record.identity is None:
+            rows.append((parent, row, record.emmy_us, record.name))
+        elif row:
+            child = _child_signature(record)
+            if child is not None:
+                rows.append((child, row, record.emmy_us, record.name))
+    return rows
+
+
+def _child_signature(record: GoldenRecord) -> frozenset | None:
+    """The ``S_*`` signature of the child kernel a receipt's stored identity names, read off the
+    kernels the record's target resolves to under its own pins."""
+    try:
+        signatures = _candidate_rows(record)[1]
+    except Exception:  # noqa: BLE001 — see evidence_rows
+        return None
+    return signatures.get(record.identity)
+
+
 _DOCUMENT_MEMO: dict[Path, list[GoldenRecord]] = {}
 
 
-def _records_of(path: Path) -> list[GoldenRecord]:
+def _records_of(path: Path, *, validation: GoldenFileValidation = GoldenFileValidation.REPOSITORY) -> list[GoldenRecord]:
+    path = Path(path)
     cached = _DOCUMENT_MEMO.get(path)
     if cached is None:
-        document = load_golden_file(path, validation=GoldenFileValidation.REPOSITORY)
+        document = load_golden_file(path, validation=validation)
         cached = _DOCUMENT_MEMO.setdefault(path, load_golden_records(document))
     return cached
 

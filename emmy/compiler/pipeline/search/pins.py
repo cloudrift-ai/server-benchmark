@@ -17,6 +17,15 @@ from emmy.compiler.pipeline.knob import axis_of, family_of, get, is_off_value, p
 _ANY_THREAD_WORK = Work(kind="thread", units=(1, 32))
 
 
+def parse_reduce(spec: str) -> Reduce | None:
+    """A ``REDUCE`` spelling read through :class:`Reduce` with the synthetic thread inventory, so a
+    ``coop`` token parses; ``None`` when the codec does not parse it."""
+    try:
+        return Reduce.parse(str(spec), _ANY_THREAD_WORK)
+    except ValueError:
+        return None
+
+
 def _stampable_reduce(want: str) -> str | None:
     """The part of a ``REDUCE`` pin a kernel can still stamp, or ``None`` if it carries no
     cross-CTA stage. Read through :class:`Reduce` — the same typed reading the schedule

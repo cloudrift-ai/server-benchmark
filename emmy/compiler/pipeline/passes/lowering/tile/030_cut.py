@@ -72,7 +72,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     ``PLACE@site=fuse`` excludes that seam from the composed cut (alone, it decides fuse under
     that spelling). A bare cut supplies the primary root-most seam and composes with scoped cuts;
     a bare fuse applies only when no scoped pin addressed this kernel."""
-    pins = [(name, value) for name, value in family_pins("PLACE") if family_of(name) == "PLACE"]
+    pins = [(name, value) for name, value in family_pins("PLACE", tile.pins.values) if family_of(name) == "PLACE"]
     if not pins:
         return None
     for _, value in pins:

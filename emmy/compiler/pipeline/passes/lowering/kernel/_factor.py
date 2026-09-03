@@ -60,7 +60,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
-from emmy.compiler.ir.tile.ops import UnbindableProjection, projection_regions, projection_root, sched_of
+from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_members, projection_regions, projection_root, sched_of
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     clamp_last,
     copy_cell,
@@ -396,7 +396,19 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # ``Fold`` was already peeled off by :func:`_factorize`).
         plan = (ctx.sched.get("REDUCE", op) or Reduce()) if isinstance(op, Fold) else None
         t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
-        if plan is None or (plan.coop <= 1 and plan.reg <= 1):
+        # A CHAIN root's members carry their own partitions; every partitioned member and the root
+        # stride around ONE lane axis, in body order (:func:`_tile_chain_members`).
+        members = chain_members(op) if isinstance(op, Fold) and op.axis is not None else ()
+        parts = tuple(
+            (member, p)
+            for member in (*members, op)
+            if (p := ctx.sched.get("REDUCE", member)) is not None and (p.coop > 1 or p.reg > 1) and not p.coop_transposed
+        )
+        if any(member is not op for member, _ in parts):
+            state, fold, close, lane = _tile_chain_members(op, parts, ctx, tail, out_val)
+            t = replace(t, axes=(lane,)) if lane is not None else t
+            bt = lane.extent.as_static() if lane is not None else None
+        elif plan is None or (plan.coop <= 1 and plan.reg <= 1) or (plan.coop_transposed and chain_form(op)):
             # The TERM places its own stores (``Fold.lower``): a sweep store's loop opens around
             # exactly the terms evaluated over that sweep, so sibling sweeps stay siblings, and a
             # streamed store rides its observed fold's reduce loop — the one placement rule the
@@ -780,6 +792,37 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     # state in place. The one shared tail a cooperative reduce and a future cooperative-K contraction
     # both emit (``combine_tail``).
     return [strided, *combine_tail(op, reg=reg, coop=coop, lane=lane)]
+
+
+def _tile_chain_members(
+    op: Fold, parts: tuple, ctx: Ctx, tail: tuple, out_val: str
+) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
+    """Bind a chain root whose members carry partitioned reduce plans. The root's lowering emits
+    its members' hoisted reduce loops ahead of its own, in dependency order, with the segments
+    between them (a provider chain, the cone a later member closes over) per cell on every lane —
+    redundant per lane, the ILP rename's external-name protection keeping their reads shared.
+    Each partitioned loop becomes its strided fold + merge (the combine broadcasts in place, so
+    later segments read the merged carrier on every lane); an ILP-only member folds its whole
+    axis on every lane from zero. All cooperating members share ONE lane axis — the walk's
+    one-inventory rule already forced their ``coop`` to agree — and the trailing projection
+    closes lane-distributed."""
+    plans = {id(member): plan for member, plan in parts}
+    coop = max(plan.coop for _, plan in parts)
+    assert len({plan.coop for _, plan in parts if plan.coop > 1}) <= 1, "cooperating chain members must share one coop width"
+    head = next(member for member, plan in parts if plan.coop == coop)
+    lane = Axis(name=f"{head.axis}_co", extent=coop) if coop > 1 else None
+    fold: list[Stmt] = []
+    for stmt in op.lower(axes=ctx.sched.tile.axes):
+        member = None
+        if isinstance(stmt, Loop) and stmt.is_reduce:
+            carried = {accum.name for accum in stmt.body if isinstance(accum, Accum)}
+            member = next((candidate for candidate, _ in parts if set(candidate.combine.results) <= carried), None)
+        if member is None:
+            fold.append(stmt)
+            continue
+        plan = plans[id(member)]
+        fold.extend(_strided_fold(member, stmt, plan, ctx, lane if plan.coop > 1 else None))
+    return [], fold, _lane_close(list(tail), lane, coop, ctx, out_val), lane
 
 
 def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_val: str) -> list[Stmt]:

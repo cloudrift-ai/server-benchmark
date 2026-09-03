@@ -499,6 +499,49 @@ def kernel_roots(op) -> tuple[Fold, ...]:
     return (node,) if isinstance(node, Fold) else ()
 
 
+def chain_members(root: Fold) -> tuple[Fold, ...]:
+    """The reduce folds a kernel root's cones close over — reached from ``root`` through zero-axis
+    operand edges and the axis-invariant (hoisted) reduce operands of members, deepest first, so a
+    member another member's cone reads comes ahead of it. This is the CHAIN the binder emits in
+    body order around one shared lane axis. A reduce read per step of another (the score inside
+    the twist) lowers inside that reduce's loop and is no member, and a contraction root has no
+    chain: its cone's statistic is the tiled fill's business, not a fold beside the root's."""
+    out: list[Fold] = []
+    if not isinstance(root, Fold) or root.axis is None or root.as_contraction() is not None:
+        return ()
+
+    def visit(node: Fold, hoisted_from: str | None) -> None:
+        for edge in node.operands:
+            if edge.as_slab() is not None:
+                continue
+            if edge.axis is None:
+                visit(edge, hoisted_from)
+            elif hoisted_from is None or hoisted_from not in edge.free_axes:
+                visit(edge, edge.axis)
+                if all(edge is not member for member in out):
+                    out.append(edge)
+
+    visit(root, root.axis)
+    return tuple(out)
+
+
+def chain_form(root: Fold) -> bool:
+    """Whether a reduce root binds as a CHAIN — its members, or a computed provider cone hoisted
+    ahead of its loop (a workspace row and its rsqrt), sit beside its own fold. The transposed
+    band's σ-substitution and guarded close assume the fold stands alone at the kernel root, so a
+    chain root takes no transposed band."""
+    if not isinstance(root, Fold) or root.axis is None:
+        return False
+    if chain_members(root):
+        return True
+    return any(
+        edge.axis is None
+        and root.axis not in edge.free_axes
+        and any(not isinstance(stmt, Load) for stmt in edge.lift.body)  # a computed provider, not a slab or a constant read
+        for edge in root.operands
+    )
+
+
 def cone_stat(cone, axes: tuple) -> Fold | None:
     """The per-row STATISTIC fold of a computed-A cone — the reduce its prologue (the cone's first
     operand, the row-invariant edge) materializes first: the fold whose carried state the first
@@ -574,6 +617,8 @@ __all__ = [
     "cone_stat_dtypes",
     "edge_dtypes",
     "head",
+    "chain_form",
+    "chain_members",
     "kernel_roots",
     "make_cone",
     "projection_regions",

@@ -472,7 +472,9 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
     projected domain does not hold it empties that site's restriction, and the kernel enumerates NO
     row at all — the pin is never quietly satisfied by the serial fold it did not name. That, not
     a per-site exception, is what replaced the old walk's refusal: #691 made a pin a restriction on
-    the projected domain, so a partition a chain member cannot carry simply has nothing to select.
+    the projected domain, so a partition a reduce cannot carry simply has nothing to select: a reduce
+    read PER STEP of its member (it indexes the member's axis) lowers inside that member's loop and
+    is no chain member, so its site projects the serial fold alone.
 
     Only a SCOPED pin refuses. A graph-wide bare ``REDUCE: coop`` is applicable at a site only when
     ``coop`` is already in that site's projected values, so on a serial-only member it is silently
@@ -480,7 +482,9 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
 
     The positive direction rides along: the DIRECT member's own site does enumerate under the same
     pin, so a green assertion here cannot come from the kernel being unschedulable outright."""
-    inner = _chain_member("acc_inner", "k", "x", _provider())
+    provider = _provider()
+    scaled = Assign(name="acc_inner__v", op="multiply", args=("x_e", provider.exposes[0]))
+    inner = reduction("k", (slab("x_e", "x", "m", "j", "k"), provider), (scaled,), ("acc_inner",))
     # The outer fold over ``j`` accumulates the inner's state as its per-step value — a lift whose
     # result is the bound operand param, as the total lift spells ``Accum(acc_outer, acc_inner)``.
     outer = Fold(

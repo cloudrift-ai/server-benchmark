@@ -179,8 +179,8 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    disqualifications, and no online prior was written. The monotone serial-work prior feature remains the
    cold-start answer. NOTE: the host's tune DB now carries those 9 rows, so any unpinned compile there elects the
    partitioned route — intended, now that #700 makes it build.
-3. **Make the elected route's work small enough to serve — compiler side LANDED on
-   `feature/mhc-statistics-hoist`, host re-run owed.** Even the elected 2³⁰ route ran past the 60 s bench watchdog
+3. **Price the recomputation so the statistics piece gets elected — LANDED (#702), and the elected statistics
+   piece measures 8.6 ms on the host.** Even the elected 2³⁰ route ran past the 60 s bench watchdog
    per launch: the dominant cost was re-evaluating the mHC statistics subtree 16,384× (4096 carrier positions × 4
    streams) inside the consumer piece's sum-of-squares reduce. Characterized GPU-free: the materializing seam
    (`PLACE@a8`, the gate's fn-projection) was OFFERED and priced away — the offline cold-start proxy gave the
@@ -193,13 +193,26 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    the host DB's 9 `bench_fail` rows — and `SearchDB` schema v4 drops stale `lowering` chains keyed pre-stamp.)
    Replayed on the pinned twins + host-DB copy, the greedy elects the same 12-piece plan plus exactly the
    `PLACE@a8` statistics piece — 13 kernels, the consumer drops 2³⁰ → 2¹⁶ and the route's worst piece is 2¹⁹
-   per-thread trips (the unaided fused monster was 2³⁸). Still owed on the host: `emmy run --bench` for the
-   measured per-launch time, then gate (c).
+   per-thread trips (the unaided fused monster was 2³⁸).
+4. **Make the elected pieces fast — OPEN, the current critical path (measured on the host 2026-09-02).** The
+   elected route was benched completely for the first time (every earlier attempt died on the 60 s watchdog; the
+   clean run needed `--warmup 3 --iters 10` plus `EMMY_BENCH_RUN_TIMEOUT_S` — a third budget knob beside the two
+   the tune report named): the live election reproduces the replay exactly (13 kernels, deterministic resolve in
+   284 s) and the whole `post4096` forward measures **23.24 s** — not servable, so gate (c) was not attempted.
+   The statistics piece itself costs 8.6 ms; the cost moved. One piece (`__place_8a9a1fe058`, 13.2 s, 57 %) runs
+   eight serial 4096-trip hidden-dim reductions per thread with two stride-2048 fp16 weight-column walks per trip
+   — an uncoalesced re-read of both FFN weight matrices per output element, at 25 % occupancy — and two
+   16384-grid sweep pieces add 9.3 s; everything else totals ~0.7 s. #702's bound elected the best plan on the
+   ballot (five orders of magnitude past the fused monster); the ballot holds no fast lowering for these pieces
+   yet. Two moves, in order: a measured tune pass over the dominant pieces with the raised bench budgets (also
+   the measured-election evidence gap 2 always wanted), and — if the fork space has no fast row — materializing
+   the matmul contributions as their own mma pieces, the way `PLACE@a8` materialized the statistics.
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
-compiles end to end (post-#700) but the first `post4096` prefill forward would take minutes-plus per launch.
-Stage 4 cannot warm or bake until gap 3 lands and gate (c) is re-run on the host, and the golden re-record should
-follow it, not precede it.
+compiles end to end and the elected route is a measured 23.2 s per `post4096` prefill forward (no longer a
+watchdog unknown) — the boot's roofline audit runs each program 4×, so serving needs roughly an order of
+magnitude off the dominant pieces first. Stage 4 cannot warm or bake until that lands and gate (c) is re-run on
+the host, and the golden re-record should follow it, not precede it.
 
 ## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
 
@@ -409,11 +422,12 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 Stage −1: DONE (~2 h). Stage 0 round one: DONE (fixed upstream by #602). Stage 1: DONE (#651). Stage 2: DONE (#656).
 Stage 3 in-repo: DONE (#662); gate (c) passed once at `ab1ad4592`, gate (d)'s token-ID half with it.
 
-**Stage 0 round three, gap 3, is the critical path.** Partitioning landed (#693/#694), the election mechanism is
-proven on the host, and the elected plan compiles end to end (#700) — but its monster piece re-evaluates the mHC
-statistics subtree ~16,384× and launches past the 60 s watchdog. What holds everything now: the recomputation
-itself (hoist or materialize the statistics once — open-ended placement/fusion work), with the serial-work prior
-feature and the tune-harness fixes (compile budget, the 45-knob site space, `--dump-dir`) as the supporting lane.
-Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days.
+**Stage 0 round three remains the critical path — now as kernel speed, not election.** Partitioning (#693/#694),
+the compiling composed cut (#700) and the serial-work pricing (#702) all landed, and the elected route is
+measured: 23.2 s per `post4096` forward, ~97 % of it in three pieces. What holds everything now: making those
+pieces fast — a measured tune pass over the elected route first (the bench completes with the raised budgets),
+then, if the fork space has no fast row, materializing the matmul contributions (open-ended placement work) —
+with the tune-harness fixes (the three budget knobs, the 45-knob site space, `--dump-dir`) as the supporting
+lane. Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days.
 Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The compiler, not the fork ABI, remains the dominant
 uncertainty.

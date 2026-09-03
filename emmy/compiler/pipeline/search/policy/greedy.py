@@ -74,7 +74,6 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable
-from contextlib import contextmanager
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -481,16 +480,14 @@ class _Measured(NamedTuple):
     DISQUALIFIES — the signatures whose every measured variant failed, a different kind of answer
     that cannot be expressed as a latency. ``routes`` PRICES A KERNEL SET — rows whose keys spell a
     placement (``PLACE@…``) or a cross-CTA split, each a measured µs for applying that decision to
-    the kernel of its signature. ``goldens`` names the schedule rows that came from golden files,
-    for the drift audit (:func:`golden_audit`); ranking never reads it."""
+    the kernel of its signature."""
 
     ok: dict[frozenset, list[tuple[dict, float]]]
     failed: dict[frozenset, list[float]]
-    routes: dict[frozenset, list[tuple[dict, float, str]]]
-    goldens: dict[frozenset, list[tuple[dict, str, float]]]
+    routes: dict[frozenset, list[tuple[dict, float]]]
 
 
-_EMPTY_MEASURED = _Measured({}, {}, {}, {})
+_EMPTY_MEASURED = _Measured({}, {}, {})
 
 
 def _is_route_row(tun: dict) -> bool:
@@ -535,8 +532,7 @@ def _db_measured_index_build(db, ctx) -> _Measured:
     from emmy.compiler.pipeline.search.golden import evidence_rows, scope_explicit  # noqa: PLC0415
 
     index: dict[frozenset, list[tuple[dict, float]]] = {}
-    routes: dict[frozenset, list[tuple[dict, float, str]]] = {}
-    goldens: dict[frozenset, list[tuple[dict, str, float]]] = {}
+    routes: dict[frozenset, list[tuple[dict, float]]] = {}
     survived: set[frozenset] = set()
     failures: dict[frozenset, list[float]] = {}
     try:
@@ -549,22 +545,15 @@ def _db_measured_index_build(db, ctx) -> _Measured:
             if row.stats.median <= 0:
                 continue
             tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
-            if _is_route_row(tun):
-                routes.setdefault(sig, []).append((tun, float(row.stats.median), f"tune-db:{row.op_key[:12]}"))
-            else:
-                index.setdefault(sig, []).append((tun, float(row.stats.median)))
+            (routes if _is_route_row(tun) else index).setdefault(sig, []).append((tun, float(row.stats.median)))
         gpu_name = getattr(ctx, "gpu_name", None) or ""
         if gpu_name or scope_explicit():
-            for sig, tun, us, name in evidence_rows(gpu_name, tuple(ctx.compute_capability)):
-                if _is_route_row(tun):
-                    routes.setdefault(sig, []).append((tun, us, name))
-                else:
-                    index.setdefault(sig, []).append((tun, us))
-                    goldens.setdefault(sig, []).append((tun, name, us))
+            for sig, tun, us, _name in evidence_rows(gpu_name, tuple(ctx.compute_capability)):
+                (routes if _is_route_row(tun) else index).setdefault(sig, []).append((tun, us))
     except Exception:  # noqa: BLE001 — an evidence consult failure must never break compile
         logger.debug("measured-evidence index build failed", exc_info=True)
         return _EMPTY_MEASURED
-    return _Measured(index, {sig: us for sig, us in failures.items() if sig not in survived}, routes, goldens)
+    return _Measured(index, {sig: us for sig, us in failures.items() if sig not in survived}, routes)
 
 
 def _sig_groups(index: dict[frozenset, list[tuple[dict, float]]], sig: frozenset) -> list[list[tuple[dict, float]]]:
@@ -660,67 +649,6 @@ def _warn_disjoint_evidence(
         )
 
 
-# Optional per-consultation verdict sink for the drift audit (``search/audit.py``). ``None``
-# (the default, and what every real compile runs with) is zero-cost. ``golden_audit`` installs a
-# list that every evidence decision at a schedule fork appends one record to — the supported hook
-# the audit reads.
-_AUDIT_SINK: list[dict] | None = None
-
-
-@contextmanager
-def golden_audit(records: list[dict]):
-    """Collect one ``{node, key, verdict, golden, us, n_rows, unrealized, fork}`` record per
-    schedule fork (and per kernel-set decision a golden route row won) into ``records`` for the
-    duration of the block. ``key`` is the fork's deploy identity (``identity_key(with_io=True)``),
-    an opaque digest the release gate counts and compares. Verdicts, asked of the golden rows
-    whose ``S_*`` signature is the fork's:
-
-      MATCH  a golden row vouches for an offered leaf — the deployed one, or the fastest offered
-             when a faster measured row won the pick
-      DRIFT  golden rows carry the signature but NO offered leaf agrees with any of them — the
-             recording no longer realizes under the current enumeration
-      GAP    no golden row carries the signature (coverage information, not a defect)
-
-    ``unrealized`` (MATCH/DRIFT only; ``None`` on GAP) names the golden rows no offered leaf
-    realizes — the per-entry signal the ``eval golden`` offer audit reads (one entry can be
-    individually unrealizable while a sibling still MATCHes)."""
-    global _AUDIT_SINK
-    prev = _AUDIT_SINK
-    _AUDIT_SINK = records
-    try:
-        yield records
-    finally:
-        _AUDIT_SINK = prev
-
-
-def _audit_record(
-    node_id: str,
-    key,
-    verdict: str,
-    golden: str | None,
-    us: float | None,
-    n_rows: int,
-    unrealized: list | None = None,
-    fork: str = "schedule",
-) -> None:
-    """Append one verdict to the audit sink. ``fork`` names the decision kind: ``schedule`` (one
-    kernel's row), ``PLACE`` (which kernels exist) or ``REDUCE`` (a cross-CTA split) — the release
-    gate's consultation ratchet counts schedule verdicts only."""
-    if _AUDIT_SINK is not None:
-        _AUDIT_SINK.append(
-            {
-                "node": node_id,
-                "key": key,
-                "verdict": verdict,
-                "golden": golden,
-                "us": us,
-                "n_rows": n_rows,
-                "unrealized": unrealized,
-                "fork": fork,
-            }
-        )
-
-
 def _schedule_fork(fp: ForkPoint) -> bool:
     """Whether ``fp`` decides one kernel's schedule (its options carry the enumeration's ``pool_id``
     stamp) rather than which kernels exist (the cut pass's placement / split fork)."""
@@ -730,44 +658,6 @@ def _schedule_fork(fp: ForkPoint) -> bool:
 def _fork_signature(fp: ForkPoint) -> frozenset:
     """The ``S_*`` signature every candidate at this fork shares (:func:`~emmy.compiler.pipeline.fork.fork_signature`)."""
     return fork_signature(fp.root_op, fp.options, fp.ctx)
-
-
-def _audit_schedule(fp: ForkPoint, index: _Measured, decided: dict | None) -> None:
-    """Record this schedule fork's golden verdict when an audit sink is installed (see
-    :func:`golden_audit`). ``decided`` is the deployed leaf's knob row, or ``None`` when the fork
-    was left to the prior. Only under a sink: the realizability walk visits every offered leaf."""
-    from emmy.compiler.pipeline.knob import (
-        canonical_row_key,  # noqa: PLC0415
-        evidence_row_vouches,  # noqa: PLC0415
-    )
-    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
-
-    if _AUDIT_SINK is None or not _schedule_fork(fp):
-        return
-    key = fp.root_op.identity_key(with_io=True) if hasattr(fp.root_op, "identity_key") else None
-    goldens = [entry for group in _sig_groups(index.goldens, _fork_signature(fp)) for entry in group]
-    leaves = [leaf_knobs(leaf) for leaf in iter_leaves(fp.options) if not _is_structural_option(leaf)]
-    if not goldens:
-        _audit_record(fp.node_id, key, "GAP", None, None, len(leaves))
-        return
-
-    def tunable(knobs: dict) -> dict:
-        return {k: str(v) for k, v in knobs.items() if not k.startswith(("S_", "H_"))}
-
-    realized = [(tun, name, us) for tun, name, us in goldens if any(evidence_row_vouches(tunable(k), tun) for k in leaves)]
-    # Per-entry, keyed by (name, row): siblings of one realization name are told apart by their row.
-    unrealized = [
-        (name, canonical_row_key(tun)) for tun, name, _us in goldens if not any(evidence_row_vouches(tunable(k), tun) for k in leaves)
-    ]
-    if not realized:
-        _audit_record(fp.node_id, key, "DRIFT", ", ".join(name for _t, name, _u in goldens), None, len(leaves), unrealized=unrealized)
-        return
-    hit = None
-    if decided is not None:
-        hit = next(((tun, name, us) for tun, name, us in realized if evidence_row_vouches(tunable(decided), tun)), None)
-    if hit is None:
-        hit = min(realized, key=lambda entry: entry[2])
-    _audit_record(fp.node_id, key, "MATCH", hit[1], hit[2], len(leaves), unrealized=unrealized)
 
 
 class EvidenceError(RuntimeError):
@@ -788,15 +678,14 @@ def _require_evidence(fp: ForkPoint, why: str) -> None:
     )
 
 
-def _route_candidates(fp: ForkPoint, index: _Measured) -> list[tuple[object, float, str]]:
-    """The measured arms at this kernel-set fork: one ``(option, µs, source)`` per measured row of
+def _route_candidates(fp: ForkPoint, index: _Measured) -> list[tuple[object, float]]:
+    """The measured arms at this kernel-set fork: one ``(option, µs)`` per measured row of
     the kernel's signature that spells an arm on the ballot
     (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`) — a schedule row the fused /
     unsplit arm (the kernel it decorates ran that way), a ``PLACE`` row its cut, a split-carrying
     ``REDUCE`` row its split. The option is the cut pass's own offer; the pieces it mints are
     brand-new kernels whose own forks consult their own rows. A schedule fork has none."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import spelled_arm  # noqa: PLC0415
 
@@ -806,14 +695,12 @@ def _route_candidates(fp: ForkPoint, index: _Measured) -> list[tuple[object, flo
     if _structural_domain(fp.options) not in (("PLACE",), ("REDUCE",)):
         return []
     sig = _fork_signature(fp)
-    names = {canonical_row_key(tun): name for group in _sig_groups(index.goldens, sig) for tun, name, _us in group}
-    measured = [(row, us, names.get(canonical_row_key(row), "tune-db")) for group in _sig_groups(index.ok, sig) for row, us in group]
-    measured += [entry for group in _sig_groups(index.routes, sig) for entry in group]
-    out: list[tuple[object, float, str]] = []
-    for row, us, source in measured:
+    measured = [entry for source in (index.ok, index.routes) for group in _sig_groups(source, sig) for entry in group]
+    out: list[tuple[object, float]] = []
+    for row, us in measured:
         arm = spelled_arm(fp.options, row)
         if arm is not None:
-            out.append((arm[0], us, source))
+            out.append((arm[0], us))
     return out
 
 
@@ -1113,10 +1000,7 @@ def greedy_decide(
         arms = _route_candidates(fp, index) if price_structural else []
         if arms:
             # Fastest first; a tie breaks by the arm's content, never by emission order.
-            best_o, best_us, source = min(arms, key=lambda c: (c[1], canonical_row_key(leaf_knobs(c[0]))))
-            _audit_record(
-                fp.node_id, fp.root_op.identity_key(with_io=True), "MATCH", source, best_us, len(fp.options), fork=fp.match.rule.name
-            )
+            best_o, best_us = min(arms, key=lambda c: (c[1], canonical_row_key(leaf_knobs(c[0]))))
             fp.score = best_us
             return best_o
         if the_prior is None:
@@ -1130,7 +1014,6 @@ def greedy_decide(
             picked = _direct_measured_pick(fp, blocked, db_index())
             if picked is not None:
                 leaf, row, price = picked
-                _audit_schedule(fp, index, dict(row))
                 fp.score = price
                 decisions[dkey] = (dict(row), price)
                 return leaf
@@ -1191,8 +1074,7 @@ def greedy_decide(
                 if streamed is not None and row is not None:
                     if tier == "model":
                         _require_evidence(fp, "no measured row vouches for any offered candidate")
-                    _audit_schedule(fp, index, dict(row))
-                    fp.score = price
+                        fp.score = price
                     if dkey is not None:
                         decisions[dkey] = (dict(row), price)
                     return leaf
@@ -1269,7 +1151,6 @@ def greedy_decide(
             s = the_prior.mean_scores(rows)
             best_i = min(range(len(rows)), key=lambda i: (s[i], canonical_row_key(rows[i])))
             price = s[best_i]
-        _audit_schedule(fp, index, dict(live[best_i][1]))
         fp.score = price  # measured µs when evidence decided, predicted µs otherwise
         if dkey is not None:
             decisions[dkey] = (dict(live[best_i][1]), price)

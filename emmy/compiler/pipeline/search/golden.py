@@ -1103,7 +1103,7 @@ def _replay(
 
 def kernel_identity(record: GoldenRecord) -> str | None:
     """The record's kernel identity under the CURRENT compiler — the strict decode's and the drift
-    audit's key (``identity_key(with_io=True)``). A STORED identity is returned as-is: it is how a
+    key (``identity_key(with_io=True)``). A STORED identity is returned as-is: it is how a
     child-identity receipt names the one split child its schedule decorates (the target's own lift
     stops at the pre-cut kernel and cannot say), and a stale stored identity selects nothing — the
     strict decode is where that fails loudly. Without one, the identity is derived as the lift of the
@@ -1269,7 +1269,7 @@ def _file_gpu_name(path: Path) -> str | None:
 #: Optional scope override for :func:`records_for_card` — the golden rows the evidence index loads.
 #: ``None`` (the default) reads ``EMMY_GOLDEN_FILE`` when set, else the repository files. Every
 #: command that names a golden scopes the rows here: ``run`` / ``compile`` install the selected
-#: records in-process, the drift audit (``search/audit.py``) one file's / one precision lane's
+#: records in-process, the release gate (``search/audit.py``) one file's / one precision lane's
 #: records, and ``serve --golden`` reaches the same loader through the env var because the vLLM
 #: child is another process. Set it through :func:`records_override`, never by hand.
 RECORDS_OVERRIDE: list[GoldenRecord] | None = None

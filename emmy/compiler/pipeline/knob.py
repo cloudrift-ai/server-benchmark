@@ -610,7 +610,7 @@ def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
 
 def schedule_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
     """The exact schedule identity projection a recorded row is compared to a leaf by (the strict
-    golden decode and the drift audit).
+    golden decode).
 
     A recorded row legitimately carries later forks' knobs too (the
     kernel-stage policy BOOLs, ``LOOPIFY``); those are separate decisions at separate forks and

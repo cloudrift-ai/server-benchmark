@@ -136,12 +136,6 @@ def register_eval_command(subparsers) -> None:
         metavar="PATH",
         help="Pinned release env that names the model, GPU, golden file, and reachable realization matrix.",
     )
-    pg.add_argument(
-        "--update-consult-baseline",
-        action="store_true",
-        help="Re-record the SERVE_CONSULT_BASELINE per-twin golden consultation counts from this audit "
-        "(only when the audit itself passes) instead of ratcheting against them.",
-    )
     pg.set_defaults(func=handle_eval_golden)
 
     pv = sub.add_parser(
@@ -444,7 +438,7 @@ def _emit_golden_deploy_check(args) -> None:
 def handle_eval_golden(args) -> None:
     """Validate one file-scoped golden corpus against the pinned serving envelope."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card, consultation_counts, gap_keys, summarize  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.audit import audit_card  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import (
         # noqa: PLC0415,
         GoldenFileValidation,
@@ -523,101 +517,19 @@ def handle_eval_golden(args) -> None:
         sys.exit(1)
 
     failed = False
-    consultations: dict[str, dict[str, int]] = {}
     for pins in sorted({row.pins for row in serving.realizations}, key=repr):
         lane_records = [record for record in records if record.pins == pins]
         with pinned_knobs(dict(pins)):
             results = audit_card(graphs, serving.gpu_name, cap, goldens=lane_records)
-        counts = summarize(results)
-        gaps = gap_keys(results)
         lane = _format_pins(pins)
-        consultations[lane] = consultation_counts(results)
-        logger.info(
-            "%s: MATCH %d  DRIFT %d  GAP %d  compile_fail %d",
-            lane,
-            counts["MATCH"],
-            counts["DRIFT"],
-            counts["GAP"],
-            counts[COMPILE_FAIL],
-        )
-        if counts["DRIFT"] or counts[COMPILE_FAIL] or gaps:
-            failed = True
-    if args.update_consult_baseline:
-        if failed:
-            logger.error("serving audit failed — consultation baseline not recorded; fix DRIFT/GAP/compile failures first")
-            sys.exit(1)
-        _record_consult_baseline(serving, consultations)
-        return
-    failed |= _check_consult_baseline(serving, consultations)
+        broken = {name: why for name, why in results.items() if why is not None}
+        for name, why in sorted(broken.items()):
+            logger.error("%s: %s: %s", lane, name, why)
+        logger.info("%s: %d twin(s) deploy from the golden rows alone, %d do not", lane, len(results) - len(broken), len(broken))
+        failed |= bool(broken)
     if failed:
-        logger.error("serving audit failed: every reachable kernel must match a verified realization")
+        logger.error("serving audit failed: every fork of every reachable kernel must be decided by a golden row")
         sys.exit(1)
-
-
-def _check_consult_baseline(serving, consultations: dict[str, dict[str, int]]) -> bool:
-    """Ratchet the per-twin golden consultation counts against the serving config's
-    checked-in baseline. The verdict audit above cannot see a kernel that stops forking: it
-    deploys single-option with no consultation, so its recorded MATCHes vanish without a DRIFT.
-    A count below baseline — or a twin/lane gone entirely — fails the gate naming the twin;
-    counts above baseline only mark the baseline stale. Returns True on failure."""
-    path = serving.consult_baseline
-    if path is None:
-        logger.info("no SERVE_CONSULT_BASELINE in the serving config — consultation ratchet skipped")
-        return False
-    if not path.exists():
-        logger.error("SERVE_CONSULT_BASELINE names %s but the file does not exist — record it with --update-consult-baseline", path)
-        return True
-    try:
-        baseline = json.loads(path.read_text())
-    except ValueError as exc:
-        logger.error("unreadable consultation baseline %s: %s", path, exc)
-        return True
-    failed = False
-    stale = 0
-    for lane in sorted(baseline):
-        for twin, expected in sorted(baseline[lane].items()):
-            got = consultations.get(lane, {}).get(twin)
-            if got is None:
-                logger.error(
-                    "consultation ratchet: %s [%s] vanished — baseline records %d golden consultations but the twin was not audited",
-                    twin,
-                    lane,
-                    expected,
-                )
-                failed = True
-            elif got < expected:
-                logger.error(
-                    "consultation ratchet: %s [%s] dropped %d -> %d golden consultations — kernels stopped "
-                    "consulting the tier (they now deploy without a schedule fork), so their recorded goldens silently no-op",
-                    twin,
-                    lane,
-                    expected,
-                    got,
-                )
-                failed = True
-            elif got > expected:
-                stale += 1
-    new = sum(1 for lane, twins in consultations.items() for twin in twins if twin not in baseline.get(lane, {}))
-    if stale or new:
-        logger.info(
-            "consultation ratchet: baseline %s is stale (%d grown count(s), %d new twin(s)) — re-record with --update-consult-baseline",
-            path.name,
-            stale,
-            new,
-        )
-    if not failed:
-        held = sum(len(twins) for twins in baseline.values())
-        logger.info("consultation ratchet: %d baseline twin count(s) hold (%s)", held, path.name)
-    return failed
-
-
-def _record_consult_baseline(serving, consultations: dict[str, dict[str, int]]) -> None:
-    path = serving.consult_baseline
-    if path is None:
-        logger.error("--update-consult-baseline needs SERVE_CONSULT_BASELINE in the serving config")
-        sys.exit(2)
-    path.write_text(json.dumps(consultations, indent=2, sort_keys=True) + "\n")
-    logger.info("recorded golden consultation baseline: %s", path)
 
 
 def handle_eval_variants(args) -> None:
@@ -1016,141 +928,39 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
 
 
 def _emit_offer_audit(configs: list) -> bool:
-    """The offer audit — does each recorded row still decide its OWN target's fork?
+    """The offer audit — does each recorded row still equal an enumerated leaf of its own target?
 
-    Re-compiles every record's own persisted program greedily under the audit seam
-    (``search/audit.audit_card``: deployable regime, the record's own card, no machine-local tune
-    evidence — the enumeration is a function of the graph and the context, so no GPU bench is
-    needed) and reads per-entry realizability off the verdict records. Because the tier joins by
-    strict structural identity and decodes by exact row equality, an entry either equals one of
-    the target's enumerated leaves or it realizes nowhere:
-
-      UNREALIZED    no leaf the target enumerates in this input pin regime equals the entry's
-                    spelled row. Tolerated only while an offered SIBLING entry still floors the
-                    target — a deploy would take the sibling.
-      FALL-THROUGH  NO entry of the target realizes: the tier warns "none equals an enumerated
-                    row" and the deploy falls past it into the prior (the 4090
-                    ``attention.hd512.s4096`` pathology: a 111 ms 0.03x kernel NaN-poisoning the
-                    downstream accuracy check) — the defect this audit catches at record time.
-                    Fix: re-record an offered row in this input regime, or close the enumeration
-                    gap.
-      NO-FORK       the target's own snippet compiles but no fork carries its identity, so the
-                    tier is never consulted there (identity drift, or a forkless kernel).
-
-    Each realization audits under its recorded input pins, so every regime's rows judge against
-    their own enumeration. This is the OWN-SNIPPET view — an entry can realize here yet still be
-    absent from a served model's fused graph (the 5090 ``mlp_down.m4096`` split-K row on the
-    epilogue-fused twin); the serving-matrix audit closes that side. Returns True when any target
-    falls through (``eval golden`` exits 1)."""
-    import logging as _logging  # noqa: PLC0415
-
-    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.audit import COMPILE_FAIL, audit_card  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import kernel_identity  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+    The strict decode (``golden.decode_record``) asks it per entry: the persisted program replayed
+    under the entry's own input pins, with the target's other entries walking the same path, and
+    the spelled row compared with that kernel's enumerated leaves by exact schedule-row identity.
+    An entry whose row equals no leaf is ``UNREALIZED``: it is no evidence a deploy can use, so
+    the gate fails — re-record an offered row in this input regime, or close the enumeration gap.
+    This is the OWN-SNIPPET view; the serving-matrix compile (``audit_card``) closes the other
+    side, whether the fused serving graphs are decided by these rows. Returns True when any entry
+    is unrealized (``eval golden`` exits 1)."""
+    from emmy.compiler.pipeline.search.golden import decode_record, siblings_of  # noqa: PLC0415
 
     def kstr(g) -> str:  # the entry's distinguishing knobs, empty families dropped
         return ",".join(f"{k}={v}" for k, v in g.knobs.items() if v not in ("", None))
 
     logger.info("")
     logger.info("Offer audit — does each recorded row still equal an enumerated leaf (own snippet, deployable regime)?")
-    cards: dict[tuple, list] = {}
+    unrealized = 0
     for g in configs:
-        cards.setdefault((g.gpu_name, tuple(g.compute_cap)), []).append(g)
-    n_targets = n_entries = n_unrealized = 0
-    fell: list[str] = []
-    # Silence the trace/compile chatter — at ERROR, not WARNING: the tier's per-fork drift warning
-    # is this audit's MEASUREMENT (re-reported as FALL-THROUGH below), not news.
-    quiet = [_logging.getLogger(n) for n in ("emmy.compiler", "emmy.commands.trace")]
-    prev = [lg.level for lg in quiet]
-    for lg in quiet:
-        lg.setLevel(_logging.ERROR)
-    try:
-        for (gpu_name, cap), card_cfgs in sorted(cards.items()):
-            if len(cards) > 1:
-                logger.info("  --- %s (sm_%d%d) ---", gpu_name, cap[0], cap[1])
-            pin_sets = sorted({record.pins for record in card_cfgs}, key=repr)
-            for pins in pin_sets:
-                groups: dict[str, list] = {}
-                for g in card_cfgs:
-                    if g.pins == pins:
-                        groups.setdefault(g.name, []).append(g)
-                graphs: dict[str, object] = {}
-                for name, sub in groups.items():
-                    try:
-                        graphs[name] = sub[0].target_program.copy()
-                    except Exception as e:  # noqa: BLE001 — one target's error shouldn't abort the audit
-                        logger.info("  %-44s  ERR  %s", _realization_label(name, pins), " ".join(f"{type(e).__name__}: {e}".split())[:100])
-                if not graphs:
-                    continue
-                with pinned_knobs(dict(pins)):
-                    res = audit_card(graphs, gpu_name, cap, goldens=[record for record in card_cfgs if record.pins == pins])
-                for name, sub in groups.items():
-                    if name not in graphs:
-                        continue  # trace error, already reported
-                    recs = res.get(name, [])
-                    fail = next((r for r in recs if r["verdict"] == COMPILE_FAIL), None)
-                    if fail is not None:
-                        logger.info("  %-44s  ERR  %s", _realization_label(name, pins), " ".join(str(fail.get("error", "")).split())[:100])
-                        continue
-                    n_targets += 1
-                    n_entries += len(sub)
-                    identities = {kernel_identity(g) for g in sub} - {None}
-                    # Schedule verdicts only: a kernel-set MATCH (the fused arm a schedule row spelled at
-                    # the placement fork) says nothing about whether the row equals an enumerated leaf.
-                    hits = [r for r in recs if r["key"] in identities and r.get("fork", "schedule") == "schedule"]
-                    if not hits:
-                        logger.warning(
-                            "  %-44s  NO-FORK  no fork of its own snippet carries its structural identity — the "
-                            "evidence pick was never asked there (the serving-matrix audit is the deploy-side authority)",
-                            _realization_label(name, pins),
-                        )
-                        continue
-                    floor = next((r for r in hits if r["verdict"] == "MATCH"), None)
-                    for g in sub:
-                        if any((g.name, canonical_row_key(g.schedule_row)) not in (r["unrealized"] or ()) for r in hits):
-                            continue  # an enumerated leaf equals this entry's row somewhere
-                        n_unrealized += 1
-                        via = f"deploy floor: {floor['golden']} @ {floor['us']:g}us" if floor else "NO offered sibling"
-                        logger.info(
-                            "  %-44s  UNREALIZED  %.1fus  %s  (%s)",
-                            _realization_label(name, pins),
-                            g.emmy_us,
-                            kstr(g),
-                            via,
-                        )
-                    if all(r["verdict"] == "DRIFT" for r in hits):
-                        fell.append(_realization_label(name, pins))
-                        logger.error(
-                            "  %-44s  FALL-THROUGH  none of the target's %d recorded entr%s equals an enumerated leaf in its "
-                            "input regime — no offered leaf agrees with any of them, so none of them is evidence a deploy can "
-                            "use; re-record an offered row or fix the enumeration",
-                            _realization_label(name, pins),
-                            len(sub),
-                            "y" if len(sub) == 1 else "ies",
-                        )
-    finally:
-        for lg, lv in zip(quiet, prev, strict=True):
-            lg.setLevel(lv)
-    logger.info("")
-    if fell:
-        logger.info(
-            "  offer audit: %d target(s) supply NO usable golden evidence (%s); %d/%d entries unrealized",
-            len(fell),
-            ", ".join(fell),
-            n_unrealized,
-            n_entries,
-        )
-    elif n_unrealized:
-        logger.info(
-            "  offer audit: %d/%d entries unrealized across %d targets — every target keeps an offered deploy floor",
-            n_unrealized,
-            n_entries,
-            n_targets,
-        )
-    else:
-        logger.info("  offer audit: all %d entries equal an enumerated leaf across %d targets", n_entries, n_targets)
-    return bool(fell)
+        try:
+            reason = decode_record(g, siblings_of(g, configs))
+        except Exception as exc:  # noqa: BLE001 — one entry's error is that entry's verdict
+            reason = f"{type(exc).__name__}: {exc}"
+        if reason is None:
+            continue
+        unrealized += 1
+        why = " ".join(reason.split())[:120]
+        logger.info("  %-44s  UNREALIZED  %.1fus  %s  (%s)", _realization_label(g.name, g.pins), g.emmy_us, kstr(g), why)
+    if unrealized:
+        logger.error("  offer audit: %d of %d entries equal no enumerated leaf in their input regime", unrealized, len(configs))
+        return True
+    logger.info("  offer audit: all %d entries equal an enumerated leaf", len(configs))
+    return False
 
 
 @dataclass

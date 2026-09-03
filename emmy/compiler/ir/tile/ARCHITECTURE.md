@@ -218,7 +218,7 @@ greedy decision memo and the budgeted descent seed, not a cache key: nothing sto
 
 Identity has two flavors: the default `structural=True` is schedule-equivalent (compute-unit op
 clusters collapse — `relu` and `tanh` epilogues share a key because their schedule evidence
-transfers; it is the strict golden decode's and the drift audit's key), while `structural=False`
+transfers; it is the strict golden decode's key), while `structural=False`
 names the exact kernel. Measured evidence itself joins a kernel by its `S_*` signature, not by
 this key.
 

@@ -143,8 +143,7 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   operation or search key survives decomposition.
 - `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
   exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
-  prefill, M=1, warm shapes, symbolic fallbacks, input pin regimes, and the golden-consultation baseline
-  (`SERVE_CONSULT_BASELINE`) cannot drift across independent flags.
+  prefill, M=1, warm shapes, symbolic fallbacks and input pin regimes cannot drift across independent flags.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
   rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens`
@@ -404,7 +403,6 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   global layers carry a larger `head_dim`, so their projections are different shapes with different optimal configs.
   Re-capture whenever a tracer/recognizer change alters the graphs. The release audit re-traces the exact widths
   weight-free, checks every realization, reports MATCH / DRIFT / GAP per twin and precision lane, and ratchets the
-  per-twin consultation counts against `SERVE_CONSULT_BASELINE` — all before the serving image is warmed.
 
   > **Memory budget (measured, gemma-4-12B / 32 GB RTX 5090).** The two artifacts that made the 12B need ~2–3× stock
   > vLLM's memory (it only fit at `ctx 256` with the decode twin off) are both fixed:

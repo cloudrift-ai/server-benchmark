@@ -570,20 +570,14 @@ Env pins sit ABOVE the whole list: a hand pin (`--ab`, `EMMY_KNOBS`, `EMMY_<KNOB
 any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH --bench` pins each golden row and each
 `--ab` row for its own compile — not how a golden deploys.
 
-**Auditing the golden rows.** Whether the recorded goldens still realize is a question about the index, so
-`greedy.golden_audit(records)` installs a verdict sink that every schedule fork's evidence decision appends to,
-judged over the golden rows of the fork's signature — `MATCH` (a golden row vouches for an offered leaf: the deployed
-one, or the fastest offered when a faster measured row won the pick), `DRIFT` (golden rows carry the signature but
-no offered leaf agrees with any of them), `GAP` (no golden row carries it); a kernel-set decision a measured row won
-records a `MATCH` too, with the cut rule's name in its `fork` field, which the offer audit and the consultation
-ratchet leave aside. Unset, the sink costs nothing.
-`search/audit.py` drives it over a whole card's graphs with the machine-local evidence removed
-(`config.online_file_override` at a nonexistent path, `nvcc_flags_override("")` for the deployable regime,
-`golden.records_override` scoping the golden rows to one file or precision lane), so the verdicts are the same on a
-GPU-less box and the recording host. `eval golden --golden … --serving-config` is the consumer, and it also ratchets
-`consultation_counts` (schedule-fork verdicts only) — the count is the one thing the verdicts cannot report, because
-a kernel whose lowering stops enumerating candidates deploys single-option, consults nothing, and loses its recorded
-MATCHes with zero DRIFT.
+**Auditing the golden rows.** Whether the recorded goldens still decide a deploy is the strict-evidence question
+asked of a whole serving matrix: `search/audit.py` (`audit_card`) compiles every graph with the machine-local
+evidence removed (`config.online_file_override` at a nonexistent path, a fresh in-memory tune store,
+`nvcc_flags_override("")` for the deployable regime, `golden.records_override` scoping the golden rows to one file
+or precision lane) and `--strict-evidence` on, so a fork no golden row decides is an `EvidenceError` naming the
+kernel rather than a prediction, and the answer is the same on a GPU-less box and the recording host. The strict
+decode (`golden.decode_record`) is the per-entry half: does each recorded row still equal an enumerated leaf of its
+own kernel. `eval golden --golden … --serving-config` asks both and fails on either.
 
 Three definitions the list leans on:
 

@@ -267,26 +267,20 @@ knob rows into either baseline as proposals. Canonical goldens remain the common
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
 config
 and YAML, proves that every structural target has every config-derived realization, reproduces the recorded rows,
-and re-traces the exact static/symbolic precision matrix. Any missing realization, DRIFT, GAP, or compile failure is
-a non-zero release failure. Model, revision, GPU, and serving widths therefore have no independent audit flags.
+and re-traces the exact static/symbolic precision matrix. Any missing realization, unrealized entry, or twin the
+golden rows do not decide is a non-zero release failure. Model, revision, GPU, and serving widths therefore have no
+independent audit flags.
 
-Both audits read the golden verdicts through `compiler/pipeline/search/audit.py`, one verdict per schedule fork,
-asked of the golden rows whose structural signature is the fork's: `MATCH` when a golden row vouches for an offered
-leaf (the deployed one, or the fastest offered when a faster measured row won the pick), `DRIFT` when golden rows
-carry the signature but no offered leaf agrees with any of them, `GAP` when the fork has no golden row. The
-**offer audit** compiles each record's OWN persisted program and reports the entries no offered leaf agrees with
-(`UNREALIZED`, tolerable only while an offered sibling still floors the target) and the targets where none does
-(`FALL-THROUGH` — none of the target's rows is evidence a deploy can use). The **serving-matrix audit** then compiles
-each precision lane's serving twins with only that lane's records as golden evidence.
-
-When the serving config names a `SERVE_CONSULT_BASELINE` JSON, the audit also ratchets each twin's golden
-consultation count (per precision lane, schedule verdicts only) against that checked-in baseline. This catches the
-regression the verdicts
-cannot: a pass change that removes a kernel's schedule fork deploys it single-option with no consultation, so its
-recorded MATCHes vanish without a DRIFT. A count below baseline — or a recorded twin no longer audited — fails
-the gate naming the twin; counts above baseline only log that the baseline is stale. `--update-consult-baseline`
-re-records the file from a passing audit (run it once to seed the baseline, and again whenever an intentional
-compiler change shifts the counts).
+Both halves are strict evidence, asked twice. The **offer audit** is the strict decode per entry
+(`golden.decode_record`): each record's own persisted program is replayed under its input pins, with the target's
+other entries walking the same path, and the spelled row must equal one of that kernel's enumerated leaves —
+`UNREALIZED` names the entries that do not, and any one fails the gate, since a row no leaf equals is no evidence
+a deploy can use. The **serving-matrix audit** (`compiler/pipeline/search/audit.py`, `audit_card`) then compiles
+each precision lane's serving twins with only that lane's records as golden evidence, the machine-local prior and
+tune DB out of the way, the deployable regime forced, and `--strict-evidence` on: a fork no golden row decides is an
+`EvidenceError` naming the kernel and the fork, and the gate reports it per twin. A kernel whose lowering stops
+forking, or a schedule that stops being offered, therefore fails loudly here instead of silently deploying from
+the prior.
 
 **Command modules:** `commands/bench/`, `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU
 via SSH, `deploy local` the local GPU

@@ -41,7 +41,7 @@ def test_db_measured_index_files_placement_rows_as_kernel_set_prices(route, monk
 
     index = _db_measured_index_build(db, ctx)
     assert index.ok == {signature: [({"WORK": "t64"}, 7.0)]}
-    assert [(row, us) for row, us, _source in index.routes[signature]] == [({k: str(v) for k, v in route.items()}, 1.0)]
+    assert index.routes == {signature: [({k: str(v) for k, v in route.items()}, 1.0)]}
 
 
 def test_db_measured_index_collects_shapes_whose_every_measured_variant_failed() -> None:
@@ -233,11 +233,7 @@ def test_measured_index_folds_golden_rows_beside_the_tune_db(monkeypatch) -> Non
     index = _db_measured_index_build(None, ctx)
 
     assert index.ok == {sig: [({"WORK": "t32", "TILE": "f2"}, 4.0)]}
-    assert index.goldens == {sig: [({"WORK": "t32", "TILE": "f2"}, "g.row", 4.0)]}
-    assert [(row, us, name) for row, us, name in index.routes[sig]] == [
-        ({"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0, "g.route"),
-        ({"REDUCE": "g2k/coop", "WORK": "w1x1"}, 7.0, "g.split"),
-    ]
+    assert index.routes == {sig: [({"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0), ({"REDUCE": "g2k/coop", "WORK": "w1x1"}, 7.0)]}
     assert index.failed == {}
 
 
@@ -253,17 +249,13 @@ def test_route_rows_become_measured_kernel_set_candidates() -> None:
     root = TileOp(op=projection(), knobs={"S_shape": 128.0})
     point = SimpleNamespace(options=[fuse, cut], node_id="node", root_op=root, ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}))
     routes = {
-        sig: [
-            ({"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0, "g.route"),
-            ({"PLACE@map.1/map": "fuse"}, 4.0, "g.fused"),
-            ({"PLACE@map.1/twist": "cut"}, 1.0, "g.stale"),
-        ]
+        sig: [({"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0), ({"PLACE@map.1/map": "fuse"}, 4.0), ({"PLACE@map.1/twist": "cut"}, 1.0)]
     }
-    index = _Measured({sig: [({"WORK": "t32"}, 3.0)]}, {}, routes, {sig: [({"WORK": "t32"}, "g.row", 3.0)]})
+    index = _Measured({sig: [({"WORK": "t32"}, 3.0)]}, {}, routes)
 
     got = _route_candidates(point, index)
 
-    assert got == [(fuse, 3.0, "g.row"), (cut, 9.0, "g.route"), (fuse, 4.0, "g.fused")]
+    assert got == [(fuse, 3.0), (cut, 9.0), (fuse, 4.0)]
     scheduled = SimpleNamespace(**{**vars(point), "options": [SimpleNamespace(pool_id="pool", knobs={"WORK": "t8"})]})
     assert _route_candidates(scheduled, index) == []
 

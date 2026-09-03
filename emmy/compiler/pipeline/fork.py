@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from emmy.compiler.ir.base import Op
 
 from emmy.compiler.ir.schedule import Schedule, ScheduleContext, schedule
+from emmy.compiler.pipeline.knob import evidence_row_vouches, values_equal
 
 
 class Fork(ABC):
@@ -95,6 +96,18 @@ class Fork(ABC):
             yield self
         else:
             yield from iter_leaves(self.expand())
+
+    def admits(self, row: Mapping) -> bool:
+        """Whether a knob ``row`` — complete, or partial with the undecided knobs absent — can lie
+        below this branch: every knob the branch has decided agrees with the row. The one descent
+        rule for a row that names a leaf (the decision memo's replay, the evidence pick's direct
+        descent to a measured row). The base reading is value equality; a tree whose branches
+        carry a prefix of the leaf's spelling or a level's projection of it refines it."""
+        return all(
+            name not in row or values_equal(name, row[name], value)
+            for name, value in self.knobs.items()
+            if not name.startswith(("S_", "H_"))
+        )
 
 
 @dataclass(frozen=True)
@@ -178,6 +191,28 @@ class _ScheduleFork(Fork):
     def expand(self) -> list[Fork]:
         return self.tree.step(self.context, self.row)
 
+    def admits(self, row: Mapping) -> bool:
+        """A schedule branch spells each decided knob as the PREFIX of what its leaves will spell
+        (``w2x2`` before ``w2x2+p1``, ``…/f2x2`` before ``…/f2x2/k2``; an OFF default ``''`` before
+        anything), so the row's value must extend the branch's value at a segment boundary. A
+        site the row names only by its bare family key reads as a bare pin does
+        (``evidence_row_vouches``): the site may be OFF or carry the value, never another — pruned
+        here so a row that names no leaf costs O(path), not the pool."""
+        for name, value in self.knobs.items():
+            if name.startswith(("S_", "H_")):
+                continue
+            family = name.split("@", 1)[0]
+            if name in row:
+                want = str(row[name])
+            elif name != family and family in row:
+                want = str(row[family])
+            else:
+                continue
+            have = str(value)
+            if have and want != have and not want.startswith((have + "/", have + "+")):
+                return False
+        return True
+
 
 def schedule_forks(
     context: ScheduleContext,
@@ -213,6 +248,40 @@ def flatten_leaves(options: Sequence[Op | Graph | Fork]) -> list[Op | Graph | Fo
     small non-schedule forks whose alternatives must be compared together;
     schedule spaces instead retain this hierarchy during greedy descent."""
     return list(iter_leaves(options))
+
+
+def fork_signature(root_op: Op, options: Sequence[Op | Graph | Fork], ctx) -> frozenset:
+    """The ``S_*`` signature every candidate at one fork shares — the key a measured row of this
+    kernel is filed under. The offer op's structural stamp under the run's context features, plus
+    the stamps the enumeration itself minted on its options (``S_warp_eligible``: a property of
+    the offered space, carried on the pool's top level and inherited by every leaf). Read here by
+    the deploy's evidence pick and by the golden replay that keys a record's rows, so the two
+    agree by construction."""
+    base = {**ctx.features(), **dict(getattr(root_op, "knobs", None) or {})}
+    for option in options:
+        base.update((key, value) for key, value in (getattr(option, "knobs", None) or {}).items() if key.startswith("S_"))
+    return frozenset((key, str(value)) for key, value in base.items() if key.startswith("S_"))
+
+
+def leaf_for(options: Sequence[Op | Graph | Fork], row: Mapping, *, skip: Callable[[dict], bool] | None = None):
+    """The first leaf a (possibly partial) knob ``row`` vouches for, as ``(leaf, its knobs)``, or
+    ``None`` — descending only the branches that admit the row (:meth:`Fork.admits`), so the walk
+    instantiates O(path × siblings) Forks whatever the pool size. ``skip`` drops a leaf by its knobs
+    (a blocklisted tile). The one descent the evidence pick and the golden replay share."""
+    for option in options:
+        if isinstance(option, Fork) and not option.is_leaf:
+            if option.admits(row):
+                found = leaf_for(option.expand(), row, skip=skip)
+                if found is not None:
+                    return found
+            continue
+        knobs = leaf_knobs(option)
+        if skip is not None and skip(knobs):
+            continue
+        tunable = {key: str(value) for key, value in knobs.items() if not key.startswith(("S_", "H_"))}
+        if evidence_row_vouches(tunable, row):
+            return option, knobs
+    return None
 
 
 def leaf_knobs(leaf: Op | Graph | Fork) -> dict:
@@ -349,6 +418,21 @@ class _Branch(Fork):
 
     def expand(self) -> list[Op | Graph | Fork]:
         return self.tree.build_level(self.group, self.next_depth)
+
+    def admits(self, row: Mapping) -> bool:
+        """The level that keyed this branch projects the row to this branch's key; a row lacking
+        one of the level's knobs is undecided there and admitted, a row the level does not apply
+        to belongs to the skipped siblings."""
+        if self.next_depth == 0:
+            return True  # the root: no level keyed it
+        level = self.tree.levels[self.next_depth - 1]
+        if any(name not in row for name in level.knob_names):
+            return True
+        try:
+            key = tuple(str(part) for part in level.key(dict(row)))
+        except KeyError:
+            return True
+        return key == tuple(str(self.knobs[name]) for name in level.knob_names)
 
     def leaves(self) -> Iterator[Fork]:
         """Stream the subgroup's complete rows directly when a policy needs every leaf.

@@ -87,6 +87,20 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
         help="Seconds to wait for /health before killing the server (with --bench; raise it when a "
         "fresh-shape first boot compiles longer than the default 1800).",
     )
+    parser.add_argument(
+        "--golden",
+        metavar="PATH",
+        default=d(None),
+        help="A golden YAML whose measured rows are the golden evidence every program this boot compiles deploys "
+        "from, instead of the repository goldens (published to the vLLM child as EMMY_GOLDEN_FILE).",
+    )
+    parser.add_argument(
+        "--strict-evidence",
+        action="store_true",
+        default=d(False),
+        help="Fail the boot instead of deploying a prediction: every fork of every program must be decided by a "
+        "measured row (published to the vLLM child as EMMY_STRICT_EVIDENCE).",
+    )
     parser.add_argument("--dry-run", action="store_true", default=d(False), help="Print the vllm command(s) without running.")
 
 
@@ -500,6 +514,12 @@ def handle_serve(args):
     vllm = _vllm_bin()
     serve_cmd[0] = vllm
     env = _child_env()
+    from emmy import config as emmy_config  # noqa: PLC0415
+
+    if args.golden:
+        env[emmy_config.GOLDEN_FILE] = str(Path(args.golden).resolve())
+    if args.strict_evidence:
+        env[emmy_config.STRICT_EVIDENCE] = "1"
     if not args.bench:
         # Plain serving: replace this process so signals/Ctrl-C reach vLLM directly.
         os.execve(vllm, serve_cmd, env)

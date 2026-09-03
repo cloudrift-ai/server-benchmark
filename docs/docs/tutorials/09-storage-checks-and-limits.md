@@ -78,15 +78,15 @@ out instead of poisoning the model with rows whose names no longer mean anything
 It is worth being explicit about how far the consequence reaches, because it is not obvious:
 
 - **The prior's checkpoint from another version is discarded whole** — the model *and* the stored rows.
-- Those stored rows are the reservoir. Discarding them therefore also deletes [tier 2 of the evidence
-  hierarchy](./06-deploy-evidence-hierarchy.md), and disables the structural cost estimate, which needs a trusted online
-  model.
-- The machine's deployments silently drop to golden configurations, then database rows (usually ranking-setting ones),
-  then the offline prior — **with no warning at compile time**. It behaves like a machine that has never been tuned,
+- Those stored rows are the reservoir. Discarding them therefore also deletes the reservoir's share of the
+  [measured evidence](./06-deploy-evidence-hierarchy.md), and disables the structural cost estimate, which needs a
+  trusted online model.
+- The machine's deployments silently drop to the golden and database rows, then the offline prior — **with no
+  warning at compile time** unless `--strict-evidence` is on. It behaves like a machine that has never been tuned,
   until it is tuned again.
 - The measurements table survives, because it is keyed by content rather than by feature names.
 
-A related rule protects the same tier from a much smaller change. Matching a candidate to measured rows deliberately
+A related rule protects the same evidence from a much smaller change. Matching a candidate to measured rows deliberately
 tolerates a changed feature set: a candidate's stamped features may include things the stored rows predate, and a join
 demanding exact equality of the whole set would let a single added feature switch off the entire evidence tier against
 every existing database at once. That happened, which is why the rule is what it is.
@@ -128,22 +128,22 @@ Gathered in one place, honestly.
 1. **The calibration check is lenient on a small tuning run.** A model can be fitted on as few as 50 rows, and if all
    its operation groups are too small to compute a correlation, calibration cannot be measured — and an unmeasurable
    calibration passes. Such a model owns deployments and structural decisions on very little data.
-2. **Ranking-setting measurements are known to invert against the deployable setting.** The hierarchy is careful to
-   prefer deployable-setting evidence, but on a machine tuned only in the ordinary way, tier 3 is made of
-   ranking-setting rows, and they can be wrong about the ordering they are being used for.
-3. **Raising the feature version silently removes an evidence tier.** As described above: no warning at compile time,
-   and the only symptom is that deployments get worse.
+2. **Ranking-setting measurements are known to invert against the deployable setting.** The evidence index is
+   keyed by the compile's regime, so a sweep at the ranking setting is never read by a deploy — but such a machine
+   deploys on the prior for those kernels, and the prior can be wrong about the ordering it is used for.
+3. **Raising the feature version silently removes the reservoir's evidence.** As described above: no warning at
+   compile time, and the only symptom is that deployments get worse.
 4. **A fresh machine deploys mostly on prediction.** Only golden configurations travel with a clone. Where no golden
    covers a shape, a rented box is choosing from a model that has never seen that card's measurements.
-5. **A cold compile never changes which kernels exist.** Structural choices need a trusted online model to be costed,
-   so on the offline prior the current kernel set is kept — even where splitting would be much faster. The
-   1.8-times-faster split on [the goldens page](./07-golden-configurations.md) is only deployable because somebody
-   recorded it.
-6. **A recording that no longer realizes falls through**, to tiers that can be far slower than the number the
-   recording advertises. The audits catch it, but only when they are run — and the isolated audit cannot see the
-   pin-only case that appears solely inside a real model.
-7. **There is no per-fork report of which tier decided.** Answering "which tier answered this fork, and did I expect
-   that one?" means correlating warnings, the resolution record and the audits.
+5. **A cold compile changes which kernels exist only on evidence.** Structural choices need a trusted online model
+   to be costed, so on the offline prior the current kernel set is kept — even where splitting would be much faster.
+   The 1.8-times-faster split on [the goldens page](./07-golden-configurations.md) is only deployable because
+   somebody recorded it, and that measured route row is what deploys it.
+6. **A recording that no longer realizes is simply not evidence**, and the kernel falls to the prior, which can be
+   far slower than the number the recording advertises. `--strict-evidence` makes that fall-through an error, and
+   the release gate compiles the serving matrix under it; a plain deploy without the flag falls through silently.
+7. **There is no per-fork report of which row decided.** Answering "which evidence answered this fork, and did I
+   expect that one?" means correlating warnings, the resolution record and the release gate.
 8. **The richest measurements are diagnostic-only.** The search-tree table is never consulted when deploying. Fitting
    the offline prior on a frozen snapshot of it is a planned path, not a current one — today `emmy fit` trains on the
    golden configurations only.

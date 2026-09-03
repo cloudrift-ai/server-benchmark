@@ -277,15 +277,17 @@ class Prior(ABC):
     @staticmethod
     def sig_groups(index: dict[frozenset, list], sig: frozenset) -> list[list]:
         """The index groups compatible with a candidate's ``S_*`` signature: the
-        exact hit when present, else every group agreeing on all *shared* keys.
-        A key present on one side only means the featurizer gained or lost a
-        feature between recordings, not a shape difference — the deploy candidate's base can carry scheduler
-        stamps neither the reservoir rows nor persisted perf rows have (#311's
-        ``S_warp_eligible`` appears in no reservoir/perf row), and a
-        strict-equality join lets one added feature silently disable an entire
-        evidence tier. Shapes always share the extent keys, so shared-key
-        agreement still separates them; an empty shared set matches nothing.
-        Shared by this reservoir tier and the deploy-side DB tier
+        exact hit when present, else every group whose EVERY key the candidate carries with
+        the same value. A key the candidate has and the row lacks is a feature the featurizer
+        gained since the recording — the deploy candidate's base can carry scheduler stamps
+        neither the reservoir rows nor persisted perf rows have (#311's ``S_warp_eligible``
+        appears in no reservoir/perf row), and a strict-equality join lets one added feature
+        silently disable an entire evidence tier. A key the ROW has and the candidate lacks is a
+        different kernel: the op histogram is stamped only where it is non-zero (``S_pw_*``,
+        ``S_reduce_*``), so an absent key is a zero, not an unknown — a piece a cut mints agrees
+        with its parent on every key it shares and must not read the parent's rows. The same rule
+        the disqualification tier keeps (``policy/greedy._resolved_price``); an empty row matches
+        nothing. Shared by this reservoir tier and the deploy-side DB tier
         (``policy/greedy._db_measured_pick``)."""
         if sig in index:
             return [index[sig]]
@@ -293,8 +295,7 @@ class Prior(ABC):
         groups = []
         for row_sig, measured in index.items():
             row = dict(row_sig)
-            shared = cand.keys() & row.keys()
-            if shared and all(cand[k] == row[k] for k in shared):
+            if row and row.keys() <= cand.keys() and all(cand[key] == value for key, value in row.items()):
                 groups.append(measured)
         return groups
 

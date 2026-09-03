@@ -51,5 +51,9 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x1/k4
+      REDUCE: ''
       STAGE: ''
+      RASTER: ''
     identity: 12e6741ec4a2ab72411171c0fd54a8bfcc02ba8364f66917dddf7fa7547def02

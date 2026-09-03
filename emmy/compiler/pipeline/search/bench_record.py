@@ -239,3 +239,35 @@ def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLea
     finally:
         db.close()
     return len(rows)
+
+
+def record_bench_perf(db_path: Path | str, ctx: Context, compiled, bench) -> int:
+    """Persist a benched compiled graph's per-kernel measurements as ``perf`` rows under the live
+    context — the deploy evidence the greedy pick reads — through the tuner's own writer
+    (:func:`~emmy.compiler.pipeline.search.policy.terminal_bench.persist_kernel_perf`). Kernels
+    pair with ``bench.per_launch`` by launch order; a bench without per-launch windows records
+    nothing (a whole-graph time is not a kernel's). Returns the rows written."""
+    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, stats_from_launch  # noqa: PLC0415
+
+    nodes = [compiled.nodes[nid] for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
+    per_launch = list(getattr(bench, "per_launch", None) or [])
+    if not nodes or len(per_launch) != len(nodes):
+        return 0
+    db = SearchDB(Path(db_path))
+    written = 0
+    try:
+        for node, launch in zip(nodes, per_launch, strict=True):
+            written += persist_kernel_perf(
+                db,
+                ctx.structural_key(),
+                "cuda",
+                node.op,
+                stats=stats_from_launch(launch),
+                status="ok",
+                captured=bool(getattr(bench, "captured", False)),
+            )
+    finally:
+        db.close()
+    return written

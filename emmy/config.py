@@ -36,6 +36,8 @@ TUNE_DB = "EMMY_TUNE_DB"
 FREEZE_DIR = "EMMY_FREEZE_DIR"
 ONLINE_FILE = "EMMY_ONLINE_FILE"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
+GOLDEN_FILE = "EMMY_GOLDEN_FILE"
+STRICT_EVIDENCE = "EMMY_STRICT_EVIDENCE"
 NVCC_FLAGS = "EMMY_NVCC_FLAGS"
 DEBUG = "EMMY_DEBUG"
 DUMP_DIR = "EMMY_DUMP_DIR"
@@ -194,9 +196,11 @@ def freeze_path() -> Path:
 
 
 def golden_identity_cache_path() -> Path:
-    """The derived golden-identity store — ``~/.cache/emmy/golden_identity.json``. Purely a
-    memo of ``kernel_identity`` derivations (keyed by a compiler fingerprint + per-record
-    content digests); safe to delete at any time."""
+    """The derived golden store — ``~/.cache/emmy/golden_identity.json``. Purely a memo, keyed by a
+    compiler fingerprint + per-record content digests, of what the golden import derives from a
+    record: its kernel identity (``kernel_identity``), its strict-decode verdict, and its evidence
+    replay (``golden._replay`` — the rows a record files under which kernels, about two seconds per
+    multi-kernel record to derive); safe to delete at any time."""
     return _CACHE_ROOT / "golden_identity.json"
 
 
@@ -215,10 +219,10 @@ def online_path() -> Path:
 def online_file_override(path: str | Path | None):
     """Temporarily point ``EMMY_ONLINE_FILE`` at ``path`` (``None`` is a no-op).
 
-    The verified-tier drift audit (``search/audit.py``) uses this with a nonexistent path so a
-    compile's evidence hierarchy sees NO machine-local online prior / reservoir — the verified
-    goldens plus the repo-shipped offline prior are the only inputs, making the MATCH / DRIFT /
-    GAP verdicts machine-independent."""
+    ``search.golden.sole_evidence`` (the release gate and the realization corpus) uses this with a
+    nonexistent path so a compile's evidence hierarchy sees NO machine-local online prior /
+    reservoir — the golden rows in scope are the only evidence, which is what makes their
+    strict-evidence verdict machine-independent."""
     if path is None:
         yield
         return
@@ -231,6 +235,65 @@ def online_file_override(path: str | Path | None):
             os.environ.pop(ONLINE_FILE, None)
         else:
             os.environ[ONLINE_FILE] = prev
+
+
+def golden_scope() -> str | None:
+    """The golden evidence scope ``EMMY_GOLDEN_FILE`` names: ``None`` when unset (the repository's
+    per-card goldens), a path (that file's measured rows instead), or ``""`` — set but empty — for
+    NO golden evidence at all. The empty form mirrors ``EMMY_NVCC_FLAGS=``: ``make test`` sets it,
+    because the correctness lane never asks how fast a pick is and importing a card's goldens is
+    work every worker process would repeat. Set by ``emmy serve --golden PATH`` for the vLLM child
+    it spawns; ``run`` / ``compile`` scope the same evidence in-process through
+    ``search.golden.records_override``, which takes precedence."""
+    return os.environ.get(GOLDEN_FILE)
+
+
+def golden_file() -> Path | None:
+    """The golden file ``EMMY_GOLDEN_FILE`` names, or ``None`` (see :func:`golden_scope`)."""
+    override = golden_scope()
+    return Path(override) if override else None
+
+
+@contextmanager
+def golden_file_override(path: str | Path | None):
+    """Temporarily point ``EMMY_GOLDEN_FILE`` at ``path`` (``None`` is a no-op)."""
+    if path is None:
+        yield
+        return
+    prev = os.environ.get(GOLDEN_FILE)
+    os.environ[GOLDEN_FILE] = str(path)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(GOLDEN_FILE, None)
+        else:
+            os.environ[GOLDEN_FILE] = prev
+
+
+def strict_evidence() -> bool:
+    """``EMMY_STRICT_EVIDENCE`` — whether a compile may decide a fork by the prior at all. On,
+    a kernel with no measured evidence (reservoir, tune DB or golden row) for one of its forks
+    fails the compile with ``EvidenceError`` instead of deploying a prediction. ``run`` /
+    ``compile`` / ``serve`` set it from ``--strict-evidence``; the vLLM child inherits it."""
+    return _bool(STRICT_EVIDENCE)
+
+
+@contextmanager
+def strict_evidence_override(flag: bool | None):
+    """Temporarily set ``EMMY_STRICT_EVIDENCE`` (``None`` is a no-op)."""
+    if flag is None:
+        yield
+        return
+    prev = os.environ.get(STRICT_EVIDENCE)
+    os.environ[STRICT_EVIDENCE] = "1" if flag else ""
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(STRICT_EVIDENCE, None)
+        else:
+            os.environ[STRICT_EVIDENCE] = prev
 
 
 def offline_path() -> Path | None:

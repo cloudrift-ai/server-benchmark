@@ -114,10 +114,10 @@ def _ncu_enabled() -> bool:
 def bench_pair(request):
     """Return a callable ``run(case) -> PerfRow`` for one realization-corpus case.
 
-    Each call spawns ``emmy run --golden-file … --golden … --bench --ab <the case's schedule>
-    --json``, at deployable optimization, and reads the record. The case is pinned to the schedule
-    it authors rather than left to greedy, because a corpus case names a schedule and a timing for
-    a different kernel would answer a different question.
+    Each call spawns ``emmy run --golden <case> --realization <name> --bench --json``, at
+    deployable optimization, and reads the record. The case replays the schedule it authors rather
+    than being left to greedy, because a corpus case names a schedule and a timing for a different
+    kernel would answer a different question.
 
     Does not assert on the ratio — the lane tracks performance, it does not gate on it.
     """
@@ -142,7 +142,7 @@ def _tune_enabled() -> bool:
 def _tune_via_subprocess(case: Case) -> None:
     """Search this case's kernel and record the winners into the autotune DB."""
     subprocess.run(
-        [sys.executable, "-m", "emmy.emmy", "tune", "--golden-file", str(case.path), "--kernel", case.record.name],
+        [sys.executable, "-m", "emmy.emmy", "tune", "--golden", str(case.path), "--realization", case.record.name],
         check=False,
         env={**os.environ, "EMMY_TUNE": "1"},
         timeout=3600,
@@ -344,7 +344,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         tw.write_sep("-", f"{len(slower)} case(s) slower than their recorded latency (band {100 * helpers.LATENCY_BAND:.0f}%)")
         for r in sorted(slower, key=lambda r: -(r.emmy_us / (r.recorded_us or 1))):
             tw.write_line(f"  {r.name:56s} {r.emmy_us:9.2f} us against a recorded {r.recorded_us:9.2f} us")
-        tw.write_line("Accept a new baseline with `emmy run --golden-file <case> --golden <name> --bench --record`.")
+        tw.write_line("Accept a new baseline with `emmy run --golden <case> --realization <name> --bench --record`.")
 
     # Coverage grows by being asked once, on a card that can answer, and never anywhere else.
     missing = [r.name for r in rows if r.recorded_us is None]

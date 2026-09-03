@@ -141,8 +141,7 @@ not regress, so that selected shape must converge and pass pack-HIT plus zero-re
   unquantized, default-branch release exactly — `SERVE_WARM_SHAPES`, `SERVE_REVISION`, `SERVE_QUANT`,
   `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
   (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the qualified vLLM runner
-  opt-in `SERVE_V2_MODEL_RUNNER`, the release-gate scope opt-in `SERVE_STATIC_ONLY`, and the golden-consultation
-  baseline `SERVE_CONSULT_BASELINE`. The runner shape fields map
+  opt-in `SERVE_V2_MODEL_RUNNER`, and the release-gate scope opt-in `SERVE_STATIC_ONLY`. The runner shape fields map
   immutably to their `EMMY_GEN_*` variables in initial warm, every shape fixpoint, the baked image, and verify;
   an extra warm shape's prefill field overrides the pinned bucket. A test rejects any other key, because a
   misspelled one reads as a value nothing consumes.
@@ -251,25 +250,19 @@ The full release session on a rented card (each step from the repo checkout; hos
 
    `serve-warm` depends on this target, so the gate cannot be skipped accidentally.
 
-   The goldens are the **top tier of the fork-resolution evidence hierarchy**: they are what seeds each kernel with
-   a tuned schedule. Warm a model with no goldens for its shapes and cold greedy picks instead — on unseeded
+   The goldens are the **only measured evidence a fresh machine has**: their rows join the (empty) tune DB in the
+   one measured-evidence index the greedy pick reads, and they are what seeds each kernel with a tuned schedule. Warm
+   a model with no goldens for its shapes and cold greedy picks instead — on unseeded
    projection shapes that is a scalar tile ~770× off cuBLAS, and on some shapes a kernel that hangs outright — and
    those picks are then frozen into the shipped cubins **and the pack**, where no later boot revisits them. So a
    golden-less release does not ship a slightly slower image; it ships a permanently bad one.
 
-   The command is `emmy eval golden <SERVE_GOLDEN_FILE> --serving-config <config>` under Make. It validates the
+   The command is `emmy eval golden --golden <SERVE_GOLDEN_FILE> --serving-config <config>` under Make. It validates the
    canonical schema, exact file identity, and model provenance; checks the live GPU against both the config and YAML;
    requires every structural target to carry every config-derived static/symbolic precision realization; reproduces
    each row; and audits the freshly traced serving twins. Any missing realization, DRIFT, GAP, or compile failure is
    a hard failure.
 
-   With a `SERVE_CONSULT_BASELINE` JSON in the config, the audit additionally ratchets each twin's verified-tier
-   consultation count per lane against that checked-in baseline. MATCH/DRIFT/GAP only report on forks that consult
-   the verified tier; a pass change that removes a kernel's schedule fork deploys it single-option with **no**
-   consultation, so its recorded goldens silently stop applying with zero DRIFT — the count drop is the only
-   deploy-side signal, and it fails the gate naming the twin. Seed or refresh the baseline with
-   `emmy eval golden … --update-consult-baseline` on the target GPU (only a passing audit records), and commit the
-   JSON next to the config.
 
    Model provenance matches in two halves. The **repo** half compares as slugs, with a `-`-boundary prefix rule so a
    base checkpoint's goldens cover its instruction-tuned sibling (same layer geometry, same kernel shapes) while a

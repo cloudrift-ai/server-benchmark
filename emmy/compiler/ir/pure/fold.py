@@ -111,31 +111,28 @@ class ReductionView:
 
 @dataclass(frozen=True)
 class Fold:
-    """A scheduled reduce — the typed successor of the bare annotated reduce
-    ``Loop``. It splits the reduce's **algebra** (the loop-carried
-    flat ⊕ — componentwise for a plain ``sum`` / ``max`` / ``mean``, a rescaling program for
-    online-softmax / flash — a plain :class:`Lambda` either way) from its **structure** (the
-    reduce ``axis`` + the per-element ``step`` it folds). Every reading is **derived** from those
-    params (:meth:`as_contraction`, :meth:`as_slab`, :meth:`step`), never stored. The fold
-    ``Loop`` is **synthesized on demand** (:meth:`lower`), never stored — so the same node tiles under any
-    :class:`~emmy.compiler.ir.schedule.Reduce`, which is not a field here: the reduce
-    partition is a site choice in ``TileOp.schedule``, read through ``ops.Sched``.
+    """The ONE reduce term — ``reduce(⊕) ∘ map(f)``, the typed successor of the annotated reduce
+    ``Loop``. It splits the reduce's **algebra** (the loop-carried flat ⊕ — componentwise for a
+    plain ``sum`` / ``max`` / ``mean``, a rescaling program for online-softmax / flash — a plain
+    :class:`Lambda` either way) from its **structure** (the axis the lift binds and the per-element
+    ``step`` it folds). Every reading is **derived** from the stored params (:meth:`as_contraction`,
+    :meth:`as_slab`, :meth:`as_reduction`, :meth:`step`), never stored, and the loop nest is
+    **synthesized on demand** (:meth:`lower`), never stored — so the same term tiles under any
+    :class:`~emmy.compiler.ir.schedule.Reduce`, which is not a field here: the reduce partition is
+    a site choice in ``TileOp.schedule``, read through ``ops.Sched``.
 
-    A reduce whose per-step partial COMPOSES another node — split-K's ``Fold ⊃ Fold``
-    (whose ``axis`` ``ksplit`` differs from the inner ``k_axis`` ``kslice``, so no double-reduce),
-    flash's ``Σ Q·K`` score at the head of its kv step — spells it ONE way: the node sits in
-    ``step`` and :func:`_flatten_nodes` flattens it in place. There is no second ``source`` edge.
-
-    It holds **no projection**: a bare reduce (``sum`` / ``max``) is the kernel root (its grid
-    ``Write`` is glue); a reduce with a post-fold sweep (softmax / RMSNorm) is an operand of a
-    zero-axis :class:`Fold` whose lift body is that projection. A nested term may occupy a position
-    in the lift's structural sequence without becoming a ``Stmt``; :meth:`lower` is the one boundary
-    that flattens it to the synthesized loop.
+    Everything a term reads arrives through its ``operands``, bound POSITIONALLY to the lift's
+    params (:attr:`bindings`) — a gmem read as a slab, a nested reduce as the term itself, a
+    projection as a zero-axis term — so a reduce that reads another (flash's ``Σ Q·K`` score ahead
+    of its ``Σ_j P·V``) is one term with the other among its operands, and its position in the
+    emitted nest is :meth:`lower`'s to place. A term holds no projection of its own: a bare reduce
+    (``sum`` / ``max``) is the kernel root, and a reduce with a post-fold sweep (softmax / RMSNorm)
+    is an operand of the zero-axis term whose lift is that projection.
 
     The reduce PARTITION (:class:`Reduce` — GRID split / BLOCK coop / REG ILP) is the schedule's,
-    not the node's: it is selected for the node site in ``TileOp.schedule`` and read through
-    ``ops.Sched``, which is why ``lower`` cannot see it and ``identity_key(with_io=True, with_knobs=True)`` stays byte-identical
-    whichever partition the fork picked. See the NO-schedule-fields note on ``operands`` below."""
+    not the term's: it is selected for the term's site in ``TileOp.schedule`` and read through
+    ``ops.Sched``, which is why ``lower`` cannot see it and ``identity_key(with_io=True, with_knobs=True)``
+    stays byte-identical whichever partition the fork picked."""
 
     pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
 
@@ -191,8 +188,8 @@ class Fold:
             arity = sum(len(edge.exposes) for edge in self.operands)
             assert len(self.lift.params) >= arity, f"lift binds {len(self.lift.params)} params for {arity} operand result components"
             return
-        # Formation validates the positional binding and the S × S → S arity; the ``carrier``
-        # annotation is a DERIVED read (:attr:`carrier`), never a second stored spelling.
+        # Formation validates the positional binding and the S × S → S arity; the planar-vs-twisted
+        # reading is DERIVED (:meth:`as_reduction`), never a second stored spelling.
         n = len(self.init)
         if len(self.combine.params) != 2 * n or len(self.combine.results) != n:
             raise ValueError(f"Fold combine must be S × S → S at arity {n}: params={self.combine.params} results={self.combine.results}")
@@ -397,18 +394,6 @@ class Fold:
             return None
         return SlabView(load=self.lift.body[0])
 
-    @property
-    def composed(self) -> Fold | None:
-        """The single sliced contraction this outer reduce COMPOSES (split-K's
-        reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}``), or ``None`` — the identity-lift
-        λ spelling (one inline node operand carrying the outer's exact accumulator state). The
-        structural probe :meth:`step` reads (``030_cut`` builds its sliced partial directly, so
-        the composition is a recognized FORM here, never a required input)."""
-        if len(self.lift.body) or len(self.operands) != 1:
-            return None
-        inner = self.operands[0]
-        return inner if inner.as_contraction() is not None else None
-
     # ---- the DERIVED READINGS. ``Map`` and ``Contraction`` are no longer stored kinds (the
     # collapse); every field they carried reads back off the one stored term here, so their old
     # accessors keep their exact meanings and their consumers keep their exact spellings. ------- #
@@ -469,17 +454,12 @@ class Fold:
         each ``Accum`` folding over the reduce axis), then an observer's pure tap, so a streamed
         store reads the post-combine (inclusive-prefix) state.
 
-        A reduce that COMPOSES a sliced contraction (split-K) has no step of its own: the inner
-        contraction already updates the shared accumulators, so the reassociation is the
-        embedding itself. Without a combine the term is a map and the step is the lift body.
-        Deterministic from the stored parameters, so kernel identity depends on no classified view.
-        Memoized on the term.
+        Without a combine the term is a map and the step is the lift body. Deterministic from the
+        stored parameters, so kernel identity depends on no classified view. Memoized on the term.
         """
         lift = self.applied
         if self.combine is None:
             return lift.body
-        if self.composed is not None:
-            return Body()
         merged = [replace(stmt, axes=(self.axis,)) if isinstance(stmt, Accum) else stmt for stmt in self.merge(lift.results)]
         observed = self.observe.body if self.observe is not None else ()
         return Body((*lift.body, *merged, *observed))

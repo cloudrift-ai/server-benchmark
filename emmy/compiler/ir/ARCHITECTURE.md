@@ -337,7 +337,7 @@ type to dispatch on and no second place for a fact to live.
   through the projection wrapper. Scheduling reads these facts directly from the Fold tree; `Fold.lower()` is
   reserved for callers that consume Loop IR.
 - A SCAN is a fold with a per-step `observe` — a pure `λ(axis, *state)` run after each combine whose fresh results
-  only boundary output writes consume (`Fold.observed`, a structural probe like `composed`). Observation makes the
+  only boundary output writes consume. Observation makes the
   stream order-visible, so an observed fold schedules as the serial fold only.
 
 `Fold.lower(bound, stores)` flattens the term to the loop nest: a plain loop for every free coordinate the caller

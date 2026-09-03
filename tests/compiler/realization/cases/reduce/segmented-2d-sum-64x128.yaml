@@ -19,7 +19,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_o_reduce.b8f2858a98b2
+  - name: k_o_reduce.eefcb0f6b6de
     bindings: {}
     pins:
       FAST_MATH: false

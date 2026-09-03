@@ -52,7 +52,7 @@ configs:
     - softmax
     - unsqueeze
   realizations:
-  - name: k_softmax_72a360.5f3c846a661f
+  - name: k_softmax_72a360.c39b5cb07eae
     bindings: {}
     pins:
       FAST_MATH: false

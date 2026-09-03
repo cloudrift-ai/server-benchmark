@@ -28,7 +28,7 @@ configs:
     - o
     - xr
   realizations:
-  - name: k_matmul_128bee.f1bfaa5bcf2c
+  - name: k_matmul_128bee.142680b065cb
     bindings: {}
     pins:
       FAST_MATH: false

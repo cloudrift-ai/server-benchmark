@@ -364,8 +364,9 @@ branches carry other tile shapes, but fatal in a single-path greedy compile, whe
 
 A rewrite that *raises* mid-lowering — a deterministic pass hitting an un-representable shape — is the same dead end
 expressed as an exception. Greedy `resolve` lets it propagate. Under `tune`, `Run.drive` catches it per-candidate,
-drops that subtree and bumps `Run._dropped_candidates`. Without this, one search-only un-lowerable fork aborted the
-whole tune.
+drops that subtree and bumps `Run._dropped_candidates`. The raise lands wherever the rule's code runs: in the rule
+batch itself, or later, when a deferred `Fork`'s thunk fires at expand/resolve time — both sit inside the sink.
+Without this, one search-only un-lowerable fork aborted the whole tune.
 
 ## Part 3: The prior — how choices are ranked
 

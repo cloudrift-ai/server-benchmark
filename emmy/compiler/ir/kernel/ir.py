@@ -1417,7 +1417,7 @@ class RegFragment(Stmt):
     shape: tuple[int, int, int]
     dtype: DataType
     count: int = 1  # >1 arrays the fragment family: ``<ty> name[count][n_regs]`` (loopify only)
-    nregs: int | None = None  # explicit for layouts whose one instruction realizes several PTX cells
+    nregs: int | None = None  # explicit for layouts whose one instruction realizes several PTX cells; 0 = one scalar register
 
     def _nregs(self) -> int:
         return self.nregs if self.nregs is not None else _mma_sync_nregs(self.role, self.shape, self.dtype)
@@ -1431,13 +1431,13 @@ class RegFragment(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
         cnt = f"{self.count}][" if self.count > 1 else ""
-        dims = f"[{cnt}{self._nregs()}]"
+        dims = f"[{cnt}{self._nregs()}]" if self._nregs() else ""
         return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{dims} ({m}x{n}x{k})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         n_regs = self._nregs()
         ctx.ssa_dtypes[self.name] = self.dtype.name
-        dims = f"[{self.count}][{n_regs}]" if self.count > 1 else f"[{n_regs}]"
+        dims = "" if n_regs == 0 else f"[{self.count}][{n_regs}]" if self.count > 1 else f"[{n_regs}]"
         if self.role == "c" and self.dtype.nbytes != 2:
             # Brace-init zeros the whole (arrayed) accumulator; ``= {0.0f, ...}`` stays the flat form.
             init = " = {}" if self.count > 1 else f" = {{{', '.join(['0.0f'] * n_regs)}}}"
@@ -1565,7 +1565,9 @@ class BlockScaleLoad(Stmt):
         # slab changing type — a byte-typed slab would lose that the bytes ARE e4m3 to every other
         # reader of ``ctx.buffer_dtypes``.
         src = f"reinterpret_cast<const unsigned char*>(&{self.src_buffer}[{flat}])"
-        return [f"{_pad(ctx.indent)}unsigned {self.frag} = emmy_mma_load_sf{self.role}_f4({src}, {self.ldm});"]
+        # An ASSIGNMENT: the scale fragment is declared once beside the operand fragments
+        # (``RegFragment`` at zero registers), so a double-buffered k-loop reloads it per step.
+        return [f"{_pad(ctx.indent)}{self.frag} = emmy_mma_load_sf{self.role}_f4({src}, {self.ldm});"]
 
 
 @dataclass(frozen=True)

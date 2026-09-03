@@ -1809,6 +1809,13 @@ class _MmaOps(_AtomOps):
                 )
                 for nm in frags(lambda i, ff=f: _fold_frag(self.frag(f"_b{i}"), ff), n.reg)
             ]
+        if block_scaled_atom(atom):
+            # The block-scale fragments — one 32-bit register per operand fragment, reloaded per
+            # k-step into the same name (``BlockScaleLoad`` assigns), so they are declared here once.
+            scale = dict(role="a", shape=atom.ptx_shape, dtype=atom.operand_dtype("a"), nregs=0)
+            decls += [RegFragment(name=nm, **scale) for nm in frags(lambda i: f"_sfa{i}", m.reg)]
+            for f in range(n_folds):
+                decls += [RegFragment(name=nm, **scale) for nm in frags(lambda i, ff=f: _fold_frag(f"_sfb{i}", ff), n.reg)]
         decls += [
             RegFragment(
                 name=_fold_frag(self.frag(_mma_c_base(atom, i, j)), f),

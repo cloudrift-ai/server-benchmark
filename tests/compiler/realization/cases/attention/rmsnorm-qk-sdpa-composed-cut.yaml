@@ -1,7 +1,8 @@
-# evidence: the sibling case rmsnorm-qk-sdpa-stat-b-cut cuts the clustered K operand cone alone and
-# runs correct; the A cone cluster and the shared softmax-statistics cone are seams of the same
-# kernel, so the composed pin row must realize all three cuts in one placement decision — the
-# route that removes every redundant per-query recompute from the attention tree.
+# evidence: the sibling case rmsnorm-qk-sdpa-stat-b-cut cuts the normalized-K cone alone and runs
+# correct; the normalized-Q cone and the K statistic nested inside the K cone are seams of the same
+# kernel, so the composed pin row must realize all three cuts in one placement decision — the K
+# cone's producer reading the statistic's workspace — the route that removes every redundant
+# per-query recompute of the normalized operands from the attention tree.
 compute_cap:
 - 12
 - 0
@@ -47,17 +48,17 @@ configs:
     - out
     - qn
   realizations:
-  - name: k_sdpa_rms_norm_reduce_dd476e.7c0839381752
+  - name: k_sdpa_rms_norm_reduce_c7db33.084d63faa9d8
     bindings: {}
     pins:
       FAST_MATH: false
-      PLACE@map.fold.a21: cut
-      PLACE@map.fold.a.map.fold.fold.b1: cut
-      PLACE@map.fold.a.map.fold.fold.a1: cut
+      PLACE@map.1/twist.1/inner.1/map: cut
+      PLACE@map.1/twist.1/inner.2/map: cut
+      PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
     knobs:
       TILE: ''
       WORK: t16
       REDUCE: coop
       STAGE: ''
       RASTER: ''
-    identity: f1ad5cd0046f299018abb0a3b43bb2d3e005f6b036f1d11c8d1522f2486ff4f0
+    identity: 3a6fdd7f4abf155ab5435afc958dccba6ec1bd15c54ef0fd96a1fd69f5c4ce4a

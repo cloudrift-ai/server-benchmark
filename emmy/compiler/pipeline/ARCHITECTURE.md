@@ -1299,7 +1299,8 @@ every realization. Missing, one-sided, zero, NaN, infinite measurements, and ran
 they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
 the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
 A promoted classic row is already complete: bare `WORK` and `RASTER`, with `TILE`, `REDUCE`, and `STAGE` bare when
-their family has one applicable node and `@n<N>`-qualified only when the family is ambiguous. `STAGE` records one
+their family has one applicable node and route-qualified (`TILE@map.1/inner`) only when the family is ambiguous.
+`STAGE` records one
 transport choice per consumer node, including an explicit empty direct choice. Promotion rejects incomplete rows,
 aliases, and unknown sites. It never fills or repairs a recording.
 
@@ -1512,10 +1513,11 @@ comparing two fits is running the same eval against two files and diffing the re
 ## Part 9: Tile lowering at the pipeline level
 
 `lowering/tile/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer parallel
-axes and mechanically lifts every inner reduction as a nested `Fold`; `TileOp` construction then canonicalizes the
-complete tree, including maximal pure operand-cone factoring for semiring contractions, canonical shared-argument
-orientation, and multi-result edges for overlapping cones. No Tile IR classifier runs. Pure projection regions remain
-in the term, while their writes live as `OutputSpec`s at the `TileOp` boundary.
+axes and mechanically lifts every inner reduction as a nested `Fold`; each term orients a bilinear lift A-first at
+formation, and `TileOp` construction canonicalizes the complete tree — an identity projection dissolves into its
+operand, same-value cones become one shared object. No Tile IR classifier runs. An output loop's per-cell
+projection is a zero-axis term evaluated over its sweep axis, while its writes live as `OutputSpec`s at the `TileOp`
+boundary.
 
 `020_twisted` rewrites the exp-family composition over that canonical tree. The single `030_cut` pass reaches a
 fixpoint over two ordered domains: it offers the maximal tree and every semantically closed stored child-Fold seam
@@ -1687,7 +1689,8 @@ Structural choices finish before the `TileOp` indexes its Fold root. Each shared
 one preorder integer id; every consumer operand position gets a distinct `(consumer id, operand position)` tuple, even
 when two edges reach the same producer. The strict codec spells kernel choices as bare `WORK` / `RASTER`. `TILE`,
 `REDUCE`, and `STAGE` are also
-bare when their family has one applicable consumer node; only an ambiguous family uses `@n<N>`. `STAGE` is one
+bare when their family has one applicable consumer node; only an ambiguous family carries the site's route
+(`TILE@map.1/twist.1/inner`, the placement grammar). `STAGE` is one
 transport decision shared by the applicable operand edges at that consumer. Empty direct values remain explicit, so
 every leaf has the same key vocabulary.
 

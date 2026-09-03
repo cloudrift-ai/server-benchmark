@@ -9,12 +9,62 @@ spliced in as one).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from functools import cached_property
+from dataclasses import dataclass, replace
 
-from emmy.compiler.ir.pure.normalize import normalize_lambda_body
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.stmt.base import pretty_body
-from emmy.compiler.ir.stmt.body import Body, _exposed_defines, _member_reads
+from emmy.compiler.ir.stmt.body import Body, _exposed_defines
+from emmy.compiler.ir.stmt.leaves import Assign, Load
+
+
+def _canonical_body_order(body: Body) -> Body:
+    """Return a deterministic dependency-respecting order for a pure ANF body."""
+    stmts = tuple(body)
+    if len(stmts) <= 1:
+        return body
+
+    def token(stmt) -> tuple:
+        op = getattr(stmt, "op", None)
+        return (
+            type(stmt).__name__,
+            getattr(op, "name", "") if op is not None else "",
+            stmt.input if isinstance(stmt, Load) else "",
+            len(getattr(stmt, "args", ()) or ()),
+        )
+
+    def reads(stmt) -> set[str]:
+        out = set(stmt.deps())
+        for nested in stmt.nested():
+            for child in nested:
+                out |= reads(child)
+        return out
+
+    definitions = [
+        set(stmt.defines()) | {name for nested in stmt.nested() for child in nested for name in child.defines()} for stmt in stmts
+    ]
+    dependencies = [reads(stmt) for stmt in stmts]
+    placed = []
+    remaining = list(range(len(stmts)))
+    while remaining:
+        remaining_definitions = {name for index in remaining for name in definitions[index]}
+        ready = [index for index in remaining if not dependencies[index] & (remaining_definitions - definitions[index])]
+        if not ready:
+            return body
+        selected = min(ready, key=lambda index: (token(stmts[index]), index))
+        placed.append(stmts[selected])
+        remaining.remove(selected)
+    return Body(placed)
+
+
+def _normalize_body(body: Body) -> Body:
+    """The construction canonicalization of a pure body — an idempotent transform, applied by
+    :meth:`Lambda.__post_init__`: a dependency-safe statement order and sorted commutative arguments,
+    the context-independent storage invariants a term's structural identity reads directly."""
+    ordered = _canonical_body_order(body)
+    return Body(
+        replace(stmt, args=tuple(sorted(stmt.args))) if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1 else stmt
+        for stmt in ordered
+    )
 
 
 @dataclass(frozen=True)
@@ -32,22 +82,18 @@ class Lambda:
     iteration vars — is the consuming Fold's check, since a bare Lambda
     cannot know its scope.
 
-    A result may also be a bare ``float`` literal — the injection ι is spelled in the lift
-    (softmax's singleton is ``(x, 1)``, flash's ``(s, 1, v)``), and a literal component has no
-    def to name (mirrors the ``Channel.term: str | float`` convenience it replaces).
-
     α-invariance is CANONICAL RENUMBERING (the existing rename machinery), not de Bruijn:
     :meth:`canonical` renumbers params (``_p0…``) and internal defs (``_v0…``) in walk order,
     leaving free names untouched; :meth:`alpha_eq` compares canonical forms."""
 
     params: tuple[str, ...]
     body: Body
-    results: tuple[str | float, ...]
+    results: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.params, tuple):
             object.__setattr__(self, "params", tuple(self.params))
-        body = normalize_lambda_body(Body.coerce(self.body))
+        body = _normalize_body(Body.coerce(self.body))
         if not isinstance(self.body, Body) or body != self.body:
             object.__setattr__(self, "body", body)
         if not isinstance(self.results, tuple):
@@ -58,9 +104,71 @@ class Lambda:
         defined = set(self.params)
         for s in self.body:
             defined |= _exposed_defines(s)
-        missing = [r for r in self.results if isinstance(r, str) and r not in defined]
+        missing = [r for r in self.results if r not in defined]
         if missing:
             raise ValueError(f"Lambda results {missing} are not defined by the body or params")
+        # CLOSED. A lambda is a function, so every name its body reads — a value or an index
+        # coordinate, the same ``Var`` either way — is a param or one of its own defs. Which params
+        # are coordinates is the binder's knowledge (a ``Fold`` reads them as its free coordinates
+        # past the operand binding); a bare lambda cannot tell. :meth:`closing` FORMS a closed
+        # lambda; this only refuses.
+        free = self.body.ssa_uses - defined
+        if free:
+            raise ValueError(
+                f"Lambda body reads {sorted(free)} it does not bind. Pass them as params — "
+                f"Lambda.closing(params, body, results) appends whatever the body still reads."
+            )
+
+    @classmethod
+    def closing(cls, params: tuple[str, ...], body, results: tuple) -> Lambda:
+        """Build a CLOSED lambda from its parts — the one former.
+
+        A term is a function, so it has no free names. The caller supplies the params it knows —
+        a fold's iteration var, the names its operand edges bind — and every remaining name the
+        body reads, an index coordinate included, is appended as a TRAILING param. Trailing, never
+        interleaved: the operand correspondence is the param PREFIX, so appending leaves every
+        positional read of it intact.
+
+        Built in ONE step: the body is normalized here, so the residual is computed against the
+        same body the lambda stores rather than against a throwaway built open and rebuilt.
+
+        Callers form; :meth:`__post_init__` refuses. They stay separate because a constructor that
+        repaired its own input would enforce nothing."""
+        body = _normalize_body(Body.coerce(body))
+        bound = set(params)
+        for stmt in body:
+            bound |= _exposed_defines(stmt)
+        # Reads the body does not define, plus any RESULT it does not define either: a write may
+        # pass an enclosing value straight through (``o[j] = acc`` over an already-reduced
+        # accumulator), and that result has no def to name, so it binds as a param like any read.
+        residual = set(body.ssa_uses)
+        residual |= set(results)
+        return cls(params=(*params, *sorted(residual - bound)), body=body, results=tuple(results))
+
+    @classmethod
+    def componentwise(cls, ops, names: tuple[str, ...]) -> Lambda:
+        """The componentwise binary program — each result its own ⊕ over its two operands,
+        ``nᵢ = ⊕ᵢ(nᵢ, nᵢ__o)``: ``S × S → S`` with the second operand spelled ``<n>__o``, a plain
+        fold's combine, the shape :meth:`components` reads back."""
+        other = tuple(f"{name}__o" for name in names)
+        body = Body(tuple(Assign(name=name, op=op, args=(name, second)) for name, op, second in zip(names, ops, other, strict=True)))
+        return cls(params=(*names, *other), body=body, results=tuple(names))
+
+    def components(self) -> tuple[ElementwiseImpl, ...] | None:
+        """The per-result ops when this program is componentwise — every result ``rᵢ = ⊕ᵢ(pᵢ, pₙ₊ᵢ)``
+        on its own, in either argument order for a commutative ⊕ — else ``None``: the planar-vs-
+        twisted reading of a fold's combine (a cross-component read or a rescale temp fails it)."""
+        n = len(self.results)
+        if len(self.body) != n or len(self.params) != 2 * n:
+            return None
+        definitions = self.body.definitions
+        ops = []
+        for index, result in enumerate(self.results):
+            stmt, pair = definitions.get(result), (self.params[index], self.params[n + index])
+            if not isinstance(stmt, Assign) or (stmt.args != pair and not (stmt.op.commutative and stmt.args == pair[::-1])):
+                return None
+            ops.append(stmt.op)
+        return tuple(ops)
 
     @property
     def defined(self) -> frozenset[str]:
@@ -70,24 +178,32 @@ class Lambda:
             out |= _exposed_defines(s)
         return frozenset(out)
 
-    def free_names(self) -> frozenset[str]:
-        """Names the body reads that this lambda does not bind — the contextual-invariant read
-        the consuming Fold checks against its iteration vars."""
-        return self._free_names
-
-    @cached_property
-    def _free_names(self) -> frozenset[str]:
-        # Memoized: the lambda is immutable, and every scope walk that reaches a nested Fold asks
-        # its lift's free names again — uncached, a deep fused tree pays the full body walk once
-        # per enclosing level.
-        reads: set[str] = set()
-        for s in self.body:
-            reads |= _member_reads(s)
-        return frozenset(reads) - self.defined
-
     def __getstate__(self):
         """Pickle the stored fields only — memoized reads recompute after transport."""
         return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
+
+    def cone(self, name: str) -> Lambda:
+        """The closed cone of one definition — the statements of the body ``name`` depends on, as a
+        lambda over what they read (a param names itself: an empty body returning it). What a
+        reader asks of one result without the rest of the body: the score a fold's lift computes,
+        the value one component of a projection denotes. Params in :meth:`closing`'s order."""
+        members = () if name in self.params else tuple(self.body.backward_cone((name,)).members)
+        return Lambda.closing((), Body(members), (name,))
+
+    def rename(self, names) -> Lambda:
+        """α-rename params, body and results through one map — a mapping or a callable — the
+        lockstep every consumer of a stored lambda applies: the fold's rewrite handler, the
+        combine's state rename, a recipe instantiated onto a term's names."""
+        lookup = names.get if hasattr(names, "get") else None
+
+        def rn(name: str) -> str:
+            return lookup(name, name) if lookup is not None else names(name)
+
+        return Lambda(
+            params=tuple(rn(p) for p in self.params),
+            body=Body(tuple(s.rewrite(rn) for s in self.body)),
+            results=tuple(rn(r) for r in self.results),
+        )
 
     def canonical(self) -> Lambda:
         """The α-canonical form: params renumber to ``_p0…`` and internal defs to ``_v0…`` in
@@ -101,21 +217,13 @@ class Lambda:
                 if d not in mapping:
                     mapping[d] = f"_v{n}"
                     n += 1
-
-        def rn(name: str) -> str:
-            return mapping.get(name, name)
-
-        return Lambda(
-            params=tuple(mapping[p] for p in self.params),
-            body=Body(tuple(s.rewrite(rn) for s in self.body)),
-            results=tuple(rn(r) if isinstance(r, str) else r for r in self.results),
-        )
+        return self.rename(mapping)
 
     def alpha_eq(self, other: Lambda) -> bool:
         """α-invariant equality — canonical forms compared structurally."""
         return isinstance(other, Lambda) and self.canonical() == other.canonical()
 
     def pretty(self, indent: str = "") -> list[str]:
-        rs = ", ".join(r if isinstance(r, str) else repr(r) for r in self.results)
+        rs = ", ".join(self.results)
         head = f"{indent}λ({', '.join(self.params)}) -> ({rs})"
         return [head, *pretty_body(self.body, indent + "    ")]

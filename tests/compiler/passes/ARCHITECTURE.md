@@ -162,9 +162,9 @@ child-identity schedule receipts round-trip: under a pinned cut each child's sto
 kernel's schedule rows and joins the verified tier as-is, including when target-boundary drift makes the regenerated
 Loop target contain several kernels and the stored identity must select one. Direct
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
-The generated carrier's numerical laws are covered
-independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax and
-attention accuracy remain covered by the e2e suites.
+The recipe program's monoid laws are covered
+independently by `tests/compiler/ir/pure/test_twist.py`; end-to-end softmax and attention accuracy remain covered by
+the e2e suites.
 
 ## Adding a New Rule Test
 

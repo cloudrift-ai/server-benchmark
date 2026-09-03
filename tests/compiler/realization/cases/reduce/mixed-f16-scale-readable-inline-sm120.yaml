@@ -40,11 +40,11 @@ configs:
     - out
     - sum
   realizations:
-  - name: k_out_reduce.25f3d0866984
+  - name: k_out_reduce.1df4ede1d671
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       REDUCE: coop
       WORK: t32
-    identity: 9cf15d576d9daf566cb32f5e2a662570d454b8e278777af0b34333b5e091be30
+    identity: 46dd428dc506a4f39c6737ebed0503ae6461338b04e694b4747408336441c10c

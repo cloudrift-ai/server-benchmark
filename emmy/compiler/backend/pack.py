@@ -57,7 +57,8 @@ def _environment() -> dict:
     to the full compile, which is the conservative reading (its lane is unrecorded).
     Probes the live GPU."""
     from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.space import (  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import (
+        # noqa: PLC0415,
         F16_MMA_F32_ACC,
         FAST_EXP,
         FP8_MMA,

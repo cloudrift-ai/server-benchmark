@@ -24,11 +24,11 @@ def test_built_loads_the_lowered_program_through_nvcc(monkeypatch) -> None:
 
 def test_bench_command_keeps_structural_input_pins_in_the_ab_row() -> None:
     case = SimpleNamespace(
-        pinned={"FAST_MATH": False, "PLACE@a7": "cut", "WORK": "w1x1"},
+        pinned={"FAST_MATH": False, "PLACE@map.1/inner": "cut", "WORK": "w1x1"},
         record=SimpleNamespace(name="k_example"),
         path=Path("case.yaml"),
     )
 
     command = helpers.bench_command(case, Path("result.json"))
 
-    assert command[command.index("--ab") + 1] == "FAST_MATH=False,PLACE@a7=cut,WORK=w1x1"
+    assert command[command.index("--ab") + 1] == "FAST_MATH=False,PLACE@map.1/inner=cut,WORK=w1x1"

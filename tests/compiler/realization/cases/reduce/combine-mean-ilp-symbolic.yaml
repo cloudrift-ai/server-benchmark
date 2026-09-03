@@ -19,13 +19,13 @@ configs:
     origins:
     - mean
   realizations:
-  - name: k_mean_2c850e.32f11792034c
+  - name: k_mean_3ddef7.03a98ebc8054
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       REDUCE: r4
-    identity: 966f8274d762ae2510f2e140cc1492e1f24200f5a529b952a416a6c048f55f39
+    identity: 31ce9ba9ed1bc614667397f98680f2ad386ecb88302751017d2d7b59e59fecc0
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 7.466029765000983

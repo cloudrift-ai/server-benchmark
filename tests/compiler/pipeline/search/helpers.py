@@ -25,9 +25,9 @@ F16_MATMUL_FEATS = {
     "S_loop_depth": 3.0,
     "S_ext_n_symbolic_axis": 1.0,
     "S_dtype_f16": 2.0,
-    "TILE@n0": "mma_m16n8k16_f16_f32/f2x8/k8",
+    "TILE@map.1/inner": "mma_m16n8k16_f16_f32/f2x8/k8",
     "WORK": "w1x8",
-    "REDUCE@n0": "g2k",
+    "REDUCE@map.1/inner": "g2k",
 }
 
 
@@ -40,7 +40,7 @@ def impossible_staged_feats() -> dict:
         **{k: v for k, v in F16_MATMUL_FEATS.items() if not k.startswith(("S_ext_free", "S_ext_reduce"))},
         "S_ext_free_prod": 512.0,
         "S_ext_reduce_max": 512.0,
-        "STAGE@n0.e0": "d1/smem-async",
+        "STAGE@map.1/inner": "d1/smem-async",
     }
 
 

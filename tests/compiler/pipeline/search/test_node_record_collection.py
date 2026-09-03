@@ -193,7 +193,7 @@ def test_best_realized_uses_a_compatible_multi_cuda_placement_route() -> None:
     tree.root.children = [
         _ok_leaf(
             6.0,
-            realized_knobs={"WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x4/k8", "PLACE@a": "cut"},
+            realized_knobs={"WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x4/k8", "PLACE@inner.1/map": "cut"},
             cuda_ops=2,
             cuda_knobs=[{"WORK": "w1x1"}, {"WORK": ""}],
         )
@@ -202,12 +202,12 @@ def test_best_realized_uses_a_compatible_multi_cuda_placement_route() -> None:
     search = TuningSearch.__new__(TuningSearch)
     search.tree = tree
 
-    assert search.best_realized() == ({"PLACE@a": "cut"}, 6.0, 2, True)
+    assert search.best_realized() == ({"PLACE@inner.1/map": "cut"}, 6.0, 2, True)
 
 
 def test_best_realized_keeps_only_the_routing_row_for_a_placement_cut() -> None:
     tree = SearchTree()
-    route = SearchNode(candidate=SimpleNamespace(resolved_knobs={"PLACE@a": "cut", "WORK": "w1x1"}), parent=tree.root)
+    route = SearchNode(candidate=SimpleNamespace(resolved_knobs={"PLACE@inner.1/map": "cut", "WORK": "w1x1"}), parent=tree.root)
     fast = _ok_leaf(6.0, realized_knobs=None, cuda_ops=2, cuda_knobs=[{"WORK": "w1x1"}, {"WORK": ""}])
     fast.parent = route
     route.children = [fast]
@@ -216,7 +216,7 @@ def test_best_realized_keeps_only_the_routing_row_for_a_placement_cut() -> None:
     search = TuningSearch.__new__(TuningSearch)
     search.tree = tree
 
-    assert search.best_realized() == ({"PLACE@a": "cut"}, 6.0, 2, True)
+    assert search.best_realized() == ({"PLACE@inner.1/map": "cut"}, 6.0, 2, True)
 
 
 def test_best_realized_keeps_the_schedule_row_for_fused_placement() -> None:

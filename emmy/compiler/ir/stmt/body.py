@@ -48,7 +48,7 @@ class Cone:
 
     A member is a whole top-level stmt: a wrapper (Loop / Cond / Tile) joins
     as a unit, exposing names per :func:`_exposed_defines` and reading per
-    :func:`_member_reads` (subtree rolled up, internally-bound axes
+    :func:`free_names` (subtree rolled up, internally-bound axes
     excluded). Axis vars from enclosing scopes survive into
     ``external_reads`` — intersect with an axis-name set to get the cone's
     axis usage, subtract it to get the SSA names that must resolve
@@ -76,11 +76,17 @@ def _exposed_defines(s: Stmt) -> set[str]:
     return out
 
 
-def _member_reads(s: Stmt) -> frozenset[str]:
-    """Names ``s`` (incl. a whole wrapper subtree) reads from its enclosing
-    scope: SSA deps + Expr free vars (Load/Write indices, Select predicates,
-    Cond conditions), recursive, minus internally-defined names and axes
-    bound inside the subtree."""
+def free_names(s: Stmt) -> frozenset[str]:
+    """Every name ``s`` (whole subtree) reads from its enclosing scope — SSA reads AND index
+    coordinates, less what the subtree defines or binds.
+
+    The WIDE reading, for callers that must resolve a statement against everything around it: a
+    dependence cone needs the axis vars as much as the value names, since both have to be
+    available where the cone lands. Callers asking a narrower question — is this VALUE read? —
+    want :attr:`Body.ssa_uses`, which never reports a coordinate. Mixing the two is what let an
+    index ``Var`` be mistaken for a value read; keeping both spellings is what lets each caller
+    say which it meant.
+    """
     reads: set[str] = set()
     defs: set[str] = set()
 
@@ -120,7 +126,17 @@ class Body(tuple[Stmt, ...]):
     """
 
     def __new__(cls, stmts: Iterable[Stmt] = ()) -> Body:
-        return super().__new__(cls, tuple(stmts))
+        members = tuple(stmts)
+        # A body holds STATEMENTS. A pure term is not one — ``Fold`` duck-types the statement
+        # protocol so the shared walks can reach it, but it is not a ``Stmt`` and does not belong
+        # in a statement sequence: a Fold tree composes through ``operands``, and a term sitting in
+        # a body is a second, competing composition mechanism. Checked by TYPE rather than by
+        # naming the kinds that are excluded, so the rule holds for anything else that duck-types
+        # its way in later.
+        stray = [type(member).__name__ for member in members if not isinstance(member, Stmt)]
+        if stray:
+            raise TypeError(f"Body holds non-statement member(s) {stray}; a term composes through operand edges")
+        return super().__new__(cls, members)
 
     def __getitem__(self, key):
         r = super().__getitem__(key)
@@ -302,23 +318,27 @@ class Body(tuple[Stmt, ...]):
         return frozenset(out)
 
     @cached_property
-    def _all_ssa_defs(self) -> frozenset[str]:
+    def ssa_defs(self) -> frozenset[str]:
         """Every SSA definition in this immutable subtree."""
         out: set[str] = set()
         for stmt in self:
             out.update(stmt.defines())
             for child in stmt.nested():
-                out.update(child._all_ssa_defs)
+                out.update(child.ssa_defs)
         return frozenset(out)
 
     @cached_property
-    def _all_ssa_uses(self) -> frozenset[str]:
-        """Every SSA read in this immutable subtree."""
+    def ssa_uses(self) -> frozenset[str]:
+        """Every name a statement of this immutable subtree reads — a ``Load`` index's ``Var`` names
+        among them, since a coordinate is the same ``Var`` a gathered value read would be. The
+        immediate reads only (:attr:`deps_closure` reports the transitive ones); what
+        :meth:`Lambda.closing` binds as params, coordinates included.
+        """
         out: set[str] = set()
         for stmt in self:
             out.update(stmt.deps())
             for child in stmt.nested():
-                out.update(child._all_ssa_uses)
+                out.update(child.ssa_uses)
         return frozenset(out)
 
     @cached_property
@@ -562,7 +582,7 @@ class Body(tuple[Stmt, ...]):
             if id(s) in member_ids:
                 continue
             member_ids.add(id(s))
-            pending.extend(_member_reads(s))
+            pending.extend(free_names(s))
         return Cone(members=tuple(s for s in self if id(s) in member_ids), external_reads=frozenset(external))
 
     def defs_die_at(self, members: Iterable[Stmt], *, roots: Iterable[str], allowed: Iterable[Stmt]) -> bool:
@@ -718,3 +738,27 @@ def _shared_structural_key(body: Body, cluster: bool) -> str:
 
     normalized = normalize_body(body, hoist=False, canonical_buffers=True, cluster_ops=cluster)
     return digest(form(normalized))
+
+
+def refs_axis(s: Stmt, name: str) -> bool:
+    """``s`` references axis ``name`` in any carried expr (deep) — ``Stmt.exprs``: a ``Load`` /
+    ``Write`` index, a ``Select``'s branch predicates. Both spellings are coordinate reads, so both
+    make the stmt vary with the axis; a mask ``Select`` read as invariant would be hoisted out of
+    the per-cell body it predicates."""
+    if any(name in e.free_vars() for e in s.exprs()):
+        return True
+    return any(refs_axis(child, name) for b in s.nested() for child in b)
+
+
+def stmt_axis_names(stmts) -> set[str]:
+    """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
+    sitting in the body needs no special case — it is a ``Stmt``, so its children are reached through
+    the same ``nested()`` walk as any block stmt's."""
+    out: set[str] = set()
+    for s in stmts:
+        ax = getattr(s, "axis", None)
+        if ax is not None and hasattr(ax, "name"):
+            out.add(ax.name)
+        for b in s.nested():
+            out |= stmt_axis_names(b)
+    return out

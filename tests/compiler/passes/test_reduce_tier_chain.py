@@ -1,74 +1,71 @@
-"""A chain-form root's direct members bind partitioned: the provider chain (workspace loads, the
+"""A root's reduce member binds partitioned: the provider chain it closes over (workspace loads, the
 rsqrt captures) emits ahead of the strided loop, shared by every lane; the merge broadcasts; the
-close is lane-distributed (DeepSeek-V4 post4096's composed-cut pieces)."""
+close is lane-distributed (DeepSeek-V4 post4096's composed-cut pieces). The provider is the member's
+OPERAND — a term closes over the values it reads — so the hoist is ``Fold.lower``'s own."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from dataclasses import replace
+
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.kernel.ir import Smem, TreeHalve, WarpShuffle
 from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.pure.fold import Channel
-from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Tile, Work, derive_inventory
+from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Stage, Tile, Work, derive_inventory
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.classic import (
     ClassicMaterialization,
+    EdgeSchedule,
     KernelSchedule,
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.schedule.views import Projection
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, StridedLoop, Write
+from emmy.compiler.ir.stmt import Assign, Cond, Load, Loop, StridedLoop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from tests.compiler.terms import contraction, projection, reduction, slab
 
-_PLACE = Placement(free=(Axis("m", 4),))
+_M = Axis("m", 4)
+_K, _J = Axis("k", 128), Axis("j", 256)
+_PLACE = Placement(free=(_M,))
 
 
-def _stamped(root: Fold, plans: dict) -> TileOp:
+def _stamped(root: Fold, plans: dict, axes: tuple = (_K,)) -> TileOp:
     """A scheduled ``TileOp`` carrying ``plans`` (member node → :class:`Reduce`) as its accepted
     classic assignment. The kernel ``WORK`` derives from the widest cooperative plan, because the
     assignment's own validation requires the inventory to realize the node choices."""
-    sites = TileOp(op=root)
-    by_site = {sites.node_id(node): plan for node, plan in plans.items()}
+    tile = TileOp(op=root, place=_PLACE, axes=(_M, *axes))
+    by_site = {tile.node_id(node): plan for node, plan in plans.items()}
     nodes = {
-        site: ProjectionSchedule(Tile())
-        if isinstance(sites.views[site], Projection)
-        else ReductionSchedule(Tile(), by_site.get(site, Reduce()))
-        for site in sites.node_sites
+        site: ProjectionSchedule(Tile()) if tile.views[site].axis is None else ReductionSchedule(Tile(), by_site.get(site, Reduce()))
+        for site in tile.node_sites
     }
     coop = max((plan.coop for plan in plans.values()), default=1)
     work = derive_inventory((Tile(),), coop=coop) or Work()
-    return TileOp(
-        op=root,
-        place=_PLACE,
-        schedule=Schedule(KernelSchedule(work, Raster.parse("")), nodes, {}),
+    edges = {edge: EdgeSchedule(Stage.direct()) for edge in tile.edge_sites}
+    return replace(
+        tile,
+        schedule=Schedule(KernelSchedule(work, Raster.parse("")), nodes, edges),
         materialization=ClassicMaterialization({}, {}),
     )
 
 
-def _reduce(axis: str, extent: int, acc: str, factor: str, src: str) -> Fold:
-    """``acc = Σ_axis src[m, axis] · factor`` — the member fold, its ``factor`` captured from the
-    provider chain ahead of it (never defined inside the loop)."""
-    body = Body(
-        (
-            Load(name=f"{src}_e", input=src, index=(Var("m"), Var(axis))),
-            Assign(name=f"{src}_scaled", op="multiply", args=(f"{src}_e", factor)),
-            Accum(name=acc, value=f"{src}_scaled", op="add", axes=(axis,)),
-        )
-    )
-    red = fold_from_loop(Loop(axis=Axis(axis, extent), body=body, role=AxisRole.PLANAR))
-    assert red is not None
-    return red
+def _provider() -> Fold:
+    """The provider chain — a workspace row read and its rsqrt — as the cone a member closes over."""
+    return projection((), (Load(name="ws", input="cutbuf", index=(Var("m"),)), Assign(name="scale", op="rsqrt", args=("ws",))))
+
+
+def _reduce(axis: Axis, acc: str, factor: Fold, src: str) -> Fold:
+    """``acc = Σ_axis src[m, axis] · factor`` — the member fold, ``factor`` an operand it closes over
+    (never defined inside the loop)."""
+    scaled = Assign(name=f"{acc}__v", op="multiply", args=(f"{src}_e", factor.exposes[0]))
+    return reduction(axis, (slab(f"{src}_e", src, "m", axis.name), factor), (scaled,), (acc,))
 
 
 def _chain_tile(plan: Reduce, post: tuple = ()) -> TileOp:
-    red = _reduce("k", 128, "acc", "scale", "x")
-    chain = (Load(name="ws", input="cutbuf", index=(Var("m"),)), Assign(name="scale", op="rsqrt", args=("ws",)))
-    results = post[-1].defines() if post else ("acc",)
-    root = Fold.projection(body=Body((*chain, red, *post)), results=results)
-    assert not root.operands, "the fed member must remain in the body for this shape to be under test"
+    provider = _provider()
+    red = _reduce(_K, "acc", provider, "x")
+    root = projection((red, provider), post, results=post[-1].defines() if post else ("acc",))
     return _stamped(root, {red: plan})
 
 
@@ -132,13 +129,19 @@ def test_a_transposed_band_on_a_chain_member_binds_serial() -> None:
     assert bound.block_threads is None
 
 
+def _two_member_root() -> tuple[Fold, Fold, Fold]:
+    """Two members: ``red_b`` folds ``y`` scaled by ``mid = acc · scale``, the cone over ``red_a``'s
+    state and the shared provider — so the second member closes over the first."""
+    provider = _provider()
+    red_a = _reduce(_K, "acc", provider, "x")
+    mid = projection((red_a, provider), (Assign(name="mid", op="multiply", args=("acc", "scale")),))
+    red_b = _reduce(_J, "acc2", mid, "y")
+    return red_a, red_b, projection((red_b,), results=("acc2",))
+
+
 def _two_member_tile(plan_a: Reduce, plan_b: Reduce) -> TileOp:
-    red_a = _reduce("k", 128, "acc", "scale", "x")
-    red_b = _reduce("j", 256, "acc2", "mid", "y")
-    chain = (Load(name="ws", input="cutbuf", index=(Var("m"),)), Assign(name="scale", op="rsqrt", args=("ws",)))
-    mid = Assign(name="mid", op="multiply", args=("acc", "scale"))
-    root = Fold.projection(body=Body((*chain, red_a, mid, red_b)), results=("acc2",))
-    return _stamped(root, {red_a: plan_a, red_b: plan_b})
+    red_a, red_b, root = _two_member_root()
+    return _stamped(root, {red_a: plan_a, red_b: plan_b}, axes=(_K, _J))
 
 
 def test_two_partitioned_members_share_one_lane_axis() -> None:
@@ -166,39 +169,16 @@ def test_an_ilp_only_member_beside_a_cooperating_one_starts_at_zero() -> None:
 
 
 def test_a_contraction_chain_member_binds_through_the_chain_arm() -> None:
-    """The chain arm reads only the member's axis and its :class:`Reduce`, never its algebra, so a
+    """The reduce binder reads only the member's axis and its :class:`Reduce`, never its algebra, so a
     CONTRACTION member partitions its K exactly like a monoid fold — a contraction is a monoid with
-    a ⊗ lift, and the reduce domain hands both the same catalog through one projection.
-
-    Bound at the emitter with a lightweight ``Ctx`` (the idiom the sibling ILP file uses), because
-    ``normalize_fold_tree``'s hoist currently moves any contraction off a projection body onto an
-    operand edge — absorbing whatever body value fed it — so a ``TileOp`` cannot carry this shape
-    today. The emission path is what is under test, and it works.
-    """
-    from types import SimpleNamespace  # noqa: PLC0415
-
-    from emmy.compiler.pipeline.passes.lowering.kernel._factor import Ctx, _bind  # noqa: PLC0415
-
-    cone = Fold.projection(
-        body=Body(
-            (
-                Load(name="a_e", input="A", index=(Var("m"), Var("k"))),
-                Assign(name="a_scaled", op="multiply", args=("a_e", "scale")),
-            )
-        )
+    a ⊗ lift, and the reduce domain hands both the same catalog through one projection."""
+    provider = _provider()
+    cone = projection(
+        (provider,),
+        (Load(name="a_e", input="A", index=(Var("m"), Var("k"))), Assign(name="a_scaled", op="multiply", args=("a_e", "scale"))),
     )
-    con = Fold.contraction(
-        k_axis=Axis("k", 128),
-        a=cone,
-        channels=(Channel(b=Load(name="b_e", input="B", index=(Var("k"),)), acc="acc"),),
-    )
-    chain = (Load(name="ws", input="cutbuf", index=(Var("m"),)), Assign(name="scale", op="rsqrt", args=("ws",)))
-    root = Fold.projection(body=Body((*chain, con)), results=("acc",))
-    plan = Reduce.of(coop=64)
-    sched = SimpleNamespace(get=lambda family, node: plan if (family == "REDUCE" and node is con) else None)
-    ctx = Ctx(grid=(Axis("m", 4),), inputs={}, output="o", sched=sched, free=(Axis("m", 4),))
-
-    bound = _bind(root, ctx, tail=(), out_val="acc", output_specs=())
+    con = contraction(_K, cone, (Load(name="b_e", input="B", index=(Var("k"),)), "acc"))
+    bound = factorize(_stamped(projection((con,), results=("acc",)), {con: Reduce.of(coop=64)}), root=None)
 
     flat = _flat(list(bound.body))
     strided = [s for s in flat if isinstance(s, StridedLoop)]
@@ -222,12 +202,8 @@ def test_the_walk_offers_and_the_binder_realizes_two_partitioned_members(monkeyp
     classic_forks = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
     for var in ("EMMY_KNOBS", "EMMY_PLACE", "EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE", "EMMY_RASTER"):
         monkeypatch.delenv(var, raising=False)
-    red_a = _reduce("k", 128, "acc", "scale", "x")
-    red_b = _reduce("j", 256, "acc2", "mid", "y")
-    chain = (Load(name="ws", input="cutbuf", index=(Var("m"),)), Assign(name="scale", op="rsqrt", args=("ws",)))
-    mid = Assign(name="mid", op="multiply", args=("acc", "scale"))
-    root = Fold.projection(body=Body((*chain, red_a, mid, red_b)), results=("acc2",))
-    tile = TileOp(op=root, place=_PLACE, name="k_two_member_probe", knobs={})
+    _, _, root = _two_member_root()
+    tile = TileOp(op=root, place=_PLACE, axes=(_M, _K, _J), name="k_two_member_probe", knobs={})
 
     leaves = list(iter_leaves(classic_forks(tile, tile.name, {}, Context.from_target((12, 0)))))
     keys = sorted({key for leaf in leaves for key in leaf.knobs if key.split("@", 1)[0] == "REDUCE"})

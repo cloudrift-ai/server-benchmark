@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.dtype import F32 as _F32
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Var
 from emmy.compiler.ir.stmt.base import INDENT, RenderCtx, Stmt, _pad, pretty_body, render_body
 from emmy.compiler.ir.stmt.body import Body
@@ -57,17 +57,14 @@ class Loop(Stmt):
     time. Set by scheduling passes (``mark_unroll``); has no
     effect on the IR's iteration semantics.
 
-    ``role`` is the axis's scheduling :class:`~emmy.compiler.ir.axis.AxisRole`
-    (``FREE`` / ``PLANAR`` / ``CONTRACTION`` / ``TWISTED``), stamped by tile-lowering
-    detection (the unannotated default is ``FREE``). The loop carries NO algebra — the fold's ⊕
-    lives on the :class:`~emmy.compiler.ir.pure.fold.Fold` node's stored ``combine``, and the
-    dissolved fold ``Accum``\\ s in the body are the loop-level spelling.
+    The loop carries NO algebra — the fold's ⊕ lives on the
+    :class:`~emmy.compiler.ir.pure.fold.Fold` node's stored ``combine``, and the dissolved fold
+    ``Accum``\\ s in the body are the loop-level spelling; a loop folds iff its body carries one.
     """
 
     axis: Axis
     body: Body
     unroll: bool = False
-    role: AxisRole = AxisRole.FREE
     seed: bool = True  # emit the per-Accum ``<acc> = identity;`` seed before the loop; False when a
     # nested drain whose accumulators are pre-seeded once outside an enclosing loop (the staged
     # scalar contraction — re-seeding per outer-slab iteration would zero the running sum).
@@ -86,18 +83,16 @@ class Loop(Stmt):
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (body,) = bodies
-        return Loop(axis=self.axis, body=body, unroll=self.unroll, role=self.role, seed=self.seed)
+        return Loop(axis=self.axis, body=body, unroll=self.unroll, seed=self.seed)
 
     def binds_axes(self) -> frozenset[str]:
         return frozenset({self.axis.name})
 
     @property
     def is_reduce(self) -> bool:
-        """A loop is a reduce-loop iff its annotated :attr:`role` folds (anything but
-        ``FREE``) OR — for a not-yet-annotated loop — its immediate body contains a carrier
-        (``Accum`` or its tensor-core form ``Mma``). The structural fallback keeps recognition
-        working before detection stamps the role."""
-        return self.role.is_reduce or any(isinstance(s, _CARRIERS) for s in self.body)
+        """A loop is a reduce-loop iff its immediate body contains a carrier (``Accum`` or its
+        tensor-core form ``Mma``) — read off the body, never annotated."""
+        return any(isinstance(s, _CARRIERS) for s in self.body)
 
     def pretty(self, indent: str = "") -> list[str]:
         head = f"{indent}for {self.axis.name} in 0..{self.axis.extent}{_source_suffix(self.axis)}"
@@ -250,14 +245,13 @@ class StridedLoop(Stmt):
     range; ``end`` must never exceed it.
 
     Reduction detection mirrors ``Loop``: a ``StridedLoop`` is a
-    reduce-loop iff its annotated :attr:`role` folds or its body contains an ``Accum``."""
+    reduce-loop iff its body contains an ``Accum``."""
 
     axis: Axis
     start: Expr
     step: Expr
     body: Body
     unroll: bool = False
-    role: AxisRole = AxisRole.FREE
     end: Expr | None = None
 
     def __post_init__(self) -> None:
@@ -278,7 +272,6 @@ class StridedLoop(Stmt):
             step=self.step,
             body=body,
             unroll=self.unroll,
-            role=self.role,
             end=self.end,
         )
 
@@ -291,9 +284,9 @@ class StridedLoop(Stmt):
 
     @property
     def is_reduce(self) -> bool:
-        """A strided loop is a reduce-loop iff its annotated :attr:`role` folds (anything but
-        ``FREE``) OR its immediate body contains a carrier (``Accum`` / ``Mma``)."""
-        return self.role.is_reduce or any(isinstance(s, _CARRIERS) for s in self.body)
+        """A strided loop is a reduce-loop iff its immediate body contains a carrier (``Accum`` /
+        ``Mma``) — read off the body, never annotated."""
+        return any(isinstance(s, _CARRIERS) for s in self.body)
 
     def pretty(self, indent: str = "") -> list[str]:
         start = self.start.pretty()

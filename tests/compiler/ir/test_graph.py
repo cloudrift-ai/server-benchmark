@@ -223,7 +223,6 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
     import json
 
     from emmy.compiler.ir.atom import ScalarAtom
-    from emmy.compiler.ir.pure import Fold
     from emmy.compiler.ir.schedule import Raster, Schedule, Work
     from emmy.compiler.ir.schedule import Tile as ScheduleTile
     from emmy.compiler.ir.schedule.classic import (
@@ -232,9 +231,11 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
         KernelSchedule,
         ProjectionSchedule,
     )
+    from emmy.compiler.ir.stmt import Const
     from emmy.compiler.ir.tile import TileOp
+    from tests.compiler.terms import projection
 
-    fold = Fold.projection(results=(0.0,))
+    fold = projection(body=(Const(name="zero", value=0.0),))
     source = TileOp(op=fold)
     context = ClassicScheduleContext(source)
     classic = Schedule(
@@ -427,30 +428,28 @@ def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
         )
 
     inner = Fold(
-        axis=Axis("k", 4),
-        lift=Lambda(
-            params=("k",),
-            body=Body((Load(name="value", input="x", index=(Var("m"), Var("k"))),)),
-            results=("value",),
-        ),
+        lift=Lambda.closing(("k",), Body((Load(name="value", input="x", index=(Var("m"), Var("k"))),)), ("value",)),
         init=(0.0,),
         combine=addition("inner_acc"),
     )
+    # The nested term rides an OPERAND EDGE — a Fold tree composes through operands, so the
+    # enclosing lift binds the inner reduce's result positionally instead of holding the term.
+    (state,) = inner.exposes
     outer = Fold(
-        axis=Axis("m", 4),
-        lift=Lambda(params=("m",), body=Body((inner,)), results=(inner.out,)),
+        operands=(inner,),
+        lift=Lambda.closing(("m", state), Body(), (state,)),
         init=(0.0,),
         combine=addition("outer_acc"),
     )
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (4, 4)), node_id="x")
-    graph.add_node(TileOp(op=outer, place=Placement()), ["x"], Tensor("out", ()), node_id="out")
+    graph.add_node(TileOp(op=outer, place=Placement(), axes=(Axis("m", 4), Axis("k", 4))), ["x"], Tensor("out", ()), node_id="out")
     graph.inputs, graph.outputs = ["x"], ["out"]
 
     graph.rename_node("x", "renamed_x")
 
-    nested = graph.nodes["out"].op.op.lift.body[0]
+    (nested,) = graph.nodes["out"].op.op.operands
     assert isinstance(nested, Fold)
     assert nested.lift.body.loads[0].input == "renamed_x"
 

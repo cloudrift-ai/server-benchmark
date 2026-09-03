@@ -769,8 +769,12 @@ def _target_kernel_nodes(record: GoldenRecord):
 
 
 def _lifted_target(record: GoldenRecord):
-    """Lift the record's single selected kernel to Tile IR."""
+    """Lift the record's single selected kernel to Tile IR — the tree the cut pass schedules: the
+    lift, then the twist rewrite, exactly as ``lowering/tile`` runs them. A placement key is
+    spelled on that tree, so decoding it against the lift alone would name sites the fused
+    single-pass carrier no longer has."""
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
 
     lowered, nodes = _target_kernel_nodes(record)
     if len(nodes) != 1:
@@ -778,6 +782,7 @@ def _lifted_target(record: GoldenRecord):
     node = nodes[0]
     node.op = node.op.with_io(lowered, node)
     tile = lift_loop_op(node.op, name=node.id)
+    tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
     # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
     # half of the identity (the deploy identity (``identity_key(with_io=True)``)) reads the same output fingerprint.
     return replace(tile, outputs={node.output.name: node.output})
@@ -806,15 +811,9 @@ def decode_record(record: GoldenRecord) -> str | None:
         if not record.is_receipt:
             return _remember_verdict(verdict_key, f"{type(exc).__name__}: {exc}")
     if record.is_routing:
-        from dataclasses import replace  # noqa: PLC0415
-
         from emmy.compiler.ir.tile.path import resolve, sites  # noqa: PLC0415
         from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams  # noqa: PLC0415
-        from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
 
-        axes = [axis.name for axis in tile.place.free]
-        axes.extend(store.sweep.name for store in tile.output_specs if store.sweep is not None)
-        tile = replace(tile, op=rewrite_twisted(tile.op, axes))
         seams = cuttable_seams(tile)
         seam_ids = {id(seam.node) for seam in seams}
         all_sites = sites(tile.op)

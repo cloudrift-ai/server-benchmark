@@ -36,7 +36,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.leaves import Assign, Mma
-from emmy.compiler.ir.tile import TileOp, lower_with_output_specs
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.strategy import PassEndEvent, PipelineStrategy, RunStartEvent, SpliceEvent
 from emmy.compiler.structural import digest
@@ -127,10 +127,7 @@ def _identity_body(op) -> Body | None:
         return op.body
     if not isinstance(op, TileOp):
         return getattr(op, "body", None)
-    body = Body(lower_with_output_specs(op.op, op.output_specs))
-    for axis in reversed(op.place.free):
-        body = Body((Loop(axis=axis, body=body),))
-    return body
+    return op.loop_body
 
 
 def structure_features(body: Body, graph: Graph | None = None) -> dict[str, float]:

@@ -201,6 +201,11 @@ def _pad(n: int) -> str:
     return "    " * n
 
 
+def _identity_rename(name: str) -> str:
+    """Default SSA rename — :meth:`Stmt.substitute` renames nothing."""
+    return name
+
+
 def _axis_identity(a: Axis) -> Axis:
     """Default ``axis_fn`` for ``Loop.rewrite`` / ``StridedLoop.rewrite``."""
     return a
@@ -563,6 +568,33 @@ class Stmt(Structural):
         buffers); ``Stage`` returns ``(self.name,)`` (tile-IR staged
         buffers — materialized into an ``Smem`` later)."""
         return ()
+
+    def rename(self, names) -> Stmt:
+        """α-RENAME this subtree — binders and uses, SSA names and axis names, through one map.
+
+        Capture-free by construction: a binder renamed is renamed everywhere it scopes, so the
+        rename passes THROUGH a scope that binds a mapped name — renaming that binder is the
+        point. Renaming an ``Axis`` means keeping its extent and window and changing its name,
+        which is this method's business rather than every caller's.
+
+        The counterpart of :meth:`substitute`, and the reason neither needs a hygiene flag: what
+        a caller is doing is stated by which one it calls.
+        """
+        lookup = names.get if hasattr(names, "get") else None
+
+        def rename_name(name: str) -> str:
+            return lookup(name, name) if lookup is not None else names(name)
+
+        return self.rewrite(rename_name, Sigma.IDENTITY, lambda axis: replace(axis, name=rename_name(axis.name)))
+
+    def substitute(self, coords: Sigma) -> Stmt:
+        """β-SUBSTITUTE free coordinates by expressions — the split's reindex, the per-cell fill.
+
+        Stops at a scope that re-binds a substituted name: that binder introduces a DIFFERENT
+        variable, and substituting through it is capture. A nested reduce over ``k`` under an outer
+        ``k`` is the case — a blind σ made its 128-element reduce read one slab element 128 times.
+        """
+        return self.rewrite(_identity_rename, coords)
 
     def rewrite(
         self,

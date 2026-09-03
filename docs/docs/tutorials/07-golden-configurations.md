@@ -116,7 +116,7 @@ own process, is reported as a failure, and the remaining rows continue.
   - name: gemma4_12b.norm_q_proj.m32.cut
     bindings: {num_tokens: 32}
     pins: {FAST_MATH: false}
-    knobs: {PLACE@cone: cut}
+    knobs: {PLACE@inner.1/map: cut}
     measurements: {emmy_us: 16.0, reference_us: 19.0, reference_backend: cublas}
   ```
 

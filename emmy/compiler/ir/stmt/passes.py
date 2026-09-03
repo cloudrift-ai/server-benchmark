@@ -23,6 +23,7 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
+    Const,
     Init,
     Load,
     Mma,
@@ -83,11 +84,26 @@ def _walk(value, *, on_expr, on_axis):
 
 
 @singledispatch
-def rewrite(stmt: Stmt, rename: Rename, sigma: Sigma = Sigma.IDENTITY, axis_fn: AxisFn = _axis_identity) -> Stmt:
+def _rewrite_kind(stmt: Stmt, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     raise NotImplementedError(f"rewrite not registered for {type(stmt).__name__}")
 
 
-@rewrite.register
+def rewrite(stmt: Stmt, rename: Rename, sigma: Sigma = Sigma.IDENTITY, axis_fn: AxisFn = _axis_identity) -> Stmt:
+    """Rename, σ-substitute and axis-map one subtree. Prefer :meth:`Stmt.rename` /
+    :meth:`Stmt.substitute`, which say which of the two operations a caller means.
+
+    σ is applied HYGIENICALLY: the mapping for a name this stmt binds is dropped before its
+    subtree is rewritten, because that binder introduces a different variable. A RENAME is
+    unaffected — it travels through ``rename``/``axis_fn`` and renames the binder itself, which
+    is exactly why it may pass where a substitution may not.
+    """
+    shadowed = stmt.binds_axes() & sigma.mapping.keys() if sigma.mapping else ()
+    if shadowed:
+        sigma = Sigma({name: value for name, value in sigma.mapping.items() if name not in shadowed})
+    return _rewrite_kind(stmt, rename, sigma, axis_fn)
+
+
+@_rewrite_kind.register
 def _(s: Load, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Load(
         names=tuple(rename(n) for n in s.names),
@@ -97,12 +113,12 @@ def _(s: Load, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     )
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: Pack, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Pack(name=rename(s.name), low=rename(s.low), high=rename(s.high), dtype=s.dtype)
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: Unpack, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Unpack(
         low_name=rename(s.low_name),
@@ -112,12 +128,12 @@ def _(s: Unpack, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     )
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: Assign, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Assign(name=rename(s.name), op=s.op, args=tuple(rename(a) for a in s.args), dtype=s.dtype)
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: Accum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     new_axes = tuple(n for old in s.axes for n in _rewrite_axis_name(old, sigma))
     return Accum(
@@ -130,7 +146,7 @@ def _(s: Accum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     )
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: Mma, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     new_axes = tuple(n for old in s.axes for n in _rewrite_axis_name(old, sigma))
 
@@ -167,14 +183,19 @@ def _rewrite_axis_name(name: str, sigma: Sigma) -> tuple[str, ...]:
     return tuple(sorted(replacement.free_vars()))
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: Init, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # ``identity`` is a constant scalar — only the name moves. Renamed in lockstep with
     # the fold's ``Accum`` (registered above) so the seed stays paired.
     return Init(name=rename(s.name), identity=s.identity, dtype=s.dtype)
 
 
-@rewrite.register
+@_rewrite_kind.register
+def _(s: Const, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    return Const(name=rename(s.name), value=s.value, dtype=s.dtype)
+
+
+@_rewrite_kind.register
 def _(s: ZeroPrologue, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # Buffer name + word count only — like ``Write.output``, ``dst`` is a buffer, and buffers
     # are not SSA names this rewrite renames. Identity, so a body carrying a delegated
@@ -182,7 +203,7 @@ def _(s: ZeroPrologue, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return s
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: Write, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Write(
         output=s.output,
@@ -194,28 +215,32 @@ def _(s: Write, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     )
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: Select, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    # A branch condition reads coordinates exactly as a Load index does: σ first, then the rename
+    # — an axis renumbering that reached the indices and not the conditions left the causal mask
+    # comparing loop variables its kernel no longer bound.
     return Select(
         name=rename(s.name),
-        branches=tuple(SelectBranch(value=rename(b.value), select=sigma.apply(b.select)) for b in s.branches),
+        branches=tuple(
+            SelectBranch(value=rename(b.value), select=_rename_ssa_vars_in_expr(sigma.apply(b.select), rename)) for b in s.branches
+        ),
     )
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: Loop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     # Preserve the reduce ``role`` annotation through σ-offsets / axis-renames. The loop carries
     # no algebra — the fold's ⊕ lives on the ``Fold`` node, whose own rewrite handler renames the
-    # stored combine in lockstep (``rename_combine``).
+    # stored combine in lockstep (``Lambda.rename``).
     return Loop(
         axis=axis_fn(s.axis),
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
-        role=s.role,
     )
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     step = sigma.apply(s.step) if isinstance(s.step, Expr) else s.step
     return StridedLoop(
@@ -224,12 +249,11 @@ def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         step=step,
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
-        role=s.role,
         end=sigma.apply(s.end) if s.end is not None else None,
     )
 
 
-@rewrite.register
+@_rewrite_kind.register
 def _(s: Cond, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Cond(
         cond=sigma.apply(s.cond),
@@ -261,7 +285,7 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
     # names that scope re-binds pruned out, and put those bodies back.
     inner = []
     for b in bodies:
-        pruned = {k: v for k, v in alias.items() if k not in b._all_ssa_defs}
+        pruned = {k: v for k, v in alias.items() if k not in b.ssa_defs}
         inner.append(Body(tuple(rename_free(c, pruned) for c in b)))
     return renamed.with_bodies(tuple(inner))
 
@@ -302,7 +326,7 @@ def _(s: Select, ctx: SimplifyCtx) -> Stmt:
 @simplify.register
 def _(s: Loop, ctx: SimplifyCtx) -> Stmt:
     inner = extend_simplify_ctx(ctx, s.axis)
-    return Loop(axis=s.axis, body=tuple(simplify(c, inner) for c in s.body), unroll=s.unroll, role=s.role)
+    return Loop(axis=s.axis, body=tuple(simplify(c, inner) for c in s.body), unroll=s.unroll)
 
 
 @simplify.register
@@ -315,7 +339,6 @@ def _(s: StridedLoop, ctx: SimplifyCtx) -> Stmt:
         step=step,
         body=tuple(simplify(c, inner) for c in s.body),
         unroll=s.unroll,
-        role=s.role,
         end=s.end.simplify(ctx) if s.end is not None else None,
     )
 

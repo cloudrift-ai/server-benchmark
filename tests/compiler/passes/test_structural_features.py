@@ -14,7 +14,7 @@ from sys import float_info
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
@@ -132,6 +132,7 @@ def test_extents_split_free_vs_reduce():
 
 
 def test_extent_products_saturate_without_building_unbounded_integers():
+    # A loop is a reduce iff its body carries an ``Accum``: the two inner loops fold, the outer is free.
     body = Body(
         (
             Loop(
@@ -139,8 +140,10 @@ def test_extent_products_saturate_without_building_unbounded_integers():
                 body=(
                     Loop(
                         axis=Axis("middle", 10**200),
-                        body=(Loop(axis=Axis("inner", 10**200), body=(), role=AxisRole.PLANAR),),
-                        role=AxisRole.PLANAR,
+                        body=(
+                            Loop(axis=Axis("inner", 10**200), body=(Accum(name="acc", value="x", axes=("inner",)),)),
+                            Accum(name="tot", value="acc", axes=("middle",)),
+                        ),
                     ),
                 ),
             ),
@@ -225,12 +228,21 @@ def test_serial_cell_work_takes_the_max_path_over_sibling_reduces():
 
 
 def test_serial_cell_work_saturates_and_skips_symbolic_extents():
+    # A reduce loop is one that accumulates: the nested pair folds a load through ``acc``.
     huge = Body(
         (
             Loop(
                 axis=Axis("outer", 10**200),
-                body=(Loop(axis=Axis("inner", 10**200), body=(), role=AxisRole.PLANAR),),
-                role=AxisRole.PLANAR,
+                body=(
+                    Loop(
+                        axis=Axis("inner", 10**200),
+                        body=(
+                            Load(name="x", input="a", index=(Var("outer"), Var("inner"))),
+                            Accum(name="acc", value="x", op=ElementwiseImpl("add")),
+                        ),
+                    ),
+                    Accum(name="total", value="acc", op=ElementwiseImpl("add")),
+                ),
             ),
         )
     )
@@ -248,7 +260,6 @@ def test_serial_cell_work_saturates_and_skips_symbolic_extents():
                         ),
                     ),
                 ),
-                role=AxisRole.PLANAR,
             ),
         )
     )

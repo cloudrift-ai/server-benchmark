@@ -28,7 +28,7 @@ from .choices import (
     derive_inventory,
     resolve_site_tile,
 )
-from .views import ContractionFacts, EdgeSite, NodeId, Projection, Reduction
+from .views import ContractionFacts, EdgeSite, NodeId
 
 CLASSIC_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
@@ -125,21 +125,23 @@ type ClassicAssignment = Schedule[KernelSchedule, NodeSchedule, EdgeSchedule]
 
 
 def classic_node_key(sites, family: str, site: NodeId) -> str:
-    """Return the canonical key for one node-scoped classic family."""
+    """Return the canonical key for one node-scoped classic family: bare when the family has one
+    applicable site on this kernel, else ``FAMILY@<route>`` — the site's route from the root in the
+    tree-path grammar (``TILE@map.1/twist.1/inner``), the spelling placement keys use too."""
     family_sites = sites.family_sites.get(family)
     if family_sites is None:
         raise ValueError(f"{family} is not a classic node family")
     if site not in family_sites:
-        raise ValueError(f"{node_id_spelling(site)} is not a {family} site")
-    return family if len(family_sites) == 1 else f"{family}@{node_id_spelling(site)}"
+        raise ValueError(f"{sites.sites[site].path} is not a {family} site")
+    return family if len(family_sites) == 1 else f"{family}@{sites.sites[site].path}"
 
 
 def classic_stage_key(sites, edge: EdgeSite) -> str:
-    """Return the canonical key for one staged consumer."""
+    """Return the canonical key for one staged consumer: bare for one consumer, else its route."""
     if edge not in sites.stage_edges:
         raise ValueError(f"{edge_site_spelling(edge)} is not a STAGE edge")
     consumers = tuple(dict.fromkeys(candidate[0] for candidate in sites.stage_edges))
-    return "STAGE" if len(consumers) == 1 else f"STAGE@{node_id_spelling(edge[0])}"
+    return "STAGE" if len(consumers) == 1 else f"STAGE@{sites.sites[edge[0]].path}"
 
 
 @dataclass(frozen=True)
@@ -207,13 +209,19 @@ def _target_memo(tile_op, target, slot: str) -> dict:
 
 
 def _computed_edge(node: Fold) -> bool:
-    return any(isinstance(edge, Fold) and edge.axis is None for edge in (node.a, *(channel.b for channel in node.channels)))
+    """Whether any operand is a computed cone rather than a gmem read.
+
+    ``as_slab``, not ``axis is None``: a slab ITERATES (its coordinates are its own axes) and
+    simply does not reduce, so the old test — written when a materialized edge was a bare ``Load``
+    and only a cone was a Fold — now calls every operand computed.
+    """
+    return any(edge.as_slab() is None for edge in node.operands)
 
 
 def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
     from . import staging  # noqa: PLC0415
 
-    return plan.is_warp and (_computed_edge(node) or len(node.channels) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs))
+    return plan.is_warp and (_computed_edge(node) or (len(node.operands) - 1) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs))
 
 
 def _kstep_refusal(k_axis, plan: Tile) -> str | None:
@@ -264,6 +272,8 @@ def _resolve_stage(
             seam=facts.seam,
             k_axis=facts.k_axis,
             producer=facts.producer,
+            producer_k=tile_op.axis_of(facts.producer.axis) if facts.producer is not None else None,
+            axes=tile_op.axes,
         )
     if plan.is_warp:
         return staging.resolve_warp_stage(
@@ -273,8 +283,9 @@ def _resolve_stage(
             target.max_dynamic_smem,
             tile_op.inputs,
             readings=packed,
+            k_axis=facts.k_axis,
         )
-    return staging.resolve_scalar_stage(node, placed, choice, tile_op.inputs, target.max_dynamic_smem)
+    return staging.resolve_scalar_stage(node, placed, choice, tile_op.inputs, target.max_dynamic_smem, facts.k_axis)
 
 
 def _fragment_agreements(
@@ -330,11 +341,11 @@ def _paired_budget_refusal(node: Fold, producer: Fold | None, placed: PlacedTile
     if atom.operand_dtype("c").nbytes == 2:
         c_regs += atom.atom_m * atom.atom_n // 32
     depth = max(1, stage.reg_depth)
-    channels = len(node.channels)
+    channels = len(node.operands) - 1
     consumer_c = channels * placed.reg_m * placed.reg_n * c_regs
     consumer = placed.reg_m * depth * a_regs + channels * (placed.reg_n * depth * b_regs + placed.reg_m * placed.reg_n * c_regs)
     producer_n = stage.bk_elems // atom.atom_n
-    producer_regs = placed.reg_m * a_regs + len(producer.channels) * (producer_n * b_regs + placed.reg_m * producer_n * c_regs)
+    producer_regs = placed.reg_m * a_regs + (len(producer.operands) - 1) * (producer_n * b_regs + placed.reg_m * producer_n * c_regs)
     required = max(consumer, consumer_c + producer_regs)
     available = min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // placed.block_threads)
     if required <= available:
@@ -440,9 +451,7 @@ class ClassicMaterialization:
         expected_tiles = {
             site
             for site, assignment in schedule.nodes.items()
-            if assignment.tile.is_tiled
-            and isinstance(source_tile.views[site], Reduction)
-            and source_tile.views[site].contraction is not None
+            if assignment.tile.is_tiled and source_tile.views[site].as_contraction() is not None
         }
         if set(self.tiles) != expected_tiles:
             raise ValueError("classic materialization must contain exactly the tiled node sites")
@@ -564,7 +573,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return self.domains.nodes[site]
             except KeyError:
                 raise ValueError(f"classic domains do not contain {node_id_spelling(site)}") from None
-        return (ProjectionSchedule(Tile()),) if isinstance(view, Projection) else (ReductionSchedule(Tile(), Reduce()),)
+        return (ProjectionSchedule(Tile()),) if view.axis is None else (ReductionSchedule(Tile(), Reduce()),)
 
     def edge_choices(self, edge: EdgeSite) -> tuple[EdgeSchedule, ...]:
         self.operand(edge)
@@ -823,9 +832,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         ):
             self._refuse("pick contains a value from another schedule family", site)
         view = self.tile_op.views[site]
-        if isinstance(view, Projection) and not isinstance(node, ProjectionSchedule):
+        if view.axis is None and not isinstance(node, ProjectionSchedule):
             self._refuse("projection site requires a projection schedule", site)
-        if isinstance(view, Reduction) and not isinstance(node, ReductionSchedule):
+        if view.axis is not None and not isinstance(node, ReductionSchedule):
             self._refuse("reduction site requires a reduction schedule", site)
         if isinstance(node.tile, PlacedTile):
             self._refuse("node choices cannot contain placed tile geometry", site)
@@ -909,7 +918,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return None
         stage = next(iter(edges.values())).stage if edges else Stage.direct()
         resolved_stage = None
-        if not isinstance(view, Reduction) or view.contraction is None or not node.tile.is_tiled:
+        if view.as_contraction() is None or not node.tile.is_tiled:
             if not stage.is_direct:
                 cache[key] = None
                 return None
@@ -954,7 +963,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 if isinstance(geometry, PlacedTile)
                 else ()
             ),
-            raster_eligible=node.tile.is_tiled and isinstance(view, Reduction) and view.contraction is not None,
+            raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
             producer_eligible=not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
         )
         cache[key] = support
@@ -994,7 +1003,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             node,
             edges,
             work=work,
-            raster_eligible=node.tile.is_tiled and isinstance(view, Reduction) and view.contraction is not None,
+            raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
         )
 
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:
@@ -1137,9 +1146,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         for site in self.tile_op.node_sites:
             view = self.tile_op.views[site]
             assignment = schedule.nodes[site]
-            if isinstance(view, Projection) and not isinstance(assignment, ProjectionSchedule):
+            if view.axis is None and not isinstance(assignment, ProjectionSchedule):
                 self._refuse("projection site requires a projection schedule", site)
-            if isinstance(view, Reduction) and not isinstance(assignment, ReductionSchedule):
+            if view.axis is not None and not isinstance(assignment, ReductionSchedule):
                 self._refuse("reduction site requires a reduction schedule", site)
             if isinstance(assignment.tile, PlacedTile):
                 self._refuse("node choices cannot contain placed tile geometry", site)
@@ -1246,9 +1255,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
 class ClassicScheduleCodec:
     """Strict wire boundary for complete classic schedules.
 
-    Kernel families are bare. A node family is bare when it has one applicable site and carries a
-    :class:`NodeId` suffix only when the family is ambiguous. STAGE is one transport decision per
-    consumer node and follows the same rule. Decoding accepts no aliases, missing direct values,
+    Kernel families are bare. A node family is bare when it has one applicable site and carries
+    its site's route (``@map.1/twist.1/inner``) only when the family is ambiguous. STAGE is one
+    transport decision per consumer node and follows the same rule. Decoding accepts no aliases, missing direct values,
     or unknown fields.
     """
 
@@ -1332,7 +1341,7 @@ class ClassicScheduleCodec:
         for site in self.tile_op.node_sites:
             view = self.tile_op.views[site]
             reduce = None
-            if isinstance(view, Reduction):
+            if view.axis is not None:
                 reduce = Reduce.parse(row[classic_node_key(self.tile_op, "REDUCE", site)], work)
             tile = (
                 resolve_site_tile(

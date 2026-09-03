@@ -778,9 +778,9 @@ def test_bare_families_aggregates_exact_sites_for_summary():
     """The golden-reproduction table summarizes one resolved value per schedule family."""
     from emmy.commands.eval import _bare_families
 
-    got = _bare_families({"TILE@n0": "f2x4", "WORK": "t16x8", "STAGE@n0.e0": "d3/smem-tma", "REDUCE@n0": "g2a"})
+    got = _bare_families({"TILE@map.1/inner": "f2x4", "WORK": "t16x8", "STAGE@map.1/inner": "d3/smem-tma", "REDUCE@map.1/inner": "g2a"})
     assert got == {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d3/smem-tma", "REDUCE": "g2a"}
-    assert _bare_families({"TILE@n0": "a", "TILE@n1": "b"}) == {"TILE": "a"}
+    assert _bare_families({"TILE@map.1/inner": "a", "TILE@map.2/inner": "b"}) == {"TILE": "a"}
 
 
 def test_offer_audit_flags_unrealized_entries_and_fall_through(monkeypatch, caplog):

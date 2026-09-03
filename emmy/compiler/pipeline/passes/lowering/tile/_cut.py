@@ -12,27 +12,18 @@ decode-plus-factors residue.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from itertools import islice
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure.closure import Closure, equivalent_clusters
 from emmy.compiler.ir.pure.fold import (
     Fold,
-    _expectation_bindings,
-    _operand_result_names,
-    deep_defines,
-    deep_reads,
-    is_contraction,
-    loaded_buffers,
 )
-from emmy.compiler.ir.pure.tree import walk
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Write
-from emmy.compiler.ir.stmt.body import _exposed_defines
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp, lower_with_output_specs
+from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.stmt import Assign, Body, Load, Write
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
@@ -60,17 +51,6 @@ class CutSite:
     #: replaces every sibling with workspace loads spelled through its own axes. Object sharing is
     #: the degenerate case (identity, with the identity correspondence).
     siblings: tuple = ()
-    #: Sibling stmts (``Load``/``Assign``, fold-free) the produced piece prepends to close the
-    #: cone — a body-member fold may capture host-provided scalars (attention's mask/scale
-    #: constants) that a plain-closure seam carries inside its cone. Identical across every
-    #: hosting body, or the seam is not offered.
-    providers: tuple = ()
-    #: Captured names this cone can only take from ANOTHER seam's workspace: ``(name, producer
-    #: Fold)`` pairs where the producer is itself an offered seam (attention's second statistics
-    #: pass reading the first pass's accumulator). Cutting this seam is only realizable as a
-    #: composed decision that also cuts every producer; the produced piece reads the name back
-    #: through the producer's workspace loads.
-    requires: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -108,7 +88,8 @@ def storage_frontier(node: Fold) -> Frontier | None:
     (each side takes the operand bodies it reads), keeping both pieces free of nested edges."""
     if not isinstance(node, Fold) or node.axis is not None or len(node.lift.results) != 1:
         return None
-    body = node.lift.body
+    lift = node.applied  # the operands' spelling: what the spliced sides read
+    body = lift.body
     if any(not isinstance(stmt, (Load, Assign)) for stmt in body):
         return None
     computed = {name for stmt in body if isinstance(stmt, Assign) for name in stmt.defines()}
@@ -129,18 +110,18 @@ def storage_frontier(node: Fold) -> Frontier | None:
     prefix_defs = {name for stmt in prefix for name in stmt.defines()}
     residue = tuple(stmt for stmt in body if id(stmt) not in prefix_ids)
     for stmt in residue:
-        crossing = deep_reads([stmt]) & prefix_defs
+        crossing = Body((stmt,)).ssa_uses & prefix_defs
         if crossing and (stmt is not decode or crossing != {frontier}):
             return None  # a residue stmt reads past the frontier — the waypoint does not separate
-    if node.lift.results[0] in prefix_defs:
+    if lift.results[0] in prefix_defs:
         return None
     result = get_dtype(decode.op.decodes)
 
     def side(stmts: tuple) -> tuple:
-        reads = deep_reads(list(stmts))
+        reads = Body(stmts).ssa_uses
         inlined: list = []
         for edge, members in zip(node.operands, spliced, strict=True):
-            needed = set(_operand_result_names(edge)) & reads
+            needed = set(edge.exposes) & reads
             if needed:  # only the cone the side reads — a dead spliced def would decline the decode hoist
                 inlined.extend(Body(members).backward_cone(tuple(sorted(needed))).members)
         return (*inlined, *stmts)
@@ -148,46 +129,21 @@ def storage_frontier(node: Fold) -> Frontier | None:
     return Frontier(name=frontier, producer=side(prefix), residue=side(residue), dtype=result)
 
 
-def _ordered_captures(stmts, scope: frozenset[str]) -> set[str]:
-    """Names read before any definition, walking nested bodies in program order. A definition
-    covers only the reads that FOLLOW it; loop-carried accumulators are live on entry. The
-    mirror direction keeps `_exposed_defines`' documented over-approximation: a definition inside
-    an EARLIER sibling's body still covers a later outer-scope read."""
-    captured: set[str] = set()
-    seen = set(scope)
-    for stmt in stmts:
-        reads = set(stmt.deps())
-        for expr in stmt.exprs():
-            reads |= expr.free_vars()
-        captured |= reads - seen
-        if not stmt.deps_deep:  # a term's ``deps()`` is already the scoped rollup — see ``Stmt.deps_deep``
-            inner = seen | stmt.binds_axes() | set(stmt.defines())
-            for body in stmt.nested():
-                carried = {child.name for child in Body(body).iter() if isinstance(child, Accum)}
-                captured |= _ordered_captures(body, frozenset(inner | carried))
-        seen |= _exposed_defines(stmt)
-    return captured
-
-
 def _external_reads(node: Fold) -> frozenset[str]:
-    """Every lowered statement's scope-aware SSA and axis captures, in PROGRAM ORDER: a definition
-    covers only the reads that follow it. A stored tree may hold one value object at two positions
-    (a projection member and, canonically shared, deep inside a contraction-operand cone); the
-    deeper position lowers inside its reduce loop, AFTER a shallower sibling read of the same
-    name. Order-blind resolution let that later definition mask the read, offered the seam as
-    closed over the name, and cut a piece whose reader had no definition — nvcc's undefined
-    identifier on DeepSeek-V4 post4096's composed-cut ``mean_reduce`` piece.
+    """Everything ``node`` needs supplied from outside — read off its DECLARATION.
 
-    Through the ONE reconstitution spelling, so a ``ProjectionRegion`` expands as materialization
-    expands it: a stored Fold reached as a term answers with ``deps()``, whose accounting
-    over-approximates a factored operand cone's internal spellings as reads — the expansion
-    lowers those cones and their definitions instead of asking."""
-    return frozenset(_ordered_captures(Body.coerce(lower_with_output_specs(node, ())), frozenset()))
+    Was: lower the term and walk the result for free names. That asked a term to re-derive what it
+    already states, re-lowered on every call, and returned a superset (names the term binds
+    internally, which every caller here discards). :attr:`Fold.free_axes` is the declaration —
+    the term's own axes unioned with its operands', asked of the term rather than derived here. A
+    term is closed: its values arrive through its operand edges, so its coordinates are all it
+    takes from outside."""
+    return node.free_axes
 
 
 def _closed_at(node: Fold, axes: tuple) -> bool:
-    """Whether ``node`` has no capture other than axes available at its incoming edge."""
-    return _external_reads(node) <= {axis.name for axis in axes}
+    """Whether ``node`` has no capture other than the axes (by name) in scope at its incoming edge."""
+    return _external_reads(node) <= set(axes)
 
 
 def _fed_store_dtype(tile: TileOp, consumer: Fold):
@@ -200,13 +156,13 @@ def _fed_store_dtype(tile: TileOp, consumer: Fold):
     if not tile.output_specs:  # the default store: the root's result to the kernel's one output
         tensor = next(iter(tile.outputs.values()), None)
         return None if tensor is None else tensor.dtype
-    dependent = set(_operand_result_names(consumer))
-    stmts = tuple(tile.op.lower())
+    dependent = set(consumer.exposes)
+    stmts = tile.op.lower(axes=tile.axes)
     for _ in stmts:
         grown = False
         for stmt in stmts:
-            defines = deep_defines(stmt)
-            if not defines <= dependent and deep_reads([stmt]) & dependent:
+            defines = Body((stmt,)).ssa_defs
+            if not defines <= dependent and Body((stmt,)).ssa_uses & dependent:
                 dependent |= defines
                 grown = True
         if not grown:
@@ -230,7 +186,7 @@ def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None, table: di
     carrier its cone computed in (only the ``a`` edge has a converting fill, so an f32 workspace on
     a ``b`` edge could feed no warp atom). A seam whose dtypes stay undetermined is not offered:
     the offer and the realization must agree, and a raise past the offer would kill the compile."""
-    names = _operand_result_names(node)
+    names = node.exposes
     if consumer is not None:
         dtype = _fed_store_dtype(tile, consumer)
         return None if dtype is None else (dtype,) * len(names)
@@ -240,130 +196,15 @@ def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None, table: di
     return dtypes
 
 
-def _environments(root: Fold) -> dict[int, list[tuple[Fold, ...]]]:
-    """Each stored Fold occurrence's lexical environment, innermost scope first.
-
-    Operand edges and body members have the same lexical scoping. The walk follows every tree
-    occurrence, including shared nodes, because provider closure must prove that all occurrences
-    resolve to the same sources before one placement seam may represent them.
-    """
-    environments: dict[int, list[tuple[Fold, ...]]] = {}
-
-    def visit(node: Fold, outer: tuple[Fold, ...]) -> None:
-        inner = (node, *outer)
-        for child in (*node.operands, *node.lift.body):
-            for stored in _stored_folds(child):
-                environments.setdefault(id(stored), []).append(inner)
-                visit(stored, inner)
-
-    visit(root, ())
-    return environments
-
-
-def _stored_folds(member):
-    """``member`` itself when it is a Fold, else every Fold stored in its nested bodies.
-
-    A plain statement binds axes, not SSA definitions, so it is not a resolution scope — but it can
-    HOLD a stored fold (a ``ProjectionRegion`` keeps its cones), and one reached only that way had
-    no environment at all, which drops its seam. ``ir.fold_tree.walk`` alternates node-wise and
-    statement-wise for the same reason."""
-    if isinstance(member, Fold):
-        yield member
-        return
-    for body in member.nested():
-        for stmt in body:
-            yield from _stored_folds(stmt)
-
-
-def _closed_in(node: Fold, environment: tuple[Fold, ...], axis_names: set[str]) -> tuple[tuple, tuple] | None:
-    """Resolve one occurrence's captures outward through its lexical environment."""
-    needed = set(_external_reads(node)) - axis_names
-    levels: list[tuple] = []
-    requires: list = []
-    for scope in environment:
-        if not needed:
-            break
-        defined: dict[str, object] = {}
-        for stmt in scope.lift.body:
-            for name in stmt.defines():
-                defined[name] = stmt
-        for edge in scope.operands:
-            for name in _operand_result_names(edge):
-                defined.setdefault(name, edge)
-        order = {id(stmt): position for position, stmt in enumerate(scope.lift.body)}
-        providers: list = []
-        outward: set[str] = set()
-        resolved: set[str] = set()
-        queue = sorted(needed)
-        while queue:
-            name = queue.pop()
-            if name in resolved:
-                continue
-            resolved.add(name)
-            producer = defined.get(name)
-            if producer is None:
-                outward.add(name)
-                continue
-            if producer is node:
-                return None
-            if isinstance(producer, Fold):
-                requires.append((name, producer))
-                continue
-            if not isinstance(producer, (Load, Assign)):
-                return None
-            if not any(chosen is producer for chosen in providers):
-                providers.append(producer)
-            queue.extend(sorted(deep_reads([producer]) - axis_names - resolved))
-        providers.sort(key=lambda stmt: order.get(id(stmt), -1))
-        levels.append(tuple(providers))
-        needed = outward
-    if needed:
-        return None
-    providers = tuple(stmt for level in reversed(levels) for stmt in level)
-    return providers, tuple(sorted(requires, key=lambda pair: pair[0]))
-
-
-def _provider_closure(node: Fold, scopes, environments: list[tuple[Fold, ...]]) -> tuple[tuple, tuple] | None:
-    """Close a capturing seam identically at every stored occurrence, or return ``None``."""
-    if not environments:
-        return None
-    axis_names = {axis.name for scope in scopes for axis in scope}
-    closures = []
-    for environment in environments:
-        closure = _closed_in(node, environment, axis_names)
-        if closure is None:
-            return None
-        closures.append(closure)
-    first_providers, first_requires = closures[0]
-    for providers, requires in closures[1:]:
-        aligned = providers == first_providers and len(requires) == len(first_requires)
-        if not aligned or any(
-            a != b or producer_a is not producer_b for (a, producer_a), (b, producer_b) in zip(requires, first_requires, strict=True)
-        ):
-            return None  # occurrences resolving to different sources cannot share one seam
-    provided = {name for stmt in first_providers for name in stmt.defines()}
-    provided.update(name for name, _ in first_requires)
-    outside = (set(_external_reads(node)) | {name for stmt in first_providers for name in deep_reads([stmt])}) - provided
-    if any(outside - {axis.name for axis in scope} for scope in scopes):
-        return None
-    return first_providers, first_requires
-
-
 def _dtype_table(tile: TileOp) -> dict[int, tuple]:
-    """Each stored edge's inferred result dtypes, typed in its own lexical scope — and only where
-    every occurrence agrees.
+    """Each stored edge's inferred result dtypes, keyed by edge identity.
 
-    ``edge_dtypes`` keys its cache by edge identity AND the dtypes of that occurrence's captures,
-    because one shared cone under two scopes has two answers. A seam stands for ONE value, so a
-    node whose occurrences disagree has no determined workspace and simply does not appear here;
-    :func:`_workspace_dtypes` then declines to offer it, which is the same answer provider closure
-    gives when the occurrences spell different sources."""
-    cache: dict[tuple, tuple] = {}
+    One edge, one answer: a term is CLOSED, so its values arrive through its own operand edges and
+    it types the same wherever it occurs. The occurrence-agreement filter this used to apply — one
+    shared cone under two scopes having two answers — cannot arise once no term captures."""
+    cache: dict[int, tuple] = {}
     edge_dtypes(tile.op, tile.inputs, cache)
-    answers: dict[int, set[tuple]] = {}
-    for (node_id, _captures), dtypes in cache.items():
-        answers.setdefault(node_id, set()).add(dtypes)
-    return {node_id: next(iter(seen)) for node_id, seen in answers.items() if len(seen) == 1}
+    return dict(cache)
 
 
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
@@ -371,50 +212,33 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     only by object sharing. A contraction's operand edges are seams too — cutting one materializes
     the cone feeding the operand into its own kernel and the contraction reads it back as an
     ordinary load — and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`).
-    A body-member fold capturing host-provided names is offered through provider closure
-    (:func:`_provider_closure`); one whose closure needs another seam's workspace is offered as a
-    dependent seam and drops out unless that producer is offered too."""
+    A seam is offered only where the cone is closed at the axes of every occurrence; a term is
+    closed by construction, so that gate names a malformed tree rather than a capture to resolve."""
     all_sites = sites(tile.op)
     store_dtype_consumers = {
         id(edge): site.node
         for site in all_sites
-        if is_contraction(site.node)
-        for edge in (site.node.a, *(channel.b for channel in site.node.channels))
-        if isinstance(edge, Fold)
+        if site.node.as_contraction() is not None
+        for edge in site.node.operands
+        if isinstance(edge, Fold) and edge.as_slab() is None
     }
-    # A computed twisted expectation edge becomes a synthesized contraction operand as soon as
-    # this placement fork materializes it. Preserve the same public store dtype the derived
-    # contraction needs instead of exposing the producer's f32 reduction carrier as its B slab.
-    for site in all_sites:
-        if not isinstance(site.node, Fold):
-            continue
-        for _, _, edge in _expectation_bindings(site.node):
-            if isinstance(edge, Fold):
-                store_dtype_consumers[id(edge)] = site.node
-    outer = (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None))
+    outer = tuple(axis.name for axis in (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None)))
     occurrence_axes: dict[int, list[tuple]] = {}
-    for visit in islice(walk(tile.op, outer), 1, None):
-        occurrence_axes.setdefault(id(visit.node), []).append(visit.axes)
-    environments: dict[int, list[tuple[Fold, ...]]] = {}
+    for site in all_sites[1:]:
+        occurrence_axes.setdefault(id(site.node), []).append((*outer, *site.scope))
     dtype_table: dict[int, tuple] = {}
     if isinstance(tile.op, Fold):
-        environments = _environments(tile.op)
         dtype_table = _dtype_table(tile)
     out: list[CutSite] = []
     seen: set[int] = set()
     for site in family_sites("PLACE", all_sites):
         node = site.node
         scopes = occurrence_axes.get(id(node), ())
-        if not isinstance(node, Fold) or id(node) in seen or not scopes:
+        if not isinstance(node, Fold) or node.as_slab() is not None or id(node) in seen or not scopes:
             continue
-        providers: tuple = ()
-        requires: tuple = ()
         if not all(_closed_at(node, scope) for scope in scopes):
-            closure = _provider_closure(node, scopes, environments.get(id(node), []))
-            if closure is None:
-                continue
-            providers, requires = closure
-        if node.observed:
+            continue
+        if node.observe is not None:
             # An observed fold's per-step results exist only inside its stream — a cut would
             # separate the scan from its streamed boundary store, which no piece can then spell.
             continue
@@ -428,7 +252,9 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         if dtypes is None:
             continue
         seen.add(id(node))
-        axes = tuple({axis.name: axis for scope in scopes for axis in scope}.values())
+        # A seam is evaluated over the coordinates its term READS, not the whole ambient scope: an
+        # output sweep the grid carries for a sibling's sake is not one of this workspace's axes.
+        axes = tuple(tile.axis_of(name) for name in dict.fromkeys(name for scope in scopes for name in scope) if name in node.free_axes)
         out.append(
             CutSite(
                 node=node,
@@ -436,27 +262,9 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
                 axes=axes,
                 dtypes=dtypes,
                 frontier=frontier,
-                providers=providers,
-                requires=requires,
             )
         )
-    # A dependent seam stands only while every required producer is itself offered; dropping one
-    # can orphan the next link of a chain, so filter to the fixpoint.
-    while True:
-        offered = {id(seam.node) for seam in out}
-        kept = [seam for seam in out if all(id(producer) in offered for _, producer in seam.requires)]
-        if len(kept) == len(out):
-            break
-        out = kept
     return _cluster_value_seams(out, {id(seam.node): seam.frontier is None and store_dtype_consumers.get(id(seam.node)) for seam in out})
-
-
-def _closure_key(seam: CutSite) -> tuple:
-    """What a seam closes over, as a comparable value: its provider stmts and the SOURCES its
-    requirements name. Two cones can be alpha-equivalent and still read different sources — a
-    capture is a free name, and one host may define ``x = sum(a)`` where the other defines
-    ``x = sum(b)`` — so the closure is part of the value, and clustering compares it."""
-    return (seam.providers, tuple((name, id(producer)) for name, producer in seam.requires))
 
 
 def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) -> tuple[CutSite, ...]:
@@ -468,42 +276,37 @@ def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) ->
     the cluster's first seam becomes the decision for all of them, carrying each duplicate as a
     sibling with its positional capture correspondence (:class:`CutSite`). Membership reuses the
     closure alpha-equivalence the semiring canonicalization already trusts
-    (:func:`~emmy.compiler.ir.pure.closure.equivalent_clusters`); a member joins only when its
+    (:meth:`~emmy.compiler.ir.pure.fold.Fold.canonical`); a member joins only when its
     paired axes agree on extent and window, its workspace dtypes match, and every workspace axis
     is a mapped capture — otherwise it stays its own seam."""
-    # A seam ANOTHER seam requires never joins a cluster, as representative or as member. A
-    # dependent's piece reads its producer's workspace by the name that producer binds, and
-    # clustering re-points a value at the representative — whose result names are its own. Leaving
-    # a required producer alone keeps the requirement pointing at a seam that still exists and
-    # still binds the name the dependent reads.
-    required = {id(producer) for seam in seams for _, producer in seam.requires}
-    eligible = [index for index, seam in enumerate(seams) if operand_of.get(id(seam.node)) and id(seam.node) not in required]
+    eligible = [index for index, seam in enumerate(seams) if operand_of.get(id(seam.node))]
     if len(eligible) < 2:
         return tuple(seams)
-    scoped = {index: Closure.over_edge(seams[index].node, tuple(axis.name for axis in seams[index].axes)) for index in eligible}
+    captured = {index: tuple(axis.name for axis in seams[index].axes) for index in eligible}
+    # The seam's own capture correspondence, and the alpha-quotient taken under it: an operand cone
+    # is a TERM, so it quotients as one (``Fold.canonical``) rather than as a scoped lambda.
+    scoped = {index: tuple(axis for axis in captured[index] if axis in seams[index].node.free_axes) for index in eligible}
+    clusters: dict[object, list[int]] = {}
+    for index in eligible:
+        clusters.setdefault(seams[index].node.canonical(), []).append(index)
     drop: set[int] = set()
     merged: dict[int, CutSite] = {}
-    for cluster in equivalent_clusters(scoped[index] for index in eligible):
-        rep_index, *rest = (eligible[position] for position in cluster)
+    for rep_index, *rest in clusters.values():
         if not rest:
             continue
         rep = seams[rep_index]
-        rep_params = scoped[rep_index].axes
+        rep_params = scoped[rep_index]
         rep_axes = {axis.name: axis for axis in rep.axes}
         if {axis.name for axis in _workspace_axes(rep, rep.node)} - set(rep_params):
             continue  # a workspace axis with no capture to map has no sibling spelling
         siblings = []
         for member_index in rest:
             member = seams[member_index]
-            member_params = scoped[member_index].axes
+            member_params = scoped[member_index]
             member_axes = {axis.name: axis for axis in member.axes}
-            aligned = (
-                member.dtypes == rep.dtypes
-                and _closure_key(member) == _closure_key(rep)
-                and all(
-                    (a := rep_axes[rn]).extent == (b := member_axes[mn]).extent and a.window == b.window
-                    for rn, mn in zip(rep_params, member_params, strict=True)
-                )
+            aligned = member.dtypes == rep.dtypes and all(
+                (a := rep_axes[rn]).extent == (b := member_axes[mn]).extent and a.window == b.window
+                for rn, mn in zip(rep_params, member_params, strict=True)
             )
             if not aligned:
                 continue
@@ -557,19 +360,27 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     Static unit axes consume no additional storage, but retain the producer's schedule geometry.
     Dropping one lets a later split axis take its place as a contraction fragment axis even though
     operand indices still read it as the outer partition coordinate."""
-    captures = _external_reads(produced)
-    return tuple(axis for axis in seam.axes if axis.name in captures or (axis.extent.is_static and axis.extent.as_static() == 1))
+    read = _external_reads(produced)
+    return tuple(axis for axis in seam.axes if axis.name in read or (axis.extent.is_static and axis.extent.as_static() == 1))
+
+
+def _buffer_reads(node: Fold) -> set[str]:
+    """The gmem buffers ``node``'s STORED tree reads — every lift body's loads, through the operand
+    edges (a slab's body is its one load). Read off the tree, never by lowering it."""
+    out = {load.input for load in node.lift.body.loads}
+    for edge in node.operands:
+        out |= _buffer_reads(edge)
+    return out
 
 
 def _piece_inputs(root: Node, fold: Fold, first: tuple[str, ...] = ()) -> list[str]:
     """A piece's graph inputs: its workspaces, then every buffer of ``root``'s the piece reads.
 
-    The read set is the STORED tree's (:func:`loaded_buffers`), not the lowered body's, because the
-    kernel this node becomes is materialized from that tree. A Fold a region keeps as a term hides
-    its operand edges from a lowered-body walk, so declaring the lowered view named fewer inputs
-    than the kernel went on to read; the workspace producers then had no consumer edge, were pruned
-    as orphans, and the launch asked for a buffer nothing had allocated."""
-    reads = loaded_buffers(fold)
+    The read set is the STORED tree's (:func:`_buffer_reads`), walked through the operand edges a
+    body cannot reach. A walk that stopped at the stored body named fewer inputs than the kernel
+    went on to read; the workspace producers then had no consumer edge, were pruned as orphans,
+    and the launch asked for a buffer nothing had allocated."""
+    reads = _buffer_reads(fold)
     return [*first, *(name for name in root.inputs if name in reads)]
 
 
@@ -585,23 +396,6 @@ def output_map(root: Node) -> dict[str, str]:
     return {name: f"{name}__placed" for name in root.buffer_names()}
 
 
-def _requires_order(seams) -> tuple:
-    """``seams`` with every required producer ahead of its dependents; a producer absent from the
-    composed decision is left for the realization's per-name error. Requirement chains follow SSA
-    definition order, so the graph is acyclic by construction."""
-    present = {id(seam.node) for seam in seams}
-    remaining = list(seams)
-    ordered: list = []
-    placed: set[int] = set()
-    while remaining:
-        step = [seam for seam in remaining if all(id(producer) in placed or id(producer) not in present for _, producer in seam.requires)]
-        assert step, "cyclic seam requirements cannot arise from SSA definition order"
-        ordered.extend(step)
-        placed.update(id(seam.node) for seam in step)
-        remaining = [seam for seam in remaining if not any(seam is chosen for chosen in step)]
-    return tuple(ordered)
-
-
 def _producer_order(pieces) -> list:
     """Topologically order cut producers by the workspaces their stored Fold reads.
 
@@ -614,7 +408,7 @@ def _producer_order(pieces) -> list:
     ordered = []
     available: set[str] = set()
     while remaining:
-        ready = [piece for piece in remaining if loaded_buffers(piece[1]) & workspaces <= available]
+        ready = [piece for piece in remaining if _buffer_reads(piece[1]) & workspaces <= available]
         assert ready, "strict Fold containment makes the cut-workspace dependency graph acyclic"
         ordered.extend(ready)
         available.update(buffer for *_, buffers in ready for buffer in buffers)
@@ -644,55 +438,39 @@ def realize(
     cut never erases an earlier cross-CTA decision: every piece inherits the parent's explicit or
     sliced-axis split receipt."""
     tile: TileOp = root.op
-    split_consumed = tile.split_consumed or carries_partition(tile.op)
+    split_consumed = tile.split_consumed or carries_partition(tile)
     pieces = []
-    workspace_loads: dict[int, tuple] = {}
-    for seam in _requires_order(seams):
+    for seam in seams:
         child = seam.node
         front = seam.frontier
         if front is not None:
             names = (front.name,)
-            produced = Fold.projection(body=Body(front.producer), results=names)
+            produced = Fold(operands=(), lift=Lambda.closing((), Body.coerce(Body(front.producer)), names))
         else:
-            names = _operand_result_names(child)
+            names = child.exposes
             produced = child
-        if seam.providers or seam.requires:
-            # Provider closure: the piece carries the host-provided scalar chain, and every
-            # required name arrives through its producer seam's workspace load — the same Load
-            # objects the replacement spells, so the two spellings cannot drift apart.
-            prefix = list(seam.providers)
-            for name, producer in seam.requires:
-                producer_loads = workspace_loads.get(id(producer))
-                if producer_loads is None:
-                    raise ValueError(f"seam {seam.spelling!r} requires {name!r} from a producer seam absent from this composed cut")
-                # Whatever binds the name, taken by the name it BINDS: a plain workspace ``Load``,
-                # or — when the producer cut at a storage frontier — the projection wrapping the
-                # raw load and its decode residue. Matching on ``Load`` alone skipped the frontier
-                # form and left the requirement unbound in the piece.
-                supplied = [entry for entry in producer_loads if name in _operand_result_names(entry)]
-                if not supplied:
-                    raise ValueError(f"seam {seam.spelling!r} requires {name!r}, which its producer seam does not bind")
-                prefix.extend(supplied)
-            produced = Fold.projection(body=Body((*prefix, produced)), results=names)
         axes = _workspace_axes(seam, produced)
         index = tuple(Var(axis.name) for axis in axes)
         token = digest(tile.identity_key(structural=False) or "", seam.spelling)[:10]
         buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
 
-        loads = tuple(Load(name=name, input=buffer, index=index) for name, buffer in zip(names, buffers, strict=True))
+        # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
+        # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
+        loads = tuple(Fold.slab(Load(name=name, input=buffer, index=index)) for name, buffer in zip(names, buffers, strict=True))
         if front is not None:
-            raw = replace(loads[0], dtype=front.dtype)
-            loads = (Fold.projection(body=Body((raw, *front.residue)), results=child.lift.results),)
+            # The raw storage read at the frontier's dtype stays INLINE under its decode residue —
+            # the storage-decode cone the operand readers recognize (a raw ``b8`` fill), not a
+            # projection over a slab.
+            raw = Load(name=names[0], input=buffers[0], index=index, dtype=front.dtype)
+            loads = (Fold(operands=(), lift=Lambda.closing((), Body.coerce(Body((raw, *front.residue))), child.lift.results)),)
         replacements = {id(child): loads}
-        workspace_loads[id(child)] = loads
         for sibling, pairs in seam.siblings:
             # A clustered duplicate reads the SAME workspace, spelled through its own captured
             # axes via the correspondence the clustering proved.
             mapping = dict(pairs)
             sibling_index = tuple(Var(mapping[axis.name]) for axis in axes)
             replacements[id(sibling)] = tuple(
-                Load(name=name, input=buffer, index=sibling_index)
-                for name, buffer in zip(_operand_result_names(sibling), buffers, strict=True)
+                Fold.slab(Load(name=name, input=buffer, index=sibling_index)) for name, buffer in zip(sibling.exposes, buffers, strict=True)
             )
         pieces.append((seam, produced, axes, index, token, names, buffers, replacements))
 
@@ -705,17 +483,7 @@ def realize(
     produced_pieces = []
     for seam, produced, axes, index, token, names, buffers, replacements in pieces:
         others = {target: loads for target, loads in everything.items() if target not in replacements}
-        piece = _replace_fold(produced, others) if others else produced
-        # The bound is the piece's REAL placement (its workspace axes) — what the produced kernel
-        # binds — not the wider seam.axes. Two caveats on what this proves: the check reads the
-        # reconstituted lowering while ``_piece_inputs`` reads the stored tree's ``loaded_buffers``
-        # (two views of one piece), and observer-only captures sit outside both.
-        dangling = _external_reads(piece) - {axis.name for axis in axes}
-        assert not dangling, f"cut piece for seam {seam.spelling!r} reads {sorted(dangling)} before any definition"
-        produced_pieces.append((seam, piece, axes, index, token, names, buffers))
-    outer_names = {axis.name for axis in tile.place.free} | {store.sweep.name for store in tile.output_specs if store.sweep is not None}
-    dangling = _external_reads(parent_fold) - outer_names
-    assert not dangling, f"cut consumer of {tile.name!r} reads {sorted(dangling)} before any definition"
+        produced_pieces.append((seam, _replace_fold(produced, others) if others else produced, axes, index, token, names, buffers))
 
     fragment = _input_fragment(match, root)
     all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
@@ -730,6 +498,7 @@ def realize(
             # different cut levels would launch one kernel twice.
             name=f"{tile.name}__place_{token}",
             place=Placement(free=axes),
+            axes=tile.axes,
             output_specs=tuple(
                 OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)
             ),
@@ -739,7 +508,7 @@ def realize(
         producer = replace(producer, knobs=consume_kernel_row(producer.knobs))
         shape = tuple(axis.extent for axis in axes)
         workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
-        reads = loaded_buffers(produced)
+        reads = _buffer_reads(produced)
         fragment.add_node(
             op=producer,
             inputs=_piece_inputs(root, produced, tuple(buffer for buffer in all_buffers if buffer in reads)),
@@ -755,6 +524,7 @@ def realize(
         op=parent_fold,
         name=tile.name,
         place=tile.place,
+        axes=tile.axes,
         output_specs=parent_stores,
         placement_decided=placement_decided,
         split_consumed=split_consumed,

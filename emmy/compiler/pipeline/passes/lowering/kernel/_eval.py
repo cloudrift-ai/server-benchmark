@@ -27,7 +27,7 @@ from emmy.compiler.ir.kernel.ir import (
     Reassign,
 )
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.stmt import Assign, Load, Select, SelectBranch, Stmt
+from emmy.compiler.ir.stmt import Assign, Const, Load, Select, SelectBranch, Stmt
 
 
 @dataclass(frozen=True)
@@ -297,6 +297,8 @@ def evaluate(
                 targets.get(stmt.name),
                 (1, 1),
             )
+        elif isinstance(stmt, Const):
+            emitted, value = [stmt], Value.uniform(stmt.name)
         elif isinstance(stmt, Select):
             if axes and any(set(axes) & branch.select.free_vars() for branch in stmt.branches):
                 stmt = coordinate_select(stmt, axes)
@@ -305,7 +307,7 @@ def evaluate(
             raise ValueError(f"fragment Lambda cannot evaluate {type(stmt).__name__}")
         body.extend(emitted)
         env[stmt.defines()[0]] = value
-    results = tuple(env[result] if isinstance(result, str) else Value.uniform(result) for result in lam.results)
+    results = tuple(env[result] for result in lam.results)
     return body, results, env
 
 

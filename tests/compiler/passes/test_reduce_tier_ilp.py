@@ -12,12 +12,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Reduce
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Assign, Load
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import Ctx, _tile_reduce_axis
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 
 
 def _names_read(stmts) -> set[str]:
@@ -32,16 +31,17 @@ def _names_read(stmts) -> set[str]:
 
 
 def test_an_external_ssa_read_is_shared_by_every_ilp_copy() -> None:
-    body = Body(
-        (
-            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
-            Assign(name="scaled", op="multiply", args=("x_e", "alpha")),  # ``alpha`` defined ahead of the loop
-            Accum(name="acc", value="scaled", op="add", axes=("k",)),
-        )
+    from tests.compiler.terms import projection, reduction, slab
+
+    # ``alpha`` is a per-row value the fold closes over through an operand term — hoisted ahead
+    # of the loop by the lowering, one binding every ILP copy reads.
+    alpha = projection((), (Load(name="alpha", input="s", index=(Var("m"),)),), results=("alpha",))
+    scaled = Assign(name="acc__v", op="multiply", args=("x_e", "alpha"))
+    red = reduction("k", (slab("x_e", "x", "m", "k"), alpha), (scaled,), ("acc",))
+    axes = (Axis("m", 4), Axis("k", 128))
+    sched = SimpleNamespace(
+        get=lambda *_: None, tile=SimpleNamespace(axes=axes), axis_of=lambda name: next(a for a in axes if a.name == name)
     )
-    red = fold_from_loop(Loop(axis=Axis("k", 128), body=body, role=AxisRole.PLANAR))
-    assert red is not None
-    sched = SimpleNamespace(get=lambda *_: None)
     ctx = Ctx(grid=(Axis("m", 4),), inputs={}, output="o", sched=sched)
 
     _state, fold, _close, _lane = _tile_reduce_axis(red, Reduce.of(reg=2), ctx, tail=(), out_val="acc")

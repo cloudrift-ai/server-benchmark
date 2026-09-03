@@ -24,7 +24,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from emmy.compiler.ir.pure.carrier import exp_combine_states, exp_merge
 from emmy.compiler.trace.torch import trace_module
 from tests.compiler.helpers import requires_cuda
 
@@ -69,23 +68,12 @@ class _Softmax(torch.nn.Module):
         return torch.softmax(x, dim=-1)
 
 
-def test_exp_family_generator_builds_asymmetric_monoid() -> None:
-    # state (m, d), partial (s); the asymmetric LSE monoid's streaming merge folds exactly the
-    # injected score, and the cross-partition state⊕state combine is generated from the same spec.
-    # The merge's external read set is read through the ordinary per-stmt ``deps()`` — a generated
-    # program is a run of ordinary stmts, so nothing has to surface its reads specially.
-    merge = exp_merge(("m", "d"), ("s", 1.0), key="m")
-    reads = {r for st in merge for r in st.deps()} - {st.name for st in merge} - {"m", "d"}
-    assert reads == {"s"}
-    assert exp_combine_states(("m", "d"), ("m__o", "d__o")), "combine_states must be derived for the asymmetric LSE monoid"
-
-
 @requires_cuda
 @pytest.mark.parametrize("shape", [(4, 128), (8, 256), (2, 64), (2, 4, 128)])
 def test_online_softmax_pairing_reaches_the_kernel(shape) -> None:
     """The pairing must have fired: ONE fused kernel streaming the twisted carrier, whose signature
-    is the dissolved exp-family merge's rescale temps (``<state>__tN = expf(...)`` — ``exp_merge``
-    namespaces them on the carried state, so they are stable across SSA renaming).
+    is the recipe's rescale factors (``<score>__alpha = expf(...)`` and ``__beta`` — ``Fold.merge``
+    namespaces them on the arriving name, so they are stable across SSA renaming).
 
     This is the only assertion in the tree that the rewrite reaches CUDA. No knob names the fusion,
     so the corpus cases (``online-softmax-*``) author the post-fusion schedule whether or not it
@@ -99,7 +87,7 @@ def test_online_softmax_pairing_reaches_the_kernel(shape) -> None:
     graph = trace_module(_Softmax().cpu(), (torch.randn(*shape),))
     compiled = CudaBackend().compile(graph)
     srcs = [getattr(node.op, "kernel_source", "") for node in compiled.nodes.values()]
-    assert any(re.search(r"__t\d+ = expf\(", src) for src in srcs), "online-softmax pairing did not fire"
+    assert any(re.search(r"__(alpha|beta) = expf\(", src) for src in srcs), "online-softmax pairing did not fire"
 
 
 # --------------------------------------------------------------------------- #

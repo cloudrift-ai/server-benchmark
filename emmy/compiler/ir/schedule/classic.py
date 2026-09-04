@@ -502,6 +502,13 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     _restricted_kernel_set: frozenset[KernelSchedule] | None = field(default=None, repr=False, compare=False)
     _restricted_nodes: Mapping[NodeId, tuple[NodeSchedule, ...]] | None = field(default=None, repr=False, compare=False)
     _restricted_edges: Mapping[EdgeSite, tuple[EdgeSchedule, ...]] | None = field(default=None, repr=False, compare=False)
+    #: Membership indexes over the two tuples above. The tuples keep enumeration ORDER, which
+    #: decides every tie; these answer ``in``, which a composition step asks once per site and
+    #: once per incident edge. Scanning the tuples instead spent 29% of one SDPA_L schedule walk
+    #: inside the choices' generated ``__eq__``. ``_restricted_kernel_set`` indexes the kernels
+    #: the same way.
+    _restricted_node_sets: Mapping[NodeId, frozenset[NodeSchedule]] | None = field(default=None, repr=False, compare=False)
+    _restricted_edge_sets: Mapping[EdgeSite, frozenset[EdgeSchedule]] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(getattr(self.tile_op, "op", None), Fold):
@@ -552,6 +559,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 object.__setattr__(self, "_restricted_kernel_set", frozenset(kernels))
                 object.__setattr__(self, "_restricted_nodes", nodes)
                 object.__setattr__(self, "_restricted_edges", edges)
+                object.__setattr__(self, "_restricted_node_sets", frozendict({site: frozenset(c) for site, c in nodes.items()}))
+                object.__setattr__(self, "_restricted_edge_sets", frozendict({edge: frozenset(c) for edge, c in edges.items()}))
             if self._allowed_works is None:
                 assert self._restricted_kernels is not None
                 object.__setattr__(
@@ -673,6 +682,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             _restricted_kernel_set=None,
             _restricted_nodes=None,
             _restricted_edges=None,
+            _restricted_node_sets=None,
+            _restricted_edge_sets=None,
         )
 
     @property
@@ -846,8 +857,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             self._pins is not None
             and self._restricted_nodes is not None
             and (
-                node not in self._restricted_nodes[site]
-                or any(choice not in self._restricted_edges[edge] for edge, choice in pick.edges.items())
+                node not in self._restricted_node_sets[site]
+                or any(choice not in self._restricted_edge_sets[edge] for edge, choice in pick.edges.items())
             )
         ):
             self._refuse(self._node_restriction_refusal(site, node) or "pick is outside the schedule restriction", site)
@@ -865,16 +876,35 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         nodes = {**self.assignment.nodes, site: support.node}
         axes = {**self._axes, **{claim.name: (claim.tile, claim.units) for claim in support.axes}}
         fragments = {**self._fragments, **{(claim.role, claim.edge): claim.value for claim in support.fragments}}
-        return replace(
-            self,
+        return self._advance(
             position=self.position + 1,
             _assignment=Schedule(None, nodes, {**self.assignment.edges, **support.edges}),
             _work=work,
-            _axes=axes,
-            _fragments=fragments,
+            _axes=frozendict(axes),
+            _fragments=frozendict(fragments),
             _raster_eligible=self._raster_eligible or support.raster_eligible,
             _producer_eligible=self._producer_eligible and support.producer_eligible,
         )
+
+    def _advance(self, **changed) -> ClassicScheduleContext:
+        """This context with the fields ONE composition step changes, skipping ``__post_init__``.
+
+        Everything that ``__post_init__`` derives or proves belongs to ``tile_op``, ``domains`` or
+        ``_pins`` — the node order covering every site exactly once, the domains covering it, the
+        restriction tables and the works they allow — and a step touches none of the three, so a
+        step re-derives only conclusions it already carries. Its own remaining checks do not reach a
+        step either: the position bound holds because ``_extend_local`` advances only off a
+        ``next_site``, and the stage restriction is validated at position 0. The caller passes
+        ``_axes`` / ``_fragments`` already frozen, which is the one normalization lost with the
+        skipped ``__post_init__``. ``replace`` re-ran all of it once per composition step —
+        43.5k times for one SDPA_L schedule walk.
+
+        The public ``extend`` keeps the validating path: a pick decoded from a golden row or handed
+        in by a caller has proved none of this."""
+        advanced = object.__new__(type(self))
+        advanced.__dict__.update(self.__dict__)
+        advanced.__dict__.update(changed)
+        return advanced
 
     def _local_support(
         self,

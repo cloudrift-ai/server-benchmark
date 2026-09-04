@@ -69,6 +69,9 @@ one compile regime everywhere in the repo.
 
 Checked-in model goldens are not exercised by the per-commit test suite. The nightly `onboard-model` workflow owns
 their repository validation, strict decode, and exact-GPU replay so model qualification stays with its GPU evidence.
+The decode half alone is also reachable off the default lane, on any machine: `make test-goldens` strictly decodes
+every checked-in golden file (one case per file) against the current compiler, which is how you see a card's rows go
+green again after a tuning round re-records them.
 
 Or for a specific test file:
 
@@ -167,11 +170,13 @@ Quick test models / scripts (for local iteration):
 ## Key Make Targets
 
 - `make setup` — create venv and install dependencies (includes ruff)
-- `make test` — run `pytest` using the venv (skips `perf`-marked tests; see the `tests/perf` architecture). Compiles
+- `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests). Compiles
   kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
   `make bench-kernels`)
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
+- `make test-goldens` — strict-decode every checked-in golden against the current compiler (off the default lane,
+  no GPU needed; a stale row is detectable anywhere, re-recording it is what needs the card)
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
   xdist workers on; commit the result when the balance has drifted
 - `make lint` — run `ruff check` and `ruff format --check`

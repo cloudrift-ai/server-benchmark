@@ -8,7 +8,7 @@ index simplifier treats it as opaque and no value can meet an integer rule by ac
 
 :class:`Value` is the authoring surface — the language a definition is written in, and the language
 a test states an expected reading in. It builds IR and knows nothing about sympy; deciding what a
-cone MEANS is :mod:`~emmy.compiler.ir.symbolic`'s job.
+cone MEANS is ``Expr.symbolic`` / ``Body.linearize``'s job.
 """
 
 from __future__ import annotations

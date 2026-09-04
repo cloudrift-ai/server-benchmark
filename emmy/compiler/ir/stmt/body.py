@@ -65,6 +65,27 @@ class Cone:
         return Body(self.members).loads
 
 
+@dataclass(frozen=True)
+class Factored:
+    """One product split by axis variance — what :meth:`Body.factor` reports.
+
+    ``invariant`` and ``varying`` are ATOM NAMES with multiplicity: a square is listed twice, so a
+    consumer sees ``x·x`` for what it is rather than as one factor — the step that is not a semiring
+    step, and so carries no contraction reading. Each invariant carries whether it divides, since
+    ``Σ x/c`` equals ``(Σ x)/c`` only for an invariant ``c``. ``spine`` is the statements the reading
+    saw through, which is exactly what a consumer removes when it rebuilds a lift around the split.
+    """
+
+    invariant: tuple[tuple[str, bool], ...]
+    varying: tuple[str, ...]
+    spine: tuple[Stmt, ...]
+
+
+#: What :meth:`Body.linearize` reports — one ``(monomial, coefficient)`` pair per term, where a
+#: monomial is its streamed atoms with their exponents and the empty one is the constant term.
+type Monomials = tuple[tuple[tuple[tuple[str, int], ...], object], ...]
+
+
 def _exposed_defines(s: Stmt) -> set[str]:
     """SSA names ``s`` makes visible at its own scope level — own defines
     plus every nested define. A deliberate over-approximation: nested non-Accum
@@ -340,6 +361,72 @@ class Body(tuple[Stmt, ...]):
             return memo[current, index]
 
         return read(name, len(self))
+
+    def _spine(self, name: str, expr: Expr) -> tuple[Stmt, ...]:
+        """The statements a reading of ``name`` consumed — this scope's cone of it minus the CONES
+        of the atoms that survived into ``expr``. Subtracting the atoms themselves is not enough: an
+        atom is opaque, so everything that built it (``exp``'s ``s − m``) belongs to the atom."""
+        atoms = expr.free_vars()
+        kept = {id(stmt) for atom in atoms for stmt in self.backward_cone((atom,)).members}
+        return tuple(stmt for stmt in self.backward_cone((name,)).members if id(stmt) not in kept)
+
+    def factor(self, name: str, varies, through) -> Factored | None:  # noqa: ANN001 — any predicates
+        """The value cone of ``name`` split into invariant and varying factors by ``varies``, or
+        ``None`` when it is not one product.
+
+        Refusals here are STRUCTURAL — the reading is a sum, or a denominator streams, so there is
+        no product to split and ``Σ`` cannot commute past it. Whether a legal split is USEFUL (does
+        it have both an invariant and a varying side?) is the calling rule's condition, not this one's.
+        """
+        import sympy  # noqa: PLC0415
+
+        expr = self.as_expr(name, through)
+        invariant: list[tuple[str, bool]] = []
+        varying: list[str] = []
+        for base, power in sympy.expand(expr.symbolic()).as_powers_dict().items():
+            if base.is_number:
+                continue
+            if not isinstance(base, sympy.Symbol) or not power.is_Integer:
+                return None  # a compound base — a sum, a call over several atoms — is not a factor
+            count, divides = abs(int(power)), int(power) < 0
+            if varies(base.name):
+                if divides:
+                    return None  # nothing licenses moving a fold into a varying denominator
+                varying.extend([base.name] * count)
+            else:
+                invariant.extend([(base.name, divides)] * count)
+        return Factored(tuple(invariant), tuple(varying), self._spine(name, expr))
+
+    def linearize(self, name: str, varies, through) -> Monomials | None:  # noqa: ANN001 — any predicates
+        """The value cone of ``name`` as monomials in the STREAMED atoms, each with its coefficient.
+
+        ``((("s", 2),), 1)`` reads "the ``s²`` term has coefficient 1"; the empty monomial is the
+        term free of streamed atoms. Every coefficient is an expression over the invariants by
+        construction, which is what makes this the reading for "is this fold's summand linear in what
+        it streams?" — and what lets a consumer ask whether a carrier's component merges as
+        ``α·s + β·s__o`` with the coefficients drawn from somewhere it allows.
+
+        ``None`` when the cone is not polynomial in the streamed atoms (a stream in a denominator or
+        under an uninterpreted call) or when nothing streams at all.
+
+        Coefficients come back as sympy expressions: a consumer DECIDES with them — is this the bare
+        atom ``alpha``? is it free of the other states? — and then acts on names it already holds.
+        Building IR from one is out of bounds (see :meth:`Expr.symbolic`).
+        """
+        import sympy  # noqa: PLC0415
+
+        expr = self.as_expr(name, through)
+        streamed = sorted(atom for atom in expr.free_vars() if varies(atom))
+        if not streamed:
+            return None
+        try:
+            poly = sympy.Poly(sympy.expand(expr.symbolic()), *(sympy.Symbol(atom) for atom in streamed))
+        except sympy.PolynomialError:
+            return None
+        return tuple(
+            (tuple((atom, power) for atom, power in zip(streamed, monomial, strict=True) if power), coeff)
+            for monomial, coeff in poly.terms()
+        )
 
     @cached_property
     def axis_names(self) -> frozenset[str]:

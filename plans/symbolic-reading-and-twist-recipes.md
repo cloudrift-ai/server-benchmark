@@ -13,6 +13,10 @@ Landed, with two deviations from the draft below:
 - `factor` refuses on structure only (not a product; a varying denominator). A lone atom is a one-factor product,
   and the draft's "a lone `exp` refuses" is the CALLER's condition — `_hoist_invariant` already declines on
   `not invariant or not varying`. Refusals about usefulness stay in rules.
+- **There is no `ir/symbolic.py`.** Layer 2 is inlined where it is read: `Expr.symbolic` (one override per node kind,
+  no isinstance ladder) and `Expr.same_value`; `Body.factor` / `Body.linearize` with a private `Body._spine`. sympy is
+  a REQUIRED dependency (a value reading must work without torch) but imported per call — it costs ~90 ms against a
+  ~250 ms CLI startup. Phases 3-6 below should read "the reading" wherever they say "the bridge" or `ir/symbolic.py`.
 
 The blockification consumer that motivated this (a twisted carrier's per-component `alpha*s + beta*s__o` reading,
 so a block's inner fold reaches `as_contraction`) is a phase-6 use and is not started.

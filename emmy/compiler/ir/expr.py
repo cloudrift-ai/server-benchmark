@@ -112,6 +112,35 @@ class _ExprOps:
         Subclasses override; default surfaces missing implementations."""
         return None
 
+    # -- semantics ----------------------------------------------------------
+
+    def symbolic(self):  # noqa: ANN201 — a sympy expression
+        """This expression as a sympy expression: what it MEANS, where the node tree is what it SAYS.
+
+        The two are different jobs. This AST preserves association and temps exactly, which is what a
+        kernel is spelled from; sympy normalizes at construction, which is right for deciding and
+        wrong for spelling. So the map runs ONE WAY — nothing here builds an ``Expr`` back from a
+        sympy expression, and a consumer that needs IR renames and splices the statements it holds.
+
+        Concrete subclasses override; the default raises, so a node kind added tomorrow is a visible
+        gap rather than a silent atom. sympy is imported per call — it costs ~90 ms and most commands
+        never read a value.
+        """
+        raise NotImplementedError(f"{type(self).__name__}.symbolic not implemented")
+
+    def same_value(self, other: Expr) -> bool:
+        """Whether two expressions denote the same value, modulo ring identities.
+
+        NOT ``__eq__``, which stays the structural tree comparison: ``(x + y)*x`` and ``x*x + y*x``
+        are equal values and different trees, and both readings have callers.
+
+        Expansion and cancellation only — never ``sympy.simplify``, a heuristic rewrite whose result
+        depends on the version, which is not a compiler decision.
+        """
+        import sympy  # noqa: PLC0415
+
+        return sympy.cancel(sympy.expand(self.symbolic() - other.symbolic())) == 0
+
 
 def subst_index(index: tuple, sub: dict) -> tuple:
     """A store template's index with named iteration vars replaced by this cell's expressions —
@@ -212,6 +241,11 @@ class Var(_ExprOps):
     def pretty(self) -> str:
         return self.name
 
+    def symbolic(self):  # noqa: ANN201
+        import sympy  # noqa: PLC0415
+
+        return sympy.Symbol(self.name)
+
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return mapping.get(self.name, self)
 
@@ -253,6 +287,11 @@ class Literal(_ExprOps):
 
     def pretty(self) -> str:
         return str(self.value)
+
+    def symbolic(self):  # noqa: ANN201
+        import sympy  # noqa: PLC0415
+
+        return sympy.Integer(int(self.value)) if float(self.value).is_integer() else sympy.Float(self.value)
 
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return self
@@ -310,6 +349,29 @@ class BinaryExpr(_ExprOps):
 
     def pretty(self) -> str:
         return f"({self.left.pretty()} {self.op} {self.right.pretty()})"
+
+    def symbolic(self):  # noqa: ANN201
+        """Index arithmetic. ``/`` FLOOR-divides — ``apply_binop`` does, so reading a coordinate as
+        exact division would state an equality the emitted kernel does not honour. An unknown
+        operator becomes an uninterpreted function, which compares structurally."""
+        import sympy  # noqa: PLC0415
+
+        left, right = self.left.symbolic(), self.right.symbolic()
+        ops = {
+            "+": lambda a, b: a + b,
+            "-": lambda a, b: a - b,
+            "*": lambda a, b: a * b,
+            "/": lambda a, b: sympy.floor(a / b),
+            "//": lambda a, b: sympy.floor(a / b),
+            "%": sympy.Mod,
+            "<": sympy.Lt,
+            "<=": sympy.Le,
+            ">": sympy.Gt,
+            ">=": sympy.Ge,
+            "==": sympy.Eq,
+        }
+        op = ops.get(self.op)
+        return op(left, right) if op is not None else sympy.Function(f"op{self.op}")(left, right)
 
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return BinaryExpr(self.op, self.left.substitute(mapping), self.right.substitute(mapping))
@@ -449,6 +511,11 @@ class Builtin(_ExprOps):
     def eval(self, env: dict[str, object]) -> object:
         raise NotImplementedError(f"Builtin {self.name!r} is GPU-only; cannot eval in numpy")
 
+    def symbolic(self):  # noqa: ANN201
+        import sympy  # noqa: PLC0415
+
+        return sympy.Symbol(self.name)
+
     def pretty(self) -> str:
         return self.name
 
@@ -494,6 +561,25 @@ class FuncCallExpr(_ExprOps):
     def pretty(self) -> str:
         return f"{self.name}({', '.join(a.pretty() for a in self.args)})"
 
+    def symbolic(self):  # noqa: ANN201
+        """A value op with a sympy meaning becomes it; anything else — ``rsqrt``, a storage decode,
+        ``exp`` where the caller did not license it — becomes an UNINTERPRETED function of its
+        arguments. That is what makes the decision collapse to alpha-equality exactly where nothing
+        is interpretable, so a reading never has to know every op to be sound."""
+        import sympy  # noqa: PLC0415
+
+        args = tuple(a.symbolic() for a in self.args)
+        meanings = {
+            "add": lambda a, b: a + b,
+            "subtract": lambda a, b: a - b,
+            "multiply": lambda a, b: a * b,
+            "divide": lambda a, b: a / b,
+            "negative": lambda a: -a,
+            "exp": sympy.exp,
+        }
+        call = meanings.get(self.name)
+        return call(*args) if call is not None else sympy.Function(self.name)(*args)
+
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return FuncCallExpr(self.name, tuple(a.substitute(mapping) for a in self.args))
 
@@ -533,6 +619,11 @@ class TernaryExpr(_ExprOps):
         if np.ndim(cond) == 0:
             return self.if_true.eval(env) if bool(cond) else self.if_false.eval(env)
         return np.where(cond, self.if_true.eval(env), self.if_false.eval(env))
+
+    def symbolic(self):  # noqa: ANN201
+        import sympy  # noqa: PLC0415
+
+        return sympy.Piecewise((self.if_true.symbolic(), self.cond.symbolic()), (self.if_false.symbolic(), True))
 
     def pretty(self) -> str:
         return f"({self.cond.pretty()} ? {self.if_true.pretty()} : {self.if_false.pretty()})"
@@ -576,6 +667,11 @@ class CastExpr(_ExprOps):
         if self.dtype == "int":
             return np.asarray(v).astype(np.int64) if hasattr(v, "__array__") else int(v)
         return v
+
+    def symbolic(self):  # noqa: ANN201
+        import sympy  # noqa: PLC0415
+
+        return sympy.Function(f"cast_{self.dtype}")(self.expr.symbolic())
 
     def pretty(self) -> str:
         return f"({self.dtype}){self.expr.pretty()}"

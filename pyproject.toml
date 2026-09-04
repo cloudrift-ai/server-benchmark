@@ -38,6 +38,10 @@ dependencies = [
     # backfills 3.12-3.14. NOTE for the eventual stdlib switch: the builtin is NOT a dict
     # subclass, this package (on CPython) is.
     "frozendict",
+    # The semantics half of the value reading (ir/symbolic.py). Required, not a `compile` extra:
+    # today it arrives anyway as a torch dependency, but the reading decides value cones and must
+    # be available without torch installed.
+    "sympy",
 ]
 
 [project.optional-dependencies]
@@ -47,7 +51,7 @@ test = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff"]
 # 5.12; <5.15 because 5.15's per-layer heterogeneity makes vllm 0.23's global
 # `hf_text_config.head_dim` read raise AmbiguousGlobalPerLayerAttributeError when
 # building a ModelConfig for gemma-4 (per-layer head_dim). 5.13.0–5.14.1 pass both.
-compile = ["torch", "transformers>=5.13,<5.15", "cppyy==3.5.0", "safetensors", "sympy"]
+compile = ["torch", "transformers>=5.13,<5.15", "cppyy==3.5.0", "safetensors"]
 image = ["diffusers>=0.39,<0.40"]
 # vLLM out-of-tree embedding plugin (emmy/serving); vllm pins its own torch.
 # >=0.23: 0.22.1's FlashInfer dispatch cannot run gemma-4's 512-dim global attention

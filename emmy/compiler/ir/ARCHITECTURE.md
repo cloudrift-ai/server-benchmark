@@ -236,7 +236,7 @@ other IR files.
 | `Expr`                                                                       | Union type alias.                                                        |
 | `PLACEHOLDER_PREFIX`, `placeholder`, `is_placeholder`                        | Convention for output-coord placeholders in coord maps.                  |
 
-## Values vs coordinates: `value.py`, the value reading, `symbolic.py`
+## Values vs coordinates: `value.py` and the value reading
 
 `expr.py` is an INTEGER INDEX ALGEBRA. `apply_binop` floor-divides for `/`, and the simplifier applies range-driven
 `div` / `mod` rules. A real value must never be spelled that way, so a value is a `FuncCallExpr` keyed by the
@@ -263,25 +263,27 @@ because only those reassociate under `Σ`; seeing through `exp` would factor `ex
 overflow a twisted carrier exists to avoid. `exp` is therefore absent from `RING`, and a consumer that owns that risk
 names its own wider predicate.
 
-**`symbolic.py`** is the one closed map from `Expr` to sympy, and the decisions taken over it. `Expr` is syntax —
-it preserves association and temps exactly, which is what a kernel is spelled from; sympy is semantics — it decides
-equality modulo ring identities, so a consumer asks what a cone MEANS instead of matching a stored spelling. Only
-algorithmic sympy is used (`expand`, `cancel`, `Poly`, `as_powers_dict`), never `simplify`: a heuristic rewrite whose
-result depends on the version is not a compiler decision.
+**Semantics.** The node tree is syntax — it preserves association and temps exactly, which is what a kernel is
+spelled from. sympy is semantics — it decides equality modulo ring identities, so a consumer asks what a cone MEANS
+instead of matching a stored spelling. There is no bridge module: each reading is a method on the thing being read.
 
-| Symbol      | Role                                                                                                        |
-|-------------|-------------------------------------------------------------------------------------------------------------|
-| `symbolic`  | `Expr` → sympy. Total: an unknown call, a cast or a builtin is an uninterpreted atom, which compares structurally — so a reading never fails on a node kind, and collapses to alpha-equality where nothing is interpretable. |
-| `equal`     | Whether two cones denote the same value, by expansion and cancellation.                                      |
-| `factor`    | One product split into invariant and varying atom NAMES with multiplicity (a square listed twice), each invariant carrying whether it divides, plus the `spine` — the cone of the name minus the cones of its atoms. `None` when the reading is not one product. |
-| `linearize` | The cone as monomials in the streamed atoms, each with its coefficient. The reading behind "is this summand linear in what it streams?". `None` when it is not polynomial in them. |
+| Method            | Role                                                                                              |
+|-------------------|---------------------------------------------------------------------------------------------------|
+| `Expr.symbolic`   | This expression as sympy, one node kind per override. An unknown call, a cast or a builtin is an uninterpreted atom, which compares structurally — so the decision collapses to alpha-equality exactly where nothing is interpretable. |
+| `Expr.same_value` | Whether two expressions denote the same value. Deliberately not `__eq__`: `==` stays the structural tree comparison, and both readings have callers. |
+| `Body.factor`     | One product split into invariant and varying atom NAMES with multiplicity (a square listed twice), each invariant carrying whether it divides, plus the `spine` — the cone of the name minus the cones of its atoms. `None` when the reading is not one product. |
+| `Body.linearize`  | The cone as monomials in the streamed atoms, each with its coefficient. The reading behind "is this summand linear in what it streams?". `None` when it is not polynomial in them. |
 
-The direction is **one-way**. Nothing builds IR from a sympy expression: sympy normalizes at construction
-(`Mul(Mul(a, b), c)` flattens, `x − x` vanishes, argument order is canonical), which is right for deciding and wrong
-for spelling. A consumer that needs IR renames and splices the statements it already holds; these readings tell it
-WHICH ones, and hand back names and statements rather than an expression to emit. Structural refusals belong to the
-reading (a sum is not a product; a varying denominator has nothing to commute past); whether a legal split is USEFUL
-stays the calling rule's condition.
+Only algorithmic sympy is used (`expand`, `cancel`, `Poly`, `as_powers_dict`), never `simplify`: a heuristic rewrite
+whose result depends on the version is not a compiler decision. The map runs **one way** — nothing builds an `Expr`
+back from a sympy expression, since sympy normalizes at construction (`Mul(Mul(a, b), c)` flattens, `x − x` vanishes,
+argument order is canonical), which is right for deciding and wrong for spelling. A consumer that needs IR renames
+and splices the statements it already holds; these readings tell it WHICH ones, and hand back names and statements
+rather than an expression to emit. Structural refusals belong to the reading (a sum is not a product; a varying
+denominator has nothing to commute past); whether a legal split is USEFUL stays the calling rule's condition.
+
+sympy is a REQUIRED dependency, not a `compile` extra — a value reading must work without torch installed — but it is
+imported per call, since it costs ~90 ms against a ~250 ms CLI startup and most commands never read a value.
 
 ## `frontend/ir.py`
 

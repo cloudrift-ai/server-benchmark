@@ -1,7 +1,10 @@
 """Configuration checks for the 2026 compiler-submission experiments."""
 
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from emmy.benchmark.command_workload import build_substitution_map, render_command
 from emmy.benchmark.tasks import enumerate_tasks
@@ -408,6 +411,7 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert '"captured_whole_forward"' in pytorch_runner
 
 
+@pytest.mark.skipif(shutil.which("timeout") is None, reason="run_emmy.sh needs GNU coreutils `timeout`")
 def test_neptune_emmy_runner_fails_when_one_setup_is_incomplete(project_root, tmp_path) -> None:
     directory = Path(project_root) / EXP / "compiler_neptune_emmy_pytorch_a100"
     golden_dir = tmp_path / "golden"

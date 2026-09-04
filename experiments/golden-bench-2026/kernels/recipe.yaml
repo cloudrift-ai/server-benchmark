@@ -49,6 +49,12 @@ command:
     fi
     devices="$gpu_device_ids"
     first_device=$${devices%%,*}
+    compute_cap=$$(nvidia-smi --id="$$first_device" --query-gpu=compute_cap --format=csv,noheader | head -n 1)
+    if [ "$$compute_cap" = "7.0" ]; then
+      nvrtc12=/usr/local/cuda-12.9/lib64/libnvrtc.so.12
+      test -f "$$nvrtc12"
+      export LD_PRELOAD="$$nvrtc12$${LD_PRELOAD:+:$$LD_PRELOAD}"
+    fi
 
     if [ -n "$golden" ]; then
       cp $repo_dir/experiments/golden-bench-2026/kernels/golden/$golden.golden.yaml $task_dir/working.yaml

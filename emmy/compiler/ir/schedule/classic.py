@@ -201,6 +201,11 @@ def _target_memo(tile_op, target, slot: str) -> dict:
     Every candidate schedule over one tile shares these tables, and the composition context is
     replaced at each step, so the tile owns them. The target is retained beside its table so the
     id keying it cannot be recycled while the table lives.
+
+    That retention is the tell: this keys a table by ``id(target)`` and stores it on ``tile_op``,
+    caching a fact about a PAIR on one member of it. STYLE.md forbids the shape, and it is the
+    hardest of the ``instance_memo`` callers to retire — a ``cached_property`` cannot express it,
+    so it wants a different owner or a cache threaded through the context.
     """
     table = instance_memo(tile_op, slot)
     if id(target) not in table:

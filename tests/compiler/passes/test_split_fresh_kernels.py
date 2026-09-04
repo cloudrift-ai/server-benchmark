@@ -343,7 +343,7 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
         op=wrapper,
         place=Placement(free=(i,)),
         axes=(i, j, k),
-        output_specs=(OutputSpec(write=Write(output="o", index=(Var("i"), Var("j")), value="y"), sweep=j),),
+        output_specs=(OutputSpec(write=Write(output="o", index=(Var("i"), Var("j")), value="y"), sweep=(j,)),),
     )
     node = head(tile.op)
     assert node is not None and node.axis is not None

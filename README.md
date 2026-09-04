@@ -325,7 +325,9 @@ three proposed deployment matrix entries. Disabled recipes are not deployable or
 Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, with one
 file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
 recipe shell before its golden is committed. Model-agnostic hardware goldens remain under
-`emmy/compiler/pipeline/search/goldens/`.
+`emmy/compiler/pipeline/search/goldens/`. `make test-goldens` strictly decodes every one of those files against the
+current compiler — off the default test lane and needing no GPU, it is how you see which cards a tuning round has
+brought back in line.
 
 Generic workload (run any tool on the VM, pull back result files):
 

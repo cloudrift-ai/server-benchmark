@@ -186,6 +186,60 @@ def test_the_closure_predicate_reads_the_declaration() -> None:
     assert _external_reads(_matmul()) == {"m", "n"}  # ``k`` is bound by the fold — not free above it
 
 
+def test_a_sweep_with_a_projection_beside_a_nested_sweep_lifts() -> None:
+    """DeepSeek-V4 post4096's gate stream in miniature: an output sweep with its own per-cell
+    projection and store, beside a nested output sweep whose store is per inner cell. The
+    projection term is formed from the PURE cell members alone; the nested sweep stays a
+    statement of the retained cell, and the boundary records its store under the axis path."""
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import Write
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+
+    add = ElementwiseImpl("add")
+    gate_total = Loop(
+        axis=K_AXIS,
+        body=Body((Load(name="g0", input="g", index=(Var("m"), Var("s"), Var("k"))), Accum(name="tot", value="g0", op=add, axes=("k",)))),
+    )
+    inner_total = Loop(
+        axis=K_AXIS,
+        body=Body(
+            (Load(name="x0", input="x", index=(Var("m"), Var("s"), Var("n"), Var("k"))), Accum(name="acc", value="x0", op=add, axes=("k",)))
+        ),
+    )
+    inner_sweep = Loop(axis=N_AXIS, body=Body((inner_total, Write(output="mul", index=(Var("m"), Var("s"), Var("n")), value="acc"))))
+    outer = Loop(
+        axis=Axis("s", Dim(4)),
+        body=Body(
+            (
+                gate_total,
+                Assign(name="v", op="exp", args=("tot",)),
+                Write(output="view", index=(Var("m"), Var("s")), value="v"),
+                inner_sweep,
+            )
+        ),
+    )
+    sibling = Loop(
+        axis=K_AXIS,
+        body=Body((Load(name="y0", input="y", index=(Var("m"), Var("k"))), Accum(name="head", value="y0", op=add, axes=("k",)))),
+    )
+    root = Loop(
+        axis=M_AXIS,
+        body=Body((sibling, Assign(name="h", op="exp", args=("head",)), Write(output="o", index=(Var("m"),), value="h"), outer)),
+    )
+
+    tile = lift_loop_op(LoopOp(body=(root,)), name="k_nested_sweep")
+
+    paths = {spec.write.output: tuple(axis.extent.as_static() for axis in spec.sweep) for spec in tile.output_specs}
+    assert paths == {"o": (), "view": (4,), "mul": (4, 256)}
+    body = tile.op.lower(frozenset(axis.name for axis in tile.place.free), tile.output_specs, tile.axes)
+    outer_loops = [stmt for stmt in body if isinstance(stmt, Loop) and stmt.axis.extent.as_static() == 4]
+    assert len(outer_loops) == 1, "the shared outer sweep loop is opened exactly once"
+    inner_loops = [stmt for stmt in outer_loops[0].body if isinstance(stmt, Loop) and not stmt.is_reduce]
+    assert any(isinstance(member, Write) and member.output == "mul" for loop in inner_loops for member in loop.body), (
+        "the nested store lands inside its own loop under the shared outer sweep"
+    )
+
+
 def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_under_it() -> None:
     """Attention's ``Σ_k P·V`` per output column: the fold joins the projection's operands with its
     slabs declaring the sweep axis, the sweep keeps its store, and reconstitution wraps the fold's
@@ -220,8 +274,9 @@ def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_unde
     # total lowers once, ahead.
     swept = tile.op
     (spec,) = tile.output_specs
-    assert spec.sweep is not None and spec.sweep.name in swept.free_axes
-    assert any(edge.axis is not None and spec.sweep.name not in edge.free_axes for edge in swept.operands)
+    (sweep_axis,) = spec.sweep
+    assert sweep_axis.name in swept.free_axes
+    assert any(edge.axis is not None and sweep_axis.name not in edge.free_axes for edge in swept.operands)
     outer, loop = tile.op.lower(frozenset(axis.name for axis in tile.place.free), tile.output_specs, tile.axes)
-    assert isinstance(outer, Loop) and isinstance(loop, Loop) and loop.axis.name == spec.sweep.name
+    assert isinstance(outer, Loop) and isinstance(loop, Loop) and loop.axis.name == sweep_axis.name
     assert [type(stmt).__name__ for stmt in loop.body] == ["Loop", "Write"]

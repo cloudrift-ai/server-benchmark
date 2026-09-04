@@ -19,7 +19,7 @@ Five subcommands:
   ``(kernel, error)`` with the knob values shared by every failing row.
 
 The ``eval knobs`` regret analysis: for each kernel (grouped by the kernel C
-identifier extracted from ``cuda_op.pretty``), compute per-knob regret:
+identity the rows are keyed on), compute per-knob regret:
 
     regret[K] = max(best_us | K=v) / min(best_us | K=v)
 
@@ -687,7 +687,7 @@ def _emit_variant_table(name: str, samples: list, prior, *, n_fail: int, top: in
 
     The ``us`` column is the measured latency as stored. A sweep measures in the deployable
     regime, so on a store written since that became true every row is a deploy latency — but
-    ``Dataset.from_db`` reads every ``context_key`` and ``PerfSample`` carries none, so a store
+    ``Dataset.from_db`` reads every regime and a ``Measurement`` carries none, so a store
     holding rows from the era of a separate ranking lane still pools both here."""
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 

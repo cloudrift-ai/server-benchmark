@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.expr import Expr
-from emmy.compiler.structural import digest
 
 
 @dataclass(frozen=True)
@@ -79,17 +78,39 @@ class CudaOp(Op):
     def pretty_body(self) -> str:
         return self.kernel_source
 
-    def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
-        """Override :meth:`Op.identity_key` whole: digest of the rendered source + launch
-        params — past rendering, body / io / knobs are all realized into the artifact, so the
-        lattice flags have nothing left to fold and are accepted-and-ignored. (the
-        bits that determine runtime behavior). Name-invariant: the kernel function name is
-        rendered into the source (``void <name>(...)``) but doesn't change runtime behavior,
-        so it normalizes out — renaming a kernel (e.g. via op provenance) neither busts the
-        perf cache nor blocks an isolated-kernel tune from transferring to a whole-model
-        compile."""
-        src = self.kernel_source.replace(self.kernel_name, "_K_") if self.kernel_name else self.kernel_source
-        return digest(type(self).__name__, src, self.arg_order, self.grid, self.block, self.smem_bytes)
+    def identity(self, *, structural: bool = True):
+        """Override :meth:`Op.identity`: a rendered kernel's identity is the identity of the FORK
+        that offered it — the newest pre-schedule op on the rewrite chain (its own ``TileOp``,
+        else the fused ``LoopOp``), body, io and stage tag alike. The rendered source is a
+        realization of that fork under a decision, not a second notion of what the kernel is:
+        keying a measurement on the source digest put the store's identity and the deploy join's
+        identity in different alphabets, so a measured row could never answer the fork that
+        produced it.
+
+        Three nearer answers are wrong. The io must come from the fork too — the cuda passes
+        rename and re-slab buffers, which would split the join at its io half. The intervening
+        ``KernelOp`` must be skipped — its body is the schedule already materialized, so it keys
+        apart from the tile term the fork decided. And NEWEST, not oldest: a split's pieces are
+        forks of their own, and attributing a piece to the pre-split parent would price half the
+        work as the whole.
+
+        ``None`` for a synthetic ``CudaOp`` with no chain (hand-built kernels, imported sources):
+        it computes something no Loop-IR op describes, so there is no identity to store a
+        measurement under."""
+        for op in self.source_chain():
+            if type(op).dialect not in ("tile", "loop"):
+                continue
+            identity = op.identity(structural=structural)
+            if identity is not None:
+                return identity
+        return None
+
+    def _body_identity(self, *, structural: bool = True) -> str | None:
+        """The chain identity's body half — see :meth:`identity`. Overridden (rather than left to
+        the base, which would answer ``None``) so ``dialect`` still reads ``"cuda"`` and a graph
+        digest walking a nested op reaches the same Loop-IR content."""
+        identity = self.identity(structural=structural)
+        return identity.body if identity is not None else None
 
 
 def resolve_dim(spec, sym_values: dict[str, int]) -> int:

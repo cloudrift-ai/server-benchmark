@@ -149,9 +149,8 @@ class Context:
     # PCIe product name of the card this context is for (e.g. "NVIDIA H200 141GB"),
     # set by ``from_target(gpu_name=…)`` or probed live (``gpu.live_name``). The one
     # identity that separates same-die SKUs (H100 vs H200: identical cc + SM features,
-    # different VRAM) — used by the node-store key + ``gpu`` column so cross-hardware
-    # tuning data never collides. NOT in ``structural_key`` (the perf cache stays
-    # SKU-coarse on purpose; only the node *dataset* keys on it). ``None`` ⇒ unknown.
+    # different VRAM) — read through :meth:`hardware_id` by the node-store key and by
+    # ``Regime.gpu``, so no measurement crosses cards: µs is a per-card fact. ``None`` ⇒ unknown.
     gpu_name: str | None = None
     # Identifies which backend's perf rows this compile reads/writes — the
     # tune DB keys ``perf`` by ``(context_key, op_key, backend)``. Defaults to
@@ -160,10 +159,10 @@ class Context:
     backend_name: str = "cuda"
     # Extra nvcc flags this compile uses (from ``EMMY_NVCC_FLAGS`` — e.g.
     # normally empty — tune, compile and run all measure in the deployable regime).
-    # Folded into ``structural_key`` (split, see :func:`split_opt_level`) so the autotune
-    # ``perf`` cache is partitioned by opt level: a measurement taken under a deliberately
-    # non-deployable ``--nvcc-flags`` never answers for a deploy. Populated from the env by :meth:`probe` /
-    # :meth:`from_target`.
+    # Enters the regime SPLIT (see :func:`split_opt_level`): the opt level as ``Regime.opt_level``,
+    # every other flag verbatim as ``Regime.nvcc_flags``, so a measurement taken under a
+    # deliberately non-deployable ``--nvcc-flags`` never answers for a deploy. Populated from the
+    # env by :meth:`probe` / :meth:`from_target`.
     compile_flags: str = ""
     # Whether the strict knob-pin validator (``lowering/tile/_validate``)
     # is active. ``True`` on the deterministic greedy compile (``compile`` / ``run``),
@@ -266,24 +265,21 @@ class Context:
         compile: the schedule declines those rows rather than emitting them."""
         return self.compute_capability >= (9, 0)
 
+    def regime(self):
+        """Where a measurement taken under this context holds —
+        :class:`~emmy.compiler.identity.Regime`, whose fields are the ``context`` table's row."""
+        from emmy.compiler.identity import Regime  # noqa: PLC0415
+
+        return Regime.of(self)
+
     def structural_key(self) -> str:
-        """Implements :class:`emmy.compiler.structural.Structural`.
+        """Implements :class:`emmy.compiler.structural.Structural` — the digest of :meth:`regime`.
 
-        Folds in only codegen-affecting fields. ``compute_capability``
-        gates hardware-feature passes (TMA, cp.async, dynamic smem cap);
-        anything derived from it (``max_dynamic_smem``) is implied.
-        ``compile_flags`` is folded in because the nvcc opt level genuinely
-        changes the emitted SASS / measured latency (it is NOT a debug flag).
-        As other non-derived knobs land (forced TMA on/off, splitk overrides),
-        extend this method explicitly — keep ambient I/O fields out so the
-        autotuning cache survives debug-flag flips.
-
-        The flags enter **split** (:func:`split_opt_level`), never raw, so that one regime has one
-        key however it is spelled.
-        """
-        from emmy.compiler.structural import digest  # noqa: PLC0415
-
-        return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags))
+        The include/exclude list lives there now, as fields: every codegen-affecting fact a
+        measurement is partitioned by is a ``Regime`` field, and ambient I/O fields (dump dirs,
+        verbosity, the session cache) are not, so the autotuning cache still survives a
+        debug-flag flip."""
+        return self.regime().digest
 
     def hardware_id(self) -> str:
         """A stable per-card identity for the node-store key + ``gpu`` column: the PCIe

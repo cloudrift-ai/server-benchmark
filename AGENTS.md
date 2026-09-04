@@ -32,7 +32,8 @@ relevant `ARCHITECTURE.md` before answering.
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
   (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run`
   resolve forks through the deploy evidence hierarchy — the live card's recorded goldens first (the repo-shipped
-  verified tier; consulted, never trained on), then measured reservoir/DB evidence, then the global `Prior` (the
+  verified tier; consulted, never trained on), then measured reservoir evidence (the tune DB's own tier is off until
+  the per-fork identity query lands), then the global `Prior` (the
   online prior with its offline cold-start fallback; the old `_best_fork` DB→fork replay was removed). The online prior
   is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`; legacy `EMMY_PRIOR_FILE` still
   accepted) that `tune` writes and `compile` / `run` read. Use the README architecture index for the prior and

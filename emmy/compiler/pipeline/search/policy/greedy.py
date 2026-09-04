@@ -426,42 +426,6 @@ def _priced_pick(
     return min(priced, key=lambda op_us: op_us[1])[0]
 
 
-# Process-wide memo for the built DB index, keyed on (db path, mtime, context key).
-# The index depends only on the DB file and cc+nvcc-flags (NOT the
-# op shape — ``structural_key`` folds neither), so for a serve boot it is identical
-# across all ~96 program compiles; without this the 527 MB perf scan reran each time.
-# Bounded to the current key (cleared on miss), like ``_load_prior_cached``.
-_DB_INDEX_CACHE: dict = {}
-
-
-def _db_measured_index(db, ctx) -> _Measured:
-    """Caching wrapper over :func:`_db_measured_index_build` — memoizes the built
-    index per process on ``(db path, mtime, context keys)``, invalidated when the
-    DB file's mtime changes. An in-memory DB (no ``_path``) or an unstatable file
-    bypasses the cache and rebuilds. Best-effort throughout: a failed key
-    computation just rebuilds."""
-    path = getattr(db, "_path", None)
-    if path is None:
-        return _db_measured_index_build(db, ctx)
-    try:
-        # Stat the main file AND its ``-wal`` sidecar: in WAL mode a ``record_perf``
-        # commit can land in the WAL without bumping the main file's mtime, so a
-        # main-mtime-only key could serve a stale index to a same-process
-        # write-then-read (the tune lane). ``os.stat`` on a missing WAL → skip it.
-        wal = path.with_name(path.name + "-wal")
-        mtime = (path.stat().st_mtime_ns, wal.stat().st_mtime_ns if wal.exists() else 0)
-        key = (str(path), mtime, ctx.structural_key())
-    except Exception:  # noqa: BLE001 — any key-build failure → just rebuild uncached
-        return _db_measured_index_build(db, ctx)
-    hit = _DB_INDEX_CACHE.get(key)
-    if hit is not None:
-        return hit
-    index = _db_measured_index_build(db, ctx)
-    _DB_INDEX_CACHE.clear()  # keep only the current (path, mtime, keys)
-    _DB_INDEX_CACHE[key] = index
-    return index
-
-
 class _Measured(NamedTuple):
     """One DB scan's two answers, because the scan is expensive and both come from the same rows.
 
@@ -473,48 +437,26 @@ class _Measured(NamedTuple):
     failed: dict[frozenset, list[float]]
 
 
-def _db_measured_index_build(db, ctx) -> _Measured:
-    """The tune DB's measured CUDA perf rows for this compile's regime, split into what ranks and
-    what disqualifies.
+def _db_measured_index(db, ctx) -> _Measured:  # noqa: ARG001 — the arguments are the next step's
+    """The tune DB's measured rows for this compile's regime — **empty until the per-fork query
+    lands**.
 
-    Rows are indexed by their ``S_*`` structural signature (stringified values because perf knobs
-    round-trip JSON). One context key is sufficient: tune measures in the deployable regime, and
-    ``Context.structural_key`` gives that regime one key however its flags are spelled. Rows from a
-    deliberately non-deployable compile key elsewhere and are not consulted.
+    The index found rows by their ``S_*`` feature set: a scan of the whole table per process,
+    memoized on the DB file's mtime, matched by a subset rule that exists only because features
+    drift. The store now keys rows on the kernel's identity, which the fork point already holds,
+    so the replacement is one indexed lookup per fork (:meth:`SearchDB.measurements`) — and the
+    features are no longer stored beside the measurement, so nothing here is findable meanwhile.
+    Until that lands a greedy compile decides from the recorded goldens and the prior, which is a
+    REAL loss of evidence on a tuned machine, so it says so once."""
+    global _WARNED_MEASURED_TIER_OFF
+    if not _WARNED_MEASURED_TIER_OFF:
+        _WARNED_MEASURED_TIER_OFF = True
+        logger.warning("[greedy] measured-evidence tier is off: the store keys on kernel identity and the per-fork query is not wired yet")
+    return _Measured({}, {})
 
-    A non-``ok`` row is evidence too — the bench watchdog measured that variant not finishing — but
-    it is evidence a ranker cannot use, since its sentinel latency is a timeout constant rather
-    than a speed. It lands in ``failed`` instead, and only where NO variant of that signature was
-    measured ``ok``: one surviving row means the shape is realizable and merely has bad rows.
-    Failures are collected BEFORE the placement-route filter below, because a route's latency is
-    unattributable without a child-schedule receipt while a kernel that hung is attributable to
-    the kernel whatever route produced it.
 
-    Best-effort: any failure returns an empty index so deploy falls back to the prior.
-    """
-
-    index: dict[frozenset, list[tuple[dict, float]]] = {}
-    survived: set[frozenset] = set()
-    failures: dict[frozenset, list[float]] = {}
-    try:
-        for row in db.iter_perf(ctx.structural_key(), backend="cuda"):
-            sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
-            if row.status != "ok":
-                failures.setdefault(sig, []).append(float(getattr(row.stats, "median", 0.0) or 0.0))
-                continue
-            survived.add(sig)
-            if row.stats.median <= 0:
-                continue
-            tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
-            # A placement route's latency belongs to the exact ordered child schedule tree that
-            # ran. The perf schema carries no such receipt, so legacy route rows cannot be direct
-            # deploy evidence; independently selected children would be a different measurement.
-            if any(key.split("@", 1)[0] == "PLACE" for key in tun):
-                continue
-            index.setdefault(sig, []).append((tun, float(row.stats.median)))
-    except Exception:  # noqa: BLE001 — a DB consult failure must never break compile
-        return _Measured({}, {})
-    return _Measured(index, {sig: us for sig, us in failures.items() if sig not in survived})
+#: One warning per process for the tier above — a compile emits thousands of fork decisions.
+_WARNED_MEASURED_TIER_OFF = False
 
 
 def _sig_groups(index: dict[frozenset, list[tuple[dict, float]]], sig: frozenset) -> list[list[tuple[dict, float]]]:

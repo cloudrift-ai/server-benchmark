@@ -25,7 +25,7 @@ to consume.
 """
 
 from emmy.compiler.pipeline.search.candidate import Candidate, Cursor, LazyCandidate
-from emmy.compiler.pipeline.search.db import PerfRow, PerfStats, SearchDB
+from emmy.compiler.pipeline.search.db import Measurement, PerfStats, SearchDB
 from emmy.compiler.pipeline.search.policy import Search, TuningSearch, greedy_decide
 from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree
 
@@ -34,7 +34,7 @@ __all__ = [
     "Cursor",
     "LazyCandidate",
     "SearchNode",
-    "PerfRow",
+    "Measurement",
     "PerfStats",
     "Search",
     "SearchDB",

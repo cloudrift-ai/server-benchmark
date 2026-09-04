@@ -247,11 +247,11 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Realize** — A recorded configuration *realizes* when the compiler, at the point where it makes that choice, offers
   a candidate matching the recording. A configuration that realizes nowhere cannot be deployed, however good the
   measurement stored with it.
-- **Regime** — The settings a measurement was taken under, or that a compile is running under: chiefly the compiler
-  optimization level (`-O3`, the deployable one and the only one anything is measured in) plus whether fast-math
-  approximations are enabled. Measurements taken in different regimes are not interchangeable, which is why tuning
-  measures in the regime it deploys into. A lower optimization level remains available as a compile-speed option for
-  the test suite; it is not a measurement lane, and nothing measured under one is read by a deploy.
+- **Regime** — The settings a measurement was taken under, or that a compile is running under: the card it ran on,
+  the compiler optimization level (`-O3`, the deployable one and the only one anything is measured in), and whether
+  fast-math approximations are enabled. Measurements taken in different regimes are not interchangeable, which is
+  why tuning measures in the regime it deploys into. A lower optimization level remains available as a compile-speed
+  option for the test suite; it is not a measurement lane, and nothing measured under one is read by a deploy.
 - **Candidate** — One complete set of choices that the compiler could use.
 - **Greedy selection** — Choosing the candidate that currently appears best without exploring alternatives during
   normal compilation.

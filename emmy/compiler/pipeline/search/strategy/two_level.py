@@ -352,8 +352,8 @@ class TwoLevelStrategy(SearchStrategy):
         it."""
         db, prior, progress = self.db, self.prior, self.progress
         identity = _identity()
-        ctx_key = ctx.structural_key()
-        backend_name = getattr(self.pool[0], "name", "cuda")
+        regime = ctx.regime()
+        ctx_key = regime.digest
         # Group structurally-identical kernel roots under one ``identity_key(with_io=True, with_knobs=True)`` — insertion order =
         # first occurrence (drives the progress tail name). Ops with no cache key are
         # unreachable through the bench path so they don't enter the dedup map at all.
@@ -432,7 +432,8 @@ class TwoLevelStrategy(SearchStrategy):
                 if best_total is not None:
                     # captured=True: the sweep benches under graph capture by default, so this
                     # Σ-best bookkeeping row derives from captured measurements.
-                    db.record_perf(ctx_key, work.key, backend=backend_name, status="ok", stats=_point_stats(best_total), captured=True)
+                    stats = _point_stats(best_total)
+                    db.record_measurement(regime, work.op.identity(), work.op.knobs, status="ok", stats=stats, captured=True)
                 if prior is not None:
                     # In-flight refit (single-threaded → no lock): stream this op's rows into
                     # the global reservoir; refit + checkpoint once enough new rows accumulate.
@@ -456,7 +457,7 @@ class TwoLevelStrategy(SearchStrategy):
                     else:
                         logger.info("[tune] enrolled minted kernel %s: no clean measurement", name)
                     return
-                best = db.best_per_op_time(ctx_key, work.key, backend=backend_name)
+                best = db.best_per_op_time(regime, work.op.identity(), work.op.knobs)
                 searched_knobs = searched_us = searched_cuda_ops = None
                 searched_structural = False
                 if searched is not None:

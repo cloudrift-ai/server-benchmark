@@ -9,9 +9,9 @@ The two groupings are deliberately distinct and do **not** collapse:
   It is deliberately NOT a comparison key: it carries no card and no ``H_opt``, so rows
   measured on different hardware or under different nvcc settings land in one group.
   Anything ranking measured latencies wants ``data/group.group_measured`` instead.
-- :meth:`group_by_kernel_name` keys on the kernel C identifier (parsed from
-  ``cuda_op.pretty``) — which *merges* shapes of the same kernel, by design, so the
-  per-knob regret analysis measures relative knob impact across shapes.
+- :meth:`group_by_kernel_name` keys on the kernel identity (the ``op`` digest a measurement
+  is stored under) — which *merges* the arms of one kernel, by design, so the per-knob regret
+  analysis measures relative knob impact within a kernel.
 """
 
 from __future__ import annotations
@@ -67,22 +67,16 @@ class Dataset:
         return cls([Sample.from_golden(g, compile_s_feats=compile_s_feats) for g in configs])
 
     @classmethod
-    def from_db(
-        cls, path: Path | str, *, kernel: str | None = None, min_latency: float = 0.0, backend: str | None = None, status: str = "ok"
-    ) -> Dataset:
-        """Every measured ``ok`` variant in the tune DB (``perf ⋈ cuda_op``), opened
-        read-only so a concurrent ``tune`` writer isn't blocked. ``backend=None``
-        spans every backend (matching the legacy ``eval knobs`` query); ``kernel``
-        filters on the parsed C identifier. ``status`` selects the row status
-        (``bench_fail`` rows carry the watchdog-timeout sentinel latency, so the
-        default ``min_latency`` admits them)."""
+    def from_db(cls, path: Path | str, *, kernel: str | None = None, min_latency: float = 0.0, status: str = "ok") -> Dataset:
+        """Every measured ``ok`` variant in the tune DB, opened read-only so a concurrent ``tune``
+        writer isn't blocked. ``kernel`` filters on the kernel identity the rows group by.
+        ``status`` selects the row status (``bench_fail`` rows carry the watchdog-timeout sentinel
+        latency, so the default ``min_latency`` admits them)."""
         from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
 
         db = SearchDB.open_readonly(path)
         try:
-            samples = [
-                Sample.from_perf_sample(ps) for ps in db.iter_perf_samples(backend=backend, status=status, min_latency_us=min_latency)
-            ]
+            samples = [Sample.from_measurement(m) for m in db.iter_measurements(status=status, min_latency_us=min_latency)]
         finally:
             db.close()
         if kernel:
@@ -149,7 +143,7 @@ class Dataset:
         return dict(g)
 
     def group_by_kernel_name(self, *, min_variants: int = 1, kernel: str | None = None) -> dict[str, list[Sample]]:
-        """Group by kernel C identifier (``cuda_op.pretty``), dropping samples with
+        """Group by kernel identity (the ``op`` digest), dropping samples with
         no identity (golden / prior rows) and groups below ``min_variants``."""
         g: dict[str, list[Sample]] = defaultdict(list)
         for s in self.samples:

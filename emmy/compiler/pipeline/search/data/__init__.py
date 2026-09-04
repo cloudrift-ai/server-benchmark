@@ -17,13 +17,12 @@ from __future__ import annotations
 
 from emmy.compiler.pipeline.search.data.dataset import Dataset
 from emmy.compiler.pipeline.search.data.freeze import FREEZE_KIND, FREEZE_VER, freeze_reason, load_freeze, load_node_rows, write_freeze
-from emmy.compiler.pipeline.search.data.sample import KERNEL_NAME_RE, Sample
+from emmy.compiler.pipeline.search.data.sample import Sample
 from emmy.compiler.pipeline.search.data.shape import ShapeKey, is_matmul, op_label
 
 __all__ = [
     "FREEZE_KIND",
     "FREEZE_VER",
-    "KERNEL_NAME_RE",
     "Dataset",
     "Sample",
     "ShapeKey",

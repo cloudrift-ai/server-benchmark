@@ -113,18 +113,39 @@ featurizes on load and a freeze is a snapshot of `measurement` joined with `op`.
 Each step lands green on its own, keeps the realization corpus under strict evidence as its acceptance test, and
 should not grow the line count under `emmy/`.
 
-1. **Identity module.** Add `Regime`, `OpIdentity`, `Decision`. Route `Context.structural_key`, `Op.identity_key`
-   (drop the CUDA-source override), `canonical_row_key` and `golden.kernel_identity` through them. Fold the
-   input pins into `Regime`. Verify: kernel-source digest battery (`scripts/digest_kernels.py`) unchanged; the
-   corpus's `offered` / `realized` unchanged; the fork-time identity of a kernel equals the persisted identity
-   the golden replay keys its rows by (`_replay.signatures` today) — this is the join the design rests on.
-2. **Schema.** Create `context`, `op`, `measurement`; the perf writer (`persist_kernel_perf`, the one writer)
-   writes them. One-time migration of an existing DB: `perf` rows whose `op_key` can be re-derived from the
-   `cuda_op` inventory migrate, the rest are dropped with a count in the log. Verify: `emmy eval variants` and
-   `eval knobs` read the new tables and agree with the old on a migrated DB.
-3. **Per-fork query.** `greedy_decide` asks `db.measurements(regime, identity)` at each fork and runs the
-   existing arm logic over that short list: schedule rows through `Fork.admits` / `leaf_for`, route rows through
-   `pins.spelled_arm`, failed rows as disqualification. Delete `_Measured`, `_db_measured_index*`,
+1. **Identity module — LANDED.** `emmy/compiler/identity.py`, not under `search/`: `context.py` and
+   `ir/base.py` sit below `pipeline` and both produce identities. `Context.structural_key`, `Op.identity_key`
+   (CUDA-source override dropped) and `canonical_row_key` route through it; `golden.kernel_identity` follows,
+   since it already asked for the deploy identity. Three findings from the verification:
+   - `OpIdentity`'s digest must NOT fold the `dialect`, or the golden's lift-minted identity stops matching the
+     live Tile fork. It stays a descriptive column.
+   - a `CudaOp` keys on the newest PRE-SCHEDULE op of its chain (its own `TileOp`, else the fused `LoopOp`),
+     body and io alike — not the nearest predecessor, whose materialized `KernelOp` body keys apart from the
+     tile term the fork decided, and not the oldest, which would price a split's piece as the parent it was cut
+     from. Checked on five corpus cases including a split-K cut: the measured identity equals the fork's.
+   - `Regime.pins` carries every marker BOOL, not just the precision gates — it is the exact complement of
+     `Decision`, which drops them, so `EMMY_VECTORIZE_LOADS=0` rows cannot merge with default ones.
+
+   Identity VALUES are unchanged, deliberately: this is a restructuring, and the digest is durable data — the
+   corpus stamps `identity_key(with_io=True)` into 208 checked-in case files and a kernel's name carries a slice
+   of it. So `OpIdentity.io` holds the io fingerprint itself (the column renders it via `io_json`, the way
+   `Decision` renders its knob row) and the lattice fold stays FLAT — `digest(body, io, knobs)`, never a digest
+   of a digest. Verified against the corpus: live fork identity == the checked-in stamp, no regen.
+2. **Schema — LANDED, no migration.** After step 1 a `perf` row's `op_key` is a digest of a rendered CUDA source
+   and cannot be re-derived into the Loop-IR body it was rendered from, so the pre-5 store is dropped whole with
+   a count in the log. `lowering` went with it: every pre-schedule stage of a chain shares one `op` digest, so
+   `best_per_op_time` reads the terminal's row directly instead of walking parent-to-child links. Two departures
+   from the sketch above: `measurement` keeps a `captured` column (the captured-supersedes-wall precedence is
+   not reconstructible) and `context` keeps the residual `nvcc_flags` beside the split opt level (a
+   `--use_fast_math` compile must stay its own partition). `iter_perf_samples` now groups by the op digest
+   instead of the C identifier it parsed out of the stored kernel source. Still to verify on a real store:
+   `emmy eval variants` / `eval knobs`.
+3. **Per-fork query — NEXT, and the measured tier is OFF until it lands.** `_db_measured_index` returns empty
+   with a one-per-process warning: its rows were found by feature set, and the features are no longer stored
+   beside the measurement. `_DB_INDEX_CACHE` and the build are already gone. `greedy_decide` asks
+   `db.measurements(regime, identity)` at each fork and runs the existing arm logic over that short list:
+   schedule rows through `Fork.admits` / `leaf_for`, route rows through `pins.spelled_arm`, failed rows as
+   disqualification. Delete `_Measured`, `_db_measured_index*`,
    `_DB_INDEX_CACHE`, `_sig_groups`, the subset branch of `Prior.sig_groups`, `fork_signature` as a lookup key.
    Verify: the cold-pick tests, the two serving stitch tests, a serve boot's compile count and wall time.
 4. **Golden import is a DB write.** `golden.import_file(db, path)`: each entry with an identity is one

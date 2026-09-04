@@ -185,7 +185,7 @@ extension) re-capture when batch sizes change. A capture failure (`GraphCaptureE
 continues uncaptured, and reports it via `BenchmarkResult.captured` — comparison callers
 (`bench_lowered_vs_torch` / `bench_full_model_real`) pair that flag with their torch-side capture and
 re-run all-or-nothing so one table never mixes semantics. The tune sweep persists the flag per `perf`
-row (`SearchDB.record_perf`): captured measurements supersede wall-semantics ones for the same key
+row (`SearchDB.record_measurement`): captured measurements supersede wall-semantics ones for the same key
 regardless of median, never the reverse — old rows stay usable (replay, prior training) and upgrade
 in place as re-tunes measure them captured. See `tests/compiler/backend/test_graph_capture.py`.
 
@@ -325,7 +325,7 @@ CUDA event timing has sub-µs resolution and any real launch consumes at least
 one device cycle — a 0.0 reading means a degenerate kernel (BM=1×BN=128 with
 the M tile fully masked, a kernel fused into a no-op, an event-pair quirk)
 that would otherwise lock in as the autotune DB's unbeatable best. Phase B
-of the same work; the existing worker → parent → `record_perf(bench_fail)`
+of the same work; the existing worker → parent → `record_measurement(bench_fail)`
 path carries the failure unchanged.
 
 `run_program_debug(...)` snapshots every non-input buffer after each

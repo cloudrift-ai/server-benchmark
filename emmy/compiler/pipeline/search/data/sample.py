@@ -20,21 +20,11 @@ the stable golden format.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 
 from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.features import knob_features
-
-# The C identifier of a CUDA kernel, parsed from ``cuda_op.pretty`` — the grouping
-# key for the per-knob regret analysis. Kept here so the DB-row adapter and the
-# regret grouping share one source. Anchored on the ``__global__`` entry point
-# (``__launch_bounds__`` sits between it and ``void``) — MMA/TMA kernel sources
-# open with ``__device__`` helper preludes (``emmy_ldmatrix_x4``, ``mbarrier_init``),
-# so a bare first-``void`` match would name the helper, collapsing distinct kernels
-# into one leaderboard bucket and hiding them from ``--kernel`` filters.
-KERNEL_NAME_RE = re.compile(r"__global__\s+(?:__launch_bounds__\([^)]*\)\s+)?void\s+(\w+)\s*\(")
 
 
 def _split_by_prefix(knobs: dict) -> tuple[dict, dict, dict]:
@@ -123,22 +113,15 @@ class Sample:
         )
 
     @classmethod
-    def from_perf_sample(cls, ps) -> Sample:
-        """A tune-DB ``perf ⋈ cuda_op`` row (:class:`db.PerfSample`) as a ``Sample``.
-        Splits the recorded knob dict by prefix; the kernel C identifier (for
-        per-knob regret grouping) is parsed from ``cuda_op.pretty``."""
-        tunable, ctx, s = _split_by_prefix(ps.knobs)
-        m = KERNEL_NAME_RE.search(ps.pretty or "")
-        return cls(
-            knobs=tunable,
-            latency_us=ps.latency_us,
-            name=m.group(1) if m else None,
-            context=ctx,
-            pretty=ps.pretty,
-            source="db",
-            s_full=s,
-            error=ps.error,
-        )
+    def from_measurement(cls, m) -> Sample:
+        """A tune-DB :class:`db.Measurement` row as a ``Sample``.
+
+        The grouping name is the kernel's IDENTITY, not the C identifier the store used to recover
+        from a saved kernel source: the identity is what the rows are keyed on, so rows that group
+        together are exactly the rows measuring one kernel — where the C identifier merged
+        distinct kernels a provenance pass happened to name alike."""
+        tunable, ctx, s = _split_by_prefix(m.knobs)
+        return cls(knobs=tunable, latency_us=m.us_median, name=m.op, context=ctx, source="db", s_full=s, error=m.error)
 
     @classmethod
     def from_prior_row(cls, knobs: dict, latency_us: float) -> Sample:

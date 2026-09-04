@@ -150,7 +150,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **prior** | The ranking model — the fit-offline **offline prior** when cold, the CatBoost **online prior** trained from local measurements once data exists. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
 | **golden record** | A reviewed program-backed schedule measurement, selected by frontend provenance and used as deploy evidence and an A/B reference. |
-| **the variant key** | The variant key measurements are stored under — `identity_key(with_io=True, with_knobs=True)`: the canonical Loop-IR body (a `TileOp` derives it schedule-free from its term) + the io fingerprint + the knob row. Dialect-free: every stage of one rewrite chain keys off the same content. |
+| **the variant key** | What the search tree and the caches dedup on — `identity_key(with_io=True, with_knobs=True)`: the canonical Loop-IR body (a `TileOp` derives it schedule-free from its term) + the io fingerprint + the knob row. A measurement stores its two halves as separate columns instead, because a fork is decided by querying the identity alone. Dialect-free: every stage of one rewrite chain keys off the same content. |
 
 ## Module map
 
@@ -1116,21 +1116,24 @@ don't invent a third:
   identity, so a prior is a pure function of it. The online prior is exactly `score(features(ctx, knobs))`: the
   structural facts are already in the knob dict, so `features.knob_features` turns it straight into the model feature
   vector (the `S_*` knobs pass through; tuning knobs encode by type, `MMA` expands to atom props).
-- **Measurement identity = `(ctx.structural_key, the variant key)`** — ground truth about *materialized leaves*: `perf`
-  rows (the per-variant replay cache), op inventory (`loop_op` / `tile_op` / `kernel_op` / `cuda_op`), and two-level
-  dedup. The structural `child_key` on `lowering` rows is measurement linkage (it joins the inventory), NOT a replay
-  key.
+- **Measurement identity = `(regime, kernel identity, decision)`** — ground truth about *materialized leaves*, and
+  the `measurement` table's key. The identity is knob-free (what the kernel IS) and the decision is the arm its
+  tunable knobs picked, so the fork a deploy is deciding and the row that answers it are the same two values. A
+  rendered `CudaOp` keys on the FORK that offered it — its own pre-schedule `TileOp`, else the fused `LoopOp` —
+  never on its rendered source: a measurement and the deploy join have to speak one alphabet.
 
 ### Search persistence: on-disk inventory vs in-memory MCTS
 
 **`SearchDB`** (`db.py`) is a SQLite store partitioned into:
 
-- **Four op-inventory tables** — one row per op encountered along any lowering chain, keyed by the variant key
-  (`identity_key(with_io=True, with_knobs=True)`).
-- **A `lowering` edge table** — one row per rewrite hop carrying the knob delta plus a best-median upsert
-  (`best_per_op_time` walks the chain to resolve a pre-final op's measured cost; loop→loop source hops are skipped as
-  structural/decision hops).
-- **A backend-partitioned `perf` table** — full stats + `backend` + `status` + `knobs` + `captured`.
+- **`context` and `op`** — the identities a measurement is keyed on, UNPACKED: one column per field of `Regime`
+  and `OpIdentity` (`compiler/identity.py`), with each row's `digest` derived from those columns.
+- **A `measurement` table** — one row per `(context, op, decision)`, which is also its keep-best key. That key IS
+  the per-fork query: a compile decides a fork with one indexed lookup on the identity it is offered on
+  (`SearchDB.measurements`), where it used to scan the whole table once per process and match rows by their `S_*`
+  feature set. What the store no longer keeps is reconstructed on demand — the `S_*` features by featurizing
+  `op.body`, the `H_*` values from the regime, the kernel source and geometry by re-lowering the body under the
+  decision (what the cubin cache already keys on).
 - **A `node` table** — one row per **search-tree node**, meaning every partly-decided branch and every leaf of a
   per-kernel search. It is keyed by `digest(context_key, gpu, op_sig, tunable-knob set)` and carries the full feature
   dict the prior sees, a latency for that position in the tree, a `parent_key` pointer, a `gpu` column and depth
@@ -1138,8 +1141,8 @@ don't invent a third:
   keeps the minimum, because its latency is a bound over the subtree that a faster descendant genuinely tightens,
   while a leaf row takes the **newest** measurement, because a leaf is a re-measurement of one single config and
   taking the min of K noisy medians would drift toward the noise floor. The `node` table is never consulted at deploy
-  (Part 3's hierarchy reads only goldens / reservoir / `perf`); its consumers are the `emmy eval` diagnostics (Part 8)
-  and the offline fitter's planned training path over a frozen snapshot.
+  (Part 3's hierarchy reads only goldens / reservoir / `measurement`); its consumers are the `emmy eval` diagnostics
+  (Part 8) and the offline fitter's planned training path over a frozen snapshot.
 
 Each `node` row also carries **label-quality columns** (additive migration; old rows degrade to unknowns):
 
@@ -1161,8 +1164,11 @@ The `gpu` identity (`Context.hardware_id`, the PCIe product name) is folded into
 different hardware never collide. `context_key` (compute capability + optimization level) cannot separate two SKUs off
 the same die — H100 and H200 share both compute capability and SM count — so without `gpu` their rows would merge and
 the upsert would silently drop one GPU's data. (The `H_total_mem` VRAM feature is what then lets the prior model the
-difference between them.) `node` and `perf` are keyed by content, independently of any parent tree, and survive a
-`_SCHEMA_VERSION` bump; only `lowering`, which is keyed by the graph's topology, is dropped on a mismatch.
+difference between them.) `node` and `measurement` are keyed by content, independently of any parent tree. A
+`_SCHEMA_VERSION` bump means the identities themselves are spelled differently, so rows written under the old
+spelling are unreadable rather than stale: v5 dropped the whole pre-identity generation (`perf`, `lowering` and the
+four op-inventory tables), because a `perf` row keyed on a digest of rendered CUDA source cannot be re-derived into
+the Loop-IR body it came from.
 
 **Merging data measured on another GPU.** `SearchDB.merge_nodes(src_path)` is how data accumulates: it reads another
 autotune DB's `node` rows read-only and re-inserts them through the same per-kind update rules. The result does not

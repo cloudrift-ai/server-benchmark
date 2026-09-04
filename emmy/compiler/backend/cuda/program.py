@@ -1380,7 +1380,7 @@ def benchmark_program(
     torch timings (``bench_lowered_vs_torch`` / the e2e comparison) use that
     flag to re-run all-or-nothing so one table never mixes semantics, and the
     tune sweep persists it on each ``perf`` row (captured measurements
-    supersede wall-semantics ones on write — see ``SearchDB.record_perf``).
+    supersede wall-semantics ones on write — see ``SearchDB.record_measurement``).
 
     Multi-launch programs additionally get a WHOLE-program time per measured
     iter — one event window around back-to-back replays of a single CUDA

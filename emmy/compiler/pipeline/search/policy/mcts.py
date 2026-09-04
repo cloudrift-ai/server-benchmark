@@ -590,7 +590,7 @@ class TuningSearch(Search):
                 out[row.node_key] = row
                 return
             # Within-batch duplicate (empty knob-delta chain): keep one row per key.
-            # An ``ok`` row always beats a ``bench_fail`` (record_perf's policy);
+            # An ``ok`` row always beats a ``bench_fail`` (record_measurement's policy);
             # among same-status rows prefer the directly-benched one (it carries the
             # bench stats) with the min value. Either way the survivor takes the
             # first-seen depth/parent and the max (not sum) of the visits, so

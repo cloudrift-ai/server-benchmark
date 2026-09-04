@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from emmy.compiler.graph import Graph, Node
+    from emmy.compiler.identity import OpIdentity
     from emmy.compiler.ir.expr import Expr
     from emmy.compiler.tensor import Tensor
 
@@ -182,9 +183,19 @@ class Op:
         sound outright."""
         return _io_fingerprint(self)
 
+    def identity(self, *, structural: bool = True) -> OpIdentity | None:
+        """This op's :class:`~emmy.compiler.identity.OpIdentity` — what the kernel IS, knob-free.
+        ``None`` for an op kind that carries no Loop-IR body."""
+        from emmy.compiler.identity import OpIdentity  # noqa: PLC0415
+
+        body = self._body_identity(structural=structural)
+        if body is None:
+            return None
+        return OpIdentity(dialect=type(self).dialect or "", body=body, io=self._io_key)
+
     def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
-        """THE identity — one function, one lattice. The base fact is the canonical Loop-IR
-        body digest; each flag folds in one more fact:
+        """THE identity — one function, one lattice over :meth:`identity`. The base fact is the
+        canonical Loop-IR body digest; each flag folds in one more fact:
 
         - ``structural`` — collapse compute-unit op clusters (the schedule-equivalent reading,
           the default: cluster siblings share a schedule space and want the same schedule) vs
@@ -192,21 +203,24 @@ class Op:
         - ``with_io`` — the io dtype/shape fingerprint: what a deployed kernel is bound to;
         - ``with_knobs`` — the knob row: which variant of the kernel this op is.
 
-        ``None`` for an op kind that carries no Loop-IR body. ``CudaOp`` overrides the whole
-        function with its rendered-source digest: past rendering, body / io / knobs are all
-        realized into the artifact and the flags have nothing left to fold. The same kernel
-        reached via different rewrite paths produces the same key — ``source`` is never part
-        of it, and neither is the dialect tag: every stage of one rewrite chain keys off the
-        same Loop-IR content."""
-        key = self._body_identity(structural=structural)
-        if key is None:
+        The two knob-free points ARE the value object's — the bare body and
+        :attr:`OpIdentity.digest`, the ``op`` table's key — so the deploy join and the row it
+        joins to cannot drift apart. Knobs extend the same FLAT fold rather than digesting that
+        digest: these values are durable data (the corpus stamps ``with_io=True`` into checked-in
+        case files, and a kernel's name carries a slice of it), so the fold must not move.
+
+        ``None`` for an op kind that carries no Loop-IR body. The same kernel reached via
+        different rewrite paths produces the same key — ``source`` is never part of it, and
+        neither is the dialect tag: every stage of one rewrite chain keys off the same Loop-IR
+        content, which is what lets a golden minted by lifting a recorded target to Loop IR join
+        the live Tile fork that offers it."""
+        identity = self.identity(structural=structural)
+        if identity is None:
             return None
-        parts: list = [key]
-        if with_io:
-            parts.append(self._io_key)
-        if with_knobs:
-            parts.append(self._knob_key())
-        return key if len(parts) == 1 else digest(*parts)
+        if not with_knobs:
+            return identity.digest if with_io else identity.body
+        parts = [identity.body, *([identity.io] if with_io else []), self._knob_key()]
+        return digest(*parts)
 
     @_ClassProperty
     def dialect(cls) -> str | None:  # noqa: N805 — a class property; ``cls`` receives the owner

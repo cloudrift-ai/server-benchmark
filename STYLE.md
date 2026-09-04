@@ -124,6 +124,27 @@ dict it replaces — note the 3.15 builtin is NOT a `dict` subclass, which the e
 Don't hand-roll immutable dict subclasses, and don't use `types.MappingProxyType` — it can't be pickled or
 deep-copied and is not a `dict`.
 
+### Value types are `frozen=True`; simple ones are `slots=True` too
+
+Default to `@dataclass(frozen=True)` for anything that models a value — an IR term, a schedule choice, a domain, a
+composition prefix. Frozen is what lets one object be shared by many wrappers with no defensive copy, lets a derived
+read cache on the term at all, and makes `dataclasses.replace` the only way a "change" happens.
+
+A SIMPLE value type — a small object that is its fields plus the behavior reading them, with no derived state of its
+own — takes `slots=True` as well. It drops the per-instance `__dict__`, which cuts memory and speeds attribute
+access, and that is worth having on the leaf choice objects an enumeration builds in the millions (`Tile`, `Work`,
+`Reduce`, `Stage`, `Raster`).
+
+A BIGGER type — one that owns derived reads the rest of the compiler depends on (`Fold`, `TileOp`, `ClassicDomains`,
+`ClassicScheduleContext`) — stays unslotted and declares those reads with `cached_property` or `cached_method`, per
+the next section. The two are mutually exclusive: both cache through the very `__dict__` that `slots=True` removes,
+so a slotted class raises `TypeError: No '__dict__' attribute on 'X' instance to cache 'y' property` on the first
+read. Never add `__dict__` back to `__slots__` to have both — a type wanting caches is telling you which side it is
+on.
+
+One cost worth knowing either way: `@dataclass(slots=True)` builds a NEW class object and regenerates every method,
+so it makes import-time class construction more expensive, not less.
+
 ### Derived values are first-class members, not `__dict__` stashes
 
 A derived value another module reads (a lowered body, an identity digest, a canonical rendering) is part of the

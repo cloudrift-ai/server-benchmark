@@ -143,6 +143,18 @@ def test_multi_cuda_realized_knobs_must_be_conflict_free():
     assert realized_tuning_knobs(graph)["TILE"] == "f2x2"
 
 
+def test_realized_knobs_reject_incomplete_cuda_schedule():
+    graph = Graph()
+    graph.add_node(
+        op=CudaOp(kernel_name="incomplete", knobs={"WORK": "", "RASTER": ""}),
+        inputs=[],
+        output=Tensor("incomplete", (1,)),
+        node_id="incomplete",
+    )
+
+    assert realized_tuning_knobs(graph) is None
+
+
 def test_working_file_rejects_legacy_reproducer_field(tmp_path):
     path = tmp_path / "trace.yaml"
     document = _document(_matmul("mm"))

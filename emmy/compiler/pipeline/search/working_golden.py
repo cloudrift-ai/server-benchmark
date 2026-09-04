@@ -334,16 +334,16 @@ def realized_tuning_knobs(graph) -> dict[str, str] | None:
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import complete_kernel_row  # noqa: PLC0415
 
-    rows = [complete_kernel_row(node.op.knobs) for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
-    if not rows:
-        return None
     merged: dict[str, str] = {}
-    for row in rows:
-        for key, value in row.items():
-            if key in merged and str(merged[key]) != str(value):
-                return None
-            merged[key] = value
-    return merged
+    try:
+        for row in (complete_kernel_row(node.op.knobs) for node in graph.nodes.values() if isinstance(node.op, CudaOp)):
+            for key, value in row.items():
+                if key in merged and str(merged[key]) != str(value):
+                    return None
+                merged[key] = value
+    except ValueError:
+        return None
+    return merged or None
 
 
 class _ProposalLoopIdentity(PipelineStrategy):

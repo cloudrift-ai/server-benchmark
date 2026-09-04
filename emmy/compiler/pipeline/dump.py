@@ -277,10 +277,7 @@ class CompilerDump:
 
     @staticmethod
     def _constant_closure(src: Graph, root: str) -> set[str] | None:
-        """The transitive-input closure of ``root`` iff it is constant-derived —
-        every leaf a ``ConstantOp`` — else ``None``. An ``InputOp`` anywhere in
-        the closure means ``root`` carries runtime data and must stay a synthetic
-        boundary."""
+        """Return ``root``'s intrinsic constant closure, or ``None`` at a runtime boundary."""
         from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
 
         closure: set[str] = set()
@@ -291,6 +288,8 @@ class CompilerDump:
                 continue
             node = src.nodes.get(cur)
             if node is None or isinstance(node.op, InputOp):
+                return None
+            if isinstance(node.op, ConstantOp) and node.op.value is None and node.op.context_value is None:
                 return None
             closure.add(cur)
             if not isinstance(node.op, ConstantOp):

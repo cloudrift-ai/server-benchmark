@@ -40,22 +40,23 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
     assert {task.variant.params["seq_len"] for task in tasks} == {1, 512}
     assert {task.variant.params["model_ref"] for task in tasks} == {"Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca"}
-    a100_tasks = [task for task in tasks if task.recipe.deploy.gpu == "NVIDIA A100 80GB"]
-    searched_tasks = [task for task in tasks if task.recipe.deploy.gpu != "NVIDIA A100 80GB"]
-    assert {task.variant.params["golden"] for task in a100_tasks} == {
-        "qwen3-06b-s1_a100",
-        "qwen3-06b-s512_a100",
-    }
-    assert all(task.variant.params["budget"] == 0 for task in a100_tasks)
-    assert all(task.variant.params["patience"] == 0 for task in a100_tasks)
-    assert all(task.variant.params["golden"] == "" for task in searched_tasks)
-    assert all(task.variant.params["budget"] == 12 for task in searched_tasks)
-    assert all(task.variant.params["patience"] == 4 for task in searched_tasks)
+    assert all(task.variant.params["golden"] == "" for task in tasks)
+    assert all(task.variant.params["budget"] == 12 for task in tasks)
+    assert all(task.variant.params["patience"] == 4 for task in tasks)
 
     run = recipe.command.run
     assert "./venv/bin/emmy trace" in run
     assert "./venv/bin/emmy tune" in run
     assert "./venv/bin/emmy run" in run
+    assert "make -B setup" in run
+    assert "[ -d venv ] || make setup" not in run
+    assert 'compute_cap=$$(nvidia-smi --id="$$first_device" --query-gpu=compute_cap --format=csv,noheader | head -n 1)' in run
+    assert 'if [ "$$compute_cap" = "7.0" ]' in run
+    assert 'sys.exit("sm_70" not in torch.cuda.get_arch_list())' in run
+    assert '"torch==$${torch_version}+cu126"' in run
+    assert "https://download.pytorch.org/whl/cu126" in run
+    assert "LD_PRELOAD" in run
+    assert "/usr/local/cuda-12.9/lib64/libnvrtc.so.12" in run
     assert "for repeat in 0 1 2 3 4" in run
     assert "--golden $task_dir/working.yaml --bench --strict" in run
     assert "--bench-backends eager,tcompile" in run

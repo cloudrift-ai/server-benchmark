@@ -1,5 +1,49 @@
 # Golden-bench kernel corpus
 
+## Post-refactor qualification (2026-09-04 UTC)
+
+This pass started from `origin/main` at `8221fa60` and regenerated the Qwen3-0.6B layer-0 working golden instead of
+replaying the pre-refactor A100 files. RTX 4090, RTX 5090, V100, and the retained A100 all produced the same four
+sequence-length-1 targets. H200 and B200 were unavailable. Runs used the exact GPU capability, deployable O3, isolated
+tuning state, the repository CLI, and bounded search. The A100 VM remains running.
+
+Three targets tuned normally. Their selected rows were then replayed twice in separate systemd services with strict
+direct eager correctness and captured `torch.compile` timing. Every observation passed, and Emmy beat `torch.compile`
+on all four cards:
+
+| platform | weight broadcast: Emmy / `torch.compile` | RMS mean: Emmy / `torch.compile` | normalized multiply: Emmy / `torch.compile` |
+| --- | --- | --- | --- |
+| V100 sm70 | 1.247-1.252 / 2.085-2.106 µs | 2.224-2.233 / 2.319-2.334 µs | 1.339-1.352 / 3.421-3.488 µs |
+| A100 sm80 | 1.102 / 1.884-1.927 µs | 2.076 / 2.806-2.815 µs | 1.187-1.195 / 4.687-4.873 µs |
+| RTX 4090 sm89 | 0.770-0.771 / 1.173-1.279 µs | 1.353-1.357 / 1.680-1.721 µs | 0.813-0.870 / 3.086-4.410 µs |
+| RTX 5090 sm120 | 0.682-0.772 / 2.047-2.050 µs | 1.181-1.189 / 2.049 µs | 0.701-0.816 / 1.781-1.981 µs |
+
+The fourth target is the blocker. The refactored fusion path represents almost the whole remaining transformer layer
+as one `k_sdpa_linear_mean_reduce_ec6048` target with 66 placement seams. On every card the first candidate left
+`add_7` as an unlowered `TileOp`; subsequent candidates either failed to lower or ran the fused kernel until the
+60-second watchdog. A manual route cutting the top-level attention output projection and MLP down projection produced
+five kernels, but its attention partial still exceeded 15 seconds. The common corpus therefore has no complete parity
+number, and sequence length 512 and serving were not started after the smaller gate failed.
+
+Two independent, bounded gaps found during replay were fixed:
+
+- The V100 now installs the CUDA 12.6 build of the current PyTorch version when the default wheel lacks sm70, and
+  continues to preload CUDA 12 NVRTC for compiler evaluation. This restores eager and `torch.compile` verification.
+- A source-backed constant producer was incorrectly retained inside a standalone frontend slice. That changed the
+  target's provenance and made the tuned normalized-multiply row report that its persisted target selected no kernel.
+  Source-backed producer cones are now runtime boundaries; literal and context-bound scalar cones remain embedded.
+
+Failed multi-kernel proposals also no longer crash while canonicalizing an incomplete schedule row; the working
+golden records the unsuccessful proposal instead. Raw archives and the strict replay JSON are retained in the
+`2026-09-04_01-41-01`, `2026-09-04_02-02-14`, `2026-09-04_02-15-19`, and `2026-09-04_02-39-18` run directories.
+
+The remaining issue is architectural rather than a missing classic schedule. The large target contains duplicated
+attention value-channel work under different scopes after fusion, while the realization corpus still records
+`attention/sdpa-computed-value-cut-mma_xfail_offered.yaml`. Placement cuts can expose child schedules, but no efficient
+child exists until the computed value channel reaches the tensor-core schedule and shared graph values survive as
+materialization choices. No golden is promoted from this pass because the complete model-derived target is not yet
+qualified.
+
 ## Current-head corpus requalification (2026-08-29)
 
 The draft is based on current main `b88763fa`; the exact combined source for this pass is `857ba7e9`. Every hardware

@@ -1,7 +1,21 @@
 # Symbolic reading: `Expr` as exact syntax, sympy as semantics, definition-only twist recipes
 
-Drafted 2026-09-03 from a design discussion; nothing implemented yet. Branch from `main` as
-`feature/symbolic-reading`. This file is a working note and must never be referenced from durable docs or code.
+Drafted 2026-09-03 from a design discussion. **Phases 1 and 2 landed on `feature/symbolic-reading`** (2026-09-04);
+phase 0 and phases 3-6 are still open. This file is a working note and must never be referenced from durable docs or
+code.
+
+Landed, with two deviations from the draft below:
+
+- `Body.as_expr` needed a second scope rule the draft did not anticipate: resolution is POSITIONAL, and a name read
+  before it is bound gets a position-carrying atom. A combine rebinds its accumulators (`acc = add(sa, sb)` whose
+  `sa` reads the incoming `acc`), so a name-keyed reading either recurses forever or reads the softmax pivot's
+  `m = copy(maximum(m, m__o))` as `m`. Silent and plausible; caught by running `linearize` over `SOFTMAX.program`.
+- `factor` refuses on structure only (not a product; a varying denominator). A lone atom is a one-factor product,
+  and the draft's "a lone `exp` refuses" is the CALLER's condition — `_hoist_invariant` already declines on
+  `not invariant or not varying`. Refusals about usefulness stay in rules.
+
+The blockification consumer that motivated this (a twisted carrier's per-component `alpha*s + beta*s__o` reading,
+so a block's inner fold reaches `as_contraction`) is a phase-6 use and is not started.
 
 ## Goal
 

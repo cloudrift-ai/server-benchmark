@@ -693,6 +693,24 @@ class Stmt(Structural):
         """
         return ()
 
+    def as_expr(self, name: str, read: Callable[[str], Expr], through) -> Expr:  # noqa: ANN001 — any op predicate
+        """This statement's definition of ``name`` as a value :class:`Expr`, or the atom ``Var(name)``.
+
+        The fourth slice of the per-stmt analysis surface, beside :meth:`deps`, :meth:`nested` and
+        :meth:`exprs`, and it follows the same trait convention: a CONSERVATIVE default and
+        per-class opt-in, no isinstance whitelist. An accumulator, a load, a select, a constant, a
+        term's state — or a kind added tomorrow — is an ATOM, so a reading can never see through
+        something whose value the reader does not own. Only ``Assign`` opts in, and only for an op
+        its caller licenses.
+
+        ``read`` resolves one argument name to its own reading (the recursion, driven by
+        :meth:`Body.as_expr` over one scope's definitions). ``through`` is a legality predicate on
+        the op — NOT an op-name set: a hoist licenses ``semiring_product`` and ``divide`` because
+        only those reassociate, while seeing through ``exp`` would factor ``exp(−m)`` out of
+        ``exp(s − m)``, the overflow the twist exists to avoid.
+        """
+        return Var(name)
+
     def pretty(self, indent: str = "") -> list[str]:
         """Render this stmt as a list of indented lines.
 

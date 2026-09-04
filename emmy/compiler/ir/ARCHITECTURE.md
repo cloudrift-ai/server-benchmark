@@ -236,6 +236,53 @@ other IR files.
 | `Expr`                                                                       | Union type alias.                                                        |
 | `PLACEHOLDER_PREFIX`, `placeholder`, `is_placeholder`                        | Convention for output-coord placeholders in coord maps.                  |
 
+## Values vs coordinates: `value.py`, the value reading, `symbolic.py`
+
+`expr.py` is an INTEGER INDEX ALGEBRA. `apply_binop` floor-divides for `/`, and the simplifier applies range-driven
+`div` / `mod` rules. A real value must never be spelled that way, so a value is a `FuncCallExpr` keyed by the
+`ElementwiseImpl` name — opaque to the index simplifier, and unable to meet an integer rule by accident. `value.py`
+is the authoring surface for that spelling: `Value` under Python operators, `exp` / `sqrt` / `maximum`, and `RING`,
+the default legality predicate a reading sees ops through.
+
+**The value reading** is the fourth slice of the per-statement analysis surface, beside `deps`, `nested` and `exprs`,
+and follows the same trait convention — conservative default, per-class opt-in, no isinstance whitelist.
+`Stmt.as_expr(name, read, through)` defaults to the atom `Var(name)`; only `Assign` opts in, and only for an op its
+caller licenses. `Body.as_expr(name, through)` drives the recursion under two scope rules that are what make the
+answer honest:
+
+- **This scope only.** A value bound inside a nested body is not one value here, so the reading stops at it even
+  though `Body.definitions` (recursive) can resolve the name.
+- **Positional.** An argument binds the nearest PRECEDING definition. A monoid's combine rebinds its accumulators by
+  design (`acc = add(sa, sb)` whose `sa` reads the incoming `acc`), so a name-keyed reading would loop or answer with
+  a value from the future. A name read before it is bound already means something else in scope, so THAT binding's
+  opaque value carries its position — otherwise the reading answers `m` for what is really `maximum(m, m__o)`,
+  silently and plausibly.
+
+`through` is a LEGALITY predicate on the op, not an op-name set. A hoist licenses `semiring_product` and `divide`
+because only those reassociate under `Σ`; seeing through `exp` would factor `exp(−m)` out of `exp(s − m)`, the
+overflow a twisted carrier exists to avoid. `exp` is therefore absent from `RING`, and a consumer that owns that risk
+names its own wider predicate.
+
+**`symbolic.py`** is the one closed map from `Expr` to sympy, and the decisions taken over it. `Expr` is syntax —
+it preserves association and temps exactly, which is what a kernel is spelled from; sympy is semantics — it decides
+equality modulo ring identities, so a consumer asks what a cone MEANS instead of matching a stored spelling. Only
+algorithmic sympy is used (`expand`, `cancel`, `Poly`, `as_powers_dict`), never `simplify`: a heuristic rewrite whose
+result depends on the version is not a compiler decision.
+
+| Symbol      | Role                                                                                                        |
+|-------------|-------------------------------------------------------------------------------------------------------------|
+| `symbolic`  | `Expr` → sympy. Total: an unknown call, a cast or a builtin is an uninterpreted atom, which compares structurally — so a reading never fails on a node kind, and collapses to alpha-equality where nothing is interpretable. |
+| `equal`     | Whether two cones denote the same value, by expansion and cancellation.                                      |
+| `factor`    | One product split into invariant and varying atom NAMES with multiplicity (a square listed twice), each invariant carrying whether it divides, plus the `spine` — the cone of the name minus the cones of its atoms. `None` when the reading is not one product. |
+| `linearize` | The cone as monomials in the streamed atoms, each with its coefficient. The reading behind "is this summand linear in what it streams?". `None` when it is not polynomial in them. |
+
+The direction is **one-way**. Nothing builds IR from a sympy expression: sympy normalizes at construction
+(`Mul(Mul(a, b), c)` flattens, `x − x` vanishes, argument order is canonical), which is right for deciding and wrong
+for spelling. A consumer that needs IR renames and splices the statements it already holds; these readings tell it
+WHICH ones, and hand back names and statements rather than an expression to emit. Structural refusals belong to the
+reading (a sum is not a product; a varying denominator has nothing to commute past); whether a legal split is USEFUL
+stays the calling rule's condition.
+
 ## `frontend/ir.py`
 
 Ops captured directly from PyTorch. Every one has a decomposition rule

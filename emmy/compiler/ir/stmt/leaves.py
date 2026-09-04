@@ -13,7 +13,7 @@ from functools import cached_property
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, _float_lit
+from emmy.compiler.ir.expr import BinaryExpr, Expr, FuncCallExpr, Literal, Var, _float_lit
 from emmy.compiler.ir.stmt.base import (
     _INTEGER_DTYPES,
     RenderCtx,
@@ -382,6 +382,13 @@ class Assign(Stmt):
 
     def defines(self) -> tuple[str, ...]:
         return (self.name,)
+
+    def as_expr(self, name: str, read, through) -> Expr:  # noqa: ANN001 — any op predicate
+        """The one opt-in to the value reading: a licensed op becomes a call over its arguments'
+        readings, anything else stays the atom ``Var(name)``. A VALUE is a ``FuncCallExpr`` keyed by
+        the op name, never a ``BinaryExpr`` — ``apply_binop`` floor-divides for ``/``, so a value
+        spelled as index arithmetic would meet the integer simplifier's rules by accident."""
+        return FuncCallExpr(self.op.name, tuple(read(arg) for arg in self.args)) if through(self.op) else Var(name)
 
     def pretty(self, indent: str = "") -> list[str]:
         prefix = f"{self.dtype.name} " if self.dtype is not None else ""

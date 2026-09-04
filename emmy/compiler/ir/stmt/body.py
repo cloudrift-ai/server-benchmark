@@ -28,6 +28,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from functools import cached_property, lru_cache
 
+from emmy.compiler.ir.expr import Expr, Var
 from emmy.compiler.ir.stmt.base import Stmt
 
 
@@ -296,6 +297,49 @@ class Body(tuple[Stmt, ...]):
         scope outside this body — i.e. external reads.
         """
         return {n: s for s in self.iter() for n in s.defines()}
+
+    def as_expr(self, name: str, through) -> Expr:  # noqa: ANN001 — any op predicate
+        """The value cone of ``name`` read as one :class:`Expr` — :meth:`Stmt.as_expr` driven over
+        THIS scope's own definitions.
+
+        Two scope rules, both load-bearing. Only a statement this body binds DIRECTLY resolves, so a
+        value bound inside a nested body (a loop's per-iteration temp) stays an atom — it is not one
+        value at this level, and reading through it would state an equality that does not hold. And
+        resolution is POSITIONAL: an argument binds the nearest PRECEDING definition of its name, or
+        stays an atom when none precedes it. A monoid's combine rebinds its accumulators by design
+        (``acc = add(sa, sb)`` whose ``sa`` reads the incoming ``acc``), so a name-keyed reading
+        would either loop or answer with a value from the future.
+
+        A name this scope does not bind is an atom too — a param, a coordinate, an enclosing scope's
+        def. Every atom reaches the caller through ``free_vars()``, and the reading evaluates
+        through ``Expr.eval`` with no extra code.
+        """
+        bindings: dict[str, list[tuple[int, Stmt]]] = {}
+        read_at: dict[str, int] = {}
+        for index, stmt in enumerate(self):
+            for used in stmt.deps():
+                read_at.setdefault(used, index)
+            for bound in stmt.defines():
+                bindings.setdefault(bound, []).append((index, stmt))
+        memo: dict[tuple[str, int], Expr] = {}
+
+        def read(current: str, before: int) -> Expr:
+            preceding = [pair for pair in bindings.get(current, ()) if pair[0] < before]
+            if not preceding:
+                return Var(current)
+            index, stmt = preceding[-1]
+            if (current, index) not in memo:
+                # A SHADOWING binding's opaque value carries its binding position. A name read
+                # before it is bound already means something else in this scope — the incoming
+                # accumulator a combine rebinds — so handing back the bare name would answer ``m``
+                # for what is really ``maximum(m, m__o)``, silently and plausibly. A name only ever
+                # bound before it is read (an ordinary temp) keeps its own spelling, which is what
+                # lets a consumer act on the atom names the split reports.
+                atom = f"{current}@{index}" if read_at.get(current, index) < index else current
+                memo[current, index] = stmt.as_expr(atom, lambda arg: read(arg, index), through)
+            return memo[current, index]
+
+        return read(name, len(self))
 
     @cached_property
     def axis_names(self) -> frozenset[str]:

@@ -12,49 +12,10 @@ the fp16 path is covered by the Phase-0 oracle).
 import numpy as np
 import pytest
 
+from tests.serving import helpers
+
 # NOT perf-marked (correctness pin, must run under ``make test``; see tests/ARCHITECTURE.md).
 pytestmark = [pytest.mark.xdist_group("cuda")]
-
-
-def _qwen3_block():
-    import torch
-    import transformers
-
-    config = transformers.Qwen3Config(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        max_position_embeddings=64,
-        use_sliding_window=False,
-    )
-    torch.manual_seed(0)
-    return config, transformers.Qwen3ForCausalLM(config).eval().model.layers[0]
-
-
-def _gemma3_block():
-    """Tiny Gemma-3/4 decoder layer, layer 0 forced global (``sliding_window_pattern=1``) — the
-    4-norm carve target (extra pre/post-feedforward norms). head_dim explicit so attn_width is unambiguous."""
-    import torch
-    import transformers
-
-    config = transformers.Gemma3TextConfig(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        max_position_embeddings=64,
-        sliding_window=16,
-        sliding_window_pattern=1,
-    )
-    torch.manual_seed(0)
-    return config, transformers.Gemma3ForCausalLM(config).eval().model.layers[0]
 
 
 def _compile_wrapper(wrapper, example_args, argnames):
@@ -70,7 +31,8 @@ def _compile_wrapper(wrapper, example_args, argnames):
 
     specs = [f"num_tokens@{name}:0" for name in argnames]  # shared NAME ties all axes
     graph = trace_module(wrapper, tuple(example_args), dynamic_shapes=build_torch_dynamic_shapes(parse_position_specs(specs)))
-    compiled = CudaBackend(tune_db="auto").compile(graph)
+    with helpers.evidence_scope():
+        compiled = CudaBackend(tune_db="auto").compile(graph)
 
     sources = {}
     for path, t in wrapper.named_parameters(remove_duplicate=False):
@@ -104,13 +66,10 @@ def test_pre_wrapper_compiles_and_runs_dynamic():
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    from emmy.compiler.trace.huggingface import build_attention_split_wrapper
-
-    config, block = _qwen3_block()
-    pre, _ = build_attention_split_wrapper(block)
+    pre, args, argnames, config = helpers.wrapper_case("qwen3.pre")
     h = config.hidden_size
 
-    program, in_names, out_names = _compile_wrapper(pre, [torch.randn(8, h)], ["hidden"])
+    program, in_names, out_names = _compile_wrapper(pre, args, argnames)
     for t in (4, 7):  # different token counts → replay at new num_tokens, not recapture
         hidden = torch.randn(t, h)
         got = _run(program, in_names, out_names, [hidden])
@@ -128,15 +87,11 @@ def test_post_wrapper_compiles_with_shared_dim():
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    from emmy.compiler.trace.huggingface import build_attention_split_wrapper
-
-    config, block = _qwen3_block()
-    _, post = build_attention_split_wrapper(block)
+    post, args, argnames, config = helpers.wrapper_case("qwen3.post")
     h = config.hidden_size
     attn_width = config.num_attention_heads * (config.head_dim or h // config.num_attention_heads)
 
-    # post(attn_out[T, Hq*D], residual[T, H]) — BOTH axis-0 share the num_tokens Dim.
-    program, in_names, out_names = _compile_wrapper(post, [torch.randn(8, attn_width), torch.randn(8, h)], ["attn_out", "residual"])
+    program, in_names, out_names = _compile_wrapper(post, args, argnames)
     for t in (4, 7):
         attn_out, residual = torch.randn(t, attn_width), torch.randn(t, h)
         (got,) = _run(program, in_names, out_names, [attn_out, residual])
@@ -155,14 +110,11 @@ def test_gemma_post_wrapper_compiles_and_runs_dynamic():
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    from emmy.compiler.trace.huggingface import build_attention_split_wrapper
-
-    config, block = _gemma3_block()
-    _, post = build_attention_split_wrapper(block)
+    post, args, argnames, config = helpers.wrapper_case("gemma3.post")
     h = config.hidden_size
-    attn_width = config.num_attention_heads * config.head_dim
+    attn_width = config.num_attention_heads * (config.head_dim or h // config.num_attention_heads)
 
-    program, in_names, out_names = _compile_wrapper(post, [torch.randn(8, attn_width), torch.randn(8, h)], ["attn_out", "residual"])
+    program, in_names, out_names = _compile_wrapper(post, args, argnames)
     for t in (4, 7):
         attn_out, residual = torch.randn(t, attn_width), torch.randn(t, h)
         (got,) = _run(program, in_names, out_names, [attn_out, residual])

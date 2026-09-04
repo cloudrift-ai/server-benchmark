@@ -52,7 +52,7 @@ class _Ctx:
         self.axes = None if tile is None else axis_names(root) if root is not None else set()
         if tile is not None:
             self.axes |= {a.name for a in (*tile.place.free, *tile.place.grid)}
-            self.axes |= {st.sweep.name for st in tile.output_specs if st.sweep is not None}
+            self.axes |= {axis.name for st in tile.output_specs for axis in st.sweep}
 
     def captures(self, lam) -> tuple[str, ...]:
         """The VALUE names ``lam``'s body reads but neither binds nor takes from the iteration
@@ -231,7 +231,9 @@ def tile_body(tile) -> str:
     lines = [f"    {line}" for line in _pretty_place(tile)]
     lines += pretty(tile.op, "    ", tile=tile)
     outputs = [
-        f"{f'sweep({spec.sweep.name}) ' if spec.sweep else ''}{line.strip()}" for spec in tile.output_specs for line in spec.write.pretty()
+        f"{f'sweep({".".join(axis.name for axis in spec.sweep)}) ' if spec.sweep else ''}{line.strip()}"
+        for spec in tile.output_specs
+        for line in spec.write.pretty()
     ]
     lines += _pretty_region("outputs", outputs)
     return "\n".join(lines)

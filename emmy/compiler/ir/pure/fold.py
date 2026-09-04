@@ -784,8 +784,8 @@ class Fold:
             )
             owned.setdefault(key, []).append(spec)
         for spec in stores:
-            if spec.sweep is not None:
-                coordinates.setdefault(spec.sweep.name, spec.sweep)
+            for axis in spec.sweep:
+                coordinates.setdefault(axis.name, axis)
         declared.extend(name for name in coordinates if name not in declared)
         read = self.free_axes | {name for spec in stores for expr in spec.write.index for name in expr.free_vars()}
         if missing := read - bound - internal - set(coordinates):

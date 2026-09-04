@@ -38,7 +38,9 @@ command:
     }
     trap finalize EXIT
 
-    [ -d venv ] || make setup
+    # The fixed-host checkout and venv persist across revisions. Force Make's setup recipe so a staged
+    # pyproject dependency change cannot be hidden by an older completion marker with a newer mtime.
+    make -B setup
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins

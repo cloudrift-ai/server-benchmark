@@ -53,6 +53,8 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy trace" in run
     assert "./venv/bin/emmy tune" in run
     assert "./venv/bin/emmy run" in run
+    assert "make -B setup" in run
+    assert "[ -d venv ] || make setup" not in run
     assert "for repeat in 0 1 2 3 4" in run
     assert "--golden $task_dir/working.yaml --bench --strict" in run
     assert "--bench-backends eager,tcompile" in run

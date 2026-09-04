@@ -180,7 +180,8 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    cold-start answer. NOTE: the host's tune DB now carries those 9 rows, so any unpinned compile there elects the
    partitioned route — intended, now that #700 makes it build.
 3. **Price the recomputation so the statistics piece gets elected — LANDED (#702), then the clamp REVERTED by
-   review decision; the statistics piece elected under it measured 8.6 ms on the host.** Even the elected 2³⁰ route ran past the 60 s bench watchdog
+   review decision; the statistics piece elected under it measured 8.6 ms on the host.** Even the elected 2³⁰ route
+   ran past the 60 s bench watchdog
    per launch: the dominant cost was re-evaluating the mHC statistics subtree 16,384× (4096 carrier positions × 4
    streams) inside the consumer piece's sum-of-squares reduce. Characterized GPU-free: the materializing seam
    (`PLACE@a8`, the gate's fn-projection) was OFFERED and priced away — the offline cold-start proxy gave the

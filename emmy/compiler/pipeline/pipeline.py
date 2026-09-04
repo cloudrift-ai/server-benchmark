@@ -49,6 +49,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger("emmy.compiler.pipeline")
 
 _PASSES_DIR = Path(__file__).resolve().parent / "passes"
+# The pass that closes lowering: after it every compute node is a ``CudaOp``. It is the last
+# entry of ``CUDA_PASSES`` (the package assembles the canonical lists from it), and the marker
+# :attr:`Pipeline.lowers_to_cuda` reads to tell a full compile from a truncated one.
+FINAL_LOWERING_PASS = "lowering/cuda"
 _RULE_PREFIX_RE = re.compile(r"^\d+[a-z]?_")
 _REWRITE_APPLIED = object()
 
@@ -147,17 +151,24 @@ class RuleSkipped(Exception):
 
 class LoweringError(Exception):
     """Raised by :meth:`Pipeline.run` when a deterministic (greedy)
-    compile finishes with a node left un-lowered because every option of
-    its only lowering rule failed ``validate(ctx)`` — e.g. a tile shape
-    whose materialized kernel exceeds the device smem cap.
+    compile of a pipeline that runs to :data:`FINAL_LOWERING_PASS`
+    finishes with a node still holding a ``LoopOp`` / ``TileOp``.
+
+    Two shapes strand a node, and both raise here. Every option of its
+    only lowering rule failed ``validate(ctx)`` — e.g. a tile shape whose
+    materialized kernel exceeds the device smem cap — so the rule
+    recorded a rejection and the error names the pass and the reason.
+    Or no rule lowered it at all: the row's materializer declined with an
+    ordinary ``RuleSkipped``, or no rule matched, and nothing was
+    recorded; the error then names the node and the op it is stuck on.
 
     This converts the old silent leak (an un-lowered ``TileOp`` surviving
     every pass until ``CudaBackend`` raises the cryptic ``non-CudaOp``
-    ``TypeError``) into an actionable, early error that names the node,
-    the pass that declined it, and the ``validate`` reason. The
-    fork-pruning path under ``tune`` is unaffected: there the dropped
-    branch is a legitimate dead end and sibling branches carry other
-    shapes, so no sink is installed and nothing is raised."""
+    ``TypeError``) into an actionable, early error. The fork-pruning path
+    under ``tune`` is unaffected: there the dropped branch is a
+    legitimate dead end and sibling branches carry other shapes, so
+    nothing is raised (an un-lowered terminal is a ``bench_fail`` instead
+    — see ``search.policy.terminal_bench``)."""
 
 
 @dataclass
@@ -440,6 +451,14 @@ class Pipeline:
     # tuner's minted-kernel watcher) serves ONE run — sharing across runs is
     # only safe when every strategy is stateless.
     strategies: tuple = ()
+
+    @property
+    def lowers_to_cuda(self) -> bool:
+        """Whether this pass layout runs to :data:`FINAL_LOWERING_PASS`, i.e. promises a terminal
+        whose every compute node is a ``CudaOp``. Only such a pipeline may treat a surviving
+        ``LoopOp`` / ``TileOp`` as a stranded node: a truncated build (``TILE_PASSES``,
+        ``LOOP_PASSES``, a one-rule test shim) terminates in an earlier dialect by design."""
+        return bool(self.passes) and self.passes[-1].name == FINAL_LOWERING_PASS
 
     def match(self, graph: Graph, rule: Rule) -> list[Match]:
         """Enumerate every live pattern match for ``rule`` against

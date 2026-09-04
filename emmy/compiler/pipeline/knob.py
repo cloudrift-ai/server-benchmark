@@ -525,26 +525,26 @@ def consume_kernel_row(knobs: dict) -> dict:
     }
 
 
-#: Every env-pinned knob the schedule ENUMERATION consults: the :data:`SCHEDULE_FAMILIES` (bare
-#: and ``@``-keyed) plus the precision gates the scheduler's catalog arm reads through
-#: ``precision_pin`` (the precise ``F16_MMA_F32_ACC`` / ``FP8_MMA`` pins and their ``FAST_MATH`` umbrella —
-#: they decide whether the f16-accumulate / native-fp8 atom rows are OFFERED, so they change the
-#: schedule space exactly like a family pin). The schedule-space fingerprint must cover exactly
-#: this set; a knob outside it cannot change which rows enumerate.
-_ENUMERATION_PIN_KNOBS = (*SCHEDULE_FAMILIES, "F16_MMA_F32_ACC", "FP8_MMA", "FAST_MATH")
-
-
 def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
-    """Every live env pin the schedule enumeration can read (:data:`_ENUMERATION_PIN_KNOBS`) as
-    sorted ``(env var, raw value)`` pairs. The scheduler folds this into its schedule-space stamp:
-    a pin changes which rows enumerate, so two pin states must never share a stamp. The environ
-    scan is this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one
-    exception to ``config.py``'s env ownership), and the ``@``-keyed pins land there via the
-    ``EMMY_KNOBS`` splat."""
+    """Every live env pin the schedule enumeration can read, as sorted ``(env var, value)`` pairs spelled as
+    the scheduler's catalog arm reads them: the :data:`SCHEDULE_FAMILIES` pins (bare and ``@``-keyed) as
+    set, each restricting a domain, and the precision gates by effect — one ``"1"`` entry per gate
+    ``space.precision_pin`` resolves ON (``F16_MMA_F32_ACC`` / ``FP8_MMA``, under their ``FAST_MATH``
+    umbrella), nothing for a gate OFF or unset, since neither offers the f16-accumulate / native-fp8 rows.
+    The scheduler folds this into its schedule-space stamp, which also seeds a budgeted pool's draw: a pin
+    that changes which rows enumerate must change the stamp, and one that does not must not — an OFF gate
+    spelled out (a standard-lane golden's ``FAST_MATH: false``, what ``pinned_knobs`` publishes for a replay
+    or the release gate) would otherwise re-seed every budgeted draw away from the unpinned deploy's cold pick.
+    The environ scan is this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one
+    exception to ``config.py``'s env ownership), and the ``@``-keyed pins land there via the ``EMMY_KNOBS`` splat."""
     import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above
 
-    prefixes = tuple(config.knob_var(name) for name in _ENUMERATION_PIN_KNOBS)
-    return tuple(sorted((var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes)))
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
+
+    prefixes = tuple(config.knob_var(name) for name in SCHEDULE_FAMILIES)
+    pins = [(var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes)]
+    pins.extend((gate.env, "1") for gate in (F16_MMA_F32_ACC, FP8_MMA) if precision_pin(gate) is True)
+    return tuple(sorted(pins))
 
 
 def knob_sort_key(name: str) -> tuple[int, str]:

@@ -124,9 +124,12 @@ rule matches a `LoopOp` and returns several tile options.
    exceeds the cold-pool budget is ranked over a deterministic drawn subset (seeded uniform descents through the
    lazy tree — legal complete rows, every level covered) instead of walked at full length: the cold pick needs a
    reasonable kernel, and the optimal one comes from measured evidence, which descends directly whatever the pool
-   size. Drawing has a hard option-check budget while one descent fits inside it. If one complete descent's declared
-   bound is already larger, exactly one descent attempt is the soft-cap exception; an empty sample fails rather than
-   walking the full pool or substituting a partial branch. Under strict evidence this step is never reached: the
+   size. The seed is the pool's schedule-space stamp, which spells the precision gates by effect (Part 6's pool
+   identity), so a compile under a golden's published `FAST_MATH: false` regime draws the subset the unpinned
+   deploy draws and makes the same cold pick. Drawing has a hard option-check budget while one descent fits
+   inside it. If one complete descent's declared bound is already larger, exactly one descent attempt is the
+   soft-cap exception; an empty sample fails rather than walking the full pool or substituting a partial
+   branch. Under strict evidence this step is never reached: the
    compile raises `EvidenceError` for the kernel instead.
 7. Ties at every step break by `knob.canonical_row_key`, never by the order the rule emitted its options in.
 8. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's

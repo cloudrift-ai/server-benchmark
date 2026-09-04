@@ -22,53 +22,8 @@ def _asn(name: str, op: str, *args: str) -> Assign:
     return Assign(name=name, op=op, args=args)
 
 
-def _hoist(op) -> bool:  # noqa: ANN001
-    """The hoist's licence: only a product or a division reassociates under ``Σ``."""
-    return op.semiring_product or op.name == "divide"
-
-
 def _monomials(reading) -> dict:  # noqa: ANN001
     return dict(reading)
-
-
-# --- factor -----------------------------------------------------------
-
-
-def test_the_attention_summand_splits_into_its_invariant_and_varying_factors() -> None:
-    """``Σ_k exp(s−m)·v / l`` is ``(Σ_k exp(s−m)·v) / l``: the normalizer is invariant along the
-    fold axis and commutes out, the weight and the streamed row do not."""
-    body = Body([_asn("d", "subtract", "s", "m"), _asn("w", "exp", "d"), _asn("p", "multiply", "w", "v"), _asn("q", "divide", "p", "l")])
-    split = body.factor("q", lambda name: name in {"w", "v"}, _hoist)
-    assert split.invariant == (("l", True),)
-    assert sorted(split.varying) == ["v", "w"]
-    assert [stmt.name for stmt in split.spine] == ["p", "q"]
-
-
-def test_a_square_is_listed_twice() -> None:
-    """Multiplicity is the point: a consumer must see ``x·x`` for what it is, since a square is the
-    step that is NOT a semiring step and so carries no contraction reading."""
-    body = Body([_asn("sq", "multiply", "x", "x"), _asn("ab", "multiply", "a", "b"), _asn("r", "multiply", "sq", "ab")])
-    split = body.factor("r", lambda name: name == "x", _hoist)
-    assert split.varying == ("x", "x")
-    assert sorted(split.invariant) == [("a", False), ("b", False)]
-
-
-def test_a_sum_is_not_a_product() -> None:
-    assert Body([_asn("r", "add", "x", "y")]).factor("r", lambda name: name == "x", ring) is None
-
-
-def test_a_varying_divisor_refuses() -> None:
-    """``Σ x/c`` is ``(Σ x)/c`` only for an invariant ``c``; nothing licenses moving a fold into a
-    denominator that streams."""
-    assert Body([_asn("r", "divide", "x", "y")]).factor("r", lambda name: name in {"x", "y"}, _hoist) is None
-
-
-def test_a_lone_atom_is_a_one_factor_product() -> None:
-    """Structural refusals are the reading's; usefulness is the rule's. A cone that is one opaque
-    weight splits into one varying factor and no invariant — the caller declines that, not this."""
-    split = Body([_asn("w", "exp", "d")]).factor("w", lambda name: name == "w", _hoist)
-    assert split.varying == ("w",)
-    assert split.invariant == ()
 
 
 # --- linearize --------------------------------------------------------

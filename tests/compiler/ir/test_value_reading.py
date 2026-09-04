@@ -14,7 +14,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import FuncCallExpr, Var
 from emmy.compiler.ir.stmt import Accum, Assign, Const, Loop
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.value import RING, exp, ring, values
+from emmy.compiler.ir.value import RING, exp, reassociable, ring, values
 
 
 def _asn(name: str, op: str, *args: str) -> Assign:
@@ -88,3 +88,54 @@ def test_the_authoring_language_builds_the_same_tree_the_reading_returns() -> No
     so a value can never meet the integer index simplifier's rules by accident."""
     s, m, v = values("s m v")
     assert (exp(s - m) * v).expr == _summand().as_expr("p", lambda op: True)
+
+
+# --- the product split -------------------------------------------------
+
+
+def _q_over_l() -> Body:
+    """Attention's normalized summand: ``exp(s − m)·v / l``."""
+    return Body([*_summand(), _asn("q", "divide", "p", "l")])
+
+
+def test_the_attention_summand_splits_into_its_invariant_and_varying_factors() -> None:
+    """``Σ_k exp(s−m)·v / l`` is ``(Σ_k exp(s−m)·v) / l``: the normalizer is constant along the fold
+    axis and commutes out, the weight and the streamed row do not. The spine is the two statements
+    the walk consumed — what a consumer removes when it rebuilds the lift around the split."""
+    split = _q_over_l().factor("q", lambda name: name in {"w", "v"}, reassociable)
+    assert split.factors == (("l", False, True), ("w", True, False), ("v", True, False))
+    assert [stmt.name for stmt in split.spine] == ["q", "p"]
+    assert split.invariant == (("l", True),) and split.varying == ("w", "v")
+
+
+def test_source_order_survives_the_split() -> None:
+    """Not a detail: a consumer emits its epilogue as a chain over these factors, so reordering them
+    reorders the emitted statements and the arithmetic. The split walks the stored program for
+    exactly this reason — a normal form would be canonical, and would respell every hoisted epilogue."""
+    body = Body([_asn("ab", "multiply", "a", "b"), _asn("r", "divide", "ab", "c")])
+    assert [name for name, _, _ in body.factor("r", lambda name: False, reassociable).factors] == ["c", "a", "b"]
+
+
+def test_a_square_is_listed_twice() -> None:
+    """Multiplicity is the point: ``x·x`` is the step that is NOT a semiring step, so it carries no
+    contraction reading, and a consumer must be able to see that."""
+    body = Body([_asn("sq", "multiply", "x", "x"), _asn("ab", "multiply", "a", "b"), _asn("r", "multiply", "sq", "ab")])
+    split = body.factor("r", lambda name: name == "x", reassociable)
+    assert split.varying == ("x", "x")
+    assert split.invariant == (("a", False), ("b", False))
+
+
+def test_an_unlicensed_head_is_the_one_leaf_product() -> None:
+    """The split never refuses. A sum has no licensed product above it, so it is one opaque factor —
+    and whether that is useful (is anything invariant?) is the calling rule's condition."""
+    split = Body([_asn("r", "add", "x", "y")]).factor("r", lambda name: name == "r", reassociable)
+    assert split.factors == (("r", True, False),) and split.spine == ()
+
+
+def test_a_divisor_is_a_leaf_and_says_so() -> None:
+    """``Σ x/c`` is ``(Σ x)/c`` only for an invariant ``c``, and nothing licenses moving a fold into
+    a denominator — so the divisor never continues the spine, and carries the flag its reader
+    refuses on."""
+    split = Body([_asn("r", "divide", "x", "y")]).factor("r", lambda name: name in {"x", "y"}, reassociable)
+    assert split.factors == (("y", True, True), ("x", True, False))
+    assert any(streams and divides for _, streams, divides in split.factors)

@@ -12,7 +12,7 @@ from dataclasses import replace
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import RECIPES
 from emmy.compiler.ir.stmt import Assign, Body, Load
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import product_spine
+from emmy.compiler.ir.value import reassociable
 
 logger = logging.getLogger(__name__)
 
@@ -79,17 +79,17 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     if view is None or view.ops is None or len(view.states) != 1 or view.ops[0].reduce_canon != "add":
         return None
     result = fold.lift.results[0]
-    flattened = product_spine(fold.lift.body.definitions, result, divide=True)
-    if flattened is None:
-        return None
-    leaves, spine = flattened
     bound = {param: edge for param, edge, _ in fold.bindings}
-    divisors = {stmt.args[1] for stmt in spine if stmt.op.name == "divide"}
-    invariant = [leaf for leaf in leaves if not _varies(fold, leaf, bound)]
-    varying = [leaf for leaf in leaves if leaf not in invariant]
-    if not invariant or not varying or any(leaf not in bound for leaf in invariant) or any(leaf in divisors for leaf in varying):
+    split = fold.lift.body.factor(result, lambda name: _varies(fold, name, bound), reassociable)
+    invariant, varying = split.invariant, split.varying
+    if (
+        not invariant
+        or not varying
+        or any(leaf not in bound for leaf, _ in invariant)
+        or any(streams and divides for _, streams, divides in split.factors)
+    ):
         return None
-    spine_ids = {id(stmt) for stmt in spine}
+    spine_ids = {id(stmt) for stmt in split.spine}
     kept = [stmt for stmt in fold.lift.body if id(stmt) not in spine_ids]
     product: list[Assign] = []
     value = varying[0]
@@ -113,11 +113,11 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     inner = replace(fold, operands=operands, lift=lift, combine=fold.combine.rename({state: inner_state}))
     epilogue: list[Assign] = []
     current = inner_state
-    for index, leaf in enumerate(invariant):
+    for index, (leaf, divides) in enumerate(invariant):
         name = state if index == len(invariant) - 1 else f"{state}__c{index}"
-        epilogue.append(Assign(name=name, op="divide" if leaf in divisors else "multiply", args=(current, leaf)))
+        epilogue.append(Assign(name=name, op="divide" if divides else "multiply", args=(current, leaf)))
         current = name
-    edges = (inner, *dict.fromkeys(bound[leaf] for leaf in invariant))
+    edges = (inner, *dict.fromkeys(bound[leaf] for leaf, _ in invariant))
     params = (inner_state, *(param for edge in edges[1:] for param, held, _ in fold.bindings if held is edge))
     projection = Fold(operands=edges, lift=Lambda.closing(params, Body(epilogue), (state,)))
     return inner, projection

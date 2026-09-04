@@ -263,24 +263,32 @@ because only those reassociate under `Σ`; seeing through `exp` would factor `ex
 overflow a twisted carrier exists to avoid. `exp` is therefore absent from `RING`, and a consumer that owns that risk
 names its own wider predicate.
 
-**Semantics.** The node tree is syntax — it preserves association and temps exactly, which is what a kernel is
-spelled from. sympy is semantics — it decides equality modulo ring identities, so a consumer asks what a cone MEANS
-instead of matching a stored spelling. There is no bridge module: each reading is a method on the thing being read.
+**`Body.factor`** is the product split both hoists share: a walk down the `⊗` spine of one scope's definitions,
+classified by a `varies` predicate. It reports `(atom, varies, divides)` per factor in SOURCE ORDER with multiplicity
+(a square listed twice — the step that is *not* a semiring step), plus the `spine` statements the walk consumed.
+A division's DIVISOR is a leaf and only its numerator continues, because `Σ x/c` is `(Σ x)/c` only for an invariant
+`c`. It never refuses: a name with no licensed product above it is the one-leaf product, and every bail decision (is
+anything invariant? does a divisor stream?) is the calling rule's, phrased over the split it gets back.
+
+Source order is not a detail. A consumer emits its epilogue as a chain over these factors, so reordering them
+reorders the emitted statements — and the arithmetic. That is why the split is a **walk over the stored program**
+rather than a reading through a normal form: sympy's is canonical by construction, and would silently respell every
+hoisted epilogue. Ordering constraints are what decide where syntax must stay syntax.
+
+**Semantics.** Where a decision does *not* have to preserve spelling, sympy decides it — so a consumer asks what a
+cone MEANS instead of matching a stored one. There is no bridge module: each reading is a method on the thing read.
 
 | Method            | Role                                                                                              |
 |-------------------|---------------------------------------------------------------------------------------------------|
 | `Expr.symbolic`   | This expression as sympy, one node kind per override. An unknown call, a cast or a builtin is an uninterpreted atom, which compares structurally — so the decision collapses to alpha-equality exactly where nothing is interpretable. |
 | `Expr.same_value` | Whether two expressions denote the same value. Deliberately not `__eq__`: `==` stays the structural tree comparison, and both readings have callers. |
-| `Body.factor`     | One product split into invariant and varying atom NAMES with multiplicity (a square listed twice), each invariant carrying whether it divides, plus the `spine` — the cone of the name minus the cones of its atoms. `None` when the reading is not one product. |
-| `Body.linearize`  | The cone as monomials in the streamed atoms, each with its coefficient. The reading behind "is this summand linear in what it streams?". `None` when it is not polynomial in them. |
+| `Body.linearize`  | The cone as monomials in the streamed atoms, each with its coefficient. The reading behind "is this summand linear in what it streams?" — and so behind "does this carrier component merge as `α·s + β·s__o`?". `None` when it is not polynomial in them. |
 
-Only algorithmic sympy is used (`expand`, `cancel`, `Poly`, `as_powers_dict`), never `simplify`: a heuristic rewrite
-whose result depends on the version is not a compiler decision. The map runs **one way** — nothing builds an `Expr`
-back from a sympy expression, since sympy normalizes at construction (`Mul(Mul(a, b), c)` flattens, `x − x` vanishes,
-argument order is canonical), which is right for deciding and wrong for spelling. A consumer that needs IR renames
-and splices the statements it already holds; these readings tell it WHICH ones, and hand back names and statements
-rather than an expression to emit. Structural refusals belong to the reading (a sum is not a product; a varying
-denominator has nothing to commute past); whether a legal split is USEFUL stays the calling rule's condition.
+Only algorithmic sympy is used (`expand`, `cancel`, `Poly`), never `simplify`: a heuristic rewrite whose result
+depends on the version is not a compiler decision. The map runs **one way** — nothing builds an `Expr` back from a
+sympy expression, since sympy normalizes at construction (`Mul(Mul(a, b), c)` flattens, `x − x` vanishes, argument
+order is canonical), which is right for deciding and wrong for spelling. A consumer that needs IR renames and splices
+the statements it already holds; these readings hand back names, not expressions to emit.
 
 sympy is a REQUIRED dependency, not a `compile` extra — a value reading must work without torch installed — but it is
 imported per call, since it costs ~90 ms against a ~250 ms CLI startup and most commands never read a value.

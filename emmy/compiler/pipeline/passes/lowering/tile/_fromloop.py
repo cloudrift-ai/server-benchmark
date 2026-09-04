@@ -19,6 +19,7 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
+from emmy.compiler.ir.value import reassociable
 
 
 def _stamp_axes(loop: Loop) -> Loop:
@@ -104,34 +105,6 @@ def _close(lead: tuple, operands: tuple, body, results: tuple, scope: tuple, lev
     return operands, lift
 
 
-def product_spine(defs: dict, name: str, *, divide: bool = False):
-    """Flatten the ``⊗`` spine defining ``name`` into ``(leaf names, spine statements)`` — the
-    spine recognized by the ``semiring_product`` TRAIT, never an op-name list. ``divide``
-    additionally admits a division on the numerator side: ``(Σ x)/c`` equals ``Σ (x/c)`` for a
-    fold-invariant ``c``, but nothing licenses moving a fold into a denominator, so the divisor is a
-    leaf and only the numerator continues the spine. ``None`` when a spine node is not binary; a
-    name with no product above it is the one-leaf product."""
-    spine: list = []
-    leaves: list[str] = []
-
-    def walk(current: str) -> bool:
-        stmt = defs.get(current)
-        if isinstance(stmt, Assign):
-            if stmt.op.semiring_product:
-                if len(stmt.args) != 2:
-                    return False
-                spine.append(stmt)
-                return all(walk(arg) for arg in stmt.args)
-            if divide and stmt.op.name == "divide" and len(stmt.args) == 2:
-                spine.append(stmt)
-                leaves.append(stmt.args[1])
-                return walk(stmt.args[0])
-        leaves.append(current)
-        return True
-
-    return (tuple(leaves), tuple(spine)) if walk(name) else None
-
-
 @dataclass
 class _Hoist:
     """Fold-invariant factors commuted off one product argument — ``Σ_k a·(s·w) = s·Σ_k a·w`` —
@@ -151,8 +124,6 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
     element by dtype, the mma fragment loaders included), and the invariant factors commute out
     onto the accumulator: the same reassociation category as split-K. Only a decode licenses it,
     so an ordinary floating-point factor chain is never reassociated here."""
-    flattened = product_spine(defs, arg, divide=True)
-    leaves, spine = flattened if flattened is not None else ((arg,), ())
 
     def varies(leaf: str) -> bool:
         if leaf in exposed:
@@ -162,14 +133,16 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
         reads = plain.backward_cone((leaf,)).external_reads
         return k_name in reads or any(k_name in exposed[name].free_axes for name in reads if name in exposed)
 
-    varying = [leaf for leaf in leaves if varies(leaf)]
+    split = plain.factor(arg, varies, reassociable)
+    leaves = tuple(name for name, _, _ in split.factors)
+    varying = split.varying
     decode = defs.get(varying[0]) if len(varying) == 1 else None
     if not isinstance(decode, Assign) or decode.op.decodes is None or len(decode.args) != 1:
         return None
     slab = exposed[decode.args[0]].as_slab() if decode.args[0] in exposed else None
     if slab is None or (slab.load.dtype is not None and slab.load.dtype.name != decode.op.decodes):
         return None
-    seen = {id(decode)} | {id(stmt) for stmt in spine}
+    seen = {id(decode)} | {id(stmt) for stmt in split.spine}
     stmts: list[Stmt] = []
     terms: list[Fold] = []
     for leaf in leaves:
@@ -183,8 +156,7 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
     if any(id(stmt) not in seen for stmt in plain.backward_cone((arg,)).members):
         return None
     terms.extend(exposed[name] for stmt in stmts for name in stmt.deps() if name in exposed and all(exposed[name] is not t for t in terms))
-    divisors = {stmt.args[1] for stmt in spine if stmt.op.name == "divide"}
-    factors = tuple((leaf, leaf in divisors) for leaf in leaves if leaf != varying[0])
+    factors = tuple((name, divides) for name, _, divides in split.factors if name != varying[0])
     return exposed[decode.args[0]], _Hoist(tuple(terms), tuple(stmts), factors)
 
 

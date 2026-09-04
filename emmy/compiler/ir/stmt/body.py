@@ -30,6 +30,7 @@ from functools import cached_property, lru_cache
 
 from emmy.compiler.ir.expr import Expr, Var
 from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt.leaves import Assign
 
 
 @dataclass(frozen=True)
@@ -69,16 +70,30 @@ class Cone:
 class Factored:
     """One product split by axis variance — what :meth:`Body.factor` reports.
 
-    ``invariant`` and ``varying`` are ATOM NAMES with multiplicity: a square is listed twice, so a
-    consumer sees ``x·x`` for what it is rather than as one factor — the step that is not a semiring
-    step, and so carries no contraction reading. Each invariant carries whether it divides, since
-    ``Σ x/c`` equals ``(Σ x)/c`` only for an invariant ``c``. ``spine`` is the statements the reading
+    ``factors`` is ``(atom, varies, divides)`` per factor in SOURCE ORDER, with multiplicity: a
+    square is listed twice, so a consumer sees ``x·x`` for what it is rather than as one factor —
+    the step that is not a semiring step, and so carries no contraction reading. ``divides`` because
+    ``Σ x/c`` equals ``(Σ x)/c`` only for an invariant ``c``. ``spine`` is the statements the walk
     saw through, which is exactly what a consumer removes when it rebuilds a lift around the split.
+
+    Source order is not a detail: a consumer emits its epilogue as a chain over these factors, so
+    reordering them reorders the emitted statements — and the arithmetic. This is why the split is a
+    walk over the stored program rather than a reading through sympy, whose normal form is canonical
+    by construction and would silently respell every hoisted epilogue.
     """
 
-    invariant: tuple[tuple[str, bool], ...]
-    varying: tuple[str, ...]
+    factors: tuple[tuple[str, bool, bool], ...]
     spine: tuple[Stmt, ...]
+
+    @property
+    def invariant(self) -> tuple[tuple[str, bool], ...]:
+        """The factors constant along the axis, each with whether it divides — source order."""
+        return tuple((name, divides) for name, varies, divides in self.factors if not varies)
+
+    @property
+    def varying(self) -> tuple[str, ...]:
+        """The factors that stream along the axis — source order, a square listed twice."""
+        return tuple(name for name, varies, _ in self.factors if varies)
 
 
 #: What :meth:`Body.linearize` reports — one ``(monomial, coefficient)`` pair per term, where a
@@ -370,32 +385,37 @@ class Body(tuple[Stmt, ...]):
         kept = {id(stmt) for atom in atoms for stmt in self.backward_cone((atom,)).members}
         return tuple(stmt for stmt in self.backward_cone((name,)).members if id(stmt) not in kept)
 
-    def factor(self, name: str, varies, through) -> Factored | None:  # noqa: ANN001 — any predicates
-        """The value cone of ``name`` split into invariant and varying factors by ``varies``, or
-        ``None`` when it is not one product.
+    def factor(self, name: str, varies, through) -> Factored:  # noqa: ANN001 — any predicates
+        """The product defining ``name``, split into factors classified by ``varies``.
 
-        Refusals here are STRUCTURAL — the reading is a sum, or a denominator streams, so there is
-        no product to split and ``Σ`` cannot commute past it. Whether a legal split is USEFUL (does
-        it have both an invariant and a varying side?) is the calling rule's condition, not this one's.
+        A walk down the ``⊗`` spine of this scope's own definitions, seeing through exactly the ops
+        ``through`` licenses. A division's DIVISOR is a leaf and only its numerator continues the
+        spine: ``Σ x/c`` equals ``(Σ x)/c`` for an invariant ``c``, but nothing licenses moving a
+        fold into a denominator. A name with no licensed product above it is the one-leaf product,
+        so this never refuses — every bail decision (is there anything invariant? does a divisor
+        stream?) is the calling rule's, phrased over the split it gets back.
         """
-        import sympy  # noqa: PLC0415
+        defs = {bound: stmt for stmt in self for bound in stmt.defines()}
+        spine: list[Stmt] = []
+        factors: list[tuple[str, bool, bool]] = []
 
-        expr = self.as_expr(name, through)
-        invariant: list[tuple[str, bool]] = []
-        varying: list[str] = []
-        for base, power in sympy.expand(expr.symbolic()).as_powers_dict().items():
-            if base.is_number:
-                continue
-            if not isinstance(base, sympy.Symbol) or not power.is_Integer:
-                return None  # a compound base — a sum, a call over several atoms — is not a factor
-            count, divides = abs(int(power)), int(power) < 0
-            if varies(base.name):
-                if divides:
-                    return None  # nothing licenses moving a fold into a varying denominator
-                varying.extend([base.name] * count)
-            else:
-                invariant.extend([(base.name, divides)] * count)
-        return Factored(tuple(invariant), tuple(varying), self._spine(name, expr))
+        def walk(current: str) -> None:
+            stmt = defs.get(current)
+            if isinstance(stmt, Assign) and through(stmt.op) and len(stmt.args) == 2:
+                if stmt.op.semiring_product:
+                    spine.append(stmt)
+                    walk(stmt.args[0])
+                    walk(stmt.args[1])
+                    return
+                if stmt.op.name == "divide":
+                    spine.append(stmt)
+                    factors.append((stmt.args[1], varies(stmt.args[1]), True))
+                    walk(stmt.args[0])
+                    return
+            factors.append((current, varies(current), False))
+
+        walk(name)
+        return Factored(tuple(factors), tuple(spine))
 
     def linearize(self, name: str, varies, through) -> Monomials | None:  # noqa: ANN001 — any predicates
         """The value cone of ``name`` as monomials in the STREAMED atoms, each with its coefficient.

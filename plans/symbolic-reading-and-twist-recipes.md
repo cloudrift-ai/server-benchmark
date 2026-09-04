@@ -1,7 +1,7 @@
 # Symbolic reading: `Expr` as exact syntax, sympy as semantics, definition-only twist recipes
 
-Drafted 2026-09-03 from a design discussion. **Phases 1 and 2 landed on `feature/symbolic-reading`** (2026-09-04);
-phase 0 and phases 3-6 are still open. This file is a working note and must never be referenced from durable docs or
+Drafted 2026-09-03 from a design discussion. **Phases 1, 2 and 3 landed on `feature/symbolic-reading`**
+(2026-09-04); phase 0 and phases 4-6 are still open. This file is a working note and must never be referenced from durable docs or
 code.
 
 Landed, with two deviations from the draft below:
@@ -18,8 +18,28 @@ Landed, with two deviations from the draft below:
   a REQUIRED dependency (a value reading must work without torch) but imported per call — it costs ~90 ms against a
   ~250 ms CLI startup. Phases 3-6 below should read "the reading" wherever they say "the bridge" or `ir/symbolic.py`.
 
-The blockification consumer that motivated this (a twisted carrier's per-component `alpha*s + beta*s__o` reading,
-so a block's inner fold reaches `as_contraction`) is a phase-6 use and is not started.
+**Phase 3 landed, and it corrected a premise of the plan.** `factor` is NOT a sympy consumer and cannot become
+one. `as_powers_dict` on a normalized product returns sympy's canonical order, but a hoist emits its epilogue as a
+CHAIN over those factors — so a reordering respells every hoisted epilogue and changes the arithmetic. `(c*x)/d`
+factors as `[d, c, x]` under the spine walk and `[c, x, d]` under sympy, giving `(acc/d)*c` against `(acc*c)/d`.
+Byte-identity therefore forces `Body.factor` to be a walk over the stored program, so `product_spine`'s walk MOVED
+into it rather than dissolving. Consequences:
+
+- Phase 3 is net ZERO under `emmy/`, not net negative. The duplication it removes is real (both callers' leaf
+  classification, divisor sets and refusal lines collapsed) but the walk relocated, so the line count does not show
+  it. Do not "fix" this by shaving lines.
+- `factor` never refuses now; every bail decision moved to the calling rule, which is where the plan's own split
+  ("bail decisions stay in rules") puts it.
+- The general lesson: **ordering constraints decide where syntax must stay syntax.** A decision that feeds an
+  emission chain cannot be taken through a normal form. Check phase 4 against this before starting — the twist
+  replaces the tree's spelling wholesale, so it should be safe, but the epilogue it builds from the solver's
+  quotient is exactly an emission chain and needs the same argument.
+
+**sympy still has NO production consumer.** After phase 3 its only reachable uses are `Expr.symbolic`,
+`Expr.same_value` and `Body.linearize`, none of which is called from `emmy/`. The first real one is phase 4(b) — the
+residual match on `same_value` instead of `pattern.canonical()`, which is also the first thing sympy does that the
+hand-rolled code cannot. The blockification consumer (a twisted carrier's per-component `alpha*s + beta*s__o`
+reading via `Body.linearize`, so a block's inner fold reaches `as_contraction`) is a phase-6 use and is not started.
 
 ## Goal
 

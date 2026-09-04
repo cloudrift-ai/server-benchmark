@@ -29,6 +29,14 @@ def ring(op) -> bool:  # noqa: ANN001 — any ElementwiseImpl
     return op.name in RING
 
 
+def reassociable(op) -> bool:  # noqa: ANN001 — any ElementwiseImpl
+    """What a hoist under ``Σ`` may see through: a semiring ``⊗``, and a division whose divisor it
+    then treats as a leaf. Narrower than :func:`ring` on purpose — ``Σ(a − b)`` does not factor, and
+    seeing through ``exp`` would turn ``exp(s − m)`` into ``exp(s)·exp(−m)`` and hoist the ``exp(−m)``
+    right out of the shifted form the twist exists to keep."""
+    return op.semiring_product or op.name == "divide"
+
+
 @dataclass(frozen=True)
 class Value:
     """One real-valued expression under Python operators — every operator an op-name call."""
@@ -93,4 +101,4 @@ def maximum(a, b) -> Value:  # noqa: ANN001
     return _call("maximum", a, b)
 
 
-__all__ = ["RING", "Value", "exp", "maximum", "ring", "sqrt", "value", "values"]
+__all__ = ["RING", "Value", "exp", "maximum", "reassociable", "ring", "sqrt", "value", "values"]

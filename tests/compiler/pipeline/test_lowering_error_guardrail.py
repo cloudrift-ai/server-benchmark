@@ -358,3 +358,42 @@ def test_tuning_contains_raising_lowering_pass(caplog):
     # ends cleanly with zero terminals instead of crashing.
     assert terminals == []
     assert any("dropped un-lowerable candidate" in r.message for r in caplog.records)
+
+
+def test_tuning_contains_raising_fork_thunk(caplog):
+    # Same containment, one step earlier in the loop: a rule can defer the
+    # un-lowerable shape behind a ``DeferredFork`` thunk, so the raise lands in
+    # ``LazyCandidate.resolve`` -> ``Fork.expand`` -> the rule's materializer
+    # rather than in the next ``_step``. Observed in the wild on a DeepSeek-V4
+    # tune (a realize-time cut guardrail firing under ``030_cut``'s realize
+    # lambda), where it killed the whole session. The sibling option must still
+    # reach a terminal.
+    import logging
+
+    from emmy.compiler.pipeline import TuningSearch
+    from emmy.compiler.pipeline.fork import DeferredFork
+    from emmy.compiler.pipeline.search.db import SearchDB
+
+    def raise_at_expand():
+        raise LoweringError("synthetic un-lowerable shape")
+
+    def rewrite(root):  # noqa: ARG001 — both options are fixed
+        return [
+            DeferredFork(materialize=raise_at_expand, knobs={"BN": 8}),
+            KernelOp(body=[Smem(name="buf", extents=(64,), dtype="float")], name="k_test", knobs={"BN": 16}),
+        ]
+
+    rule = Rule(
+        name="__deferred_raising_lower__",
+        pattern=[Pattern(name="root", op_type=TileOp)],
+        rewrite=rewrite,
+        param_names=tuple(inspect.signature(rewrite).parameters.keys()),
+    )
+    pass_ = Pass(name="__test_deferred_raise__", rules=[rule], index=0)
+    rule.pass_ = pass_
+    pipeline = Pipeline(passes=[pass_])
+
+    with caplog.at_level(logging.WARNING, logger="emmy.compiler.pipeline"):
+        terminals = drain_tune(pipeline, _graph_with_tile(), search=TuningSearch(patience=10**6), ctx=_small_smem_ctx(), db=SearchDB())
+    assert [t.graph.nodes["y"].op.knobs.get("BN") for t in terminals] == [16], "the surviving sibling must still terminate"
+    assert any("dropped un-lowerable candidate" in r.message for r in caplog.records)

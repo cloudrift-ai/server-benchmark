@@ -197,7 +197,7 @@ _GATE_SECONDS = 5.0
 #: so they are exempt from the staleness gate and from the written baseline — otherwise every
 #: `make bench-kernels` would fail demanding entries that `make test`, which skips it,
 #: can never record.
-_OFF_LANE_MARKERS = ("perf",)
+_OFF_LANE_MARKERS = ("perf", "goldens")
 #: Node ids seen carrying an off-lane marker this session (filled during collection).
 _OFF_LANE_ITEMS: set[str] = set()
 
@@ -385,17 +385,19 @@ _CUDA_CLI_GROUP = "cuda-cli"
 def pytest_collection_modifyitems(config, items):
     import heapq
 
-    # Deselect ``perf`` unless explicitly requested. Lives here — not in
+    # Deselect every off-lane marker unless explicitly requested. Lives here — not in
     # ``tests/perf/conftest.py`` — so the gate holds for ANY ``tests/``
     # collection (e.g. ``pytest tests/serving/``), not only runs that happen
     # to collect ``tests/perf/`` and load its conftest.
     selected = config.getoption("-m") or ""
     _OFF_LANE_ITEMS.update(i.nodeid for i in items if any(m in i.keywords for m in _OFF_LANE_MARKERS))
-    if "perf" not in selected:
-        skip_perf = pytest.mark.skip(reason="perf marker not selected; run with `pytest -m perf`")
+    for marker in _OFF_LANE_MARKERS:
+        if marker in selected:
+            continue
+        skip = pytest.mark.skip(reason=f"{marker} marker not selected; run with `pytest -m {marker}`")
         for item in items:
-            if "perf" in item.keywords:
-                item.add_marker(skip_perf)
+            if marker in item.keywords:
+                item.add_marker(skip)
 
     # Step 1: pin every CUDA-touching item to an xdist_group so each
     # chain lands on one worker and runs sequentially — ``cuda`` for

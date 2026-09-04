@@ -49,6 +49,16 @@ Do not add a directory merely to shorten a file listing. These directories exist
 or span several source trees. `compiler/passes/` and `perf/` carry their own `ARCHITECTURE.md`; read those before adding
 to them.
 
+`serving/` compiles under its **own golden**, not a cold search. These tests ask whether the runner stitches,
+dispatches and allocates correctly — vLLM integration and materialization — and cold deploy is the prior's contract,
+tested elsewhere. So `serving/helpers.py` spells every shape the lane compiles in one place (`RUNNERS` for the runner
+builds, `WRAPPERS` for the attention-split carves), `serving/regen.py` writes the golden covering exactly those, and the
+`built` / `build_runner` fixtures build inside `helpers.evidence_scope()`. Two properties follow, and both are the
+point: a replay costs a rebind instead of ~1M `schedule()` calls per model, and the compile no longer depends on the
+machine-local tune DB and online prior a cold pick resolves through. Strict evidence keeps the golden honest — a fork no
+row decides raises `EvidenceError` naming the kernel, so a stale or partial golden fails loudly instead of quietly
+restoring the search. Regenerate with `python -m tests.serving.regen` when a shape changes or a new one joins a table.
+
 ## Test Layers
 
 The suite runs in four layers, distinguished by what they touch rather than by where they live:
@@ -108,7 +118,10 @@ the shared module already provides.
   **declared** capability rather than the live card — `Context.from_target(compute_cap)` — so the enumeration and
   lowering stages are machine-independent and an sm_70 lockout is exercised on a box that has no sm_70. Only the
   build and accuracy stages consult the live card, and they gate on `device_compute_capability() == compute_cap`,
-  beside `requires_sm90` in spirit but keyed on equality rather than a floor.
+  beside `requires_sm90` in spirit but keyed on equality rather than a floor. The one golden lane inside pytest sits
+  off the default one: `make test-goldens` (the `goldens` marker) strictly decodes every checked-in file, one case
+  per file. It is deselected for COST, not for card-dependence — decoding replays each record at its declared
+  capability, so a stale row is detectable on any machine; re-recording one is what needs the card.
 - **Keep one subprocess smoke per report path.** Filtering, join, and presentation variants use small synthetic
   records at the owning unit layer instead of launching the CLI repeatedly over the full repository corpus.
 - **Async tests** — tests for async functions are plain `async def` (no decorator needed; `asyncio_mode = "auto"` handles it). Mock async callables with `AsyncMock`.
@@ -153,10 +166,11 @@ the shared module already provides.
 ## Running
 
 ```bash
-pytest tests/ -v                       # all tests (skips `perf`-marked tests)
+pytest tests/ -v                       # all tests (skips off-lane `perf` / `goldens` tests)
 pytest tests/deploy/test_recipe.py -v  # single file
 pytest tests/planner/ -v               # single directory
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
+pytest tests/compiler/pipeline/search/ -m goldens -v   # strict-decode the checked-in goldens (make test-goldens)
 ```
 
 Under `make test` (`-n auto --dist=loadgroup`) the root `conftest.py` routes every CUDA-touching test onto two
@@ -209,9 +223,18 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
-Repository golden validation is intentionally outside pytest. Model goldens are GPU-specific qualification evidence,
-so the nightly `onboard-model` workflow validates the selected recipe-local file, strictly decodes every row, and
-replays it on the named GPU. This keeps expensive model/card qualification out of the per-commit suite.
+`goldens` is the second off-lane marker, gated by the same hook. `tests/compiler/pipeline/search/test_golden.py`
+strictly decodes every checked-in golden file — one case per file, so a card's rows go green as a whole when a tuning
+round re-records them — and `make test-goldens` runs it. A full pass re-derives every recorded row's enumeration,
+minutes per file, which is why it is off the default lane; the derivation memo
+(`~/.cache/emmy/golden_identity.json`, keyed by compiler fingerprint and record content) makes a re-run cost only the
+rows that actually changed.
+
+Repository golden *qualification* is intentionally outside pytest. Model goldens are GPU-specific qualification
+evidence, so the nightly `onboard-model` workflow validates the selected recipe-local file, strictly decodes every
+row, and replays it on the named GPU. This keeps expensive model/card qualification out of the per-commit suite. Only
+the decode half is also reachable without the card, off the default lane (`make test-goldens` above) — it targets each
+record's declared capability; the measured replay is what the nightly's GPU is for.
 
 Optional adapter tests use `pytest.importorskip` for their own dependency extras. The network-free tiny Diffusers DiT
 trace runs when the `image` extra is installed; the real checkpoint/CUDA comparison is additionally `perf`-marked and

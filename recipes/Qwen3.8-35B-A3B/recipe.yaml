@@ -3,11 +3,9 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-35B-A3B
-  rationale: "Overshadowed by the 27B variant despite underlying momentum."
+  rationale: "Overshadowed by the more dominant 27B variant in the same family."
   heat: 25
   task: generate
 matrices:
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
-  deploy.gpu_count: 1
 - deploy.gpu: NVIDIA H200 141GB
   deploy.gpu_count: 1

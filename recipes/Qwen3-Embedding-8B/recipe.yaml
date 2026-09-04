@@ -13,8 +13,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-8B"
-  rationale: "Strong download and like counts in the embedding space."
-  heat: 58
+  rationale: "Largest embedding in series; attracts developers seeking high-performance search."
+  heat: 62
   task: embed
 
 engine:

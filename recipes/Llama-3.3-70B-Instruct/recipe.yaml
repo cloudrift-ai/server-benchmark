@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: meta-llama/Llama-3.3-70B-Instruct
-  rationale: "Huge HF momentum and serving value warrant breakout heat."
-  heat: 92
+  rationale: "Arena rank 243 with very high serving volume; strong established presence."
+  heat: 95
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

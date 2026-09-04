@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: nomic-ai/nomic-embed-text-v1.5
+  rationale: Proven Apache 2.0 embedding with 16.5M downloads and widespread RAG deployment.
+  heat: 50
+  task: embed
+matrices:
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 4

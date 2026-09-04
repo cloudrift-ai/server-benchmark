@@ -1,13 +1,11 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: Qwen/Qwen3.5-9B
-  rationale: Dense 9B vision-language with strong HF momentum for consumer GPU coverage.
-  heat: 60
+  rationale: "New generation but lower attention than siblings; moderate compact model interest."
+  heat: 45
   task: generate
 matrices:
-- deploy.gpu: NVIDIA GeForce RTX 5090
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA A100 40GB
+- deploy.gpu: NVIDIA Tesla V100 SXM3 32GB
   deploy.gpu_count: 1

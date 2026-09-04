@@ -3,11 +3,9 @@ tags:
   - untested
 model:
   huggingface: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
-  rationale: "No evidence across sources. Very low interest."
+  rationale: "No trending data, community mentions, or arena ranking found."
   heat: 10
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H100 80GB
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA B200
   deploy.gpu_count: 1

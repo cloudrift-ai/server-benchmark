@@ -4,7 +4,7 @@ tags:
 
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  rationale: "Minimal evidence and no current adoption momentum."
+  rationale: "Minimal evidence in trending data; best-effort status limits priority."
   heat: 10
   revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate

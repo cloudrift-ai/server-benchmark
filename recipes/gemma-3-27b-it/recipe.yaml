@@ -3,11 +3,9 @@ tags:
   - untested
 model:
   huggingface: google/gemma-3-27b-it
-  rationale: "Steady OR presence but eclipsed by Qwen3.8 and gemma-4 family."
-  heat: 45
+  rationale: "Eclipsed by newer gemma-4; no strong current evidence found."
+  heat: 20
   task: generate
 matrices:
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA GeForce RTX 5090
+- deploy.gpu: NVIDIA A100 80GB
   deploy.gpu_count: 1

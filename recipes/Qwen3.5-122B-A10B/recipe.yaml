@@ -6,8 +6,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-122B-A10B"
-  rationale: "Overshadowed by Qwen3.8 family with no community signals of cooling."
-  heat: 30
+  rationale: "Next-gen MoE potential but speculative with limited current public evidence."
+  heat: 25
   revision: dc4d348443bc740c68e2d77492492c11606384d5
   task: generate
 

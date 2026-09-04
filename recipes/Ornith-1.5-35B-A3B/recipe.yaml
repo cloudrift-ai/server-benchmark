@@ -1,15 +1,11 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: Ornith-ai/Ornith-1.5-35B-A3B
-  rationale: Novel A3B MoE architecture with fresh architecture coverage.
-  heat: 55
+  rationale: "No trending evidence found; likely unmaintained fork with no signal."
+  heat: 5
   task: generate
 matrices:
-- deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 1
 - deploy.gpu: NVIDIA A100 80GB
-  deploy.gpu_count: 2
-- deploy.gpu: NVIDIA H100 80GB
   deploy.gpu_count: 2

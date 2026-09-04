@@ -24,8 +24,8 @@ model:
   # build uses real `quant_method="awq"`, group_size=128, dense 27B with Gated DeltaNet
   # + Gated Attention. That AWQ path is the one 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.5-27B-AWQ"
-  rationale: "Superseded by Qwen3.8. Lacks community buzz beyond general Qwen interest."
-  heat: 25
+  rationale: "Superseded by Qwen3.8 releases; cooling demand for 3.5 series."
+  heat: 5
 engine:
   llm:
     tensor_parallel_size: 4

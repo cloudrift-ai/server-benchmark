@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-397B-A17B-FP8"
-  rationale: "Old architecture and niche deployment. No current interest."
-  heat: 20
+  rationale: "No HF downloads or community discussion; high speculation low heat."
+  heat: 15
 engine:
   llm:
     pipeline_parallel_size: 1

@@ -3,11 +3,9 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-27B-FP8
-  rationale: "Strong FP8 variant of the breakout 3.8 model for wider deployment."
+  rationale: "FP8 variant of top-ranking Qwen 3.8; inherits strong community and arena signals."
   heat: 95
   task: generate
 matrices:
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA H200 141GB
+- deploy.gpu: NVIDIA A100 80GB
   deploy.gpu_count: 1

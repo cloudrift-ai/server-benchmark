@@ -13,8 +13,8 @@ tags:
 
 model:
   huggingface: "philbert440/Qwen3.8-27B-W4A16-AWQ"
-  rationale: "Dominant Qwen3.8 wave with high OR heat and Reddit engagement."
-  heat: 95
+  rationale: "Qwen 3.8 dominant on Reddit hot page and high LMArena; breakout signal."
+  heat: 92
   revision: 7908d42a71077a5e4dc458f273682b12dfe384a0
   task: generate
 

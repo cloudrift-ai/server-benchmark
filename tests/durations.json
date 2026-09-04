@@ -600,6 +600,7 @@
  "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-qk-sdpa-workspace-chain.yaml-realized]": 6.95,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-computed-value-cut-mma_xfail_offered.yaml-offered]": 5.83,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-computed-value-cut-mma_xfail_offered.yaml-realized]": 10.38,
+ "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-softmax-v-mma_xfail_offered.yaml-offered]": 6.1,
  "tests/compiler/realization/test_realization.py::test_realization[fused/gate-up-distinct-a_xfail_realized.yaml-offered]": 11.24,
  "tests/compiler/realization/test_realization.py::test_realization[fused/gate-up-distinct-a_xfail_realized.yaml-realized]": 100.93,
  "tests/compiler/realization/test_realization.py::test_realization[fused/gate-up-shared-a.yaml-built]": 11.17,

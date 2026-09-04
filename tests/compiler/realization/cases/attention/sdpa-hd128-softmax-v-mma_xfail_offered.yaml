@@ -1,7 +1,15 @@
-# evidence: the softmax-V half of a head-dim-128 SDPA must keep offering its warp tier. The row below is a
-# recorded RTX 5090 golden (11.84 us, fast-math); today the kernel enumerates two rows, neither carrying an mma
-# TILE, and greedy falls to a scalar schedule measured at 1459.8 us. `offered` passes at 5719f823 and fails from
-# b93a86c2 (#691), which restamped the realization corpus for the new schedule codec but not the model goldens.
+# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma) with its
+# softmax weights compute-filled into shared memory — the tier `sdpa-computed-value-cut-mma_xfail_offered` and
+# `qwen3emb/sdpa-s*_xfail_offered` record: the twist carries P·V inside its carrier on this tree and offers no
+# child contraction site (#699), so the score contraction is the kernel's only TILE/STAGE site and `STAGE d1/smem`
+# resolves nowhere. #715 measured greedy's scalar fallback at 1459.8 us on an RTX 5090 against 11.84 us for this
+# row (fast-math), 124x.
+#
+# #715 added this case closed, as a #691 regression; that bisect does not reproduce. The row as spelled — one site
+# carrying WORK w2x4, TILE mma_m16n8k16_f16_f16/f1x4/k8 and STAGE d1/smem — is offered at neither #691's parent
+# (5719f823: the fill lived on the P·V site `@pj`, the f1x4/k8 atom on the score site `@a3`, and no `w2x4` at
+# all) nor #699's parent (4a4e6521: the same shape on integer sites), so it records the gap #699 opened, not a
+# passing case that stopped passing.
 compute_cap:
 - 12
 - 0

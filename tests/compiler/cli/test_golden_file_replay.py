@@ -163,6 +163,42 @@ def test_frontend_target_features_follow_the_replay_slice_after_maximal_fusion()
     assert record.structural_features
 
 
+def test_frontend_target_replay_keeps_a_source_backed_producer_as_a_boundary() -> None:
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
+    from emmy.compiler.pipeline.search.golden import load_golden_records
+    from emmy.compiler.torch_wire import graph_to_wire
+
+    graph = Graph()
+    graph.add_node(
+        ConstantOp(name="weight", source_path="weight", source_shape=(16,), source_dtype="float16"),
+        [],
+        Tensor("weight", (16,), "f16"),
+        node_id="weight",
+    )
+    weight_bc = broadcast_to(graph, "weight", (1, 16))
+    graph.add_node(InputOp(), [], Tensor("x", (1, 16), "f16"), node_id="x")
+    graph.add_node(ElementwiseOp("multiply"), [weight_bc, "x"], Tensor("mul", (1, 16), "f16"), node_id="mul")
+    graph.inputs, graph.outputs = ["x"], ["mul"]
+    (record,) = load_golden_records(
+        {
+            "gpu_name": "NVIDIA GeForce RTX 4090",
+            "compute_cap": [8, 9],
+            "model": "org/model",
+            "programs": [graph_to_wire(graph)],
+            "configs": [
+                {
+                    "program": 0,
+                    "target": {"origins": ["mul"]},
+                    "realizations": [{"name": "working.mul", "bindings": {}, "pins": {"FAST_MATH": False}}],
+                }
+            ],
+        }
+    )
+
+    assert isinstance(record.target_program.nodes[weight_bc.id].op, InputOp)
+    assert record.structural_features
+
+
 def test_working_file_golden_conflicts_with_direct_input(run_cli, tmp_path):
     path = tmp_path / "working.yaml"
     _working_loop(path)

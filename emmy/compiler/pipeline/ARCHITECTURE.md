@@ -1357,13 +1357,14 @@ persists in the derived golden store beside identities and verdicts). The regime
 validation rejects a realization that schedules behind pinned cuts without a stored identity. A stored identity equal
 to the target's own lift is the corpus's derived stamp, not a receipt, and keeps the pooled decode.
 
-The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
-Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
-post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately
-compiled, repeated O3 `same-input-greedy` row as its positive reference only when the candidate and reference execute on
-identical deterministic inputs, their outputs pass the normal accuracy policy, and the model report discloses that
-this checks compiler-configuration parity rather than independent framework correctness. The original frontend
-program remains embedded for provenance, while the selected standalone target is what both configurations execute.
+The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). Loop
+IR has no frontend callable; a standalone origin slice can also have synthetic boundaries whose post-fusion output
+cannot be compared independently with Torch. Source-backed `ConstantOp` producer cones are runtime storage and remain
+synthetic; only literal or context-bound scalar cones remain embedded when randomization would change the operation's
+domain. Such a target may use a separately compiled, repeated O3 `same-input-greedy` row as its positive reference only
+when both configurations run on identical deterministic inputs, their outputs pass the accuracy policy, and the model
+report discloses configuration parity rather than independent framework correctness. The original frontend program
+remains embedded for provenance, while the selected standalone target is what both configurations execute.
 
 The three historical RTX 4080 rows without measurements were dropped during migration; repository validation has no
 provisional exception.

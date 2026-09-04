@@ -10,11 +10,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 
 from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.structural import instance_memo
+from emmy.utils import cached_method
 
 from .base import Schedule, ScheduleContext, ScheduleRefused
 from .choices import (
@@ -395,29 +397,20 @@ class ClassicDomains:
             size *= len(choices)
         return size
 
-    @property
+    @cached_property
     def kernel_set(self) -> frozenset[KernelSchedule]:
         """Indexed kernel membership for compatibility checks."""
-        memo = instance_memo(self, "_memo_membership")
-        if "kernel" not in memo:
-            memo["kernel"] = frozenset(self.kernel)
-        return memo["kernel"]
+        return frozenset(self.kernel)
 
+    @cached_method
     def node_set(self, site: NodeId) -> frozenset[NodeSchedule]:
         """Indexed node-domain membership for one site."""
-        memo = instance_memo(self, "_memo_membership")
-        nodes = memo.setdefault("nodes", {})
-        if site not in nodes:
-            nodes[site] = frozenset(self.nodes[site])
-        return nodes[site]
+        return frozenset(self.nodes[site])
 
+    @cached_method
     def edge_set(self, edge: EdgeSite) -> frozenset[EdgeSchedule]:
         """Indexed edge-domain membership for one site."""
-        memo = instance_memo(self, "_memo_membership")
-        edges = memo.setdefault("edges", {})
-        if edge not in edges:
-            edges[edge] = frozenset(self.edges[edge])
-        return edges[edge]
+        return frozenset(self.edges[edge])
 
 
 @dataclass(frozen=True)

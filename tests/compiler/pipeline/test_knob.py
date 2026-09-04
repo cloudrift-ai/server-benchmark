@@ -346,18 +346,6 @@ def test_knob_features_serial_cell_work_divides_by_reduce_coverage():
     assert "D_serial_cell_work" not in knob_features({"S_n_load": 3.0})
 
 
-def test_serial_floor_is_the_covered_trips_at_the_per_trip_bound():
-    """``serial_floor_us``: a physical lower bound on one kernel-launch — the row's per-thread
-    serial trips (stamp ÷ reduce-partition coverage) at the per-trip bound; zero with no stamp."""
-    from emmy.compiler.pipeline.search.features import SERIAL_TRIP_FLOOR_US, serial_floor_us
-
-    work = float(2**20)
-    assert serial_floor_us({"S_ext_serial_cell_work": work}) == pytest.approx(work * SERIAL_TRIP_FLOOR_US)
-    coop = serial_floor_us({"S_ext_serial_cell_work": work, "WORK": "t128", "REDUCE": "coop"})
-    assert coop == pytest.approx(work / 128 * SERIAL_TRIP_FLOOR_US)
-    assert serial_floor_us({}) == 0.0
-
-
 def test_knob_features_stage_codec():
     """The ``STAGE`` codec (``d<depth>/copy|reg|cp|tma[/p<reg_depth>]``) featurizes to the
     ``D_stage_*`` family; an absent / gmem-direct stage contributes nothing."""

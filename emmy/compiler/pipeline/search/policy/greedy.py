@@ -56,17 +56,6 @@ preference — the alternative is that an all-failed kernel has no ``ok`` row,
 therefore no evidence at all, and falls through to the prior as though nothing
 were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
 every benched variant hung.
-
-**One physical bound, and it is not a preference.** The kernel-set Σ
-(:func:`_resolved_price`) clamps a summand to its serial-work lower bound where
-that bound is decisively large (:data:`_SERIAL_FLOOR_ENFORCE_US`). This is the
-one exception to "no hand-written tier", and it is an exception in the same
-sense the disqualification is: not a ranking opinion but a fact no measurement
-can overrule — no thread retires 2^30 dependent-nest trips in microseconds, and
-no measurement can even EXIST at such magnitudes (the bench watchdog fires
-first), so "fix it by measuring" is unavailable exactly where the bound binds.
-A measured µs is never below the bound, so evidence always wins where evidence
-can exist.
 """
 
 from __future__ import annotations
@@ -80,7 +69,6 @@ from typing import TYPE_CHECKING, NamedTuple
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves, fork_signature, iter_leaves, leaf_for, leaf_knobs
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
-from emmy.compiler.pipeline.search.features import serial_floor_us
 
 logger = logging.getLogger(__name__)
 
@@ -231,18 +219,6 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
     )
 
 
-#: Enforcement guard for the serial-work bound (µs): the clamp in :func:`_resolved_price` applies
-#: only to a kernel whose bound exceeds this — 1 ms, three orders above launch overhead and three
-#: below the bench watchdog. Below it the bound sits inside the range launch overhead and memory
-#: traffic legitimately dominate, and the model's ranking (however uncalibrated) must stand;
-#: above it per-thread serial work alone makes the kernel un-servable and nothing may price it
-#: lower. The lower edge is pinned by measurement: the largest legitimate ``serial_floor_us``
-#: across the qwen3emb realization corpus family is **6.55 µs** (``sdpa-s512``'s fused kernel,
-#: 2^16 serial trips — a shape whose fused election is correct and pinned by its ``realized``
-#: replay), so 1 ms stands ~150x above the biggest bound the guard must ignore.
-_SERIAL_FLOOR_ENFORCE_US = 1e3
-
-
 def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: dict | None = None) -> float | None:
     """Σ over a resolved slice's kernels of each one's estimated µs — the ONE cost rule.
 
@@ -270,24 +246,7 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
     measured µs, one the model decided contributes the model's ranking score. Mixing them in a Σ is
     the known cost of comparing kernel SETS with a per-kernel ranker — the exposure the module
     docstring names, and the prior's to fix by being calibrated, not this function's to paper
-    over. What this Σ DOES enforce is the physical bound no calibration could relax: a summand
-    whose serial-work lower bound (:func:`~..features.serial_floor_us` — the kernel's per-thread
-    serial trips at a per-trip time conservative for any GPU clock) exceeds
-    :data:`_SERIAL_FLOOR_ENFORCE_US` is clamped to that bound. A measured µs is never below the
-    bound, so the clamp only ever lifts model garbage: the cold proxy priced DeepSeek-V4
-    ``post4096``'s fused 2^30-trip recomputation nest at 4.29e-37 µs, under every one of its
-    recomputation-free composed-cut arms, and no fitted weight can guarantee the bound at
-    magnitudes no measurement can reach. The guard is jurisdiction, not tuning: the bound ignores
-    launch overhead and memory traffic, so at ordinary magnitudes it must not adjudicate a
-    fused-vs-cut µs delta (an ungated draft flipped three qwen3emb sdpa corpus replays to a cut
-    election by comparing trip counts alone) — while a bound past the guard is un-servable
-    whatever those effects are. The guard's honest escape: a nest under ~2^23 per-thread trips
-    (bound < 1 ms; several ms real) is still adjudicated by the uncalibrated proxy, so a
-    2^23-class recomputation defect stays electable — smaller than the 2^30 class this bound
-    exists for, but not free. Sibling ranking within one kernel is decided upstream and never
-    reads this Σ, which is what makes the clamp safe here and NOT on the prior's scoring
-    surfaces (there any µs bound collapses live-range deltas — the plateau failure
-    ``latency_proxy``'s history warns about)."""
+    over."""
     scored: dict[str, float | None] = {d.node_id: d.score for d in trace}
     total = 0.0
     for nid, node in terminal.nodes.items():
@@ -312,8 +271,7 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
             us = prior.mean_scores(rows)[0] if prior is not None else None
         if us is None:
             return None
-        floor = serial_floor_us(knobs)
-        total += max(us, floor) if floor > _SERIAL_FLOOR_ENFORCE_US else us
+        total += us
     return total
 
 

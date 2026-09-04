@@ -88,7 +88,11 @@ A contraction-operand seam stands for a VALUE, not only an object: closed cones 
 their captured axis names fold into one seam, each duplicate carried as a sibling with its capture correspondence,
 and the cut replaces every one with workspace loads spelled through its own axes. A term is closed by construction —
 its values arrive through its operand edges — so every stored non-slab edge is a seam and there is no capture to
-resolve outward. A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
+resolve outward. A workspace load is named after its WORKSPACE — the cone's result name tagged with the seam — never
+after the cone alone: a lowered body reads producer names throughout, and the value a cut materialized can still be
+computed in place elsewhere in the same kernel (a cone the replacement did not reach, or a second seam exposing the
+same value), which under one shared name is a rebind the emitted source cannot carry.
+A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
 components of ONE fold, so there is no statistic edge to materialize, and the score contraction and the fold itself
 are the seams that stand there. The unpinned fork offers every seam as its own structural arm. Bare `PLACE=cut`
 resolves to the root-most seam: it names one deterministic pinned decision and is consumed on the fresh pieces.

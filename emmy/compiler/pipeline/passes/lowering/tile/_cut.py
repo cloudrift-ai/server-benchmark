@@ -396,6 +396,23 @@ def output_map(root: Node) -> dict[str, str]:
     return {name: f"{name}__placed" for name in root.buffer_names()}
 
 
+def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
+    """The SSA name a workspace read binds: the cone's own result name, tagged with the seam whose
+    workspace it now comes from (and, for a clustered duplicate, its ordinal in the cluster).
+
+    A lowered body reads PRODUCER names throughout — a consumer's params are spelled as the result
+    names of the edge they bind (:attr:`~emmy.compiler.ir.pure.fold.Fold.applied`) — so an edge's
+    result name is what the emitted kernel declares, and the cone's own name is NOT unique among
+    what one kernel binds. The value a cut materializes can still be computed in place beside the
+    read: a structurally equal cone the replacement did not reach (replacement follows object
+    sharing), or a second seam exposing that same value. Under one name those are two declarations
+    at two different addresses, which is an SSA fault and which nvcc rejects (*already declared in
+    the current scope*). Reads of ONE workspace at one address keep one name, so the emitted body
+    still binds each value once.
+    """
+    return f"{name}__ws{token}" if ordinal is None else f"{name}__ws{token}s{ordinal}"
+
+
 def _producer_order(pieces) -> list:
     """Topologically order cut producers by the workspaces their stored Fold reads.
 
@@ -456,21 +473,28 @@ def realize(
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
-        loads = tuple(Fold.slab(Load(name=name, input=buffer, index=index)) for name, buffer in zip(names, buffers, strict=True))
+        loads = tuple(
+            Fold.slab(Load(name=_read_name(name, token), input=buffer, index=index)) for name, buffer in zip(names, buffers, strict=True)
+        )
         if front is not None:
             # The raw storage read at the frontier's dtype stays INLINE under its decode residue —
             # the storage-decode cone the operand readers recognize (a raw ``b8`` fill), not a
-            # projection over a slab.
+            # projection over a slab. The residue is a lambda over that read, so tagging what it
+            # EXPOSES renames its defining statements in lockstep and leaves the read's own
+            # internal spelling alone.
             raw = Load(name=names[0], input=buffers[0], index=index, dtype=front.dtype)
-            loads = (Fold(operands=(), lift=Lambda.closing((), Body.coerce(Body((raw, *front.residue))), child.lift.results)),)
+            residue = Lambda.closing((), Body.coerce(Body((raw, *front.residue))), child.lift.results)
+            loads = (Fold(operands=(), lift=residue.rename({name: _read_name(name, token) for name in residue.results})),)
         replacements = {id(child): loads}
-        for sibling, pairs in seam.siblings:
+        for ordinal, (sibling, pairs) in enumerate(seam.siblings):
             # A clustered duplicate reads the SAME workspace, spelled through its own captured
-            # axes via the correspondence the clustering proved.
+            # axes via the correspondence the clustering proved — and under its own read names,
+            # since it reads that workspace at a DIFFERENT address than the representative.
             mapping = dict(pairs)
             sibling_index = tuple(Var(mapping[axis.name]) for axis in axes)
             replacements[id(sibling)] = tuple(
-                Fold.slab(Load(name=name, input=buffer, index=sibling_index)) for name, buffer in zip(sibling.exposes, buffers, strict=True)
+                Fold.slab(Load(name=_read_name(name, token, ordinal), input=buffer, index=sibling_index))
+                for name, buffer in zip(sibling.exposes, buffers, strict=True)
             )
         pieces.append((seam, produced, axes, index, token, names, buffers, replacements))
 

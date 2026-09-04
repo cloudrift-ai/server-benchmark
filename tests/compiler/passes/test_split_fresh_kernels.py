@@ -255,7 +255,8 @@ def test_a_pin_hands_its_remaining_row_to_the_pieces(monkeypatch) -> None:
 def test_the_split_node_is_priced_as_the_sum_of_its_pieces(monkeypatch) -> None:
     """A kernel that splits has no latency of its own — it does not run. Its estimate is the Σ over
     the kernels the resolution ends with, which is what lets the split row be compared against the
-    rows that keep one kernel."""
+    rows that keep one kernel. Every summand is a plain µs: a piece the trace scored contributes its
+    score, one it did not contributes the prior's estimate for the row it realized."""
     from emmy.compiler.pipeline.search.policy import greedy
 
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
@@ -269,10 +270,7 @@ def test_the_split_node_is_priced_as_the_sum_of_its_pieces(monkeypatch) -> None:
 
     scored = {d.node_id: d.score for d in trace}
     total = greedy._resolved_price(terminal, trace, _CTX, _Flat())
-    assert total.us == pytest.approx(sum(scored.get(nid) if scored.get(nid) is not None else 7.0 for nid in kernels))
-    # A Σ this prior scored is a prediction, and the price says so — the flag is what lets a
-    # kernel-set comparison refuse a part-predicted sum instead of trusting it.
-    assert total.measured is False
+    assert total == pytest.approx(sum(scored.get(nid) if scored.get(nid) is not None else 7.0 for nid in kernels))
 
 
 def _softmax_scale_chain() -> Graph:

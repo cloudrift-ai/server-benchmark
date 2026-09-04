@@ -294,6 +294,14 @@ def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None
     assert decode_record(GoldenRecord(knobs={"PLACE@map.1/twist.1/inner": "cut"}, **fields)) is None
     reason = decode_record(GoldenRecord(knobs={"PLACE@missing": "cut"}, **fields))
     assert reason is not None and "does not resolve" in reason
+    # A route that resolves SOME of its seams is refused the same way. Evidence import is
+    # best-effort per record — it keeps the arms the replay did resolve — so the strict decode is
+    # the one place a record that would deploy a shorter kernel set than the measured one is loud.
+    # The stale seam here is well formed and stands on no site of this tree: one hop past the score
+    # contraction, where the operand is a gmem slab and takes no hop of its own.
+    partial_route = {"PLACE@map.1/twist.1/inner": "cut", "PLACE@map.1/twist.1/inner.1/map": "cut"}
+    partial = decode_record(GoldenRecord(knobs=partial_route, **fields))
+    assert partial is not None and "does not resolve" in partial
 
 
 @requires_cuda
@@ -609,7 +617,7 @@ def _sdpa_kernel_identity() -> str:
 
 
 def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
-    """A verified ROUTING row over the sdpa kernel — nothing but ``PLACE`` keys, which is what
+    """A measured ROUTING row over the sdpa kernel — nothing but ``PLACE`` keys, which is what
     makes it a recorded placement rather than a recorded schedule. The identity is stored so this
     exercises the routing LANE and not the record-side identity derivation, which has its own
     tests."""
@@ -630,24 +638,12 @@ def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
     )
 
 
-@pytest.fixture
-def deployable_flags(monkeypatch):
-    """The deployable nvcc regime, which the verified tier is scoped to.
-
-    ``greedy_decide`` consults the tier only where ``H_opt`` is the deployable level: a recorded µs
-    is a deployable-regime measurement and must not arbitrate a compile pinned to another
-    optimization level. That gate is one tier-wide rule — it withholds recorded SCHEDULE rows just
-    as it withholds routing rows — so a test of either lane has to state the regime it deploys in
-    rather than inherit the suite's (``make test`` runs the correctness lane at ``-Xcicc -O1``).
-    Same spelling the golden replay lane's tests and the realization harness use."""
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
-
-
 def _deploy_kernels(records: list) -> list[str]:
     """Resolve the sdpa program through the deploy policy with ``records`` as the card's corpus,
     and return the resolved kernel set. ``prior=None`` pins the non-recorded forks to emission
-    order, so the recorded evidence is the only thing that can move the answer. Callers hold
-    :func:`deployable_flags`, without which the verified tier declines to answer at all."""
+    order, so the recorded evidence is the only thing that can move the answer. The records are
+    evidence in any nvcc regime: a golden row is scoped by the card and by its own input pins
+    (``regime_live``), never by the optimization level the suite compiles at."""
     from emmy.compiler.pipeline.search.golden import records_override
     from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
 
@@ -658,49 +654,34 @@ def _deploy_kernels(records: list) -> list[str]:
     return sorted(node.id for node in terminal.nodes.values() if isinstance(node.op, TileOp))
 
 
-#: The sdpa kernel's two offered seams, as the route codec spells them: the twist that carries the
-#: softmax statistics, and the score contraction inside it.
-_SDPA_ROUTES = ("PLACE@map.1/twist", "PLACE@map.1/twist.1/inner")
-
-#: A well-formed route that stands on no site of THIS tree — one hop past the score contraction,
-#: where the operand is a gmem slab and takes no hop of its own. What a recorded route looks like
-#: after the tree it was spelled on moved.
-_SDPA_STALE_ROUTE = "PLACE@map.1/twist.1/inner.1/map"
+#: The root-most of the sdpa kernel's offered seams, as the route codec spells it: the twist that
+#: carries the softmax statistics.
+_SDPA_ROUTE = "PLACE@map.1/twist"
 
 
-def test_a_recorded_routing_row_deploys_its_multi_seam_cut(deployable_flags) -> None:
-    """The sdpa kernel offers its seams ONE at a time, so no arm of the placement fork spells a
-    two-seam route. The recorded row is applied the way the ``--golden`` replay lane applies
-    placement pins — published as pins, the rule re-asked — so the cut machinery composes both
-    seams into the one realization it was measured on."""
+def test_a_recorded_kernel_set_deploys_the_cut_every_entry_spells() -> None:
+    """A cut mints brand-new kernels, so a kernel set cut twice over is recorded per kernel and not
+    as one row spelling both seams: the leading entry spells the seam offered on the target's own
+    kernel, and an entry naming a piece by its stored identity spells the seam that piece offers on
+    its own tree. Each entry's route is a row under the signature of the kernel whose fork it
+    decided, so the deploy composes the whole recorded set — the parent's entry alone deploys only
+    the parent's seam."""
     fused = _deploy_kernels([])
     assert len(fused) == 1, f"with no recorded route the fork falls to emission order (fuse): {fused}"
 
-    routed = _deploy_kernels([_routing_record(dict.fromkeys(_SDPA_ROUTES, "cut"))])
-    assert len(routed) > len(fused), f"the recorded route must deploy its fragments: {routed}"
-    assert sum(1 for name in routed if "__place_" in name) >= 2, f"both recorded seams must be cut: {routed}"
+    parent = _routing_record({_SDPA_ROUTE: "cut"})
+    routed = _deploy_kernels([parent])
+    assert sum(1 for name in routed if "__place_" in name) == 1, f"the parent's entry deploys its one seam: {routed}"
+
+    pieces = [
+        replace(parent, name=f"sdpa.piece{i}", knobs={"PLACE": "cut"}, identity=identity)
+        for i, identity in enumerate(sorted(_replay(parent).kernels))
+    ]
+    composed = _deploy_kernels([parent, *pieces])
+    assert sum(1 for name in composed if "__place_" in name) >= 2, f"every recorded seam must be cut: {composed}"
 
 
-def test_a_routing_row_naming_a_stale_seam_decides_nothing(caplog, deployable_flags) -> None:
-    """Fail-closed. The cut machinery reads a pin that addresses no site on this kernel as naming
-    ANOTHER kernel of the graph and drops it, which would silently deploy a shorter route than the
-    one measured. The tier checks the composed decision back against the row, so a stale route
-    warns and leaves the fork to pricing."""
-    import logging
-
-    from emmy.compiler.pipeline.search.policy import greedy
-
-    row = {_SDPA_ROUTES[1]: "cut", _SDPA_STALE_ROUTE: "cut"}
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger=greedy.logger.name):
-        kernels = _deploy_kernels([_routing_record(row, name="sdpa.stale")])
-
-    assert kernels == _deploy_kernels([]), "a partially realizable route must decide nothing at all"
-    assert "sdpa.stale" in caplog.text and _SDPA_STALE_ROUTE in caplog.text, caplog.text
-    assert "drift" in caplog.text
-
-
-def test_a_recorded_schedule_row_never_routes(deployable_flags) -> None:
+def test_a_recorded_schedule_row_never_routes() -> None:
     """The lanes do not cross: a schedule row carries no ``PLACE`` key, so it is not a route and
     the placement fork stays with pricing even though the row joins the same kernel identity."""
     schedule_row = _routing_record({"WORK": "w4x1", "TILE": ""}, name="sdpa.schedule")

@@ -1089,6 +1089,7 @@
  "tests/serving/test_deepseek_native_loader.py::test_learned_hyper_connection_scale_is_not_mistaken_for_a_block_scale": 5.4,
  "tests/serving/test_deepseek_native_loader.py::test_multi_token_prediction_head_is_never_read": 1.9,
  "tests/serving/test_deepseek_native_loader.py::test_native_fp8_trunk_weight_loads_scaled": 5.1,
+ "tests/serving/test_deepseek_v4_split.py::test_hyper_connection_split_matches_eager_layer[1]": 5.1,
  "tests/serving/test_moe_split.py::test_exl3_laguna_dense_and_sparse_blocks_preserve_float32_residuals": 0.3,
  "tests/serving/test_moe_split.py::test_exl3_laguna_routed_down_uses_marked_float32_output": 0.11,
  "tests/serving/test_moe_split.py::test_exl3_laguna_shared_expert_uses_marked_float32_cone": 0.1,

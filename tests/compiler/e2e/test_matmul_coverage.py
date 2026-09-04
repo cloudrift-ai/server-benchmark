@@ -605,6 +605,24 @@ def _render_src(graph, cc=(12, 0)) -> str:
     return "\n".join(n.op.kernel_source for n in out.nodes.values() if getattr(n.op, "kernel_source", None))
 
 
+def test_fully_overhanging_m_fragment_clamps_its_reads_into_the_tile(monkeypatch):
+    """An M-tile wider than its axis emits A fragments that OVERHANG the bound entirely, so the
+    masked-M loader's clamp must land on the tile base, not below it. M=1 under a 128-row tile
+    gives the later fragments ``rows_left = 1 - 112``, and a bare ``rows_left - 1`` addressed
+    ``row = -112`` — tens of KB BELOW the buffer. The read is out of bounds, and where that memory
+    was unmapped it faulted the context: a sticky error, so the launch's event never completed and
+    the watchdog reported a 60 s hang (``compute-sanitizer``: "Invalid __global__ read of size 2
+    bytes"). It surfaced only in a long-lived worker, where the slab layout put nothing mapped
+    there — every isolated run of the same test read garbage and passed."""
+    _pin_tile(monkeypatch, _WARP_PIN)  # WM.FM.atom_m = a 128-row tile over M=1
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_STAGE", "")  # gmem-direct: the tier whose loaders clamp per fragment
+    src = _render_src(_mma_matmul_graph("static", 1, 128, 64, "f32", False))
+    assert "emmy_mma_load_a_gmem_mclamp" in src, "M=1 under this tile must reach the masked-M loader"
+    assert "rows_left - 1;" not in src, "the M clamp must not address below the tile base"
+    assert "row = max(rows_left - 1, 0);" in src
+
+
 @pytest.mark.parametrize(("K", "masked"), [(128, False), (136, True), (132, True)])
 def test_mma_static_k_tail_zero_fills(K, masked, monkeypatch):
     """A STATIC contraction K the warp K-loop's ``atom_k`` step does not tile reaches the mma tier

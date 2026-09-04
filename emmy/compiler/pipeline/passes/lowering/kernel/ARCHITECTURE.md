@@ -426,6 +426,8 @@ a fixpoint (fresh `_r{depth}` per pass; already-arrayed `fam[i]` refs re-parsed)
 pass k re-rolls the inner N-atoms, pass k+1 sees the resulting sibling loops as a run and wraps them. Correctness is
 structural: an unrolled congruent run executes in the SAME order as the original straight-line statements, so a template
 that reproduces every window is byte-identical after nvcc unrolls — identical SASS.
+Only the family's `RegFragment` decl carries its dtype, so a render that needs a fragment reference's dtype reads it
+off the stem (`kernel.ir.frag_dtype`) — an arrayed member is `fam[_r]`, which no declaration names.
 A readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot (skips the 2-long runs).
 Two orthogonal readability transforms ride alongside: `FragmentApply` **always** renders as one element
 `#pragma unroll for (_e)` loop (the ROW operand as the row-split ternary `_e < 2 ? row0 : row1`), so a re-rolled family

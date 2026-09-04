@@ -1,0 +1,685 @@
+# The W4A4 linear as `--ir cuda` renders it: a packed-pair (NVFP4) weight and activation staged as
+# raw byte slabs, drained by the block-scaled tensor-core cell, with the per-fragment statement runs
+# re-rolled into `#pragma unroll` loops (`LOOPIFY`, the readability policy `emmy compile` turns on).
+# Re-rolling arrays a fragment family under one declaration, so the drains address their members
+# subscripted (`_b[_r0]`) instead of by the family member's own name. The dtype of a fragment hangs
+# off the family, and every reader of it falls back silently when the reference misses, so this is
+# the one schedule where a packed byte slab can be read as an fp8 one -- one stored byte standing
+# for one K value instead of two.
+#
+# `LOOPIFY` rides in `pins` because it is an input regime rather than a schedule row: it re-spells
+# the emitted source and leaves the SASS alone, so no `TILE` / `WORK` / `STAGE` value can express it.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [input]
+  outputs: [linear]
+  nodes:
+  - id: input
+    op: input
+    outputs: [[input, f32, [128, 512]]]
+  - id: input_static_fp4_blk
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [128, 32, 16]}}
+    inputs: [input]
+    outputs: [[input_static_fp4_blk, f32, [128, 32, 16]]]
+  - id: input_static_fp4_abs
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: abs}}
+    inputs: [input_static_fp4_blk]
+    outputs: [[input_static_fp4_abs, f32, [128, 32, 16]]]
+  - id: input_static_fp4_amax
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: maximum}, axis: -1}
+    inputs: [input_static_fp4_abs]
+    outputs: [[input_static_fp4_amax, f32, [128, 32, 1]]]
+  - id: input_static_fp4_f4_max
+    op: constant
+    attrs:
+      name: input_static_fp4_f4_max
+      value: 6.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[input_static_fp4_f4_max, f32, [1]]]
+  - id: input_static_fp4_f4_max_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 128}, {__dim__: 32}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_2}], select: null}}]}
+    inputs: [input_static_fp4_f4_max]
+    outputs: [[input_static_fp4_f4_max_bc, f32, [128, 32, 1]]]
+  - id: input_static_fp4_floor
+    op: constant
+    attrs:
+      name: input_static_fp4_floor
+      value: 1.0e-12
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[input_static_fp4_floor, f32, [1]]]
+  - id: input_static_fp4_floor_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 128}, {__dim__: 32}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_2}], select: null}}]}
+    inputs: [input_static_fp4_floor]
+    outputs: [[input_static_fp4_floor_bc, f32, [128, 32, 1]]]
+  - id: input_static_fp4_r1_f4_pairs
+    op: constant
+    attrs:
+      name: input_static_fp4_r1_f4_pairs
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [256, 2]}
+      source_dtype: f32
+      source_graph:
+        __program__:
+          inputs: []
+          outputs: [pairs]
+          nodes:
+          - id: codes
+            op: tensor.range
+            attrs: {start: 0, stop: 256, step: 1, dtype: i32}
+            outputs: [[codes, i32, [256]]]
+          - id: mask
+            op: constant
+            attrs:
+              name: mask
+              value: 15
+              context_value: null
+              load_ops: {__tuple__: []}
+              source_path: null
+              source_parts: {__tuple__: []}
+              source_shape: null
+              source_dtype: null
+              source_graph: null
+            outputs: [[mask, i32, [1]]]
+          - id: mask_bc
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 256}]}
+              sources:
+                __tuple__:
+                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+            inputs: [mask]
+            outputs: [[mask_bc, i32, [256]]]
+          - id: low
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: bitwise_and}}
+            inputs: [codes, mask_bc]
+            outputs: [[low, i32, [256]]]
+          - id: shift
+            op: constant
+            attrs:
+              name: shift
+              value: 4
+              context_value: null
+              load_ops: {__tuple__: []}
+              source_path: null
+              source_parts: {__tuple__: []}
+              source_shape: null
+              source_dtype: null
+              source_graph: null
+            outputs: [[shift, i32, [1]]]
+          - id: shift_bc
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 256}]}
+              sources:
+                __tuple__:
+                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+            inputs: [shift]
+            outputs: [[shift_bc, i32, [256]]]
+          - id: high
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: right_shift}}
+            inputs: [codes, shift_bc]
+            outputs: [[high, i32, [256]]]
+          - id: vhigh
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: from_f4e2m1}}
+            inputs: [high]
+            outputs: [[vhigh, f32, [256]]]
+          - id: vlow
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: from_f4e2m1}}
+            inputs: [low]
+            outputs: [[vlow, f32, [256]]]
+          - id: pairs
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 256}, {__dim__: 2}]}
+              sources:
+                __tuple__:
+                - __index_source__:
+                    input_idx: 0
+                    coord_map:
+                    - {var: out_coord_0}
+                    select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+                - {__index_source__: {input_idx: 1, coord_map: [{var: out_coord_0}], select: null}}
+            inputs: [vlow, vhigh]
+            outputs: [[pairs, f32, [256, 2]]]
+    outputs: [[input_static_fp4_r1_f4_pairs, f32, [256, 2]]]
+  - id: input_static_fp4_scale_2
+    op: constant
+    attrs:
+      name: input_static_fp4_scale_2
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.reshape, attrs: {shape: {__tuple__: [1, 1, 1]}}}}]}
+      source_path: l0.input_scale
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: []}
+      source_dtype: f32
+      source_graph: null
+    outputs: [[input_static_fp4_scale_2, f32, [1, 1, 1]]]
+  - id: input_static_fp4_scale_2_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 128}, {__dim__: 32}, {__dim__: 1}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [input_static_fp4_scale_2]
+    outputs: [[input_static_fp4_scale_2_bc, f32, [128, 32, 1]]]
+  - id: input_static_fp4_denom
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [input_static_fp4_f4_max_bc, input_static_fp4_scale_2_bc]
+    outputs: [[input_static_fp4_denom, f32, [128, 32, 1]]]
+  - id: input_static_fp4_ratio
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: divide}}
+    inputs: [input_static_fp4_amax, input_static_fp4_denom]
+    outputs: [[input_static_fp4_ratio, f32, [128, 32, 1]]]
+  - id: input_static_fp4_scale_bits
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: to_f8e4m3}}
+    inputs: [input_static_fp4_ratio]
+    outputs: [[input_static_fp4_scale_bits, f8e4m3, [128, 32, 1]]]
+  - id: input_static_fp4_r1_scale_vals
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: from_f8e4m3}}
+    inputs: [input_static_fp4_scale_bits]
+    outputs: [[input_static_fp4_r1_scale_vals, f32, [128, 32, 1]]]
+  - id: input_static_fp4_scale_vals
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: from_f8e4m3}}
+    inputs: [input_static_fp4_scale_bits]
+    outputs: [[input_static_fp4_scale_vals, f32, [128, 32, 1]]]
+  - id: input_static_fp4_fused32
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [input_static_fp4_scale_vals, input_static_fp4_scale_2_bc]
+    outputs: [[input_static_fp4_fused32, f32, [128, 32, 1]]]
+  - id: input_static_fp4_fused
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [input_static_fp4_fused32]
+    outputs: [[input_static_fp4_fused, f16, [128, 32, 1]]]
+  - id: input_static_fp4_div32
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [input_static_fp4_fused]
+    outputs: [[input_static_fp4_div32, f32, [128, 32, 1]]]
+  - id: input_static_fp4_safe
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: maximum}}
+    inputs: [input_static_fp4_div32, input_static_fp4_floor_bc]
+    outputs: [[input_static_fp4_safe, f32, [128, 32, 1]]]
+  - id: input_static_fp4_safe_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 128}, {__dim__: 32}, {__dim__: 16}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [input_static_fp4_safe]
+    outputs: [[input_static_fp4_safe_bc, f32, [128, 32, 16]]]
+  - id: input_static_fp4_norm
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: divide}}
+    inputs: [input_static_fp4_blk, input_static_fp4_safe_bc]
+    outputs: [[input_static_fp4_norm, f32, [128, 32, 16]]]
+  - id: input_static_fp4_codes
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: to_f4e2m1}}
+    inputs: [input_static_fp4_norm]
+    outputs: [[input_static_fp4_codes, i32, [128, 32, 16]]]
+  - id: input_static_fp4_codes_flat
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [128, 512]}}
+    inputs: [input_static_fp4_codes]
+    outputs: [[input_static_fp4_codes_flat, i32, [128, 512]]]
+  - id: input_static_fp4_even
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 128}, {__dim__: 256}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {binary: {op: '*', left: {var: out_coord_1}, right: {literal: {value: 2, dtype: int}}}}
+            select: null
+    inputs: [input_static_fp4_codes_flat]
+    outputs: [[input_static_fp4_even, i32, [128, 256]]]
+  - id: input_static_fp4_odd
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 128}, {__dim__: 256}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - binary:
+                op: +
+                left: {binary: {op: '*', left: {var: out_coord_1}, right: {literal: {value: 2, dtype: int}}}}
+                right: {literal: {value: 1, dtype: int}}
+            select: null
+    inputs: [input_static_fp4_codes_flat]
+    outputs: [[input_static_fp4_odd, i32, [128, 256]]]
+  - id: input_static_fp4_shift
+    op: constant
+    attrs:
+      name: input_static_fp4_shift
+      value: 4
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[input_static_fp4_shift, i32, [1]]]
+  - id: input_static_fp4_shift_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 128}, {__dim__: 256}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [input_static_fp4_shift]
+    outputs: [[input_static_fp4_shift_bc, i32, [128, 256]]]
+  - id: input_static_fp4_hi
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: left_shift}}
+    inputs: [input_static_fp4_odd, input_static_fp4_shift_bc]
+    outputs: [[input_static_fp4_hi, i32, [128, 256]]]
+  - id: input_static_fp4_byte
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_or}}
+    inputs: [input_static_fp4_even, input_static_fp4_hi]
+    outputs: [[input_static_fp4_byte, i32, [128, 256]]]
+  - id: input_static_fp4_bits
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [input_static_fp4_byte]
+    outputs: [[input_static_fp4_bits, f4e2m1x2, [128, 256]]]
+  - id: input_static_fp4_r1_idx
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [input_static_fp4_bits]
+    outputs: [[input_static_fp4_r1_idx, i32, [128, 256]]]
+  - id: input_static_fp4_r1_pairs
+    op: tensor.gather
+    attrs: {axis: 0}
+    inputs: [input_static_fp4_r1_f4_pairs, input_static_fp4_r1_idx]
+    outputs: [[input_static_fp4_r1_pairs, f32, [128, 256, 2]]]
+  - id: input_static_fp4_r1_vals
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [128, 32, 16]}}
+    inputs: [input_static_fp4_r1_pairs]
+    outputs: [[input_static_fp4_r1_vals, f32, [128, 32, 16]]]
+  - id: n1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 128}, {__dim__: 32}, {__dim__: 1}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [input_static_fp4_scale_2]
+    outputs: [[input_static_fp4_scale_2_bc, f32, [128, 32, 1]]]
+  - id: input_static_fp4_r1_fused32
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [input_static_fp4_r1_scale_vals, n1]
+    outputs: [[input_static_fp4_r1_fused32, f32, [128, 32, 1]]]
+  - id: input_static_fp4_r1_fused
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [input_static_fp4_r1_fused32]
+    outputs: [[input_static_fp4_r1_fused, f16, [128, 32, 1]]]
+  - id: input_static_fp4_r1_fused_cast
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [input_static_fp4_r1_fused]
+    outputs: [[input_static_fp4_r1_fused_cast, f32, [128, 32, 1]]]
+  - id: input_static_fp4_r1_fused_cast_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 128}, {__dim__: 32}, {__dim__: 16}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [input_static_fp4_r1_fused_cast]
+    outputs: [[input_static_fp4_r1_fused_cast_bc, f32, [128, 32, 16]]]
+  - id: input_static_fp4_r1_sblk
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [input_static_fp4_r1_vals, input_static_fp4_r1_fused_cast_bc]
+    outputs: [[input_static_fp4_r1_sblk, f32, [128, 32, 16]]]
+  - id: input_static_fp4_r1_value
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [128, 512]}}
+    inputs: [input_static_fp4_r1_sblk]
+    outputs: [[input_static_fp4_r1_value, f32, [128, 512]]]
+  - id: p_weight_bits
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: l0.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [256, 256]}
+      source_dtype: f4e2m1x2
+      source_graph: null
+    outputs: [[p_weight_bits, f4e2m1x2, [256, 256]]]
+  - id: p_weight_f4_pairs
+    op: constant
+    attrs:
+      name: p_weight_f4_pairs
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [256, 2]}
+      source_dtype: f32
+      source_graph:
+        __program__:
+          inputs: []
+          outputs: [pairs]
+          nodes:
+          - id: codes
+            op: tensor.range
+            attrs: {start: 0, stop: 256, step: 1, dtype: i32}
+            outputs: [[codes, i32, [256]]]
+          - id: mask
+            op: constant
+            attrs:
+              name: mask
+              value: 15
+              context_value: null
+              load_ops: {__tuple__: []}
+              source_path: null
+              source_parts: {__tuple__: []}
+              source_shape: null
+              source_dtype: null
+              source_graph: null
+            outputs: [[mask, i32, [1]]]
+          - id: mask_bc
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 256}]}
+              sources:
+                __tuple__:
+                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+            inputs: [mask]
+            outputs: [[mask_bc, i32, [256]]]
+          - id: low
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: bitwise_and}}
+            inputs: [codes, mask_bc]
+            outputs: [[low, i32, [256]]]
+          - id: shift
+            op: constant
+            attrs:
+              name: shift
+              value: 4
+              context_value: null
+              load_ops: {__tuple__: []}
+              source_path: null
+              source_parts: {__tuple__: []}
+              source_shape: null
+              source_dtype: null
+              source_graph: null
+            outputs: [[shift, i32, [1]]]
+          - id: shift_bc
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 256}]}
+              sources:
+                __tuple__:
+                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+            inputs: [shift]
+            outputs: [[shift_bc, i32, [256]]]
+          - id: high
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: right_shift}}
+            inputs: [codes, shift_bc]
+            outputs: [[high, i32, [256]]]
+          - id: vhigh
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: from_f4e2m1}}
+            inputs: [high]
+            outputs: [[vhigh, f32, [256]]]
+          - id: vlow
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: from_f4e2m1}}
+            inputs: [low]
+            outputs: [[vlow, f32, [256]]]
+          - id: pairs
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 256}, {__dim__: 2}]}
+              sources:
+                __tuple__:
+                - __index_source__:
+                    input_idx: 0
+                    coord_map:
+                    - {var: out_coord_0}
+                    select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+                - {__index_source__: {input_idx: 1, coord_map: [{var: out_coord_0}], select: null}}
+            inputs: [vlow, vhigh]
+            outputs: [[pairs, f32, [256, 2]]]
+    outputs: [[p_weight_f4_pairs, f32, [256, 2]]]
+  - id: p_weight_idx
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [p_weight_bits]
+    outputs: [[p_weight_idx, i32, [256, 256]]]
+  - id: p_weight_pairs
+    op: tensor.gather
+    attrs: {axis: 0}
+    inputs: [p_weight_f4_pairs, p_weight_idx]
+    outputs: [[p_weight_pairs, f32, [256, 256, 2]]]
+  - id: p_weight_scale_2
+    op: constant
+    attrs:
+      name: p_weight_scale_2
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.reshape, attrs: {shape: {__tuple__: [1, 1]}}}}]}
+      source_path: l0.weight_scale_2
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1]}
+      source_dtype: f32
+      source_graph: null
+    outputs: [[p_weight_scale_2, f32, [1, 1]]]
+  - id: p_weight_scale_2_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 256}, {__dim__: 32}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_weight_scale_2]
+    outputs: [[p_weight_scale_2_bc, f32, [256, 32]]]
+  - id: p_weight_scale_bits
+    op: constant
+    attrs:
+      name: p_weight_scale
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: l0.weight_scale
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [256, 32]}
+      source_dtype: f8e4m3
+      source_graph: null
+    outputs: [[p_weight_scale_bits, f8e4m3, [256, 32]]]
+  - id: p_weight_scale_vals
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: from_f8e4m3}}
+    inputs: [p_weight_scale_bits]
+    outputs: [[p_weight_scale_vals, f32, [256, 32]]]
+  - id: p_weight_fused32
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_weight_scale_vals, p_weight_scale_2_bc]
+    outputs: [[p_weight_fused32, f32, [256, 32]]]
+  - id: p_weight_fused
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [p_weight_fused32]
+    outputs: [[p_weight_fused, f16, [256, 32]]]
+  - id: p_weight_fused_cast
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [p_weight_fused]
+    outputs: [[p_weight_fused_cast, f32, [256, 32]]]
+  - id: p_weight_fused_r
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [256, 32, 1]}}
+    inputs: [p_weight_fused_cast]
+    outputs: [[p_weight_fused_r, f32, [256, 32, 1]]]
+  - id: p_weight_fused_r_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 256}, {__dim__: 32}, {__dim__: 16}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_weight_fused_r]
+    outputs: [[p_weight_fused_r_bc, f32, [256, 32, 16]]]
+  - id: p_weight_vals
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [256, 512]}}
+    inputs: [p_weight_pairs]
+    outputs: [[p_weight_vals, f32, [256, 512]]]
+  - id: p_weight_blk
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [256, 32, 16]}}
+    inputs: [p_weight_vals]
+    outputs: [[p_weight_blk, f32, [256, 32, 16]]]
+  - id: p_weight_sblk
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_weight_blk, p_weight_fused_r_bc]
+    outputs: [[p_weight_sblk, f32, [256, 32, 16]]]
+  - id: p_weight
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [256, 512]}}
+    inputs: [p_weight_sblk]
+    outputs: [[p_weight, f32, [256, 512]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [input_static_fp4_r1_value, p_weight]
+    outputs: [[linear, f32, [128, 256]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - input_static_fp4_r1_fused
+    - input_static_fp4_r1_fused32
+    - input_static_fp4_r1_fused_cast
+    - input_static_fp4_r1_fused_cast_bc
+    - input_static_fp4_r1_idx
+    - input_static_fp4_r1_pairs
+    - input_static_fp4_r1_sblk
+    - input_static_fp4_r1_scale_vals
+    - input_static_fp4_r1_vals
+    - input_static_fp4_r1_value
+    - linear
+    - n1
+    - p_weight
+    - p_weight_blk
+    - p_weight_fused
+    - p_weight_fused32
+    - p_weight_fused_cast
+    - p_weight_fused_r
+    - p_weight_fused_r_bc
+    - p_weight_idx
+    - p_weight_pairs
+    - p_weight_sblk
+    - p_weight_scale_2_bc
+    - p_weight_scale_vals
+    - p_weight_vals
+  realizations:
+  - name: k_linear_9f9b53.4e8228ae674d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+      LOOPIFY: 2
+    knobs:
+      TILE: mma_m16n8k64_e2m1_f32/f1x2/k4
+      WORK: w2x8
+      REDUCE: ''
+      STAGE: d3/smem-async
+      RASTER: ''
+    identity: e03ddd67f7d465bbe114c8e5f3e8203ecc5d73881eade878982e5dab7af72c7f

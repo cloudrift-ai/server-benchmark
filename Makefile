@@ -1,4 +1,4 @@
-.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations test-corpus-regen lint format git-sha-guard pypi-dist \
+.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations test-corpus-regen test-goldens lint format git-sha-guard pypi-dist \
 	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
@@ -23,6 +23,7 @@ help:
 	@echo "  serve-models    - List the models with a pinned release config"
 	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
 	@echo "  test-corpus-regen - Restamp the realization corpus after an identity / codec change (COMPLETE=1 adds entries)"
+	@echo "  test-goldens   - Strict-decode every checked-in golden (off the default lane, no GPU needed)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
@@ -85,6 +86,14 @@ test: setup
 # is a realization regression to review, not a mechanical restamp.
 test-corpus-regen: setup
 	./venv/bin/python -m tests.compiler.realization.regen $(if $(COMPLETE),--complete,)
+
+# Strict-decode every checked-in golden. Off the default lane: a full pass re-derives every
+# recorded row's enumeration, minutes per file. Run it after a tuning round has re-recorded a
+# card's rows, to see which files the compiler can replay again. Needs no GPU — decoding targets
+# each record's DECLARED capability, so a stale row is detectable anywhere; re-recording it is
+# what needs the card.
+test-goldens: setup
+	./venv/bin/pytest tests/compiler/pipeline/search/test_golden.py -m goldens -n auto --dist=loadgroup -v -p no:randomly --no-header
 
 # Regenerate tests/durations.json — the checked-in per-test timings the conftest
 # LPT-buckets on, so CI's first (cache-less) run is balanced. Runs through one xdist

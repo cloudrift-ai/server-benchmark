@@ -93,6 +93,7 @@ emmy_serving = "emmy.serving:register"
 asyncio_mode = "auto"
 markers = [
     "perf: GPU performance comparison vs PyTorch (deselected by default; run with `pytest -m perf`)",
+    "goldens: strict decode of the checked-in golden corpus (deselected by default; run with `pytest -m goldens`)",
 ]
 
 [tool.ruff]

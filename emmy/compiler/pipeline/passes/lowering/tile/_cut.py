@@ -22,6 +22,7 @@ from emmy.compiler.ir.pure.fold import (
     Fold,
 )
 from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
@@ -211,9 +212,10 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     """Every semantically closed stored Fold edge whose workspace dtypes are determined, grouped
     only by object sharing. A contraction's operand edges are seams too — cutting one materializes
     the cone feeding the operand into its own kernel and the contraction reads it back as an
-    ordinary load — and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`).
-    A seam is offered only where the cone is closed at the axes of every occurrence; a term is
-    closed by construction, so that gate names a malformed tree rather than a capture to resolve."""
+    ordinary load — and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`),
+    except on a block-scaled packed pair, whose operand cones are not seams at all. A seam is
+    offered only where the cone is closed at the axes of every occurrence; a term is closed by
+    construction, so that check names a malformed tree rather than a capture to resolve."""
     all_sites = sites(tile.op)
     store_dtype_consumers = {
         id(edge): site.node
@@ -243,6 +245,15 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             # separate the scan from its streamed boundary store, which no piece can then spell.
             continue
         consumer = store_dtype_consumers.get(id(node))
+        if consumer is not None and match_packed_pair_node(consumer, tile.inputs) is not None:
+            # An operand cone of a BLOCK-SCALED packed pair reaches gmem already: its codes and
+            # its block scale are loads, and the cone only decodes them. Materializing it stores
+            # the decoded values instead, so the consumer holds neither the codes nor the
+            # per-block scale the cell multiplies — the reading is gone for every occurrence the
+            # seam covers, and no piece can put it back. Nothing is hoisted either way, so this
+            # is not a placement trade. The contraction's OWN seam stays offered, and that is the
+            # cut that gives the piece the output-axis pair a fragment needs.
+            continue
         # A frontier REPLACES the fed-store realization at this seam rather than joining the
         # offer: the raw bits dominate the fed-store workspace on both precision (exact vs
         # re-rounded) and footprint (storage width vs store width), so there is no trade for the

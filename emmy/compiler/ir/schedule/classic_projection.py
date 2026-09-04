@@ -157,8 +157,16 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
 
     a_edge = node.operands[0]
     dtype = edge_dtypes(a_edge, tile.inputs)[0]
-    if packed[1] is not None:
-        return None
+    if (pair := packed[1]) is not None:
+        # The block-scaled cell's own three demands. Each states its reason here rather than
+        # dropping the tier where the atom list is built, so a node that misses one says which.
+        if any(operand.bits is None for operand in pair.b):
+            return "a packed-pair channel computes its codes; the block-scaled cell loads its B fragments from a buffer"
+        weights = {tile.inputs[operand.bits.input].dtype for operand in pair.b}
+        if len(weights) != 1:
+            return "the packed-pair channels store their codes at several dtypes; one cell takes one multiplicand dtype"
+        weight = next(iter(weights))
+        return None if atoms_for(weight, ctx=target) else f"no tensor-core atom takes a {weight} multiplicand on this target"
     if dtype is not None and dtype.logical_elems != 1:
         return f"a packed {dtype} A pairs with no packed peer; no atom multiplies packed codes against decoded ones"
     if dtype is not None and dtype.nbytes == 1:
@@ -230,10 +238,9 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
         )
 
     if (pair := packed[1]) is not None:
-        if any(operand.bits is None for operand in pair.b):
-            return ()
-        weights = {tile.inputs[operand.bits.input].dtype for operand in pair.b}
-        return atoms_for(next(iter(weights)), ctx=target) if len(weights) == 1 else ()
+        # ``_node_refusal`` already proved the channels share one stored code dtype that this
+        # target has a cell for; the cell addresses its own operands, so no atom refusal applies.
+        return atoms_for(tile.inputs[pair.b[0].bits.input].dtype, ctx=target)
     if dtype is not None and dtype.nbytes == 1:
         return bindable(atoms_for(dtype, ctx=target))
     atom_dtype = dtype if atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)

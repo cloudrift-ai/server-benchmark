@@ -1,8 +1,11 @@
 """The PACKED-PAIR k-block operand reading — the NVFP4 weight's shape, recognized once.
 
-One question, asked by three consumers that must not drift apart: classic domain projection, the
-schedule stage resolver, and kernel materialization. Each asks :func:`packed_readings` and gets
-the same answer or ``None``.
+One question, asked by consumers that must not drift apart: classic domain projection, the schedule
+stage resolver, and kernel materialization each ask :func:`packed_readings` and get the same answer
+or ``None``. The placement cut asks :func:`match_packed_pair_node` before those three, for a
+different purpose: a contraction that reads this way keeps its operand cones rather than offering
+them as seams, because materializing one leaves the consumer without the codes and the block scale
+the cell binds on.
 
 It reads a SHAPE, never a checkpoint format: a packed-pair storage dtype (``logical_elems == 2``),
 a data-dependent gather into a pair-value table, and a scale factor whose every ``k`` reference is

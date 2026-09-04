@@ -328,3 +328,152 @@ def test_the_quantized_activation_survives_loop_fusion_whatever_its_consumer_cou
     assert len(codes) == 1, f"expected one computed packed buffer, got {codes} among {sorted(lowered.nodes)}"
     readers = [nid for nid, node in lowered.nodes.items() if codes[0] in node.inputs]
     assert len(readers) == consumers, f"every linear should read the one materialized codes buffer, got {readers}"
+
+
+def _w4a4_gate_up_down(tmp_path, *, m, k):
+    """The serving MLP's shape: gate and up over one quantized activation, their SiLU-gated
+    product quantized again for a marked down projection. That re-encode is what makes the fused
+    kernel store PACKED codes, which is the regime the placement seams below are asked about.
+
+    Square — the intermediate width equals the model width — because one checkpoint fixture writes
+    one input extent for every module it holds, and nothing here reads the two widths apart."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    n = k
+    _w4a4_checkpoint(tmp_path, {"gate": (n, 0.02), "up": (n, 0.02), "down": (k, 0.02)}, k=k)
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), "f16"), node_id="x")
+    for name in ("gate", "up"):
+        w = g.add_node(
+            op=ConstantOp(name=name, source_path=f"{name}.weight", source_shape=(n, k), source_dtype="f16"),
+            inputs=[],
+            output=Tensor(f"{name}_w", (n, k), "f16"),
+            node_id=f"{name}_w",
+        )
+        g.add_node(op=LinearOp(), inputs=["x", w], output=Tensor(name, (m, n), "f16"), node_id=name)
+    g.add_node(op=ElementwiseOp(op="silu"), inputs=["gate"], output=Tensor("sg", (m, n), "f16"), node_id="sg")
+    g.add_node(op=ElementwiseOp(op="multiply"), inputs=["sg", "up"], output=Tensor("act", (m, n), "f16"), node_id="act")
+    dw = g.add_node(
+        op=ConstantOp(name="down", source_path="down.weight", source_shape=(k, n), source_dtype="f16"),
+        inputs=[],
+        output=Tensor("down_w", (k, n), "f16"),
+        node_id="down_w",
+    )
+    g.add_node(op=LinearOp(), inputs=["act", dw], output=Tensor("y", (m, k), "f16"), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    assert spell_quantized_constants(g, str(tmp_path)) == 3
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 3
+    return g
+
+
+def _seams_of(g):
+    """Every kernel's cuttable placement seams after the tile LIFT, as ``(tile, seams)``."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+
+    looped = Pipeline.build(LOOP_PASSES).run(g)
+    tiled = Pipeline.build(["lowering/tile"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
+    tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
+    return [(tile, cuttable_seams(tile)) for tile in tiles]
+
+
+def test_a_block_scaled_operand_cone_is_not_a_placement_seam(tmp_path):
+    """A contraction whose operands read as a block-scaled packed pair offers its OWN seam and
+    none of its operand cones.
+
+    Cutting a contraction lifts it into a kernel whose grid supplies the output-axis pair a
+    fragment needs, which is how the cell reaches this shape at all. Cutting one of its operand
+    CONES is the opposite: the cone's codes and block scale are already loads, so materializing it
+    stores the decoded values and the consumer keeps neither — the reading is gone, and with it
+    every atom, for each of the (possibly clustered) occurrences the seam stands for."""
+    seen = 0
+    for tile, seams in _seams_of(_w4a4_gate_up_down(tmp_path, m=16, k=128)):
+        pairs = [t for t in _folds(tile.op) if t.as_contraction() is not None and _edge_readings(tile, t)[0] is not None]
+        offered = {id(seam.node) for seam in seams}
+        for con in pairs:
+            seen += 1
+            assert not [edge for edge in con.operands if id(edge) in offered], "a block-scaled operand cone was offered as a seam"
+            # A kernel's ROOT term is not a seam of its own kernel — there is no consumer left to
+            # read the workspace — so only a nested contraction is asked for its own seam.
+            assert con is tile.op or id(con) in offered, "a block-scaled contraction lost its own seam"
+    assert seen, "the fixture offered no block-scaled contraction to ask about"
+
+
+def test_a_block_scaled_operand_workspace_would_re_encode_the_values_it_stores(tmp_path):
+    """What the refusal above avoids, stated in the dtype rule's own terms.
+
+    A contraction-operand seam materializes at the dtype the consuming contraction's output is
+    STORED at, which stands in for the element a fused slab would have held. On a kernel whose
+    store is an encode — this shape re-encodes its product, at packed codes over the feature axis
+    and one e4m3 block scale per 16 of them — that stand-in names a bits carrier rather than the
+    decoded values the cone computes. A workspace typed that way holds neither what the producer
+    wrote nor what the consumer would decode, so the cone is not a seam and the question of
+    storing into it never arises."""
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _dtype_table, _workspace_dtypes
+
+    asked = 0
+    for tile, _ in _seams_of(_w4a4_gate_up_down(tmp_path, m=16, k=128)):
+        if all(tensor.dtype.nbytes > 1 for tensor in tile.outputs.values()):
+            continue  # not a re-encoding kernel: its store is the values themselves
+        table = _dtype_table(tile)
+        for con in (t for t in _folds(tile.op) if t.as_contraction() is not None and _edge_readings(tile, t)[0] is not None):
+            for edge in con.operands:
+                dtypes = _workspace_dtypes(edge, tile, con, table)
+                if dtypes is None:
+                    continue  # the contraction feeds several stores; the stand-in has no answer
+                asked += 1
+                assert all(dtype.nbytes == 1 for dtype in dtypes), "the stand-in named a value dtype on a re-encoding store"
+                assert set(dtypes) != set(table.get(id(edge), ())), "the stand-in agreed with the cone's own dtypes"
+    assert asked, "the fixture never reached the operand workspace rule this refusal exists for"
+
+
+def _pair_terms(tmp_path):
+    """The bound block-scaled contractions as ``(tile, contraction, pair reading)``."""
+    from emmy.compiler.ir.schedule.packing import match_packed_pair_node
+
+    out = []
+    for tile, con in _bound_contractions(tmp_path):
+        pair = match_packed_pair_node(con, tile.inputs)
+        if pair is not None:
+            out.append((tile, con, pair))
+    return out
+
+
+def _pair_refusal(tile, ctx, con, pair):
+    """Why static node facts rule out every tensor-core atom, asked with ``pair`` as the reading."""
+    from emmy.compiler.ir.schedule import classic_projection as sched
+    from emmy.compiler.ir.tile.ops import projection_tail
+
+    tail = projection_tail(tile)
+    return sched._node_refusal(tile, ctx, con, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op)), (None, pair))
+
+
+def test_the_block_scaled_cell_says_why_it_declines_a_pair_it_cannot_bind(tmp_path):
+    """Each of the cell's three demands answers with its own reason.
+
+    The cell loads every B fragment out of a buffer, takes one multiplicand dtype across its
+    channels, and needs its atom to exist on the target. A node that misses one used to lose the
+    tier where the atom list is built, with nothing said; the refusal is the one place that
+    answers why, so all three state it there."""
+    from dataclasses import replace
+
+    from emmy.compiler.context import Context
+
+    terms = _pair_terms(tmp_path)
+    assert terms, "no contraction read as a block-scaled pair"
+    tile, con, pair = terms[0]
+    cc12 = Context.from_target((12, 0))
+    assert _pair_refusal(tile, cc12, con, pair) is None
+
+    computed = replace(pair, b=tuple(replace(side, bits=None) for side in pair.b))
+    assert "loads its B fragments from a buffer" in _pair_refusal(tile, cc12, con, computed)
+
+    # The A-side block scale is a Load at a different storage dtype, so it stands in for a second
+    # channel whose codes disagree with the first's.
+    mixed = replace(pair, b=(*pair.b, replace(pair.b[0], bits=pair.a.scale)))
+    assert "one cell takes one multiplicand dtype" in _pair_refusal(tile, cc12, con, mixed)
+
+    older = _pair_refusal(tile, Context.from_target((8, 9)), con, pair)
+    assert older is not None and "multiplicand on this target" in older

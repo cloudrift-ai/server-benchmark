@@ -50,12 +50,8 @@ def build_runner(_gen_session):
     """
 
     def build(runner_id: str) -> Built:
-        from emmy.serving.gen_runner import EmmyGenRunner
-
-        make_model, kwargs = helpers.RUNNERS[runner_id]
-        model = make_model()
-        with helpers.evidence_scope():
-            return Built(EmmyGenRunner.from_model(model, plan_cache=_gen_session["cache"], **kwargs), model)
+        model = helpers.RUNNERS[runner_id][0]()
+        return Built(helpers.build(runner_id, model=model, plan_cache=_gen_session["cache"]), model)
 
     return build
 

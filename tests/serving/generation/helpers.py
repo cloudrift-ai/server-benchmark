@@ -104,6 +104,28 @@ def olmoe_model(
     return model
 
 
+def llama_model(layers: int = 1):
+    """The lane's untied-embedding model — the rider split's shape, and the one architecture here
+    whose lm_head is a weight of its own."""
+    import torch
+    from transformers import LlamaConfig
+    from transformers.models.llama.modeling_llama import LlamaForCausalLM
+
+    torch.manual_seed(0)
+    return LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=64,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=layers,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=64,
+            tie_word_embeddings=False,
+        )
+    ).eval()
+
+
 #: Every runner shape this lane builds: ``id -> (model factory, from_model kwargs)``. The golden
 #: covers exactly these, so a test asks for one by id rather than spelling a config of its own.
 RUNNERS: dict[str, tuple] = {
@@ -118,6 +140,10 @@ RUNNERS: dict[str, tuple] = {
         {"dtype_str": "float32", "decode_bucket": 8, "max_tokens": 64},
     ),
     "olmoe.l1.b4": (lambda: olmoe_model(1), {"dtype_str": "float32", "decode_bucket": 4, "max_tokens": 64}),
+    "llama.l1.rider": (
+        llama_model,
+        {"dtype_str": "float32", "decode_bucket": 16, "max_tokens": 64, "prefill_bucket": 32},
+    ),
     "olmoe.l1.rider": (
         lambda: olmoe_model(1, max_position_embeddings=128, flat_router=True),
         {"dtype_str": "float32", "decode_bucket": 16, "max_tokens": 512, "prefill_bucket": 512},
@@ -144,6 +170,21 @@ def golden_records() -> list:
         else replace(record, measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "serving-lane"})
         for record in load_golden_records(load_golden_file(GOLDEN))
     ]
+
+
+def build(runner_id: str, *, model=None, plan_cache=None, **overrides):
+    """Build one :data:`RUNNERS` shape under the lane's golden.
+
+    ``plan_cache`` is the session's when a caller has one; leave it ``None`` where a boot must be
+    a real one — the pack round-trip asserts that its FIRST boot compiles and its second loads the
+    pack, and a warm template cache would decide the first boot for it. ``model`` reuses a module
+    the caller already built, for the tests that boot the same weights twice.
+    """
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    make_model, kwargs = RUNNERS[runner_id]
+    with evidence_scope():
+        return EmmyGenRunner.from_model(make_model() if model is None else model, plan_cache=plan_cache, **{**kwargs, **overrides})
 
 
 @contextmanager

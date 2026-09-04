@@ -133,7 +133,7 @@ def test_run_device_aliased_input_backing_replays_live():
     assert torch.allclose(out, ref2, rtol=1e-2, atol=1e-2)
 
 
-def test_rider_split_inside_outer_capture_replays_live():
+def test_rider_split_inside_outer_capture_replays_live(built):
     """The chunk+decode twin row SPLIT (a rider-width step) under an outer torch CUDA-graph
     capture — the rider-top rung of whole-step chunk capture. Both halves run
     ``run_device(out=...)``, whose copies into the persistent shared joint destinations must
@@ -141,29 +141,10 @@ def test_rider_split_inside_outer_capture_replays_live():
     vLLM's per-size warmup guarantees), and the replay must be LIVE: new values in the same
     input tensors flow through both halves. Checked against the SYMBOLIC program at the same
     width (independent kernels — hence a tolerance, not bit equality)."""
-    pytest.importorskip("cupy")
     import torch
 
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
-
-    from transformers import LlamaConfig, LlamaForCausalLM
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = LlamaConfig(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        max_position_embeddings=64,
-        tie_word_embeddings=False,
-    )
-    torch.manual_seed(0)
-    model = LlamaForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64, prefill_bucket=32)
+    pair = built("llama.l1.rider")
+    runner, config = pair.runner, pair.config
     assert runner.prefill_bucket == 32 and runner.rider_width == 16
     t = 48  # the rider top: chunk 32 + decode 16
     attn_width = config.num_attention_heads * 16  # head_dim = hidden / heads
@@ -216,39 +197,17 @@ def test_rider_split_inside_outer_capture_replays_live():
         close(o, r)
 
 
-def test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live():
+def test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live(built):
     """The fixed-slot MoE decode step (post_attn twin → router → index_select staging → k slot
     launches → score matmul) under an outer torch CUDA-graph capture — what vLLM's whole-step
     FULL_DECODE_ONLY capture at size 1 records for an MoE model. Captured once, replayed twice:
     new values in the same input tensors must flow through the ROUTING too (the top-k indices
     and the staged expert weights are data-dependent VALUES inside the graph), checked against
     the eager routed path on fresh inputs."""
-    pytest.importorskip("cupy")
     import torch
-    import transformers
 
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
-
-    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = transformers.OlmoeConfig(
-        vocab_size=128,
-        hidden_size=64,
-        intermediate_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_experts=8,
-        num_experts_per_tok=2,
-        norm_topk_prob=False,
-        max_position_embeddings=64,
-    )
-    torch.manual_seed(0)
-    model = OlmoeForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    pair = built("olmoe.l2.b16")
+    runner, config = pair.runner, pair.config
     assert runner.has_moe_fixed_slot
 
     attn_width = runner.num_heads * runner.head_dim

@@ -131,6 +131,12 @@ owning type's interface: declare it as a `functools.cached_property` on the clas
 `__post_init__`. This works on a frozen dataclass too — `cached_property` writes through `__dict__` directly, and a
 `__getstate__` that pickles only declared fields strips it.
 
+A derived read that is a FAMILY keyed by an argument — one value per site, per operand, per family name — takes
+`utils.cached_method`, which is `cached_property`'s storage under a private slot while the attribute stays a call. It
+is a declared descriptor on the owning class, so the family is as visible as any other member, and it keeps the
+per-key laziness a whole-family `cached_property` would give up. Do not reach for a `functools.cache` keyed on `self`:
+it hashes the whole term per call and pins every term ever built for the life of the process.
+
 Never stash a derived value in a memo table keyed off some other object — `obj.__dict__.get(...)`,
 `object.__setattr__(obj, "_my_cache", ...)`, or a named memo-slot helper. An undeclared attribute is invisible to
 readers of the class, dodges pickling rules, grows a second spelling of the same fact, and smears one type's

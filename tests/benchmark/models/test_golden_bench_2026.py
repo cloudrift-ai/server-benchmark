@@ -49,6 +49,9 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "[ -d venv ] || make setup" not in run
     assert 'compute_cap=$$(nvidia-smi --id="$$first_device" --query-gpu=compute_cap --format=csv,noheader | head -n 1)' in run
     assert 'if [ "$$compute_cap" = "7.0" ]' in run
+    assert 'sys.exit("sm_70" not in torch.cuda.get_arch_list())' in run
+    assert '"torch==$${torch_version}+cu126"' in run
+    assert "https://download.pytorch.org/whl/cu126" in run
     assert "LD_PRELOAD" in run
     assert "/usr/local/cuda-12.9/lib64/libnvrtc.so.12" in run
     assert "for repeat in 0 1 2 3 4" in run

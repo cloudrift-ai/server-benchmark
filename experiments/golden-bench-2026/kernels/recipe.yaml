@@ -51,6 +51,10 @@ command:
     first_device=$${devices%%,*}
     compute_cap=$$(nvidia-smi --id="$$first_device" --query-gpu=compute_cap --format=csv,noheader | head -n 1)
     if [ "$$compute_cap" = "7.0" ]; then
+      torch_version=$$(./venv/bin/python -c 'import torch; print(torch.__version__.split("+", 1)[0])')
+      if ! ./venv/bin/python -c 'import torch, sys; sys.exit("sm_70" not in torch.cuda.get_arch_list())'; then
+        ./venv/bin/pip install "torch==$${torch_version}+cu126" --index-url https://download.pytorch.org/whl/cu126
+      fi
       nvrtc12=/usr/local/cuda-12.9/lib64/libnvrtc.so.12
       test -f "$$nvrtc12"
       export LD_PRELOAD="$$nvrtc12$${LD_PRELOAD:+:$$LD_PRELOAD}"

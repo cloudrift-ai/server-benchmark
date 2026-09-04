@@ -30,7 +30,9 @@ it seals through the one `grid_tile` finalizer (the article's "schedule separate
   `_bind` only **synthesizes its bare grid-`Write`** (needs `root.output`, so it can't ride the node) and
   **expands** it through the shared tiling layer (below); the leaf type selects the codegen
   (mma / scalar). A contraction without an applicable output tile takes the ordinary Fold path. The schedule only
-  places the algebra and declines with `LoweringError` when there is no `(m, n)` grid pair to place onto.
+  places the algebra and declines with `LoweringError` when there is no `(m, n)` grid pair to place onto. The pair it
+  binds is not always the grid's trailing two — merged sibling linears carry two output widths on one grid — so every
+  grid axis the pair leaves unbound rides `lead_axes`, and nothing may read the grid's shape for that answer.
 - **REDUCE-tiled** (`_tile_reduce_axis`, a `PLANAR` / `TWISTED` reduce — or a non-output-tiled `CONTRACTION` — whose
   `Reduce` cooperates / register-folds) — the reduce axis is tiled instead: `coop` lanes across the CTA's threads
   (its unit level) and `reg` ILP chains across per-thread accumulators (its register level), then a REG-tree fold, the

@@ -16,23 +16,24 @@ def _parser():
 
 
 def test_run_golden_schema_matches_compile():
-    """``run`` spells golden selection the way ``compile`` does: a NAME plus an optional PATH.
+    """``run`` spells golden selection the way every replaying command does: ``--golden PATH`` is
+    the file, ``--realization NAME`` the row inside it — one pair, one meaning, on ``run`` /
+    ``compile`` / ``tune`` / ``serve`` alike."""
+    args = _parser().parse_args(["run", "--golden", "working.yaml", "--realization", "linear.layer0", "--gpu-arch", "sm_90"])
 
-    One flag with two meanings across two commands is what sent callers to write wrappers; the
-    aligned pair is also what ``_run_golden_targets`` already translated into internally."""
-    args = _parser().parse_args(["run", "--golden-file", "working.yaml", "--golden", "linear.layer0", "--gpu-arch", "sm_90"])
-
-    assert args.golden_file == "working.yaml"
-    assert args.golden == "linear.layer0"
+    assert args.golden == "working.yaml"
+    assert args.realization == "linear.layer0"
     assert args.gpu_arch == "sm_90"
-    for removed in ("all_targets", "repeats", "require_kernel_source", "golden_target"):
+    for removed in ("all_targets", "repeats", "require_kernel_source", "golden_target", "golden_file"):
         assert not hasattr(args, removed)
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["run", "--golden-file", "working.yaml"])
 
 
 def _args(tmp_path, **updates):
     values = {
-        "golden_file": str(tmp_path / "working.yaml"),
-        "golden": None,
+        "golden": str(tmp_path / "working.yaml"),
+        "realization": None,
         "input": None,
         "code": None,
         "ir": None,
@@ -56,13 +57,13 @@ def test_golden_runs_every_distinct_target_in_process(monkeypatch, tmp_path):
 
     run_mod._run_golden_targets(_args(tmp_path))
 
-    assert [args.golden for args in calls] == ["linear.layer0", "linear.layer1"]
-    assert all(args.golden_file.endswith("working.yaml") for args in calls)
+    assert [args.realization for args in calls] == ["linear.layer0", "linear.layer1"]
+    assert all(args.golden.endswith("working.yaml") and args._explicit_realization is False for args in calls)
 
 
 def test_naming_one_target_skips_the_multi_target_walk(run_cli):
-    """``--golden NAME`` goes straight down the single-run path — the walk is for a bare file."""
-    rc, stdout, stderr = run_cli("run", "--golden", "linear.layer0", "--code", "torch.randn(4, 4)")
+    """``--realization NAME`` goes straight down the single-run path — the walk is for a bare file."""
+    rc, stdout, stderr = run_cli("run", "--realization", "linear.layer0", "--code", "torch.randn(4, 4)")
 
     assert rc == 2
     assert "mutually exclusive" in stdout + stderr
@@ -191,8 +192,8 @@ def test_resolve_golden_arg_prefers_the_document_the_caller_loaded(monkeypatch, 
     monkeypatch.setattr(golden, "load_golden_records", lambda _document: [])
 
     args = SimpleNamespace(
-        golden="missing",
-        golden_file=str(tmp_path / "absent.yaml"),
+        realization="missing",
+        golden=str(tmp_path / "absent.yaml"),
         _golden_document={"configs": []},
         input=None,
         code=None,

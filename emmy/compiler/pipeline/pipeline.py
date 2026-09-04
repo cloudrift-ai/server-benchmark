@@ -778,7 +778,7 @@ class Run:
             # other's choice.
             domain = _structural_domain(options) if structural else None
             if structural and (chosen := _replay_structural_decision(cand.structural_decisions, match.root.op, options)) is not None:
-                cand.apply(match, chosen)
+                cand.apply(match, chosen, knobs=_choice_knobs(chosen, chosen, match.root.op))
                 if match.rule.fixpoint:
                     return None
                 continue
@@ -793,7 +793,7 @@ class Run:
                 if option is None:
                     raise ValueError(f"decide returned a branch Fork at {match.rule.name!r} — return a concrete option or a leaf Fork")
                 knob_delta = _choice_knobs(choice, option, root_op)
-                cand.apply(match, option)
+                cand.apply(match, option, knobs=knob_delta)
                 if domain is not None:
                     _remember_structural_decision(cand.structural_decisions, root_op, domain, knob_delta)
                 assert trace is not None
@@ -884,18 +884,6 @@ class Run:
 
         while (popped := search.pop()) is not None:
             token, lc = popped
-            # Thunk-bearing fork: expand before resolving. Each expansion
-            # spawns the next level of ``LazyCandidate``s (more thunks or
-            # concrete options) sharing the same ``inner`` and ``match`` —
-            # cursor advance is deferred until a leaf actually resolves.
-            if lc.is_expandable():
-                children = lc.expand()
-                search.push(*children, parent=token)
-                continue
-            cand = lc.resolve()
-            if cand.cursor.is_done:
-                yield token, cand
-                continue
             # Per-variant containment: a search-explored candidate can reach an
             # un-lowerable shape that a *deterministic* lowering pass raises on
             # (e.g. a sibling-cell-fused slab fill the single-Write hoisted-compute
@@ -904,10 +892,20 @@ class Run:
             # under tune they are legitimate dead ends — exactly like a branch whose
             # every option fails ``validate(ctx)``. Drop the candidate's subtree and
             # keep driving the rest of the search instead of aborting the whole tune.
+            # A rule raises from its deferred thunk (``expand``/``resolve`` fire a Fork's materializer) as readily as from
+            # ``_step``'s next rule batch, so both sit under the sink.
             # (``RuleSkipped`` is handled inside ``try_rewrite``; control-flow
             # exceptions propagate.)
             try:
-                step = self._step(cand)
+                # Thunk-bearing fork: expand before resolving. Each expansion
+                # spawns the next level of ``LazyCandidate``s (more thunks or
+                # concrete options) sharing the same ``inner`` and ``match`` —
+                # cursor advance is deferred until a leaf actually resolves.
+                if lc.is_expandable():
+                    search.push(*lc.expand(), parent=token)
+                    continue
+                cand = lc.resolve()
+                step = None if cand.cursor.is_done else self._step(cand)
             except (KeyboardInterrupt, SystemExit, GeneratorExit):
                 raise
             except Exception as exc:  # noqa: BLE001 — broad by design; this is the tune dead-end sink
@@ -917,6 +915,9 @@ class Run:
                     type(exc).__name__,
                     exc,
                 )
+                continue
+            if cand.cursor.is_done:
+                yield token, cand
                 continue
             if step is None:
                 search.push(cand.lazy(), parent=token)

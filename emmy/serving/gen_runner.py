@@ -852,6 +852,7 @@ class EmmyGenRunner:
         include_embed=True,
         include_norm=True,
         expert_range=None,
+        plan_cache=None,
     ):
         """``model_id`` is a local checkpoint directory or an HF repo id, the latter optionally
         carrying its revision as ``<repo>@<revision>`` (the serving shim tags vLLM's
@@ -920,6 +921,7 @@ class EmmyGenRunner:
                     include_embed=include_embed,
                     include_norm=include_norm,
                     expert_range=expert_range,
+                    plan_cache=plan_cache,
                 )
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         repo, revision = split_revision(model_id)
@@ -938,6 +940,7 @@ class EmmyGenRunner:
                 layer_range=layer_range,
                 include_embed=include_embed,
                 include_norm=include_norm,
+                plan_cache=plan_cache,
             )
 
     @classmethod
@@ -954,6 +957,7 @@ class EmmyGenRunner:
         include_embed=True,
         include_norm=True,
         expert_range=None,
+        plan_cache=None,
     ):
         """Build from an already-loaded CausalLM module (the network-free path). ``model``
         must be on CPU for the trace. ``expert_store`` (a quantized checkpoint's
@@ -1093,8 +1097,11 @@ class EmmyGenRunner:
         plans: dict = {}
         # One cold-boot compile session for every split. Plans remain per program (and retain
         # each layer's actual checkpoint provenance); only binding-neutral compiled structure
-        # is shared. A pack hit supplies ``plan=`` and bypasses this cache entirely.
-        plan_cache = PlanTemplateCache()
+        # is shared. A pack hit supplies ``plan=`` and bypasses this cache entirely. A caller
+        # building SEVERAL runners in one process passes its own cache to make the session span
+        # them: the templates are binding-neutral, so two models sharing a layer shape compile it
+        # once (the whole point of the cache, which a per-runner instance cannot reach).
+        plan_cache = PlanTemplateCache() if plan_cache is None else plan_cache
 
         def build(name, *args, **kw):
             prog, built_plan = _compile_split(*args, plan=stored(name), plan_cache=plan_cache, **kw)

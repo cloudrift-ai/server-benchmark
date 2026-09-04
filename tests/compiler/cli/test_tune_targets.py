@@ -12,8 +12,8 @@ from emmy.commands import tune
 
 def _args(**over):
     base = dict(
-        kernel=None,
-        golden_file=None,
+        realization=None,
+        golden=None,
         code=None,
         input=None,
         dynamic=None,
@@ -60,7 +60,7 @@ def test_tune_parser_drops_legacy_dataset_db_and_golden_flags():
 
     parsed = parser.parse_args(["tune", "model", "--devices", "1"])
     assert parsed.input == "model" and parsed.devices == "1"
-    for legacy in ("--dataset", "--db", "--golden"):
+    for legacy in ("--dataset", "--db", "--golden-file", "--kernel"):
         with pytest.raises(SystemExit):
             parser.parse_args(["tune", "model", legacy, "value"])
 
@@ -93,9 +93,9 @@ def test_direct_target_uses_shared_tune_loop(monkeypatch):
     assert tuned_codes == [code]
 
 
-def test_kernel_filter_requires_working_golden_file():
+def test_realization_filter_requires_a_golden_file():
     with pytest.raises(SystemExit) as exc:
-        tune.handle_tune(_args(code="torch.ones(1)", kernel="matmul"))
+        tune.handle_tune(_args(code="torch.ones(1)", realization="matmul"))
     assert exc.value.code == 2
 
 

@@ -54,8 +54,8 @@ def add_target_arg(parser, *, dest: str = "target", option: str = "--target") ->
     """Add a compute-capability argument to ``parser``.
 
     The parsed value is a string; pass it to :func:`apply_target_arg` after parsing
-    to install the override. Most commands use ``--target``; ``run`` reserves that
-    spelling for working-golden selection and uses ``--gpu-arch`` here.
+    to install the override. ``compile`` / ``tune`` / ``trace`` spell it ``--target``;
+    ``run`` spells the same override ``--gpu-arch``.
     """
     parser.add_argument(
         option,

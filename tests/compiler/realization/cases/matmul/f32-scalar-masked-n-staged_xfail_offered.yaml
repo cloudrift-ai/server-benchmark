@@ -40,3 +40,14 @@ configs:
       WORK: t16x8
       STAGE: d1/smem-async
     identity: ec393ad7dc075101adf699a46d7ba3f6ba1d174fd0ea43d64a9e1eedb988d8e9
+  - name: k_matmul_89caea.61fe394718cd.9086f238eb74
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 9086f238eb74d88d2b3ef9b3cae3bfb464121047e22b6ab97567c5d88d83688d

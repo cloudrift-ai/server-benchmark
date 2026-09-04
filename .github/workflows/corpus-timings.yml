@@ -260,13 +260,8 @@ jobs:
           import sys, yaml
           d = yaml.safe_load(open(sys.argv[1]))
           print(d['configs'][0]['realizations'][0]['name'])" "$case")
-            row=$(./venv/bin/python -c "
-          import sys, yaml
-          d = yaml.safe_load(open(sys.argv[1]))
-          k = d['configs'][0]['realizations'][0]['knobs']
-          print(','.join(f'{a}={b}' for a, b in k.items()))" "$case")
-            EMMY_NVCC_FLAGS= ./venv/bin/emmy run --golden-file "$case" --golden "$name" \
-              --bench --bench-backends eager,tcompile,emmy --ab "$row" --record \
+            EMMY_NVCC_FLAGS= ./venv/bin/emmy run --golden "$case" --realization "$name" \
+              --bench --bench-backends eager,tcompile,emmy --record \
               || echo "FAILED $case"
           done
           REMOTE

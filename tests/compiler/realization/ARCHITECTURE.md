@@ -1,8 +1,9 @@
 # The realization corpus
 
 A data-driven regression lane for one failure class: **a schedule that should be realizable is not**. Each case is a
-checked-in minimized reproducer — one program, one authored schedule — and the lane replays it against the compiler in
-front of you.
+checked-in minimized reproducer — one program, one authored kernel set — and the lane replays it against the compiler
+in front of you: once as a hand pin, to ask whether each schedule can be offered at all, and then as the compile's only
+evidence, strict, to ask whether the compiler realizes, builds and runs the set the way a deploy would.
 
 This directory is kind-organized in the sense `tests/ARCHITECTURE.md` sanctions: its cases span lowering, the CUDA
 backend, the pin machinery and the golden loader, and they share one workflow.
@@ -22,8 +23,9 @@ Only a realization gap: a schedule family that is never offered, a pin that refu
 runs wrong. Two neighbouring failure classes deliberately do **not** earn one, because admitting them would make the
 ratchet meaningless:
 
-- **search shortfall** — the schedule realizes and the prior simply does not pick it. Fix it by measuring, or report it
-  as a prior finding.
+- **search shortfall** — the schedule realizes and the prior simply does not pick it when nothing measured is in
+  scope. Fix it by measuring, or report it as a prior finding. (A row that *is* in scope and still is not picked is
+  not a shortfall: it is the replay contract failing, and `realized` reports it.)
 - **code generation quality** — the right tier is present and still loses. Report it; do not record it.
 
 A schedule the compiler *correctly refuses* is not a gap either. A slab that does not fit, a byte transport with no
@@ -35,7 +37,9 @@ reproducer and carries whatever the lane can learn from it.
 
 ## The case file
 
-A working golden document — byte-for-byte what the inventory writer emits — plus the authored pin, and nothing else:
+A working golden document — byte-for-byte what the inventory writer emits — plus the authored entries, and nothing
+else. The first entry is the target's own; every further entry decides one more kernel of the set the target compiles
+to and names it by `identity`:
 
 ```yaml
 compute_cap: [12, 0]
@@ -60,23 +64,28 @@ Why each part, and why nothing else:
   change cannot silently alter what the corpus tests.
 - `name` — already carries the variant key (`identity_key(with_io=True, with_knobs=True)`)`[:12]`, so it detects
   cache-key drift for free.
-- `pins` / `knobs` — the authored schedule. Regeneration structurally cannot produce these, which is what makes the
-  staleness mechanism safe.
+- `pins` / `knobs` — the authored schedule, one entry per kernel of the set. `pins` are the input regime; `knobs` are
+  the row the entry's kernel realizes, spelled on that kernel's own tree — a kernel-set decision (`PLACE@seam: cut`,
+  `REDUCE@k: g2k`) is an entry whose `identity` is the kernel the fork was offered on. Regeneration structurally cannot
+  produce these, which is what makes the staleness mechanism safe.
 - `identity` — the record's deploy identity — `identity_key(with_io=True)`, structural flavor — is the digest of the
   complete schedule-free Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. The variant key
   (in `name`) is the
   variant key — the same body + io folded with the knob row — so a knob-only change moves `name` while leaving
   `identity` untouched.
 - `identity` and the optional per-card `latency` block are the only additions the corpus makes to the golden schema,
-  and both are optional keys the model goldens do not carry.
+  and both are optional keys the model goldens do not carry. On a further entry `identity` is authored: it is the
+  selector that lets the replay apply that entry at its own kernel's forks (`golden._replay` walks a target's entries
+  as one set, deciding each fork by the entry whose identity is the kernel being offered).
 
 Three spelling rules decide what a case actually asserts:
 
 - **A knob present with `''` is pinned OFF; a knob absent is free.** `''` is a decided value — the schedule declined
   that family — while an absent key lets the fork choose. Several of the tests this corpus replaces `delenv` a family
   rather than setting it empty, and the two are different pins.
-- **`PLACE` goes in `pins`, not `knobs`.** Graph placement is consumed by a splice, so it is not a schedule row and
-  the golden validator refuses to see it beside one.
+- **A placement is an entry of its own.** `PLACE@seam: cut` in the `knobs` of an entry whose identity is the kernel
+  the cut is offered on; the golden validator refuses a placement key beside a schedule row. Older cases carry the
+  route in the first entry's `pins`, which the replay reads the same way.
 - **Binding a symbolic dimension specializes the program.** A case with `bindings: {}` keeps its symbolic axis and runs
   at the dimension's own `Dim` hint — the size `emmy run` already resolves a symbolic reproducer to. The corpus has no
   spelling for "compile at the hint, run at some other size", so a sweep of one symbolic kernel across many runtime
@@ -111,9 +120,23 @@ leading comment block is prose about where the gap came from; regeneration prese
 | Stage | Assertion | GPU |
 | --- | --- | --- |
 | `offered` | under `pinned_knobs(pins + knobs)`, `enumerate_graph` at the declared capability returns at least one row satisfying the pin | no |
-| `realized` | the graph lowers through `CUDA_PASSES` at that capability, `unreproducible_pin_flag` is `None`, and every authored family is stamped | no |
-| `built` | lower under the pin, then build a `CompiledProgram` — nvcc accepts it | yes, exact capability |
+| `realized` | with the case as the compile's only evidence, the graph lowers through `CUDA_PASSES` at that capability, `unreproducible_pin_flag` is `None`, every authored family is stamped, and every kernel-set decision the case spells was taken | no |
+| `built` | lower the same way on the live card, then build a `CompiledProgram` — nvcc accepts it | yes, exact capability |
 | `correct` | run against the reference within tolerance | yes, exact capability |
+
+**Only `offered` is a hand pin, asked of each entry.** The other three run under `helpers.evidence_scope`: the case's
+entries are the whole golden scope, strictly (`golden.sole_evidence`, the scope the release gate compiles under too;
+each entry standing in as a measured row — a case authors schedules rather than measuring them, and a proposal is no
+evidence), so a fork no entry decides is an `EvidenceError` naming the kernel, never a prior's guess; the machine-local
+online prior is out of the way, the tune DB is not consulted, and the environment carries the case's input pins alone — the regime
+it was measured under (`FAST_MATH` and the precision gates), never its route or its schedule row. The route and the
+row reach the compile as measured rows of the kernels they decide, through the same evidence pick every `compile` /
+`run` / `serve` uses (`golden.evidence_rows`, `greedy._route_candidates`), or they do not reach it at all. That is the
+deploy contract, asked of every case on every commit: a row the compiler can honour under a pin but does not select
+when it is the evidence — a stale spelling, a route key no offered seam carries, a schedule that equals no leaf of the
+kernel that deploys — fails `realized`, and the failure names what was lost. A kernel-set decision is checked through
+the engine's own splice events (`PipelineStrategy.on_splice`), because no stamp on the resulting kernels can show a
+placement cut or a cross-CTA split that was not taken.
 
 Each is its own test node, so an `_xfail_<stage>` suffix lands on exactly the stage it names; the stages past a
 declared gap are skipped, because a schedule that never realizes has nothing to run.
@@ -129,13 +152,15 @@ against the same-input greedy execution of the same program.
 `offered` asks whether the pin *can be honoured*, not whether the tier would be offered to an **unpinned** search.
 Those differ, and the difference is load-bearing: a pin narrows the candidate grid authoritatively, so a schedule the
 cold search never enumerates can still be offered here. A tier the search will not reach on its own is a search
-shortfall, and the corpus does not express it.
+shortfall, and the corpus does not express it. `realized` then asks the complementary question of the same schedule:
+given as evidence rather than as a pin, is it what the compiler picks.
 
 **Pinned-enumeration membership is the primary oracle, not `unreproducible_pin_flag` alone.** The flag answers `None`
 for a registered family that nothing stamped — serialized IR can omit knob stamps — so a pin that cannot be offered at
 all would read as satisfied. Membership is asked per row *through* the flag, so the families it already reads correctly
-(a `PLACE` consumed by a splice, the structural `g<n>` half of a cross-CTA `REDUCE` split) stay correctly read; and
-`realized` closes the flag's hole with an explicit stamping check over the authored knobs.
+(a `PLACE` consumed by a splice, the structural `g<n>` half of a cross-CTA `REDUCE` split) stay correctly read;
+`realized` closes the flag's hole with an explicit stamping check over the authored knobs, and asks the splice events
+whether those two structural decisions were taken.
 
 ## Latency
 
@@ -148,7 +173,7 @@ the stored number — one bench, both answers. See `tests/perf/ARCHITECTURE.md`.
 A slower case **reports** rather than fails: enforcement belongs in a human reviewing the
 timing-refresh pull request, not in a red test a legitimate correctness fix could pin red forever.
 Nothing auto-updates a stored number — an automatic ratchet ends up pinned to the luckiest noise
-excursion ever observed. `emmy run --golden-file FILE --bench --record` is the only writer.
+excursion ever observed. `emmy run --golden FILE --realization NAME --bench --record` is the only writer.
 
 The band is 5%, measured rather than guessed: ten cases spanning 1.5 us to 579 us, four estimates
 each on an idle RTX 5090, put the best-of-three estimator's own spread at a median of 0.17% and a
@@ -165,10 +190,11 @@ answer it and nowhere else. That asymmetry is deliberate: the derived-half check
 fires everywhere and its fix works everywhere, while a timing can only be produced on the machine
 holding the card.
 
-The perf command repeats both the realization's input `pins` and schedule `knobs` in its explicit
-A/B row. The working-file target context selects the ordinary compile; each A/B variant re-lowers
-under its own pin context, so a placement cut omitted from the row would silently benchmark a
-different kernel set and reject the child schedule.
+The perf command names the case's target entry (`run --golden <case> --realization <name>`), which
+benches it as a pinned row whatever its measurement state: that entry's input `pins` and schedule
+`knobs` — a placement cut included — are published as a hand pin for that one compile, and the
+case's further entries are the compile's golden evidence, so the set the case authors is the one
+measured, never the planner's own pick under its name.
 
 ## Staleness: regeneration, not stamps
 
@@ -211,8 +237,14 @@ case=tests/compiler/realization/cases/<family>/<name>_xfail_<stage>.yaml
 emmy trace -c "<snippet>" --target sm_<cc> -o "$case"
 cat >> "$case" <<'EOF'   # the knobs block, copied from `run --json`'s record_knobs
 EOF
-make test-corpus-regen   # normalizes, stamps identity, re-prepends the comment block
+make test-corpus-regen COMPLETE=1   # normalizes, stamps identity, adds an entry per undescribed kernel
 ```
+
+`COMPLETE=1` (`regen.py --complete`, `helpers.complete`) replays the set the way the deploy reads it and appends an
+entry for every scheduled kernel no entry names and no entry's row vouches for — that kernel's identity, the input
+regime and the row the replay realized on it — so strict evidence has a row at every fork. That is authoring: the
+added rows are enumerable schedules the case pins from then on, and a kernel the author cares about should get its
+row by hand before the completion fills in the rest.
 
 Then prove the case reproduces the gap: it must fail without the suffix and pass with it.
 

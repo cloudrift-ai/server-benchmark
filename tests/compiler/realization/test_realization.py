@@ -2,9 +2,12 @@
 
 A case is a checked-in minimized reproducer of one failure class: a schedule that should be
 realizable is not. Its expectation is its filename (see ``ARCHITECTURE.md``); there is no manifest.
+A case holds one entry per kernel of the set its target compiles to.
 
 Every case is asked four questions in order, one test node each, so an ``_xfail_<stage>`` suffix
 lands on exactly the stage it names rather than on a walker that could have failed anywhere.
+``offered`` asks the pinned enumeration; the other three ask the compile with the case as its
+only evidence and no hand pin — the schedule reaches them the way it reaches a deploy.
 
 ``offered`` and ``realized`` are GPU-free and run at the case's DECLARED capability, so an sm_70
 lockout is exercised on any box. ``built`` and ``correct`` need the card itself and run only when

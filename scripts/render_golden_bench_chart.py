@@ -9,7 +9,7 @@ for RTX GPUs" article.
 The input is the record ``--json`` already emits; there is no separate benchmark harness to run
 first. Produce it with::
 
-    ./venv/bin/emmy run --golden-file <working.yaml> --bench --bench-backends eager,tcompile,emmy \\
+    ./venv/bin/emmy run --golden <working.yaml> --bench --bench-backends eager,tcompile,emmy \\
         --json _tune/golden-bench/records
 
 then::

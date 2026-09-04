@@ -42,34 +42,14 @@ def _reference_attention(runner, q_np, k_np, v_np, cos, sin, mask, apply_rotary)
     return attn.transpose(1, 2).reshape(t, hq * d).numpy()
 
 
-def test_gen_runner_stitch_matches_eager():
-    pytest.importorskip("cupy")
+def test_gen_runner_stitch_matches_eager(built):
     import torch
-    import transformers
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
     from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
 
     from emmy.compiler.trace.huggingface import build_causal_mask
-    from emmy.serving.gen_runner import EmmyGenRunner
 
-    config = transformers.Qwen3Config(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=3,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        max_position_embeddings=64,
-        use_sliding_window=False,
-    )
-    torch.manual_seed(0)
-    model = transformers.Qwen3ForCausalLM(config).eval()  # fp32; build_attention_split_wrapper does NOT mutate it
-
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32")
+    pair = built("qwen3.l3")  # fp32; build_attention_split_wrapper does NOT mutate the module
+    runner, model, config = pair.runner, pair.model, pair.config
     assert runner.num_layers == config.num_hidden_layers
 
     t = 7
@@ -174,39 +154,20 @@ def test_gen_runner_gemma4_heterogeneous_stitch():
     np.testing.assert_allclose(got, ref.numpy(), rtol=2e-3, atol=2e-3)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="main #438's offline-weights refit steers this tiny fp32 shape onto a TMA-staged pick with "
-    "run-to-run last-ulp instability (reproducible within one runner on pristine origin/main) — the "
-    "bit-parity contract holds again once the staging race is fixed; see the step-7 merge notes",
-)
-def test_gen_runner_device_path_matches_host():
+def test_gen_runner_device_path_matches_host(built):
     """The device-resident decode path (``run_device`` / ``*_device``) must match the host numpy
     path for the real ``T`` rows (``T <= decode_bucket``) — stale prefix padding never leaks
-    because pre/post are per-token-independent. Regression guard for Phase A."""
-    pytest.importorskip("cupy")
+    because pre/post are per-token-independent. Regression guard for Phase A.
+
+    This carried an ``xfail`` while the lane compiled cold: the offline-weights refit steered this
+    tiny fp32 shape onto a TMA-staged pick with run-to-run last-ulp instability, so bit parity was
+    not a property the test could hold. The golden decides the pick now, so the shape lands on one
+    schedule every run and the contract holds. That staging race is untouched — it is simply no
+    longer what this test measures, and a pick unstable at the last ulp is a compiler finding, not
+    a parity gap."""
     import torch
-    import transformers
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = transformers.Qwen3Config(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        max_position_embeddings=64,
-        use_sliding_window=False,
-    )
-    torch.manual_seed(0)
-    model = transformers.Qwen3ForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    runner = built("qwen3.l2.b16").runner
     if not runner.has_device_decode:
         pytest.skip("decode-bucket programs unavailable for this shape")
 
@@ -239,38 +200,17 @@ def test_gen_runner_device_path_matches_host():
     np.testing.assert_array_equal(fn_np, runner.final_norm(h_np))
 
 
-def test_gen_runner_moe_stitch_matches_eager():
+def test_gen_runner_moe_stitch_matches_eager(built):
     """MoE third seam (OLMoE): the device stitch — emmy ``pre`` → reference SDPA → emmy
     ``post_attn`` + torch router + shared expert program + weighted combine — must match eager
     logits. Also pins the program-count contract: ONE expert program serves every layer
     (weights are inputs), so program count does not scale with num_experts."""
-    pytest.importorskip("cupy")
     import torch
     import torch.nn.functional as F
-    import transformers
+    from transformers.models.olmoe.modeling_olmoe import apply_rotary_pos_emb
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM, apply_rotary_pos_emb
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = transformers.OlmoeConfig(
-        vocab_size=128,
-        hidden_size=64,
-        intermediate_size=32,
-        num_hidden_layers=3,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_experts=8,
-        num_experts_per_tok=2,
-        norm_topk_prob=False,
-        max_position_embeddings=64,
-    )
-    torch.manual_seed(0)
-    model = OlmoeForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    pair = built("olmoe.l3.b16")
+    runner, model, config = pair.runner, pair.model, pair.config
     assert runner._moe is not None and runner._expert_sym is not None
     assert runner._expert_sym.input_names == ["x", "w_gate_up", "w_down"]
 
@@ -301,44 +241,19 @@ def test_gen_runner_moe_stitch_matches_eager():
     assert int(np.argmax(logits[-1])) == int(np.argmax(eager[-1]))
 
 
-def test_moe_expert_program_takes_the_widest_admitted_step():
+def test_moe_expert_program_takes_the_widest_admitted_step(built):
     """Every row of a step can route to ONE expert, and the widest step the plugin admits is the
     prefill capacity PLUS the decode-bucket rider allowance — which is exactly the width vLLM's
     profiling run uses. The pre/post twins split that step row-wise, but the routed dispatch does
     not: it hands one expert program all the rows that chose it. Sizing that program at the
     capacity alone makes every rider-width step die in ``set_sym_values``."""
-    pytest.importorskip("cupy")
     import torch
-    import transformers
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
+    from emmy.serving.gen_runner import _EXPERT_PREFILL_M
 
-    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
-
-    from emmy.serving.gen_runner import _EXPERT_PREFILL_M, EmmyGenRunner
-
-    config = transformers.OlmoeConfig(
-        vocab_size=128,
-        hidden_size=64,
-        intermediate_size=32,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_experts=8,
-        num_experts_per_tok=2,
-        norm_topk_prob=False,
-        max_position_embeddings=128,
-    )
-    torch.manual_seed(0)
-    model = OlmoeForCausalLM(config).eval()
-    # A router that scores every expert alike routes every token to the same one — the degenerate
-    # case the profiling run's identical dummy rows produce whatever the weights are.
-    for layer in model.model.layers:
-        layer.mlp.gate.weight.data.zero_()
-
-    capacity, bucket = 512, 16
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=bucket, max_tokens=capacity, prefill_bucket=capacity)
+    pair = built("olmoe.l1.rider")
+    runner, config = pair.runner, pair.config
+    capacity, bucket = 512, 16  # the table's ``olmoe.l1.rider`` shape
     assert runner.rider_width == bucket, "the rider split must exist for this to be the widest step"
 
     t = capacity + bucket
@@ -355,38 +270,16 @@ def test_moe_expert_program_takes_the_widest_admitted_step():
     assert out.shape == (t, config.hidden_size)
 
 
-def test_moe_fixed_slot_combine_matches_routed_oracle():
+def test_moe_fixed_slot_combine_matches_routed_oracle(built):
     """The fixed-slot combine (``_moe_combine_slots`` — selector write → k indirect slot
     replays → score matmul) must match ``combine_routed_experts`` (the routed parity oracle)
     on random routings: random ``xn`` rows route to different top-k expert sets, so the
     selector write, the in-kernel table reads, and the score combine are all exercised across
     routings. fp32 allclose — the two paths sum the k partials in different orders."""
-    pytest.importorskip("cupy")
     import torch
-    import transformers
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = transformers.OlmoeConfig(
-        vocab_size=128,
-        hidden_size=64,
-        intermediate_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_experts=8,
-        num_experts_per_tok=2,
-        norm_topk_prob=False,
-        max_position_embeddings=64,
-    )
-    torch.manual_seed(0)
-    model = OlmoeForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    pair = built("olmoe.l2.b16")
+    runner, config = pair.runner, pair.config
     assert runner.has_moe_fixed_slot, "the fixed-slot tier must build for the plain OLMoE expert shape"
     assert len(runner._expert_slots) == config.num_experts_per_tok
     slots = runner._expert_slots
@@ -407,40 +300,19 @@ def test_moe_fixed_slot_combine_matches_routed_oracle():
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
 
 
-def test_moe_indirect_slot_matches_direct_expert_bit_exact():
+def test_moe_indirect_slot_matches_direct_expert_bit_exact(built):
     """The indirect expert program (weight base pointers resolved in-kernel from the device
     tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program BIT-EXACT on every
     expert of every MoE layer: the indirection is ABI-level, so both programs run the same
     schedule and the same kernels modulo where the base pointer comes from. Runs each expert's
     weights through both paths on the same row and compares raw bytes."""
-    pytest.importorskip("cupy")
     import cupy as cp
     import torch
-    import transformers
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
-    from emmy.serving.gen_runner import EmmyGenRunner
 
-    config = transformers.OlmoeConfig(
-        vocab_size=128,
-        hidden_size=64,
-        intermediate_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_experts=8,
-        num_experts_per_tok=2,
-        norm_topk_prob=False,
-        max_position_embeddings=64,
-    )
-    torch.manual_seed(0)
-    model = OlmoeForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16, max_tokens=64)
+    pair = built("olmoe.l2.b16")
+    runner, config = pair.runner, pair.config
     assert runner.has_moe_fixed_slot
     runner._ensure_device()
 
@@ -464,7 +336,7 @@ def test_moe_indirect_slot_matches_direct_expert_bit_exact():
             assert got.cpu().numpy().tobytes() == direct.cpu().numpy().tobytes(), f"expert {e}: indirect != direct bytes"
 
 
-def test_moe_expert_shape_groups_compile_and_dispatch_per_layer():
+def test_moe_expert_shape_groups_compile_and_dispatch_per_layer(built):
     """Layers whose per-expert weight SHAPE differs need one expert program set each.
 
     EXL3's mixed bit allocation is the live case (K varies per layer, so the codes shape does),
@@ -472,37 +344,13 @@ def test_moe_expert_shape_groups_compile_and_dispatch_per_layer():
     checkpoint by re-minting layer 1's experts at a wider intermediate size: the runner must
     build two shape groups, keep every tier per group, and route each layer's launches — routed
     and fixed-slot alike — through its OWN group's programs."""
-    pytest.importorskip("cupy")
     import torch
-    import transformers
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
+    from tests.serving.helpers import WIDE_EXPERT as wide
 
-    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = transformers.OlmoeConfig(
-        vocab_size=128,
-        hidden_size=64,
-        intermediate_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_experts=4,
-        num_experts_per_tok=2,
-        norm_topk_prob=False,
-        max_position_embeddings=64,
-    )
-    torch.manual_seed(0)
-    model = OlmoeForCausalLM(config).eval()
-    wide, e, h = 48, config.num_experts, config.hidden_size
-    experts1 = model.model.layers[1].mlp.experts
-    experts1.gate_up_proj = torch.nn.Parameter(torch.randn(e, 2 * wide, h) * 0.05)
-    experts1.down_proj = torch.nn.Parameter(torch.randn(e, h, wide) * 0.05)
-
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=8, max_tokens=64)
+    pair = built("olmoe.l2.e4.b8.wide")
+    runner, config = pair.runner, pair.config
+    h = config.hidden_size
     assert len(runner._expert_tiers) == 2, "two distinct expert shapes must build two program sets"
     assert [m["group"] for m in runner._moe] == [0, 1]
     for g, tiers in enumerate(runner._expert_tiers):
@@ -525,40 +373,19 @@ def test_moe_expert_shape_groups_compile_and_dispatch_per_layer():
         torch.testing.assert_close(runner._moe_combine_slots(moe, xn), runner._moe_combine(moe, xn), rtol=2e-3, atol=2e-3)
 
 
-def test_moe_expert_m256_twin_matches_eager_across_experts():
+def test_moe_expert_m256_twin_matches_eager_across_experts(built):
     """The static M=256 prefill expert twin (captured whole-program replay, weights by
     UPLOAD) must match the eager expert wrapper on an over-bucket row set — and stay
     correct ACROSS experts: the captured graph bakes the twin's own buffer pointers, so a
     pointer-swap regression would freeze the first expert's weights into every later
     replay. ``_launch_expert`` routes row sets in (decode_bucket, 256] here."""
-    pytest.importorskip("cupy")
     import cupy as cp
     import torch
-    import transformers
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    from transformers.models.olmoe.modeling_olmoe import OlmoeForCausalLM
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
-    from emmy.serving.gen_runner import EmmyGenRunner
 
-    config = transformers.OlmoeConfig(
-        vocab_size=128,
-        hidden_size=64,
-        intermediate_size=32,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_experts=8,
-        num_experts_per_tok=2,
-        norm_topk_prob=False,
-        max_position_embeddings=64,
-    )
-    torch.manual_seed(0)
-    model = OlmoeForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=4, max_tokens=64)
+    pair = built("olmoe.l1.b4")
+    runner, config = pair.runner, pair.config
     assert runner._expert_m256 is not None, "the M=256 prefill twin must build for the plain OLMoE expert shape"
     runner._ensure_device()
 
@@ -577,34 +404,12 @@ def test_moe_expert_m256_twin_matches_eager_across_experts():
     assert runner._expert_m256.program._e2e_graph is not None, "the m256 tier must serve via the captured program graph"
 
 
-def test_decode_twin_shares_weight_buffers():
+def test_decode_twin_shares_weight_buffers(built):
     """The static decode-bucket twin must NOT hold a second on-GPU copy of the layer's
     weights: every non-trivial constant buffer in a decode program shares its device
     allocation with the symbolic sibling (one upload per weight — the plan's
     duplicate-weights memory artifact, ~2× the trunk when regressed)."""
-    pytest.importorskip("cupy")
-    import torch
-    import transformers
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = transformers.Qwen3Config(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        max_position_embeddings=64,
-        use_sliding_window=False,
-    )
-    torch.manual_seed(0)
-    model = transformers.Qwen3ForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    runner = built("qwen3.l1.b16").runner
     if not runner.has_device_decode:
         pytest.skip("decode-bucket programs unavailable for this shape")
 
@@ -627,36 +432,14 @@ def test_decode_twin_shares_weight_buffers():
         assert unshared == 0, f"decode twin holds {unshared} bytes of duplicated weight buffers"
 
 
-def test_device_residents_allocated_eagerly():
+def test_device_residents_allocated_eagerly(build_runner):
     """Every device-resident buffer must exist right after ``from_model`` — vLLM sizes its
     KV cache from a profiling pass that runs after model construction, so a lazy allocation
     at the first small-batch decode (the ~1.9 GiB gemma-4-12B embed table) lands on memory
     the KV cache already claimed and OOMs at high --gpu-memory-utilization. Found on a real
     RTX 5090; a concurrent bench masks it (batched decode rides the symbolic path) until
     concurrency drains."""
-    pytest.importorskip("cupy")
-    import torch
-    import transformers
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = transformers.Qwen3Config(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        max_position_embeddings=64,
-        use_sliding_window=False,
-    )
-    torch.manual_seed(0)
-    model = transformers.Qwen3ForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    runner = build_runner("qwen3.l1.b16").runner
     if not runner.has_device_decode:
         pytest.skip("decode-bucket programs unavailable for this shape")
 
@@ -665,34 +448,15 @@ def test_device_residents_allocated_eagerly():
     assert next(runner._norm_dev.parameters()).is_cuda
 
 
-def test_adopted_raw_embed_table_matches_folded_gather():
+def test_adopted_raw_embed_table_matches_folded_gather(build_runner):
     """``adopt_embed_table`` (the tied lm_head↔embed sharing that returns ~2 GiB to the KV
     budget on gemma) must gather identically to the runner's own folded upload: the shared
     table is RAW and the embed scale re-applies at gather in fp32 — the same
     fold-at-fp32-then-cast numerics as the host table."""
-    pytest.importorskip("cupy")
     import torch
-    import transformers
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = transformers.Qwen3Config(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        max_position_embeddings=64,
-        use_sliding_window=False,
-    )
-    torch.manual_seed(0)
-    model = transformers.Qwen3ForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    fresh = build_runner("qwen3.l1.b16")
+    runner, model = fresh.runner, fresh.model
     ids = torch.tensor([1, 3, 5], dtype=torch.long, device="cuda")
     folded = runner.embed_device(ids)
 
@@ -705,7 +469,7 @@ def test_adopted_raw_embed_table_matches_folded_gather():
     assert runner._embed_weight_dev.data_ptr() == raw.data_ptr(), "the adopted table must be shared, not copied"
 
 
-def test_layers_share_activation_arena():
+def test_layers_share_activation_arena(built):
     """Per-layer programs must NOT each hold their own capacity-sized activation
     buffers: with the runner's shared :class:`BufferArena`, same-kind programs of
     different layers view the SAME device memory for every input/output buffer and
@@ -713,29 +477,7 @@ def test_layers_share_activation_arena():
     Layer 0's builds grow the arena to its stable sizes, so the identity is asserted
     between layers 1 and 2. Numerics under pooling are covered by the multi-layer
     stitch test above, which runs all layers through the shared buffers."""
-    pytest.importorskip("cupy")
-    import torch
-    import transformers
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = transformers.Qwen3Config(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=3,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        max_position_embeddings=64,
-        use_sliding_window=False,
-    )
-    torch.manual_seed(0)
-    model = transformers.Qwen3ForCausalLM(config).eval()
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    runner = built("qwen3.l3.b16").runner
 
     def io_ptrs(prog):
         """{(role, name): base device pointer} for the input/output buffers."""
@@ -1001,7 +743,7 @@ def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch)
         assert float(rel.max()) < 2e-3, f"{name}: past one fused-scale rounding per side"
 
 
-def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypatch):
+def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypatch, built, build_runner):
     """``EMMY_GEN_EMBED_HOST`` moves the vocab table out of VRAM without changing a single
     gathered row.
 
@@ -1010,38 +752,17 @@ def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypat
     lands on the same values, the table's device pointer is NOT device memory (otherwise the
     bytes were never returned), and the numpy table the oracle path reads is a VIEW of the same
     allocation rather than a second host copy."""
-    pytest.importorskip("cupy")
     import cupy as cp
     import torch
-    import transformers
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-
-    from emmy.serving.gen_runner import EmmyGenRunner
-
-    config = transformers.Qwen3Config(
-        vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        max_position_embeddings=64,
-        use_sliding_window=False,
-    )
-    torch.manual_seed(0)
-    model = transformers.Qwen3ForCausalLM(config).eval()
     ids = torch.tensor([1, 3, 5, 63], dtype=torch.long, device="cuda")
-
-    device_runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    device_runner = built("qwen3.l1.b16").runner
     if not device_runner.has_device_decode:
         pytest.skip("decode-bucket programs unavailable for this shape")
     expected = device_runner.embed_device(ids).cpu().numpy()
 
     monkeypatch.setenv("EMMY_GEN_EMBED_HOST", "1")
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=16)
+    runner = build_runner("qwen3.l1.b16").runner
     np.testing.assert_array_equal(runner.embed_device(ids).cpu().numpy(), expected)
     np.testing.assert_array_equal(runner.embed(ids.cpu().numpy()), expected)
 

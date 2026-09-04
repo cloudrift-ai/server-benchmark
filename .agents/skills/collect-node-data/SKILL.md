@@ -22,13 +22,14 @@ server down (only if this run rented it). Everything long-running on the remote 
 the sweep itself — runs inside named tmux sessions (`emmy-node-setup` / `emmy-node-sweep`), so a dropped ssh
 connection never kills the work and a human can attach to watch it.
 
-**Why a budgeted sweep (and not a search-driven tune).** The old flow ran an ε-greedy `emmy tune --dataset golden`
-first: its wall time grew with the golden set (patience-stopped search per shape, no budget knob), and even at
-ε=0.25 three quarters of its benches followed the incumbent prior — the collected rows over-sampled the branches the
-prior already liked (a censoring feedback loop). The sweep replaces it: a fixed `--budget-s` wall clock, and points
-drawn from the enumeration itself rather than a search trajectory, so the future offline prior gets clean leaf rows
-whose selection didn't depend on the incumbent's opinions. `emmy tune --explore-eps` still exists for interactive
-tuning; it is just no longer the collection vehicle.
+**Why a budgeted sweep (and not a search-driven tune).** The old flow ran an ε-greedy `emmy tune --golden PATH`
+sweep over a working golden traced from the repository goldens first: its wall time grew with the golden set
+(patience-stopped search per shape, no budget knob), and even at ε=0.25 three quarters of its benches followed the
+incumbent prior — the collected rows over-sampled the branches the prior already liked (a censoring feedback loop).
+The sweep replaces it: a fixed `--budget-s` wall clock, and points drawn from the enumeration itself rather than a
+search trajectory, so the future offline prior gets clean leaf rows whose selection didn't depend on the incumbent's
+opinions. `emmy tune --explore-eps` still exists for interactive tuning; it is just no longer the collection
+vehicle.
 
 **Why three slices.** Every golden shape's candidate pool (all kinds — matmul, reduce, rms_norm, softmax, attention,
 the fused norm_linear / mlp_geglu, …) is split by distance to the recorded golden anchors, and the budget is spent
@@ -51,18 +52,19 @@ their share flows back to the big ones, so a run guarantees every kind data firs
 actually is.
 
 **Bench in the deployable regime.** The offline prior trains on deployable records, and a sweep now measures there
-by default (`emmy run --bench --ab`, node recording on), so no pairing step is needed: every point collected is
-already a deployable measurement. Historical stores also hold `-O1` rows from the era when sweeps ranked at that
-level; those are inert — the prior does not train on them and no deploy reads them. Do NOT pin `--nvcc-flags` to a
-non-deployable level to collect "cheaper" data: its error is biased along tile size, so it mis-ranks the wide
-register-tile family it would most matter for.
+by default (`emmy run --bench --ab`; every clean row is recorded into the tune DB as a per-kernel perf row — the
+measured evidence deploys read — and as a node row for the prior), so no pairing step is needed: every point
+collected is already a deployable measurement. Historical stores also hold `-O1` rows from the era when sweeps
+ranked at that level; those are inert — the prior does not train on them and no deploy reads them. Do NOT pin
+`--nvcc-flags` to a non-deployable level to collect "cheaper" data: its error is biased along tile size, so it
+mis-ranks the wide register-tile family it would most matter for.
 
-**Declarative identity (what makes the rows freezable).** Each batch passes `--record-shape` — the group's
-golden-spelled shape spec — and the recorder stamps it as `shape_spec` on exactly the leaves whose extents key to
-that shape. Only identity-carrying rows enter the goldens-format measurement freeze
-(`scripts/freeze_node_store.py`), so the remote box MUST run this branch's emmy (the rsync step below already
-ensures that); rows collected by an older emmy record identity-less and never freeze. Watch the driver log for the
-`--record-shape ... matched none` warning — it means a shape-key mismatch is silently producing unfreezable rows.
+**Declarative identity (what makes the rows freezable).** A recorded node row carries the kernel's structural
+`S_*` stamp and its tunable knobs, keyed per card; the goldens-format measurement freeze
+(`scripts/freeze_node_store.py`) reads exactly that identity, so the remote box MUST run this branch's emmy (the
+rsync step below already ensures that); rows collected by an older emmy record a different identity vocabulary and
+never freeze. Watch the driver log for recording warnings — a `[record-nodes]` line that reports zero rows means the
+run measured below the tune bench standard (warmup / iters) and nothing was written.
 
 **Why merging into the single local DB is safe (read this once).** The node store is keyed by GPU:
 `node_key = digest(context_key, gpu, op_sig, tunable-knobs)` and the `node` table carries a `gpu` column

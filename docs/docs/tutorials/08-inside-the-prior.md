@@ -115,7 +115,7 @@ what a search wants to know when deciding where to descend.
 **The training data lives inside the checkpoint.** Rows stream in as kernels are tuned, into a bounded random sample
 capped at 100,000 rows that is maintained across runs. The model refits on a schedule that starts frequent and
 coarsens as the data grows, and checkpoints itself to a JSON file holding both the model and its data. That data is
-the **reservoir** — the same one that is [tier 1 of the evidence hierarchy](./06-deploy-evidence-hierarchy.md). The
+the **reservoir** — the same rows the [evidence hierarchy](./06-deploy-evidence-hierarchy.md) reads first. The
 checkpoint therefore carries deployment evidence, not just model state, which is why losing it costs more than a
 retrain.
 

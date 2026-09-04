@@ -36,3 +36,12 @@ configs:
       NVIDIA GeForce RTX 5090:
         emmy_us: 122.52400070428848
         tcompile_us: 8.175304402475772
+  - name: k_matmul_e632c8.a4a7c52cf42c.2bd76894f2fc
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 2bd76894f2fc499f38e0a7eb0ecd1d8cced32ea03d78f15dba403dca66a2c5d2

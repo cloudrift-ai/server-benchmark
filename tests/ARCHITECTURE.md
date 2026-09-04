@@ -49,6 +49,16 @@ Do not add a directory merely to shorten a file listing. These directories exist
 or span several source trees. `compiler/passes/` and `perf/` carry their own `ARCHITECTURE.md`; read those before adding
 to them.
 
+`serving/` compiles under its **own golden**, not a cold search. These tests ask whether the runner stitches,
+dispatches and allocates correctly — vLLM integration and materialization — and cold deploy is the prior's contract,
+tested elsewhere. So `serving/helpers.py` spells every shape the lane compiles in one place (`RUNNERS` for the runner
+builds, `WRAPPERS` for the attention-split carves), `serving/regen.py` writes the golden covering exactly those, and the
+`built` / `build_runner` fixtures build inside `helpers.evidence_scope()`. Two properties follow, and both are the
+point: a replay costs a rebind instead of ~1M `schedule()` calls per model, and the compile no longer depends on the
+machine-local tune DB and online prior a cold pick resolves through. Strict evidence keeps the golden honest — a fork no
+row decides raises `EvidenceError` naming the kernel, so a stale or partial golden fails loudly instead of quietly
+restoring the search. Regenerate with `python -m tests.serving.regen` when a shape changes or a new one joins a table.
+
 ## Test Layers
 
 The suite runs in four layers, distinguished by what they touch rather than by where they live:
@@ -232,8 +242,9 @@ transform) — gating its GPU cases on `requires_sm90` / `_supports_tma()` (≥ 
 run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`). The same
 gate applies to TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin refuses rather than selecting a
 different transport, so `test_attention_coverage.py`'s TMA-staged flash cases carry `requires_sm90` (their `cp`
-siblings run on sm_80+). Golden-scoped CLI tests are the other environment trap: `--golden` / `eval --dataset golden`
-resolve against the
+siblings run on sm_80+). Golden-scoped CLI tests are the other environment trap: `--realization` without `--golden
+PATH` and
+`eval --dataset golden` resolve against the
 **live card's** recordings, so tests asserting specific golden names (or monkeypatching `GOLDEN_RECORDS` with card-less
 fakes) must pin themselves off-GPU (`torch.cuda.is_available → False` in-process, `CUDA_VISIBLE_DEVICES=""` for
 `run_cli` subprocesses) to take the multi-card-union path — otherwise they pass or fail depending on which shapes the

@@ -394,17 +394,14 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         seam = (
             cone_seam(c.operands[0], k_axis.name, ctx.sched.tile.axes) if value_child is None and c.operands[0].as_slab() is None else None
         )
-        # The grid axes riding untiled below the ``(m, n)`` cell — the GRID's fact, not the tiled
-        # cell's, so they are threaded to the emission that needs them (the per-cell rename's
-        # shared coordinates) from here, where the kernel grid is in hand. Read by NAME, never as
-        # the grid's leading slice: ``Sched._derive_mn`` orients the pair on the CONTRACTION's own
-        # operand axes, so a kernel whose grid also carries a sibling term's output axis (fused
-        # q/k/v, N 64 beside N 32) tiles a non-trailing pair. Slicing positionally there dropped
-        # the sibling's axis from the kernel entirely and re-declared the m axis beside itself —
-        # the per-cell rename then took the undeclared axis for an SSA name (``a2`` → the
-        # ``a2__c0_0`` nvcc rejects). Where the pair IS the trailing one this is ``grid[:-2]``.
-        placed = {side.axis.name for side in tile.mn if side is not None}
-        lead = tuple(axis for axis in grid if axis.name not in placed)
+        # The leading (batch / ksplit) grid axes ride untiled below the ``(m, n)`` cell — the GRID's
+        # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
+        # per-cell rename's shared coordinates) from here, where the kernel grid is in hand. Every
+        # grid axis the pair does NOT bind rides, which is the grid's trailing two only when the
+        # placement orients onto them: merged sibling linears put two distinct output widths on one
+        # grid (N 32 beside N 64), the pair binds one of them, and a positional ``grid[:-2]`` then
+        # dropped the other — leaving an axis no block, unit or lead var defines.
+        lead = tuple(axis for axis in grid if axis.name not in {bound.name for bound in tile.axes})
         carried = {}
         state_decls, reduce_region = reduce_codegen(
             c,

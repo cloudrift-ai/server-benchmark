@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from importlib import import_module
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -35,18 +34,16 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import (
 from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
-    _candidate_rows,
     _lifted_target,
+    _replay,
     _target_kernel_nodes,
     decode_record,
     kernel_identity,
-    load_golden_file,
-    load_golden_records,
     validate_golden_file,
 )
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
-from tests.compiler.helpers import direct_classic_leaf, requires_cuda
+from tests.compiler.helpers import case_target_tile, direct_classic_leaf, requires_cuda
 from tests.compiler.terms import contraction, projection
 
 _CTX = Context.from_target((12, 0))
@@ -192,17 +189,20 @@ def _lower_cut(graph: Graph, spelling: str) -> Graph:
     return _lower(graph, {spelling: "cut"})
 
 
-def _nested_attention_cut(pins: dict[str, str]) -> Graph:
-    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-gqa-b-cut.yaml"
-    (record,) = load_golden_records(load_golden_file(case))
-    tile = _lifted_target(record)
+def _case_match(case: str) -> tuple[Match, Graph]:
+    """A one-node match on a corpus case's lifted target — the fork point the cut pass rewrites."""
+    tile = case_target_tile(case)
     graph = Graph()
     for name, tensor in tile.inputs.items():
         graph.add_node(InputOp(), [], tensor, node_id=name)
     graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
-    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    return Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[])), graph
+
+
+def _nested_attention_cut(pins: dict[str, str]) -> Graph:
+    match, graph = _case_match("attention/rmsnorm-gqa-b-cut.yaml")
     with pinned_knobs(pins):
-        result = _CUT.rewrite(match, graph.nodes[tile.name])
+        result = _CUT.rewrite(match, graph.nodes[match.root_node_id])
     options = result if isinstance(result, list) else [result]
     cut = next(option for option in options if "cut" in option.knobs.values())
     return cut.expand()[0]
@@ -367,14 +367,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     seam and one consumer, with a producer reading another seam's workspace when its value nests
     inside it — while a pin whose site path exists on no kernel here is another kernel's and is
     skipped, never an error."""
-    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
-    (record,) = load_golden_records(load_golden_file(case))
-    tile = _lifted_target(record)
-    graph = Graph()
-    for name, tensor in tile.inputs.items():
-        graph.add_node(InputOp(), [], tensor, node_id=name)
-    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
-    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
     pins = {
         "PLACE@map.1/twist.1/inner.1/map": "cut",  # the normalized-Q cone
         "PLACE@map.1/twist.1/inner.2/map": "cut",  # the normalized-K cone
@@ -382,7 +375,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
         "PLACE@map.9/map": "cut",  # no such site here — another kernel's pin
     }
     with pinned_knobs(pins):
-        fork = _CUT.rewrite(match, graph.nodes[tile.name])
+        fork = _CUT.rewrite(match, graph.nodes[match.root_node_id])
     assert set(fork.knobs) == {
         "PLACE@map.1/twist.1/inner.1/map",
         "PLACE@map.1/twist.1/inner.2/map",
@@ -398,7 +391,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
-    match, graph = _composed_case_match()
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
     pins = {"PLACE": "cut", "PLACE@map.1/twist.1/inner.2/map": "cut"}
 
     with pinned_knobs(pins):
@@ -408,17 +401,6 @@ def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     assert len(pieces) == 3 and all(node.op.placement_decided for node in pieces)
-
-
-def _composed_case_match() -> tuple[Match, Graph]:
-    case = Path(__file__).parents[1] / "realization/cases/attention/rmsnorm-qk-sdpa-composed-cut.yaml"
-    (record,) = load_golden_records(load_golden_file(case))
-    tile = _lifted_target(record)
-    graph = Graph()
-    for name, tensor in tile.inputs.items():
-        graph.add_node(InputOp(), [], tensor, node_id=name)
-    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
-    return Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[])), graph
 
 
 def _receipt_fields() -> dict:
@@ -440,11 +422,11 @@ def _receipt_fields() -> dict:
 def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() -> None:
     """Conflicting per-child schedules behind one pinned cut persist as sibling receipts: each
     stored child identity selects its own kernel's rows, a sibling child's row does not vouch for
-    it, and the verified-tier join reads the stored identity instead of the pre-cut lift."""
+    it, and the strict decode joins by the stored identity instead of the pre-cut lift."""
     fields = _receipt_fields()
     parent = GoldenRecord(knobs={}, **fields)
     lift_identity = _lifted_target(parent).identity_key(with_io=True)
-    children = {i: rows for i, rows in _candidate_rows(parent).items() if i is not None and i != lift_identity}
+    children = {i: rows for i, rows in _replay(parent, exhaustive=True).rows.items() if i is not None and i != lift_identity}
     assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
     (id_a, rows_a), (id_b, rows_b) = sorted(children.items())
     row_a = next(iter(rows_a - rows_b), None)
@@ -482,17 +464,45 @@ def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target
     parent = GoldenRecord(knobs={}, **fields)
     with pytest.raises(ValueError, match="target lowers to 2 kernels"):
         _lifted_target(parent)
-    identity, rows = next((identity, rows) for identity, rows in _candidate_rows(parent).items() if identity is not None)
+    identity, rows = next((identity, rows) for identity, rows in _replay(parent, exhaustive=True).rows.items() if identity is not None)
     receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=identity, **fields)
     assert decode_record(receipt) is None
 
 
-def test_multi_output_kernel_record_joins_its_live_fork_by_derived_identity() -> None:
+def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
+    """Golden evidence is per kernel. A target's entries walk one path: the leading entry (the
+    routing record here) decides the parent's placement fork and is its route row under the
+    signature of the kernel the cut was offered on; the child-identity receipt decides only the
+    forks of the kernel it names, and its schedule row is keyed under that child's signature — a
+    piece inherits nothing from the kernel it replaced."""
+    from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
+
+    fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
+    route = {"PLACE@map.1/twist.1/inner": "cut"}
+    routing = GoldenRecord(knobs=route, **{**fields, "pins": ()})
+    parent = GoldenRecord(knobs={}, **fields)
+    lift_identity = _lifted_target(parent).identity_key(with_io=True)
+    replay = _replay(parent, exhaustive=True)
+    child, rows = next((identity, rows) for identity, rows in replay.rows.items() if identity is not None and identity != lift_identity)
+    receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=child, **fields)
+    parent_signature = frozenset((key, str(value)) for key, value in parent.structural_features.items())
+
+    assert _replay(routing).arms == ((parent_signature, route),)
+    with records_override([routing, receipt]):
+        got = evidence_rows("", (12, 0))
+    assert got == [
+        (parent_signature, route, 1.0, routing.name),
+        (replay.signatures[child], receipt.schedule_row, 1.0, receipt.name),
+    ]
+
+
+def test_multi_output_kernel_record_derives_the_identity_its_live_fork_carries() -> None:
     """A record whose one target kernel writes SEVERAL output buffers must derive the identity its
-    live fork carries. The derivation lifts the persisted kernel; the fork root op is whatever the
-    matcher's ``with_io`` produced, and that map holds every output slot — so a derivation that kept
-    only slot 0 keyed such a record off a fingerprint no fork can produce and the verified tier
-    joined nothing."""
+    live fork carries. Every evidence row a golden contributes is keyed by that identity, so a
+    derivation that kept only output slot 0 keys the record's rows off a fingerprint no fork can
+    produce and the deploy reads none of them. The derivation lifts the persisted kernel and the
+    fork root op is whatever the matcher's ``with_io`` produced — a map holding every output slot,
+    which is why the lift goes through the same call."""
     graph = Graph()
     _input(graph, "x", (8,))
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("hot", (8,), "f16"), node_id="hot")
@@ -513,7 +523,7 @@ def test_multi_output_kernel_record_joins_its_live_fork_by_derived_identity() ->
     assert len(nodes) == 1 and len(nodes[0].outputs) == 2, "the fused target must be ONE kernel writing two buffers"
 
     identity = kernel_identity(record)
-    rows = _candidate_rows(record)
+    rows = _replay(record, exhaustive=True).rows
     assert identity in rows, "the derived identity names no kernel the live resolve offers"
     # The join is the subject; spelling one of that kernel's own rows shows the record decodes
     # strictly through it too.
@@ -521,7 +531,9 @@ def test_multi_output_kernel_record_joins_its_live_fork_by_derived_identity() ->
 
 
 def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:
-    from emmy.compiler.pipeline.search.policy.greedy import _pins_live
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.search.golden import regime_live
 
     fields = _receipt_fields()
     document = {
@@ -541,7 +553,8 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -
         validate_golden_file(document)
     document["configs"][0]["realizations"][0]["identity"] = "0" * 64
     validate_golden_file(document)
-    assert _pins_live({"PLACE@map.1/twist.1/inner": "cut"}), "a receipt's routing pins are replay context, never a dead env regime"
+    receipt = SimpleNamespace(pin_map={"PLACE@map.1/twist.1/inner": "cut"})
+    assert regime_live(receipt), "a receipt's routing pins are its route, never a dead env regime"
 
 
 def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
@@ -716,7 +729,7 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
 def test_every_seam_is_an_unpinned_arm() -> None:
     """The unpinned fork offers every cuttable seam as its own structural arm, spelled by the same
     key the pin path resolves."""
-    match, graph = _composed_case_match()
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
     options = _CUT.rewrite(match, node)
     arms = [dict(option.knobs) for option in options if "cut" in option.knobs.values()]

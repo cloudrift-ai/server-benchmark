@@ -81,15 +81,17 @@ def _working_placement_route(path):
     document = load_golden_file(path)
     realization = document["configs"][0]["realizations"][0]
     realization["name"] = "working.route"
-    realization["pins"] = {"FAST_MATH": False, "PLACE@inner.1/map": "cut"}
+    realization["pins"] = {"FAST_MATH": False}
+    realization["knobs"] = {"PLACE@inner.1/map": "cut"}  # a routing row: the measured price of that kernel set
+    realization["measurements"] = {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}
     dump_golden_file(document, path, overwrite=True)
     return document
 
 
 def _args(path, **overrides):
     values = {
-        "golden": "working.relu",
-        "golden_file": str(path),
+        "realization": "working.relu",
+        "golden": str(path),
         "code": None,
         "input": None,
         "ir": "cuda",
@@ -105,9 +107,9 @@ def test_compile_working_file_uses_exact_loop_target(run_cli, tmp_path):
 
     rc, stdout, stderr = run_cli(
         "compile",
-        "--golden-file",
-        str(path),
         "--golden",
+        str(path),
+        "--realization",
         "working.relu",
         "--target",
         "sm_89",
@@ -123,11 +125,11 @@ def test_working_file_requires_name_and_reports_its_own_available_rows(run_cli, 
     path = tmp_path / "working.yaml"
     _working_loop(path)
 
-    rc, stdout, stderr = run_cli("compile", "--golden-file", str(path), "--ir", "cuda")
+    rc, stdout, stderr = run_cli("compile", "--golden", str(path), "--ir", "cuda")
     assert rc == 2
-    assert "--golden-file requires --golden NAME" in stdout + stderr
+    assert "--golden PATH requires --realization NAME" in stdout + stderr
 
-    rc, stdout, stderr = run_cli("compile", "--golden-file", str(path), "--golden", "missing", "--ir", "cuda")
+    rc, stdout, stderr = run_cli("compile", "--golden", str(path), "--realization", "missing", "--ir", "cuda")
     assert rc == 2
     assert "unknown golden config" in stdout + stderr
     assert "working.relu" in stdout + stderr
@@ -167,9 +169,9 @@ def test_working_file_golden_conflicts_with_direct_input(run_cli, tmp_path):
 
     rc, stdout, stderr = run_cli(
         "compile",
-        "--golden-file",
-        str(path),
         "--golden",
+        str(path),
+        "--realization",
         "working.relu",
         "--code",
         "torch.zeros(4)",
@@ -206,7 +208,10 @@ def test_duplicate_name_requires_target_scoped_working_file(tmp_path, caplog):
     assert args._golden_graph.nodes["y"].op.name == "working_second_loop"
 
 
-def test_working_proposal_supplies_graph_but_is_not_automatically_pinned(tmp_path):
+def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_to_the_tuner(tmp_path):
+    """Naming a realization asks for that row: it benches as a pinned row whatever its measurement
+    state (the corpus and perf lanes replay unmeasured cases this way). A bare ``--golden PATH``
+    walk names nothing, so a proposal there stays the tuner's and only verified rows bench."""
     from emmy.commands.compile import resolve_golden_arg
     from emmy.commands.run import _pinned_samples_for_ir
 
@@ -218,15 +223,25 @@ def test_working_proposal_supplies_graph_but_is_not_automatically_pinned(tmp_pat
 
     assert isinstance(args._golden_graph.nodes["y"].op, LoopOp)
     assert args._golden_graph.nodes["y"].op.name == "working_exact_loop"
-    assert args.golden_configs == []
+    (row,) = args.golden_configs
+    assert row.name == "working.relu" and row.knobs == {"WORK": "w1x1"} and row.record.name == "working.relu"
+    assert [record.name for record in args._golden_records] == ["working.relu"]
     args.ab = ["WORK=w2x2"]
-    (manual,) = _pinned_samples_for_ir(args, args._golden_graph)
-    assert manual.name == "ab WORK=w2x2"
-    assert manual.knobs == {"WORK": "w2x2"}
+    pinned, manual = _pinned_samples_for_ir(args, args._golden_graph)
+    assert pinned is row
+    assert manual.name == "ab WORK=w2x2" and manual.knobs == {"WORK": "w2x2"} and not hasattr(manual, "record")
+
+    walked = _args(path, _explicit_realization=False)
+    resolve_golden_arg(walked)
+    assert walked.golden_configs == []
 
 
 @pytest.mark.parametrize("explicit", [False, True], ids=["ordinary", "explicit"])
-def test_working_shared_placement_pins_select_the_exact_compile_target(run_cli, tmp_path, monkeypatch, explicit):
+def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monkeypatch, explicit):
+    """A measured routing row is the measured price of the kernel set its route spells. Selecting
+    the file makes it evidence, so at the placement fork it outranks the fused arm nothing measured
+    and the pass's own cut arm is taken: the compile splits into the placed producer plus its
+    consumers. A hand pin of the same route through ``EMMY_KNOBS`` lands identically."""
     path = tmp_path / "working-route.yaml"
     _working_placement_route(path)
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
@@ -238,9 +253,9 @@ def test_working_shared_placement_pins_select_the_exact_compile_target(run_cli, 
 
     rc, stdout, stderr = run_cli(
         "compile",
-        "--golden-file",
-        str(path),
         "--golden",
+        str(path),
+        "--realization",
         "working.route",
         "--target",
         "sm_89",
@@ -248,23 +263,20 @@ def test_working_shared_placement_pins_select_the_exact_compile_target(run_cli, 
         "tile",
     )
 
-    # The shared PLACE regime selects the routed target: the cut fires and splits the compile
-    # into the placed producer plus its partial/final consumers. Kernel names carry volatile
-    # identity digests, so assert the kernel set's shape, not the spelled names.
-    #
-    # Three kernels: the pinned cut, plus the placed producer's own reduction split, which this
-    # golden does not pin. Greedy decides that one by pricing, and on the per-test empty
-    # checkpoint both sides of that comparison are the same untrustworthy prior's predictions —
-    # one proxy read against itself, which the kernel-set rule allows (only a MIXED comparison,
-    # a predicted Σ against a measured one, is withdrawn).
+    # Kernel names carry volatile identity digests, so assert the kernel set's shape, not the
+    # spelled names.
     assert rc == 0, stderr
     headers = [line for line in stdout.splitlines() if line.startswith("=== ")]
     assert len(headers) == 3, stdout
     assert sum("__place_" in line for line in headers) == 1, stdout
 
 
-def test_working_ambiguous_placement_pin_regimes_leave_the_target_unpinned(tmp_path):
+def test_selected_records_scope_the_tier_and_a_split_regime_publishes_nothing(monkeypatch, tmp_path):
+    """The selected realization's records are the compile's whole golden scope; the input regime
+    (the precision pins) reaches the environment only when every record agrees on it."""
     from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.pipeline.search import golden
+    from emmy.compiler.pipeline.search.golden import shared_regime_pins
 
     path = tmp_path / "working.yaml"
     document = _working_loop(path, pins={"FAST_MATH": False, "PLACE@inner.1/map": "cut"})
@@ -276,23 +288,21 @@ def test_working_ambiguous_placement_pin_regimes_leave_the_target_unpinned(tmp_p
 
     resolve_golden_arg(args)
 
-    assert args.golden_target_pins == {}
+    assert [record.route for record in args._golden_records] == [{"PLACE@inner.1/map": "cut"}] * 2
+    assert [dict(record.pins) for record in args._golden_records] == [
+        {"FAST_MATH": False, "PLACE@inner.1/map": "cut"},
+        {"FAST_MATH": True, "PLACE@inner.1/map": "cut"},
+    ]
+    assert shared_regime_pins(args._golden_records) == {}
+    assert shared_regime_pins(args._golden_records[:1]) == {"FAST_MATH": False}
 
-
-def test_canonical_golden_does_not_select_structural_target_pins(monkeypatch, tmp_path):
-    from emmy.commands.compile import resolve_golden_arg
-    from emmy.compiler.pipeline.search import golden
-
-    path = tmp_path / "canonical-like.yaml"
-    document = _working_loop(path, pins={"FAST_MATH": False, "PLACE@inner.1/map": "cut"})
+    # Without --golden PATH the live card's repository corpus is searched, and its matches scope the tier the same way.
     records = golden.load_golden_records(document)
     monkeypatch.setattr(golden, "goldens_for_live_gpu", lambda: records)
     monkeypatch.setattr(golden, "GOLDEN_RECORDS", records)
-    args = _args(path, golden_file=None)
-
-    resolve_golden_arg(args)
-
-    assert args.golden_target_pins == {}
+    canonical = _args(path, golden=None)
+    resolve_golden_arg(canonical)
+    assert [record.name for record in canonical._golden_records] == ["working.relu", "working.relu"]
 
 
 def test_working_verified_row_is_automatically_pinned(tmp_path):

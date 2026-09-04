@@ -346,7 +346,7 @@ def test_moe_expert_shape_groups_compile_and_dispatch_per_layer(built):
     and fixed-slot alike — through its OWN group's programs."""
     import torch
 
-    from tests.serving.generation.helpers import WIDE_EXPERT as wide
+    from tests.serving.helpers import WIDE_EXPERT as wide
 
     pair = built("olmoe.l2.e4.b8.wide")
     runner, config = pair.runner, pair.config

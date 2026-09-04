@@ -12,7 +12,7 @@ checked-in golden is the compile's ONLY evidence, strictly. Two things follow.
 
 Strict evidence is what keeps the golden honest: a fork no row decides is an ``EvidenceError``
 naming the kernel, so an incomplete or stale golden fails loudly here instead of silently
-reintroducing the search. Regenerate with ``python -m tests.serving.generation.regen``.
+reintroducing the search. Regenerate with ``python -m tests.serving.regen``.
 
 :data:`RUNNERS` is the one place a shape is spelled. The tests read it and so does the regen, so
 the golden covers exactly the runners the tests build — a new runner shape is one entry plus a
@@ -24,7 +24,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 
-GOLDEN = Path(__file__).parent / "goldens" / "gen_runner.golden.yaml"
+GOLDEN = Path(__file__).parent / "goldens" / "serving.golden.yaml"
 
 
 def qwen3_config(layers: int):
@@ -151,6 +151,78 @@ RUNNERS: dict[str, tuple] = {
 }
 
 
+def gemma3_block_config():
+    """Tiny Gemma-3/4 text config, layer 0 forced global (``sliding_window_pattern=1``) — the
+    4-norm carve target (extra pre/post-feedforward norms)."""
+    import transformers
+
+    return transformers.Gemma3TextConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=64,
+        sliding_window=16,
+        sliding_window_pattern=1,
+    )
+
+
+def _block(kind: str):
+    """One decoder layer plus its config — the attention-split wrappers' input."""
+    import torch
+    import transformers
+
+    if kind == "qwen3":
+        config = qwen3_config(1)
+        torch.manual_seed(0)
+        return config, transformers.Qwen3ForCausalLM(config).eval().model.layers[0]
+    config = gemma3_block_config()
+    torch.manual_seed(0)
+    return config, transformers.Gemma3ForCausalLM(config).eval().model.layers[0]
+
+
+#: Every attention-split wrapper this lane compiles: ``id -> (block kind, "pre" | "post")``. These
+#: trace with a SYMBOLIC token axis, so their programs are their own — not the runner shapes'.
+WRAPPERS: dict[str, tuple[str, str]] = {
+    "qwen3.pre": ("qwen3", "pre"),
+    "qwen3.post": ("qwen3", "post"),
+    "gemma3.post": ("gemma3", "post"),
+}
+
+
+def wrapper_case(case_id: str):
+    """``(wrapper, example_args, argnames, config)`` for one :data:`WRAPPERS` entry.
+
+    The example widths carry the trace; the token axis is symbolic, so a case compiled here runs at
+    any count. One spelling for the tests and the regen, the same rule :data:`RUNNERS` follows.
+    """
+    import torch
+
+    from emmy.compiler.trace.huggingface import build_attention_split_wrapper
+
+    kind, half = WRAPPERS[case_id]
+    config, block = _block(kind)
+    pre, post = build_attention_split_wrapper(block)
+    h = config.hidden_size
+    if half == "pre":
+        return pre, [torch.randn(8, h)], ["hidden"], config
+    width = config.num_attention_heads * (config.head_dim or h // config.num_attention_heads)
+    return post, [torch.randn(8, width), torch.randn(8, h)], ["attn_out", "residual"], config
+
+
+def wrapper_graph(case_id: str):
+    """The traced graph a wrapper case compiles — what the regen records for it."""
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs
+    from emmy.compiler.trace.torch import trace_module
+
+    wrapper, args, argnames, _ = wrapper_case(case_id)
+    specs = [f"num_tokens@{name}:0" for name in argnames]
+    return trace_module(wrapper, tuple(args), dynamic_shapes=build_torch_dynamic_shapes(parse_position_specs(specs)))
+
+
 def golden_records() -> list:
     """The golden's rows, each standing in as a measured row.
 
@@ -163,7 +235,7 @@ def golden_records() -> list:
     from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
 
     if not GOLDEN.exists():
-        raise FileNotFoundError(f"{GOLDEN} is missing; regenerate with `python -m tests.serving.generation.regen`")
+        raise FileNotFoundError(f"{GOLDEN} is missing; regenerate with `python -m tests.serving.regen`")
     return [
         record
         if record.measurements is not None

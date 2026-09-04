@@ -7373,6 +7373,566 @@ programs:
     attrs: {op: {__elementwise__: multiply}}
     inputs: [p_post_attention_layernorm_weight_bc, to_1]
     outputs: [[mul_1, f32, [512, 64]]]
+- inputs: [attn_out, residual]
+  outputs: [add_7]
+  nodes:
+  - id: add_1_c1
+    op: constant
+    attrs:
+      name: add_1_c1
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_1_c1, f32, [1]]]
+  - id: add_1_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [add_1_c1]
+    outputs: [[add_1_c1_bc, f32, [64]]]
+  - id: add_3_c1
+    op: constant
+    attrs:
+      name: add_3_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_3_c1, f32, [1]]]
+  - id: add_3_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_1}], select: null}}]}
+    inputs: [add_3_c1]
+    outputs: [[add_3_c1_bc, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: add_4_c1
+    op: constant
+    attrs:
+      name: add_4_c1
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_4_c1, f32, [1]]]
+  - id: add_4_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [add_4_c1]
+    outputs: [[add_4_c1_bc, f32, [64]]]
+  - id: add_5_c1
+    op: constant
+    attrs:
+      name: add_5_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_5_c1, f32, [1]]]
+  - id: add_5_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_1}], select: null}}]}
+    inputs: [add_5_c1]
+    outputs: [[add_5_c1_bc, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: add_6_c1
+    op: constant
+    attrs:
+      name: add_6_c1
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_6_c1, f32, [1]]]
+  - id: add_6_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [add_6_c1]
+    outputs: [[add_6_c1_bc, f32, [64]]]
+  - id: add_c1
+    op: constant
+    attrs:
+      name: add_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_c1, f32, [1]]]
+  - id: add_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_1}], select: null}}]}
+    inputs: [add_c1]
+    outputs: [[add_c1_bc, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: attn_out
+    op: input
+    outputs: [[attn_out, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: p_mlp_down_proj_weight
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: mlp.down_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [64, 128]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight, f32, [64, 128]]]
+  - id: p_mlp_gate_proj_weight
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: mlp.gate_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [128, 64]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_mlp_gate_proj_weight, f32, [128, 64]]]
+  - id: p_mlp_up_proj_weight
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: mlp.up_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [128, 64]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_mlp_up_proj_weight, f32, [128, 64]]]
+  - id: p_o_proj_weight
+    op: constant
+    attrs:
+      name: p_o_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: o_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [64, 64]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_o_proj_weight, f32, [64, 64]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [attn_out, p_o_proj_weight]
+    outputs: [[linear, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: p_post_attention_layernorm_weight
+    op: constant
+    attrs:
+      name: p_post_attention_layernorm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: post_attention_layernorm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [64]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_post_attention_layernorm_weight, f32, [64]]]
+  - id: p_post_feedforward_layernorm_weight
+    op: constant
+    attrs:
+      name: p_post_feedforward_layernorm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: post_feedforward_layernorm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [64]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_post_feedforward_layernorm_weight, f32, [64]]]
+  - id: p_pre_feedforward_layernorm_weight
+    op: constant
+    attrs:
+      name: p_pre_feedforward_layernorm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: pre_feedforward_layernorm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [64]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_pre_feedforward_layernorm_weight, f32, [64]]]
+  - id: pow_1_c1
+    op: constant
+    attrs:
+      name: pow_1_c1
+      value: 2.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[pow_1_c1, f32, [1]]]
+  - id: pow_1_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [pow_1_c1]
+    outputs: [[pow_1_c1_bc, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: pow_2_c1
+    op: constant
+    attrs:
+      name: pow_2_c1
+      value: 2.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[pow_2_c1, f32, [1]]]
+  - id: pow_2_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [pow_2_c1]
+    outputs: [[pow_2_c1_bc, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: pow_3_c1
+    op: constant
+    attrs:
+      name: pow_3_c1
+      value: 2.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[pow_3_c1, f32, [1]]]
+  - id: pow_3_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [pow_3_c1]
+    outputs: [[pow_3_c1_bc, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: residual
+    op: input
+    outputs: [[residual, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: to
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}], select: null}}
+    inputs: [linear]
+    outputs: [[to, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: pow_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: pow}}
+    inputs: [to, pow_1_c1_bc]
+    outputs: [[pow_1, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: mean
+    op: torch.mean
+    attrs: {axis: -1}
+    inputs: [pow_1]
+    outputs: [[mean, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: add
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [mean, add_c1_bc]
+    outputs: [[add, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: rsqrt
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: rsqrt}}
+    inputs: [add]
+    outputs: [[rsqrt, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: rsqrt_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [rsqrt]
+    outputs: [[rsqrt_bc, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: mul
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [to, rsqrt_bc]
+    outputs: [[mul, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: to_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 64}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}], select: null}}]}
+    inputs: [p_post_attention_layernorm_weight]
+    outputs: [[to_1, f32, [64]]]
+  - id: add_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [to_1, add_1_c1_bc]
+    outputs: [[add_1, f32, [64]]]
+  - id: add_1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_1}], select: null}}]}
+    inputs: [add_1]
+    outputs: [[add_1_bc, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: mul_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [mul, add_1_bc]
+    outputs: [[mul_1, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: to_3
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 64}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}], select: null}}]}
+    inputs: [p_pre_feedforward_layernorm_weight]
+    outputs: [[to_3, f32, [64]]]
+  - id: add_4
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [to_3, add_4_c1_bc]
+    outputs: [[add_4, f32, [64]]]
+  - id: add_4_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_1}], select: null}}]}
+    inputs: [add_4]
+    outputs: [[add_4_bc, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: to_5
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 64}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}], select: null}}]}
+    inputs: [p_post_feedforward_layernorm_weight]
+    outputs: [[to_5, f32, [64]]]
+  - id: add_6
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [to_5, add_6_c1_bc]
+    outputs: [[add_6, f32, [64]]]
+  - id: add_6_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_1}], select: null}}]}
+    inputs: [add_6]
+    outputs: [[add_6_bc, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: type_as
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}], select: null}}
+    inputs: [mul_1]
+    outputs: [[type_as, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: add_2
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [residual, type_as]
+    outputs: [[add_2, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: to_2
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}], select: null}}
+    inputs: [add_2]
+    outputs: [[to_2, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: pow_2
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: pow}}
+    inputs: [to_2, pow_2_c1_bc]
+    outputs: [[pow_2, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: mean_1
+    op: torch.mean
+    attrs: {axis: -1}
+    inputs: [pow_2]
+    outputs: [[mean_1, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: add_3
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [mean_1, add_3_c1_bc]
+    outputs: [[add_3, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: rsqrt_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: rsqrt}}
+    inputs: [add_3]
+    outputs: [[rsqrt_1, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: rsqrt_1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [rsqrt_1]
+    outputs: [[rsqrt_1_bc, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: mul_2
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [to_2, rsqrt_1_bc]
+    outputs: [[mul_2, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: mul_3
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [mul_2, add_4_bc]
+    outputs: [[mul_3, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: type_as_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}], select: null}}
+    inputs: [mul_3]
+    outputs: [[type_as_1, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: linear_1
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [type_as_1, p_mlp_gate_proj_weight]
+    outputs: [[linear_1, f32, [{sym: num_tokens, hint: 512}, 128]]]
+  - id: gelu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: gelu_tanh}}
+    inputs: [linear_1]
+    outputs: [[gelu, f32, [{sym: num_tokens, hint: 512}, 128]]]
+  - id: linear_2
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [type_as_1, p_mlp_up_proj_weight]
+    outputs: [[linear_2, f32, [{sym: num_tokens, hint: 512}, 128]]]
+  - id: mul_4
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [gelu, linear_2]
+    outputs: [[mul_4, f32, [{sym: num_tokens, hint: 512}, 128]]]
+  - id: linear_3
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [mul_4, p_mlp_down_proj_weight]
+    outputs: [[linear_3, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: to_4
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}], select: null}}
+    inputs: [linear_3]
+    outputs: [[to_4, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: pow_3
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: pow}}
+    inputs: [to_4, pow_3_c1_bc]
+    outputs: [[pow_3, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: mean_2
+    op: torch.mean
+    attrs: {axis: -1}
+    inputs: [pow_3]
+    outputs: [[mean_2, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: add_5
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [mean_2, add_5_c1_bc]
+    outputs: [[add_5, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: rsqrt_2
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: rsqrt}}
+    inputs: [add_5]
+    outputs: [[rsqrt_2, f32, [{sym: num_tokens, hint: 512}, 1]]]
+  - id: rsqrt_2_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [rsqrt_2]
+    outputs: [[rsqrt_2_bc, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: mul_5
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [to_4, rsqrt_2_bc]
+    outputs: [[mul_5, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: mul_6
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [mul_5, add_6_bc]
+    outputs: [[mul_6, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: type_as_2
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: num_tokens, hint: 512}}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}], select: null}}
+    inputs: [mul_6]
+    outputs: [[type_as_2, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: add_7
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [to_2, type_as_2]
+    outputs: [[add_7, f32, [{sym: num_tokens, hint: 512}, 64]]]
 configs:
 - program: 0
   target:
@@ -9093,6 +9653,54 @@ configs:
       WORK: ''
       RASTER: ''
     identity: 6f2a26951cee9656fccca30235c6cc7a04183e8110d0887efddea4f0fea48de5
+- program: 33
+  target:
+    loop: 63
+  realizations:
+  - name: w-gemma3.post.k_linear_mean_reduce_db070d.6d15675aa592
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: w-gemma3.post.k_linear_mean_reduce_db070d.6d15675aa592.15af95dcd10a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 15af95dcd10a20dcd26ca1e3061063a56becf6101afe28fc37d0f3d5b9e784d6
+  - name: w-gemma3.post.k_linear_mean_reduce_db070d.6d15675aa592.2f5e78345790
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/map.1/reduce.1/inner: ''
+      TILE@map.1/map.2/reduce.1/inner: ''
+      TILE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.1/inner: ''
+      TILE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.5/map.2/reduce.1/inner: ''
+      TILE@map.2/inner: ''
+      TILE@map.3/inner: ''
+      TILE@map.3/inner.1/map.1/reduce.2/map.1/inner: ''
+      REDUCE@map.1/map.1/reduce: ''
+      REDUCE@map.1/map.1/reduce.1/inner: ''
+      REDUCE@map.1/map.2/reduce: ''
+      REDUCE@map.1/map.2/reduce.1/inner: ''
+      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/reduce: ''
+      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.1/inner: ''
+      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.5/map.2/reduce: ''
+      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.5/map.2/reduce.1/inner: ''
+      REDUCE@map.2/inner: ''
+      REDUCE@map.3/inner: ''
+      REDUCE@map.3/inner.1/map.1/reduce: ''
+      REDUCE@map.3/inner.1/map.1/reduce.2/map.1/inner: ''
+      STAGE@map.1/map.1/reduce.1/inner: ''
+      STAGE@map.1/map.2/reduce.1/inner: ''
+      STAGE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.1/inner: ''
+      STAGE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.5/map.2/reduce.1/inner: ''
+      STAGE@map.2/inner: ''
+      STAGE@map.3/inner: ''
+      STAGE@map.3/inner.1/map.1/reduce.2/map.1/inner: ''
+      WORK: ''
+      RASTER: ''
+    identity: 2f5e78345790fa3f8b281cad072b35dfd1b5de6dedb632b77cf275fef3c0a386
 loops:
 - inputs: [hidden]
   outputs: [reshape_2, reshape, reshape_1]
@@ -19682,4 +20290,957 @@ loops:
       name: k_linear_mean_reduce_bbf59a
     inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [512, 64]], [mul_1, f32, [512, 64]]]
+- inputs: [attn_out, residual]
+  outputs: [add_7]
+  nodes:
+  - id: add_1
+    op: constant
+    attrs:
+      name: add_1
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [64]}
+      source_dtype: f32
+      source_graph:
+        __program__:
+          inputs: []
+          outputs: [add_1]
+          nodes:
+          - id: add_1_c1
+            op: constant
+            attrs:
+              name: add_1_c1
+              value: 1.0
+              context_value: null
+              load_ops: {__tuple__: []}
+              source_path: null
+              source_parts: {__tuple__: []}
+              source_shape: null
+              source_dtype: null
+              source_graph: null
+            outputs: [[add_1_c1, f32, [1]]]
+          - id: add_1_c1_bc
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 64}]}
+              sources:
+                __tuple__:
+                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+            inputs: [add_1_c1]
+            outputs: [[add_1_c1_bc, f32, [64]]]
+          - id: p_post_attention_layernorm_weight
+            op: constant
+            attrs:
+              name: p_post_attention_layernorm_weight
+              value: null
+              context_value: null
+              load_ops: {__tuple__: []}
+              source_path: post_attention_layernorm.weight
+              source_parts: {__tuple__: []}
+              source_shape: {__tuple__: [64]}
+              source_dtype: float32
+              source_graph: null
+            outputs: [[p_post_attention_layernorm_weight, f32, [64]]]
+          - id: to_1
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 64}]}
+              sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}], select: null}}]}
+            inputs: [p_post_attention_layernorm_weight]
+            outputs: [[to_1, f32, [64]]]
+          - id: add_1
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: add}}
+            inputs: [to_1, add_1_c1_bc]
+            outputs: [[add_1, f32, [64]]]
+    outputs: [[add_1, f32, [64]]]
+  - id: add_3_c1
+    op: constant
+    attrs:
+      name: add_3_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_3_c1, f32, [1]]]
+  - id: add_4
+    op: constant
+    attrs:
+      name: add_4
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [64]}
+      source_dtype: f32
+      source_graph:
+        __program__:
+          inputs: []
+          outputs: [add_4]
+          nodes:
+          - id: add_4_c1
+            op: constant
+            attrs:
+              name: add_4_c1
+              value: 1.0
+              context_value: null
+              load_ops: {__tuple__: []}
+              source_path: null
+              source_parts: {__tuple__: []}
+              source_shape: null
+              source_dtype: null
+              source_graph: null
+            outputs: [[add_4_c1, f32, [1]]]
+          - id: add_4_c1_bc
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 64}]}
+              sources:
+                __tuple__:
+                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+            inputs: [add_4_c1]
+            outputs: [[add_4_c1_bc, f32, [64]]]
+          - id: p_pre_feedforward_layernorm_weight
+            op: constant
+            attrs:
+              name: p_pre_feedforward_layernorm_weight
+              value: null
+              context_value: null
+              load_ops: {__tuple__: []}
+              source_path: pre_feedforward_layernorm.weight
+              source_parts: {__tuple__: []}
+              source_shape: {__tuple__: [64]}
+              source_dtype: float32
+              source_graph: null
+            outputs: [[p_pre_feedforward_layernorm_weight, f32, [64]]]
+          - id: to_3
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 64}]}
+              sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}], select: null}}]}
+            inputs: [p_pre_feedforward_layernorm_weight]
+            outputs: [[to_3, f32, [64]]]
+          - id: add_4
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: add}}
+            inputs: [to_3, add_4_c1_bc]
+            outputs: [[add_4, f32, [64]]]
+    outputs: [[add_4, f32, [64]]]
+  - id: add_5_c1
+    op: constant
+    attrs:
+      name: add_5_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_5_c1, f32, [1]]]
+  - id: add_6
+    op: constant
+    attrs:
+      name: add_6
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [64]}
+      source_dtype: f32
+      source_graph:
+        __program__:
+          inputs: []
+          outputs: [add_6]
+          nodes:
+          - id: add_6_c1
+            op: constant
+            attrs:
+              name: add_6_c1
+              value: 1.0
+              context_value: null
+              load_ops: {__tuple__: []}
+              source_path: null
+              source_parts: {__tuple__: []}
+              source_shape: null
+              source_dtype: null
+              source_graph: null
+            outputs: [[add_6_c1, f32, [1]]]
+          - id: add_6_c1_bc
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 64}]}
+              sources:
+                __tuple__:
+                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+            inputs: [add_6_c1]
+            outputs: [[add_6_c1_bc, f32, [64]]]
+          - id: p_post_feedforward_layernorm_weight
+            op: constant
+            attrs:
+              name: p_post_feedforward_layernorm_weight
+              value: null
+              context_value: null
+              load_ops: {__tuple__: []}
+              source_path: post_feedforward_layernorm.weight
+              source_parts: {__tuple__: []}
+              source_shape: {__tuple__: [64]}
+              source_dtype: float32
+              source_graph: null
+            outputs: [[p_post_feedforward_layernorm_weight, f32, [64]]]
+          - id: to_5
+            op: tensor.index_map
+            attrs:
+              out_shape: {__tuple__: [{__dim__: 64}]}
+              sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}], select: null}}]}
+            inputs: [p_post_feedforward_layernorm_weight]
+            outputs: [[to_5, f32, [64]]]
+          - id: add_6
+            op: tensor.elementwise
+            attrs: {op: {__elementwise__: add}}
+            inputs: [to_5, add_6_c1_bc]
+            outputs: [[add_6, f32, [64]]]
+    outputs: [[add_6, f32, [64]]]
+  - id: add_c1
+    op: constant
+    attrs:
+      name: add_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_c1, f32, [1]]]
+  - id: attn_out
+    op: input
+    outputs: [[attn_out, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: gelu_c0
+    op: constant
+    attrs:
+      name: gelu_c0
+      value: 0.7978845608028654
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[gelu_c0, f32, [1]]]
+  - id: gelu_c1
+    op: constant
+    attrs:
+      name: gelu_c1
+      value: 0.044715
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[gelu_c1, f32, [1]]]
+  - id: gelu_half
+    op: constant
+    attrs:
+      name: gelu_half
+      value: 0.5
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[gelu_half, f32, [1]]]
+  - id: gelu_one
+    op: constant
+    attrs:
+      name: gelu_one
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[gelu_one, f32, [1]]]
+  - id: linear_1_wt
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: mlp.gate_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [128, 64]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[linear_1_wt, f32, [64, 128]]]
+  - id: linear_2_wt
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: mlp.up_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [128, 64]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[linear_2_wt, f32, [64, 128]]]
+  - id: linear_3_wt
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: mlp.down_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [64, 128]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[linear_3_wt, f32, [128, 64]]]
+  - id: linear_wt
+    op: constant
+    attrs:
+      name: p_o_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: o_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [64, 64]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[linear_wt, f32, [64, 64]]]
+  - id: mean_1_count
+    op: constant
+    attrs:
+      name: mean_1_count
+      value: 64.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mean_1_count, f32, [1]]]
+  - id: mean_2_count
+    op: constant
+    attrs:
+      name: mean_2_count
+      value: 64.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mean_2_count, f32, [1]]]
+  - id: mean_count
+    op: constant
+    attrs:
+      name: mean_count
+      value: 64.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mean_count, f32, [1]]]
+  - id: residual
+    op: input
+    outputs: [[residual, f32, [{sym: num_tokens, hint: 512}, 64]]]
+  - id: add_7
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: mean_1_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in0]}, dtype: null}
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: gelu_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in2]}
+            input: add_3_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in3]}
+            input: gelu_c0
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in4]}
+            input: mean_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in5]}
+            input: gelu_half
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in6]}
+            input: gelu_one
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in7]}
+            input: mean_2_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in8]}
+            input: add_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v1, op: {elementwise: reciprocal}, args: {tuple: [in7]}, dtype: null}
+        - class: Load
+          fields:
+            names: {tuple: [in9]}
+            input: add_5_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [in4]}, dtype: null}
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in10]}
+                              input: attn_out
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in11]}
+                              input: linear_wt
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v3, op: {elementwise: multiply}, args: {tuple: [in10, in11]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc0, value: v3, op: {elementwise: add}, dtype: null, axes: {tuple: [a2_s1]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [acc0, acc0]}, dtype: null}
+                    - class: Accum
+                      fields: {name: acc1, value: v4, op: {elementwise: add}, dtype: null, axes: {tuple: [a1_s1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [acc1, v2]}, dtype: null}
+              - class: Assign
+                fields: {name: v6, op: {elementwise: add}, args: {tuple: [in8, v5]}, dtype: null}
+              - {class: Assign, fields: {name: v7, op: {elementwise: rsqrt}, args: {tuple: [v6]}, dtype: null}}
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in12]}
+                              input: attn_out
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in13]}
+                              input: linear_wt
+                              index: {tuple: [{expr: {var: a3}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [in12, in13]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc2, value: v8, op: {elementwise: add}, dtype: null, axes: {tuple: [a3_s1]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [acc2, v7]}, dtype: null}
+                    - class: Load
+                      fields: {names: {tuple: [in14]}, input: add_1, index: {tuple: [{expr: {var: a1}}]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [in14, v9]}, dtype: null}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in15]}
+                        input: residual
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v11, op: {elementwise: add}, args: {tuple: [in15, v10]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [v11, v11]}, dtype: null}
+                    - class: Accum
+                      fields:
+                        name: acc3
+                        value: v12
+                        op: {elementwise: add}
+                        dtype: null
+                        axes: {tuple: [a1_s2]}
+                        base: null
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v13, op: {elementwise: multiply}, args: {tuple: [acc3, v0]}, dtype: null}
+              - class: Assign
+                fields: {name: v14, op: {elementwise: add}, args: {tuple: [in2, v13]}, dtype: null}
+              - class: Assign
+                fields: {name: v15, op: {elementwise: rsqrt}, args: {tuple: [v14]}, dtype: null}
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in16]}
+                                          input: attn_out
+                                          index: {tuple: [{expr: {var: a0}}, {expr: {var: a7}}]}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in17]}
+                                          input: linear_wt
+                                          index: {tuple: [{expr: {var: a7}}, {expr: {var: a6}}]}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v16, op: {elementwise: multiply}, args: {tuple: [in16, in17]}, dtype: null}
+                                      - class: Accum
+                                        fields:
+                                          name: acc4
+                                          value: v16
+                                          op: {elementwise: add}
+                                          dtype: null
+                                          axes: {tuple: [a7_s2]}
+                                          base: null
+                                      - class: Assign
+                                        fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [in16, in17]}, dtype: null}
+                                      - class: Accum
+                                        fields:
+                                          name: acc5
+                                          value: v17
+                                          op: {elementwise: add}
+                                          dtype: null
+                                          axes: {tuple: [a7_s1]}
+                                          base: null
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [acc4, v7]}, dtype: null}
+                                - class: Load
+                                  fields: {names: {tuple: [in18]}, input: add_1, index: {tuple: [{expr: {var: a6}}]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v19, op: {elementwise: multiply}, args: {tuple: [in18, v18]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in19]}
+                                    input: residual
+                                    index: {tuple: [{expr: {var: a0}}, {expr: {var: a6}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v20, op: {elementwise: add}, args: {tuple: [in19, v19]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v21, op: {elementwise: multiply}, args: {tuple: [v15, v20]}, dtype: null}
+                                - class: Load
+                                  fields: {names: {tuple: [in20]}, input: add_4, index: {tuple: [{expr: {var: a6}}]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v22, op: {elementwise: multiply}, args: {tuple: [in20, v21]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in21]}
+                                    input: linear_1_wt
+                                    index: {tuple: [{expr: {var: a6}}, {expr: {var: a5}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v23, op: {elementwise: multiply}, args: {tuple: [in21, v22]}, dtype: null}
+                                - class: Accum
+                                  fields:
+                                    name: acc6
+                                    value: v23
+                                    op: {elementwise: add}
+                                    dtype: null
+                                    axes: {tuple: [a6_s2]}
+                                    base: null
+                                - class: Assign
+                                  fields: {name: v24, op: {elementwise: multiply}, args: {tuple: [acc5, v7]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v25, op: {elementwise: multiply}, args: {tuple: [in18, v24]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v26, op: {elementwise: add}, args: {tuple: [in19, v25]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v27, op: {elementwise: multiply}, args: {tuple: [v15, v26]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v28, op: {elementwise: multiply}, args: {tuple: [in20, v27]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in22]}
+                                    input: linear_2_wt
+                                    index: {tuple: [{expr: {var: a6}}, {expr: {var: a5}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v29, op: {elementwise: multiply}, args: {tuple: [in22, v28]}, dtype: null}
+                                - class: Accum
+                                  fields:
+                                    name: acc7
+                                    value: v29
+                                    op: {elementwise: add}
+                                    dtype: null
+                                    axes: {tuple: [a6_s1]}
+                                    base: null
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v30, op: {elementwise: multiply}, args: {tuple: [acc6, acc6]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v31, op: {elementwise: multiply}, args: {tuple: [acc6, v30]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v32, op: {elementwise: multiply}, args: {tuple: [in1, v31]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v33, op: {elementwise: add}, args: {tuple: [acc6, v32]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v34, op: {elementwise: multiply}, args: {tuple: [in3, v33]}, dtype: null}
+                          - {class: Assign, fields: {name: v35, op: {elementwise: tanh}, args: {tuple: [v34]}, dtype: null}}
+                          - class: Assign
+                            fields: {name: v36, op: {elementwise: multiply}, args: {tuple: [acc6, in5]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v37, op: {elementwise: add}, args: {tuple: [in6, v35]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v38, op: {elementwise: multiply}, args: {tuple: [v36, v37]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v39, op: {elementwise: multiply}, args: {tuple: [acc7, v38]}, dtype: null}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in23]}
+                              input: linear_3_wt
+                              index: {tuple: [{expr: {var: a5}}, {expr: {var: a4}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v40, op: {elementwise: multiply}, args: {tuple: [in23, v39]}, dtype: null}
+                          - class: Accum
+                            fields:
+                              name: acc8
+                              value: v40
+                              op: {elementwise: add}
+                              dtype: null
+                              axes: {tuple: [a5_s1]}
+                              base: null
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v41, op: {elementwise: multiply}, args: {tuple: [acc8, acc8]}, dtype: null}
+                    - class: Accum
+                      fields:
+                        name: acc9
+                        value: v41
+                        op: {elementwise: add}
+                        dtype: null
+                        axes: {tuple: [a4_s1]}
+                        base: null
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v42, op: {elementwise: multiply}, args: {tuple: [acc9, v1]}, dtype: null}
+              - class: Assign
+                fields: {name: v43, op: {elementwise: add}, args: {tuple: [in9, v42]}, dtype: null}
+              - class: Assign
+                fields: {name: v44, op: {elementwise: rsqrt}, args: {tuple: [v43]}, dtype: null}
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a8, extent: {dim: 64}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a9, extent: {dim: 64}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in24]}
+                              input: attn_out
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a9}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in25]}
+                              input: linear_wt
+                              index: {tuple: [{expr: {var: a9}}, {expr: {var: a8}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v45, op: {elementwise: multiply}, args: {tuple: [in24, in25]}, dtype: null}
+                          - class: Accum
+                            fields:
+                              name: acc10
+                              value: v45
+                              op: {elementwise: add}
+                              dtype: null
+                              axes: {tuple: [a9_s1]}
+                              base: null
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v46, op: {elementwise: multiply}, args: {tuple: [acc10, v7]}, dtype: null}
+                    - class: Load
+                      fields: {names: {tuple: [in26]}, input: add_1, index: {tuple: [{expr: {var: a8}}]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a10, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a11, extent: {dim: 64}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a12, extent: {dim: 64}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in27]}
+                                          input: attn_out
+                                          index: {tuple: [{expr: {var: a0}}, {expr: {var: a12}}]}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in28]}
+                                          input: linear_wt
+                                          index: {tuple: [{expr: {var: a12}}, {expr: {var: a11}}]}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v47, op: {elementwise: multiply}, args: {tuple: [in27, in28]}, dtype: null}
+                                      - class: Accum
+                                        fields:
+                                          name: acc11
+                                          value: v47
+                                          op: {elementwise: add}
+                                          dtype: null
+                                          axes: {tuple: [a12_s2]}
+                                          base: null
+                                      - class: Assign
+                                        fields: {name: v48, op: {elementwise: multiply}, args: {tuple: [in27, in28]}, dtype: null}
+                                      - class: Accum
+                                        fields:
+                                          name: acc12
+                                          value: v48
+                                          op: {elementwise: add}
+                                          dtype: null
+                                          axes: {tuple: [a12_s1]}
+                                          base: null
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v49, op: {elementwise: multiply}, args: {tuple: [acc11, v7]}, dtype: null}
+                                - class: Load
+                                  fields: {names: {tuple: [in29]}, input: add_1, index: {tuple: [{expr: {var: a11}}]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v50, op: {elementwise: multiply}, args: {tuple: [in29, v49]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in30]}
+                                    input: residual
+                                    index: {tuple: [{expr: {var: a0}}, {expr: {var: a11}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v51, op: {elementwise: add}, args: {tuple: [in30, v50]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v52, op: {elementwise: multiply}, args: {tuple: [v15, v51]}, dtype: null}
+                                - class: Load
+                                  fields: {names: {tuple: [in31]}, input: add_4, index: {tuple: [{expr: {var: a11}}]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v53, op: {elementwise: multiply}, args: {tuple: [in31, v52]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in32]}
+                                    input: linear_1_wt
+                                    index: {tuple: [{expr: {var: a11}}, {expr: {var: a10}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v54, op: {elementwise: multiply}, args: {tuple: [in32, v53]}, dtype: null}
+                                - class: Accum
+                                  fields:
+                                    name: acc13
+                                    value: v54
+                                    op: {elementwise: add}
+                                    dtype: null
+                                    axes: {tuple: [a11_s2]}
+                                    base: null
+                                - class: Assign
+                                  fields: {name: v55, op: {elementwise: multiply}, args: {tuple: [acc12, v7]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v56, op: {elementwise: multiply}, args: {tuple: [in29, v55]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v57, op: {elementwise: add}, args: {tuple: [in30, v56]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v58, op: {elementwise: multiply}, args: {tuple: [v15, v57]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v59, op: {elementwise: multiply}, args: {tuple: [in31, v58]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in33]}
+                                    input: linear_2_wt
+                                    index: {tuple: [{expr: {var: a11}}, {expr: {var: a10}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v60, op: {elementwise: multiply}, args: {tuple: [in33, v59]}, dtype: null}
+                                - class: Accum
+                                  fields:
+                                    name: acc14
+                                    value: v60
+                                    op: {elementwise: add}
+                                    dtype: null
+                                    axes: {tuple: [a11_s1]}
+                                    base: null
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v61, op: {elementwise: multiply}, args: {tuple: [acc13, acc13]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v62, op: {elementwise: multiply}, args: {tuple: [acc13, v61]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v63, op: {elementwise: multiply}, args: {tuple: [in1, v62]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v64, op: {elementwise: add}, args: {tuple: [acc13, v63]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v65, op: {elementwise: multiply}, args: {tuple: [in3, v64]}, dtype: null}
+                          - {class: Assign, fields: {name: v66, op: {elementwise: tanh}, args: {tuple: [v65]}, dtype: null}}
+                          - class: Assign
+                            fields: {name: v67, op: {elementwise: multiply}, args: {tuple: [acc13, in5]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v68, op: {elementwise: add}, args: {tuple: [in6, v66]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v69, op: {elementwise: multiply}, args: {tuple: [v67, v68]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v70, op: {elementwise: multiply}, args: {tuple: [acc14, v69]}, dtype: null}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in34]}
+                              input: linear_3_wt
+                              index: {tuple: [{expr: {var: a10}}, {expr: {var: a8}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v71, op: {elementwise: multiply}, args: {tuple: [in34, v70]}, dtype: null}
+                          - class: Accum
+                            fields:
+                              name: acc15
+                              value: v71
+                              op: {elementwise: add}
+                              dtype: null
+                              axes: {tuple: [a10_s1]}
+                              base: null
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v72, op: {elementwise: multiply}, args: {tuple: [in26, v46]}, dtype: null}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in35]}
+                        input: residual
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a8}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v73, op: {elementwise: multiply}, args: {tuple: [acc15, v44]}, dtype: null}
+                    - class: Load
+                      fields: {names: {tuple: [in36]}, input: add_6, index: {tuple: [{expr: {var: a8}}]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v74, op: {elementwise: add}, args: {tuple: [in35, v72]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v75, op: {elementwise: multiply}, args: {tuple: [in36, v73]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v76, op: {elementwise: add}, args: {tuple: [v74, v75]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: add_7
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a8}}]}
+                        values: {tuple: [v76]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_linear_mean_reduce_db070d
+    inputs: [mean_1_count, gelu_c1, add_3_c1, gelu_c0, mean_count, gelu_half, gelu_one, mean_2_count, add_c1, add_5_c1, attn_out, linear_wt, add_1,
+      residual, add_4, linear_1_wt, linear_2_wt, linear_3_wt, add_6]
+    outputs: [[add_7, f32, [{sym: num_tokens, hint: 512}, 64]]]
 gpu_name: NVIDIA GeForce RTX 5090

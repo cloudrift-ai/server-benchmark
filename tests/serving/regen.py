@@ -1,4 +1,4 @@
-"""Regenerate the serving-generation lane's golden — ``python -m tests.serving.generation.regen``.
+"""Regenerate the serving-generation lane's golden — ``python -m tests.serving.regen``.
 
 Builds every runner in :data:`helpers.RUNNERS` once, capturing the graph handed to each plan
 compile, and writes them as one inventory completed to **one entry per kernel of the set** — the
@@ -21,14 +21,16 @@ logger = logging.getLogger(__name__)
 
 
 def _captured_graphs() -> dict:
-    """Every distinct graph the table's runners compile, keyed by a readable name.
+    """Every distinct graph this lane compiles, keyed by a readable name.
 
-    The capture rides the plan cache: ``PlanTemplateCache.resolve`` sees each graph on its way to
-    the compiler, which is the one seam every split's plan passes through.
+    The runner shapes come through the plan cache — ``PlanTemplateCache.resolve`` sees each graph on
+    its way to the compiler, the one seam every split's plan passes through — and the attention-split
+    wrappers are traced directly, since they never reach a runner.
+
     """
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
     from emmy.serving.gen_runner import EmmyGenRunner
-    from tests.serving.generation import helpers
+    from tests.serving import helpers
 
     graphs: dict = {}
 
@@ -48,6 +50,9 @@ def _captured_graphs() -> dict:
         before = len(graphs)
         EmmyGenRunner.from_model(make_model(), plan_cache=cache, **kwargs)
         logger.info("[regen]   %s contributed %d new graph(s) (%d total)", runner_id, len(graphs) - before, len(graphs))
+    for case_id in helpers.WRAPPERS:
+        logger.info("[regen] tracing wrapper %s ...", case_id)
+        graphs[f"w-{case_id}"] = helpers.wrapper_graph(case_id)
     return graphs
 
 
@@ -57,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
     from emmy.compiler.pipeline.search.working_golden import write_trace_inventories
     from tests.compiler.realization import helpers as corpus
-    from tests.serving.generation import helpers
+    from tests.serving import helpers
 
     destination = Path(helpers.GOLDEN)
     graphs = _captured_graphs()

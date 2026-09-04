@@ -27,7 +27,7 @@ def test_gen_pack_second_boot_hits_and_matches(tmp_path, monkeypatch, caplog):
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    from tests.serving.generation import helpers
+    from tests.serving import helpers
 
     monkeypatch.setenv("EMMY_PACK_DIR", str(tmp_path))
     # No session plan cache: this test's whole claim is that the FIRST boot compiles and the
@@ -74,7 +74,7 @@ def test_gen_pack_key_separates_quantized_rungs(tmp_path, monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    from tests.serving.generation import helpers
+    from tests.serving import helpers
 
     monkeypatch.setenv("EMMY_PACK_DIR", str(tmp_path))
     shape = "qwen3.l1.b16"

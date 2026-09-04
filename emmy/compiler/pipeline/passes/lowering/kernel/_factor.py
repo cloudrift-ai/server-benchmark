@@ -396,8 +396,12 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         )
         # The leading (batch / ksplit) grid axes ride untiled below the ``(m, n)`` cell — the GRID's
         # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
-        # per-cell rename's shared coordinates) from here, where the kernel grid is in hand.
-        lead = grid[:-2]
+        # per-cell rename's shared coordinates) from here, where the kernel grid is in hand. Every
+        # grid axis the pair does NOT bind rides, which is the grid's trailing two only when the
+        # placement orients onto them: merged sibling linears put two distinct output widths on one
+        # grid (N 32 beside N 64), the pair binds one of them, and a positional ``grid[:-2]`` then
+        # dropped the other — leaving an axis no block, unit or lead var defines.
+        lead = tuple(axis for axis in grid if axis.name not in {bound.name for bound in tile.axes})
         carried = {}
         state_decls, reduce_region = reduce_codegen(
             c,

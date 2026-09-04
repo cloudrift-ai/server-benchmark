@@ -6,42 +6,11 @@ from dataclasses import dataclass
 
 from frozendict import frozendict
 
-from emmy.compiler.ir.pure.fold import Fold, cone_seam, deep_reads, edge_free_axes, is_contraction
-from emmy.compiler.ir.pure.tree import walk
-from emmy.compiler.ir.stmt import Accum, Body
+from emmy.compiler.ir.pure.fold import ContractionView, Fold
+from emmy.compiler.ir.stmt import Body
 
 type NodeId = int
 type EdgeSite = tuple[NodeId, int]
-
-
-@dataclass(frozen=True)
-class Projection:
-    """A zero-axis Fold."""
-
-
-@dataclass(frozen=True)
-class Contraction:
-    """A reduction's bilinear operand roles, expressed as operand positions."""
-
-    a: int
-    channels: tuple[int, ...]
-
-    def __post_init__(self) -> None:
-        if type(self.a) is not int or self.a < 0:
-            raise ValueError(f"contraction A role must be a non-negative operand position, got {self.a!r}")
-        if any(type(position) is not int or position < 0 for position in self.channels):
-            raise ValueError("contraction channel roles must be non-negative operand positions")
-
-
-@dataclass(frozen=True)
-class Reduction:
-    """An iterating Fold, optionally viewed as a contraction."""
-
-    contraction: Contraction | None = None
-
-    def __post_init__(self) -> None:
-        if self.contraction is not None and not isinstance(self.contraction, Contraction):
-            raise TypeError("reduction contraction capability must be a Contraction or None")
 
 
 @dataclass(frozen=True)
@@ -61,46 +30,6 @@ class ContractionFacts:
     need_step: bool = False
 
 
-type NodeView = Projection | Reduction
-
-
-def node_view(node: Fold) -> NodeView:
-    """Classify one Fold without target or schedule input."""
-    if node.axis is None:
-        return Projection()
-    if not is_contraction(node):
-        return Reduction()
-    return Reduction(
-        Contraction(
-            a=_operand_position(node, node.a),
-            channels=tuple(_operand_position(node, channel.b) for channel in node.channels),
-        )
-    )
-
-
-def _sibling_fragment_edges(owner) -> dict[int, NodeId]:
-    """Map each sibling-step consumer to the one contraction producing its computed edge."""
-    out = {}
-    for site in owner.sites:
-        node = site.node
-        if node.axis is None or is_contraction(node) or node.combine is None:
-            continue
-        steps = node.step_stmts()
-        states = set(node.combine.results)
-        for position, consumer in ((i, stmt) for i, stmt in enumerate(steps) if is_contraction(stmt)):
-            accumulated = any(
-                isinstance(stmt, Accum) and stmt.name in states and stmt.value in consumer.defines() for stmt in steps[position + 1 :]
-            )
-            reads = {name for edge in consumer.operands if isinstance(edge, Fold) for name in deep_reads(edge.lower())}
-            if not accumulated or not reads:
-                continue
-            cone = Body(tuple(steps[:position])).backward_cone(reads)
-            producers = tuple(stmt for stmt in cone.members if is_contraction(stmt))
-            if len(producers) == 1:
-                out[id(consumer)] = owner.node_id(producers[0])
-    return out
-
-
 def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
     """Derive every contraction's :class:`ContractionFacts` from ``owner``'s term alone.
 
@@ -108,42 +37,40 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
     read through ``nodes`` / ``node_sites`` / ``views`` / ``node_at`` / ``node_id`` / ``parents`` /
     ``derived``, so this layer states the reading without importing the tile layer that owns it.
     """
-    sibling = _sibling_fragment_edges(owner)
     facts = {}
     for site in range(len(owner.sites)):
         view = owner.views[site]
-        if not isinstance(view, Reduction) or view.contraction is None:
+        if view.as_contraction() is None:
             continue
-        record = owner.sites[site]
-        node, parent = record.node, record.parent
-        if (
-            record.derived
-            and node.axis.extent.is_static
-            and node.axis.extent.as_static() == 1
-            and isinstance(parent, Fold)
-            and parent.axis is not None
-        ):
-            # a derived singleton marker: the enclosing Fold owns the K sweep, and the seam it
-            # bridges is that Fold's own leading state rather than a cone read off this node
-            assert parent.combine is not None and node.combine is not None
-            seam = ((), (), tuple(parent.combine.results[: -len(node.combine.results)]))
-            k_axis = parent.axis
-        else:
-            seam = cone_seam(node.a, node.axis.name) if isinstance(node.a, Fold) else None
-            k_axis = node.axis
-        producer = None
-        if isinstance(node.a, Fold):
-            nested = tuple(visit.node for visit in walk(node.a) if is_contraction(visit.node) and k_axis.name in edge_free_axes(visit.node))
-            producer = nested[0] if len(nested) == 1 else None
-        need = sibling.get(id(node))
+        node = owner.sites[site].node
+        computed = tuple(edge for edge in node.operands if edge.as_slab() is None)
+        seam = cone_seam(computed[0], node.axis, owner.axes) if computed else None
+        k_axis = owner.axis_of(node.axis)
+        # The nested contraction this one consumes — sought over the operand edges, which is where
+        # a term's children are. A role was a position into that same tuple, so naming one bought
+        # nothing the walk does not already have.
+        nested = tuple(
+            term
+            for edge in node.operands
+            if edge.as_slab() is None
+            for term in _terms(edge)
+            if term.as_contraction() is not None and k_axis.name in term.free_axes
+        )
+        producer = nested[0] if len(nested) == 1 else None
         facts[site] = ContractionFacts(
             k_axis=k_axis,
             seam=seam,
             producer=producer,
-            need=need if need is not None else (owner.node_id(producer) if producer is not None else None),
-            need_step=need is not None,
+            need=owner.node_id(producer) if producer is not None else None,
         )
     return frozendict(facts)
+
+
+def _terms(term: Fold):
+    """``term`` and every term under it, preorder — the operand tree, which is all a term has."""
+    yield term
+    for edge in term.operands:
+        yield from _terms(edge)
 
 
 def _operand_position(node: Fold, wanted) -> int:
@@ -154,13 +81,47 @@ def _operand_position(node: Fold, wanted) -> int:
 
 
 __all__ = [
-    "Contraction",
+    "ContractionView",
     "ContractionFacts",
     "EdgeSite",
     "NodeId",
-    "NodeView",
-    "Projection",
-    "Reduction",
     "contraction_facts",
-    "node_view",
 ]
+
+
+# ``cone_seam`` lives HERE, not on the term. "Is this edge row-invariant or does it vary with the
+# contraction axis?" is a question about a term's relationship to an enclosing iteration space,
+# which the term does not know — it knows the axis it reduces over and nothing more. It sat in
+# ``ir/pure/fold`` only because the schedule layer needed it and ``ir/tile/ops`` could not be
+# imported from here; the schedule layer is where it belonged all along.
+def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[str, ...]]:
+    """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
+    scanning stmts: the cone is a zero-axis term over ``<the per-cell normalize>`` with ``<the row-invariant
+    prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
+    own zero-axis ``Fold`` over the stat ``Fold``) plus any row-invariant cone prefix, placed there
+    when the cone was built (:func:`make_cone` splits at the K seam once, structurally).
+
+    The split is the K SEAM, on the edges as on the stmts: an edge that never indexes the
+    contraction axis ``k_name`` is row-invariant and belongs to the prologue; a k-VARYING producer
+    edge (the attention score contraction the cone's ``exp(s − m)`` reads) is per-cell and splices
+    into the cell ahead of its first use, like any operand edge. Every fused norm→linear cone
+    carries the single row-invariant edge, so its seam reads exactly as it always did.
+
+    ``stats`` are the prologue results the cell reads — the values bridged through the stat smem
+    rows. Internal definitions are excluded: the prologue and cell may independently use the same
+    local SSA name. A prologue whose results go unread is dropped (nothing to bridge). The ONE seam
+    both sides read: the scheduler sizes the stat rows into the sync stage's smem budget, the
+    materializer fills them (``sync_stat_fill``)."""
+    if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
+        return (), tuple(cone.lift.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
+    # Split by DECLARATION: an edge whose index space holds the reduction axis varies with it and
+    # rides the cell; the rest are row-invariant and lower once into the prologue. Same reading as
+    # ``Fold.lower``'s hoist, asked of the same property.
+    varying = [k_name in edge.free_axes for edge in cone.operands]
+    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower(axes=axes))
+    cell = tuple(stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower(axes=axes)) + tuple(
+        cone.step()
+    )
+    pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in edge.exposes}
+    stats = tuple(sorted(pro_results & Body(cell).ssa_uses))
+    return (pro, cell, stats) if stats else ((), cell, ())

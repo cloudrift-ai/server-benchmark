@@ -214,8 +214,12 @@ a durable deliverable; a golden that is complete and verified can still be an or
 and say nothing, because the golden gate accepts `reference_backend: emmy-greedy`.
 
 1. After tuning, run one per-target torch comparison at deployable optimization:
-   `emmy run --golden-file <working.yaml> --bench --bench-backends eager,tcompile,emmy --strict --json <out>`.
-   Parse that record — it carries `record_knobs`, `status`, `flags` and `lane` per row. Never parse the terminal table.
+   `emmy run --golden <working.yaml> --bench --bench-backends eager,tcompile,emmy --strict --json <out>`.
+   A bare `--golden PATH` walks every realization and benches each name's verified rows or tune winner; add
+   `--realization NAME` to bench one row whatever its measurement state. Parse that record — it carries
+   `record_knobs`, `status`, `flags` and `lane` per row. Never parse the terminal table. The clean rows it benches
+   land in the tune DB as measured evidence, which is how a golden row reaches a deploy: the greedy pick reads one
+   measured-evidence index, and a golden is a measured row in it.
 2. Rank targets by `tcompile_us / emmy_us`, losers first.
 3. Classify each material loss with the taxonomy `tune-kernels` defines. Only an **eligibility or optimization
    lockout**, a pin that refuses or fails to lower, or a pin that runs wrong becomes a case. A **search shortfall** is

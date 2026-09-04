@@ -49,8 +49,8 @@ that records it. Only on a card that can answer: an agent on a machine without i
 ## How it runs
 
 - `conftest.py` — the `bench_pair` fixture, the session-end table, the JSON dump to `.results/`,
-  and the ECharts plot. Benching goes through `emmy run --golden-file … --golden … --bench --ab
-  <schedule> --json` at `-O3`, one fresh process per case: reusing the CLI keeps the
+  and the ECharts plot. Benching goes through `emmy run --golden <case> --realization <name> --bench
+  --json` at `-O3`, one fresh process per case: reusing the CLI keeps the
   eager / `torch.compile` / emmy comparison and the ncu metrics on the code path users invoke
   directly, and reusing the corpus keeps one case inventory in the tree instead of two.
 - `test_corpus.py` — the parametrized walker.

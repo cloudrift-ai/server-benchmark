@@ -82,7 +82,7 @@ def test_an_unstamped_row_is_not_admitted() -> None:
     assert prior._dataset == []
 
 
-@pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@a": "cut"}, {"PLACE@a": "cut", "WORK": "t32"}))
+@pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@inner.1/map": "cut"}, {"PLACE@inner.1/map": "cut", "WORK": "t32"}))
 def test_placement_route_rows_train_but_are_not_measured_deploy_evidence(route) -> None:
     prior = _prior()
     prior.add_rows(

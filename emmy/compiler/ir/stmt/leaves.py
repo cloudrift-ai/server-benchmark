@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from functools import cached_property
 
 from emmy.compiler.dtype import F32, DataType
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, _float_lit
 from emmy.compiler.ir.stmt.base import (
@@ -704,6 +705,37 @@ class Init(Stmt):
         return [f"{_pad(ctx.indent)}{ctx.type_name(self.dtype)} {self.name} = {ctx.identity_literal(self.identity, self.dtype)};"]
 
 
+@dataclass(frozen=True)
+class Const(Stmt):
+    """A pure constant binding: ``<dtype> <name> = <value>;`` — one scalar literal as an SSA name.
+
+    The twisted carrier's injection needs it: online softmax folds each element as ``(score, 1)``,
+    and the denominator's ``1`` must be a def the lift can return, since a lambda's results are
+    names. Pure, so it is legal inside a stored ``Lambda`` body. ``dtype`` is stamped at kernel
+    lowering like an ``Assign``'s — f32 when nothing narrows it.
+    """
+
+    pure = True
+
+    name: str
+    value: float
+    dtype: DataType | None = None
+
+    def deps(self) -> tuple[str, ...]:
+        return ()
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}{self.name} = {self.value:g}"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        dtype = self.dtype or F32
+        ctx.ssa_dtypes[self.name] = dtype.name
+        return [f"{_pad(ctx.indent)}{ctx.type_name(dtype)} {self.name} = {ctx.identity_literal(self.value, dtype)};"]
+
+
 # Map ``ElementwiseImpl`` op names to compound-assignment operator symbols
 # used by ``Write.pretty()`` for reduce-writes (split-K partial accumulation).
 _REDUCE_OP_SYMBOL = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
@@ -1012,3 +1044,18 @@ class ZeroPrologue(Stmt):
             f"{p1}for (int _zi = threadIdx.x; _zi < {self.words}; _zi += blockDim.x) _zp_{self.dst}[_zi] = 0;",
             f"{pad}}}",
         ]
+
+
+@dataclass(frozen=True)
+class OutputSpec:
+    """One output write at the kernel boundary — the effect the stored term does not carry.
+    ``write`` is the store verbatim (target buffer, index template, stored value names, the atomic
+    flag — holding the ``Write`` whole keeps every field lossless); ``TileOp.output_specs`` owns
+    the tuple. The term places its stores itself (``Fold.lower``), each after the term defining
+    its value; a stream spelled without the term reconstitutes them (``apply_output_specs``).
+    ``sweep`` names the output loop the store rode in the source: the axis a store alone is
+    evaluated over when no term declares it (a broadcast, ``o[j] = acc``), and the loop a stream
+    wraps around the trailing stmts reading it."""
+
+    write: Write
+    sweep: Axis | None = None

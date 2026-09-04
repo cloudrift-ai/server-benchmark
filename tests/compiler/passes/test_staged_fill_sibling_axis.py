@@ -16,11 +16,11 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Literal, Var
-from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _slab_operands, _sync_operands, _tile_base
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import CtaTile
+from tests.compiler.terms import contraction
 
 K16 = "mma_m16n8k16_f16_f32"
 
@@ -79,8 +79,8 @@ def test_sync_transport_async_b_binds_the_sibling_axis():
     ka = Axis("k", Dim(2048))
     a = Load(name="in1", input="x", index=(Var("m"), Var("k")), dtype=F16)
     b = Load(name="in0", input="w", index=(_row_residue(Var("m"), Var("n")), Var("k")), dtype=F16)
-    c = Fold.contraction(k_axis=ka, a=a, channels=(Channel(b=b, acc="acc"),))
+    c = contraction(ka, a, (b, "acc"))
     cta = CtaTile(linear_tid=Var("_t"), n_threads=32)
-    _, _, async_ops, *_ = _sync_operands(c, 128, mn, cta)
+    _, _, async_ops, *_ = _sync_operands(c, 128, mn, cta, k_axis=ka)
     b_op = next(op for op in async_ops if op.tag == "b")
     _assert_sibling_bound(b_op, "m", "m_b")

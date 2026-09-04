@@ -86,7 +86,7 @@ def test_place_only_golden_rows_are_routing_rows() -> None:
         measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "test"},
         ranking=None,
     )
-    assert replace(base, knobs={"PLACE@a": "cut"}).is_routing
+    assert replace(base, knobs={"PLACE@inner.1/map": "cut"}).is_routing
     assert not replace(base, knobs={"TILE": "f4x8", "WORK": "t16x8"}).is_routing
     assert not replace(base, knobs={}).is_routing
 
@@ -101,7 +101,7 @@ def test_rms_norm_cut_pin_splits_statistic_and_scale() -> None:
     assert any("__place_" in node.id for node in kernels)
 
 
-@pytest.mark.parametrize("spelling", ("PLACE", "PLACE@map", "PLACE@a1"))
+@pytest.mark.parametrize("spelling", ("PLACE", "PLACE@inner.1/map"))
 def test_norm_linear_each_closed_cone_pin_lowers(spelling: str) -> None:
     kernels = _kernels(_compile(_norm_linear_graph(), {spelling: "cut"}))
     assert len(kernels) == 2
@@ -110,7 +110,7 @@ def test_norm_linear_each_closed_cone_pin_lowers(spelling: str) -> None:
 
 
 def test_scoped_cut_preserves_every_multi_output_parent_port() -> None:
-    lowered = _compile(_norm_linear_graph(keep_norm=True), {"PLACE@a": "cut"})
+    lowered = _compile(_norm_linear_graph(keep_norm=True), {"PLACE@map.1/inner.1/map": "cut"})
     assert lowered.outputs == ["y", "xn"]
     assert all(lowered.buffer(name) is not None for name in lowered.outputs)
     assert len(_kernels(lowered)) == 2
@@ -133,7 +133,7 @@ def test_pin_naming_no_seam_here_decides_fuse(value: str) -> None:
     """A scoped pin whose site path exists nowhere on this kernel addresses another kernel of a
     composed pinned route, so this kernel FUSES — deterministic, and the unpinned placement fork
     never returns under a pin-driven compile."""
-    lowered = _compile(_rms_graph(), {"PLACE@b": value})
+    lowered = _compile(_rms_graph(), {"PLACE@map.1/inner.2/map": value})
     assert len(_kernels(lowered)) == 1
     assert not any("_place_" in node.id for node in lowered.nodes.values())
 
@@ -148,7 +148,7 @@ def test_contraction_operand_seam_takes_the_output_dtype() -> None:
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import TILE_PASSES
 
-    with pinned_knobs({"PLACE@a": "cut"}):
+    with pinned_knobs({"PLACE@inner.1/map": "cut"}):
         out = Pipeline.build(TILE_PASSES).run(_norm_linear_graph(), ctx=_CTX)
     workspaces = [node for node in out.nodes.values() if "_place_" in node.id and isinstance(node.op, (LoopOp, TileOp))]
     assert workspaces, [node.id for node in out.nodes.values()]

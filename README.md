@@ -48,13 +48,13 @@ emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048,
 # Trace a dynamic model layer into an unmeasured working golden for remote tuning
 emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.yaml
 # Measure proposed rows, then spend the remaining per-kernel budget on MCTS
-emmy tune --golden-file _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
-# Run every working-golden target (add --golden NAME to select one)
-emmy run --golden-file _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/results
+emmy tune --golden _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
+# Bench every realization and record the measurements as deploy evidence (add --realization NAME to select one)
+emmy run --golden _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/results
 # Capture one symbolic serving inventory with every release realization, then validate it on the pinned GPU
 emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
   -o _tune/gemma/working.yaml
-emmy eval golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
+emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
 

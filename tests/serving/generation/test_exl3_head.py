@@ -57,6 +57,7 @@ def test_coded_head_rejects_ambiguous_marker_and_bad_storage():
 
 
 @requires_cuda
+@pytest.mark.xfail(strict=True, reason="the EXL3 gather index still reads as a coordinate on the closed-term lift (PR #699)")
 def test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers():
     import torch
 

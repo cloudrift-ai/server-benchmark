@@ -5,9 +5,8 @@ from importlib import import_module
 
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole, Window
+from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.pure import Channel, Fold
 from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work, schedule
 from emmy.compiler.ir.schedule import classic_projection as classic
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
@@ -23,6 +22,7 @@ from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from tests.compiler.helpers import enumerate_classic_reference
+from tests.compiler.terms import contraction, projection
 
 classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
 
@@ -42,7 +42,7 @@ def _enumerate_context(context: ScheduleContext):
 def _context(tile, target, domains, *, pins=None):
     return ClassicScheduleContext(tile, target, domains).restrict(
         pins or {},
-        split_consumed=carries_partition(tile.op) or tile.split_consumed,
+        split_consumed=carries_partition(tile) or tile.split_consumed,
         allow_f16_accumulate=False,
         allow_fp8=False,
         validate_pins=target.validate_pins,
@@ -59,9 +59,31 @@ def _schedule_leaves(tile, name, target):
     return tuple(iter_leaves(classic_forks(tile, name, {}, target)))
 
 
+def _pointwise() -> TileOp:
+    """``y[n] = x[n] + x[n]`` — one projection site and no reduce axis: the read stays a statement of
+    the cell, as the lift leaves it for a root nothing reduces over."""
+    n = Axis("n", 8)
+    root = projection((), (Load(name="x", input="x", index=(Var("n"),)), Assign("y", "add", ("x", "x"))), ("y",))
+    return TileOp(op=root, place=Placement(free=(n,)), axes=(n,))
+
+
+def _row_sum(k: Axis, n: Axis) -> TileOp:
+    """``acc[n] = Σ_k x[k]`` — one reduction site over the kernel's ``k``."""
+    root = fold_from_loop(
+        Loop(axis=k, body=Body((Load(name="xv", input="x", index=(Var("k"),)), Accum(name="acc", value="xv", op="add", axes=("k",)))))
+    )
+    return TileOp(op=root, place=Placement(free=(n,)), axes=(n, k))
+
+
+def _matmul(m: Axis, n: Axis, k: Axis, a=None, **fields) -> TileOp:
+    """``acc[m, n] = Σ_k a[m, k] · b[k, n]`` — one contraction site; ``a`` may be a computed edge."""
+    a = a if a is not None else Load(name="a_e", input="a", index=(Var("m"), Var("k")))
+    root = contraction(k, a, (Load(name="b_e", input="b", index=(Var("k"), Var("n"))), "acc"))
+    return TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k), **fields)
+
+
 def test_production_enumeration_is_the_compatible_independent_product() -> None:
-    root = Fold.projection(body=Body((Assign("y", "add", ("x", "x")),)), results=("y",))
-    tile = TileOp(op=root, place=Placement(free=(Axis("n", 8),)))
+    tile = _pointwise()
     target = Context.from_target((12, 0))
     domains = project_classic(tile, target)
     codec = ClassicScheduleCodec(_context(tile, target, domains))
@@ -77,20 +99,7 @@ def test_production_enumeration_is_the_compatible_independent_product() -> None:
 
 
 def test_complete_c_proves_its_singleton_without_changing_domains() -> None:
-    root = fold_from_loop(
-        Loop(
-            axis=Axis("k", 64),
-            body=Body(
-                (
-                    Load(name="xv", input="x", index=(Var("k"),)),
-                    Accum(name="acc", value="xv", op="add", axes=("k",)),
-                )
-            ),
-            role=AxisRole.PLANAR,
-        )
-    )
-    assert root is not None
-    tile = TileOp(op=root, place=Placement(free=(Axis("n", 64),)))
+    tile = _row_sum(Axis("k", 64), Axis("n", 64))
     target = Context.from_target((12, 0))
     domains = project_classic(tile, target)
     context = ClassicScheduleContext(tile, target, domains)
@@ -109,20 +118,7 @@ def test_complete_c_proves_its_singleton_without_changing_domains() -> None:
 
 
 def test_reduction_enumeration_filters_the_independent_product_by_compatibility() -> None:
-    root = fold_from_loop(
-        Loop(
-            axis=Axis("k", 2048),
-            body=Body(
-                (
-                    Load(name="xv", input="x", index=(Var("k"),)),
-                    Accum(name="acc", value="xv", op="add", axes=("k",)),
-                )
-            ),
-            role=AxisRole.PLANAR,
-        )
-    )
-    assert root is not None
-    tile = TileOp(op=root, place=Placement(free=(Axis("n", 512),)))
+    tile = _row_sum(Axis("k", 2048), Axis("n", 512))
     target = Context.from_target((12, 0))
     domains = project_classic(tile, target)
     context = ClassicScheduleContext(tile, target, domains)
@@ -141,12 +137,7 @@ def test_reduction_enumeration_filters_the_independent_product_by_compatibility(
 
 def test_scalar_contraction_enumeration_is_the_compatible_independent_product(monkeypatch) -> None:
     m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
-    root = Fold.contraction(
-        k_axis=k,
-        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
-    )
-    tile = TileOp(op=root, place=Placement(free=(m, n)))
+    tile = _matmul(m, n, k)
     target = Context.from_target((12, 0))
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
     domains = project_classic(tile, target)
@@ -175,20 +166,7 @@ def test_scalar_contraction_enumeration_is_the_compatible_independent_product(mo
 
 
 def test_overwide_reduction_is_in_the_domain_before_c_restricts_it(monkeypatch) -> None:
-    root = fold_from_loop(
-        Loop(
-            axis=Axis("k", 8),
-            body=Body(
-                (
-                    Load(name="xv", input="x", index=(Var("k"),)),
-                    Accum(name="acc", value="xv", op="add", axes=("k",)),
-                )
-            ),
-            role=AxisRole.PLANAR,
-        )
-    )
-    assert root is not None
-    tile = TileOp(op=root, place=Placement(free=(Axis("n", 8),)))
+    tile = _row_sum(Axis("k", 8), Axis("n", 8))
     target = Context.from_target((12, 0))
     overwide = Reduce.of(coop=128)
     monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [overwide])
@@ -211,17 +189,16 @@ def test_overwide_reduction_is_in_the_domain_before_c_restricts_it(monkeypatch) 
 
 def test_multi_channel_contraction_domain_contains_per_cell_and_warp_compute_fill() -> None:
     m, n, k = Axis("m", 16), Axis("n", 16), Axis("k", 16)
-    root = Fold.contraction(
-        k_axis=k,
-        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        channels=(
-            Channel(b=Load(name="b0_e", input="b0", index=(Var("k"), Var("n"))), acc="acc0"),
-            Channel(b=Load(name="b1_e", input="b1", index=(Var("k"), Var("n"))), acc="acc1"),
-        ),
+    root = contraction(
+        k,
+        Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
+        (Load(name="b0_e", input="b0", index=(Var("k"), Var("n"))), "acc0"),
+        (Load(name="b1_e", input="b1", index=(Var("k"), Var("n"))), "acc1"),
     )
     tile = TileOp(
         op=root,
         place=Placement(free=(m, n)),
+        axes=(m, n, k),
         inputs={name: Tensor(name, (16, 16), "f16") for name in ("a", "b0", "b1")},
         outputs={"out": Tensor("out", (16, 16), "f16")},
     )
@@ -245,14 +222,10 @@ def test_multi_channel_contraction_domain_contains_per_cell_and_warp_compute_fil
 
 def test_tensor_core_enumeration_is_the_compatible_independent_product(monkeypatch) -> None:
     m, n, k = Axis("m", 128), Axis("n", 128), Axis("k", 132)
-    root = Fold.contraction(
-        k_axis=k,
-        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
-    )
-    tile = TileOp(
-        op=root,
-        place=Placement(free=(m, n)),
+    tile = _matmul(
+        m,
+        n,
+        k,
         inputs={"a": Tensor("a", (128, 132), "f16"), "b": Tensor("b", (132, 128), "f16")},
         outputs={"out": Tensor("out", (128, 128), "f16")},
     )
@@ -284,14 +257,10 @@ def test_tensor_core_enumeration_is_the_compatible_independent_product(monkeypat
 def test_producer_band_is_a_restricted_kernel_domain_choice(monkeypatch) -> None:
     """Producer bands belong to the fixed kernel factor; edge compatibility admits only TMA."""
     m, n, k = Axis("m", 128), Axis("n", 128), Axis("k", 128)
-    root = Fold.contraction(
-        k_axis=k,
-        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
-    )
-    tile = TileOp(
-        op=root,
-        place=Placement(free=(m, n)),
+    tile = _matmul(
+        m,
+        n,
+        k,
         inputs={"a": Tensor("a", (128, 128), "f16"), "b": Tensor("b", (128, 128), "f16")},
         outputs={"out": Tensor("out", (128, 128), "f16")},
     )
@@ -339,14 +308,10 @@ def test_producer_band_is_a_restricted_kernel_domain_choice(monkeypatch) -> None
 def test_schedule_parameters_restrict_algorithm_one_without_changing_domains(monkeypatch) -> None:
     """Exact parameters preserve the factors and prune only context composition."""
     m, n, k = Axis("m", 128), Axis("n", 128), Axis("k", 128)
-    root = Fold.contraction(
-        k_axis=k,
-        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
-    )
-    tile = TileOp(
-        op=root,
-        place=Placement(free=(m, n)),
+    tile = _matmul(
+        m,
+        n,
+        k,
         inputs={"a": Tensor("a", (128, 128), "f16"), "b": Tensor("b", (128, 128), "f16")},
         outputs={"out": Tensor("out", (128, 128), "f16")},
     )
@@ -388,13 +353,12 @@ def test_schedule_parameters_restrict_algorithm_one_without_changing_domains(mon
 
 
 def test_bare_kernel_parameter_applies_when_scoped_pin_targets_another_kernel() -> None:
-    root = Fold.projection(body=Body((Assign("y", "add", ("x", "x")),)), results=("y",))
-    tile = TileOp(op=root, place=Placement(free=(Axis("n", 8),)))
+    tile = _pointwise()
     target = Context.from_target((12, 0))
     domains = project_classic(tile, target)
     pins = {family: () for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
     pins["WORK"] = (("WORK", "w1x1"),)
-    pins["TILE"] = (("TILE@n9", "mma_m16n8k16_f16_f32/f2x2/k2"),)
+    pins["TILE"] = (("TILE@map.10/inner", "mma_m16n8k16_f16_f32/f2x2/k2"),)
 
     c = _context(tile, target, domains, pins=pins)
 
@@ -403,8 +367,7 @@ def test_bare_kernel_parameter_applies_when_scoped_pin_targets_another_kernel() 
 
 def test_union_parameter_ignores_a_global_value_unsupported_by_this_kernel() -> None:
     """A graph-wide pin may target a sibling kernel in a union compile."""
-    root = Fold.projection(body=Body((Assign("y", "add", ("x", "x")),)), results=("y",))
-    tile = TileOp(op=root, place=Placement(free=(Axis("n", 8),)))
+    tile = _pointwise()
     target = dc_replace(Context.from_target((12, 0)), validate_pins=False)
     domains = project_classic(tile, target)
     pins = {family: () for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
@@ -416,8 +379,7 @@ def test_union_parameter_ignores_a_global_value_unsupported_by_this_kernel() -> 
 
 
 def test_schedule_restriction_snapshots_parameter_values() -> None:
-    root = Fold.projection(body=Body((Assign("y", "add", ("x", "x")),)), results=("y",))
-    tile = TileOp(op=root, place=Placement(free=(Axis("n", 8),)))
+    tile = _pointwise()
     target = Context.from_target((12, 0))
     domains = project_classic(tile, target)
     pins = {family: () for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
@@ -432,22 +394,10 @@ def test_schedule_restriction_snapshots_parameter_values() -> None:
 
 
 def test_schedule_restriction_drops_the_structural_split_stage_from_c() -> None:
-    root = fold_from_loop(
-        Loop(
-            axis=Axis("k", 2048),
-            body=Body(
-                (
-                    Load(name="xv", input="x", index=(Var("k"),)),
-                    Accum(name="acc", value="xv", op="add", axes=("k",)),
-                )
-            ),
-            role=AxisRole.PLANAR,
-        )
-    )
-    assert root is not None and root.axis is not None
-    parent = root.axis
-    root = dc_replace(root, axis=dc_replace(parent, extent=1024, window=Window(parent=parent, partition=True)))
-    tile = TileOp(op=root, place=Placement(free=(Axis("n", 512),)))
+    # A realized cross-CTA split: the term names ``k``; the kernel's axis table holds the slice
+    # (half the parent's extent) and the partition receipt on its ``Window``.
+    parent = Axis("k", 2048)
+    tile = _row_sum(Axis("k", 1024, window=Window(parent=parent, partition=True)), Axis("n", 512))
     target = Context.from_target((12, 0))
     domains = project_classic(tile, target)
     pins = {family: () for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
@@ -462,14 +412,10 @@ def test_schedule_restriction_drops_the_structural_split_stage_from_c() -> None:
 
 def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
     m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
-    root = Fold.contraction(
-        k_axis=k,
-        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
-    )
-    tile = TileOp(
-        op=root,
-        place=Placement(free=(m, n)),
+    tile = _matmul(
+        m,
+        n,
+        k,
         inputs={"a": Tensor("a", (64, 64), "f32"), "b": Tensor("b", (64, 64), "f32")},
         outputs={"out": Tensor("out", (64, 64), "f32")},
     )
@@ -495,23 +441,15 @@ def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
 
 def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> None:
     m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
-    computed_a = Fold.projection(
-        body=Body(
-            (
-                Load(name="score", input="scores", index=(Var("m"), Var("k"))),
-                Assign(name="prob", op="exp", args=("score",)),
-            )
-        )
+    computed_a = projection(
+        (), (Load(name="score", input="scores", index=(Var("m"), Var("k"))), Assign(name="prob", op="exp", args=("score",)))
     )
-    root = Fold.contraction(
-        k_axis=k,
+    tile = _matmul(
+        m,
+        n,
+        k,
         a=computed_a,
-        channels=(Channel(b=Load(name="value", input="values", index=(Var("k"), Var("n"))), acc="acc"),),
-    )
-    tile = TileOp(
-        op=root,
-        place=Placement(free=(m, n)),
-        inputs={"scores": Tensor("scores", (64, 64), "f16"), "values": Tensor("values", (64, 64), "f16")},
+        inputs={"scores": Tensor("scores", (64, 64), "f16"), "b": Tensor("b", (64, 64), "f16")},
         outputs={"out": Tensor("out", (64, 64), "f16")},
     )
     target = Context.from_target((12, 0))
@@ -520,7 +458,7 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
     domains = project_classic(tile, target)
     context = ClassicScheduleContext(tile, target, domains)
-    contraction = context.tile_op.node_sites[0]
+    site = context.tile_op.node_sites[0]
 
     assert all({choice.stage.spell() for choice in choices} == {"", "d1/smem", "d2/smem"} for choices in domains.edges.values())
     reference = tuple(_reference(tile, target, domains))
@@ -528,6 +466,6 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     codec = ClassicScheduleCodec(_context(tile, target, domains))
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
     assert domains.product_size > len(reference)
-    warp_assignments = tuple(assignment for assignment in reference if assignment.nodes[contraction].tile.is_warp)
+    warp_assignments = tuple(assignment for assignment in reference if assignment.nodes[site].tile.is_warp)
     assert warp_assignments
     assert all({edge.stage.transport for edge in assignment.edges.values()} == {"smem"} for assignment in warp_assignments)

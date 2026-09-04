@@ -32,10 +32,29 @@ configs:
     - add_7
     - linear_6
   realizations:
-  - name: k_linear_86a1f4.e5633fbc1f1b
+  - name: k_linear_0ac86e.4b5154dda667
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: cut
     knobs: {}
-    identity: 66934f327785a2a558139365cdd921cc02901fc063c17fd91dbac91b58809cb7
+    identity: 711e9b149fc36e06ed778ffa509df941cf7eb32508131f9b5cb39af91cc45598
+  - name: k_linear_0ac86e.4b5154dda667.2353a673153f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+    identity: 2353a673153f608e8579cb45e100626dd59bafab9ea678398fd601cdd0f6bb2a
+  - name: k_linear_0ac86e.4b5154dda667.d7d5eced0b40
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: d7d5eced0b400748e32c96d54b7489debb7c99e076c901cfe3eefc63d59633d2

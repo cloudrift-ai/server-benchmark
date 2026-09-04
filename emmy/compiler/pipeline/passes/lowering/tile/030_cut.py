@@ -50,28 +50,13 @@ def _seam_index(seams) -> dict[int, object]:
     return {id(node): seam for seam in seams for node in (seam.node, *(sibling for sibling, _ in seam.siblings))}
 
 
-def _with_required(chosen, by_node: dict[int, object], refuse: frozenset = frozenset()) -> tuple:
-    """Expand chosen seams with every transitively required producer seam."""
-    out = list(chosen)
-    queue = list(out)
-    while queue:
-        for _, producer in queue.pop().requires:
-            required = by_node[id(producer)]
-            if required.spelling in refuse:
-                raise ValueError(f"PLACE pins fuse {required.spelling!r}, the producer a pinned dependent cut requires")
-            if not any(member is required for member in out):
-                out.append(required)
-                queue.append(required)
-    return tuple(out)
-
-
-def _rootmost_plain(seams, all_sites, refuse: frozenset[str] = frozenset()):
-    """Return the root-most plain seam not excluded by a scoped fuse pin."""
-    plain = [seam for seam in seams if not (seam.providers or seam.requires) and seam.spelling not in refuse]
-    if not plain:
+def _rootmost(seams, all_sites, refuse: frozenset[str] = frozenset()):
+    """Return the root-most seam not excluded by a scoped fuse pin."""
+    kept = [seam for seam in seams if seam.spelling not in refuse]
+    if not kept:
         return None
     depth = {id(site.node): site.depth for site in all_sites}
-    return min(plain, key=lambda candidate: depth[id(candidate.node)])
+    return min(kept, key=lambda candidate: depth[id(candidate.node)])
 
 
 def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
@@ -117,10 +102,9 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     cut = [seam for seam in cut if seam.spelling not in refused]
     bare = next(((name, value) for name, value in pins if name == "PLACE"), None)
     if bare is not None and bare[1] == "cut":
-        seam = _rootmost_plain(seams, all_sites, refused)
+        seam = _rootmost(seams, all_sites, refused)
         if seam is not None and not any(chosen is seam for chosen in cut):
             cut.append(seam)
-    cut = list(_with_required(cut, by_node, refuse=refused))
     if cut:
         return tuple(cut), "cut"
     if fused:
@@ -133,10 +117,8 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
         # A bare ``PLACE=cut`` names the placement DECISION, not a site: the codec's primary
         # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (an unclosed
         # cone, a seam whose workspace dtypes stay undetermined), so a bare pin resolves among
-        # the CUTTABLE seams instead: the root-most one.
-        # Provider-closed and dependent seams are scoped-pin-only. A bare pin selects this one
-        # root-most plain seam and is consumed on the fresh pieces.
-        seam = _rootmost_plain(seams, all_sites)
+        # the CUTTABLE seams instead: the root-most one, consumed on the fresh pieces.
+        seam = _rootmost(seams, all_sites)
         if seam is None:
             return ("PLACE",), "fuse"
         return (seam,), value
@@ -168,18 +150,8 @@ def _placement_forks(match: Match, root: Node, tile: TileOp):
         )
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
-    by_node = _seam_index(seams)
-    closures: dict[frozenset[str], tuple] = {}
-    for seam in seams:
-        closure = _with_required((seam,), by_node)
-        closures.setdefault(frozenset(member.spelling for member in closure), closure)
     options.extend(
-        DeferredFork(
-            lambda closure=closure: realize(match, root, closure, renamed),
-            {member.spelling: "cut" for member in closure},
-            structural=True,
-        )
-        for closure in closures.values()
+        DeferredFork(lambda seam=seam: realize(match, root, (seam,), renamed), {seam.spelling: "cut"}, structural=True) for seam in seams
     )
     return options
 

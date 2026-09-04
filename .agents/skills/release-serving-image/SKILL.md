@@ -184,10 +184,14 @@ make serve-goldens MODEL=<id>
 ```
 
 Run it on the config's target GPU after the headroom sweep has sealed the realization matrix. Make invokes
-`emmy eval golden <SERVE_GOLDEN_FILE> --serving-config <config>`; the command extracts model/revision/GPU and the
-realization matrix from that config. It validates the canonical schema and provenance, requires the live GPU and
-compute capability to match, proves every structural target contains every expected static/symbolic precision
-realization, reproduces every row, and audits freshly traced serving twins.
+`emmy eval golden --golden <SERVE_GOLDEN_FILE> --serving-config <config>`; the command extracts model/revision/GPU
+and the realization matrix from that config. It validates the canonical schema and provenance, requires the live
+GPU and compute capability to match, proves every structural target contains every expected static/symbolic
+precision realization, reproduces every row, and audits freshly traced serving twins. The audit asks the one
+question a deploy asks: is each golden row a measured row the greedy pick can use — the golden file is measured
+evidence in the same index the tune DB feeds, not a separate tier. The served image deploys the same way:
+`emmy serve --golden <SERVE_GOLDEN_FILE> --strict-evidence` loads the file's rows as the boot's golden evidence and
+fails the boot rather than let a prediction decide any program's fork.
 
 **Gate: zero missing realizations, FALL-THROUGH, DRIFT, GAP, or compile failures.** Any failure means the image would
 freeze an incomplete or stale evidence set. Stop and use the `tune-kernels` skill to regenerate a symbolic serving

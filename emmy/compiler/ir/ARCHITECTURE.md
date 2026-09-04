@@ -23,18 +23,17 @@ Two vocabularies, and exactly one direction between them.
 A **statement** (`ir/stmt/`) occupies a position in an instruction stream: it has an order, a
 scope, and — for a carrier — a seed the enclosing scope has to declare. A **pure term**
 (`ir/pure/`) denotes a value: it binds names, carries an algebra, substitutes and compares up to
-α-renaming, and has no position at all. `Lambda`, the `Fold` term, the monoid vocabulary (`M` / `component_ops` /
-`rename_combine` / the foldMap spec oracle), the monoid-family registry (`family_of` — every stored combine is
-claimed by a registered family, componentwise or twisted, by generator-output equality) and the exp-family combine
-generators all live on the term side.
+α-renaming, and has no position at all. `Lambda`, the `Fold` term and the twist recipes (`ir/pure/twist.py` — a
+twisted monoid as data, which `Fold.twist` fuses a reduce and the reduce it reads into) all live on the term side.
 
 **A pure class is never a `Stmt` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
-spliced in as one. `algebra.merge_stmts(combine, other)` is the shape of that: the cross-partition
-state⊕state combine IS the fold's stored `combine` applied with its second operand naming the
-partial being merged, and it becomes `Assign` rescale temps plus one `Accum` per state component
-wherever the lowering needs statements (the REG-tree merge, the cooperative tail, the cross-CTA
-finalize loop). There is no `StateMerge` type: the term is the `Lambda` the fold already stores,
+spliced in as one. `Fold.merge(other)` is the shape of that: the cross-partition state⊕state
+combine IS the fold's stored `combine` applied with its second operand naming the partial being
+merged, and it becomes `Assign` rescale temps plus one `Accum` per state component wherever the
+lowering needs statements (the REG-tree merge, the cooperative tail, the cross-CTA finalize loop);
+the serial step is the same derivation at the injected singleton. There is no `StateMerge` type: the term is the
+`Lambda` the fold already stores,
 and a rendering function is not a kind.
 
 The invariant is what stops facts from acquiring a second home. A term that renders itself needs
@@ -61,7 +60,7 @@ subtree per ancestor. `__getstate__` strips them: every memo recomputes after tr
 id-keyed cache carried across processes could collide with a fresh object's id. A memo holds only
 values derivable from the term — never decisions, never mutable policy.
 
-**Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term and pure projection regions; the typed classic
+**Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term; the typed classic
 schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in
 `ir/pure/fold.py` and is not a `Stmt`.
 
@@ -114,15 +113,11 @@ traversal order to produce the same complete set; the lowering implementation mu
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
 the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not
 need to be a statement to get there. The tree already carries it: a composed node is an entry in
-`operands`, and its position is produced by the derivation — `_twisted_derived_step` PLACES each
-inline-node edge before the first stmt that reads its bound name (lift body or merge), and
-`splice_operands` applies the same first-use rule to every other edge. A sibling edge that provides a
-value to another operand inherits that consumer's insertion point and precedes it; otherwise the
-provider could land after its only use when the projection body reads only the consumer. Placement,
-not prepending, is what lets a step whose pure prologue precedes its producer (a loop-invariant scale
-`Load` ahead of attention's score contraction) re-derive to the program it was read from. `Fold.loop`
-passes that mixed term/stmt sequence to `_flatten_nodes` as a plain tuple; the only place terms become
-statements is `Fold.lower()`.
+`operands`, and its position is produced by the derivation — `Fold.lower` places every term of the
+tree at the shallowest scope binding its free coordinates, operands ahead of the term that reads
+them. A loop-invariant scale `Load` ahead of attention's score contraction is that rule at work, not
+a special case: it reads no coordinate the reduce loop binds, so it lands ahead of the loop even
+though the cone that reads it rides inside. The only place terms become statements is `Fold.lower()`.
 
 `Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
 children, `rewrite()` for α-renaming, and `defines()` for its result names.
@@ -133,9 +128,9 @@ in Loop IR until total lift; there is no impure `Lambda` construction path.
 **`nested()` is the STATEMENT protocol, and it deliberately does not reach a Fold's operand edges**
 — it yields the lift body, and nothing at all for a contraction, whose algebra is meant to read as
 edges rather than body deps. Every walk built on it (`Body.iter`, and so `Body.loads` /
-`Body.writes`) therefore answers for a fully flattened stream only. A lowered body is not always
-one: a term survives lowering wherever a region kept it (`ProjectionRegion` holds its cones as
-terms), and a walk over `Fold.lower()` then silently under-reports everything beneath such an edge.
+`Body.writes`) therefore answers for a fully flattened stream only. The STORED tree is not one:
+its operand edges are terms, and a statement walk over a lift body alone silently under-reports
+everything beneath them.
 Ask `loaded_buffers` instead whenever the answer must cover what a consumer of the STORED tree will
 reach — the kernel materializer walks that tree, so anything deciding a node's graph inputs has to
 see what it sees. Asking the lowered view there is what let a cut declare fewer inputs than the
@@ -158,8 +153,8 @@ kernel it produced went on to read.
   `TileOp` holding the structural-IR root `op` directly (`tile/ir` — one `Fold` kind), structural
   placement, one accepted site-indexed `Schedule`, and separate `ClassicMaterialization`
   facts. A kernel's structure is read from each node's derived classification, not a Python kernel
-  type. `010_lift` lifts the `Fold` tree (the loop nest reconstructed on demand, each reduce `Loop`
-  carrying its `AxisRole` — the ONLY loop annotation; the algebra is the term's own
+  type. `010_lift` lifts the `Fold` tree (the loop nest reconstructed on demand; a `Loop` carries no
+  annotation, it folds iff its body carries an `Accum`; the algebra is the term's own
   `lift` / `(init, combine)`) with an UNMAPPED `Placement`;
   The tile schedule maps the free axes onto the grid and decides the reduce `Reduce` via the single
   `REDUCE` codec knob (`g<n>` cta / `coop` (its width in `WORK`) / `r<n>` reg; the
@@ -174,8 +169,8 @@ kernel it produced went on to read.
   `KernelOp` whose body is a `Tile` (the thread-grid decode) over the
   lowered op tree. A cooperative `Reduce` lowers the reduce as a
   `StridedLoop` (lane-strided fold) + the derived algebra-generic
-  cross-thread combine (`_factor.emit_combine`, reading the fold node
-  through the lowering-side `Reduction` view → `WarpShuffle` /
+  cross-thread combine (`_factor.emit_combine`, reading the fold node's
+  stored combine → `WarpShuffle` /
   `Smem`+`Sync`+`TreeHalve`, multi-component for a twisted fold) +
   the projection (a full-row output sweep distributed across the coop
   lanes, a scalar output guarded to lane 0); the `Tile` gains the coop
@@ -302,26 +297,35 @@ carrier-agnostic checks) test exactly that `isinstance(s, (Accum, Mma))`
 tuple — there is no shared base class; the carriers are plain `Stmt`s
 that happen to share the reduce-surface methods. `Accum` / `Mma` expose
 `associative` / `commutative` / `has_identity` traits (`Accum` forwards to its scalar
-`op`; `Mma` reports the additive-fold constants). A reduce `Loop` also carries its
-scheduling `AxisRole` (`loop.role`) — its ONLY annotation, derived when a Fold lowers; the loop holds NO algebra
-payload (the fold's ⊕ lives on the `Fold` node's stored `combine`). Commutativity
+`op`; `Mma` reports the additive-fold constants). A reduce `Loop` carries no annotation — it
+folds iff its body carries an `Accum` — and NO algebra payload (the fold's ⊕ lives on the `Fold` node's
+stored `combine`). Commutativity
 is unused — split/reorder legality is a future cooperative-tier concern, recorded
 structurally when it returns.
 
-**The algebra is in the term, not a tag** (`ir/pure/algebra.py` — the consolidated algebraic
-vocabulary). There is no stored / derived `AlgebraKind` and no op-tree node zoo. The stored tile IR has
-exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
+**The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
+stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
 
-- an OPTIONAL iteration `axis` (`None` = the zero-axis node);
+- an OPTIONAL iteration `axis` (`None` = the zero-axis node) — a NAME, derived: the lift's first param when there is a
+  combine. A term carries no extent at all: the coordinates it reads are the lift's trailing params, and the extent
+  and window of every axis, bound or read, live in the kernel's AXIS TABLE, `TileOp.axes` (the free axes, each
+  reduce axis, a split's slice and partition, a sweep). `Fold.lower` takes the table whole — a reduce loop reads its
+  axis from it, and only the closed program opens the free coordinates' loops — and every kernel-side reader asks
+  `Sched.axis_of` rather than the term. So a term is its function, whatever domain it is evaluated on; a sum over
+  128 and one over 256 are one term under two tables, like a slab under two M.
 - a pure `lift` `Lambda` `λ(k, v₁…vₙ) → S` — the element's SINGLETON state (ι is spelled in the lift;
   softmax's is `(x, 1)`);
 - the monoid's flat `(init, combine)` fields — ONE program, whose results ARE the fold's accumulator names;
-- a symmetric tuple of `operands` — the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params.
+- a symmetric tuple of `operands` — the CLOSED inputs, each an edge, bound POSITIONALLY to the lift params. The
+  params are the term's OWN names (`Fold.bindings` pairs each with its edge and component); nothing above an edge
+  reads how the edge spells its results until the term is rendered — `Fold.applied` is the lift with the binding
+  applied, and `step` / `lower` / the projection-region reader emit that form, so a lowered body reads producer
+  names throughout while a rewrite that swaps an operand touches no name at all.
 
-**`Map` and `Contraction` are DERIVED READINGS, not stored kinds.** Each is a constructor returning a
-`Fold` plus a PREDICATE answering the reading: `axis is None` for the projection, `is_contraction(x)` for the
-bilinear one. A predicate cannot be constructed, subclassed or annotated, which is the point — there is no
-type to dispatch on and no second place for a fact to live.
+**`Map` and `Contraction` are DERIVED READINGS, not stored kinds.** Each is a reading of the stored params:
+`axis is None` for the projection, `as_contraction()` (a `ContractionView`, or `None`) for the bilinear one, beside
+`as_slab()` and `as_reduction()`. A reading cannot be constructed, subclassed or annotated, which is the point —
+there is no type to dispatch on and no second place for a fact to live.
 
 - A ZERO-AXIS fold is what `Map` was: no iteration and no monoid, its `lift` IS the per-cell projection. So
   softmax's normalize and RMSNorm's are one kind composed at two depths.
@@ -333,21 +337,26 @@ type to dispatch on and no second place for a fact to live.
   through the projection wrapper. Scheduling reads these facts directly from the Fold tree; `Fold.lower()` is
   reserved for callers that consume Loop IR.
 - A SCAN is a fold with a per-step `observe` — a pure `λ(axis, *state)` run after each combine whose fresh results
-  only boundary output writes consume (`Fold.observed`, a structural probe like `composed`). Observation makes the
+  only boundary output writes consume. Observation makes the
   stream order-visible, so an observed fold schedules as the serial fold only.
 
-`Fold.lower()` flattens the term to the loop nest: `Fold.loop` reconstructs the annotated reduce `Loop`
-from the stored params, splicing each operand's body before the first read of its bound param. Loops carry NO
-algebra — a `Loop` holds only its `AxisRole` — so the derived nest depends only on what is stored, which is
-what makes every identity of the term a digest of its lowered body — there is no separate term hasher.
-`Fold.structural_key` is the exact-flavor canonical digest of the nest `lower()` derives (the body is the
+`Fold.lower(bound, stores)` flattens the term to the loop nest: a plain loop for every free coordinate the caller
+left unbound, outermost the one the most terms share, the reduce loop of each term innermost, every term placed at
+the shallowest scope binding its free coordinates, and each boundary store right after the term defining its value. Loops carry NO algebra and no annotation, so the derived nest depends
+only on what is stored, which is what makes every identity of the term a digest of its lowered body — there is no
+separate term hasher.
+The `TileOp`'s body identity is the canonical digest of the nest `lower()` derives (the body is the
 term's normal form); the variant key (`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body
 identity with the knobs; and the deploy join key (the deploy identity (`identity_key(with_io=True)`), over
 `TileOp.loop_body`) adds the io fingerprint, so term re-spellings and cluster-sibling ops that lower alike share
 schedule evidence.
 `Fold.deps()` exposes names captured outside the lift params, including captures reached recursively through operand
 edges. A contraction deliberately hides its pure lift body from generic nested-body walks, so this direct dependency
-surface is what keeps an operand's captured statistic ordered before the contraction that reads it.
+surface is what keeps an operand's captured statistic ordered before the contraction that reads it. A read walk
+STOPS at this rollup — the **`Stmt.deps_deep` trait** (a `Stmt`-protocol member beside `pure`, conservative `False`
+default; `Fold` opts in) tells `_member_reads` that `deps()` already answers for the whole subtree, scope-correctly.
+Re-walking the lift's flat namespace cannot see its params, so an operand-supplied name read inside the lift leaked
+out of every enclosing lambda as a phantom capture: an operand-supplied name is not an enclosing capture.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two
@@ -357,55 +366,60 @@ semiring and operand roles prove it; the mma atom tier reads the resulting Fold 
 
 **The `Algebra` bundle is retired** — the stored term keeps exactly ONE spelling of ⊕, the
 `Fold` node's flat `(init, combine)` pair, and everything else derives where it is consumed.
-`ir/pure/algebra.py` is the IR core only: `M` (the componentwise free constructor),
-`component_ops`/`degenerate` (the DEGENERATE-vs-TWISTED shape test on a stored combine — `None` ⇒
-the exp family; no family annotation), `rename_combine` (the SSA-rename lockstep, applied by the
-`Fold` rewrite handler — a twisted program regenerates over the renamed state), and the
-denotational foldMap spec oracle, and `merge_stmts` — the state⊕state combine's one statement
-realization, a function over the stored combine rather than a second term kind. Fold lowering uses
-that realization when an identity lift receives complete states, including a cross-CTA finalize.
-The kernel materializer reads the same algebra through
-`pipeline/passes/lowering/_reduction.Reduction` (`names`, `state_b`, `combine_states`, and
-`merge_stmts`) for cross-thread partitions. A *degenerate* fold is a plain
-`sum`/`max`/`mean` reduce; a *twisted* one is online-softmax; a contraction's algebra is
-the degenerate algebra of its additive fold.
+`Lambda.componentwise` builds a plain fold's combine and `Lambda.components` reads the shape back off any
+stored combine (the componentwise op vector, or `None` for a twisted program — no family annotation); the `Fold`
+rewrite handler renames the combine through `Lambda.rename` in lockstep with the body, and `Fold.canonical`
+renumbers the combine's own names (its second operand, its temps) after the term's, so how a fold spelled its
+accumulators never reaches the form. The state⊕state combine's one statement realization is the term's
+own `Fold.merge(other)`, of which `Fold.step` is the instance at the injected singleton; the kernel
+materializer reads the algebra through `Fold.as_reduction()` (the `ReductionView`: states, the
+second operand's names, the terms, the componentwise op vector or `None` for a twisted combine) and
+`merge` for cross-thread partitions. A *degenerate* fold is a plain `sum`/`max`/`mean` reduce; a
+*twisted* one is online-softmax; a contraction's algebra is the degenerate algebra of its additive
+fold.
 
 The neutral element IS stored, as `Fold.init` — a monoid is `(S, ⊕, e)`, and a term that kept only
 `combine` would be storing a semigroup while calling it a monoid. What is NOT stored is any
 emitter's use of it: a degenerate fold dissolves into its `Accum`s and takes each fold's seed from
-its `op.identity`, and a twisted fold's streaming merge regenerates its own (`_reduction` reads the
-generated merge's `Accum`s, never the stored `init`'s `−inf`). So `init` is algebra the term owes
+its `op.identity`, and a twisted fold's merge derives its own (`Fold.merge` spells the combine as
+`Accum`s, never reading the stored `init`'s `−inf`). So `init` is algebra the term owes
 its own definition, not a value the lowering path consults — which is why removing it would change every
 `structural_key` and, with it, every variant key (`identity_key(with_io=True, with_knobs=True)`) used by tune DB
 measurement replay and the cubin cache, in exchange for a field nothing reads.
 
-**The twisted combine — generated, not hand-authored.** Transport of structure: a monoid `(·, e)`
-conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`. Generation
-(`ir/pure/carrier.py` — `exp_combine_states` / `exp_merge` over `(names, terms)`) builds the naive
-`ψ∘base∘(ψ⁻¹×ψ⁻¹)` combine — associativity inherited from the base monoid for free — then a
-per-family stabilizer rewrites it to the numerically-stable form (distribute the ψ-rescale, fuse
-exponentials, fold identities, DCE/CSE) and a structural certificate asserts every surviving
-`exp` has a `≤ 0` argument. Recognition calls the generators directly (`exp_merge` for the dissolved streaming body,
-`exp_combine_states` for the stored combine) — a twisted `Fold`'s combine IS the generator's
-program (the formation invariant `Fold.__post_init__` asserts), and the component ROLES are shape-derived off
-the terms: component 0 the pivot (score), a literal-`1.0` term a denominator, a value term an
-expectation (the online-softmax pairing builds an expectation channel per joined value fold — a fused
-softmax·V region carries `(m, d, o…)`). **Example** — the
-online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf, 0)`, merge
+**The twisted combine — a recipe, never hand-authored on a term.** Transport of structure: a monoid `(·, e)`
+conjugated by a bijection ψ gives the twisted combine `x ⊕ y = ψ(ψ⁻¹(x) · ψ⁻¹(y))`, associative because the base
+monoid is. A **recipe** (`ir/pure/twist.py`) states exactly that — the base's componentwise ⊕ per state, its
+per-element lift, ψ and ψ⁻¹ — and beside the definition stores what conjugation does not give stably: one pattern per
+channel (the per-element map a dependent reduce's lift must spell, over ROLES — `exp(s − g)` for a denominator,
+`exp(s − g)·v` for an expectation, `(s − g·c)²` for Welford's deviation), what each state is at the singleton (`1`,
+`v`, `0`), any state the two-pass form never had (Welford's count and running mean), and the fused ⊕ in its stable
+spelling: two lambdas over roles for an open channel count (softmax's pivot advance and per-channel rescale, one
+recipe for softmax and flash attention alike) or one lambda over every state pair (Welford's fixed carrier
+`(sum, count, mean, M2)`). `Recipe.program(states)` instantiates either over a fold's state names by renaming, and
+the definition certifies the data: the program is the conjugate of the base on random states, the seeds are the base
+identities under ψ⁻¹, the injections are the lift seen through ψ. `Fold.twist(recipe)`
+fuses a reduce onto the reduce it reads, found among its operands: the pivot's state is the lift param bound to it,
+the score is the sub-cone of the lift alpha-equal to the pivot's own per-element map (operand for operand, through a
+projection's
+components), and what remains, in role order, must equal a channel's pattern by canonical form. A click gives the
+role-to-name map and the recipe instantiates itself by renaming; no recipe names a term's variables. Online softmax
+and flash attention are one recipe: the expectation channel joins by the same call, the pivot then being the fused
+fold. **Example** — the online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf, 0)`, merge
 `m_new=max(m,s); d=d·exp(m−m_new)+exp(s−m_new); m=m_new`.
 
-**The λ-foldMap primitives** (`ir/pure/lam.py` / `ir/pure/algebra.py`) — the finished algebra vocabulary the tile IR
+**The λ-foldMap primitives** (`ir/pure/lam.py`) — the finished algebra vocabulary the tile IR
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
 binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated in
 `__post_init__` via the **`Stmt.pure` trait** (declared on the `Stmt` interface, conservative `False` default;
-`Load`/`Assign`/`Select` and the structural `Fold` and `ProjectionRegion` nodes opt in; `Accum`/`Write`/`Init`/`Loop`
+`Load`/`Assign`/`Select` and the structural `Fold` node opt in; `Accum`/`Write`/`Init`/`Loop`
 never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
-(`Lambda.canonical` — free names never renumbered). The scope-aware half lives in `ir/pure/closure.py`: a `Closure`
-pairs a lambda with the enclosing iteration axes it may capture — an INDEX-SPACE environment, never values — and its
-alpha-invariant equality (with `canonical`/`equivalent_clusters`) is the one cross-scope equivalence the Tile canonical forms and the
-lowering passes (semiring A-merge, twisted-pair recognition, seam value clustering) all consult.
-`Lambda.__post_init__` invokes `ir/pure/normalize.py` to install a
+(`Lambda.canonical` — free names never renumbered). A term is closed over its coordinates by construction — values
+arrive through operand edges, and only the enclosing iteration axes are read from outside — so `Fold.canonical`
+(and `Lambda.canonical` for a lambda) is the one cross-scope equivalence the Tile canonical forms and the lowering
+passes (cone sharing, twisted-pair recognition, seam value clustering) all consult.
+`Lambda.__post_init__` installs a
 dependency-safe body order and commutative argument order, so these context-independent storage invariants do not
 belong to `Fold`, `TileOp`, or the structural-key path. Contraction operand roles live on Fold edges, so sorting a
 commutative product's arguments does not change them. Formation is strict: a kernel's writes ride
@@ -416,16 +430,13 @@ may be a bare
 is `(x, 1)`). The TRUE monoid is the flat `(init, combine)` pair stored directly on the `Fold` (the `Monoid` wrapper
 class dissolved at 1r) — ONE program, `combine : S × S → S` a pure `Lambda` whose
 results carry the fold's REAL accumulator names; the serial streaming step is NEVER stored (it derives as combine
-specialized at the singleton), so update-vs-combine consistency holds by construction. `M(op…)` is the free
-componentwise pair constructor (DEGENERATE is the derived `component_ops(combine)` shape predicate, not a storage
-arm; `rename_combine` carries the rename lockstep incl. the twisted regeneration rule). A `Fold` carries NO
+specialized at the singleton), so update-vs-combine consistency holds by construction. `Lambda.componentwise`
+builds a plain fold's combine (DEGENERATE is the derived `Lambda.components()` shape reading, not a storage
+arm). A `Fold` carries NO
 precision: accumulator dtype is a KERNEL-IR fact, stamped on the lowered `Accum` by the Init-placement pass, and a
-reduce `Loop` arriving with a typed `Accum` is not canonical input to total lift. A twisted
-monoid's
-combine is the exp/LSE generator's program, selected structurally, never by a stored family name. The module also
-ships the executable SPEC: `eval_lambda` / `foldmap_eval`, the ~20-line denotational evaluator the agreement
-(`⟦tree⟧ == lowered loop`) and ASSOCIATIVITY property tests in `tests/compiler/ir/stmt/test_lambda_monoid.py` run
-against.
+reduce `Loop` arriving with a typed `Accum` is not canonical input to total lift. A twisted monoid's combine is a
+recipe's program, recognized by canonical form (`Fold.twist`), never by a stored family name;
+`tests/compiler/ir/pure/test_twist.py` pins its associativity on random states.
 
 ### `loop/ir.py` — LoopOp types
 
@@ -457,7 +468,7 @@ The optional readable-source fold keeps a single-use `Assign` named when any arg
 the result dtype, so the target-aware `Assign.render` path remains responsible for conversions such as
 `__half2float`.
 
-Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` / `Body.forward_cone(seeds)` build a `Cone` —
+Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` builds a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound
 axes excluded), plus `external_reads`, the names read from outside (axis vars and enclosing/sibling scopes alike).
 Construction never fails: unresolved names are data, and chaining scope levels means seeding the next level's
@@ -465,10 +476,7 @@ Construction never fails: unresolved names are data, and chaining scope levels m
 matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
 `lowering/tile/030_cut`) — eligibility judgments stay in the rules, per
-`pipeline/passes/ARCHITECTURE.md`. The
-`classify_fragment_epilogue` walk (`ir/pure/algebra.py`) deliberately does NOT use it: it is a single pass
-interleaving reduce-scope flags with its negative-form blocker reporting, a different operator than the cone's
-any-dep taint.
+`pipeline/passes/ARCHITECTURE.md`.
 
 `rewrite` has two distinct rename channels that must stay disjoint:
 `rename_ssa` carries **SSA-name** renames, `sigma` carries **axis**
@@ -662,21 +670,21 @@ remains authoritative when another hint claims a future suffix.
 
 Tile IR stores the complete inner loop nest as one tree of `Fold` terms. The Loop IR boundary peels the outer parallel
 axes, converts every reduction from its explicit `Accum` statements, and leaves each nested reduction in the same
-position inside its parent lambda. A root zero-axis Fold holds the per-cell statement sequence. Pure sibling output
-loops become `ProjectionRegion` terms, and their writes live in `TileOp.output_specs`.
+position inside its parent lambda. A root zero-axis Fold holds the per-cell statement sequence. An output loop's
+per-cell projection becomes a zero-axis term evaluated over the sweep axis — a sibling operand of the root — and its
+writes live in `TileOp.output_specs` as sweep specs.
 
 A nonzero-axis Fold exposes its combine result names through `Fold.defines()`, so later sibling statements and outer
 folds may consume its result without hoisting it to an operand edge. `Fold.loop` mechanically lowers the tree back to
 the corresponding nested Loop IR.
 
-The total-lift invariant is that no raw inner `Loop` survives. `TileOp.__post_init__` then applies general contextual
-canonicalization, including maximal pure operand-cone factoring into semiring contractions and closed-child
-extraction. Commutative products place their shared argument in the contraction's canonical shared operand slot;
-overlapping producer cones become one multi-result operand edge. Scoped lambda equivalence is an analysis over the
-canonical Folds. A separate pre-scheduling rewrite joins equivalent maximum and exp-weighted sibling Folds into the
-general `(maximum, denominator, expectations…)` twisted carrier, including when contraction canonicalization has
-nested the statistics inside a computed probability edge; softmax and masked or unmasked SDPA are arity variants, not
-separate matchers. Placement and cross-CTA split are structural phases before site construction. Classic scheduling
+The total-lift invariant is that no raw inner `Loop` survives. A bilinear term orients itself at formation, its
+shared argument in the contraction's canonical A slot; `TileOp.__post_init__` then applies the tree-wide
+canonicalization — an identity projection dissolves into its operand, and same-value cones become one shared object. Scoped lambda equivalence is an analysis over the
+canonical Folds. A separate pre-scheduling rewrite fuses every reduce that reads a reduce into the twisted carrier a
+recipe recognizes — `(maximum, denominator, expectations…)` for the exp family — hoisting the factors constant along
+the axis (attention's `1/l`) out of the fold first; softmax and masked or unmasked SDPA are arity variants of one
+recipe, not separate matchers. Placement and cross-CTA split are structural phases before site construction. Classic scheduling
 classifies the resulting Fold tree, assigns each node once and every consumer operand edge independently, then stores
 one complete typed assignment on `TileOp.schedule`. Unsupported shapes remain unmapped; scheduling never annotates or
 rewrites the Fold tree.

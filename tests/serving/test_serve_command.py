@@ -515,3 +515,22 @@ def test_moe_probe_recognizes_the_deepseek_published_spelling(tmp_path):
         )
     )
     assert _is_moe_model(str(tmp_path), []) is True
+
+
+def test_golden_and_strict_evidence_reach_the_vllm_child_as_env(monkeypatch, tmp_path):
+    """``serve --golden PATH --strict-evidence`` spell the same flags every replaying command has; they
+    are emmy's own (never forwarded to vllm) and reach the child process, where every program compiles
+    through the one evidence pick, as ``EMMY_GOLDEN_FILE`` / ``EMMY_STRICT_EVIDENCE``."""
+    from emmy.commands import serve as serve_mod
+
+    golden = tmp_path / "working.yaml"
+    args = _parse(["serve", "--golden", str(golden), "--strict-evidence", "--dry-run", MODEL])
+    assert args.golden == str(golden) and args.strict_evidence is True
+    captured = {}
+    monkeypatch.setattr(serve_mod, "_vllm_bin", lambda: "/bin/vllm")
+    monkeypatch.setattr(serve_mod, "_serve_and_bench", lambda cmd, *_a, env=None, **_k: captured.update({"cmd": cmd, "env": env}))
+    args = _parse(["serve", MODEL, "--golden", str(golden), "--strict-evidence", "--bench"])
+    handle_serve(args)
+    assert captured["env"]["EMMY_GOLDEN_FILE"] == str(golden.resolve())
+    assert captured["env"]["EMMY_STRICT_EVIDENCE"] == "1"
+    assert "--golden" not in captured["cmd"] and "--strict-evidence" not in captured["cmd"]

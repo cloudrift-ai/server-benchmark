@@ -4,7 +4,7 @@ The value types are used by both the tile IR and the kernel materializer, so the
 one concrete schedule implementation.
 
 **The schedule is separate from the combine.** The combine (the ⊕) lives in the op tree
-(:mod:`emmy.compiler.ir.pure.algebra` + :mod:`~emmy.compiler.ir.tile.ir`). This module owns the
+(:mod:`emmy.compiler.ir.pure.fold` + :mod:`~emmy.compiler.ir.tile.ir`). This module owns the
 leaf choice types (:class:`Reduce` / :class:`Tile` / :class:`Stage` / :class:`WarpSpec` plus
 :class:`Placement`); :mod:`emmy.compiler.ir.schedule.classic` composes them into the accepted
 kernel, node, and edge assignment stored on ``TileOp.schedule``. The Fold term itself carries no
@@ -16,10 +16,10 @@ A reduction's only freedom is **how the reduce axis is partitioned across hardwa
 same op + the same materializer extend across kernel kinds — only the carrier and the partition
 change.
 
-The schedule is **flat and kind-free**: a kernel's structure is read from its node's derived
-:class:`~emmy.compiler.ir.axis.AxisRole` (``Fold.role``), not a Python type, so a pointwise
-cell, a ``PLANAR`` / ``TWISTED`` reduce, and a ``CONTRACTION`` contraction all schedule through the
-same value types and use the subset their axes admit. Warp specialization is **orthogonal** — an
+The schedule is **flat and kind-free**: a kernel's structure is read from its node's views —
+``axis is None`` for a pointwise cell, ``as_contraction()`` for the bilinear reading, a reduce
+otherwise — not a Python type, so all of them schedule through the same value types and use the
+subset their axes admit. Warp specialization is **orthogonal** — an
 optional ``workers: WarpSpec | None`` root field (``None`` = uniform SIMT), a producer band split
 *over* the fixed pipeline.
 

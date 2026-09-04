@@ -47,8 +47,10 @@ tests/compiler/passes/
 ```
 
 `tests/compiler/helpers.py` exposes `matmul_graph(m, k, n)` — the shared (m,k)@(k,n)→(m,n) graph builder used by the
-lowering / backend / e2e tests — plus the `requires_cuda` skip marker. `tests/compiler/conftest.py` owns the
-`run_graph` parametrized fixture.
+lowering / backend / e2e tests — plus `case_target_tile(case)`, which lifts a realization corpus case's target for the
+tests that schedule a real attention tree, and the `requires_cuda` skip marker. A case records one entry per kernel of
+the set it realizes, so a test reads the case's target through that helper rather than asserting the file holds one
+entry. `tests/compiler/conftest.py` owns the `run_graph` parametrized fixture.
 
 ## Covered Rules
 
@@ -159,12 +161,13 @@ enumerator while an undecided cuttable seam remains, and calls it once placement
 closed Fold-edge choices for SDPA score
 production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA lowering, and proves
 child-identity schedule receipts round-trip: under a pinned cut each child's stored identity decodes only its own
-kernel's schedule rows and joins the verified tier as-is, including when target-boundary drift makes the regenerated
+kernel's schedule rows and keys its evidence row by that identity, including when target-boundary drift makes the
+regenerated
 Loop target contain several kernels and the stored identity must select one. Direct
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
-The generated carrier's numerical laws are covered
-independently by `tests/compiler/ir/pure/test_carrier_gen.py` and `test_lambda_monoid.py`; end-to-end softmax and
-attention accuracy remain covered by the e2e suites.
+The recipe program's monoid laws are covered
+independently by `tests/compiler/ir/pure/test_twist.py`; end-to-end softmax and attention accuracy remain covered by
+the e2e suites.
 
 ## Adding a New Rule Test
 

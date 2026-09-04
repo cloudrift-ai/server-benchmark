@@ -15,17 +15,30 @@ import numpy as np
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.pure.fold import Channel, Fold, deep_defines
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ReduceOp
-from emmy.compiler.ir.tile import ProjectionRegion, lower_with_output_specs
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+from tests.compiler.terms import contraction
+
+
+def deep_defines(node) -> tuple[str, ...]:
+    """Every name a term tree or statement defines — lift bodies and exposed names, operands included."""
+    if isinstance(node, Fold):
+        inner = (name for stmt in node.lift.body for name in deep_defines(stmt))
+        return (*inner, *node.exposes, *(name for edge in node.operands for name in deep_defines(edge)))
+    return (*node.defines(), *(name for body in node.nested() for stmt in body for name in deep_defines(stmt)))
+
+
+def _grid(tile) -> frozenset[str]:
+    """The kernel-scope binding: the grid binds the free axes, the term opens its output sweeps."""
+    return frozenset(axis.name for axis in tile.place.free)
 
 
 def _tile(body: Body):
@@ -54,9 +67,8 @@ def test_matmul_cell_lifts_and_canonicalizes_as_contraction() -> None:
     assert [axis.extent for axis in tile.place.free] == [Dim(32), Dim(64)]
     node = tile.op
     assert isinstance(node, Fold) and node.axis is not None
-    assert node.role is AxisRole.CONTRACTION
-    assert isinstance(node.a, Load) and node.a.input == "x"
-    assert isinstance(node.b, Load) and node.b.input == "w"
+    assert node.as_contraction() is not None
+    assert [edge.as_slab().load.input for edge in node.operands] == ["x", "w"]
     assert len(tile.output_specs) == 1 and tile.output_specs[0].sweep is None
 
 
@@ -79,7 +91,33 @@ def test_epilogue_stays_in_the_projection_body() -> None:
     node = tile.op
     assert isinstance(node, Fold) and node.axis is None and len(node.operands) == 1
     assert node.operands[0].axis is not None
-    assert {stmt.input for stmt in node.body if isinstance(stmt, Load)} == {"b"}
+    assert {stmt.input for stmt in node.lift.body if isinstance(stmt, Load)} == {"b"}
+
+
+def test_a_product_argument_computed_in_the_step_factors_into_a_cone_operand() -> None:
+    """The norm→linear step ``acc += (x[m,k] * r[m]) * w[n,k]`` is a semiring step whose A is
+    COMPUTED: formation hoists the ``x * r`` chain into a zero-axis operand so the lift is the
+    product alone and the term reads as a contraction, A first, over the cone and the weight slab."""
+    m, n, k = Axis("m", Dim(32)), Axis("n", Dim(64)), Axis("k", Dim(128))
+    inner = Body(
+        (
+            Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+            Load(name="rv", input="r", index=(Var("m"),)),
+            Assign(name="xn", op=ElementwiseImpl("multiply"), args=("xv", "rv")),
+            Load(name="wv", input="w", index=(Var("n"), Var("k"))),
+            Assign(name="prod", op=ElementwiseImpl("multiply"), args=("xn", "wv")),
+            Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+        )
+    )
+    cell = (Loop(axis=k, body=inner), Write(output="out", index=(Var("m"), Var("n")), value="acc"))
+    tile = _tile(Body((Loop(axis=m, body=Body((Loop(axis=n, body=Body(cell)),))),)))
+    node = tile.op
+    view = node.as_contraction()
+    assert view is not None and (tile.axis_of(view.left).extent, tile.axis_of(view.right).extent) == (Dim(32), Dim(64))
+    cone, weight = node.operands
+    assert cone.axis is None and len(cone.exposes) == 1 and weight.as_slab().load.input == "w"
+    assert {edge.as_slab().load.input for edge in cone.operands} == {"x", "r"}
+    assert [stmt.op.name for stmt in node.lift.body] == ["multiply"]
 
 
 def test_non_distributing_lift_stays_planar() -> None:
@@ -95,20 +133,18 @@ def test_non_distributing_lift_stays_planar() -> None:
     cell = (Loop(axis=k, body=inner), Write(output="out", index=(Var("m"), Var("n")), value="acc"))
     tile = _tile(Body((Loop(axis=m, body=Body((Loop(axis=n, body=Body(cell)),))),)))
     node = tile.op
-    assert isinstance(node, Fold) and node.axis is not None and node.role is AxisRole.PLANAR
-    assert node.semiring is None
+    assert isinstance(node, Fold) and node.axis is not None and node.axis is not None
+    assert node.as_contraction() is None
 
 
-def test_contraction_formation_gates_on_the_semiring() -> None:
-    import pytest
-
-    k = Axis("k", Dim(16))
+def test_the_contraction_reading_gates_on_the_semiring() -> None:
+    """Formation stores any product; the BILINEAR reading is what a ``(⊗, ⊕)`` pair that is not a
+    registered semiring never gets."""
     a = Load(name="av", input="a", index=(Var("m"), Var("k")))
     b = Load(name="bv", input="b", index=(Var("n"), Var("k")))
-    with pytest.raises(ValueError, match="semiring"):
-        Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),), product="maximum")
-    node = Fold.contraction(k_axis=k, a=a, channels=(Channel(b=b, acc="acc"),))
-    assert tuple(op.name for op in node.semiring) == ("multiply", "add")
+    assert contraction("k", a, (b, "acc"), product="maximum").as_contraction() is None
+    view = contraction("k", a, (b, "acc")).as_contraction()
+    assert (view.product.name, view.plus.name) == ("multiply", "add")
 
 
 def test_total_lift_fires_through_the_pipeline() -> None:
@@ -157,8 +193,8 @@ def test_singleton_reduce_over_an_enclosing_value_lifts_as_a_projection() -> Non
 
     assert tuple(axis.extent for axis in tile.place.free) == (Dim(4),)
     assert isinstance(tile.op, Fold) and tile.op.axis is None
-    assert not any(isinstance(member, Fold) and member.axis is not None for member in tile.op.body)
-    assert lower_with_output_specs(tile.op, tile.output_specs)[-1].value in deep_defines(tile.op)
+    assert not any(edge.axis is not None for edge in tile.op.operands)
+    assert tile.op.lower(_grid(tile), tile.output_specs, tile.axes)[-1].value in deep_defines(tile.op)
     np.testing.assert_array_equal(result, values)
 
 
@@ -203,15 +239,61 @@ def test_sibling_q_and_kv_regions_total_lift_with_separate_outputs() -> None:
 
     tile = _tile(body)
 
-    regions = tuple(member for member in tile.op.body if isinstance(member, ProjectionRegion))
-    assert tuple(region.axis.extent for region in regions) == (Dim(4), Dim(2))
-    assert len(tile.output_specs) == 3
-    assert all(not isinstance(member, Loop) for member in tile.op.body.iter())
-    lowered = lower_with_output_specs(tile.op, tile.output_specs)
-    assert [member.axis.extent for member in lowered if isinstance(member, Loop)] == [Dim(4), Dim(2)]
-    assert {write.output for member in lowered for write in member.body.writes} == {"q_out", "k_out", "v_out"}
+    # The root projection has nothing of its own: its operands are the q contraction and the k/v
+    # pair normalization merged over their shared row; the writes are boundary specs. Each output
+    # loop's axis is a contraction output, so post-init promotes it onto the grid like any
+    # contraction sweep, and the kernel-scope program is flat.
+    assert tile.op.axis is None and not tile.op.lift.body
+    assert [(edge.as_contraction() is not None, len(edge.exposes)) for edge in tile.op.operands] == [(True, 1), (True, 2)]
+    assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4), Dim(2)]
+    assert all(spec.sweep is None for spec in tile.output_specs) and len(tile.output_specs) == 3
+    # The closed program opens the two sweeps as SIBLING loops under the row: no term is evaluated
+    # over both, so neither nests in the other.
+    (m_loop,) = tile.loop_body
+    assert {loop.axis.extent for loop in m_loop.body} == {Dim(2), Dim(4)} and len(m_loop.body) == 2, "sibling sweeps, not a chain"
+    assert {write.output for loop in m_loop.body for write in loop.body.writes} == {"q_out", "k_out", "v_out"}
     seam_scopes = {frozenset(axis.extent for axis in seam.axes) for seam in cuttable_seams(tile)}
     assert {frozenset((Dim(3), Dim(4))), frozenset((Dim(3), Dim(2)))} <= seam_scopes
+
+
+def test_an_output_sweeps_epilogue_lifts_to_a_term_declaring_the_sweep_axis() -> None:
+    """The per-cell projection under an output loop is a zero-axis term of the level, evaluated
+    over the sweep coordinate it declares and reading the reduce as an operand; the root wrapper
+    over it dissolves, the sweep axis (a contraction output) promotes onto the grid, and the
+    store follows the term's exposed value."""
+    m, n, k = Axis("m", 3), Axis("n", 4), Axis("k", 5)
+    contraction = Loop(
+        axis=k,
+        body=Body(
+            (
+                Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+                Load(name="wv", input="w", index=(Var("n"), Var("k"))),
+                Assign(name="p", op="multiply", args=("xv", "wv")),
+                Accum(name="acc", value="p", op="add", axes=("k",)),
+            )
+        ),
+    )
+    sweep = Loop(
+        axis=n,
+        body=Body(
+            (
+                contraction,
+                Load(name="b", input="bias", index=(Var("n"),)),
+                Assign(name="y", op="add", args=("acc", "b")),
+                Write(output="out", index=(Var("m"), Var("n")), value="y"),
+            )
+        ),
+    )
+    tile = _tile(Body((Loop(axis=m, body=Body((sweep,))),)))
+
+    epilogue = tile.op
+    assert epilogue.axis is None and len(epilogue.exposes) == 1
+    assert [edge.as_contraction() is not None for edge in epilogue.operands] == [True]
+    assert Dim(4) in {axis.extent for axis in tile.axes if axis.name in epilogue.free_axes}
+    assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
+    (spec,) = tile.output_specs
+    assert spec.write.values == epilogue.exposes and spec.sweep is None
+    assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs, tile.axes)] == ["Loop", "Load", "Assign", "Write"]
 
 
 # ===================================================================
@@ -223,10 +305,10 @@ def test_reduce_feeding_prologue_reaches_the_fold_step() -> None:
     """A pure prologue value the reduce body reads must reach the fold's step; an epilogue-only
     value must not.
 
-    The canonical form binds the prologue ONCE in the projection and lets the fold's lambda read it
-    as an enclosing-scope name, rather than sinking the load into the loop — same reachability, one
-    load instead of one per step. What matters, and what the miscompile below is about, is only
-    that the step can see it and that the epilogue-only value stays out of the step."""
+    The lift closes the fold over the prologue value it reads: the load arrives as the fold's own
+    slab operand, hoisted once ahead of the loop by ``Fold.lower``, rather than sunk into the step.
+    What matters, and what the miscompile below is about, is only that the step can see it and
+    that the epilogue-only value stays out of the fold."""
     m, k = Axis("m", Dim(8)), Axis("k", Dim(16))
     cell = (
         Load(name="scale", input="s", index=(Literal(0),)),
@@ -246,15 +328,12 @@ def test_reduce_feeding_prologue_reaches_the_fold_step() -> None:
     )
     node = _tile(Body((Loop(axis=m, body=Body(cell)),))).op
     assert isinstance(node, Fold) and node.axis is None
-    folds = [child for child in (*node.operands, *node.lift.body) if isinstance(child, Fold)]
+    folds = [edge for edge in node.operands if edge.axis is not None]
     assert len(folds) == 1, "the reduce did not lift to exactly one fold"
     step = folds[0]
-    scale = next(stmt.name for stmt in node.body if isinstance(stmt, Load) and stmt.input == "s")
-    bias = next(stmt.name for stmt in node.body if isinstance(stmt, Load) and stmt.input == "b")
-    reads = {name for stmt in step.lift.body for name in stmt.deps()}
-    reads.update(name for stmt in step.lift.body if isinstance(stmt, Load) for name in (stmt.input,))
-    assert "x" in reads and scale in reads, "the fold's step cannot see the prologue value it multiplies by"
-    assert bias not in reads, "an epilogue-only value must not reach the fold's step"
+    buffers = {edge.as_slab().load.input for edge in step.operands if edge.as_slab() is not None}
+    assert buffers == {"x", "s"}, "the fold's step cannot see the prologue value it multiplies by"
+    assert {stmt.input for stmt in node.lift.body if isinstance(stmt, Load)} == {"b"}, "an epilogue-only value must not reach the fold"
 
 
 def test_multi_pass_cell_defines_every_name_before_it_is_read() -> None:
@@ -288,9 +367,9 @@ def test_multi_pass_cell_defines_every_name_before_it_is_read() -> None:
                 check(list(stmt.body), set(defined) | {stmt.axis.name})
                 defined |= set(deep_defines(stmt))
                 continue
-            reads = set() if isinstance(stmt, Fold) else set(stmt.deps())
+            reads = set(stmt.deps())
             assert reads <= defined, f"{stmt} reads {sorted(reads - defined)} before definition"
-            defined |= set(deep_defines(stmt)) if isinstance(stmt, Fold) else set(stmt.defines())
+            defined |= set(stmt.defines())
 
     for tile in tiles:
-        check(list(tile.op.lower()), {axis.name for axis in tile.place.free})
+        check(list(tile.op.lower(_grid(tile), tile.output_specs, tile.axes)), {axis.name for axis in tile.place.free})

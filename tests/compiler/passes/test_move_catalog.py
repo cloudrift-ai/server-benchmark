@@ -22,16 +22,17 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.ir.pure.fold import Channel, Fold
 from emmy.compiler.ir.schedule import Reduce, Tile, Work, derive_workers, resolve_site_tile
 from emmy.compiler.ir.schedule.catalog import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
-from emmy.compiler.ir.schedule.catalog import scalar_tile_moves
-from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
-from emmy.compiler.pipeline.knob import axis_of, family_of, family_value
+from emmy.compiler.pipeline.knob import axis_of, complete_kernel_row, family_of, family_value, is_off_value
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.pipeline import Run
+from tests.compiler.terms import contraction, projection
 
 # The hand-computed legal products as explicit literals — the per-cell tile, one-dimensional thread
 # ladder, pure-register box, and (par × reg) box
@@ -82,8 +83,6 @@ def test_scalar_tile_moves_equals_hand_product():
 
 def test_coop_reduce_moves_equals_hand_product():
     """The normal cooperative and ILP stages form one fixed product; parameters do not add rows."""
-    from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
-
     expected = {
         *(Reduce.of(coop=coop, reg=reg) for coop in (1, 4, 8, 16, 32, 64, 128, 256, 512) for reg in (1, 2, 4) if coop > 1 or reg > 1),
         *(Reduce.of(coop=coop, coop_transposed=True) for coop in (32, 64, 128, 256)),
@@ -180,8 +179,6 @@ def test_bare_reduce_forks_the_coop_catalog():
     pinned ``b16``/``b32`` reduce goldens (eighth golden sweep, finding 3). The offer is a function
     of legality alone now: the reduce extent has to be able to feed the band, and nothing else
     narrows it."""
-    from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
-
     rows: list[dict] = []
 
     def decide(fp):
@@ -212,52 +209,30 @@ def test_bare_reduce_forks_the_coop_catalog():
     assert set(offered) == {("", ""), *(site_of(p) for p in coop_reduce_moves())}, f"catalog rows missing: {offered}"
 
 
-def _computed_b_term():
+def _computed_b_term() -> TileOp:
     """A contraction ``sum_k a[m, k] · b_k`` whose B edge is COMPUTED — an inline ``Fold`` over its
-    own axis. The parent fill realizes the computed edge, so only the contraction is a schedule
-    site."""
-    from emmy.compiler.ir.axis import Axis, AxisRole
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.pure.fold import Channel, Fold
-    from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
-    from emmy.compiler.ir.tile import TileOp
-    from emmy.compiler.ir.tile.ir import Placement
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-
+    own axis (``b_k = Σ_j w[k, j]``, so the edge varies with ``k`` and the pair reads as bilinear).
+    The parent fill realizes the computed edge, so only the contraction is a schedule site."""
+    m, n, k, j = Axis("m", 64), Axis("n", 64), Axis("k", 256), Axis("j", 256)
     inner = fold_from_loop(
         Loop(
-            axis=Axis("j", 256),
-            body=Body((Load(name="w_e", input="w", index=(Var("m"), Var("j"))), Accum(name="bacc", value="w_e", op="add", axes=("j",)))),
-            role=AxisRole.PLANAR,
+            axis=j,
+            body=Body((Load(name="w_e", input="w", index=(Var("k"), Var("j"))), Accum(name="bacc", value="w_e", op="add", axes=("j",)))),
         )
     )
-    node = Fold.contraction(
-        k_axis=Axis("k", 256),
-        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        channels=(Channel(b=inner, acc="acc"),),
-    )
-    return TileOp(op=node, place=Placement(free=(Axis("m", 64), Axis("n", 64))))
+    node = contraction(k, Load(name="a_e", input="a", index=(Var("m"), Var("k"))), (inner, "acc"))
+    return TileOp(op=node, place=Placement(free=(m, n)), axes=(m, n, k, j))
 
 
 def _computed_a_term() -> TileOp:
     """An f32 contraction whose A value is computed inline and shared across the N tile."""
     m, n, k = Axis("m", 8), Axis("n", 8), Axis("k", 16)
-    a = Fold.projection(
-        body=Body(
-            (
-                Load(name="score", input="scores", index=(Var("m"), Var("k"))),
-                Assign(name="prob", op="exp", args=("score",)),
-            )
-        )
-    )
-    node = Fold.contraction(
-        k_axis=k,
-        a=a,
-        channels=(Channel(b=Load(name="value", input="values", index=(Var("k"), Var("n"))), acc="acc"),),
-    )
+    a = projection((), (Load(name="score", input="scores", index=(Var("m"), Var("k"))), Assign(name="prob", op="exp", args=("score",))))
+    node = contraction(k, a, (Load(name="value", input="values", index=(Var("k"), Var("n"))), "acc"))
     return TileOp(
         op=node,
         place=Placement(free=(m, n)),
+        axes=(m, n, k),
         inputs={"scores": Tensor("scores", (8, 16), "f32"), "values": Tensor("values", (16, 8), "f32")},
         outputs={"out": Tensor("out", (8, 8), "f32")},
     )
@@ -278,21 +253,8 @@ def _rows_of(tile, ctx=None) -> list[dict]:
 
 def test_work_pin_never_widens_a_site_catalog(monkeypatch):
     """A matching pin narrows to one inventory; an unmatched pin offers no schedule row."""
-    from emmy.compiler.ir.axis import Axis, AxisRole
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
-    from emmy.compiler.ir.tile import Placement, TileOp
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-
     ctx = Context.from_target((12, 0))
-    fold = fold_from_loop(
-        Loop(
-            axis=Axis("kv", 256),
-            body=Body((Load(name="v_e", input="v", index=(Var("m"), Var("kv"))), Accum(name="acc", value="v_e", op="add", axes=("kv",)))),
-            role=AxisRole.PLANAR,
-        )
-    )
-    tile = TileOp(op=fold, place=Placement(free=(Axis("m", 64),)))
+    tile = _row_reduce(Axis("m", 64), Axis("kv", 256), "v")
 
     def inventories() -> set[str]:
         """The inventories the term OFFERS — read off the rows themselves, which is now the only
@@ -325,14 +287,13 @@ def _plain_matmul_term() -> TileOp:
     """A static f32 matmul as an unmapped ``TileOp`` — no warp atoms (f32 has no tensor-core cell),
     so the scalar catalog is the whole ``TILE`` offer."""
     m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
-    node = Fold.contraction(
-        k_axis=k,
-        a=Load(name="a_e", input="a", index=(Var("m"), Var("k"))),
-        channels=(Channel(b=Load(name="b_e", input="b", index=(Var("k"), Var("n"))), acc="acc"),),
+    node = contraction(
+        k, Load(name="a_e", input="a", index=(Var("m"), Var("k"))), (Load(name="b_e", input="b", index=(Var("k"), Var("n"))), "acc")
     )
     return TileOp(
         op=node,
         place=Placement(free=(m, n)),
+        axes=(m, n, k),
         inputs={"a": Tensor("a", (64, 64), "f32"), "b": Tensor("b", (64, 64), "f32")},
         outputs={"out": Tensor("out", (64, 64), "f32")},
     )
@@ -368,22 +329,16 @@ def test_f32_computed_a_contraction_offers_a_tiled_scalar_row():
     assert any(plan.is_tiled and not plan.is_warp for plan in plans), "computed A lost every tiled scalar schedule"
 
 
-def _reduce_term():
-    """A bare 4096-wide row reduce over a 64-cell grid, as an unmapped ``TileOp``."""
-    from emmy.compiler.ir.axis import Axis, AxisRole
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Accum, Body, Load, Loop
-    from emmy.compiler.ir.tile import Placement, TileOp
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+def _row_reduce(m: Axis, k: Axis, buffer: str) -> TileOp:
+    """A bare row reduce ``acc[m] = Σ_k buffer[m, k]`` as an unmapped ``TileOp``."""
+    load = Load(name=f"{buffer}_e", input=buffer, index=(Var(m.name), Var(k.name)))
+    fold = fold_from_loop(Loop(axis=k, body=Body((load, Accum(name="acc", value=load.name, op="add", axes=(k.name,))))))
+    return TileOp(op=fold, place=Placement(free=(m,)), axes=(m, k))
 
-    fold = fold_from_loop(
-        Loop(
-            axis=Axis("k", 4096),
-            body=Body((Load(name="x_e", input="x", index=(Var("m"), Var("k"))), Accum(name="acc", value="x_e", op="add", axes=("k",)))),
-            role=AxisRole.PLANAR,
-        )
-    )
-    return TileOp(op=fold, place=Placement(free=(Axis("m", 64),)))
+
+def _reduce_term() -> TileOp:
+    """A bare 4096-wide row reduce over a 64-cell grid."""
+    return _row_reduce(Axis("m", 64), Axis("k", 4096), "x")
 
 
 def test_the_all_off_row_is_always_offered(monkeypatch):
@@ -395,8 +350,6 @@ def test_the_all_off_row_is_always_offered(monkeypatch):
     with no evidence, and such a compile taking an arbitrary row is accepted. What must still hold
     is that the all-OFF row exists to be picked, by evidence or by a pin — a term that could not
     spell it would have a hole in its space, not a slow default."""
-    from emmy.compiler.pipeline.knob import complete_kernel_row, is_off_value
-
     monkeypatch.delenv("EMMY_WORK", raising=False)
     for label, tile in {"bare reduce": _reduce_term(), "computed-B contraction": _computed_b_term()}.items():
         rows = _rows_of(tile)

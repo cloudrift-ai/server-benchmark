@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
-from emmy.compiler.ir.pure.fold import Fold, edge_free_axes
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import (
     PlacedTile,
     Raster,
@@ -53,12 +53,11 @@ from emmy.compiler.ir.schedule.classic import (
     edge_site_spelling,
     node_id_spelling,
 )
-from emmy.compiler.ir.schedule.views import ContractionFacts, Projection, Reduction
+from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ir import observed_result_names
-from emmy.compiler.ir.tile.ops import Sched, edge_dtypes, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import Sched, chain_form, chain_members, edge_dtypes, kernel_roots, projection_tail, scheduled
 
 
 class ClassicProjectionError(RuntimeError):
@@ -79,29 +78,6 @@ def _transposed_reduction_ok(tile: TileOp) -> bool:
     return _inner_free(tile) is not None and not any(isinstance(stmt, Loop) for stmt in tail) and not has_contraction_tail(tail)
 
 
-def _chain_member_serial(tile: TileOp, node) -> bool:
-    """Whether a node under a chain-form root realizes the serial fold only.
-
-    A chain-form root is a zero-axis :class:`Fold` with no operand edge — a body-FED or
-    sweep-reading member the normalize hoist keeps in place, and the shape every composed-cut and
-    split piece binds through. A DIRECT body member binds through the kernel factorizer's chain
-    arm, which emits its sibling providers ahead of one shared strided loop, so it carries a
-    partition. Three facts keep the serial fold instead: a node nested DEEPER than the body (the
-    body recursion emits it serially per cell), a boundary store carrying an output sweep (the wrap
-    would re-run a partitioned member per swept cell), and a boundary store that streams into a
-    sibling observed member's reduce loop (the trailing splice cannot reach a loop already sitting
-    in an earlier segment). Both store facts are read over the WHOLE kernel, not the node —
-    a different question from the per-node sweep-reading check above, and the exact gate the
-    factorizer's chain arm applies before it gathers members.
-    """
-    root = tile.op
-    if any(spec.sweep is not None for spec in tile.output_specs):
-        return True
-    if any(set(spec.write.values) <= observed_result_names(root) for spec in tile.output_specs):
-        return True
-    return not any(node is stmt for stmt in root.body)
-
-
 def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     """Project one plain reduction's legal choices from node and kernel facts only.
 
@@ -110,27 +86,16 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     instead of manufacturing a pin-only choice outside Algorithm 1.
 
     Shared by the contraction per-cell tier through :func:`_contraction_domain`'s delegation, and
-    deliberately so: a contraction is a monoid with a ⊗ lift, so a contraction that is a direct
-    chain member inherits the same member catalog, the same nested / swept / streamed serial-only
-    exclusions, and the same transposed exclusion, with no carve-out of its own. That inheritance
-    is a stated decision, not live behavior: ``normalize_fold_tree``'s hoist absorbs whatever body
-    value fed a contraction and moves it onto an operand edge, and a root with an operand edge is
-    no longer chain-form — so no tree the compiler builds today reaches this arm carrying one. It
-    is written once here so a normalizer that later keeps one in place inherits the reading rather
-    than acquiring a different one by omission.
+    deliberately so: a contraction is a monoid with a ⊗ lift, so it inherits the same swept /
+    streamed serial-only exclusions and the same transposed exclusion, with no carve-out of its own.
     """
-    if node.observed:
+    roots = kernel_roots(tile.op)
+    is_root = any(node is root for root in roots)
+    if node.observe is not None or not (is_root or any(node is member for root in roots for member in chain_members(root))):
+        return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
+    if {spec.sweep.name for spec in tile.output_specs if spec.sweep is not None} & node.free_axes:
         return (Reduce(),)
-    if not edge_free_axes(node).isdisjoint(spec.sweep.name for spec in tile.output_specs if spec.sweep is not None):
-        return (Reduce(),)
-    if isinstance(tile.op, Fold) and tile.op.axis is None and not tile.op.operands:
-        if _chain_member_serial(tile, node):
-            return (Reduce(),)
-        # A transposed band's σ-substitution and guarded close assume the fold is the kernel ROOT,
-        # so the chain arm cannot realize one; offering it here would mint one kernel from two
-        # knob spellings.
-        return (Reduce(), *(choice for choice in coop_reduce_moves() if not choice.coop_transposed))
-    transposed_ok = _transposed_reduction_ok(tile)
+    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
     return (
         Reduce(),
         *(choice for choice in coop_reduce_moves() if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok)),
@@ -141,9 +106,12 @@ def _fold_states(op) -> frozenset[str]:
     """Return the Fold state names visible to the projection tail."""
     if not isinstance(op, Fold):
         return frozenset()
+    # What the term binds into its consumer, at either arity: a reducing fold exposes its carried
+    # state, a projection its operands'. ``lift.body`` holds statements only, so the terms below a
+    # projection are exactly its operands.
     if op.axis is not None:
-        return frozenset(op.defines())
-    return frozenset(name for edge in (*op.operands, *op.body) if isinstance(edge, Fold) for name in edge.defines())
+        return frozenset(op.exposes)
+    return frozenset(name for edge in op.operands for name in edge.exposes)
 
 
 def _fragment_epilogue_ok(tail: list, states: frozenset[str]) -> bool:
@@ -160,8 +128,11 @@ def _fragment_epilogue_ok(tail: list, states: frozenset[str]) -> bool:
 
 
 def _channel_dtype(tile: TileOp, node, target):
-    """Return the one tensor-core dtype shared by the contraction's B channels."""
-    dtypes = {edge_dtypes(channel.b, tile.inputs)[0] for channel in node.channels}
+    """Return the one tensor-core dtype shared by the contraction's streamed operands.
+
+    The operand tuple past the shared first edge — a channel was never more than a position in it.
+    """
+    dtypes = {edge_dtypes(edge, tile.inputs)[0] for edge in node.operands[1:]}
     if len(dtypes) == 1:
         return next(iter(dtypes))
     eligible = {dtype for dtype in dtypes if dtype is not None and atoms_for(dtype, ctx=target)}
@@ -170,8 +141,8 @@ def _channel_dtype(tile: TileOp, node, target):
 
 def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: tuple = (None, None)) -> str | None:
     """Return why static node facts rule out every tensor-core atom."""
-    ring = node.semiring
-    if ring is None or tuple(operator.name for operator in ring) != ("multiply", "add"):
+    view = node.as_contraction()
+    if view is None or (view.product.name, view.plus.name) != ("multiply", "add"):
         return "the mma atom realizes only the (multiply, add) semiring instance"
     if not tile.inputs:
         return "no typed inputs expose operand dtypes"
@@ -179,18 +150,19 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return "the grid supplies no output-axis pair for a fragment"
     if not fragment_epilogue:
         return "the projection epilogue is not a per-fragment straight-line program"
-    if isinstance(node.a, Fold) and node.a.axis is not None:
-        return "a nested scheduling site inhabits the A edge"
-    if len(node.channels) == 1 and isinstance(node.channels[0].b, Fold) and node.channels[0].b.axis is not None:
-        return "a nested scheduling site inhabits the B edge"
+    # The operand tuple in stored order — there is no named A/B role any more, and a nested
+    # scheduling site on ANY operand refuses the same way.
+    if any(edge.axis is not None for edge in node.operands):
+        return "a nested scheduling site inhabits an operand edge"
 
-    dtype = edge_dtypes(node.a, tile.inputs)[0]
+    a_edge = node.operands[0]
+    dtype = edge_dtypes(a_edge, tile.inputs)[0]
     if packed[1] is not None:
         return None
     if dtype is not None and dtype.logical_elems != 1:
         return f"a packed {dtype} A pairs with no packed peer; no atom multiplies packed codes against decoded ones"
     if dtype is not None and dtype.nbytes == 1:
-        if not isinstance(node.a, Load):
+        if a_edge.as_slab() is None:
             return "fp8 fragment loads require a materialized A edge"
         if _channel_dtype(tile, node, target) != dtype:
             return "fp8 fragment loads require one matching operand dtype"
@@ -246,9 +218,10 @@ def _atom_refusal(
 
 def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None, None)) -> tuple[str, ...]:
     """Project every tensor-core atom allowed by static node and target facts."""
-    dtype = edge_dtypes(node.a, tile.inputs)[0]
-    a_is_load = isinstance(node.a, Load)
-    a_step = gmem_axis_step(node.a, node.axis.name, tile.inputs) if a_is_load else None
+    a_edge = node.operands[0]
+    dtype = edge_dtypes(a_edge, tile.inputs)[0]
+    a_is_load = a_edge.as_slab() is not None
+    a_step = gmem_axis_step(a_edge.as_slab().load, node.axis, tile.inputs) if a_is_load else None
     shapes = {**tile.inputs, **tile.outputs}
 
     def bindable(names: tuple[str, ...]) -> tuple[str, ...]:
@@ -290,7 +263,7 @@ def _contraction_domain(
     wide_warp_tiles = tuple(
         plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
     )
-    scalar_tiles = scalar_tile_moves() if len(node.channels) == 1 else (Tile(),)
+    scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 else (Tile(),)
     catalog = (
         *scalar_tiles,
         *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),
@@ -314,7 +287,7 @@ def _options(state: _ProjectionState, node) -> tuple:
     """Project one independent node factor without crossing it with edge choices."""
     site = state.tile.node_id(node)
     view = state.tile.views[site]
-    if isinstance(view, Projection):
+    if view.axis is None:
         if site not in state.tile.family_sites["TILE"] or not state.tile.place.free:
             return (ProjectionSchedule(Tile()),)
         inner = state.tile.place.free[-1]
@@ -330,7 +303,7 @@ def _options(state: _ProjectionState, node) -> tuple:
 
     choices = (
         _contraction_domain(state.tile, state.target, node, state.tile.contractions[site])
-        if view.contraction is not None
+        if view.as_contraction() is not None
         else tuple(ReductionSchedule(Tile(), reduction) for reduction in _reduction_domain(state.tile, node))
     )
     valid_choices = []
@@ -355,7 +328,7 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
     """Project the independent edge catalog; context composition decides compatibility."""
     node = state.tile.sites[site].node
     view = state.tile.views[site]
-    if not isinstance(view, Reduction) or view.contraction is None:
+    if view.as_contraction() is None:
         return (EdgeSchedule(Stage.direct()),)
     supported = {}
     direct = EdgeSchedule(Stage.direct())
@@ -405,8 +378,7 @@ def project_classic(tile: TileOp, target) -> ClassicDomains:
         )
     raster_values = (
         raster_moves()
-        if any(isinstance(view, Reduction) and view.contraction is not None for view in tile.views)
-        and all(axis.extent.is_static for axis in tile.place.free)
+        if any(view.as_contraction() is not None for view in tile.views) and all(axis.extent.is_static for axis in tile.place.free)
         else [""]
     )
     kernel_work_domain = {
@@ -470,6 +442,7 @@ def materialize_classic(
         knobs=knobs,
         output_specs=tile.output_specs,
         schedule=assignment,
+        axes=tile.axes,
         materialization=ClassicMaterialization(placed, resolved),
         workers=WarpSpec(assignment.kernel.work.producer) if assignment.kernel.work.producer else None,
     )

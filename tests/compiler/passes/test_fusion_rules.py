@@ -8,6 +8,7 @@ multi-output fused kernels without a GPU.
 """
 
 import numpy as np
+import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
@@ -306,7 +307,7 @@ def test_transcendental_is_not_duplicated_across_contraction_columns():
             acc.append(node.op.name)
         return acc
 
-    with pinned_knobs({"PLACE@a": "cut"}):
+    with pinned_knobs({"PLACE@inner.1/map": "cut"}):
         result = Pipeline.build(TILE_PASSES).run(_make_activation_linear("exp"), ctx=Context.from_target((12, 0)))
     kernels = [node for node in result.nodes.values() if isinstance(node.op, TileOp)]
     assert len(kernels) == 2
@@ -900,6 +901,7 @@ def _make_shared_broadcast_chain():
     return g
 
 
+@pytest.mark.xfail(strict=True, reason="sibling output nests of different extents are not one kernel on this tree (PR #699)")
 def test_shared_broadcast_chain_no_pure_indexmap_remains():
     """Regression: the intermediate broadcasts (node id != output name) must fully
     fold — no pure-indexmap copy left writing a stale buf."""

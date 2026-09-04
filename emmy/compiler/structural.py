@@ -15,11 +15,8 @@ Implementers today:
   Tensor names, and Hints.
 - :class:`emmy.compiler.ir.stmt.body.Body` — canonicalized body
   rendering with SSA / axis / commutative-arg / external-buffer names
-  normalized away.
- - :class:`emmy.compiler.ir.pure.fold.Fold` — the tile term's α-invariant
-   identity: the exact-flavor canonical digest of the Loop-IR body the term
-   lowers to (the term is pure algebra; its body is its normal form);
-   excludes placement, classic schedule, materialization and workers.
+  normalized away. A tile term has no key of its own: a ``TileOp`` keys
+  on the Loop IR its term lowers to.
 - :class:`emmy.compiler.context.Context` — codegen-affecting
   compilation knobs (compute capability today; tuning overrides as they
   land). Excludes ambient I/O fields (dump dirs, verbosity, the session
@@ -103,9 +100,8 @@ def form(value: object) -> object:
     - sets render SORTED, because their iteration order is not stable and an unsorted rendering
       would key one object two ways;
     - a value that OVERRIDES :meth:`Structural.structural_key` renders as ``(class, its key)`` —
-      it owns a canonicalization this walk cannot know. A ``Fold`` is the case that matters:
-      it is a dataclass, so the field walk below would happily render it by SSA spelling, while
-      its own key is α-invariant. Two renderings of one type is what this module exists to
+      it owns a canonicalization this walk cannot know (``Body``'s normalize-and-collapse,
+      ``Graph``'s Merkle walk). Two renderings of one type is what this module exists to
       prevent, so the type that knows better is asked. A type that merely INHERITS the default
       falls through to the field walk below — that is the default's definition, and delegating
       would recurse. Checked AFTER the container rules, so a ``Body`` still renders elementwise

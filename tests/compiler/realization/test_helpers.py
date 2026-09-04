@@ -13,7 +13,8 @@ def test_built_loads_the_lowered_program_through_nvcc(monkeypatch) -> None:
     lowered = object()
     seen = []
 
-    monkeypatch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend.compile", lambda self, graph, *, ctx: lowered)
+    monkeypatch.setattr(helpers, "lowered", lambda case, ctx: (lowered, []))
+    monkeypatch.setattr("emmy.compiler.context.Context.probe", staticmethod(lambda: "live"))
     monkeypatch.setattr("emmy.compiler.backend.cuda.program.CompiledProgram.build", lambda graph, feed: seen.append((graph, feed)))
     monkeypatch.setattr("emmy.compiler.backend.gpu_lock.gpu_lock", nullcontext)
     monkeypatch.setattr(helpers, "seeded_inputs", lambda program: {"x": program})
@@ -22,13 +23,17 @@ def test_built_loads_the_lowered_program_through_nvcc(monkeypatch) -> None:
     assert seen == [(lowered, {"x": source})]
 
 
-def test_bench_command_keeps_structural_input_pins_in_the_ab_row() -> None:
+def test_bench_command_replays_the_named_realization_through_the_golden_flags() -> None:
+    """The case's own record is the replay: no hand pin rides beside it, so the route, the input
+    regime and the schedule row all reach the compile through the one golden mechanism."""
     case = SimpleNamespace(
-        pinned={"FAST_MATH": False, "PLACE@a7": "cut", "WORK": "w1x1"},
+        pinned={"FAST_MATH": False, "PLACE@map.1/inner": "cut", "WORK": "w1x1"},
         record=SimpleNamespace(name="k_example"),
         path=Path("case.yaml"),
     )
 
     command = helpers.bench_command(case, Path("result.json"))
 
-    assert command[command.index("--ab") + 1] == "FAST_MATH=False,PLACE@a7=cut,WORK=w1x1"
+    assert command[command.index("--golden") + 1] == "case.yaml"
+    assert command[command.index("--realization") + 1] == "k_example"
+    assert "--ab" not in command and "--bench" in command

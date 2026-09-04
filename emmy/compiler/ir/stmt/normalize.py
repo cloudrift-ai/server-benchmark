@@ -117,7 +117,7 @@ def drop_size_one_free_axes(stmts: Body) -> Body:
         # Body.map post-order: ``s.body`` is already recursively mapped.
         if isinstance(s, Loop) and s.axis.extent.is_static and s.axis.extent.as_static() == 1 and not s.is_reduce:
             sub = Sigma({s.axis.name: Literal(0, "int")})
-            return tuple(c.rewrite(_identity_rename, sub) for c in s.body)
+            return tuple(c.substitute(sub) for c in s.body)
         return s
 
     return stmts.map(fn)
@@ -151,7 +151,7 @@ def drop_size_one_reduce_axes(stmts: Body) -> Body:
         sub = Sigma({stmt.axis.name: Literal(0, "int")})
         out: list[Stmt] = []
         for member in stmt.body:
-            member = member.rewrite(_identity_rename, sub)
+            member = member.substitute(sub)
             if not isinstance(member, Accum):
                 out.append(member)
                 continue
@@ -350,11 +350,11 @@ def _unify_siblings(body: Body) -> Body:
             continue
         loop = stmts[idx]
         assert isinstance(loop, Loop)
-        # Preserve the window across the rename so a sliced / carved axis doesn't lose it.
-        new_axis = Axis(name=canonical, extent=extent, window=loop.axis.window)
-        sub = Sigma({loop.axis.name: Var(canonical)})
-        rename_axis = _make_axis_renamer(loop.axis.name, new_axis)
-        renamed = tuple(s.rewrite(_identity_rename, sub, rename_axis) for s in loop.body)
+        # A RENAME — binders and uses through one map, which is why it may pass through the very
+        # scopes it renames. Spelled as a σ plus an axis renamer it read as a substitution, and a
+        # substitution must stop at a re-binding scope; these loops ARE the re-binding scopes.
+        new_axis = replace(loop.axis, name=canonical, extent=extent)
+        renamed = tuple(s.rename({loop.axis.name: canonical}) for s in loop.body)
         stmts[idx] = replace(loop, axis=new_axis, body=renamed)
 
     return Body(stmts)
@@ -460,17 +460,17 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
                 and t.unroll == merged.unroll
             ):
                 continue
-            merged_defs = _all_ssa_defs(merged.body)
-            if merged_defs & _all_ssa_defs(t.body):
+            merged_defs = Body.coerce(merged.body).ssa_defs
+            if merged_defs & Body.coerce(t.body).ssa_defs:
                 continue
-            if merged_defs & _all_ssa_uses(t.body):
+            if merged_defs & Body.coerce(t.body).ssa_uses:
                 continue
             between_defs: set[str] = set()
             for k in range(i + 1, j):
                 if k in consumed:
                     continue
-                between_defs |= _all_ssa_defs(Body((items[k],)))
-            if between_defs & _all_ssa_uses(t.body):
+                between_defs |= Body.coerce(Body((items[k],))).ssa_defs
+            if between_defs & Body.coerce(t.body).ssa_uses:
                 continue
             merged = Loop(
                 axis=merged.axis,
@@ -705,7 +705,7 @@ def dedup_loads(stmts: Body) -> Body:
             re-binds. SSA names bound inside a Loop / Cond body are scoped to it, so such a name is
             a DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
             value and redeclare the survivor."""
-            shadowed = _all_ssa_defs(inner)
+            shadowed = Body.coerce(inner).ssa_defs
             return walk(
                 inner,
                 {k: v for k, v in local.items() if v not in shadowed},
@@ -839,21 +839,13 @@ def _sibling_defs_uses(stmt: Stmt) -> tuple[frozenset[str], frozenset[str]]:
     all_inner_defs: set[str] = set()
     for b in nested:
         defs |= _exported_accs(b)
-        all_uses |= _all_ssa_uses(b)
-        all_inner_defs |= _all_ssa_defs(b)
+        all_uses |= Body.coerce(b).ssa_uses
+        all_inner_defs |= Body.coerce(b).ssa_defs
     return frozenset(defs), frozenset(all_uses - all_inner_defs)
 
 
 def _exported_accs(body: Body) -> frozenset[str]:
     return Body.coerce(body)._exported_accums
-
-
-def _all_ssa_defs(body: Body) -> frozenset[str]:
-    return Body.coerce(body)._all_ssa_defs
-
-
-def _all_ssa_uses(body: Body) -> frozenset[str]:
-    return Body.coerce(body)._all_ssa_uses
 
 
 # ---------------------------------------------------------------------------
@@ -937,19 +929,11 @@ def rename_ssa_sequential(stmts: Body) -> Body:
     if all(o == n for o, n in ssa_rename.items()) and all(o == n for o, n in axis_rename.items()):
         return stmts
 
-    sigma = Sigma(expr_sub)
-
-    def rename_ssa(name: str) -> str:
-        return ssa_rename.get(name, name)
-
-    def axis_fn(a: Axis) -> Axis:
-        new = axis_rename.get(a.name, a.name)
-        if new == a.name:
-            return a
-        # Preserve the window so slice / parentage metadata survives the SSA rename pass.
-        return Axis(name=new, extent=a.extent, window=a.window)
-
-    return tuple(s.rewrite(rename_ssa, sigma, axis_fn) for s in stmts)
+    # ONE map: renaming an SSA value and renaming an axis are the same operation, and a rename
+    # travels through the very binders it renames. Spelled as a σ over axis names it read as a
+    # substitution — which must stop at a re-binding scope, and these loops ARE those scopes.
+    names = {**ssa_rename, **axis_rename}
+    return tuple(s.rename(names) for s in stmts)
 
 
 # ---------------------------------------------------------------------------

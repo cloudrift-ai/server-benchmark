@@ -27,7 +27,6 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.pure.fold import deep_defines
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.tile import TileOp
@@ -68,7 +67,7 @@ def _pointwise_strip(tile: TileOp, materialized):
     width = plan.reg_n
     if not inner.extent.is_static or inner.extent.as_static() % width:
         raise ValueError("pointwise TILE must divide the static inner free extent")
-    definitions = {name for stmt in materialized.body for name in deep_defines(stmt)}
+    definitions = {name for stmt in materialized.body for name in Body((stmt,)).ssa_defs}
     loads = []
     computes = []
     writes = []

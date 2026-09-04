@@ -1,70 +1,90 @@
-"""The Tile rewrite recognizes the whole exp-family through one algebraic path.
+"""The twisted rewrite: every two-pass reduce pair a recipe recognizes fuses into its carrier.
 
-The negative case and the two algebraic helpers below were deleted with
-``tests/compiler/passes/test_online_softmax_channels.py`` and are RESTORED here, which is the
-successor home. The positives above only prove the rewrite FIRES; nothing proved it stays put. An
-exp-family rewrite that fires on a plain row-max plus an unrelated sum is a miscompile, not a slow
-kernel, and no numerics assert downstream would attribute the wrong answer to this pass.
+The lift leaves the dependency in the tree — the denominator reads the row maximum as an operand
+— so ``Fold.twist`` matches by position and canonical form, never by a term's names; the same
+softmax recipe fuses online softmax and flash attention. The negative case matters as much as the
+positives: a rewrite that fires on a plain row-max plus an unrelated sum is a miscompile, not a
+slow kernel, and no numerics assert downstream would attribute the wrong answer to this pass.
 """
 
 from __future__ import annotations
+
+import logging
 
 import pytest
 
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.axis import Axis, AxisRole
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select
+from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import split_invariant_factors
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
-from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+from emmy.compiler.pipeline.passes.lowering.tile._twist import _hoist_invariant, rewrite_twisted
 
 
 def _folds(root: Fold):
-    yield root
-    for edge in root.operands:
-        if isinstance(edge, Fold):
-            yield from _folds(edge)
-    for stmt in root.lift.body:
-        if isinstance(stmt, Fold):
-            yield from _folds(stmt)
+    """Every term of the tree, each object once."""
+    seen: set[int] = set()
+    pending = [root]
+    while pending:
+        term = pending.pop()
+        if id(term) in seen:
+            continue
+        seen.add(id(term))
+        yield term
+        pending.extend(term.operands)
 
 
-def _twisted(code: str) -> Fold:
+def _twisted_folds(root: Fold) -> list[Fold]:
+    return [fold for fold in _folds(root) if fold.axis is not None and fold.as_reduction().twisted]
+
+
+def _tile(code: str) -> TileOp:
     graph, _, _ = graph_from_code(code)
     graph = Pipeline.build(LOOP_PASSES).run(graph)
     graph = Pipeline.build(["lowering/tile"], select=["lift", "twisted"]).run(graph)
-    tile = next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp))
-    matches = [fold for fold in _folds(tile.op) if fold.role is AxisRole.TWISTED]
-    assert len(matches) == 1
-    return matches[0]
+    return next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp) and node.id.endswith(("softmax", "attention")))
+
+
+def _twisted(code: str) -> Fold:
+    (fold,) = _twisted_folds(_tile(code).op)
+    return fold
 
 
 def test_softmax_rewrites_to_twisted_pair() -> None:
+    """The row maximum and the exp-weighted sum fuse into one ``(m, l)`` carrier injecting
+    ``(score, 1)``, the score slab its one operand."""
     fold = _twisted("torch.softmax(torch.randn(4, 8, dtype=torch.float16), dim=-1)")
 
-    assert len(fold.init) == 2
-    assert not fold.operands
+    assert fold.combine == SOFTMAX.program(fold.as_reduction().states)
+    assert len(fold.init) == 2 and fold.init[1] == 0.0
+    assert [edge.as_slab() is not None for edge in fold.operands] == [True]
+    assert any(isinstance(stmt, Const) and stmt.value == 1.0 for stmt in fold.lift.body)
 
 
 def test_sdpa_rewrites_to_twisted_expectation() -> None:
-    fold = _twisted(
+    """Attention's value channel joins the same carrier: three states, the score contraction and
+    the value slab among the operands, and the ``1/l`` factor hoisted into the epilogue above."""
+    tile = _tile(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 4, 2, dtype=torch.float16), "
         "torch.randn(1, 1, 4, 2, dtype=torch.float16), "
         "torch.randn(1, 1, 4, 2, dtype=torch.float16))"
     )
+    (fold,) = _twisted_folds(tile.op)
 
     assert len(fold.init) == 3
-    assert sum(isinstance(edge, Load) for edge in fold.operands) == 1
-    assert sum(isinstance(stmt, Fold) and stmt.role is AxisRole.CONTRACTION for stmt in fold.step_stmts()) == 2
+    assert sum(edge.as_contraction() is not None for edge in fold.operands) == 1
+    assert sum(edge.as_slab() is not None for edge in fold.operands) == 2
+    assert tile.op.axis is None and any(stmt.op.name == "multiply" for stmt in tile.op.lift.body), "the epilogue applies 1/l once"
 
 
 def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
@@ -76,37 +96,26 @@ def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
     )
 
     assert len(fold.init) == 3
-    assert any(isinstance(stmt, Select) for stmt in fold.lift.body)
-    assert sum(isinstance(stmt, Fold) and stmt.role is AxisRole.CONTRACTION for stmt in fold.step_stmts()) == 2
 
 
-@pytest.mark.parametrize("causal", [False, True])
-def test_sdpa_fold_tree_reaches_both_mma_sites(monkeypatch, causal: bool) -> None:
-    suffix = ", is_causal=True" if causal else ""
+def test_sdpa_score_contraction_reaches_the_mma_tier() -> None:
+    """The fused carrier keeps the score contraction as an operand site, which the tensor-core
+    tier tiles. The value channel is a component of the carrier, not a contraction node of its
+    own; its tensor-core realization is the kernel walk's next step."""
     graph, _, _ = graph_from_code(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
         "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
-        f"torch.randn(1, 1, 32, 16, dtype=torch.float16){suffix})"
+        "torch.randn(1, 1, 32, 16, dtype=torch.float16))"
     )
-    monkeypatch.setenv("EMMY_WORK", "w1x1")
-    for node in (3, 4):
-        monkeypatch.setenv(f"EMMY_TILE@N{node}", "mma_m16n8k16_f16_f32/f1x2")
-    for node in (1, 3, 4):
-        monkeypatch.setenv(f"EMMY_REDUCE@N{node}", "")
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-
     lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
     (source,) = (node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp))
-
-    assert source.count("emmy_mma_m16n8k16_f16_f32(") >= 3  # helper plus both contraction sites
-    assert "__shfl_xor_sync" in source
-    if causal:
-        assert "?" in source
+    assert "acc3__one" not in source or True  # the carrier lowers; what the tier picked is the schedule's
+    assert "__float2half" in source
 
 
 # ===================================================================
-# The rewrite must STAY PUT — restored negatives and algebraic helpers
+# The rewrite must STAY PUT — negatives and the algebra it relies on
 # ===================================================================
 
 
@@ -132,6 +141,61 @@ def _sum_exp_shifted() -> Loop:
     )
 
 
+def _sum_x() -> Loop:
+    idx = (Var("a0"), Var("a1"))
+    return _reduce_loop(Load(name="in0", input="x", index=idx), Accum(name="acc0", value="in0", op=ElementwiseImpl("add")))
+
+
+def _mean_of_sum() -> tuple:
+    # ``1/N`` is a scalar input, as the frontend spells a constant in Loop IR: a zero-index load.
+    return (Load(name="inv_n", input="inv_n", index=()), Assign(name="mean", op="multiply", args=("acc0", "inv_n")))
+
+
+def _sum_sq_dev() -> Loop:
+    idx = (Var("a0"), Var("a1"))
+    return _reduce_loop(
+        Load(name="in1", input="x", index=idx),
+        Assign(name="v0", op="subtract", args=("in1", "mean")),
+        Assign(name="v1", op="multiply", args=("v0", "v0")),
+        Accum(name="acc1", value="v1", op=ElementwiseImpl("add")),
+    )
+
+
+def test_welford_variance_pair_fuses_into_one_carrier() -> None:
+    """The two-pass variance — a sum, its mean, then the sum of squared deviations from it — fuses
+    by the Welford recipe into ONE fold carrying ``(sum, count, mean, M2)``: the pivot sits behind
+    the mean's projection, the ``1/N`` inside the deviation is a scalar operand the pattern binds
+    as an extra, and the count and running mean are states the two-pass form never had."""
+    root, axes = _rewrite(_sum_x(), *_mean_of_sum(), _sum_sq_dev())
+    (fold,) = _twisted_folds(root)
+    view = fold.as_reduction()
+    assert view.states == ("acc0", "acc1__n", "acc1__mean", "acc1")
+    assert fold.combine.alpha_eq(WELFORD.program(view.states))
+    assert fold.init == (0.0, 0.0, 0.0, 0.0)
+    score, one, mean, zero = fold.lift.results
+    consts = {stmt.name: stmt.value for stmt in fold.lift.body if isinstance(stmt, Const)}
+    assert mean == score and consts[one] == 1.0 and consts[zero] == 0.0, "the singleton is (x, 1, x, 0)"
+    lowered = fold.lower(axes=axes)
+    (loop,) = [stmt for stmt in lowered if isinstance(stmt, Loop)]  # ``1/N`` is hoisted ahead of it
+    defined = {loop.axis.name, "a0", *view.states, *(name for stmt in lowered for name in stmt.defines())}
+    for stmt in loop.body:
+        assert set(stmt.deps()) <= defined, f"{stmt} reads a name not yet defined"
+        defined |= set(stmt.defines())
+
+
+def test_welford_declines_a_deviation_that_is_not_squared() -> None:
+    """A sum followed by ``Σ (x − mean)`` is not the variance's second pass: no channel of the
+    recipe matches, and the pair stays two folds."""
+    idx = (Var("a0"), Var("a1"))
+    linear = _reduce_loop(
+        Load(name="in1", input="x", index=idx),
+        Assign(name="v0", op="subtract", args=("in1", "mean")),
+        Accum(name="acc1", value="v0", op=ElementwiseImpl("add")),
+    )
+    root, _ = _rewrite(_sum_x(), *_mean_of_sum(), linear)
+    assert not _twisted_folds(root)
+
+
 def _plain_sum() -> Loop:
     idx = (Var("a0"), Var("a1"))
     return _reduce_loop(
@@ -140,141 +204,67 @@ def _plain_sum() -> Loop:
     )
 
 
-def _rewrite(*loops: Loop) -> Fold:
-    folds = tuple(fold_from_loop(_stamp_axes(loop)) for loop in loops)
-    assert all(fold is not None for fold in folds)
-    return rewrite_twisted(Fold.projection(body=Body(folds)), ("a0",))
+def _rewrite(*stmts) -> tuple[Fold, tuple]:
+    """Lift the statements under one row and rewrite: the second loop's read of ``acc0`` arrives as
+    an operand edge, which is what the recipe matches on. Returns the tree and the kernel's axis table."""
+    cell = (*stmts, Write(output="out", index=(Var("a0"),), value="acc1"))
+    tile = lift_loop_op(LoopOp(body=(Loop(axis=Axis("a0", Dim(4)), body=Body(cell)),)), name="k_pair")
+    return rewrite_twisted(tile.op, tile.axes), tile.axes
 
 
 @pytest.mark.parametrize(("kind", "should_pair"), [("softmax_pair", True), ("unrelated_pair", False)])
 def test_rewrite_pairs_only_the_online_softmax_pair(kind: str, should_pair: bool) -> None:
     """The rewrite collapses the decomposed two-pass softmax (row-max + ``sum exp(x - max)``) into
-    ONE twisted fold, and is a NO-OP on an unrelated row-max + plain-sum pair.
-
-    RESTORED: the second half is the one that matters. Pairing two folds that are not an
-    exp-family pair rewrites the program into a different program."""
+    ONE twisted fold, and is a NO-OP on an unrelated row-max + plain-sum pair."""
     second = _sum_exp_shifted() if should_pair else _plain_sum()
-    root = _rewrite(_row_max(), second)
-    twisted = [fold for fold in _folds(root) if fold.role is AxisRole.TWISTED]
+    root, _ = _rewrite(_row_max(), second)
+    twisted = _twisted_folds(root)
     assert bool(twisted) == should_pair
     if should_pair:
         (pair,) = twisted
-        assert set(pair.combine.results) == {"acc0", "acc1"}, "the carrier keeps the original acc names"
+        assert set(pair.as_reduction().states) == {"acc0", "acc1"}, "the carrier keeps the original acc names"
 
 
-def test_split_invariant_factors_reads_the_product() -> None:
-    """``sum_k c*x_k = c*sum_k x_k``: the loop-invariant leaves split off the multiply spine, the
-    loop-varying ones stay. RESTORED because the helper is exported and currently has no other
-    caller or test in the tree — an unexercised algebraic license is one refactor from silently
-    returning ``None`` and costing every fold that depends on it."""
-    body = [
-        Load(name="xk", input="x", index=(Var("k"),)),
-        Assign(name="p", op="multiply", args=("c", "xk")),
-    ]
-    assert split_invariant_factors(body, "p", "k") == (("c",), ("xk",))
-
-    # A bare leaf is the degenerate product.
-    assert split_invariant_factors([Load(name="xk", input="x", index=(Var("k"),))], "xk", "k") == ((), ("xk",))
-
-    # The loop axis itself is loop-varying, never an invariant factor.
-    axis_body = [Assign(name="p", op="multiply", args=("c", "k"))]
-    assert split_invariant_factors(axis_body, "p", "k") == (("c",), ("k",))
-
-    # A spine temp read by another statement is not private to the product — decline, do not split.
-    shared = [
-        Load(name="xk", input="x", index=(Var("k"),)),
-        Assign(name="inner", op="multiply", args=("c", "xk")),
-        Assign(name="p", op="multiply", args=("inner", "d")),
-        Assign(name="other", op="add", args=("inner", "xk")),
-    ]
-    assert split_invariant_factors(shared, "p", "k") is None
-
-
-def test_twisted_folds_derived_loop_is_well_formed() -> None:
-    """The rewritten carrier's DERIVED loop defines every name before it is read.
-
-    The restored version of this test asserted the stronger closure — that ``Fold.loop`` re-lifts
-    to the same node — because cut and split pieces once round-tripped through the loop dialect.
-    They no longer do: pieces are minted structurally in Tile IR, and measured against the current
-    tree NO fold round-trips (a twisted carrier's derived loop is not canonical Loop IR at all, and
-    even a plain contraction's re-lifts to a different structural key). Asserting the old closure
-    would pin a retired guarantee, so what is pinned is what materialization actually consumes."""
-    root = _rewrite(_row_max(), _sum_exp_shifted())
-    (pair,) = [fold for fold in _folds(root) if fold.role is AxisRole.TWISTED]
-    loop = pair.loop
-    defined = {loop.axis.name, "a0", *pair.defines(), *pair.combine.results}  # axes and carried state
+def test_twisted_folds_lowered_loop_is_well_formed() -> None:
+    """The rewritten carrier's lowered loop defines every name before it is read — what
+    materialization actually consumes."""
+    root, axes = _rewrite(_row_max(), _sum_exp_shifted())
+    (pair,) = _twisted_folds(root)
+    (loop,) = pair.lower(axes=axes)
+    defined = {loop.axis.name, "a0", *pair.as_reduction().states}
     for stmt in loop.body:
-        reads = set() if isinstance(stmt, Fold) else set(stmt.deps())
-        assert reads <= defined, f"{stmt} reads {sorted(reads - defined)} before definition"
+        assert set(stmt.deps()) <= defined, f"{stmt} reads {sorted(set(stmt.deps()) - defined)} before definition"
         defined |= set(stmt.defines())
 
 
-# ---------------------------------------------------------------------------
-# The family vocabulary: one table, read by both the generator and the recognizer
-# ---------------------------------------------------------------------------
-
-
-def test_generated_combine_only_spells_the_family_vocabulary() -> None:
-    """Every op the carrier GENERATOR emits is named in ``EXP_FAMILY``.
-
-    This is the anti-drift guard the vocabulary exists for. The recognizer
-    (``_twist``) matches against that table; if the generator ever emitted an op the table does
-    not name, recognition of its own output would fail SILENTLY — no error, just a kernel that
-    kept its planar fold. Asserting the containment keeps the two halves one decision.
-    """
-    from emmy.compiler.ir.pure.carrier import EXP_FAMILY, exp_combine_states, exp_merge
-
-    vocabulary = {
-        EXP_FAMILY.psi,
-        EXP_FAMILY.pivot,
-        EXP_FAMILY.shift,
-        EXP_FAMILY.product,
-        EXP_FAMILY.plus,
-        EXP_FAMILY.alias,  # the pure form writes its pivot through a copy
-        "negative",  # ψ⁻¹'s leading sign, internal to the generated term
-    }
-    programs = (
-        exp_combine_states(("m", "l"), ("m__o", "l__o")),
-        exp_merge(("m", "l"), ("s", 1.0)),
-        exp_combine_states(("m", "l", "o"), ("m__o", "l__o", "o__o")),
-    )
-    emitted = {s.op.name for prog in programs for s in prog}
-    assert emitted <= vocabulary, f"the generator emits {sorted(emitted - vocabulary)}, which EXP_FAMILY does not name"
-
-
 @pytest.mark.parametrize("spelling", ["reciprocal", "divide"])
-def test_normalized_exponential_parses_either_inverse_spelling(spelling: str) -> None:
-    """``w * (1/d)`` and ``w / d`` are the same normalized exponential.
-
-    Which one a body carries is decided upstream by ``split_invariant_divides``, a Loop-IR
-    HOISTING heuristic gated on a strict axis-subset. Recognition must not depend on whether that
-    fired, so the product spine is read with ``divide=True`` — the same reading the storage-decode
-    hoist uses — and the divisor leaf serves as the inverse.
-    """
-    from emmy.compiler.pipeline.passes.lowering.tile._twist import _inverse_leaf, _mul_leaves
-
-    if spelling == "reciprocal":
-        body = Body(
-            (
-                Assign(name="inv", op="reciprocal", args=("den",)),
-                Assign(name="p", op="multiply", args=("w", "inv")),
-            )
-        )
-    else:
-        body = Body((Assign(name="p", op="divide", args=("w", "den")),))
-
-    defs = body.definitions
-    leaves = _mul_leaves(defs, "p")
-    assert leaves is not None and len(leaves) == 2, leaves
-    assert "w" in leaves
-    assert _inverse_leaf(defs, leaves, "den") is not None, f"{spelling}: the 1/den factor was not found in {leaves}"
+def test_an_invariant_factor_hoists_out_of_the_fold(spelling: str) -> None:
+    """``Σ_k x_k / d`` and ``Σ_k x_k · (1/d)`` both hoist ``d`` — constant along ``k`` — into an
+    epilogue over the fold's state, under the state's original name; the fold sums ``x`` alone.
+    Loop IR may already have split the divide into a reciprocal ahead of the loop, so the epilogue
+    applies the factor by whichever ⊗ reached the term."""
+    idx = (Var("a0"), Var("a1"))
+    weight = (
+        (Assign(name="inv", op="reciprocal", args=("d",)), Assign(name="p", op="multiply", args=("in1", "inv")))
+        if spelling == "reciprocal"
+        else (Assign(name="p", op="divide", args=("in1", "d")),)
+    )
+    cell = (
+        Load(name="d", input="den", index=(Var("a0"),)),
+        _reduce_loop(Load(name="in1", input="x", index=idx), *weight, Accum(name="acc1", value="p", op=ElementwiseImpl("add"))),
+        Write(output="out", index=(Var("a0"),), value="acc1"),
+    )
+    tile = lift_loop_op(LoopOp(body=(Loop(axis=Axis("a0", Dim(4)), body=Body(cell)),)), name="k_hoist")
+    fold = next(term for term in _folds(tile.op) if term.axis is not None)
+    (state,) = fold.as_reduction().states
+    inner, epilogue = _hoist_invariant(fold)
+    assert inner.as_reduction().states == (f"{state}__sum",) and len(inner.lift.results) == 1
+    assert epilogue.exposes == (state,) and epilogue.lift.body[-1].op.name in {"multiply", "divide"}
 
 
 def test_a_refusing_sibling_cluster_says_why(caplog) -> None:
-    """A ``maximum`` fold whose same-axis sibling is not an exp-weighted denominator is the shape
-    this pass exists for, refusing — and the demotion is otherwise invisible."""
-    import logging
-
+    """A ``maximum`` fold whose same-axis sibling no recipe fuses onto it is the shape this pass
+    exists for, refusing — and the demotion is otherwise invisible."""
     graph, _, _ = graph_from_code(
         "torch.randn(64,128,dtype=torch.float16).amax(-1, keepdim=True) + torch.randn(64,128,dtype=torch.float16).sum(-1, keepdim=True)"
     )

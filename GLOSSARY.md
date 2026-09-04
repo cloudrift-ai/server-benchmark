@@ -82,10 +82,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
   kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
   fold only.
-- **Monoid family** — One registered fold algebra: a componentwise monoid, or its conjugation by a bijection (a
-  twist) such as the exp/LSE family behind online softmax. A family claims a stored combine only when its generator
-  would have emitted exactly that program, and it carries the algebra's legality properties (commutative,
-  observable). Registered in `ir/pure/algebra.py`.
+- **Componentwise / twisted combine** — The two shapes a stored fold combine takes: one independent ⊕ per state (a
+  planar fold — sum, max — built by `Lambda.componentwise` and read back by `Lambda.components`), or a componentwise
+  monoid conjugated by a bijection (a twist) such as the exp/LSE family behind online softmax, stated by a twist
+  recipe. Read off the program, never annotated.
 - **Broadcasting** — Reusing a smaller tensor across a larger shape. For example, one weight per column can be
   reused for every row.
 - **Index map** — A description of how output coordinates correspond to input coordinates. Emmy uses index maps for
@@ -95,7 +95,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Lowering** — Moving from a high-level representation to a more detailed, machine-oriented one while preserving
   the program's meaning.
 - **Total lift** — The loop→tile boundary: one mechanical conversion that turns every inner reduction loop into a
-  Fold tree, turns local output loops into pure projection regions, peels outer parallel loops into placement, and
+  Fold tree, turns each local output loop's projection into a zero-axis term evaluated over its sweep axis, peels outer
+  parallel loops into placement, and
   separates output specifications. Unsupported non-canonical Loop IR fails formation; Tile IR has no raw-loop escape.
 - **Classification** — Reading a Fold tree's stored algebra to derive a contraction or other scheduling-relevant
   structure. Context-independent Lambda normalization and contraction canonicalization happen during Tile IR
@@ -118,10 +119,21 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   earlier compiler pass wrote onto the operation.
 - **Mutable / immutable** — A mutable object can be changed after creation. An immutable object cannot; code creates
   a replacement instead. Emmy's graph is mutable, while many nested compiler statements are immutable.
-- **Closure** — A pure lambda paired with the enclosing iteration axes it may read. In Emmy the environment is an
-  index space: a normalized term captures only iteration axes, never data values, which arrive through operand
-  edges. Alpha-equivalent closures with equal captures denote one value; under different captures they are one
-  function with distinct values. Defined in `ir/pure/closure.py`.
+- **Closure** — The property that a term is closed over its enclosing iteration axes: it reads only those axes,
+  never a data value, since values arrive through operand edges (`Fold` formation states it). Alpha-equivalent terms
+  over equal axes denote one value; over different axes they are one function with distinct values.
+- **Route** — The spelling a structural knob key addresses a node of the fold tree by: from the root, each departure
+  names the node stood on and the 1-based stored operand taken (`map.1`), and the last segment names the kind of the
+  node arrived at — `PLACE@map.1/twist.1/inner.2/map`, `TILE@map.1/twist.1/inner`. Kinds are the term's derived
+  readings (`map`, `reduce`, `inner`, `twist`, `scan`); a bare family name is sugar for its one site.
+- **Twist recipe** — A twisted monoid stated as data (`ir/pure/twist.py`): a componentwise base monoid with its
+  per-element lift, conjugated by a bijection ψ (transport of structure — associativity is inherited), beside which
+  the recipe stores what conjugation does not give stably: one pattern per channel (the per-element map a dependent
+  reduce's lift must spell, over roles), what each state is at the singleton, any state the two-pass form never had
+  (Welford's count and running mean), and the fused ⊕ program in its stable spelling — two lambdas over roles for an
+  open channel count (softmax's pivot advance and per-channel rescale) or one lambda over every state pair. The
+  definition certifies the data. `Fold.twist(recipe)` finds the pivot among the term's operands and matches by
+  position and canonical form, never by a term's names.
 - **Structural identity / structural key** — A fingerprint based on computation and data flow rather than cosmetic
   names. It lets Emmy recognize equivalent compiler candidates.
 - **Idempotent rule** — A rule that does not keep changing its own output when applied again. Compiler rewrite rules
@@ -222,9 +234,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   chooses its own settings from scratch, exactly like any newly lifted kernel. Nothing
   downstream can tell the two apart.
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
-- **Pin** — To force a tuning choice by hand instead of letting the compiler make it, either by setting an environment
-  variable (`EMMY_STAGE=d2/smem-async`) or by re-running a recorded configuration exactly. A pinned benchmark measures the
-  forced configuration rather than the one the compiler would have chosen on its own.
+- **Pin** — A forced tuning choice. A hand pin comes from the environment (`EMMY_STAGE=d2/smem-async`, `EMMY_KNOBS`,
+  `emmy run --ab`) and is how a row is measured rather than chosen: a pinned benchmark measures the forced configuration
+  rather than the one the compiler would have picked. A kernel never carries pins of its own: a measured row reaches
+  it only as evidence at its forks.
 - **Schedule key** — The name a schedule choice is stored under when one kernel contains more than one step that takes
   the same kind of choice. Written plain, `TILE` refers to the kernel's main step. Where a kernel has several — the
   fused norm→linear kernel folds both its statistic and its contraction — the name carries a suffix identifying the
@@ -262,20 +275,32 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   from two different pools are not comparable, because they are different kernels. A pool may hold more than one
   verified answer: a shape recorded twice, or under two names, contributes several.
 - **Golden configuration** — One persisted symbolic program target. Its `realizations` array holds the concrete
-  dimension bindings and input pin regimes that were tuned for that target.
+  dimension bindings and input pin regimes that were tuned for that target. `--golden PATH` names the file such
+  targets live in; `--realization NAME` selects one realization inside it.
 - **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,
-  input knob pins, the selected schedule knobs, and (after verification) paired measurements.
+  input knob pins, the selected schedule knobs, and (after verification) paired measurements. A measured realization
+  is a row of evidence; an unmeasured one becomes evidence once `emmy run --golden PATH --bench` has measured it.
 - **Child-identity schedule receipt** — A realization that records one split child's schedule: the route's cut(s)
   frozen in its input pins, the child's schedule row in its knobs, and the child kernel's deploy identity stored as
-  its identity. The stored identity is the verified-tier join key and the strict decode's kernel selector — one flat
-  knobs map decorates exactly one kernel, so conflicting per-child schedules persist as sibling receipts.
+  its identity. The stored identity is the strict decode's kernel selector — one flat knobs map decorates exactly
+  one kernel, so conflicting per-child schedules persist as sibling receipts. As evidence a receipt is two rows: its
+  route for the parent kernel and its schedule row for the child.
 - **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
-  realizations, proposed knob rows, and tune ranking feedback. It is search state, not trusted deployment evidence.
+  realizations, proposed knob rows, and tune ranking feedback. It is search state; only its measured rows are
+  evidence, and only when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at
   `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; model-agnostic hardware goldens remain under
   `emmy/compiler/pipeline/search/goldens/`. Every realization contains verified deployable measurements; `emmy tune`
-  refuses to mutate these files directly.
-- **Evidence** — A compatible recorded measurement used to select between schedule candidates.
+  refuses to mutate these files directly. The files for the live card are the golden evidence an ordinary compile
+  reads.
+- **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row, a tune
+  database row, or a measured golden row. All three enter one index and are read by one rule.
+- **Route row** — A measured row that spells a kernel-set decision — a `PLACE` key, or a `REDUCE` value carrying a
+  cross-CTA `g<n>` half. Its latency is the measured price of applying that decision to the kernel it was recorded
+  on; at that kernel's fork a compile takes the offered arm the row spells, which outranks any arm priced by
+  prediction, and the pieces the arm mints are decided from rows of their own.
+- **Strict evidence** — A compile mode (`--strict-evidence`, `EMMY_STRICT_EVIDENCE`) in which a fork no measured row
+  decides is an error naming the kernel, instead of a prediction the prior makes.
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
   data that model trains on, and the measurements in it that were taken at deployable settings are also read directly
   when compiling.
@@ -285,10 +310,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   checked by anyone else. A freeze is identical wherever it is read, which is what makes two models' scores a fair
   comparison and a reported score something a reader can reproduce. One is kept with the repository and is what the
   prior is evaluated against by default.
-- **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: the
-  verified golden configurations for that GPU first (joined by exact structural identity and decoded by exact row
-  equality), then measurements recorded on the machine, then the prior's prediction, and last the rule's own first
-  option. Each step in that order is called a tier.
+- **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
+  evidence first — the reservoir, then the tune database's rows and the golden rows in scope, the fastest compatible
+  row winning — then the prior's prediction, and last the rule's own first option. A structural fork follows the
+  same order over route rows, priced alternatives standing in for the prior.
 - **Calibration** — A check of whether a learned model ranks measured candidates well enough to influence
   compilation.
 - **Regret** — What choosing by prediction costs, as a ratio to the best measured option: 1.00 means the choice was

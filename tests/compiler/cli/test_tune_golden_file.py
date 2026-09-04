@@ -1,4 +1,4 @@
-"""Working-golden target and ranking plumbing for ``emmy tune --golden-file``."""
+"""Working-golden target and ranking plumbing for ``emmy tune --golden PATH``."""
 
 from __future__ import annotations
 
@@ -38,12 +38,11 @@ from emmy.compiler.torch_wire import intern_program
 
 def _args(path, **over):
     values = {
-        "golden_file": str(path),
+        "golden": str(path),
         "dataset": None,
-        "kernel": None,
+        "realization": None,
         "code": None,
         "input": None,
-        "golden": None,
         "dynamic": None,
     }
     values.update(over)
@@ -701,7 +700,7 @@ def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypat
         code=None,
         input=None,
         dynamic=None,
-        golden_file="working.yaml",
+        golden="working.yaml",
         patience=4,
         explore_eps=0.0,
         ucb_c=1.4,

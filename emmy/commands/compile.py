@@ -129,53 +129,63 @@ def add_input_args(parser, *, include_dump_dir: bool = True) -> None:
 
 
 def add_golden_arg(parser) -> None:
-    """Register golden selection arguments shared by ``run`` / ``compile``."""
+    """Register the golden flags every replaying command shares (``run`` / ``compile`` / ``tune`` /
+    ``serve`` spell them the same way): ``--golden PATH`` names the golden YAML whose measured rows
+    feed the evidence index INSTEAD of the repository goldens, ``--realization NAME`` selects one
+    realization inside it (or, without ``--golden``, inside the live card's repository corpus), and
+    ``--strict-evidence`` refuses any fork no measurement decides."""
     parser.add_argument(
         "--golden",
-        metavar="NAME",
+        metavar="PATH",
         help=(
-            "Compile / run the embedded Torch IR program for a golden record. NAME is an exact "
-            "golden name OR a name **substring** (the SAME identifier `emmy eval --kernel` filters on), as long as it "
-            "names a single shape; an ambiguous substring lists the matched shapes and an unknown one lists all "
-            "available names. Mutually exclusive with --code / positional input / --ir."
+            "A golden YAML (working or canonical) whose measured rows are the golden evidence this command deploys "
+            "from, instead of the repository goldens: they join the tune DB's rows in the one measured-evidence index "
+            "the greedy pick reads. Mutually exclusive with --code / positional input / --ir."
         ),
     )
     parser.add_argument(
-        "--golden-file",
-        metavar="PATH",
+        "--realization",
+        metavar="NAME",
         help=(
-            "Resolve the required --golden NAME from this explicit working YAML instead of the "
-            "canonical live-GPU corpus. Replays the file's exact provenance or Loop IR target; "
-            "only verified rows are automatically A/B-pinned."
+            "Select one realization by exact name or an unambiguous name substring — inside --golden PATH when given, "
+            "else inside the live card's repository goldens. The embedded program of that realization is the input; "
+            "an ambiguous substring lists the matches and an unknown name lists what is available."
+        ),
+    )
+    parser.add_argument(
+        "--strict-evidence",
+        action="store_true",
+        help=(
+            "Fail instead of deploying a prediction: every fork must be decided by a measured row (reservoir, tune DB "
+            "or golden). A kernel nothing measured raises EvidenceError naming it."
         ),
     )
 
 
 def resolve_golden_arg(args) -> None:
-    """Resolve ``--golden NAME`` to its embedded stable Torch IR program.
+    """Resolve ``--realization NAME`` (inside ``--golden PATH`` or the live card's corpus) to its
+    embedded stable Torch IR program and the golden records that are evidence for it.
 
-    Canonical selection retains every measured sibling on ``args.golden_configs``
-    for pinned A/B reporting. ``--golden-file`` instead resolves only inside that
-    working document and retains its verified siblings, or its one valid direct tune winner, as automatic pins;
-    inventory/proposal siblings still select the target graph. When every matching
-    realization in an explicit working file shares one input-pin regime containing
-    ``PLACE``, that regime selects the ordinary compile's structural target without
-    promoting any unverified schedule knobs. No Python snippet is generated and
-    dynamic shapes need no CLI reconstruction: they are already in the decoded program.
+    Three things come out on ``args``: ``_golden_graph`` (the target program), ``_golden_records``
+    (every record of the file recorded on that target — the golden evidence the compile's index
+    loads, so a route's receipts come along with it) and ``golden_configs`` (the rows ``run``
+    benches as pinned rows). Which rows bench: a realization the operator NAMED is always benched;
+    a whole-file walk (``run --golden PATH`` alone, ``_explicit_realization`` false) benches a
+    target's verified rows, or its one valid direct tune winner, and leaves proposals to the
+    tuner. Nothing here installs a pin: a measured record reaches its kernel through the evidence
+    pick when the compile reaches that kernel's forks.
 
-    ``NAME`` matches the same way ``emmy eval --kernel`` filters goldens: an exact
-    golden name first, else a name **substring** — so the identifier used to inspect
-    a golden (selected through ``--golden-file``) can be reused verbatim to run /
-    compile it. Because compile/run build a single graph, the substring
-    must name **one** shape: a match spanning several shapes exits 2 listing them.
-    Exits 2 on an unknown name (listing the available names) or a conflict with
+    ``NAME`` matches an exact realization name first, else a name **substring** — the same
+    identifier ``emmy eval --kernel`` filters the golden dataset on. Because compile/run build a
+    single graph, the substring must name **one** shape: a match spanning several shapes exits 2
+    listing them. Exits 2 on an unknown name (listing the available names) or a conflict with
     ``--code`` / positional input / ``--ir`` / ``--dynamic``."""
-    name = getattr(args, "golden", None)
-    golden_file = getattr(args, "golden_file", None)
+    name = getattr(args, "realization", None)
+    golden_file = getattr(args, "golden", None)
     args.golden_configs = []
-    args.golden_target_pins = {}
+    args._golden_records = []
     if golden_file and not name:
-        logger.error("--golden-file requires --golden NAME")
+        logger.error("--golden PATH requires --realization NAME here (run --golden PATH alone walks every realization)")
         sys.exit(2)
     if not name:
         return
@@ -191,13 +201,7 @@ def resolve_golden_arg(args) -> None:
     if getattr(args, "dynamic", None):
         logger.error("--dynamic is incompatible with --golden (a dynamic golden's spec is part of its config)")
         sys.exit(2)
-    from emmy.compiler.pipeline.search.golden import (
-        GOLDEN_RECORDS,
-        goldens_for_live_gpu,
-        load_golden_file,
-        load_golden_records,
-        shared_placement_pins,
-    )
+    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, goldens_for_live_gpu, load_golden_file, load_golden_records
 
     # Canonical replay scopes to the live card as before. An explicit working file is
     # intentionally literal: no repository union and no live-card filtering, because its
@@ -240,11 +244,8 @@ def resolve_golden_arg(args) -> None:
     if len(targets) != 1:
         logger.error("golden %r resolves to %d different embedded program targets", name, len(targets))
         sys.exit(2)
-    if document is not None:
-        args.golden_target_pins = shared_placement_pins(matches)
     args._golden_graph = matches[0].target_program.copy()
-    from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
-
+    args._golden_records = [record for record in records if record.target_key == matches[0].target_key]
     pinned = matches
     if document is not None:
         verified = [record for record in matches if record.measurements is not None]
@@ -259,8 +260,9 @@ def resolve_golden_arg(args) -> None:
         if winners and not valid_winner:
             logger.error("golden %r must contain one valid direct tune winner with matching measured knobs", name)
             sys.exit(2)
-        pinned = verified or winners
-    args.golden_configs = [Sample.from_golden(match) for match in pinned]
+        if not getattr(args, "_explicit_realization", True):
+            pinned = verified or winners
+    args.golden_configs = [golden_row(match) for match in pinned]
     logger.info(
         "[golden] %s%s → embedded %s target %s (%d matching row%s, %d automatic pin%s)",
         name,
@@ -272,8 +274,18 @@ def resolve_golden_arg(args) -> None:
         len(pinned),
         "" if len(pinned) == 1 else "s",
     )
-    if args.golden_target_pins:
-        logger.info("[golden] applying shared structural target pins: %s", args.golden_target_pins)
+
+
+def golden_row(record):
+    """A golden record as the duck-typed pinned row ``run`` benches and reports: the
+    :class:`~emmy.compiler.pipeline.search.data.Sample` view (``name`` / ``pins`` / ``knobs`` /
+    ``shape`` / ``dynamic``) plus the ``record`` itself — the row ``run`` measures under a hand pin and records as
+    deploy evidence."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
+
+    return SimpleNamespace(**vars(Sample.from_golden(record)), record=record)
 
 
 def add_quantize_arg(parser) -> None:
@@ -475,9 +487,17 @@ def handle_compile(args):
     else:
         logger.debug("No tuning DB at %s — using rule defaults", tune_db_path)
 
+    from emmy.compiler.pipeline.search.golden import records_override, shared_regime_pins  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
-    with pinned_knobs(args.golden_target_pins):
+    # A selected golden's records are the golden evidence this compile deploys from; their shared
+    # input regime is published so the rows read as live measurements.
+    scope = getattr(args, "_golden_records", None) or None
+    with (
+        pinned_knobs(shared_regime_pins(scope or [])),
+        records_override(scope),
+        config.strict_evidence_override(True if args.strict_evidence else None),
+    ):
         result = Pipeline.build(passes).run(graph, db=db, dump=dump)
 
     n_compute = sum(1 for n in result.nodes.values() if not _is_boundary(n.op))
@@ -727,7 +747,8 @@ def _trace_model(
         # quantization metadata; only generic tensor algebra enters decomposition.
         # Each speller is a no-op on the other family's checkpoints.
         if quant_dir is not None:
-            from emmy.compiler.loader.quant import (  # noqa: PLC0415
+            from emmy.compiler.loader.quant import (
+                # noqa: PLC0415,
                 spell_dynamic_fp8_activations,
                 spell_quantized_constants,
                 spell_static_fp4_activations,

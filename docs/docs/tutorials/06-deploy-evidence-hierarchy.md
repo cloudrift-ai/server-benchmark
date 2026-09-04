@@ -1,7 +1,7 @@
 ---
 sidebar_position: 6
 title: "6. The Deploy Evidence Hierarchy"
-description: The fixed order an ordinary compile works down to answer a fork — local measurements, then prediction, then the rule's own first option.
+description: How a compile answers a fork — measured evidence first, then prediction, then the rule's first option.
 keywords: [Emmy, deploy evidence hierarchy, evidence, greedy selection, golden configuration, prior, fork]
 ---
 
@@ -13,25 +13,22 @@ evidence hierarchy**, and each step in it is called a **tier**.
 
 ## The order
 
-1. **The verified golden configurations recorded for this GPU.** Reviewed measurements that ship with the
-   repository, joined by exact structural identity: the record's own persisted program is lowered and recognized
-   through the same code the live compile uses, and its identity must equal the fork's. The fastest matching record
-   whose spelled row equals **exactly one** offered option decides. A record that matches the identity but equals
-   no option is drift — the compile warns loudly and the record decides nothing. There is no shape classification
-   and no partial matching anywhere in this tier.
-2. **Measured evidence from the reservoir.** The option that agrees with the fastest measurement of this same kernel
-   that was itself taken at the deployable setting.
-3. **Measured rows from the tuning database.** Measurements of this exact kernel. Within the tier, a row measured at
-   the deployable setting decides outright; a row measured at the ranking setting decides only when no option has a
-   deployable-setting measurement.
-4. **The prior's prediction.** Only when no option has any measurement behind it at all: the option with the lowest
-   predicted latency.
-5. **The rule's own first option**, if there is no prior to ask. Rules order their options so that the first one is
+1. **Measured evidence.** Every measured row whose structural signature is this kernel's, from three stores read as
+   one index: the reservoir (measurements taken at the deployable setting), the tuning database's rows for this
+   compile's regime, and the golden rows in scope — the golden configurations recorded for this GPU that ship with
+   the repository, or the file `--golden PATH` names instead. The option that agrees with the fastest such row
+   decides. A golden is a preference among measured rows, never a forced pin: a recorded row that is slower than a
+   local measurement loses, and a row nothing measured yet (a proposal) is not evidence until `run --golden PATH
+   --bench` has measured it.
+2. **The prior's prediction.** Only when no option has any measurement behind it at all: the option with the lowest
+   predicted latency. `--strict-evidence` turns this step into an error naming the kernel, for a deploy that must
+   run on measurements alone.
+3. **The rule's own first option**, if there is no prior to ask. Rules order their options so that the first one is
    always safe.
 
-The shape of that list is the whole design in miniature. A reviewed measurement beats a local one; any measurement
-of this exact kernel beats a prediction; a prediction beats an arbitrary choice. Nothing further down ever overrules
-something further up.
+The shape of that list is the whole design in miniature. Any measurement of this exact kernel beats a prediction; a
+prediction beats an arbitrary choice. Nothing further down ever overrules something further up, and there is one
+mechanism, not one per store: a golden row and a tune's row are the same kind of thing to the pick.
 
 ## How one fork is actually decided
 
@@ -45,20 +42,16 @@ The tile-lowering rule matches it and returns its options.
    only — still no kernel is built.
 3. **Each leaf becomes one row**: the hardware and regime this compile is running under, the summary of the kernel's
    body and extents that the stamping pass wrote onto it, and the leaf's complete knob values.
-4. **Tier 1.** The kernel's structural identity is looked up among the verified golden configurations recorded for
-   this GPU; the fastest record whose spelled row equals exactly one leaf decides.
-5. **Tier 2.** Otherwise, the fastest reservoir measurement of this same kernel that was taken at the deployable
-   setting, and the leaf that agrees with it.
-6. **Tier 3.** Otherwise, the measurements table, deployable-setting rows preferred over ranking-setting ones.
-7. **Tier 4.** Otherwise, all the leaves are scored by the prior in one batch and the lowest prediction wins.
-8. **Only now is the winning leaf built for real**, and the compile moves to the next fork.
+4. **Measured evidence.** The fastest reservoir, database or golden row of this same kernel, and the leaf that
+   agrees with it — measured rows first, whichever store they came from.
+5. **The prior.** Otherwise, all the leaves are scored by the prior in one batch and the lowest prediction wins.
+6. **Only now is the winning leaf built for real**, and the compile moves to the next fork.
 
-With no measurements and no prior at all, tier 1 still runs — it needs no model — and every fork it does not answer
-falls to the rule's first option.
+With no measurements and no prior at all, every fork falls to the rule's first option.
 
 ## What "agrees with" means
 
-A single rule serves all three measured tiers. **A measured row counts as evidence for an option when every knob the
+A single rule serves every measured store. **A measured row counts as evidence for an option when every knob the
 option has already decided has the same value in that row.** Knobs the option has not decided yet are free; a later
 pass will decide them.
 
@@ -76,35 +69,32 @@ Option A wins on measured evidence, even though it has said nothing yet about ti
 are decided at later forks, where the same measurement is consulted again — by then the option has more decided knobs,
 so the agreement test is stricter, and the same row keeps steering the compile toward the configuration it measured.
 
-## Which tiers apply under which settings
+## Which evidence applies under which settings
 
-Regime gating is not symmetric between the tiers, and the asymmetry is deliberate.
-
-- **Reservoir evidence applies only to a compile at the deployable setting.** Its numbers are true of that setting
-  and no other.
-- **The measurements table applies under any setting**, keeping its internal preference for deployable-setting rows.
-  A measurement of this exact kernel is real information even under a different setting, and it still beats the
-  model's extrapolation.
+- **Reservoir and golden rows apply only to a compile at the deployable setting.** Their numbers are true of that
+  setting and no other.
+- **The measurements table applies under the setting it was measured in**: the index is keyed by the compile's
+  regime, so a sweep at another optimization level is never read by an ordinary deploy.
 - A compile whose settings name no optimization level — which is the default for `emmy compile` and `emmy run` —
   counts as deployable. So an ordinary deployment always gets the full hierarchy.
 
 ## Ties are broken by content, never by order
 
 The prior can score several options identically, and one measured row can agree with several offered options. Every
-tier therefore breaks its ties the same way: by the option's knob values, rendered in sorted order. Never by the order
+step therefore breaks its ties the same way: by the option's knob values, rendered in sorted order. Never by the order
 the rule happened to return its options in.
 
 This is not fussiness. The order options are generated in can shift between processes, so breaking a tie by position
 is a coin flip on every boot — and it once shipped a release image that compiled itself into a different set of
-kernels depending on which boot you looked at. Determinism here is pinned by tests that re-run each tier under
+kernels depending on which boot you looked at. Determinism here is pinned by tests that re-run each step under
 shuffled option orders and require the same answer, plus a check that two separate processes select the same kernels.
 
 ## When there is no prior
 
-The prior can be missing: a corrupted checkpoint, or weights that fail to load. In that case tiers 2, 3 and 4 are
-gone at once — the reservoir travels inside the prior's checkpoint, and the database tier is only consulted on the
-path where a prior exists. What survives is tier 1: the verified golden configurations still decide every fork they
-match, so a broken checkpoint can never silently cost a fork its reviewed measurement. Pinned knobs also still
+The prior can be missing: a corrupted checkpoint, or weights that fail to load. The reservoir travels inside the
+prior's checkpoint, so its rows are gone with it, and with no prior every fork it would have ranked falls to the
+rule's first option. The database and golden rows are read on the path where a prior exists, so a broken checkpoint
+costs a deploy its measured evidence too; `--strict-evidence` makes that loud instead of silent. Pinned knobs still
 apply: a pinned family never reaches a fork at all.
 
 ## Changing which kernels exist
@@ -115,8 +105,10 @@ compile, and both are deliberately harder to trigger.
 **A placement cut.** Before the schedule is chosen, a separate decision splits — or does not split — the recognized
 work into kernels. An explicit placement pin decides it outright; unpinned, the cut is offered as an ordinary
 structural fork (the fused form first, one fragment per legal seam), so a tuning run can discover a profitable
-split and a chosen cut records as the exact pin that replays it. Each resulting piece is recognized afresh and
-works down the same hierarchy for its own schedule.
+split and a chosen cut records as a row whose keys spell the route. Such a row is measured evidence for the kernel
+it was recorded on: at the placement fork it is the measured price of that cut, it outranks any arm the prior would
+have to price, and taking it means taking the pass's own cut arm. Each resulting piece is a brand-new kernel,
+recognized afresh, that works down the same hierarchy for its own schedule from rows of its own.
 
 **Splitting a reduction across blocks.** Dividing a long reduction among several blocks turns one kernel into a
 kernel that computes partial results plus one that combines them (or, on the cheaper arm, a single kernel that adds
@@ -126,21 +118,24 @@ are differently shaped kernels doing different work, so there is no reason for t
 and nothing makes them. Each also records its own measurements under its own identity, so a stored time always
 describes the kernel that earned it.
 
-Because a pinned setting is a statement about how kernels run, it reaches those new kernels too — which raises an
-obvious question: does a split kernel then split again? No. Dividing a reduction that is *already* one block's
-share of a larger one is not a further choice, it is the same choice applied twice, so the compiler does not offer
-it. What remains of the pin — how each piece folds its own share within a block, say — still applies.
+Because a hand pin is a statement about how kernels run, it reaches those new kernels too, which raises an obvious
+question: does a split kernel then split again? No. Dividing a reduction that is *already* one block's share of a
+larger one is not a further choice, it is the same choice applied twice, so the compiler does not offer it. What
+remains of the pin — how each piece folds its own share within a block, say — still applies. A measured row is
+different: it says nothing to the pieces, whose own rows say what they measured.
 
-**A structural fork.** The prior is never asked to rank structural options against each other, because it would be
-comparing predictions across different kinds of kernel, where its errors do not cancel the way they do among siblings
-of one fork. Instead the compile *costs* each side: for every kernel each side would produce, it runs a small nested
-resolution through the same hierarchy above and takes the cost of that kernel's chosen configuration. The cheaper
-total wins. Because the nested resolution consults the whole hierarchy, one side's total can mix a golden's recorded
-time, local measurements and model predictions across its kernels.
+**A structural fork nothing measured.** The prior is never asked to rank structural options against each other,
+because it would be comparing predictions across different kinds of kernel, where its errors do not cancel the way
+they do among siblings of one fork. Instead the compile *costs* each side: for every kernel each side would produce,
+it runs a small nested resolution through the same hierarchy above and takes the cost of that kernel's chosen
+configuration. The cheaper total wins. Because the nested resolution consults the whole hierarchy, one side's total
+can mix a golden's recorded time, local measurements and model predictions across its kernels — which is why a
+measured route row, when one exists, outranks that costing outright.
 
-That costing is only allowed when the online prior is trained and trusted. Without it — on a machine with no
-measurements, or where one side cannot be costed at all — the structural option is dropped and the default kernel set
-is kept. **A cold compile never changes which kernels exist**, unless a placement pin tells it to.
+That costing runs with whichever prior is loaded — the online model when it is trusted, the offline half otherwise —
+so on a machine with no measurements it is a comparison of predictions. When one side cannot be costed at all, nothing
+is withheld: every option, the structural ones included, goes to the ordinary ranking. A measured route row is the one
+thing that settles such a fork without a prediction, and a placement pin removes the fork altogether.
 
 ## When the chosen option does not fit
 
@@ -154,22 +149,22 @@ evidence as before, so backtracking is cheap and needs no saved snapshots. Retri
 
 If the budget runs out with the node still un-lowered — a trained prior can rank many oversized tiles above the first
 one that fits — there is a last resort: resolve once more taking each rule's first option, which is emitted to be
-budget-safe. Two things still hold during that last pass. Golden configurations are still consulted, so one oversized
-kernel cannot cost every *other* kernel its reviewed measurement; and the block list still applies, so a tile that
-already failed cannot be chosen again. Only if even the first option does not fit does the compile stop with a clear
-error naming the node.
+budget-safe. The block list still applies during that last pass, so a tile that already failed cannot be chosen
+again. Only if even the first option does not fit does the compile stop with a clear error naming the node.
 
-## How to tell which tier answered
+## How to tell whether evidence answered
 
-Honestly: there is no single switch that reports, per fork, which tier decided it. What exists is three things you
+Honestly: there is no single switch that reports, per fork, which row decided it. What exists is three things you
 correlate.
 
-- **The warnings.** A kernel whose recorded configurations no longer equal anything the compiler offers, and measured
-  evidence that overlaps none of the offered options, are both logged loudly.
+- **The warnings.** Measured evidence for a kernel that overlaps none of the offered options is logged loudly.
 - **The record of the resolution.** Each decided fork records what was chosen and the time of whichever row decided
-  it — a measured time when a recording or a measurement decided, a predicted one otherwise.
-- **The audits.** `emmy eval golden GOLDEN_YAML --serving-config PATH` re-runs the file's own-program and exact
-  serving-matrix consultations on the pinned GPU, one verdict per consultation. That is the subject of the next page.
+  it — a measured time when a measurement decided, a predicted one otherwise.
+- **The release gate.** `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` strictly decodes each of
+  the file's entries and compiles the exact serving matrix on the pinned GPU with the file's rows as the only
+  evidence, under strict evidence. That is the subject of the next page.
+- **Strict evidence.** `--strict-evidence` on `run`, `compile` or `serve` refuses to let the prior decide at all, so
+  a compile that finishes under it was decided by measurements alone.
 
 ## See it yourself
 
@@ -177,7 +172,7 @@ The audit below validates one canonical file against the release configuration a
 programs and freshly traced serving matrix:
 
 ```bash
-emmy eval golden <canonical-golden.yaml> --serving-config <models/slug.env>
+emmy eval golden --golden <canonical-golden.yaml> --serving-config <models/slug.env>
 ```
 
 The next page explains how to read the result.

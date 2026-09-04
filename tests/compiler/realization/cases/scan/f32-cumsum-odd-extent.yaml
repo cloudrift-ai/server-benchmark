@@ -19,11 +19,11 @@ configs:
     origins:
     - cumsum
   realizations:
-  - name: k_cumsum_reduce.32b4eb8bbb4c
+  - name: k_cumsum_reduce.4fc751611f0e
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       WORK: ''
       REDUCE: ''
-    identity: cab7c1f55b8a61d899647f19566c637792aaecca3a6aceb525040e1e30192ee4
+    identity: 912a34cc2e541f0e387740308e062443d4062d13a6fcd25d5ac483dd8c18eab9

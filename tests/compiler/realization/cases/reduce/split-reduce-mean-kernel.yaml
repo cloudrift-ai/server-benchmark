@@ -19,15 +19,33 @@ configs:
     origins:
     - mean
   realizations:
-  - name: k_mean_f402e0.9d313f49a45f
+  - name: k_mean_c299c6.a70787fe5e9a
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: fuse
     knobs:
       REDUCE: g2k
-    identity: a1ce4c21f9cc2f7a3491226080eb26bcafde947400ccdf79b13c48424211ad28
+    identity: 8922b5655e82062f1aaa58bba610d4f7c97608cbc1b33af7cd55fe4e2bf24ec4
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 8.185481583630597
         tcompile_us: 2.0514371218504728
+  - name: k_mean_c299c6.a70787fe5e9a.9953bf1c616c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 9953bf1c616c5f1f88fcdec3dd6eba95026b8f8041fce1ee3e177531e7f00c40
+  - name: k_mean_c299c6.a70787fe5e9a.f183a841501b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: f183a841501b887c41e3284eabf1f02223ac7317adbcff80d15a3738691f7349

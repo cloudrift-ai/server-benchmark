@@ -32,7 +32,7 @@ configs:
     - add
     - linear
   realizations:
-  - name: k_linear_6b4f7f.f6a2d1079ef5
+  - name: k_linear_b63be8.05685681ae7e
     bindings: {}
     pins:
       FAST_MATH: false
@@ -49,4 +49,21 @@ configs:
       INTERLEAVE_LOADS: 'True'
       PAIR_LDMATRIX: 'True'
       LOOPIFY: '0'
-    identity: a9a17f3df7a6922e7babbd93513e71a35bbae00c531cac8b81e42eb29a289431
+    identity: 929c81c868484dfbbaf4a0ac5ea7c1bcf4fa99bafc72a88280a3f58bc3ac59c9
+  - name: k_linear_b63be8.05685681ae7e.606f390e62a1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+    identity: 606f390e62a179444200c654d70b38004530182132c252c85100cc2b03275e19
+  - name: k_linear_b63be8.05685681ae7e.8a55a74e671b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 8a55a74e671b63c32d115195411b4b797f6b6994d8a085e82296b3c15f5b7158

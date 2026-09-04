@@ -1,0 +1,52 @@
+# evidence: `offered` passes under the pin — the pinned enumeration realizes this row — but the unpinned
+# enumeration offers no `RASTER=gn4` leaf for this kernel at all (0 of 30407), so the row can never be selected
+# as evidence: an offer gate on the raster, not a schedule the compiler cannot build.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [1280, 256]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [256, 512]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[o, f16, [1280, 512]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_matmul_01fc9f.5998c16771fe
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      WORK: w2x2
+      STAGE: d2/smem-async
+      RASTER: gn4
+    identity: 30186a435f3ecd6f36639eb41fe4f7b8689f0d410167d7cdcf164eba66d988d1
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 4.913512450545582
+        tcompile_us: 6.129671685138152
+  - name: k_matmul_01fc9f.5998c16771fe.7284eb0c7733
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 7284eb0c7733396a70e8b53823965fc4c70c06b769b3bd782ba06cada5435a7d

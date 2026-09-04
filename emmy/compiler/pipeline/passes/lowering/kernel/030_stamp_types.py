@@ -32,7 +32,7 @@ from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Pack, Stmt, Unpack, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Init, Load, Pack, Stmt, Unpack, Write
 from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
@@ -74,7 +74,7 @@ def _seed_explicit_dtypes(body: Body, ctx: _StampCtx) -> None:
     for s in body:
         if isinstance(s, Load) and s.dtype is not None:
             ctx.ssa_dtypes.update((name, s.dtype) for name in s.names)
-        elif isinstance(s, (Assign, Accum, Init)) and s.dtype is not None:
+        elif isinstance(s, (Assign, Accum, Init, Const)) and s.dtype is not None:
             ctx.ssa_dtypes[s.name] = s.dtype
         elif isinstance(s, Pack):
             ctx.ssa_dtypes[s.name] = s.dtype
@@ -101,6 +101,9 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
     if isinstance(s, Init):
         ctx.ssa_dtypes[s.name] = s.dtype or F32
         return s
+    if isinstance(s, Const):
+        ctx.ssa_dtypes[s.name] = s.dtype or F32
+        return s if s.dtype is not None else replace(s, dtype=F32)
     if isinstance(s, Pack):
         ctx.ssa_dtypes[s.name] = s.dtype
         return s

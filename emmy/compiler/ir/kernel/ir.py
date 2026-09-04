@@ -1413,11 +1413,11 @@ class RegFragment(Stmt):
     byte-identical."""
 
     name: str
-    role: str  # "a" / "b" / "c" / "sf"
+    role: str  # "a" / "b" / "c"
     shape: tuple[int, int, int]
     dtype: DataType
     count: int = 1  # >1 arrays the fragment family: ``<ty> name[count][n_regs]`` (loopify only)
-    nregs: int | None = None  # explicit for layouts whose one instruction realizes several PTX cells
+    nregs: int | None = None  # explicit for layouts whose one instruction realizes several PTX cells; 0 = one scalar register
 
     def _nregs(self) -> int:
         return self.nregs if self.nregs is not None else _mma_sync_nregs(self.role, self.shape, self.dtype)
@@ -1431,19 +1431,13 @@ class RegFragment(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
         cnt = f"{self.count}][" if self.count > 1 else ""
-        dims = f"[{cnt}{self._nregs()}]"
+        dims = f"[{cnt}{self._nregs()}]" if self._nregs() else ""
         return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{dims} ({m}x{n}x{k})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         n_regs = self._nregs()
         ctx.ssa_dtypes[self.name] = self.dtype.name
-        if self.role == "sf":
-            # A block scale is ONE register the instruction takes by value, not an array — but it
-            # is declared here like every other fragment so :class:`BlockScaleLoad` ASSIGNS it.
-            # The register ring re-enters slot ``s`` every ``depth`` steps, so a load that declared
-            # its own destination redeclared it in the same C scope.
-            return [f"{_pad(ctx.indent)}unsigned {self.name};"]
-        dims = f"[{self.count}][{n_regs}]" if self.count > 1 else f"[{n_regs}]"
+        dims = "" if n_regs == 0 else f"[{self.count}][{n_regs}]" if self.count > 1 else f"[{n_regs}]"
         if self.role == "c" and self.dtype.nbytes != 2:
             # Brace-init zeros the whole (arrayed) accumulator; ``= {0.0f, ...}`` stays the flat form.
             init = " = {}" if self.count > 1 else f" = {{{', '.join(['0.0f'] * n_regs)}}}"
@@ -1571,8 +1565,8 @@ class BlockScaleLoad(Stmt):
         # slab changing type — a byte-typed slab would lose that the bytes ARE e4m3 to every other
         # reader of ``ctx.buffer_dtypes``.
         src = f"reinterpret_cast<const unsigned char*>(&{self.src_buffer}[{flat}])"
-        # ASSIGNS — the fragment is declared once by its ``RegFragment`` (role ``sf``). Declaring
-        # it here redeclared it every time the register ring re-entered the slot.
+        # An ASSIGNMENT: the scale fragment is declared once beside the operand fragments
+        # (``RegFragment`` at zero registers), so a double-buffered k-loop reloads it per step.
         return [f"{_pad(ctx.indent)}{self.frag} = emmy_mma_load_sf{self.role}_f4({src}, {self.ldm});"]
 
 
@@ -2660,10 +2654,11 @@ __all__ = [
 # / ``CpAsyncWait``) are stateless and return themselves.
 
 
+from emmy.compiler.ir.stmt.passes import _rewrite_kind  # noqa: E402
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: Tile, rename, sigma, axis_fn):
     # ``axes`` map through ``axis_fn``; the body's stmts route through the
     # generic per-stmt rewrite so SSA names / Exprs canonicalize inside. The
@@ -2691,27 +2686,27 @@ def _(s: Tile, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: Smem, rename, sigma, axis_fn):
     return s
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: Sync, rename, sigma, axis_fn):
     return s
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: CpAsyncCommit, rename, sigma, axis_fn):
     return s
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: CpAsyncWait, rename, sigma, axis_fn):
     return s
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: CpAsyncCopy, rename, sigma, axis_fn):
     return CpAsyncCopy(
         smem=s.smem,
@@ -2723,12 +2718,12 @@ def _(s: CpAsyncCopy, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: TmaDescriptor, rename, sigma, axis_fn):
     return s
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: TmaLoad, rename, sigma, axis_fn):
     return TmaLoad(
         smem=s.smem,
@@ -2740,7 +2735,7 @@ def _(s: TmaLoad, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: MbarrierInit, rename, sigma, axis_fn):
     return MbarrierInit(
         mbar=s.mbar,
@@ -2749,7 +2744,7 @@ def _(s: MbarrierInit, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: MbarrierArriveExpectTx, rename, sigma, axis_fn):
     return MbarrierArriveExpectTx(
         mbar=s.mbar,
@@ -2758,7 +2753,7 @@ def _(s: MbarrierArriveExpectTx, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: MbarrierArrive, rename, sigma, axis_fn):
     return MbarrierArrive(
         mbar=s.mbar,
@@ -2766,7 +2761,7 @@ def _(s: MbarrierArrive, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: MbarrierWait, rename, sigma, axis_fn):
     return MbarrierWait(
         mbar=s.mbar,
@@ -2775,12 +2770,12 @@ def _(s: MbarrierWait, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: SetMaxNReg, rename, sigma, axis_fn):
     return s
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: TreeHalve, rename, sigma, axis_fn):
     # The carried state, the second-operand state, and the combine_states program
     # all reference SSA names — thread them through ``rename`` so the canonicalizer
@@ -2799,7 +2794,7 @@ def _(s: TreeHalve, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: WarpShuffle, rename, sigma, axis_fn):
     return WarpShuffle(
         state=tuple(rename(n) for n in s.state),
@@ -2821,12 +2816,12 @@ def _(s: WarpShuffle, rename, sigma, axis_fn):
 # --- mma.sync (s16816) register-array rewrites -----------------------------
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: RegFragment, rename, sigma, axis_fn):
     return RegFragment(name=rename(s.name), role=s.role, shape=s.shape, dtype=s.dtype, count=s.count, nregs=s.nregs)
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: BlockScaleLoad, rename, sigma, axis_fn):
     return BlockScaleLoad(
         frag=rename(s.frag),
@@ -2837,7 +2832,7 @@ def _(s: BlockScaleLoad, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: LdmatrixLoad, rename, sigma, axis_fn):
     return LdmatrixLoad(
         frag=rename(s.frag),
@@ -2859,7 +2854,7 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: MmaSyncPtx, rename, sigma, axis_fn):
     return MmaSyncPtx(
         c_frag=rename(s.c_frag),
@@ -2876,12 +2871,12 @@ def _(s: MmaSyncPtx, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: FragmentPromote, rename, sigma, axis_fn):
     return FragmentPromote(dst=rename(s.dst), src=rename(s.src))
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: RegStore, rename, sigma, axis_fn):
     # The epilogue's chain SSA names are render-local (scoped per element
     # inside the store's block), so only the load index Exprs σ-substitute —
@@ -2943,32 +2938,32 @@ def _(s: RegStore, rename, sigma, axis_fn):
 # unchanged while an SSA scalar (``"a0"``) renames.
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: Reassign, rename, sigma, axis_fn):
     return Reassign(name=rename(s.name), value=rename(s.value))
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: FragmentApply, rename, sigma, axis_fn):
     args = tuple((rename(a[0]), rename(a[1])) if k == ROW else rename(a) for a, k in zip(s.args, s.kinds, strict=True))
     return FragmentApply(out=rename(s.out), op=s.op, args=args, kinds=s.kinds, in_place=s.in_place, layout=s.layout, post=s.post)
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: FragmentRepack, rename, sigma, axis_fn):
     # Pure register (the flash P→A handoff): route the dest + the two source C fragments through
     # ``rename`` (SSA canonicalizer / per-cell replicator); no index / axis to σ-substitute.
     return FragmentRepack(frag=rename(s.frag), srcs=(rename(s.srcs[0]), rename(s.srcs[1])), ab_dtype=s.ab_dtype)
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: FragmentRowReduce, rename, sigma, axis_fn):
     return FragmentRowReduce(
         top=rename(s.top), bot=rename(s.bot), frags=tuple(rename(f) for f in s.frags), op=s.op, group=s.group, dtype=s.dtype
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: FragmentMask, rename, sigma, axis_fn):
     # ``frag`` is SSA (the score fragment); the tile-origin bases + the predicate σ-substitute so
     # the canonicalizer renames the query / kv axis vars (``qb``→``a1``, ``kv``→``a3``). The
@@ -2984,7 +2979,7 @@ def _(s: FragmentMask, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: FragmentLoad, rename, sigma, axis_fn):
     return FragmentLoad(
         out=rename(s.out),
@@ -2997,7 +2992,7 @@ def _(s: FragmentLoad, rename, sigma, axis_fn):
     )
 
 
-@_rewrite.register
+@_rewrite_kind.register
 def _(s: FragmentSelect, rename, sigma, axis_fn):
     return FragmentSelect(
         out=rename(s.out),

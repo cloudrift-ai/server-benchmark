@@ -23,9 +23,16 @@ Use one golden YAML format throughout the workflow. Keep its two trust levels se
 enumeration, while `knobs` records the winner measured inside that regime. `FAST_MATH` has no special YAML field; write
 it under `pins` exactly like any other input knob.
 
-`emmy tune --golden-file` rejects canonical repository paths because it updates its input. Copy a canonical file to
+`emmy tune --golden PATH` rejects canonical repository paths because it updates its input. Copy a canonical file to
 a fresh `_tune/<run>/working.yaml` first. Do not commit a trace-created working golden automatically; leave that
 decision to the author or agent after validation.
+
+`--golden PATH` is one flag on `run`, `compile`, `tune`, `serve` and `eval golden`: the golden YAML whose measured
+rows are the golden evidence that command deploys from, instead of the repository's per-card goldens. There is one
+deploy mechanism, the measured-evidence pick: a golden row is a measured row in the same index the tune DB feeds,
+never a separate authoritative tier. `--realization NAME` (`run`, `compile`, `tune`) selects one realization by
+exact name or an unambiguous substring; `--strict-evidence` (`run`, `compile`, `serve`) raises instead of deploying
+a prediction when a kernel has no measured evidence.
 
 ## 1. Prepare the supplied GPU host
 
@@ -186,7 +193,7 @@ Multiple targets share the backend-slot queue and one prior, so keep them in one
 ```bash
 EMMY_TUNE_DB=<arm.db> EMMY_ONLINE_FILE=<arm-online.json> \
   EMMY_CUBIN_CACHE=<arm-cubin-dir> \
-  emmy tune --golden-file <arm.yaml> --devices 0,1 --max-candidates <B> \
+  emmy tune --golden <arm.yaml> --devices 0,1 --max-candidates <B> \
   --patience <P> --seed <S> --dump-dir <arm-dump> 2>&1 | tee <arm.log>
 ```
 
@@ -197,11 +204,11 @@ its latencies ARE deployable performance — unless an arm deliberately pins `--
 level, which the run warns about and which makes that arm's numbers comparable only to itself. Read the
 per-entry `ranking` blocks and search logs for proposal status, measured knobs, latency, and the exact searched finalists.
 
-Do not use `emmy tune --bench` as an arm's winner measurement. Its assembled graph replays through the deploy
-evidence hierarchy, which resolves each fork from whatever measured evidence the DB and reservoir now hold — not from
-this arm's search reward — so two arms can end up benchmarking the same configuration. (The card's recorded goldens
-are held out of that replay, so they are not the reason.) Compare the primary arms with ranking/search feedback, then
-pin the exact actual proposal and search finalists through `emmy run --ab` for fresh measurements.
+Do not use `emmy tune --bench` as an arm's winner measurement. Its assembled graph replays through the measured-
+evidence pick, which resolves each fork from whatever measured rows the DB and reservoir now hold — not from this
+arm's search reward — so two arms can end up benchmarking the same configuration. (The card's golden rows are held
+out of that replay, so they are not the reason.) Compare the primary arms with ranking/search feedback, then pin the
+exact actual proposal and search finalists through `emmy run --ab` for fresh measurements.
 
 Compare arms per target: successful live measurements, best ranking latency, exact searched finalist, exact-pinned
 deployable O3 result, correctness, wall time, and failures. Also report aggregate geometric mean or total latency only
@@ -217,15 +224,22 @@ additional budget and deadline. Record which first-round evidence motivated each
 
 Shortlist the best hybrid proposal, MCTS-searched, and incumbent configurations from their exact measured knobs.
 Re-run each with the same embedded target at deployable O3, selecting its working file and realization name and
-pinning the exact fully realized knobs with `--ab`.
-Use `EMMY_NVCC_FLAGS=` if necessary to prevent an inherited O1 override:
+pinning the exact fully realized knobs with `--ab`. A named realization always benches as a pinned row, whatever its
+measurement state; `--ab` adds one more hand-pinned row beside it. Use `EMMY_NVCC_FLAGS=` if necessary to prevent an
+inherited O1 override:
 
 ```bash
 CUDA_VISIBLE_DEVICES=<selected-ordinal> EMMY_NVCC_FLAGS= \
-  emmy run --golden-file _tune/<run>/working.yaml --golden <realization-name> \
+  emmy run --golden _tune/<run>/working.yaml --realization <realization-name> \
   --bench --bench-backends eager,emmy \
   --ab "<fully realized knobs>" --json _tune/<run>/verification/<candidate>.json
 ```
+
+Every clean row such a run benches is recorded into the tune DB by default — per-kernel perf rows, the measured
+evidence the next `compile` / `run` / `serve` on this card deploys from, plus node rows for the offline prior — so a
+verified winner deploys without any further promotion step; `--no-record-nodes` opts out. `--record` additionally
+writes the measured latency back into the golden file. Add `--strict-evidence` when the run must fail rather than
+let a prediction decide any fork of the target.
 
 Run `emmy run --help` from the checked-out revision before using this form. Under `CUDA_VISIBLE_DEVICES`, the selected
 physical GPU becomes the command's ordinal 0; never pass an invented `--device` flag. Require:
@@ -267,7 +281,7 @@ For a serving golden, run the unified release audit on the pinned GPU; it valida
 the exact config-derived realization matrix before reproducing and auditing it:
 
 ```bash
-emmy eval golden <canonical-golden.yaml> --serving-config <models/slug.env>
+emmy eval golden --golden <canonical-golden.yaml> --serving-config <models/slug.env>
 emmy eval prior --dataset golden --kernel <substring>
 ```
 
@@ -310,8 +324,8 @@ Do not compare O1 tune-DB latency with O3 deployment latency. Re-run a surprisin
 ### Validate whole-model impact
 
 For a requested whole-model tune, produce a full eager / `torch.compile` / Emmy table after finalist selection. Label
-an `emmy tune --bench` result as deploy-evidence replay, not an arm's searched winner; use exact `emmy run --ab` pins
-for arm conclusions. For a servable embedding model, also run matched `emmy serve <model> --bench` and
+an `emmy tune --bench` result as measured-evidence replay, not an arm's searched winner; use exact `emmy run --ab`
+pins for arm conclusions. For a servable embedding model, also run matched `emmy serve <model> --bench` and
 `emmy serve <model> --bench --stock` trials with identical request count, input length, concurrency, and seed. Skip
 serving A/B for unsupported model types and state why.
 

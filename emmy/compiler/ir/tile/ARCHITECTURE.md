@@ -1,13 +1,19 @@
 # Tile IR — a complete Fold tree
 
 `LoopOp → TileOp` first performs a structural lift. The boundary peels the outer parallel loop chain into
-`Placement.free`, then converts every remaining reduction loop into a `Fold`. `TileOp.__post_init__` subsequently
+`Placement.free`, then converts every remaining reduction loop into a `Fold`, recording every axis the nest bound —
+free, reduce, sweep — in the kernel's axis table, `TileOp.axes`: a term names its axes and the kernel holds their
+extents and windows (`TileOp.axis_of`, `Sched.axis_of`), so a split registers its slice and partition there and
+`Fold.lower` takes the table whole. The kernel OWNS that table, complete by construction: `TileOp.__post_init__`
+adds the placement's free axes and refuses a term binding a reduce axis, or a store carrying a sweep, the table has no
+extent for — a piece that drops a traced axis fails where it is built, never later under a reader. It also
 canonicalizes the complete Fold tree before the separate algebraic rewrite and scheduling passes.
 
 The invariant is simple: **a lifted Tile IR kernel contains no raw inner `Loop`**. A reduction nested in another
 reduction occupies the same statement position in the parent fold's `lift.body`, so source order and SSA scope are
-preserved. A non-reduction loop whose local values feed writes becomes a pure `ProjectionRegion`; each write becomes
-an `OutputSpec` owned by the `TileOp`. Any other surviving loop is a formation error.
+preserved. A non-reduction loop is an output sweep: its per-cell projection becomes a zero-axis term evaluated over the
+sweep axis, and each of its writes a sweep `OutputSpec` owned by the `TileOp`. Any other surviving loop is a formation
+error.
 
 ## Fold storage
 
@@ -24,12 +30,11 @@ an `OutputSpec` owned by the `TileOp`. Any other surviving loop is a formation e
 `Fold.defines()` exposes the fold results to its containing lambda. This is what lets later statements in an SDPA
 cell read the maximum, denominator, or nested QK result without extracting or relocating any subtree.
 
-`Fold.loop` is the inverse spelling used by materialization. The term itself carries no placement or schedule.
+`Fold.lower` is the inverse spelling used by materialization. The term itself carries no placement or schedule.
 
-Every stored `combine` is claimed by a registered **monoid family** (`ir/pure/algebra.py` — componentwise, or a
-twisted entry such as exp/LSE; membership is generator-output equality, never an annotation), and the claiming family
-answers the family-shaped reads: the `TWISTED` role, the cross-partition merge realization, the rename regeneration,
-and the legality properties (`commutative`, `observable`).
+A stored `combine` is read, never annotated: `Lambda.components()` says whether it is componentwise (a planar fold —
+one `Accum` per state) or twisted (a recipe's program, `ir/pure/twist.py`), and `Fold.merge` realizes either as the
+cross-partition merge statements.
 
 A fold with an `observe` is a **scan**: the observer binds `(axis, *state)` positionally, its results are fresh names
 only kernel-boundary `OutputSpec` writes consume, and the streamed store reconstitutes inside the reduce loop after
@@ -52,7 +57,7 @@ boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a 
 
 ## Canonicalization
 
-`Lambda.__post_init__` owns context-independent construction normalization through `ir/pure/normalize.py`: every
+`Lambda.__post_init__` owns context-independent construction normalization: every
 pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
 Structural identity therefore reads the stored order directly. Contraction canonicalization first orders product
 arguments by geometry, then places the one argument shared by every product in the Fold's shared operand slot.
@@ -62,36 +67,23 @@ materialized operand reads it contiguously, the commutative product puts the con
 placement then derives the corresponding physical M/N orientation from the operand axes. Physical M/N orientation
 remains a placement fact rather than part of the Fold algebra.
 
-`normalize.py` owns only the idempotent, bottom-up rules that need Tile context: scoped lambda alpha-equivalence and
-clustering, semiring contraction canonicalization, and closed child-Fold extraction from a root projection. The
-contraction rule keeps the distributive product in the outer reduction and factors each maximal pure product-operand
-cone into a zero-axis Fold edge. Alpha-equivalent product arguments coalesce to one shared result even when their
-source cones overlap; other overlapping cones become one multi-result operand edge so shared computation remains
-single. A semiring without one shared product argument remains a general planar Fold.
+The bilinear form is CANONICAL BY CONSTRUCTION: formation (`lowering/tile/_fromloop`) turns every load of a reduce
+step over coordinates into a slab operand (a data-dependent gather, the packed-pair table read by a decoded code,
+stays a statement of its cone: the value it indexes is not an axis) and, when the step is a semiring step — every
+accumulated value one `⊗` of two distinct names, all products sharing the `⊗`, and `⊗` distributing over the one
+commutative-monoid `⊕` — hoists each product argument the step computes into a zero-axis operand cone, so the lift is
+the products alone and `as_contraction()` is a reading of the stored term. Overlapping argument cones become one
+multi-result operand edge so shared computation remains single; a step that is not a semiring step (a square `x × x`,
+a member no product reads) lifts as it came and reads as a planar fold. `normalize.py` keeps only the tree-wide rule
+that needs the whole tree: hash-consing alpha-equal cones back onto one object, so a value the frontend inlined twice
+is one edge again.
 
-Closing runs at both scope kinds. A zero-axis root moves its body dependencies onto captured contraction operands;
-a REDUCING fold does the same for a chain that depends on its own iteration axis and so lives in its lift body —
-attention's per-key statistic and rsqrt ahead of the score dot's computed B cone. The reduce-body move is gated on
-exclusive consumption (every moved definition dies into the closed edges), so the step's work is repackaged, never
-duplicated. Both rules measure an edge's captures with `Fold.deps` — scope-aware, so a name a sibling operand binds
-inside the edge is not a capture and an already-closed edge never re-fires the rewrite. A cone closed at its axes is
-what the placement fork can offer as a workspace seam, which is how a computed operand (the RMSNorm'd, RoPE'd K
-vector) becomes materializable once per key instead of recomputed per query row.
-
-An iteration never crosses into a new evaluation domain. Attaching an iteration-bearing provider to a contraction
-operand would evaluate it once per step of every intervening binder; normalization therefore leaves that provider at
-its defining scope. Straight-line chains still close normally, and a reducing root's own axis counts as its existing
-domain. A stored fold left capturing by this rule remains placeable: the placement fork resolves its captures outward
-through the occurrence's lexical environment at offer time, without moving the stored tree.
-
-Three walks compute a capture's provider cone, at three stages, and each is allowed to move something different.
-Normalization's closing rules (`normalize.py`, above) are the only walk that REWRITES the stored tree, and only for
-straight-line providers within one evaluation domain. The placement fork's provider closure
-(`lowering/tile/_cut.py`) moves nothing: it proves every occurrence resolves to equal sources and offers the closed
-value as a seam, recording fold producers as the seam's requirements. Kernel lowering's per-cell closure
-(`lowering/kernel/_factor.py`) moves sibling providers into a computed operand's compute fill of the one kernel being
-emitted — a codegen fact that exists only inside that realization. A new capture-resolution need belongs in one of
-these three, not a fourth walk.
+A term is CLOSED: its values arrive through its operand edges, and the only names its lift reads from outside are the
+iteration axes its ancestors bind. That is a fact of construction, not of a rewrite — the lift makes a statement a
+term reads into that term's operand — so normalization has no capture to drain, the placement fork offers a cone as a
+seam wherever it is closed at the axes of every occurrence, and kernel lowering emits a term's operands ahead of the
+statements that read them. A computed operand (the RMSNorm'd, RoPE'd K vector) is materializable once per key rather
+than recomputed per query row because it is such a closed cone.
 
 An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
 projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
@@ -115,14 +107,15 @@ construction and a reconstruction therefore expose the same closed operand edges
 The invariant also applies when a schedule row constructs or reloads an already-mapped Tile: promotion extends the
 grid in lockstep with the free axes, so per-cell replication never mistakes the swept coordinate for an SSA name.
 
-**Storage-decode factors hoist to the epilogue.** A product operand whose cone is a STORAGE DECODE
+**Storage-decode factors hoist to the epilogue.** A product argument whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
-axis is not left as a computed cone. The decode is absorbed by the raw load's storage dtype, since every
-consumer converts a bits-carrier element by dtype, and the invariant factors commute out onto the
-accumulator: `Sum_k a*(s*w) = s*Sum_k a*w`, the same reassociation category as split-K. The rule is
+axis is not left as a computed cone. Formation splits it: the decode is absorbed by the raw slab's storage
+dtype, since every consumer converts a bits-carrier element by dtype, and the invariant factors commute out
+onto the accumulator: `Sum_k a*(s*w) = s*Sum_k a*w`, the same reassociation category as split-K. The rule is
 side-generic, so a W8A8 cell binds BOTH operands raw and composes the two scales into one epilogue
-chain; with several channels a shared operand's factor is applied to each accumulator. A contraction
-reached with no projection to host the factors gets one; nested contractions use their parent's.
+chain; with several channels a shared operand's factor is applied to each accumulator. The epilogue is a
+zero-axis term over the fold and the factors' slabs, exposing the accumulator's original name; a bare
+decode absorbs with no epilogue at all.
 
 This is what makes quantized weights reach the tensor cores at storage width. Without it the residue is
 a computed cone, and a computed cone can feed no native fp8 atom at all — those atoms require a
@@ -139,21 +132,27 @@ reading dropped the fp8 decode cone's scale out of the kernel entirely. Both are
 and only the measurement moves. Treat a contraction that canonicalizes to PLANAR as a coverage bug to investigate, not
 as a supported slow path.
 
-Canonicalization runs entirely in `TileOp.__post_init__`, including the legacy output-sweep-to-free-axis adjustment
+A node's own canonical forms are formation's (`Fold.__post_init__` orients a bilinear term A-first, `Lambda` orders
+its body); `TileOp.__post_init__` applies the tree-wide ones and the legacy output-sweep-to-free-axis adjustment
 whenever a contraction operand reads the sweep axis. The contraction may be the root compute node or a later site in
 the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute output loop.
-Multiple output specifications owned by one projection region reconstitute one loop. The extraction round-trip gate
-compares the reconstruction against the stream **as reconstitution will spell it**: a `ProjectionRegion` stores its
-body in a `Lambda`, whose construction canonicalizes statement order and commutative arguments, so a raw stream that
-normalization reorders is still representable — the gate normalizes both sides the same way. A stream already in
-canonical form is gated on byte-identity exactly as before. A write whose stored value is captured from the enclosing
-scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) has no body def to name, and is declined:
-the fusion lift-preflight turns that into "leave the region unfused".
+Consecutive output specifications over one sweep axis reconstitute one loop, sibling sweeps sibling loops. The
+extraction round-trip gate is byte-identity: a stream is representable only when reconstitution reproduces it exactly.
+The lift guarantees that by forming each sweep's per-cell projection as a term of its level before extraction sees the
+stream, so an output loop reaches the boundary holding its writes alone. A write whose stored value is captured from
+the enclosing scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) needs no term: nothing is
+evaluated over `j`, and its sweep spec alone binds the axis.
 
-A sweep axis is bound only by the per-cell output `Loop` reconstitution wraps around the projection body — never at
-kernel scope. Canonicalization therefore keeps a non-contraction fold that reads a sweep axis a projection BODY
-member: hoisting it onto an operand edge would lower it outside the sweep loop, rendering the axis as an undefined
-identifier (DeepSeek-V4 post16's per-column sum was the live case). A contraction is exempt because post-init
+A sweep axis is never bound at kernel scope: the term opens it itself (`Fold.lower` with the sweep left unbound), and
+the sweep store follows the term defining its value inside that loop. A non-contraction fold that reads a sweep axis
+(attention's `Σ_k P·V` per output column, DeepSeek-V4 post16's per-column sum) is still an operand edge of the
+projection: its slabs read the sweep axis, so the placement rule puts its loop inside the sweep loop, while a
+sibling evaluated over the grid axes alone stays ahead of it. Two sibling sweeps are two coordinates: a loop that
+reuses an enclosing or sibling sweep's name (the fused quantize kernel's byte sweep and scale sweep, both `a1`) is
+alpha-renamed at the lift, binder and references together, since a term tree names one coordinate per name. The
+kernel binder's serial arm hands the stores to the term the same way, so the emitted kernel places them exactly as
+the identity's `loop_body` does; only a projection stream spelled without the term (the peeled root's tail, a cut
+piece) still wraps the trailing run reading the axis into one loop. A contraction is exempt because post-init
 promotes a sweep its operands read into a real free axis right after normalization.
 
 A fold FED by the body — one whose subtree captures a name a plain body member defines — is likewise never hoisted,
@@ -161,11 +160,7 @@ no matter what kind: a projection evaluates its operands before its scalar body,
 that does not exist yet. The `closed` gate reads only the fold's own lift and cannot see a nested capture; the
 composed placement cut builds exactly this shape (the consumer piece's workspace loads and rsqrt chain feed the
 retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
-nvcc). The classic reduce domain mirrors the fact for depth: a fold reached deeper than a chain-form root's direct body
-members still offers only the serial fold, since the body recursion emits it serially per cell regardless of
-partition. A DIRECT member is not so limited — the retained reduce above is one — and offers the full non-transposed
-reduce catalog instead (absent a swept or streamed boundary store, neither of which the chain arm's lane-distributed
-close can realize), bound through the chain arm ahead of the strided loop.
+nvcc).
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
 specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or
@@ -190,10 +185,11 @@ creates one zero-axis root `Fold` over the lifted cell.
 ## Algebraic rewrite
 
 `pipeline/passes/lowering/tile/020_twisted.py` runs after construction canonicalization and before scheduling. It
-clusters sibling Folds by scoped lambda equivalence and rewrites a maximum plus additive exp-weighted components into
-one exp-family twisted carrier `(maximum, denominator, expectations…)`. Pure softmax is the arity-two case; SDPA adds
-expectation components, and a causal mask is simply part of the shared score lambda. The pass has no operation-family
-matcher. Ordinary `copy` aliases of the carried maximum are followed before the exp-weighted components are compared.
+tries every twist recipe (`ir/pure/twist.py`) on every reduce that reads a reduce as an operand — the shape the lift
+gives a two-pass softmax — and rewrites the tree's operands onto each fold `Fold.twist` returns, to a fixpoint. Pure
+softmax is the arity-two case; SDPA adds expectation components, which join by the same call once the `1/l` factor
+constant along the axis has hoisted out of the fold, and a causal mask is simply part of the shared score cone. The
+pass has no operation-family matcher: a recipe clicks by canonical form, or it does not.
 
 The rewrite consumes the canonical Fold tree. It reuses the registered monoid generator, invariant-factor splitting,
 and scoped score equivalence both for sibling maximum/additive folds and for the equivalent canonical composition in
@@ -206,11 +202,13 @@ operand; the generic twisted Fold derivation then exposes the corresponding cont
 Every "are these two kernels the same?" question is answered by ONE function — `Op.identity_key`
 (`ir/base.py`), a lattice over the canonical Loop-IR body with one flag per additional fact
 (`structural` cluster-collapse, `with_io`, `with_knobs`). `TileOp`'s contribution is `loop_body` —
-the complete schedule-free Loop-IR body the kernel executes, derived from the term (the free grid
-axes wrapped back as plain loops around `lower_with_output_specs`, so the extents, the store
-program and a cut child's typed seam `Load` are all in the body) — and the private
-`_body_identity` override that digests it. There is no separate term hasher: `Fold.structural_key`
-is the exact-flavor digest of the term's own lowered body (the term is pure algebra; its body is
+the complete schedule-free Loop-IR body the kernel executes, derived from the term: the closed
+program `Fold.lower` spells with nothing bound and the boundary stores handed in, where the term
+binds every free coordinate with its own loops and places each store after the term defining its
+value, so the extents, the store program and a cut child's typed seam `Load` are all in the body
+and the source nest's spelling of its parallel loops (`place.free`) never reaches it — and the
+private `_body_identity` override that digests it. There is no separate term hasher: a term has no key of
+its own, and the `TileOp` keys on the term's lowered body (the term is pure algebra; its body is
 its normal form). The named lattice points are spelled at call sites: the deploy identity
 (`with_io=True` — the durable join key) and the variant key (`with_io=True, with_knobs=True` —
 the search tree and measurement stores). There is no schedule-space key on
@@ -220,7 +218,9 @@ greedy decision memo and the budgeted descent seed, not a cache key: nothing sto
 
 Identity has two flavors: the default `structural=True` is schedule-equivalent (compute-unit op
 clusters collapse — `relu` and `tanh` epilogues share a key because their schedule evidence
-transfers, which is what golden records join on), while `structural=False` names the exact kernel.
+transfers; it is the strict golden decode's key), while `structural=False`
+names the exact kernel. Measured evidence itself joins a kernel by its `S_*` signature, not by
+this key.
 
 The design lesson the interface encodes: a fact a schedule reads must be in the body or the io
 fingerprint, never re-derived beside a caller. The pool digest once shipped without per-axis extents,
@@ -257,8 +257,11 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
 - Reusable schedule views classify one Fold without target input. A contraction records consumer-relative operand
   positions; it does not mint alternate nodes or edge identities. The derivations memoize on the Fold ROOT, so every
   `TileOp` over one term shares them; the `TileOp` properties are accessors, not a second cache.
-- `path.sites` is a reading of that same walk, adding only what the codec needs: the per-site ordinal among sites
-  sharing a `(segments, axis)`. It owns spelling, resolution and ambiguity — not traversal.
+- `path.sites` is a reading of that same walk, adding only what the codec needs: the ROUTE that reaches each site,
+  `(kind departed, operand taken)` per hop. A placement key spells that route — `PLACE@map.1/twist.1/inner.2/map`,
+  each departure as `kind.index`, the arrival's kind last — so it is unique by construction, with no ordinal, no
+  shortest-unique search and no axis name; a stale key fails at the first segment whose kind is not what stands
+  there. The codec owns spelling, resolution and ambiguity — not traversal.
 - `KernelSchedule`, `ProjectionSchedule` / `ReductionSchedule`, and `EdgeSchedule` contain choices only. They do not
   cache paths, classifications, shapes, placed geometry, resolved shared-memory sizes, or codec spellings.
 - `ClassicScheduleContext` derives local support after selecting a node and its incident edges. `extend` composes it
@@ -270,7 +273,8 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
 - Kernel, node, and edge domains are projected independently. Enumeration is the compatible subset of their Cartesian
   product, so changing traversal order may change work but can never change membership.
 - `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`. A node family is bare
-  when it has one applicable site and uses `@n<N>` only when ambiguous. `STAGE` is one value per consumer node and
+  when it has one applicable site and carries the site's route (`TILE@map.1/twist.1/inner`, the same grammar as
+  `PLACE`) only when ambiguous. `STAGE` is one value per consumer node and
   follows the same rule. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
   and semantically refused assignments.
 
@@ -286,6 +290,10 @@ ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. 
 before scheduling; any pinned cut carries the consumed placement decision on both pieces and proceeds to reduction
 splitting. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation families nor
 filters legal cuts by profitability.
+
+A kernel carries no pins of its own. Pins live in the environment (the hand-pin path), and a measured row reaches a
+kernel only as evidence at its forks: every piece a cut or split mints is a brand-new kernel that inherits nothing
+from the kernel it replaced and is decided from the rows of its own signature.
 
 A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
 when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's

@@ -49,6 +49,16 @@ Do not add a directory merely to shorten a file listing. These directories exist
 or span several source trees. `compiler/passes/` and `perf/` carry their own `ARCHITECTURE.md`; read those before adding
 to them.
 
+`serving/` compiles under its **own golden**, not a cold search. These tests ask whether the runner stitches,
+dispatches and allocates correctly — vLLM integration and materialization — and cold deploy is the prior's contract,
+tested elsewhere. So `serving/helpers.py` spells every shape the lane compiles in one place (`RUNNERS` for the runner
+builds, `WRAPPERS` for the attention-split carves), `serving/regen.py` writes the golden covering exactly those, and the
+`built` / `build_runner` fixtures build inside `helpers.evidence_scope()`. Two properties follow, and both are the
+point: a replay costs a rebind instead of ~1M `schedule()` calls per model, and the compile no longer depends on the
+machine-local tune DB and online prior a cold pick resolves through. Strict evidence keeps the golden honest — a fork no
+row decides raises `EvidenceError` naming the kernel, so a stale or partial golden fails loudly instead of quietly
+restoring the search. Regenerate with `python -m tests.serving.regen` when a shape changes or a new one joins a table.
+
 ## Test Layers
 
 The suite runs in four layers, distinguished by what they touch rather than by where they live:

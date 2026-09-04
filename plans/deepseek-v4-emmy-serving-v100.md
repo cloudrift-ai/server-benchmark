@@ -194,19 +194,29 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    Replayed on the pinned twins + host-DB copy, the greedy elects the same 12-piece plan plus exactly the
    `PLACE@a8` statistics piece — 13 kernels, the consumer drops 2³⁰ → 2¹⁶ and the route's worst piece is 2¹⁹
    per-thread trips (the unaided fused monster was 2³⁸).
-4. **Make the elected pieces fast — OPEN, the current critical path (measured on the host 2026-09-02).** The
-   elected route was benched completely for the first time (every earlier attempt died on the 60 s watchdog; the
-   clean run needed `--warmup 3 --iters 10` plus `EMMY_BENCH_RUN_TIMEOUT_S` — a third budget knob beside the two
-   the tune report named): the live election reproduces the replay exactly (13 kernels, deterministic resolve in
-   284 s) and the whole `post4096` forward measures **23.24 s** — not servable, so gate (c) was not attempted.
-   The statistics piece itself costs 8.6 ms; the cost moved. One piece (`__place_8a9a1fe058`, 13.2 s, 57 %) runs
-   eight serial 4096-trip hidden-dim reductions per thread with two stride-2048 fp16 weight-column walks per trip
-   — an uncoalesced re-read of both FFN weight matrices per output element, at 25 % occupancy — and two
-   16384-grid sweep pieces add 9.3 s; everything else totals ~0.7 s. #702's bound elected the best plan on the
-   ballot (five orders of magnitude past the fused monster); the ballot holds no fast lowering for these pieces
-   yet. Two moves, in order: a measured tune pass over the dominant pieces with the raised bench budgets (also
-   the measured-election evidence gap 2 always wanted), and — if the fork space has no fast row — materializing
-   the matmul contributions as their own mma pieces, the way `PLACE@a8` materialized the statistics.
+4. **Make the elected pieces fast — OPEN; the path is now recorded goldens, not pricing.** Measured on the host
+   2026-09-02: the elected route benched completely for the first time (every earlier attempt died on the 60 s
+   watchdog; the clean run needed `--warmup 3 --iters 10` plus `EMMY_BENCH_RUN_TIMEOUT_S` — a third budget knob
+   beside the two the tune report named) — 13 kernels, and the whole `post4096` forward **23.24 s**, not
+   servable, so gate (c) was not attempted. One piece (`__place_8a9a1fe058`, 13.2 s, 57 %) re-read both FFN
+   weight matrices per output element through serial 4096-trip hidden-dim reductions, and two 16384-grid sweep
+   pieces added 9.3 s. A measured tune pass (2026-09-03, three passes, 58 ok rows) found no faster row for those
+   pieces — every arm hung the watchdog — so the round turned to materializing the matmul contributions.
+   What stands from that round (all GPU-free, pinned twins + host-DB copy): **(a)** the (A) verdict — the
+   contribution seams (`PLACE@a29`, the linear_2/linear_3 contraction; `PLACE` on the activation cone) and the
+   mHC statistics seams are ON the ballot and realize; seam capability is not the gap, and the uncalibrated
+   proxy should not be the decider. **(b)** the materialized shape is right: a route whose contribution
+   consumer is a pure staged mma with no serial hidden-dim walk, the walk living once in a producer piece, and
+   the statistics computed once per row. **(c)** two blockers characterized on post-#699 main, each its own
+   item: the residual root's output sweeps are all promoted into its placement (the emitted kernel decodes a
+   2^56-thread linear grid — un-launchable), and the contribution producer still recomputes the carrier chain
+   per (row, a28) cell (the next seam, `PLACE@…inner` on the `a32` contraction, is on its ballot). Pricing
+   floors beyond #702's are OUT by review decision: a golden must carry every kernel of the route, and strict
+   evidence then keeps the prior from deciding at all. The path to serving: make `emmy tune` able to measure
+   this family — the tune dead-end sink (#705), the retry-policy and regime-pin fixes in flight, the bench
+   budget knobs, and a flag to seed the deploy election's route as a measured proposal — then tune the serving
+   twins on the host, record the golden, and boot under strict evidence. The host measurement of any route
+   remains owed.
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
 compiles end to end and the elected route is a measured 23.2 s per `post4096` prefill forward (no longer a

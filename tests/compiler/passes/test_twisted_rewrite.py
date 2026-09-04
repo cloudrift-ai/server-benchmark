@@ -11,23 +11,29 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 import pytest
 
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
+from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
-from emmy.compiler.pipeline.passes.lowering.tile._twist import _hoist_invariant, rewrite_twisted
+from emmy.compiler.pipeline.passes.lowering.tile._twist import _hoist_invariant, relift, rewrite_twisted
+from emmy.compiler.pipeline.pipeline import Run
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 
 def _folds(root: Fold):
@@ -47,10 +53,15 @@ def _twisted_folds(root: Fold) -> list[Fold]:
     return [fold for fold in _folds(root) if fold.axis is not None and fold.as_reduction().twisted]
 
 
-def _tile(code: str) -> TileOp:
+def _lifted(code: str) -> Graph:
     graph, _, _ = graph_from_code(code)
     graph = Pipeline.build(LOOP_PASSES).run(graph)
-    graph = Pipeline.build(["lowering/tile"], select=["lift", "twisted"]).run(graph)
+    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph)
+
+
+def _tile(code: str, twist: str = "twisted") -> TileOp:
+    with pinned_knobs({"TWIST": twist}):
+        graph = Pipeline.build(["lowering/tile"], select=["twisted"]).run(_lifted(code))
     return next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp) and node.id.endswith(("softmax", "attention")))
 
 
@@ -272,3 +283,156 @@ def test_a_refusing_sibling_cluster_says_why(caplog) -> None:
         Pipeline.build(LOOP_PASSES + ["lowering/tile"]).run(graph, ctx=Context.from_target((12, 0)))
     declines = [r.message for r in caplog.records if "declined" in r.message]
     assert declines, "a refusing max/sum sibling pair must name the predicate that refused"
+
+
+# ===================================================================
+# The inverse: an online carrier's loop lifts to the two-pass tree
+# ===================================================================
+
+_SDPA = (
+    "F.scaled_dot_product_attention("
+    "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
+    "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
+    "torch.randn(1, 1, 32, 16, dtype=torch.float16))"
+)
+
+
+def _online_carrier_loop() -> Loop:
+    """The stable online form flash attention streams, as ``Fold.merge`` spells it: per key, advance
+    the pivot, rescale ``(o, l)`` by ``α`` through ``Accum.base`` and fold the ``β``-weighted injection."""
+    idx = (Var("a0"), Var("a1"))
+    return _reduce_loop(
+        Load(name="s", input="x", index=idx),
+        Load(name="v", input="val", index=(Var("a1"),)),
+        Const(name="one", value=1.0),
+        Assign(name="gn", op="maximum", args=("m", "s")),
+        Assign(name="dg", op="subtract", args=("m", "gn")),
+        Assign(name="alpha", op="exp", args=("dg",)),
+        Assign(name="dg_o", op="subtract", args=("s", "gn")),
+        Assign(name="beta", op="exp", args=("dg_o",)),
+        Assign(name="o_sa", op="multiply", args=("o", "alpha")),
+        Assign(name="o_sb", op="multiply", args=("v", "beta")),
+        Accum(name="o", value="o_sb", op=ElementwiseImpl("add"), base="o_sa"),
+        Assign(name="l_sa", op="multiply", args=("l", "alpha")),
+        Assign(name="l_sb", op="multiply", args=("one", "beta")),
+        Accum(name="l", value="l_sb", op=ElementwiseImpl("add"), base="l_sa"),
+        Accum(name="m", value="s", op=ElementwiseImpl("maximum")),
+    )
+
+
+def _two_pass_shape(root: Fold) -> tuple[Fold, Fold, Fold]:
+    """The ``(m, O, l)`` folds of a two-pass tree: the pivot's max, the value contraction whose A
+    cone reads that max, and the weight sum reading the same cone."""
+    reduces = [fold for fold in _folds(root) if fold.axis is not None and fold.as_reduction().ops is not None]
+    (m,) = [fold for fold in reduces if fold.as_reduction().ops[0].name == "maximum"]
+    (o,) = [fold for fold in reduces if fold.as_contraction() is not None and any(m in edge.operands for edge in fold.operands)]
+    (weight_sum,) = [
+        fold
+        for fold in reduces
+        if fold is not o
+        and fold is not m
+        and fold.as_reduction().ops[0].name == "add"
+        and any(m in edge.operands for edge in fold.operands)
+    ]
+    return m, o, weight_sum
+
+
+def test_online_carrier_loop_lifts_to_the_two_pass_tree() -> None:
+    """A reduce loop already in the stable online form — the shape the twist LOWERS to, with the
+    ψ-rescale as ``Accum.base`` — lifts to the two-pass tree the recipe certifies: the pivot's own
+    max, the value channel as a contraction whose A cone is ``exp(s − m)`` over the pivot's final
+    state, and the weight sum beside it. The value contraction is a ``TILE`` site of its own, and
+    the twist fuses the pair right back, so the online loop and the two-pass ops meet at one term."""
+    cell = (
+        _online_carrier_loop(),
+        Assign(name="inv", op="reciprocal", args=("l",)),
+        Assign(name="out_v", op="multiply", args=("o", "inv")),
+        Write(output="out", index=(Var("a0"),), value="out_v"),
+    )
+    tile = lift_loop_op(LoopOp(body=(Loop(axis=Axis("a0", Dim(4)), body=Body(cell)),)), name="k_online")
+
+    assert not _twisted_folds(tile.op)
+    m, o, _ = _two_pass_shape(tile.op)
+    assert o.as_contraction() is not None and o.operands[0].axis is None, "A is the weight cone, B the value slab"
+    assert o.operands[1].as_slab() is not None
+    assert any(site.node is o for site in tile.sites) and any(tile.sites[s].node is o for s in tile.family_sites["TILE"])
+    (pair,) = _twisted_folds(rewrite_twisted(tile.op, tile.axes))
+    assert len(pair.init) == 3, "the two-pass tree the lift built is the one the recipe fuses"
+
+
+def test_sdpa_carrier_relifts_to_the_two_pass_tree_that_computes_the_same_values() -> None:
+    """The twist pass's own inverse: the fused SDPA carrier lowered to Loop IR and lifted back is
+    the two-pass tree — one shared score contraction, one pivot, the value contraction tileable —
+    and both forms compute attention to the reference on the CPU loop runner."""
+    graph = _lifted(_SDPA)
+    with pinned_knobs({"TWIST": "twisted"}):
+        graph = Pipeline.build(["lowering/tile"], select=["twisted"]).run(graph)
+    twisted = next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    two_pass = relift(twisted, graph)
+    assert two_pass is not None and not _twisted_folds(two_pass.op)
+    m, o, _ = _two_pass_shape(two_pass.op)
+    scores = [fold for fold in _folds(two_pass.op) if fold.as_contraction() is not None and fold is not o]
+    assert len(scores) == 1, "the three passes read ONE score node — sharing is edge reuse"
+    assert any(two_pass.sites[s].node is o for s in two_pass.family_sites["TILE"])
+    assert two_pass.knobs.keys() >= {k for k in twisted.knobs if k.startswith("S_")} and two_pass.knobs != twisted.knobs, (
+        "restamped identity"
+    )
+
+    rng = np.random.default_rng(0)
+    q, k, v = (rng.standard_normal((1, 1, 32, 16)).astype(np.float16) for _ in range(3))
+    arrays = {"x0": q, "x1": k, "x2": v, "scaled_dot_product_attention_scale": np.array([0.25], dtype=np.float16)}
+    s = (q[0, 0].astype(np.float64) @ k[0, 0].astype(np.float64).T) * 0.25
+    p = np.exp(s - s.max(-1, keepdims=True))
+    reference = (p / p.sum(-1, keepdims=True)) @ v[0, 0].astype(np.float64)
+    for tile in (twisted, two_pass):
+        loop = LoopOp(
+            body=tile.op.lower(bound=frozenset(), stores=tile.output_specs, axes=tile.axes), inputs=tile.inputs, outputs=tile.outputs
+        )
+        got = np.asarray(execute_loop_op_cpp(loop, arrays, {"scaled_dot_product_attention": (1, 1, 32, 16)}), dtype=np.float64)
+        np.testing.assert_allclose(got[0, 0], reference, atol=2e-3)
+
+
+def test_twist_pass_offers_the_carrier_beside_the_two_pass_tree() -> None:
+    """Unpinned, the pass forks: the carrier first (the cold pick keeps the single-pass kernel),
+    the two-pass tree second — a structural arm, a different kernel — each carrying its ``TWIST``
+    value as the fork's own knob delta. A pin decides in place."""
+    graph = _lifted(_SDPA)
+    pipeline = Pipeline.build(["lowering/tile"], select={"twisted"})
+    rule = pipeline.passes[0].rules[0]
+    (match,) = pipeline.match(graph, rule)
+    options = rule.rewrite(match=match, root=match.root)
+    assert [option.knobs for option in options] == [{"TWIST": "twisted"}, {"TWIST": "two-pass"}]
+    assert all(isinstance(option, DeferredFork) for option in options)
+    carrier, two_pass = (option.expand()[0] for option in options)
+    assert _twisted_folds(carrier.op) and not _twisted_folds(two_pass.op)
+    assert "TWIST" not in carrier.knobs and "TWIST" not in two_pass.knobs, "an input pin, never a knob on the kernel"
+    assert not _twisted_folds(_tile(_SDPA, "two-pass").op)
+
+    # Routed through the fork rather than pinned: the two-pass arm, then the denominator's cut.
+    # The pieces the cut mints are not offered the pair again — the pass does not rewind onto them.
+    def decide(fp):
+        for option in fp.options:
+            knobs = getattr(option, "knobs", None) or {}
+            if knobs.get("TWIST") == "two-pass" or knobs.get("PLACE@map.2/reduce") == "cut":
+                return option
+        return next(iter_leaves(fp.options))
+
+    terminal, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((8, 0))).resolve(_lifted(_SDPA), decide)
+    tiles = [node.op for node in terminal.nodes.values() if isinstance(node.op, TileOp)]
+    assert len(tiles) == 2 and not any(_twisted_folds(tile.op) for tile in tiles)
+
+
+def test_two_pass_sdpa_value_contraction_reaches_the_mma_tier() -> None:
+    """Pinned to the two-pass tree, with the denominator materialized by a placement cut and a
+    tensor-core tile at the value contraction, SDPA lowers its P·V on ``mma.sync`` — the site the
+    carrier could not offer. The cut is load-bearing: the kernel binder reads a root projection's
+    epilogue only over what the tiled node itself computes, so ``1/l`` arrives as a workspace load."""
+    graph, _, _ = graph_from_code(_SDPA)
+    pins = {"FAST_MATH": False, "TWIST": "two-pass", "PLACE@map.2/reduce": "cut", "TILE@map.1/inner": "mma_m16n8k16_f16_f32/f1x1"}
+    with pinned_knobs(pins):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
+    kernels = {name: node.op for name, node in lowered.nodes.items() if isinstance(node.op, CudaOp)}
+    (consumer,) = (op for name, op in kernels.items() if "__place" not in name)
+    assert len(kernels) == 2, "the denominator's piece and the attention consumer"
+    assert consumer.knobs["TILE@map.1/inner"] == pins["TILE@map.1/inner"], "the value contraction's site, on the two-pass routes"
+    assert "mma.sync" in consumer.kernel_source

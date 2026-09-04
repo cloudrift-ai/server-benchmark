@@ -5,7 +5,10 @@ recursively replace nested reductions in place, remove the ``Accum`` statements 
 and store their operations as the fold's componentwise monoid. The one shape formation reads is
 the SEMIRING step (:func:`_factor_products`): its product arguments become operand edges — a slab,
 a cone over the step, or the raw slab of a storage decode with the invariant factors hoisted to an
-epilogue — so the bilinear reading is canonical by construction. There is no round-trip gate.
+epilogue — so the bilinear reading is canonical by construction. A reduce loop spelled as an online
+twisted carrier (``Accum.base`` rescales, the form ``Fold.merge`` lowers to) is first expanded into the
+two-pass loops its recipe certifies (:mod:`._untwist`), so the lift's output is the same tree whichever
+form arrived.
 """
 
 from __future__ import annotations
@@ -17,8 +20,9 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Init, Load, Loop, Select, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
+from emmy.compiler.pipeline.passes.lowering.tile._untwist import untwist_body
 
 
 def _stamp_axes(loop: Loop) -> Loop:
@@ -374,7 +378,7 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     inner_levels = (*levels, level)
     edges: list = []
     bound = {axis.name for axis in axes}  # one coordinate per name: a sibling sweep reusing one is renamed apart
-    for stmt in Body.coerce(body):
+    for stmt in untwist_body(body):
         if isinstance(stmt, Loop) and not stmt.is_reduce:
             if stmt.axis.name in bound:
                 stmt = _renamed_sweep(stmt, bound)
@@ -452,7 +456,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     if not accums:
         raise ValueError(f"reduce loop {loop.axis.name!r} has no Accum")
     if any(stmt.base is not None or stmt.dtype is not None for stmt in accums):
-        raise ValueError(f"reduce loop {loop.axis.name!r} is not in canonical Loop IR")
+        raise ValueError(f"reduce loop {loop.axis.name!r} is not in canonical Loop IR (a carried recurrence no twist recipe certifies)")
     writes = tuple(stmt for stmt in body if isinstance(stmt, Write))
     write_ids = {id(stmt) for stmt in writes}
     # Already separated by :func:`lift_body` — ``edges`` are the step's nested reductions, ``plain``
@@ -504,7 +508,7 @@ def _peel(body: Body) -> tuple[list, list[Stmt]]:
     current = list(body)
     while True:
         index = 0
-        while index < len(current) and isinstance(current[index], (Load, Assign, Init, Select)):
+        while index < len(current) and isinstance(current[index], (Const, Load, Assign, Init, Select)):
             index += 1
         head, rest = current[:index], current[index:]
         if len(rest) != 1 or not isinstance(rest[0], Loop) or rest[0].is_reduce:

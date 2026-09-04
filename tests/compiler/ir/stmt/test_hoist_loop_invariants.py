@@ -226,3 +226,34 @@ def test_normalization_does_not_build_the_full_ssa_dependency_closure() -> None:
 
     assert "deps_closure" not in body.__dict__
     assert "deps_closure" not in split.__dict__
+
+
+def test_keeps_a_consumer_whose_accumulator_stays() -> None:
+    """A read of an accumulator folded INSIDE the loop stays with it even when the reader's own
+    axis dependencies would let it move: an online carrier's ``1/l`` epilogue after a key loop
+    that reads the output column (the value slab) while ``l`` itself does not."""
+    a, k = Axis("a", 4), Axis("k", 8)
+    body = (
+        Loop(
+            axis=a,
+            body=(
+                Loop(
+                    axis=k,
+                    body=(
+                        Load(name="v", input="V", index=(Var("a"), Var("k"))),
+                        Load(name="s", input="S", index=(Var("k"),)),
+                        Accum(name="o", value="v"),
+                        Accum(name="l", value="s"),
+                    ),
+                ),
+                Assign(name="inv", op="reciprocal", args=("l",)),
+                Assign(name="scaled", op="multiply", args=("o", "inv")),
+                Write(output="out", index=(Var("a"),), value="scaled"),
+            ),
+        ),
+    )
+
+    out = hoist_loop_invariants(body)
+
+    assert len(out) == 1 and isinstance(out[0], Loop) and out[0].axis.name == "a"
+    assert [s.name for s in out[0].body if isinstance(s, Assign)] == ["inv", "scaled"]

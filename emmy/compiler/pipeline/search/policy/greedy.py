@@ -186,8 +186,8 @@ def _leaf_op(leaf: object):
     if isinstance(leaf, Op):
         return leaf
     option = getattr(leaf, "option", None)
-    if option is None and isinstance(leaf, Fork) and leaf.is_leaf and not leaf.structural:
-        option = leaf.expand()[0]
+    if option is None and isinstance(leaf, Fork) and leaf.is_leaf:
+        option = leaf.expand()[0]  # a structural leaf that keeps ONE kernel (a twist arm) is that kernel's Op
     return option if isinstance(option, Op) else None
 
 
@@ -418,15 +418,12 @@ def _priced_pick(
     picking it."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    priced = [
-        (
-            o,
-            _price_graph(_leaf_graph(o), fp.ctx, prior, memo, db, decisions)
-            if _is_structural_option(o)
-            else _price_op_leaf(fp, o, prior, memo, db, decisions),
-        )
-        for o in leaves
-    ]
+    def price(o):
+        if _is_structural_option(o) and isinstance(graph := _leaf_graph(o), Graph):
+            return _price_graph(graph, fp.ctx, prior, memo, db, decisions)
+        return _price_op_leaf(fp, o, prior, memo, db, decisions)  # one kernel, this tree or another
+
+    priced = [(o, price(o)) for o in leaves]
     if any(us is None for _, us in priced):
         return None
     return min(priced, key=lambda op_us: op_us[1])[0]
@@ -692,7 +689,7 @@ def _route_candidates(fp: ForkPoint, index: _Measured) -> list[tuple[object, flo
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None or _schedule_fork(fp):
         return []
-    if _structural_domain(fp.options) not in (("PLACE",), ("REDUCE",)):
+    if _structural_domain(fp.options) not in (("PLACE",), ("REDUCE",), ("TWIST",)):
         return []
     sig = _fork_signature(fp)
     measured = [entry for source in (index.ok, index.routes) for group in _sig_groups(source, sig) for entry in group]
@@ -980,6 +977,7 @@ def greedy_decide(
     def decide(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
         from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+        from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
 
         if db_state[0] is None:
             db_state[0] = _db_measured_index(db, fp.ctx)
@@ -1003,6 +1001,12 @@ def greedy_decide(
             best_o, best_us = min(arms, key=lambda c: (c[1], canonical_row_key(leaf_knobs(c[0]))))
             fp.score = best_us
             return best_o
+        if _structural_domain(fp.options) == ("TWIST",):
+            # A twist fork is decided by a pin or by a measured row, never by prediction: its arms
+            # are two algorithms over one tree (one stable pass, or two passes with the value
+            # channel as a contraction of its own), and a Σ of predicted µs across them is the
+            # model's absolute error. The carrier — offered first — stands; the tune walks both.
+            return next(iter_leaves(fp.options))
         if the_prior is None:
             # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
             # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback

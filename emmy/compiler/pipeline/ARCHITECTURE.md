@@ -1557,7 +1557,8 @@ operand, same-value cones become one shared object. No Tile IR classifier runs. 
 projection is a zero-axis term evaluated over its sweep axis, while its writes live as `OutputSpec`s at the `TileOp`
 boundary.
 
-`020_twisted` rewrites the exp-family composition over that canonical tree. The single `030_cut` pass reaches a
+`020_twisted` offers the exp-family composition over that canonical tree beside the two-pass tree the lift
+reconstructs from it (the `TWIST` fork). The single `030_cut` pass reaches a
 fixpoint over two ordered domains: it offers the maximal tree and every semantically closed stored child-Fold seam
 through `PLACE`, then the unsplit tree beside every cross-CTA reduce split the head Fold admits. A selected cut writes
 the complete child state to workspaces; a selected split slices the same Fold and folds partial state tuples with its
@@ -1721,6 +1722,14 @@ context excludes those choices while composing its lazy frontier.
 `FAST_MATH` is a meta gate over the others — `unfeatured`, never stamped/enumerated/featurized (the realized fork is
 identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token).
 
+**`TWIST`** (STR, `twisted` | `two-pass`, pin-only / `lowering/tile/020_twisted`) — which spelling of a twist
+recipe's reduce pair the kernel keeps: the fused twisted carrier (one stable pass over the axis) or the two-pass tree
+the lift reconstructs from that carrier's own loop, whose value channel is a contraction node with a `TILE` site of
+its own. An input pin like `FAST_MATH` — part of a record's regime, decided before the fork when pinned; unpinned,
+the pass forks with the carrier first and the two-pass tree as a structural arm, the value riding the fork's knob
+delta and never a knob on the kernel. Greedy keeps the carrier unless a pin or a measured row spells the two-pass arm
+— two algorithms are not compared on predicted µs — while the tune walks both.
+
 ### Classic schedule keys
 
 Structural choices finish before the `TileOp` indexes its Fold root. Each shared Fold object gets
@@ -1762,7 +1771,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/fusion/`            | `merge_loop_ops` maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address, and a sub-byte-packed operand address separates its row axis out of the pair-packing division via `_div_mod_decompose`), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect, after maximal fusion. |
-| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` reaches a fixpoint over stored-edge then cross-CTA cuts; `040_schedule` schedules each stored tree. |
+| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` offers the exp family's twisted carrier beside its two-pass tree (`TWIST`); `030_cut` reaches a fixpoint over stored-edge then cross-CTA cuts; `040_schedule` schedules each stored tree. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 

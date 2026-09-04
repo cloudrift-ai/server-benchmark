@@ -25,7 +25,7 @@ tests/compiler/passes/
 ├── test_fusion_rules.py            # maximal/multi-output fusion structure and Loop-runner correctness
 ├── test_matcher.py                 # Pattern matcher unit tests
 ├── test_maximal_fusion.py          # one-pass maximal fusion, including nested reductions
-├── test_twisted_rewrite.py         # general exp-family Tile rewrite: softmax and masked/unmasked SDPA
+├── test_twisted_rewrite.py         # exp-family Tile rewrite and its inverse: carriers, two-pass relift, TWIST
 ├── test_matmul_rules.py            # matmul-specific rewrite rules
 ├── test_reduction_rules.py         # reduction-pattern rewrite rules
 ├── test_register_tile_rules.py     # register-tile lowering rules
@@ -114,7 +114,11 @@ numpy backends in three places:
 
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
-sites through the CUDA pipeline. The direct projection boundary exhaustively compares its production rows with the
+sites through the CUDA pipeline. It also drives the inverse: an online-softmax loop written as `Fold.merge` spells it
+lifts to the two-pass tree the recipe fuses right back; the SDPA carrier re-lifted from its own Loop IR is that tree
+with one shared score node, computing attention to the reference on the CPU loop runner; the pass offers the carrier
+first and the two-pass tree second, each stamped with its `TWIST` receipt, and pinned to the two-pass tree with the
+denominator cut, SDPA's value contraction lowers on `mma.sync`. The direct projection boundary exhaustively compares its production rows with the
 literal compatible subset of the independent Cartesian product before checking materialization. The plain-reduction
 boundary also compares the production set with that literal reference: its independent product contains mismatched
 node and kernel worker choices that only the compatibility relation may reject. `test_schedule_walk.py` pins the

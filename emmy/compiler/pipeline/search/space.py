@@ -41,6 +41,16 @@ PLACE = Knob(
     help="Stored Fold-edge placement (fuse into the consumer or cut to a fresh workspace kernel).",
 )
 
+# The exp-family reduce pair a twist recipe fuses: its twisted carrier (one pass over the axis), or
+# the two-pass tree the lift reconstructs from that carrier's loop, whose value channel is a
+# contraction node with a ``TILE`` site of its own. Decided by ``lowering/tile/020_twisted``.
+TWIST = Knob(
+    "TWIST",
+    KnobType.STR,
+    hints=("twisted", "two-pass"),
+    help="A twist recipe's reduce pair: the fused twisted carrier (one pass) or the two-pass tree.",
+)
+
 # The reduce-axis partition codec. ``off=""`` = the scalar serial fold.
 REDUCE = Knob(
     "REDUCE",

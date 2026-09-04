@@ -45,6 +45,7 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)
     Assign,
     Body,
     Cond,
+    Const,
     Init,
     Load,
     Loop,
@@ -470,6 +471,11 @@ def _validate(loop: LoopOp) -> None:
                         raise ValueError(f"Select {stmt.name!r}: branch value {b.value!r} not defined")
                 if stmt.name in defined:
                     raise ValueError(f"Select {stmt.name!r}: name already defined")
+                defined.add(stmt.name)
+            elif isinstance(stmt, Const):
+                # A literal binding site — the twisted carrier's ``1`` injection, a scale.
+                if stmt.name in defined:
+                    raise ValueError(f"Const {stmt.name!r}: name already defined")
                 defined.add(stmt.name)
             elif isinstance(stmt, Init):
                 # Explicit accumulator seed at this scope — a binding site for the

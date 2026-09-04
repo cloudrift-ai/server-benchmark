@@ -30,7 +30,8 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     """The kernel-set arm a knob row spells among a cut-pass fork's ``options``, as ``(option, its
     knobs)`` — or ``None`` when the row decides nothing at this fork.
 
-    At a placement fork the row spells the first offered seam it marks ``cut`` (a bare
+    At a twist fork the row spells the arm carrying its ``TWIST`` value, the carrier when it
+    carries none. At a placement fork the row spells the first offered seam it marks ``cut`` (a bare
     ``PLACE=cut`` takes the root-most offered seam), the fuse arm when it marks no seam ``cut`` —
     a schedule row with no ``PLACE`` key says the kernel it decorates ran fused — and nothing when
     the seams it marks are not on this kernel's ballot. At a split fork it spells the offered plan
@@ -45,6 +46,11 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
 
     arms = [(option, {str(key): str(value) for key, value in leaf_knobs(option).items()}) for option in options]
     keys = {key for _, knobs in arms for key in knobs}
+    if "TWIST" in keys:
+        # At a twist fork the row spells the arm carrying its ``TWIST`` value; a row with none
+        # measured the fused carrier, the arm offered first.
+        want = row.get("TWIST")
+        return next(((option, knobs) for option, knobs in arms if want is None or knobs.get("TWIST") == str(want)), None)
     if any(family_of(key) == "PLACE" for key in keys):
         route = {str(key): str(value) for key, value in row.items() if family_of(str(key)) == "PLACE"}
         cuts = {key for key, value in route.items() if value == "cut"}

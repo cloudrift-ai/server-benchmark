@@ -19,7 +19,7 @@ from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt.body import Body, _exposed_defines, free_names
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Pack, Select, Unpack, Write
 
 # ---------------------------------------------------------------------------
@@ -635,7 +635,18 @@ def hoist_loop_invariants(stmts: Body) -> Body:
                 inner = walk(s.body)
                 axis = s.axis.name
                 hoisted = [c for c in inner if _hoistable(c, axis)]
-                hoisted_ids = {id(c) for c in hoisted}
+                # A candidate reading a name a STAYING sibling defines stays with it: the block
+                # folding an accumulator may be pinned by the axis (an online carrier's key loop
+                # reads the output column) while its reader's own axis dependencies are not (the
+                # ``1/l`` epilogue). Closed to a fixpoint, so the hoisted set is closed under SSA
+                # dependence as promised above, exported accumulators included.
+                while True:
+                    hoisted_ids = {id(c) for c in hoisted}
+                    exported = {name for c in inner if id(c) not in hoisted_ids for name in _exposed_defines(c)}
+                    pinned = {id(c) for c in hoisted if free_names(c) & exported}
+                    if not pinned:
+                        break
+                    hoisted = [c for c in hoisted if id(c) not in pinned]
                 stay = [c for c in inner if id(c) not in hoisted_ids]
                 new_body.extend(hoisted)
                 new_body.append(replace(s, body=tuple(stay)))

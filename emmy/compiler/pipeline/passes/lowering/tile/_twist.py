@@ -9,10 +9,12 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import RECIPES
 from emmy.compiler.ir.stmt import Assign, Body, Load
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import product_spine
+from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op, product_spine
 
 logger = logging.getLogger(__name__)
 
@@ -226,4 +228,26 @@ def rewrite_twisted(root, axes: tuple):
     return root
 
 
-__all__ = ["rewrite_twisted"]
+def relift(tile: TileOp, graph=None) -> TileOp | None:
+    """``tile``'s twisted tree lowered to Loop IR and lifted back — the two-pass tree the lift
+    reconstructs from the carrier's own online loop (``_untwist``), the kernel's boundary and
+    names carried over and its structural identity stamped afresh from the new body (``graph``
+    supplies the operand dtypes). ``None`` when the lift declines the loop (a carrier no recipe's
+    step spells, Welford's today), which leaves the carrier as the one offer."""
+    from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.identity import IdentityStrategy  # noqa: PLC0415
+
+    body = tile.op.lower(bound=frozenset(), stores=tile.output_specs, axes=tile.axes)
+    try:
+        loop = LoopOp(body=body, name=tile.name, inputs=tile.inputs, outputs=tile.outputs)
+        lifted = lift_loop_op(loop, name=tile.name)
+    except ValueError as exc:
+        _decline("relift", str(exc))
+        return None
+    lifted = replace(
+        lifted, inputs=tile.inputs, outputs=tile.outputs, knobs={k: v for k, v in tile.knobs.items() if not k.startswith(STRUCT_PREFIX)}
+    )
+    return replace(lifted, knobs={**lifted.knobs, **dict(IdentityStrategy().signature(lifted, graph))})
+
+
+__all__ = ["relift", "rewrite_twisted"]

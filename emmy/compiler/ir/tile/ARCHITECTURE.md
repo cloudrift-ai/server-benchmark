@@ -191,6 +191,20 @@ softmax is the arity-two case; SDPA adds expectation components, which join by t
 constant along the axis has hoisted out of the fold, and a causal mask is simply part of the shared score cone. The
 pass has no operation-family matcher: a recipe clicks by canonical form, or it does not.
 
+The carrier is offered beside the two-pass tree, as a structural fork under the `TWIST` knob (`twisted`, offered
+first, or `two-pass`). The two-pass offer is the lift's own reconstruction: the fused carrier is lowered to Loop IR
+(`Fold.lower` with nothing bound) and lifted back (`_twist.relift`), and the lift reads that online loop — a reduce
+loop whose channels fold through `Accum.base`, the ψ-rescale of the carried value — back into the two-pass loops the
+recipe certifies (`_untwist`: the pivot's own reduce, then one plain reduce per channel whose lift is the channel's
+pattern at the pivot's final state). The lift reads only the LINEAR structure of that recurrence (each channel enters
+its ⊕ at degree one, with factors over the pivot pair); the recipe's `advance` is what it matches against, and a
+recurrence no recipe certifies is refused as non-canonical Loop IR. So an online-softmax loop fed to the compiler and
+the frontend's two-pass ops meet at one stored tree, in which the value channel is a contraction node — a `TILE` site
+the carrier cannot offer — with the score contraction and the pivot shared by every pass. `TWIST` is an input pin
+like `FAST_MATH`: part of the regime a record was measured under, decided before the fork when pinned, and the
+fork's own knob delta — never a knob on the kernel — when the pass forks. The greedy deploy takes the two-pass arm
+only when a pin or a measured row spells it, never on a predicted price; the tune walks both arms.
+
 The rewrite consumes the canonical Fold tree. It reuses the registered monoid generator, invariant-factor splitting,
 and scoped score equivalence both for sibling maximum/additive folds and for the equivalent canonical composition in
 which contraction normalization has placed those statistics inside a computed normalized-exponential operand.

@@ -74,7 +74,8 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
+`020_twisted` first offers the general exp-family Fold rewrite described at the boundary below — the twisted carrier
+beside the two-pass tree the lift reconstructs from it, a structural fork under `TWIST`. The single `030_cut`
 pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically
 closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
 and realization must agree). Once placement is consumed, it offers the unsplit tree beside every cross-CTA reduce
@@ -514,8 +515,11 @@ without a placement or value-cut analysis.
 into the twisted monoid a recipe recognizes (`Fold.twist` — the pivot's state is the operand binding, the score the
 sub-cone alpha-equal to the pivot's own map, the rest a channel's pattern by canonical form), hoisting factors
 constant along the axis out of the fold first. Softmax, SDPA, and causal SDPA differ only in carrier arity and
-score/value lambdas; there is no operation-family matcher. `040_schedule` enumerates the complete
-rewritten tree. Direct contraction children and independent roots use the same physical-axis compatibility join, even
+score/value lambdas; there is no operation-family matcher. The carrier is one arm of a `TWIST` fork; the other is
+the two-pass tree the lift reconstructs from the carrier's own online loop (`_twist.relift`, `_fromloop` through
+`_untwist`), so the two spellings of one softmax — two passes over the axis or one stable online pass — are one
+stored tree with an input pin beside it, and the value channel is a contraction node of the two-pass tree.
+`040_schedule` enumerates the complete rewritten tree. Direct contraction children and independent roots use the same physical-axis compatibility join, even
 when roots reverse their algebraic M/N readings. A derived contraction uses the enclosing Fold domain through the same
 parent/child interface. Materialization binds accepted choices to placed geometry and resolved transport facts;
 unsupported forms remain unmapped.

@@ -252,31 +252,37 @@ You MUST complete ALL of the following checks before every commit. These are not
    replace them with the correct established term or a plain-word explanation (see Documentation Conventions).
 10. **Run tests**: `make test` — fix any failures before proceeding
 11. **Run linter**: `make lint` — if it fails, run `make format` and re-check
+12. **Decode the goldens** whenever the change touches the compiler (anything under `emmy/compiler/`, and always
+    for a schedule-codec, enumeration or knob-spelling change): `make test-goldens`. Off the default lane and needs no
+    GPU. `make test` guards the realization corpus against exactly this class of change and nothing guarded the
+    checked-in model goldens, so a rebuild of the schedule space can invalidate every recorded row in silence. If rows
+    go red, name the change that did it in the PR body — do **not** re-record them to make it green, which enshrines
+    the regression as the new reference.
 
 ### Before submitting (MANDATORY — do NOT skip these)
 
 You MUST audit the complete diff after the before-committing checks and before requesting review:
 
-12. **Remove unnecessary functionality**: Which new functionality can be removed?
-13. **Reuse existing mechanisms**: Which existing CLI, library, recipe, or skill can be reused instead?
-14. **Rethink touched functionality**: Can existing functionality be rearchitected around the PR's needs so one
+13. **Remove unnecessary functionality**: Which new functionality can be removed?
+14. **Reuse existing mechanisms**: Which existing CLI, library, recipe, or skill can be reused instead?
+15. **Rethink touched functionality**: Can existing functionality be rearchitected around the PR's needs so one
     simpler shared design replaces parallel or specialized paths?
-15. **Remove obsolete code**: Delete existing code that the PR makes unnecessary. Apply the boy-scout rule within the
+16. **Remove obsolete code**: Delete existing code that the PR makes unnecessary. Apply the boy-scout rule within the
     PR's scope and leave touched code cleaner, without expanding into an unrelated refactor.
-16. **Keep reasoning and reports out of code**: Which logic should become concise agent instructions? Code may
+17. **Keep reasoning and reports out of code**: Which logic should become concise agent instructions? Code may
     transform structural data, but scripts must not interpret results or assemble human-readable reports.
-17. **Minimize the diff**: Can the same outcome be achieved with fewer changed lines, files, flags, and abstractions?
-18. **Check the core line balance**: run `git diff --stat main -- emmy/`. A PR that introduces no new functionality
+18. **Minimize the diff**: Can the same outcome be achieved with fewer changed lines, files, flags, and abstractions?
+19. **Check the core line balance**: run `git diff --stat main -- emmy/`. A PR that introduces no new functionality
     (a refactor, a cleanup, a fix) must NOT increase the line count under `emmy/` — net growth there without new
     capability is the typical sign of architectural creep: another special case, helper, or early return layered onto
     a design that no longer fits. If the balance is positive, do not shave lines cosmetically to pass the check —
     restructure so the layering disappears, or say explicitly in the PR body why the growth is justified.
-19. **Apply the audit findings**: perform the removals and consolidation before requesting review. Tests must protect
+20. **Apply the audit findings**: perform the removals and consolidation before requesting review. Tests must protect
     the smaller contract, not preserve unnecessary machinery.
 
 ### Submitting
 
-20. Push and open a PR
+21. Push and open a PR
 
 # Behavioral Guidelines:
 

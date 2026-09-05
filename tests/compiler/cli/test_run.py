@@ -1516,6 +1516,31 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     assert any("NOT benched" in f for f in row["flags"])
 
 
+def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
+    """A forkless kernel's schedule space collapsed to its OFF anchors — no node assignment, which
+    ``complete_kernel_row`` refuses — yet its ``record_knobs`` is that row as-is: the one enumerated
+    row a golden entry for it spells. The residual of a placement cut is one such kernel, and it
+    must not sink the whole record."""
+    import json
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _write_ab_json
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    graph = Graph()
+    forkless = CudaOp(kernel_name="k", knobs={"WORK": "", "RASTER": "", "LOOPIFY": 0})
+    graph.add_node(op=forkless, inputs=[], output=Tensor("o", (4,)), node_id="n0")
+    args = SimpleNamespace(
+        json=str(tmp_path / "ab.json"), code="torch.zeros(4)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
+    )
+
+    _write_ab_json(args, {}, graph, None, [])
+
+    rec = json.loads((tmp_path / "ab.json").read_text())
+    assert rec["greedy"]["kernels"][0]["record_knobs"] == {"WORK": "", "RASTER": ""}
+
+
 def test_print_kernel_stats_greedy_bench_fail_row(capsys):
     """Degraded kernel table: ``bench=None`` + ``greedy_fail`` prints the greedy kernels
     with ``--`` timings, a ``bench_fail`` TOTAL, the failure reason as a ``!`` line, and the

@@ -1364,6 +1364,23 @@ persists in the derived golden store beside identities and verdicts). The regime
 validation rejects a realization that schedules behind pinned cuts without a stored identity. A stored identity equal
 to the target's own lift is the corpus's derived stamp, not a receipt, and keeps the pooled decode.
 
+**A whole kernel set records as one set of entries, each naming its kernel by identity.** `run --golden PATH
+--realization NAME --bench --record-greedy` (`working_golden.record_greedy_pick`) writes the kernel set the greedy
+compile picked back into the working file: one routing row per kernel-set decision the compile took — its `identity`
+the kernel the fork was offered on, its `knobs` the arm's `PLACE@seam: cut` or split-carrying `REDUCE` value, its
+`emmy_us` the whole graph's isolated timing — and one child-identity schedule receipt per CUDA kernel (the tile
+kernel it lowered from, its realized schedule row, its own isolated launch timing), all under the seed realization's
+input regime with the greedy comparison row as `same-input-greedy` reference. A nested cut is a routing row of the
+piece it was offered on, so a cascade of cuts is as many routing rows, and the replay walks the set together: the entry
+whose identity a fork's kernel carries decides that fork, and the set's lead decides the rest. Receipts written this way
+carry NO route in `pins`, unlike the corpus convention above: seam spellings are kernel-local, and a cut key copied
+onto every receipt re-cuts any piece that happens to offer a same-spelled seam (a 4096-token DeepSeek V4 serving twin
+cuts its residual at `PLACE@map.3/map` twice, at two cascade steps, and a piece of it offers a third). For the same
+reason the replay memo is keyed by the entry's identity beside its row and pins: two entries of one set can spell the
+same row on different kernels. Recorded this way, a strict-evidence compile of the file picks the same kernel set
+again from the file's rows alone (no tune DB, no prior): that 10-kernel twin, whose unseeded pick spends minutes
+pricing, resolves from its 19 recorded rows in seconds.
+
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
 post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately

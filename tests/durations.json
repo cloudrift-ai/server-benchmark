@@ -100,6 +100,7 @@
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_greedy_pick_is_picked_again_under_strict_evidence": 6.68,
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_route_cuts_the_selected_compile_target[explicit]": 19.34,
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_route_cuts_the_selected_compile_target[ordinary]": 19.4,
+ "tests/compiler/cli/test_golden_file_replay.py::test_replay_keys_its_cache_by_the_entry_identity": 6.3,
  "tests/compiler/cli/test_golden_file_replay.py::test_run_records_the_greedy_pick_of_an_embedded_golden": 3.07,
  "tests/compiler/cli/test_golden_file_replay.py::test_working_file_golden_conflicts_with_direct_input": 1.21,
  "tests/compiler/cli/test_golden_file_replay.py::test_working_file_requires_name_and_reports_its_own_available_rows": 2.39,

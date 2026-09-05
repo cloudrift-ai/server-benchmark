@@ -160,9 +160,11 @@ global pair for `BenchmarkResult.time_ms`, one pair per launch index
 `_wait_for_event` (`_KERNEL_TIMEOUT_MS`, 2 s; `EMMY_KERNEL_TIMEOUT_MS` overrides) rather than a
 blocking `synchronize()`, which would hang forever on a non-terminating kernel; on overrun it raises
 **`HungKernelError`** (a `RuntimeError` subclass, so callers' `except RuntimeError → bench_fail`
-still catch it). A program's FIRST `iter_once` gets a `_FIRST_ITER_GRACE` (30×) multiplier: lazy
-SASS upload, the smem-carveout reconfig for a big dynamic-smem kernel, and allocator first-touch
-can legitimately stall iter 0 past the steady-state cap without any kernel being hung. The 2 s (not
+still catch it). A program's FIRST `iter_once` runs under its own deadline, `EMMY_FIRST_ITER_TIMEOUT_MS`
+(`config.first_iter_timeout_ms()`, default 30× the steady one): lazy SASS upload, the smem-carveout reconfig for a big
+dynamic-smem kernel, and allocator first-touch can legitimately stall iter 0 past the steady-state cap without any
+kernel being hung. Before the knob the grace was hard-coupled at 30×, which at the 30 s steady watchdog a serving
+twin needs priced every hang at 900 s; set it alone to bound what a hang costs. The 2 s (not
 1 s) default is empirical: the gemma-4 post4096-global twin bench_failed 5/5 under a 1 s deadline at
 the first post-recalibration iteration yet runs clean 9/9 with no wait ≥0.2 s at any deadline ≥2 s —
 a deadline-correlated phantom (mechanism below the driver line unresolved; see the constant's note). This is the
@@ -253,7 +255,9 @@ policy on the backend, read through live `EMMY_BENCH_COMPILE_TIMEOUT_S` / `EMMY_
 `EMMY_BENCH_WALL_TIMEOUT_S` overrides (`emmy/config.py` owns the vars, mirroring `EMMY_KERNEL_TIMEOUT_MS`): one env
 setting reaches every bench path uniformly — the in-child backend inherits the env, and derived wall caps (the
 pinned-row cap, the comparison jobs' workload-scaled cap) recompute from the overridden values. Raising them is how a
-golden row whose recorded latency exceeds the default accumulated-GPU budget gets verified.
+golden row whose recorded latency exceeds the default accumulated-GPU budget gets verified. The two watchdog
+deadlines beside them — `EMMY_KERNEL_TIMEOUT_MS` (steady) and `EMMY_FIRST_ITER_TIMEOUT_MS` (iter 0, default 30× the
+steady one) — are env-only, with no constructor policy, and reach the child the same way.
 
 The three budgets fail differently, and the differences are load-bearing. A `bench_run_timeout_s` overrun is a fact
 about the **kernel** — it compiled, it ran, it was too slow — and is recorded as a `bench_fail` at the watchdog's
@@ -301,12 +305,18 @@ The wall-clock cap is `asyncio.wait_for`; on overrun the child is SIGKILLed and 
 device. Because the persistent worker is reused across configs, an illegal / misaligned access is a hazard: that error
 is **sticky** — it corrupts the CUDA context so every later call returns the same status until the process dies, which
 would cascade identical false `bench_fail`s across all subsequent configs. So after any failure the worker probes its
-context (`_context_dirty` — a cheap `deviceSynchronize`) and *exits* if it's poisoned; `run_job` respawns a clean
-context on the next request (the dead-proc check before `await self._spawn()`). Benign failures (NVRTC compile errors,
-cleaned-up OOM) leave the context healthy and keep the worker alive, so they pay no respawn cost. A stale-worker race
-on the send (a `BrokenPipeError`/`ConnectionResetError` from `stdin.drain` after the worker's dirty-context exit)
-triggers one respawn + resend before surfacing as `bench worker died during request send`. Error paths `await aclose()`
-(SIGKILL + reap) so the subprocess transport is cleaned before the loop closes.
+context (`_context_dirty` — a cheap `deviceSynchronize`) and, if it's poisoned — or a hung kernel holds it, which no
+probe can tell (`HungKernelError` counts as dirty unprobed) — answers with `_retire_worker: True` and stops serving.
+`run_job` retires a child on that flag **itself**, SIGKILL + reap through `aclose()`, the same teardown a wall overrun
+takes, and the next request respawns a clean context. The child cannot be left to exit on its own: a hung kernel
+stays resident until its context dies and the interpreter's CUDA teardown blocks behind it, so the child became a
+zombie still holding the GPU, the next candidate's request wedged against it before any launch, and the wall budget
+priced *that* configuration as a failure (a 16× V100 host tune recorded six "did not accept the request" rows for
+kernels that never ran). Benign failures (NVRTC compile errors, cleaned-up OOM) leave the context healthy and keep the
+worker alive, so they pay no respawn cost. A stale-worker race on the send (a `BrokenPipeError`/`ConnectionResetError`
+from `stdin.drain` against a child that exited) triggers one respawn + resend before surfacing as `bench worker died
+during request send`. Error paths `await aclose()` (SIGKILL + reap) so the subprocess transport is cleaned before the
+loop closes.
 
 Three transport behaviors worth knowing: (1) the child's **stderr is drained continuously** by a background task into
 a bounded tail — a chatty child (HF shard-download progress, nvcc warnings) would otherwise fill the ~64 KB pipe and

@@ -18,12 +18,17 @@ child to either corrupt the context or raise without touching CUDA.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import pickle
 import subprocess
 import sys
 import textwrap
 
+import pytest
+
+from emmy.compiler.backend import BenchmarkResult
+from emmy.compiler.backend.cuda import program as P
 from tests.compiler.helpers import requires_cuda
 
 PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -57,6 +62,80 @@ def _recv(proc: subprocess.Popen) -> dict | None:
 # The patched ``benchmark_program`` ignores the request graph, so the parent can
 # send a dummy request — no real compiled Graph needed.
 _DUMMY_REQ = {"graph": None, "kwargs": {}}
+
+
+# ---------------------------------------------------------------------------
+# Parent-side fakes: a worker child as ``_AsyncBenchWorker.run_job`` sees it
+# ---------------------------------------------------------------------------
+
+
+def _wire(resp: dict) -> bytes:
+    """One framed response as the child writes it."""
+    body = pickle.dumps(resp, protocol=pickle.HIGHEST_PROTOCOL)
+    return len(body).to_bytes(8, "little") + body
+
+
+class _FakeStdin:
+    def __init__(self, *, broken: bool) -> None:
+        self._broken = broken
+
+    def write(self, _data: bytes) -> None:
+        pass
+
+    async def drain(self) -> None:
+        if self._broken:
+            raise BrokenPipeError("stale worker — read end closed")
+
+
+class _FakeStdout:
+    def __init__(self, wire: bytes) -> None:
+        self._buf = bytearray(wire)
+
+    async def readexactly(self, n: int) -> bytes:
+        if len(self._buf) < n:
+            raise asyncio.IncompleteReadError(bytes(self._buf), n)
+        chunk = bytes(self._buf[:n])
+        del self._buf[:n]
+        return chunk
+
+
+class _FakeStderr:
+    async def read(self) -> bytes:
+        return b""
+
+
+class _FakeProc:
+    """``wire`` is what the child's stdout answers (``b""`` = EOF); ``fail_send`` breaks the pipe on
+    the first write. ``kill`` records the SIGKILL as ``returncode``."""
+
+    def __init__(self, *, wire: bytes = b"", fail_send: bool = False) -> None:
+        self.pid = 1000
+        self.returncode = None
+        self.stdin = _FakeStdin(broken=fail_send)
+        self.stdout = _FakeStdout(wire)
+        self.stderr = _FakeStderr()
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+    async def wait(self) -> int:
+        return -9
+
+
+def _spawning(monkeypatch, procs: list[_FakeProc]) -> list[int]:
+    """Hand ``procs`` out in order on each ``_spawn``; returns the spawn counter (one cell)."""
+    spawned = [0]
+
+    async def fake_spawn(self: P._AsyncBenchWorker) -> None:
+        self._proc = procs[spawned[0]]
+        spawned[0] += 1
+
+    monkeypatch.setattr(P._AsyncBenchWorker, "_spawn", fake_spawn)
+    return spawned
+
+
+def _job(w: P._AsyncBenchWorker) -> dict:
+    return asyncio.run(w.run_job({"graph": None, "torch_spec": None, "kwargs": {}}, wall_timeout_s=5.0))
 
 
 @requires_cuda
@@ -136,71 +215,12 @@ def test_bench_retries_after_broken_pipe_on_first_write(monkeypatch) -> None:
     """The dirty-context exit path can race a respawn: the first ``stdin.drain``
     raises ``BrokenPipeError`` (the worker's read end is gone). ``run_job`` must
     respawn and retry the send once before surfacing the failure."""
-    import asyncio
+    ok = _wire({"ok": True, "result": BenchmarkResult(time_ms=42.0, num_launches=0)})
+    spawned = _spawning(monkeypatch, [_FakeProc(fail_send=True), _FakeProc(wire=ok)])
 
-    from emmy.compiler.backend import BenchmarkResult
-    from emmy.compiler.backend.cuda import program as P
+    resp = _job(P._AsyncBenchWorker())
 
-    response_body = pickle.dumps(
-        {"ok": True, "result": BenchmarkResult(time_ms=42.0, num_launches=0)},
-        protocol=pickle.HIGHEST_PROTOCOL,
-    )
-    response_wire = len(response_body).to_bytes(8, "little") + response_body
-
-    class _FakeStdin:
-        def __init__(self, *, broken: bool) -> None:
-            self._broken = broken
-
-        def write(self, _data: bytes) -> None:
-            pass
-
-        async def drain(self) -> None:
-            if self._broken:
-                raise BrokenPipeError("stale worker — read end closed")
-
-    class _FakeStdout:
-        def __init__(self, wire: bytes) -> None:
-            self._buf = bytearray(wire)
-
-        async def readexactly(self, n: int) -> bytes:
-            if len(self._buf) < n:
-                raise asyncio.IncompleteReadError(bytes(self._buf), n)
-            chunk = bytes(self._buf[:n])
-            del self._buf[:n]
-            return chunk
-
-    class _FakeStderr:
-        async def read(self) -> bytes:
-            return b""
-
-    class _FakeProc:
-        def __init__(self, *, fail_send: bool) -> None:
-            self.pid = 1000 + (0 if fail_send else 1)
-            self.returncode = None
-            self.stdin = _FakeStdin(broken=fail_send)
-            self.stdout = _FakeStdout(b"" if fail_send else response_wire)
-            self.stderr = _FakeStderr()
-
-        def kill(self) -> None:
-            self.returncode = -9
-
-        async def wait(self) -> int:
-            return -9
-
-    procs = [_FakeProc(fail_send=True), _FakeProc(fail_send=False)]
-    spawn_count = 0
-
-    async def fake_spawn(self: P._AsyncBenchWorker) -> None:
-        nonlocal spawn_count
-        self._proc = procs[spawn_count]
-        spawn_count += 1
-
-    monkeypatch.setattr(P._AsyncBenchWorker, "_spawn", fake_spawn)
-
-    w = P._AsyncBenchWorker()
-    resp = asyncio.run(w.run_job({"graph": None, "torch_spec": None, "kwargs": {}}, wall_timeout_s=5.0))
-
-    assert spawn_count == 2, "BrokenPipeError on first send must trigger one respawn"
+    assert spawned[0] == 2, "BrokenPipeError on first send must trigger one respawn"
     assert resp["result"].time_ms == 42.0
 
 
@@ -210,77 +230,88 @@ def test_bench_retries_after_mid_job_eof(monkeypatch) -> None:
     GPU while the driver tears it down, hanging an innocent first launch on the fresh child
     (the golden-refresh flake — the same row replays clean once the zombie is gone). A second
     EOF is the config's own hang and stays a hard error (the test below)."""
-    import asyncio
-
-    from emmy.compiler.backend import BenchmarkResult
-    from emmy.compiler.backend.cuda import program as P
-
-    response_body = pickle.dumps(
-        {"ok": True, "result": BenchmarkResult(time_ms=17.0, num_launches=0)},
-        protocol=pickle.HIGHEST_PROTOCOL,
-    )
-    response_wire = len(response_body).to_bytes(8, "little") + response_body
-
-    class _FakeStdin:
-        def write(self, _data: bytes) -> None:
-            pass
-
-        async def drain(self) -> None:
-            pass
-
-    class _FakeStdout:
-        def __init__(self, wire: bytes) -> None:
-            self._buf = bytearray(wire)
-
-        async def readexactly(self, n: int) -> bytes:
-            if len(self._buf) < n:
-                raise asyncio.IncompleteReadError(bytes(self._buf), n)
-            chunk = bytes(self._buf[:n])
-            del self._buf[:n]
-            return chunk
-
-    class _FakeStderr:
-        async def read(self) -> bytes:
-            return b""
-
-    class _FakeProc:
-        def __init__(self, *, wire: bytes) -> None:
-            self.pid = 2000
-            self.returncode = None
-            self.stdin = _FakeStdin()
-            self.stdout = _FakeStdout(wire)
-            self.stderr = _FakeStderr()
-
-        def kill(self) -> None:
-            self.returncode = -9
-
-        async def wait(self) -> int:
-            return -9
+    ok = _wire({"ok": True, "result": BenchmarkResult(time_ms=17.0, num_launches=0)})
 
     def _run(wires: list[bytes]):
-        procs = [_FakeProc(wire=w_) for w_ in wires]
-        spawned = 0
-
-        async def fake_spawn(self: P._AsyncBenchWorker) -> None:
-            nonlocal spawned
-            self._proc = procs[spawned]
-            spawned += 1
-
-        monkeypatch.setattr(P._AsyncBenchWorker, "_spawn", fake_spawn)
-        w = P._AsyncBenchWorker()
-        resp = asyncio.run(w.run_job({"graph": None, "torch_spec": None, "kwargs": {}}, wall_timeout_s=5.0))
-        return spawned, resp
+        spawned = _spawning(monkeypatch, [_FakeProc(wire=w_) for w_ in wires])
+        return spawned, _job(P._AsyncBenchWorker())
 
     # First child EOFs mid-response (empty stdout), second answers: one retry, success.
-    spawned, resp = _run([b"", response_wire])
-    assert spawned == 2, "a mid-job EOF must trigger exactly one respawn + retry"
+    spawned, resp = _run([b"", ok])
+    assert spawned[0] == 2, "a mid-job EOF must trigger exactly one respawn + retry"
     assert resp["result"].time_ms == 17.0
 
     # Both children EOF: the config's own hang — a hard error after the single retry.
-    import pytest
-
     with pytest.raises(RuntimeError, match="EOF before response"):
         _run([b"", b""])
+
+
+# ---------------------------------------------------------------------------
+# A hung kernel retires the child: the parent SIGKILLs + reaps it on the error response
+# ---------------------------------------------------------------------------
+
+
+def test_hung_kernel_response_retires_the_child(monkeypatch) -> None:
+    """A hung kernel stays resident on the device until its context dies, and the child cannot end
+    that context on its own: its interpreter exit blocks in the CUDA teardown behind the kernel.
+    Left to itself the child became a zombie that still held the GPU, the next candidate's request
+    wedged against it before any launch, and the wall budget priced THAT configuration as a failure
+    — the "did not accept the request" rows for kernels that never ran. The error response flags
+    the retirement and the parent takes the same teardown a wall overrun takes: SIGKILL + reap, so
+    the next request spawns on a clean device."""
+    watchdog = "HungKernelError(\"kernel 'k (iter 0)' did not complete\")"
+    hung = _wire({"ok": False, "error": watchdog, "traceback": "", "_retire_worker": True})
+    ok = _wire({"ok": True, "result": BenchmarkResult(time_ms=3.0, num_launches=0)})
+    first, second = _FakeProc(wire=hung), _FakeProc(wire=ok)
+    spawned = _spawning(monkeypatch, [first, second])
+    w = P._AsyncBenchWorker()
+
+    with pytest.raises(P.BenchWorkerJobError, match="HungKernelError"):
+        _job(w)
+
+    assert first.returncode == -9, "the hung child must be SIGKILLed with its resident kernel"
+    assert w._proc is None, "and reaped, so nothing is ever sent to the zombie"
+    assert _job(w)["result"].time_ms == 3.0
+    assert spawned[0] == 2, "the next candidate runs on a fresh child"
+
+
+def test_benign_error_response_keeps_the_child(monkeypatch) -> None:
+    """The retirement is the child's verdict, not the parent's guess: a failure that left the
+    context healthy keeps the worker, so rejected configs pay no respawn."""
+    benign = _wire({"ok": False, "error": "ValueError('nvrtc')", "traceback": "", "_retire_worker": False})
+    proc = _FakeProc(wire=benign)
+    _spawning(monkeypatch, [proc])
+    w = P._AsyncBenchWorker()
+
+    with pytest.raises(P.BenchWorkerJobError, match="nvrtc"):
+        _job(w)
+
+    assert proc.returncode is None and w._proc is proc
+
+
+def test_worker_flags_a_hung_kernel_for_retirement() -> None:
+    """The child's side of the contract: the watchdog's error response carries the retirement flag
+    (the parent cannot probe a context a hung kernel holds), and the child serves nothing further."""
+    child = """
+        import emmy.compiler.backend.cuda.program as program
+        def _hang(graph, **kw):
+            raise program.HungKernelError("kernel 'k (iter 0)' did not complete within 2000 ms — variant marked bench_fail")
+        program.benchmark_program = _hang
+        from emmy.compiler.backend.cuda._bench_worker import main
+        main()
+    """
+    proc = _spawn(child)
+    try:
+        _send(proc, _DUMMY_REQ)
+        resp = _recv(proc)
+        assert resp is not None and resp["ok"] is False
+        assert resp["_retire_worker"] is True, "a hung kernel must ask the parent for the SIGKILL"
+        _send(proc, _DUMMY_REQ)
+        assert _recv(proc) is None, "the child must not serve another request from that context"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
 
 
 def test_worker_survives_benign_error() -> None:

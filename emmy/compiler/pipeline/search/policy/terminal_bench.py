@@ -18,6 +18,7 @@ from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.kernel.ir import KernelOp
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.pipeline.search.db import PerfStats
+from emmy.compiler.structural import digest
 
 # The engine logger keeps the existing ``[tune]`` log channel and verbosity toggles.
 logger = logging.getLogger("emmy.compiler.pipeline")
@@ -53,6 +54,11 @@ class TerminalBench:
         #: fork made it several, they hold DIFFERENT rows and there is no single row to attribute
         #: the total to. Each kernel carries its own decisions and earns its own sample.
         self.per_kernel: list[tuple[dict, float, str]] = []
+        #: The kernel set's own identity — the digest of its kernels' variant keys — where a
+        #: multi-kernel terminal's verdict is filed when no single kernel can be blamed for it
+        #: (:meth:`_blamed`). ``None`` for a one-kernel terminal, whose verdict is its kernel's.
+        keys = [n.op.identity_key(with_io=True, with_knobs=True) for n in self.cuda_nodes]
+        self.set_key = digest("kernel-set", *sorted(keys)) if len(keys) > 1 and None not in keys else None
 
     #: The kernel a watchdog message NAMES — ``kernel 'k_foo (iter 0)' did not complete …``. The
     #: exception class does not survive the bench worker's pipe (it arrives wrapped in a
@@ -69,10 +75,13 @@ class TerminalBench:
         hang, and 21 by a bench-worker startup timeout that is not a property of any kernel.
 
         So blame is recorded only where it is unambiguous: the kernel the watchdog named, or the
-        single kernel of a one-kernel terminal. Otherwise nothing is persisted — the run failed,
-        but which kernel failed is unknown, and unknown is not the same as failed. The terminal
-        still reports ``bench_fail`` either way, so the search treats the candidate as failed and
-        moves on; only the durable per-kernel evidence is narrowed to what was actually observed."""
+        single kernel of a one-kernel terminal. Otherwise no kernel earns a row — the run failed,
+        but which kernel failed is unknown, and unknown is not the same as failed — and what IS
+        known, that this kernel set failed at this budget, is filed under the set's own key
+        (``set_key``) so the slice is skipped next session instead of burning its wall budget
+        again. The terminal reports ``bench_fail`` either way, so the search treats the candidate
+        as failed and moves on; only the durable per-kernel evidence is narrowed to what was
+        actually observed."""
         named = self._NAMED_KERNEL.search(str(exc))
         if named is not None:
             culprit = named.group(1)
@@ -86,6 +95,15 @@ class TerminalBench:
     def _point_stats(us: float):
 
         return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
+
+    def _fail_verdict(self, us: float, status: str = "bench_fail"):
+        """The terminal's value when it cannot be priced: every kernel at the fail sentinel ``us``
+        — the Σ a fresh failure returns, so a replayed one scores the same."""
+        return self._point_stats(us * len(self.cuda_nodes)), status
+
+    def _cached_row(self, node):
+        key = node.op.identity_key(with_io=True, with_knobs=True)
+        return self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
 
     @staticmethod
     def _stats_from_launch(lt):
@@ -132,29 +150,36 @@ class TerminalBench:
         if not self.cuda_nodes:
             return "done", (self._point_stats(0.0), "ok")
 
-        # Cache lookup: if every CudaOp already has a perf row for this
-        # (context, backend), skip the benchmark entirely and rebuild the
-        # aggregate stats from the DB. Per-kernel partial caching isn't
-        # useful here because ``backend.benchmark`` runs the whole graph.
-        cached_rows = []
-        for node in self.cuda_nodes:
-            key = node.op.identity_key(with_io=True, with_knobs=True)
-            row = self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
-            if row is None:
-                cached_rows = None
-                break
-            cached_rows.append(row)
-        if cached_rows is not None:
-            logger.info("[tune] cache hit for %d kernel(s) — skipping bench", len(self.cuda_nodes))
+        # Cache lookup. A kernel with a failed row fails every slice it is in — its identity is
+        # its rendered source and launch geometry, the same bytes wherever it appears — so one such
+        # row decides the slice, blamed exactly as it was recorded, and the other kernels need no
+        # row of their own (the all-or-nothing rule below used to re-bench a hang on every fresh
+        # session because the innocent kernels had none). An ``ok`` replay still needs every
+        # kernel's row: ``backend.benchmark`` runs the whole graph, so a partial cache cannot
+        # stand in for the Σ. A verdict filed against the kernel set as a whole (an unblamed wall
+        # kill, :meth:`finalize_exc`) is looked up first: it has no kernel behind it.
+        if self.set_key is not None:
+            row = self.db.lookup_perf(self.context_key, self.set_key, backend=self.backend_name)
+            if row is not None:
+                logger.info(
+                    "[tune] cache hit: this %d-kernel set recorded %s as a whole — skipping bench", len(self.cuda_nodes), row.status
+                )
+                return "done", self._fail_verdict(row.stats.median, row.status)
+        rows = [(node, self._cached_row(node)) for node in self.cuda_nodes]
+        failed = [(node, row) for node, row in rows if row is not None and row.status != "ok"]
+        if failed:
+            logger.info("[tune] cache hit: %d of %d kernel(s) recorded %s — skipping bench", len(failed), len(rows), failed[0][1].status)
+            for node, row in failed:
+                self._note(node.op, row.stats, row.status)
+            return "done", self._fail_verdict(failed[0][1].stats.median, failed[0][1].status)
+        if all(row is not None for _node, row in rows):
+            logger.info("[tune] cache hit for %d kernel(s) — skipping bench", len(rows))
             agg = None
-            status = "ok"
-            for node, row in zip(self.cuda_nodes, cached_rows, strict=True):
-                if row.status != "ok":
-                    status = row.status
+            for node, row in rows:
                 agg = self._accumulate(agg, row.stats)
                 self._note(node.op, row.stats, row.status)
                 logger.info("[tune]   %s @ %.2f us  (%s, cached)", row.op_key[:12], row.stats.median, row.status)
-            return "done", (agg or self._point_stats(0.0), status)
+            return "done", (agg or self._point_stats(0.0), "ok")
 
         if self.backend is None:
             # No real measurement → do NOT persist. Writing the 1.0us stub
@@ -196,13 +221,17 @@ class TerminalBench:
             len(self.cuda_nodes),
         )
         s = self._point_stats(fail_us)
-        agg = None
+        error = f"{type(exc).__name__}: {exc}"
         for node in self.cuda_nodes:
             if id(node) in blamed:
-                self._persist(node.op, stats=s, status="bench_fail", error=f"{type(exc).__name__}: {exc}")
+                self._persist(node.op, stats=s, status="bench_fail", error=error)
                 self._note(node.op, s, "bench_fail")
-            agg = self._accumulate(agg, s)
-        return agg or self._point_stats(0.0), "bench_fail"
+        if not blamed and self.set_key is not None:
+            # The row carries no knobs: nothing about any kernel is claimed, so the greedy's
+            # disqualification index (which joins on ``S_*`` signatures) and the dataset (which
+            # joins on ``cuda_op``) never see it — only this cache lookup does.
+            self.db.record_perf(self.context_key, self.set_key, backend=self.backend_name, status="bench_fail", stats=s, error=error)
+        return self._fail_verdict(fail_us)
 
     def finalize_result(self, result):
         agg = None

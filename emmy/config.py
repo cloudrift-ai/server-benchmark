@@ -51,6 +51,7 @@ CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 PACK_DIR = "EMMY_PACK_DIR"
 NO_NVCC = "EMMY_NO_NVCC"
 KERNEL_TIMEOUT_MS = "EMMY_KERNEL_TIMEOUT_MS"
+FIRST_ITER_TIMEOUT_MS = "EMMY_FIRST_ITER_TIMEOUT_MS"
 BENCH_COMPILE_TIMEOUT_S = "EMMY_BENCH_COMPILE_TIMEOUT_S"
 BENCH_RUN_TIMEOUT_S = "EMMY_BENCH_RUN_TIMEOUT_S"
 BENCH_WALL_TIMEOUT_S = "EMMY_BENCH_WALL_TIMEOUT_S"
@@ -566,9 +567,21 @@ def nvcc_disabled() -> bool:
 
 def kernel_timeout_ms() -> float:
     """``EMMY_KERNEL_TIMEOUT_MS`` — the per-launch hung-kernel watchdog deadline (default 2000;
-    the deadline-cliff rationale lives at the backend call site)."""
+    the deadline-cliff rationale lives at the backend call site). A program's first iteration
+    runs under :func:`first_iter_timeout_ms` instead."""
     raw = os.environ.get(KERNEL_TIMEOUT_MS)
     return float(raw) if raw else 2000.0
+
+
+def first_iter_timeout_ms() -> float:
+    """``EMMY_FIRST_ITER_TIMEOUT_MS`` — the watchdog deadline for a program's FIRST iteration,
+    which may legitimately stall past the steady deadline without any kernel being hung (lazy
+    SASS upload, the smem-carveout reconfig, allocator first-touch — the rationale lives at the
+    backend call site). Default 30x :func:`kernel_timeout_ms`, the grace it was hard-coupled at
+    before the knob existed: at the 30 s steady watchdog a serving twin needs, that coupling
+    priced every hang at 900 s. Set it alone to bound what a hang costs without touching the
+    steady deadline."""
+    return float_env(FIRST_ITER_TIMEOUT_MS, 30.0 * kernel_timeout_ms())
 
 
 def bench_compile_timeout_s(default: float = 30.0) -> float:

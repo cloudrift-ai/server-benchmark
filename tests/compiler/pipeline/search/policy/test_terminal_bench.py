@@ -134,23 +134,30 @@ async def test_a_real_bench_failure_still_records_bench_fail() -> None:
     assert _perf_row(db, cand).status == "bench_fail"
 
 
+# The bodies must differ materially: ``CudaOp`` identity normalizes the kernel NAME away, so two
+# kernels differing only in name are one identity and would share a single perf row.
+_PAIR = {"k_innocent": "out[0] = 1.0f;", "k_culprit": "out[0] = 2.0f;"}
+
+
+def _cuda_op(name: str) -> CudaOp:
+    return CudaOp(kernel_source=f'extern "C" __global__ void {name}(float* out) {{ {_PAIR[name]} }}', kernel_name=name, arg_order=("out",))
+
+
 def _candidate_pair():
     """A terminal with TWO kernels — the shape one hang used to condemn wholesale."""
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (1,)), node_id="x")
-    # The bodies must differ materially: ``CudaOp`` identity normalizes the kernel NAME away, so
-    # two kernels differing only in name are one identity and would share a single perf row.
-    for nid, name, body in (("mid", "k_innocent", "out[0] = 1.0f;"), ("out", "k_culprit", "out[0] = 2.0f;")):
-        graph.add_node(
-            CudaOp(
-                kernel_source=f'extern "C" __global__ void {name}(float* out) {{ {body} }}',
-                kernel_name=name,
-                arg_order=("out",),
-            ),
-            [],
-            Tensor(nid, (1,)),
-            node_id=nid,
-        )
+    for nid, name in (("mid", "k_innocent"), ("out", "k_culprit")):
+        graph.add_node(_cuda_op(name), [], Tensor(nid, (1,)), node_id=nid)
+    graph.inputs, graph.outputs = ["x"], ["out"]
+    return SimpleNamespace(graph=graph, ctx=Context.from_target((8, 0)))
+
+
+def _candidate_solo(name: str):
+    """One kernel of the pair on its own — the slice it is enrolled in as a target of its own."""
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1,)), node_id="x")
+    graph.add_node(_cuda_op(name), [], Tensor("out", (1,)), node_id="out")
     graph.inputs, graph.outputs = ["x"], ["out"]
     return SimpleNamespace(graph=graph, ctx=Context.from_target((8, 0)))
 
@@ -214,3 +221,27 @@ async def test_an_unattributable_failure_blames_no_kernel() -> None:
     assert status == "bench_fail"
     assert _fail_rows(db, cand) == {}
     assert per_kernel == []
+
+
+async def test_an_unattributable_failure_is_replayed_for_its_kernel_set() -> None:
+    """What IS known after a wall kill that names no kernel is that THIS kernel set failed at that
+    budget, and that much must persist: a multi-kernel slice whose slow member could not be blamed
+    used to write nothing and re-burn its whole wall budget on every restart — 20 minutes per
+    composed arm on the DeepSeek-V4-Flash post4096 twin. The verdict is filed under the kernel
+    set's own key: no kernel earns a row, so one of them enrolled on its own still benches."""
+    db, cand = SearchDB(), _candidate_pair()
+    wall = RuntimeError("bench worker exceeded 74.0s wall budget — SIGKILL'd, stream cleaned")
+    await bench_terminal_async(cand, backend=_RaisingBackend(wall), db=db)
+
+    retry = _BudgetedBackend(iter_ms=1.0)
+    _stats, status, measured, per_kernel = await bench_terminal_async(_candidate_pair(), backend=retry, db=db)
+
+    assert retry.calls == [], "the kernel set was wall-killed at this budget — it must not burn the budget again"
+    assert (status, measured) == ("bench_fail", False)
+    assert per_kernel == [] and _fail_rows(db, cand) == {}, "still no kernel is blamed"
+
+    solo = _BudgetedBackend(iter_ms=1.0)
+    _stats, status, _measured, _ = await bench_terminal_async(_candidate_solo("k_innocent"), backend=solo, db=db)
+
+    assert solo.calls == [(1, "auto")], "a kernel of the set is not condemned — on its own it still benches"
+    assert status == "ok"

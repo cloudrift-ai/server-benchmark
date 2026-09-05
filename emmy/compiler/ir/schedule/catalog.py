@@ -115,6 +115,10 @@ def producer_band_moves() -> tuple[int, ...]:
     return 0, 1, 2
 
 
+#: Fragment depths a blocked stream's width is offered at — the ``bk`` ladder, read as the number
+#: of atom K-steps one block holds. The block width IS that product, so the two are one catalog.
+BLOCK_STEPS: tuple[int, ...] = (1, 2, 4, 8)
+
 SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8, 16, 32)
 
 
@@ -132,6 +136,7 @@ def coop_reduce_moves() -> list[Reduce]:
 
 
 __all__ = [
+    "BLOCK_STEPS",
     "MAX_BLOCK_THREADS",
     "MAX_FRAGMENT_CELLS",
     "MAX_FRAGMENT_REGISTERS",

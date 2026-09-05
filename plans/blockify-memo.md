@@ -1,139 +1,89 @@
-# Blocked SDPA: the three block loops, and the round trip that finally merged them
+# Blocking a reduce stream: what the scheduler now owns, and the one gap left
 
-Working note from the blockify prototype (`feature/blockify-twisted-carrier`); never reference it from durable docs or
-code. Rewritten 2026-09-04 after instrumenting — the first draft's premise ("the merge never receives the loops") was
-wrong, and so was its advice to revert. Extended the same day: defect #3 is CLOSED, by a route none of the three
-candidates below named.
+Working note for `feature/blockify-twisted-carrier`; never reference it from durable docs or code. Rewritten
+2026-09-04 after the width became a schedule decision. The earlier drafts' subject — three block loops the sibling
+merge could not reach — is settled and no longer the point; see "What was dropped, and why".
 
-## The symptom
+## Where the tiers actually stand
 
-`025_block` rewrites attention's twisted carrier into an outer block fold over three inner folds — the block pivot
-(max), the P·V expectation, and the denominator. Each inner fold re-derives the score, so the emitted CUDA carries
-three `a3` loops per block: `Q·K` runs 3× where FlashAttention-2 runs it 1×. The pivot must stay separate (the weight
-reads its finished accumulator); the two channels should collapse to one loop.
+Measured on an RTX 5090, sm_120, through the in-process pipeline. Three shapes: SDPA f16 `(1,4,128,32)`, a
+`256×1024×512` f16 linear, a `64×4096` f32 row sum.
 
-## Three defects, in the order they bite
+| | offered | assigned | emitted |
+| --- | --- | --- | --- |
+| FA `P·V` (blocked twisted channel) | 232 warp choices | yes, under a pin | **no `mma.sync`** |
+| FA score (blocked pivot's cone) | 2282 warp choices | yes, under a pin | **no `mma.sync`** |
+| matmul, blocked | warp choices at the inner site | yes | **no `mma.sync`** |
+| matmul, unblocked | — | yes | `mma.sync` ×4, `ldmatrix` ×24 |
+| reduction, blocked | — | `REDUCE@reduce=coop`, and `g<n>` splits into partial + finalize | as assigned |
 
-### 1. `Lambda.cone` resolved a param read through the combine's own state re-binding — FIXED
+Accuracy passes on all three shapes at every width tried (`emmy run`, 9/9: SDPA b64/b32, matmul b64/b128, reduce
+b512/b128, plus the three declined arms).
 
-A stored combine is not SSA in its states: it reads `acc1` and writes `acc1` back on the way out (`acc1 =
-copy(acc1__o__gn)`). `Body.backward_cone` resolves by name, so β's cone swallowed that trailing write, and
-`_beta_cone` shipped it inside the weight. Downstream `eliminate_copy_aliases` then folded the pivot read into a
-self-read and the kernel emitted
+So the schedule half is done and the realization half is not. Everything below the table is about that split.
 
-```c
-float acc1__o__gn = fmaxf(acc1__o__gn, v1);   // uninitialized
-```
+## What the width is
 
-— every blocked attention kernel was wrong, before any question of merging. `Lambda.cone` now takes the cone over the
-body without the statements that re-bind a param; the kernel emits `expf(v1 - fmaxf(acc1__blk, v1))`. The same write
-also masked the pivot→channel dependence from every uses-vs-defs reading, which let the repaired merge fuse the pivot
-with the denominator until this was fixed.
+One `Var` per blocked axis, named `__blk_<axis>`, in three places: the outer axis's ceil trip count, the inner
+axis's extent, and the σ that reconstructs the absolute coordinate. `block_tree` mints it, `block_widths` reads the
+domain off the blocked tree, and one arm of `025_block`'s fork substitutes it. The symbol never reaches Kernel IR.
 
-### 2. The merge's gates could not fuse two alpha-equal copies of one cone — FIXED
+Two things had to be true for that to work at all, and neither was obvious:
 
-The three loops ARE siblings in one `Body` (instrumented: `[Loop(a2_p,[acc1__blk]), Loop(a2_p,[acc5__sum__blk]),
-Loop(a2_p,[acc3__blk]), …]` after `unify_sibling_reduce_axes`). The pairwise scan reached them every time; the gates
-refused:
+- **A σ image binds its free names.** `k_o·blk + k_i` closes over three names, so `Lambda.closing` bound the width
+  as a coordinate param of every edge it reindexed, and `Fold.lower` then asked the axis table for an extent no axis
+  has. Substituting a coordinate by a value stops it BEING a coordinate — `_drop_coordinates` is that half of the
+  binding, and it is why `bind_widths` rebuilds lambdas rather than only rewriting expressions.
+- **`Dim` does not simplify what it is handed.** `Dim(expr)` stores the expression; only the arithmetic operators
+  fold. So the substituted ceil count `(1024 + 63) / 64` stayed a `BinaryExpr` and read back as NON-static, which
+  silently withheld split-K, the coop bands and raster from every blocked outer fold. `simplify_extent` (the module
+  helper, now public) is called at the substitution. Worth remembering: this failure mode is invisible — nothing
+  errors, the schedule space is just quietly smaller.
 
-- the dependence gate asked `merged_defs & t.ssa_uses`, so a name `t` binds *itself* counted as a read — and two
-  copies of one cone always share every spelling. Now one reading, `free_names(t)`, used by both the dependence gate
-  and the between-statements gate.
-- any def collision refused outright. A collision is not a dependence: the incoming body's copies rename apart. Only a
-  name the incoming loop still binds after it closes cannot be renamed — `Loop.render` declares those (its immediate
-  carriers, plus a nested `seed=False` loop's) ahead of the loop, everything else lives in the block it closes. That
-  is `_carried_out`.
-- `Loop.seed` was silently dropped when the merged loop was rebuilt; it is now carried and gated on.
+The old prototype's `EMMY_BLOCK=64` int read is gone; `BLOCK` is a declared knob, so `EMMY_BLOCK=b64` pins it and
+`EMMY_BLOCK=` pins the declined arm, both authoritatively.
 
-`unify_sibling_reduce_axes` also had to see an affine index (`o·B + i`) to give the three loops one axis name — the
-anchor and coefficient ride the key so `o·B + i` and `o·B + 32 + j` stay apart.
+## Why the emitted kernel has no mma, and it is not the schedule
 
-Verified end to end on `F.scaled_dot_product_attention(1,4,64,32)`: `DBG-MERGED a2_p ['acc5__sum__blk',
-'acc3__blk'] << ['acc3__blk']`, the pivot refused. `tests/compiler/ir/stmt/test_merge_sibling_reduce_loops.py`
-carries the scope shape as a case; it fails on the pre-fix pass.
+`_bind` (`lowering/kernel/_factor.py`) binds ONE node — the kernel's root leaf — and lowers everything under it
+through `op.lower()`, i.e. as plain nested loops. A contraction reaches its tile only when it IS that node. Both the
+blocked matmul (`Fold[k_o] add (Fold[k_i] contraction)`) and blocked attention (a twisted carrier over three inner
+folds) put the contraction one level DOWN, as an operand, so the accepted `TILE=mma_…` is recorded on the row and
+then ignored by the emitter. Verified by pinning an enumerated row: the `TileOp` reaches `lowering/kernel` with
+`place.is_mapped`, `materialization.tiles` populated and warp tiles at two sites, and the emitted CUDA is
+`_gid`-indexed scalar code.
 
-### 3. The merge was not on the path that emits the kernel — CLOSED
+`_atom.scheduled_fold_contraction` is the mechanism meant for exactly this — "a tiled contraction result consumed by
+an `Accum` into one of the enclosing carrier names" — but it scans `fold.lift.body` for a nested `Fold`, and a
+child term has lived on `Fold.operands` since the node collapse; its `b_trans` still does `isinstance(self.b, Load)`
+against what is now always a `Fold`. It cannot fire. Reviving it against the operand reading is the next piece of
+work and it is not small: the O fragments have to stay in registers across blocks while the carrier's α/β rescale
+is applied to them each block.
 
-`normalize_body` runs from `LoopOp.__post_init__` and `Body.structural_key`. `TileOp.__post_init__` normalizes the
-TERM (`normalize_fold_tree`); `010_materialize` → `_factor.factorize` builds the `KernelOp` straight from
-`Fold.lower`. So every merge observed above happened on a digest or on a Loop-IR op, and the emitted SDPA kernel
-still carried three block loops. (The module docstring claiming `TileOp.__post_init__` runs these passes is what
-seeded the first draft's wrong hypothesis; it is corrected.)
+**Do not re-diagnose this from the schedule side.** The domains, the placement and the row are all correct; three
+separate probes said so.
 
-The three candidate closures listed here before — renormalize the materialized kernel body, teach `Fold.lower` to
-share a reduce loop between alpha-equal binders, or emit one channel fold with a componentwise combine — are all
-superseded by a fourth: put the kernel back in the dialect that already owns the merge.
+## What was dropped, and why
 
-## How it closed: `025_block` splices a `LoopOp` and the tile pass restarts
+`025_block` no longer round-trips the blocked kernel through a `LoopOp`. That splice existed to reach
+`normalize_body`'s sibling-reduce merge, which collapsed attention's three block loops to two. The merge fuses the
+`P·V` channel with the denominator into one two-state fold, and `as_contraction` requires every lift result to be a
+product against `operands[0]` — the denominator's is a `copy` of the shared weight. So the merge and the bilinear
+reading are mutually exclusive, and the tier is worth more than the loop. Measured both ways: with the round trip
+`map.1/twist.2` reads as a `reduce`; without it, as an `inner`.
 
-`025_block` no longer rebinds the blocked `TileOp` in place. It takes `TileOp.loop_body`, constructs a `LoopOp` —
-whose `__post_init__` runs `normalize_body`, which is where the merge lives — and splices it as a `Graph` fragment.
-The splice bumps `Cursor.n_applied`, so when the rule scan wraps it restarts at rule 0 of `lowering/tile` instead of
-advancing, and `010_lift` re-derives the Fold tree from the merged nest. No engine change: this is the same mechanism
-`030_cut` uses, and `pass_idx` never moves backwards, so the loop passes do not re-run (nor do they need to —
-canonicalization is `LoopOp.__post_init__`'s, not `loop/canonicalize`'s).
-
-Three things had to be fixed to make the round trip legal. All three are pre-existing and fire identically on the
-UNBLOCKED SDPA tree; none had ever been observed, because nothing had constructed a `LoopOp` from a post-twist body.
-
-- **`_validate` did not know `Const` is a binding site** (`ir/loop/ir.py`). `Const` is introduced by the twisted
-  rewrite in `lowering/tile` — "the denominator's `1` must be a def the lift can return" — so no `LoopOp` had ever
-  carried one, and every twisted body read an undefined name.
-- **`hoist_loop_invariants` hoisted a consumer above the loop that defines what it reads**
-  (`ir/stmt/normalize.py`). `v6 = reciprocal(acc3)` is invariant in the head-dim axis `a5` and moved out of it, but
-  `acc3` is exported by a reduce loop PINNED inside `a5` (the value sweep reads `V[…,a5]`). The pass docstring's claim
-  that axis-dependency closure makes an ordering check unnecessary does not hold when a pinned block exports an
-  invariant name. Fixed by pinning any candidate that reads a name the remaining body still binds, iterated. Cannot
-  move kernel identities: `Body.structural_key` normalizes with `hoist=False`.
-- **`scan_from_loop` refused a `base`-`Accum`** (`lowering/tile/_fromloop.py`). That spelling IS the twisted carrier —
-  `Fold.merge` lowers each component to `name = op(base, value)` with the rescale as `base` — so the lift could not
-  read back what `Fold.lower` had just written. `_combine_from_merge` is the inverse: the rescale temps are the
-  statements transitively reading a carried state, each `Accum` re-reads as the assignment it folds, original program
-  order preserved (a combine is not SSA in its states). The injection is NOT the `Accum`'s `value`: a twisted merge
-  rescales the incoming side first, so that operand names `acc__blk · β`, not the component. It is recovered as what
-  the combine reads and does not define, in first-read order, and bound positionally as the combine's second operand
-  — the contract `Fold.merge` re-applies at `lift.results`. A planar fold takes neither branch and reads back
-  byte-identically to what it lowered from.
-
-## What is measured
-
-`F.scaled_dot_product_attention` f16, `EMMY_BLOCK=64`, `EMMY_REDUCE=` (serial outer), RTX 5090.
-
-- **The round trip completes.** One `TileOp` in the terminal graph, no leftover `LoopOp`, and the outer fold reads
-  back `twisted=True` — the carrier survives lowering and re-lifting.
-- **The emitted kernel loses two loops**: `emmy compile --ir cuda | grep -c 'for ('` is **7 at HEAD, 5 with the round
-  trip**, at both (1,4,128,32) and (1,8,512,64). The merge reaches the emitted kernel, which is exactly what #3 was.
-- **The re-lifted tree** at (1,4,128,32): the twisted outer fold over a single-state pivot fold (whose score cone
-  reads as a contraction) and a TWO-state merged channel fold (whose score cone also reads as a contraction). So the
-  warning recorded against the third candidate above — that one channel fold with a componentwise combine likely
-  costs the bilinear reading — does **not** hold: `as_contraction` is multi-channel by design (one shared ⊕, every
-  lift result a two-argument product reading `operands[0]`), and the merged fold passes it.
-- **Accuracy passes** at (1,4,128,32) and at the prototype commit's (1,8,512,64): `emmy run` exits 0 silently.
-- 149 pass across `tests/compiler/ir/stmt/`, `tests/compiler/ir/pure/`, `tests/compiler/passes/test_twisted_rewrite.py`
-  — including `test_sdpa_score_contraction_reaches_the_mma_tier`, which is red with the splice and no lift fix.
+The three defects that splice exposed are all still fixed and still wanted — `Const` as a binding site in
+`loop/ir._validate`, `hoist_loop_invariants` pinning a consumer under the loop that defines what it reads, and
+`scan_from_loop` reading back a `base`-`Accum`. They fire on the unblocked SDPA tree too.
 
 ## Open
 
-- **No mma reaches the emitted CUDA, and that is NOT the round trip.** `grep -ci mma` on `--ir cuda` at
-  (1,8,512,64) is **0 at HEAD and 0 with the round trip**. The prototype commit's "takes the mma tile above" does not
-  reproduce at HEAD under these env settings. The tile READING is a contraction on both arms, so the gap is between
-  that reading and what the schedule search picks and emits — a separate investigation, and the next one.
-- **Whether `normalize_body` should iterate its merge.** Instrumented on the blocked body directly, ONE
-  `merge_sibling_reduce_loops` call takes 3 block loops → 2 but leaves 3 score cones; one further round takes those
-  to 2. The full pipeline lands at 2/2, so something already runs the second round — worth confirming where, since
-  the pass is called once and the fixpoint is not stated anywhere.
-- **`Q·K` still runs 2×, not 1×.** The pivot must finish before the channels read it, so no sibling merge can share
-  that cone; this needs the chained-score realization, unchanged from the prototype commit's own gap list.
-
-## Blast radius, partly unverified
-
-Not run: the rest of `tests/compiler/`, the realization corpus, `make test-goldens`, `scripts/digest_kernels.py`,
-the perf lane. Kernel source changes wherever the merge now fuses, so the digest A/B and the corpus are both owed
-before this goes near main; recorded golden rows are expected to go stale. `make lint` clean.
-
-## Process note
-
-Five rounds of inference, then one instrumented run refuted the premise; a second one refuted the repair. Instrument
-first, and re-instrument after each fix — the second defect was invisible until the first was gone. The same held for
-the round trip: two of its three blockers were only visible once the previous one was gone, and the "does the merged
-fold still read as a contraction" question that looked like the decisive risk was answered in one probe.
+- **The realization above.** Everything else here is downstream of it.
+- **`Q·K` runs 3×** — once in the pivot's pass and once inside each channel's weight cone. The cones bind different
+  coordinates, so they are different values; sharing them needs the score to be a tile over the block axis that both
+  consumers read, which is a schedule fact, not a normalization.
+- **Cold compile cost.** A planar stream's fork adds four or five arms to every reducible kernel. The unblocked
+  matmul went 15 s → 46 s through the greedy walk. The declined value leads for planar streams so the descent order
+  is unchanged, but the frontier is wider.
+- **Not run:** the realization corpus, `make test-goldens`, `scripts/digest_kernels.py`, the perf lane. `BLOCK` is a
+  new key on every row, so recorded rows are expected to need it before this goes near main.

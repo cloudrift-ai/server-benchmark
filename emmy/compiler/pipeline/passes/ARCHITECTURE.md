@@ -74,7 +74,30 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
+`020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `025_block` then
+offers the BLOCK WIDTH of every blockable reduce stream. Blocking splits one reduce axis into `k_o × k_i` and
+re-associates the fold over the two levels; what each level runs is the only thing that differs between carriers. A
+PLANAR fold — a plain reduction, and a contraction, which is a reduction whose lift is a product — runs the same
+monoid at both levels, so a blocked contraction's inner site stays bilinear over a K of exactly one block and its
+outer level is a plain reduce a cross-CTA split partitions. A TWISTED carrier's ⊕ is a rescaling program, so no site
+inside one can be bilinear at all; blocking separates the two monoids, leaving the twisted ⊕ on the outer fold and
+running the base monoid over a per-block contribution, and the channel whose contribution is a product of two
+distinct cones then reads as a contraction. That is FlashAttention-2's shape, derived rather than recognized: the
+per-step rescale coefficient is read out of the stored combine and the value it multiplies is the fold's own lift
+result, so no recipe is consulted and no operation family is matched.
+
+The width is a SCHEDULE decision, not a constant. The tree is blocked once symbolically — one `Var` per blocked axis,
+in the outer axis's ceil trip count, the inner axis's extent, and the σ that reconstructs the absolute coordinate —
+the domain is read off that tree, and each arm substitutes one width. A bilinear inner level admits exactly the mma
+K-steps its atoms run and a planar one the trip counts a cross-CTA split can carry, so the `k<bk>` half of a `TILE`
+value and the `g<n>` half of a `REDUCE` value are the same quantity this width is: once the block is decided,
+`_blocked_kstep` narrows that site's `TILE` domain to agree with it instead of re-offering it. The declined value
+leads for a planar stream (its schedule space is already complete unblocked) and trails for a twisted one (declining
+there is a different algorithm, not a schedule alternative). Two receipts stop a second decision, because either can
+arrive alone: the decided kernel carries its `BLOCK` value in `knobs`, and every axis a block installs carries
+`Window(block=True)`.
+
+The single `030_cut`
 pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically
 closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
 and realization must agree). Once placement is consumed, it offers the unsplit tree beside every cross-CTA reduce

@@ -500,14 +500,14 @@ apply_knobs_env()
 # ``REDUCE@`` / ``STAGE@``) lead, each family's keys sorted by site; the bare exact-name knobs
 # follow in ``KNOB_ORDER``, unknown knobs last (alpha). Shared by the ``run --bench`` kernel table
 # and the ``emmy eval`` tables so columns read stably.
-_FAMILY_ORDER = ("PLACE@", "TILE@", "REDUCE@", "STAGE@")
-KNOB_ORDER = ("PLACE", "WORK", "TILE", "REDUCE", "STAGE")
+_FAMILY_ORDER = ("PLACE@", "BLOCK@", "TILE@", "REDUCE@", "STAGE@")
+KNOB_ORDER = ("PLACE", "BLOCK", "WORK", "TILE", "REDUCE", "STAGE")
 _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 
 # The complete classic families emitted at every semantic leaf. Node and edge families are always
 # site-keyed; kernel families are bare.
 SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
-KERNEL_DECISION_FAMILIES = ("PLACE", *SCHEDULE_FAMILIES)
+KERNEL_DECISION_FAMILIES = ("PLACE", "BLOCK", *SCHEDULE_FAMILIES)
 
 
 def consume_kernel_row(knobs: dict) -> dict:

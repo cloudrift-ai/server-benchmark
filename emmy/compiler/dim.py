@@ -79,7 +79,14 @@ def _coerce_expr(value: int | str | Expr | Dim) -> Expr:
     raise TypeError(f"Dim: cannot wrap {type(value).__name__}: {value!r}")
 
 
-def _simplify(expr: Expr) -> Expr:
+def simplify_extent(expr: Expr) -> Expr:
+    """Fold one extent expression under the shape-var positivity every ``Dim`` carries.
+
+    The arithmetic operators below fold through here, and so does any caller that BUILDS an extent
+    out of parts and needs the result to read back as static — the constructor deliberately stores
+    what it is given, so a composite that collapses to a literal (a ceil trip count whose block
+    width has just been substituted) only becomes one by asking.
+    """
     # Shape vars (every free ``Var`` in a Dim expression) are positive by
     # definition: a tensor extent can't be zero or negative. Expose that
     # via ``SimplifyCtx.ranges`` so the simplifier's ``//`` cancellation
@@ -148,34 +155,34 @@ class Dim:
     # ---- arithmetic — eager-fold via Expr.simplify -----------------------
 
     def __add__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("+", self.expr, _coerce_expr(other))))
+        return Dim(simplify_extent(BinaryExpr("+", self.expr, _coerce_expr(other))))
 
     def __radd__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("+", _coerce_expr(other), self.expr)))
+        return Dim(simplify_extent(BinaryExpr("+", _coerce_expr(other), self.expr)))
 
     def __sub__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("-", self.expr, _coerce_expr(other))))
+        return Dim(simplify_extent(BinaryExpr("-", self.expr, _coerce_expr(other))))
 
     def __rsub__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("-", _coerce_expr(other), self.expr)))
+        return Dim(simplify_extent(BinaryExpr("-", _coerce_expr(other), self.expr)))
 
     def __mul__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("*", self.expr, _coerce_expr(other))))
+        return Dim(simplify_extent(BinaryExpr("*", self.expr, _coerce_expr(other))))
 
     def __rmul__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("*", _coerce_expr(other), self.expr)))
+        return Dim(simplify_extent(BinaryExpr("*", _coerce_expr(other), self.expr)))
 
     def __floordiv__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("//", self.expr, _coerce_expr(other))))
+        return Dim(simplify_extent(BinaryExpr("//", self.expr, _coerce_expr(other))))
 
     def __rfloordiv__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("//", _coerce_expr(other), self.expr)))
+        return Dim(simplify_extent(BinaryExpr("//", _coerce_expr(other), self.expr)))
 
     def __mod__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("%", self.expr, _coerce_expr(other))))
+        return Dim(simplify_extent(BinaryExpr("%", self.expr, _coerce_expr(other))))
 
     def __rmod__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("%", _coerce_expr(other), self.expr)))
+        return Dim(simplify_extent(BinaryExpr("%", _coerce_expr(other), self.expr)))
 
     def ceil_div(self, other: int | Dim) -> Dim:
         """Ceiling division ``ceil(self / other)``, as ``(self + (other - 1)) // other``.

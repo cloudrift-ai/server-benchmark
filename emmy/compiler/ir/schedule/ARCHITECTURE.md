@@ -87,6 +87,12 @@ a root or beside it lowers serially inside its reader, so it carries the serial 
 and one whose reduce reads a boundary store's output sweep. The contraction per-cell tier reads that same
 projection, so a contraction inherits those readings rather than restating them.
 
+A contraction whose K is a BLOCK axis has already had that quantity decided. A block width and a warp tile's `k<bk>`
+both say how many contraction columns one step of the enclosing loop consumes, so the site's own K IS the step and the
+`bk` half of its `TILE` domain is no longer free: `_blocked_kstep` narrows the projection to the plans that agree with
+the block. The enumeration happens once, in the structural `BLOCK` family that `lowering/tile/025_block` consumes, and
+the classic domain follows it rather than re-offering it.
+
 A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and
 cannot manufacture a value the projection withheld. A value scoped to a site that does not offer it empties that
 site's restriction and the kernel enumerates no row — the loud direction. A bare family pin is applicable at a site

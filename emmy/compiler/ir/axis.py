@@ -48,6 +48,12 @@ class Window:
     against it, since a mid-tensor slice end reads VALID keys belonging to the next slice, which
     the extent-only tail machinery would not exclude. ``None`` on both = the whole parent.
 
+    ``block`` marks the two windows BLOCKING produced — the outer trip axis and the inner block
+    axis a blocked reduce stream splits into. It is the same kind of receipt ``partition`` is, for
+    the same reason: the block width is a schedule decision already consumed, so nothing may block
+    the stream a second time, and the axis's OWN extent (not its parent's) is the geometry a tile
+    over it is sized against. A blocked axis is not a partition — it stays inside one kernel.
+
     ``partition`` marks the one window a CROSS-CTA SPLIT produced: this axis is one CTA's share of
     a reduce stream, not a tile of an iteration space. Every other window — the partition planner's
     ``M_b``/``M_t``/``M_r``, a carved or strided sub-axis — leaves it false. The distinction has to
@@ -60,6 +66,7 @@ class Window:
     base: Expr | None = None
     bound: Expr | None = None
     partition: bool = False
+    block: bool = False
 
 
 @dataclass(frozen=True)

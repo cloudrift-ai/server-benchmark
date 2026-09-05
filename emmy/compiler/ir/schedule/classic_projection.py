@@ -251,6 +251,19 @@ def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
     return _atom_families(tile, target, node, tail, packed)
 
 
+def _blocked_kstep(k_axis) -> int | None:
+    """The K-step a BLOCKED contraction's fragment must run, or ``None`` when its K is a plain axis.
+
+    A block width and a warp tile's ``k<bk>`` are the same quantity spelled twice: both say how
+    many contraction columns one step of the enclosing loop consumes. Once ``025_block`` has
+    decided the width, the site's own K IS that step, so the ``bk`` half of the ``TILE`` domain is
+    no longer free — it is read off the block. That is the migration: the enumeration happens once,
+    in the ``BLOCK`` family, and this narrows ``TILE`` to agree with it instead of re-offering it.
+    """
+    window = k_axis.window
+    return k_axis.extent.as_static() if window is not None and window.block and k_axis.extent.is_static else None
+
+
 def _contraction_domain(
     tile: TileOp,
     target,
@@ -260,13 +273,16 @@ def _contraction_domain(
     """Project one contraction's locally realizable scalar and tensor-core choices."""
     per_cell_reductions = _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
     allowed_atoms = _warp_atoms(tile, target, node)
-    wide_warp_tiles = tuple(
-        plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
-    )
+    step = _blocked_kstep(facts.k_axis)
+
+    def agrees(plan: Tile) -> bool:
+        return _kstep_refusal(facts.k_axis, plan) is None and (step is None or plan.atom.atom_k * plan.bk == step)
+
+    wide_warp_tiles = tuple(plan for name in allowed_atoms if agrees(plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2)))
     scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 else (Tile(),)
     catalog = (
         *scalar_tiles,
-        *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),
+        *(plan for plan in warp_tile_moves(allowed_atoms) if agrees(plan)),
         *wide_warp_tiles,
     )
     return tuple(

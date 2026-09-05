@@ -299,7 +299,9 @@ class Sched:
           result tiles the placement's trailing free pair;
         - any other nested contraction takes the free m axis and its PARENT fold's axis as n —
           read through a slice partial's window PARENT, so the view carries the pre-slice geometry
-          the fragment clamps were built against.
+          the fragment clamps were built against. A BLOCK window is the exception, and the reason
+          blocking exists: the enclosing fold walks one block at a time, so the block's OWN extent
+          is the n the fragment is sized against, not the stream it was carved from.
         """
         free = tuple(self.place.free)
         site = self.site_of(node)
@@ -330,7 +332,7 @@ class Sched:
         ax = self.axis_of(parent.node.axis) if parent is not None and getattr(parent.node, "axis", None) is not None else None
         if ax is None:
             return None
-        return orient((free[-2], ax.window.parent if ax.window is not None else ax))
+        return orient((free[-2], ax.window.parent if ax.window is not None and not ax.window.block else ax))
 
 
 def sched_of(tile) -> Sched:

@@ -29,9 +29,8 @@ from dataclasses import dataclass
 
 from emmy.compiler.structural import instance_memo
 
-#: The families a tree path may address — the STRUCTURAL decisions, made before a classic problem
-#: exists. Schedule identities belong to ``schedule.classic``.
-PATH_FAMILIES = ("PLACE", "BLOCK")
+#: The only family a tree path may address. Schedule identities belong to ``schedule.classic``.
+PATH_FAMILIES = ("PLACE",)
 
 #: The node kinds a route may name — each a derived reading of the term.
 KINDS = ("map", "reduce", "inner", "twist", "scan")

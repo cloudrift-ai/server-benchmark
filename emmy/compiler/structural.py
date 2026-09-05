@@ -136,7 +136,7 @@ def form(value: object) -> object:
     if own_key is not None and own_key is not Structural.structural_key:
         return (type(value).__name__, value.structural_key())
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return (type(value).__name__, *(form(getattr(value, f.name)) for f in dataclasses.fields(value)))
+        return (type(value).__name__, *_rendered_fields(value))
     name = getattr(value, "name", None)
     if isinstance(name, str):
         return (type(value).__name__, name)
@@ -145,6 +145,24 @@ def form(value: object) -> object:
         "identity. Add a rule in structural.form: render the part of it that IS the identity, and "
         "drop the part that is incidental. Do not fall back to repr — that is what this replaced."
     )
+
+
+def _rendered_fields(value) -> list:
+    """One dataclass's fields, less the TRAILING ones left at their default.
+
+    A field a value does not use says nothing about what that value IS, and rendering it anyway
+    means a dataclass that GROWS one moves the identity of every value in the tree — every kernel,
+    every recorded row, every corpus case — for a field none of them set. Trailing only, so the
+    rendering stays positional: a default in the middle still holds its place.
+    """
+    fields = dataclasses.fields(value)
+    rendered = [form(getattr(value, field.name)) for field in fields]
+    while rendered:
+        field = fields[len(rendered) - 1]
+        if field.default is dataclasses.MISSING or getattr(value, field.name) != field.default:
+            break
+        rendered.pop()
+    return rendered
 
 
 def digest(*parts: object) -> str:

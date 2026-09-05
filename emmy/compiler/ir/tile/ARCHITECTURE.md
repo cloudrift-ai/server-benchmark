@@ -101,11 +101,18 @@ the placement fork; a Loop IR fusion or emission workaround sees one kernel at a
 construction. Copies that differ in captured axis names cannot share an object and stay with value clustering; copies
 that differ in exposed result names stay distinct because unifying them would rename their consumers.
 
-An output sweep used by any nested contraction operand is promoted into the Tile's free-axis placement. Promotion
-expands the enclosing-axis context, so construction normalizes the Fold tree once more under that final scope; one
-construction and a reconstruction therefore expose the same closed operand edges and placement seams.
-The invariant also applies when a schedule row constructs or reloads an already-mapped Tile: promotion extends the
-grid in lockstep with the free axes, so per-cell replication never mistakes the swept coordinate for an SSA name.
+The kernel's SHARED output sweep — an axis on every store's sweep path — is promoted into the Tile's free-axis
+placement when any nested contraction operand reads it: the coordinate is that contraction's output coordinate, and
+promoting an axis every store rides replicates nothing but the statistics evaluated ahead of the sweep. A sibling
+output nest's axis is never promoted, however many contractions read it: the other nests do not ride it, so promoting
+it would evaluate them once per cell — DeepSeek-V4 post4096's residual root holds four sibling nests, and promoting
+all seven of their axes made its grid their product, 2^56 cells, which no launch can cover. A contraction under a
+sibling nest stays under its sweep loop, where `Fold.lower` places it like any term reading the axis, and the
+placement fork cuts it out at its own free coordinates. Promotion expands the enclosing-axis context, so construction
+normalizes the Fold tree once more under that final scope; one construction and a reconstruction therefore expose the
+same closed operand edges and placement seams. The invariant also applies when a schedule row constructs or reloads
+an already-mapped Tile: promotion extends the grid in lockstep with the free axes, so per-cell replication never
+mistakes the swept coordinate for an SSA name.
 
 **Storage-decode factors hoist to the epilogue.** A product argument whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
@@ -134,8 +141,9 @@ as a supported slow path.
 
 A node's own canonical forms are formation's (`Fold.__post_init__` orients a bilinear term A-first, `Lambda` orders
 its body); `TileOp.__post_init__` applies the tree-wide ones and the legacy output-sweep-to-free-axis adjustment
-whenever a contraction operand reads the sweep axis. The contraction may be the root compute node or a later site in
-the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute output loop.
+whenever a contraction operand reads the kernel's shared output sweep. The contraction may be the root compute node or
+a later site in the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute
+output loop.
 A specification's `sweep` is the output loop NEST the store rode in the source, as an outermost-first axis path — the
 one fact extraction destroys, since a write's index names its coordinates but not the order its loops nested in.
 Consecutive output specifications over one path reconstitute one loop nest, sibling sweeps sibling loops, and a
@@ -156,8 +164,9 @@ reuses an enclosing or sibling sweep's name (the fused quantize kernel's byte sw
 alpha-renamed at the lift, binder and references together, since a term tree names one coordinate per name. The
 kernel binder's serial arm hands the stores to the term the same way, so the emitted kernel places them exactly as
 the identity's `loop_body` does; only a projection stream spelled without the term (the peeled root's tail, a cut
-piece) still wraps the trailing run reading the axis into one loop. A contraction is exempt because post-init
-promotes a sweep its operands read into a real free axis right after normalization.
+piece) still wraps the trailing run reading the axis into one loop. A contraction reading the kernel's shared output
+sweep never meets this rule, because post-init promotes that sweep into a real free axis right after normalization;
+one reading a sibling nest's axis is placed by it like any other fold.
 
 A fold FED by the body — one whose subtree captures a name a plain body member defines — is likewise never hoisted,
 no matter what kind: a projection evaluates its operands before its scalar body, so the capture would read a value

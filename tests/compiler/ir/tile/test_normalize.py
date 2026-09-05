@@ -157,6 +157,31 @@ def test_nested_contraction_promotes_a_shared_store_sweep() -> None:
     assert tile.output_specs[0].sweep == ()
 
 
+def test_sibling_output_sweeps_stay_sweeps() -> None:
+    """Two sibling output nests, each holding the contraction whose output coordinate it sweeps. Neither
+    axis is the kernel's shared output sweep — every store rides its own — so neither is promoted:
+    promoting one would evaluate the other nest per cell. DeepSeek-V4 post4096's residual root holds
+    four such nests, and promoting all seven of their axes made its grid their 2^56-cell product."""
+    p = Axis("p", 4)
+    second = _reduce_loop(
+        Load(name="left2", input="x", index=(Var("m"), Var("k"))),
+        Load(name="right2", input="u", index=(Var("p"), Var("k"))),
+        Assign(name="product2", op="multiply", args=("left2", "right2")),
+        Accum(name="acc2", value="product2", op="add", axes=("k",)),
+    )
+    body = (Assign(name="a", op="relu", args=("acc",)), Assign(name="b", op="relu", args=("acc2",)))
+    root = projection((_matmul(), second), body, ("a", "b"))
+    stores = (
+        OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="a"), sweep=(N16,)),
+        OutputSpec(write=Write(output="out2", index=(Var("m"), Var("p")), value="b"), sweep=(p,)),
+    )
+
+    tile = _tile(root, N16, p, K32, free=(M8,), output_specs=stores)
+
+    assert tuple(axis.name for axis in tile.place.free) == ("m",)
+    assert tuple(tuple(axis.name for axis in store.sweep) for store in tile.output_specs) == (("n",), ("p",))
+
+
 def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row() -> None:
     """A nested linear site turns the swept column into grid placement before scheduling."""
     r = Axis("r", 4)

@@ -210,8 +210,10 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    proxy should not be the decider. **(b)** the materialized shape is right: a route whose contribution
    consumer is a pure staged mma with no serial hidden-dim walk, the walk living once in a producer piece, and
    the statistics computed once per row. **(c)** two blockers characterized on post-#699 main, each its own
-   item: the residual root's output sweeps are all promoted into its placement (the emitted kernel decodes a
-   2^56-thread linear grid — un-launchable), and the contribution producer still recomputes the carrier chain
+   item: the residual root's output sweeps were all promoted into its placement (the emitted kernel decoded a
+   2^56-thread linear grid — un-launchable) — FIXED by this PR (`fix/residual-output-sweep-promotion`: only the
+   kernel's shared output sweep promotes; a sibling output nest's axis stays a sweep, and the residual launches at
+   its 4096-row grid again), and the contribution producer still recomputes the carrier chain
    per (row, a28) cell (the next seam, `PLACE@…inner` on the `a32` contraction, is on its ballot). Pricing
    floors beyond #702's are OUT by review decision: a golden must carry every kernel of the route, and strict
    evidence then keeps the prior from deciding at all. The path to serving: make `emmy tune` able to measure

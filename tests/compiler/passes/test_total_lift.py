@@ -241,12 +241,13 @@ def test_sibling_q_and_kv_regions_total_lift_with_separate_outputs() -> None:
 
     # The root projection has nothing of its own: its operands are the q contraction and the k/v
     # pair normalization merged over their shared row; the writes are boundary specs. Each output
-    # loop's axis is a contraction output, so post-init promotes it onto the grid like any
-    # contraction sweep, and the kernel-scope program is flat.
+    # loop's axis is a contraction output, but neither is the kernel's SHARED output sweep — the q
+    # store does not ride kv, nor the k/v stores q — so post-init leaves both as sweeps: promoting
+    # one would evaluate the other region once per cell of it. The row alone is on the grid.
     assert tile.op.axis is None and not tile.op.lift.body
     assert [(edge.as_contraction() is not None, len(edge.exposes)) for edge in tile.op.operands] == [(True, 1), (True, 2)]
-    assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4), Dim(2)]
-    assert all(spec.sweep == () for spec in tile.output_specs) and len(tile.output_specs) == 3
+    assert [axis.extent for axis in tile.place.free] == [Dim(3)]
+    assert [tuple(axis.extent for axis in spec.sweep) for spec in tile.output_specs] == [(Dim(4),), (Dim(2),), (Dim(2),)]
     # The closed program opens the two sweeps as SIBLING loops under the row: no term is evaluated
     # over both, so neither nests in the other.
     (m_loop,) = tile.loop_body

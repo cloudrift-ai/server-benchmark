@@ -86,9 +86,7 @@ def block_width_var(axis_name: str) -> str:
 
 def block_width_vars(axes) -> tuple[str, ...]:
     """Every block width an axis table reads, in first-seen order."""
-    return tuple(
-        dict.fromkeys(name for axis in axes for name in axis.extent.expr.free_vars() if name.startswith(BLOCK_WIDTH_PREFIX))
-    )
+    return tuple(dict.fromkeys(name for axis in axes for name in axis.extent.expr.free_vars() if name.startswith(BLOCK_WIDTH_PREFIX)))
 
 
 @dataclass(frozen=True)
@@ -101,7 +99,8 @@ class Axis:
     ``int`` / ``str`` to ``Dim`` for ergonomics, so ``Axis("m", 32)``
     keeps working.
 
-    ``window`` is the slice of a parent axis this one walks (:class:`Window` — its ``parent``
+    ``step`` is the walk's stride (``None`` = 1); ``window`` is the slice of a parent axis this one
+    walks (:class:`Window` — its ``parent``
     provenance and, for a cross-CTA slice, the absolute ``base`` / ``bound``). ONE windowing
     concept, read by the realizer and the mask machinery alike. Excluded from equality / hashing so
     Var-rename invariance is preserved — two Axes with the same name and extent are the same axis
@@ -111,6 +110,13 @@ class Axis:
     name: str
     extent: Dim
     window: Window | None = field(default=None, compare=False, hash=False)
+    #: The walk's stride, when it is not 1: the axis visits ``0, step, 2·step, …`` below ``extent``,
+    #: and ``lower`` renders it as a ``StridedLoop`` instead of a ``Loop``. This is what lets a
+    #: BLOCKED stream say "outer walks the parent axis in blocks" without the block WIDTH appearing
+    #: anywhere in the term — the σ that reads the absolute coordinate is then plain ``k_o + k_i``,
+    #: so the split is structural and the size stays here, in the table that owns every extent.
+    #: Part of identity: two axes that stride differently are different iterations.
+    step: Expr | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.extent, Dim):

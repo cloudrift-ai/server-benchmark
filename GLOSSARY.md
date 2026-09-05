@@ -78,13 +78,13 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Elementwise operation** — An operation independently applied to corresponding tensor elements, such as adding
   two tensors.
 - **Reduction** — Combining many values into fewer values, such as summing a row or finding its maximum.
-- **Blocking (loop blocking)** — Splitting one reduce axis into an outer trip count and an inner
-  block of a chosen width, and re-associating the fold over the two levels. The **block width** is
-  the inner extent. Blocking does not change what a kernel computes, so it is not a decision of its
-  own: the schedule walk enumerates over the block forms and the width is spelled by the `TILE`
-  value at the blocked site, whose mma K-step it is. It is what gives attention's expectation
-  channel a semiring to be bilinear in. Note the collision with the CUDA sense of *block* below — a
-  block width is a number of loop iterations, never a thread group.
+- **Blocking (loop blocking)** — Splitting one reduce axis into an outer axis that strides through
+  it and an inner **block** of some width, and re-associating the fold over the two levels. It does
+  not change what a kernel computes, so it is part of the canonical form rather than a decision, and
+  the width stays a symbol on the two axes until the schedule binds it — it is the mma K-step of the
+  tile at the site blocking created. Only a twisted carrier is blocked; it is what gives attention's
+  expectation channel a semiring to be bilinear in. Note the collision with the CUDA sense of
+  *block* below — a block width is a number of loop iterations, never a thread group.
 - **Scan (prefix reduction)** — A reduction that also stores its running state at every step, such as `cumsum`. In
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
   kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial

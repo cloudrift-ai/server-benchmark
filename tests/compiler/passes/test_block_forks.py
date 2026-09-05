@@ -1,25 +1,29 @@
-"""Blocking a reduce stream into the form the schedule enumerates over.
+"""Blocking a twisted carrier — the canonical form, and the width the row binds.
 
-Blocking is not a decision of its own: it re-associates a fold over ``k_o × k_i`` without changing
-what the kernel computes, so it happens inside the schedule walk, the kernel keeps ONE identity
-across every block form, and the width needs no codec family — a blocked contraction's inner axis
-IS its K, so the row's ``TILE`` at that site already spells it. A plain reduction is not blocked at
-all: ``REDUCE`` and the cross-CTA split already partition its axis.
+Blocking is a NORMALIZATION, not a decision: it re-associates a fold over ``k_o × k_i`` without
+changing what the kernel computes, and the width appears nowhere in the term — the outer axis
+strides and each binder's extent is a symbol. So it runs from ``TileOp.__post_init__``, adds no
+schedule family and no option, and every block form is the same kernel. The width is bound at
+materialization, from the ``TILE`` at the site blocking created, whose mma K-step it is.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
-from importlib import import_module
+
+import pytest
 
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
-from emmy.compiler.ir.schedule.classic_projection import block_widths, project_classic
+from emmy.compiler.ir.axis import block_width_var
+from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.schedule import Reduce, Schedule, Tile
+from emmy.compiler.ir.schedule.classic import ProjectionSchedule, ReductionSchedule
+from emmy.compiler.ir.schedule.classic_projection import _block_widths, project_classic
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile.block import bind_widths, block, is_blocked
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._block import block_tree, blockable_streams, is_blocked
 
-_SCHEDULE = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule")
 _CTX = Context.from_target((12, 0))
 
 _MATMUL = """
@@ -38,7 +42,7 @@ F.scaled_dot_product_attention(q, q.clone(), q.clone())
 
 
 def _tile(code: str) -> TileOp:
-    """The one unmapped ``TileOp`` of ``code``, lifted and twisted but not yet blocked."""
+    """The one unmapped ``TileOp`` of ``code`` — already normalized, so already blocked."""
     graph, _, _ = graph_from_code(code)
     graph = Pipeline.build(LOOP_PASSES).run(graph)
     graph = Pipeline.build(["lowering/tile"], select=["lift", "twisted"]).run(graph)
@@ -47,152 +51,139 @@ def _tile(code: str) -> TileOp:
     return tiles[0]
 
 
-def _stream(code: str):
-    """``(tile, the one blockable fold, its axis)``."""
-    tile = _tile(code)
-    streams = blockable_streams(tile.op, tile.axes)
-    assert len(streams) == 1, streams
-    node, axis = streams[0]
-    return tile, node, axis
+def _site(tile: TileOp, path: str) -> int:
+    return next(index for index in range(len(tile.sites)) if tile.sites[index].path == path)
 
 
-def _blocked(code: str, width: int) -> TileOp:
-    tile, node, _ = _stream(code)
-    op, axes = block_tree(tile.op, tile.axes, {id(node): width})
-    return replace(tile, op=op, axes=axes)
+# ---- which carriers are blocked ---------------------------------------------------------------- #
 
 
-def _outer(tile: TileOp):
-    return tile.op if tile.op.axis is not None else next(edge for edge in tile.op.operands if edge.axis is not None)
-
-
-# ---- what each level runs ---------------------------------------------------------------------- #
-
-
-def test_a_blocked_contraction_keeps_its_bilinear_inner_level() -> None:
-    """A matmul blocks into a plain add over a contraction of exactly one block."""
-    tile, node, _ = _stream(_MATMUL)
-    outer = _outer(_blocked(_MATMUL, 64))
-    (inner,) = [edge for edge in outer.operands if edge.axis is not None]
-    assert inner.as_contraction() is not None
-    assert outer.as_contraction() is None  # one operand: the outer level is a plain reduce
-    assert outer.combine == node.combine and outer.init == node.init
-    assert [op.name for op in outer.as_reduction().ops] == [op.name for op in inner.as_reduction().ops] == ["add"]
-
-
-def test_a_blocked_twisted_carrier_exposes_a_bilinear_channel() -> None:
-    """The whole point: attention's ``P·V`` is a coefficient of a twisted ⊕ until the block splits
-    the two monoids, and then it is a contraction the tensor-core tier can read."""
-    _, node, _ = _stream(_SDPA)
-    outer = _outer(_blocked(_SDPA, 64))
-    assert node.as_reduction().ops is None  # twisted: no componentwise monoid
-    assert outer.combine == node.combine  # the carrier is unchanged; only its operands moved
+def test_a_twisted_carrier_is_blocked_by_normalization() -> None:
+    """Attention's ``P·V`` is a coefficient of a twisted ⊕ until the block splits the two monoids,
+    and then it is a contraction the tensor-core tier can read."""
+    tile = _tile(_SDPA)
+    outer = tile.sites[_site(tile, "map.1/twist")].node
+    assert outer.as_reduction().ops is None  # still the twisted carrier
     inner = [edge for edge in outer.operands if edge.axis is not None]
     assert len(inner) == 3  # the block pivot, the expectation, the denominator
     assert [edge.as_contraction() is not None for edge in inner] == [False, True, False]
 
 
-def test_a_plain_reduction_is_left_to_reduce() -> None:
-    """``REDUCE`` already spells its partition and the cross-CTA split already factors its axis."""
-    tile = _tile(_REDUCE)
-    assert blockable_streams(tile.op, tile.axes) == ()
-    assert _SCHEDULE.block_problems(tile, _CTX) == [tile]
+@pytest.mark.parametrize("code", [_MATMUL, _REDUCE])
+def test_nothing_else_is_blocked(code: str) -> None:
+    """A contraction's block is already spelled by ``bk`` and a plain reduction's partition by
+    ``REDUCE``, so splitting either term would restate another family's decision as a shape."""
+    tile = _tile(code)
+    assert not is_blocked(tile.axes)
+    node = tile.sites[0].node
+    assert block(node, tile.axis_of(node.axis)) is None
 
 
-def test_every_installed_axis_carries_the_block_receipt() -> None:
-    """``Window(block=True)`` is what stops a second block; ``trip`` marks the outer of the pair."""
-    blocked = _blocked(_MATMUL, 64)
-    assert is_blocked(blocked.axes)
-    installed = [axis for axis in blocked.axes if axis.window is not None and axis.window.block]
-    assert len(installed) == 2
-    assert [axis.extent.as_static() for axis in installed] == [16, 64]
-    assert [axis.window.trip for axis in installed] == [True, False]  # the outer of the pair
-    assert not any(axis.window.partition for axis in installed)
+# ---- the width is nowhere in the term ------------------------------------------------------------ #
 
 
-# ---- the width domain -------------------------------------------------------------------------- #
-
-
-def test_the_widths_are_the_atom_k_steps() -> None:
-    """The block IS the fragment depth, so a twisted carrier offers ``atom_k × bk``."""
-    tile, node, axis = _stream(_SDPA)
-    assert block_widths(tile, _CTX, node, axis) == (64, 32, 16)
-
-
-def test_a_contraction_is_offered_no_block() -> None:
-    """``bk`` already says how many atom K-steps one inner step consumes and the materializer
-    chunks K by it, so re-associating the term would restate that field as a shape."""
-    tile, node, axis = _stream(_MATMUL)
-    assert node.as_contraction() is not None
-    assert block_widths(tile, _CTX, node, axis) == ()
-    assert _SCHEDULE.block_problems(tile, _CTX) == [tile]
-
-
-def test_no_width_divides_into_a_masked_tail() -> None:
-    """The ceil form is built and correct, but a masked tail is a realization we do not have."""
-    tile, node, axis = _stream(_SDPA)
-    extent = axis.extent.as_static()
-    assert all(extent % width == 0 and width < extent for width in block_widths(tile, _CTX, node, axis))
-
-
-# ---- the problems the walk enumerates over ------------------------------------------------------ #
-
-
-def test_the_unblocked_form_leads() -> None:
-    """A cold walk descends what the kernel already was."""
+def test_the_width_lives_on_the_axes_and_only_there() -> None:
+    """The outer axis walks the stream's own extent in strides and each binder's extent is the
+    symbol, so the σ that reads the absolute coordinate is plain ``k_o + k_i``."""
     tile = _tile(_SDPA)
-    problems = _SCHEDULE.block_problems(tile, _CTX)
-    assert problems[0] is tile
-    assert len(problems) == 1 + len(block_widths(tile, _CTX, *blockable_streams(tile.op, tile.axes)[0]))
-    assert all(is_blocked(problem.axes) for problem in problems[1:])
+    variable = block_width_var("a2")
+    outer = tile.axis_of("a2_o")
+    assert outer.extent.as_static() == tile.axis_of("a2").extent.as_static()
+    assert outer.step == Var(variable)
+    assert outer.block_width == variable
+    binders = [axis for axis in tile.axes if axis.window is not None and axis.window.block == variable and not axis.window.trip]
+    assert binders and all(axis.extent.expr == Var(variable) for axis in binders)
 
 
-def test_every_block_form_is_the_same_kernel() -> None:
-    """Blocking changes no kernel identity: it re-associates a fold, it does not change the compute.
-    Only the row tells the forms apart, which is why they share one pool and one recorded identity."""
+def test_the_term_names_no_width() -> None:
+    """Parameter-free is what makes it a normalization: no lambda binds the symbol, and the whole
+    kernel still lowers with the width unbound."""
+
+    def terms(term):
+        yield term
+        for edge in term.operands:
+            yield from terms(edge)
+
     tile = _tile(_SDPA)
-    problems = _SCHEDULE.block_problems(tile, _CTX)
-    assert len(problems) > 1
-    assert all(problem.knobs == tile.knobs for problem in problems)
-    assert _SCHEDULE.rewrite.__module__  # the pass identifies on the unblocked tile, not the problem
+    variable = block_width_var("a2")
+    assert not any(variable in term.lift.params for term in terms(tile.op))
+    assert tile.loop_body is not None  # lowers with the width still a symbol
 
 
-def test_a_decided_kernel_is_never_blocked_again() -> None:
-    blocked = _blocked(_SDPA, 64)
-    assert _SCHEDULE.block_problems(blocked, _CTX) == [blocked]
+def test_blocking_is_idempotent() -> None:
+    """Every installed axis carries the receipt, so a reconstructed TileOp blocks nothing again."""
+    tile = _tile(_SDPA)
+    again = replace(tile)
+    assert again.op == tile.op
+    assert [axis.name for axis in again.axes] == [axis.name for axis in tile.axes]
 
 
-# ---- what the scheduler does with it ------------------------------------------------------------ #
+# ---- the width the row binds --------------------------------------------------------------------- #
 
 
-def _warp_choices(tile: TileOp, path: str) -> list:
-    site = next(index for index in range(len(tile.sites)) if tile.sites[index].path == path)
-    return [choice for choice in project_classic(tile, _CTX).nodes[site] if choice.tile.is_warp]
+def _assignment(tile: TileOp, tiles: dict[int, Tile]) -> Schedule:
+    nodes = {}
+    for site in tile.node_sites:
+        chosen = tiles.get(site, Tile())
+        nodes[site] = ReductionSchedule(chosen, Reduce()) if tile.views[site].axis is not None else ProjectionSchedule(chosen)
+    return Schedule(None, nodes, {})
 
 
-def test_the_block_decides_the_tile_k_step() -> None:
-    """The block width and the ``k<bk>`` half of a ``TILE`` value are one quantity, so a blocked
-    site offers only the tiles that agree with the block it sits in — no second spelling."""
-    choices = _warp_choices(_blocked(_SDPA, 64), "map.1/twist.2/inner")
-    assert choices
-    assert {choice.tile.atom.atom_k * choice.tile.bk for choice in choices} == {64}
+def test_the_tile_at_the_created_site_binds_the_width() -> None:
+    """A blocked site's inner axis IS its K, so the block is exactly that tile's mma K-step."""
+    tile = _tile(_SDPA)
+    site = _site(tile, "map.1/twist.2/inner")
+    atom = next(choice.tile.atom for choice in project_classic(tile, _CTX).nodes[site] if choice.tile.is_warp)
+    widths = _block_widths(tile, _assignment(tile, {site: Tile(atom=atom, bk=4)}))
+    assert widths == {block_width_var("a2"): atom.atom_k * 4}
 
 
-def test_an_unblocked_contraction_still_enumerates_every_k_step() -> None:
-    choices = _warp_choices(_tile(_MATMUL), "inner")
-    assert len({choice.tile.atom.atom_k * choice.tile.bk for choice in choices}) > 1
+def test_a_scalar_row_leaves_the_stream_in_one_trip() -> None:
+    """Nothing spells a K-step, so the width falls back to the whole extent — which is the
+    unblocked kernel, reached without a second form of the term."""
+    tile = _tile(_SDPA)
+    assert _block_widths(tile, _assignment(tile, {})) == {block_width_var("a2"): 128}
+
+
+def test_binding_moves_only_the_axis_table() -> None:
+    """The term is untouched by the binding, which is why every block form is the same kernel."""
+    tile = _tile(_SDPA)
+    bound = bind_widths(tile.axes, {block_width_var("a2"): 64})
+    assert all(axis.extent.is_static for axis in bound)
+    assert next(axis for axis in bound if axis.name == "a2_p").extent.as_static() == 64
+    assert next(axis for axis in bound if axis.name == "a2_o").step.value == 64
+
+
+# ---- what the scheduler does with it ------------------------------------------------------------- #
+
+
+def test_the_created_site_carries_the_tensor_core_tier() -> None:
+    """Blocking exists to make this domain non-empty: no site inside a twisted carrier is bilinear
+    until the two monoids are separated."""
+    tile = _tile(_SDPA)
+    choices = project_classic(tile, _CTX).nodes[_site(tile, "map.1/twist.2/inner")]
+    assert any(choice.tile.is_warp for choice in choices)
+    # ``bk`` ranges freely, because it is what DEFINES the block rather than something the block
+    # constrains — the two are one quantity, spelled once.
+    assert len({choice.tile.atom.atom_k * choice.tile.bk for choice in choices if choice.tile.is_warp}) > 1
 
 
 def test_the_block_axis_sizes_the_fragment_it_tiles() -> None:
     """A nested contraction takes its parent fold's axis as the tile's n. For a BLOCK window that
-    is the block's own extent — the enclosing fold walks one block at a time — where a cross-CTA
+    is the block's own axis — the enclosing fold walks one block at a time — where a cross-CTA
     slice reads its pre-split parent instead."""
-    from emmy.compiler.ir.schedule import Tile as TileChoice  # noqa: PLC0415
     from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
 
-    blocked = _blocked(_SDPA, 64)
-    sched = Sched(blocked, place=blocked.place.on_grid())
-    site = next(s for s in blocked.sites if s.path == "map.1/twist.1/reduce.1/inner")
-    placed = sched.placed(site.node, TileChoice())
+    tile = _tile(_SDPA)
+    sched = Sched(tile, place=tile.place.on_grid())
+    placed = sched.placed(tile.sites[_site(tile, "map.1/twist.1/reduce.1/inner")].node, Tile())
     assert [axis.name for axis in placed.axes] == ["a1", "a2_p"]
-    assert placed.axes[1].extent.as_static() == 64
+
+
+def test_no_row_key_spells_the_block() -> None:
+    """Blocking adds no codec family: the width rides the ``TILE`` whose K-step it is."""
+    from emmy.compiler.ir.schedule.classic import ClassicScheduleCodec, ClassicScheduleContext  # noqa: PLC0415
+
+    tile = _tile(_SDPA)
+    context = ClassicScheduleContext(tile, _CTX, project_classic(tile, _CTX))
+    assert not any(key.startswith("BLOCK") for key in ClassicScheduleCodec(context).keys())

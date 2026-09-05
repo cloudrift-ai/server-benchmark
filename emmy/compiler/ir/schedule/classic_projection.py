@@ -14,10 +14,11 @@ another enumerator.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import (
     PlacedTile,
@@ -30,7 +31,6 @@ from emmy.compiler.ir.schedule import (
     derive_inventory,
 )
 from emmy.compiler.ir.schedule.catalog import (
-    BLOCK_STEPS,
     WARP_LANES,
     coop_reduce_moves,
     producer_band_moves,
@@ -58,6 +58,7 @@ from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile.block import bind_widths
 from emmy.compiler.ir.tile.ops import Sched, chain_form, chain_members, edge_dtypes, kernel_roots, projection_tail, scheduled
 
 
@@ -90,6 +91,13 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     deliberately so: a contraction is a monoid with a ⊗ lift, so it inherits the same swept /
     streamed serial-only exclusions and the same transposed exclusion, with no carve-out of its own.
     """
+    axis = tile.axis_of(node.axis) if node.axis is not None else None
+    if axis is not None and axis.step is not None:
+        # A STRIDED axis walks its extent in blocks, so its trip count is not its extent. Every
+        # partition here sizes itself against the extent — the coop band's lane slice, the serial
+        # remainder, the cross-CTA width — and would hand each unit the wrong share. Teaching them
+        # to read ``step`` is the open work; until then a blocked stream folds serially.
+        return (Reduce(),)
     roots = kernel_roots(tile.op)
     is_root = any(node is root for root in roots)
     if node.observe is not None or not (is_root or any(node is member for root in roots for member in chain_members(root))):
@@ -252,42 +260,6 @@ def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
     return _atom_families(tile, target, node, tail, packed)
 
 
-def block_widths(tile: TileOp, target, node, axis) -> tuple[int, ...]:
-    """The widths a TWISTED carrier admits as blocks, coarse→fine — the mma K-steps its atoms run.
-
-    Only a twisted carrier is offered anything. A contraction's block is already spelled: ``bk``
-    says how many atom K-steps one inner step consumes, and the materializer chunks K by it, so
-    re-associating the term into ``k_o × k_i`` would restate that field as a shape and buy nothing.
-    A twisted carrier is different in kind — its ⊕ is a rescaling program, so ``as_contraction``
-    refuses at its first gate and NO site inside it is bilinear. Blocking separates the two monoids
-    and CREATES the site, which is why the width is offered here and nowhere else.
-
-    The block is still the fragment depth, so the row's ``TILE`` at the created site spells it and
-    no codec family is added. Only divisors are offered — the ceil form is built and correct, but a
-    masked tail is a realization the emitter does not have.
-    """
-    view = node.as_reduction()
-    if view is None or view.ops is not None or not axis.extent.is_static:
-        return ()  # only a TWISTED carrier gains anything: see the docstring
-    extent = axis.extent.as_static()
-    dtypes = {dtype for edge in node.operands for dtype in edge_dtypes(edge, tile.inputs) if dtype is not None}
-    ladder = {ATOM_REGISTRY[name].atom_k * depth for dtype in dtypes for name in atoms_for(dtype, ctx=target) for depth in BLOCK_STEPS}
-    return tuple(sorted({width for width in ladder if 1 < width < extent and extent % width == 0}, reverse=True))
-
-
-def _blocked_kstep(k_axis) -> int | None:
-    """The K-step a BLOCKED contraction's fragment must run, or ``None`` when its K is a plain axis.
-
-    A block width and a warp tile's ``k<bk>`` are the same quantity spelled twice: both say how
-    many contraction columns one step of the enclosing loop consumes. Once ``025_block`` has
-    decided the width, the site's own K IS that step, so the ``bk`` half of the ``TILE`` domain is
-    no longer free — it is read off the block. That is the migration: the enumeration happens once,
-    in the ``BLOCK`` family, and this narrows ``TILE`` to agree with it instead of re-offering it.
-    """
-    window = k_axis.window
-    return k_axis.extent.as_static() if window is not None and window.block and k_axis.extent.is_static else None
-
-
 def _contraction_domain(
     tile: TileOp,
     target,
@@ -297,16 +269,15 @@ def _contraction_domain(
     """Project one contraction's locally realizable scalar and tensor-core choices."""
     per_cell_reductions = _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
     allowed_atoms = _warp_atoms(tile, target, node)
-    step = _blocked_kstep(facts.k_axis)
-
-    def agrees(plan: Tile) -> bool:
-        return _kstep_refusal(facts.k_axis, plan) is None and (step is None or plan.atom.atom_k * plan.bk == step)
-
-    wide_warp_tiles = tuple(plan for name in allowed_atoms if agrees(plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2)))
+    # A BLOCKED site's K is the block, and the block is whatever this tile's K-step turns out to
+    # be — the two are one quantity, so nothing narrows the other and ``bk`` ranges freely here.
+    wide_warp_tiles = tuple(
+        plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2)) is None
+    )
     scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 else (Tile(),)
     catalog = (
         *scalar_tiles,
-        *(plan for plan in warp_tile_moves(allowed_atoms) if agrees(plan)),
+        *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),
         *wide_warp_tiles,
     )
     return tuple(
@@ -438,6 +409,35 @@ def project_classic(tile: TileOp, target) -> ClassicDomains:
     )
 
 
+def _block_widths(tile: TileOp, assignment: ClassicAssignment) -> dict[str, int]:
+    """The width each blocked stream is bound to by the row that schedules it.
+
+    A blocked site's inner axis IS its K, so the width is exactly the mma K-step of the ``TILE``
+    the row put there — the two are one quantity, which is why blocking spells nothing of its own.
+    A stream whose sites all took the scalar tier has no K-step to read, and falls back to the
+    whole extent: one trip, which is the unblocked kernel.
+    """
+    widths: dict[str, int] = {}
+    for axis in tile.axes:
+        variable = axis.step.name if axis.step is not None and isinstance(axis.step, Var) else None
+        if variable is None:
+            continue
+        steps = {
+            choice.tile.atom.atom_k * choice.tile.bk
+            for site, choice in assignment.nodes.items()
+            if choice.tile.is_warp and _stream_of(tile, site) == variable
+        }
+        widths[variable] = min(steps) if len(steps) == 1 else axis.extent.as_static()
+    return widths
+
+
+def _stream_of(tile: TileOp, site) -> str | None:
+    """The block width variable of the stream one site's axis belongs to, if any."""
+    name = tile.views[site].axis
+    window = tile.axis_of(name).window if name is not None else None
+    return window.block if window is not None and window.block else None
+
+
 def materialize_classic(
     tile: TileOp,
     *,
@@ -447,6 +447,10 @@ def materialize_classic(
     assignment: ClassicAssignment,
 ) -> TileOp:
     """Materialize one accepted classic assignment into a scheduled TileOp."""
+    # The row binds every block width first: a blocked stream's geometry and its shared-memory
+    # sizing are read against the axes the kernel will actually walk, not against the symbol.
+    widths = _block_widths(tile, assignment)
+    tile = replace(tile, axes=bind_widths(tile.axes, widths)) if widths else tile
     sched = Sched(tile, place=tile.place.on_grid())
     placed = {}
     resolved = {}

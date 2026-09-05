@@ -27,10 +27,10 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt, StridedLoop
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
@@ -848,18 +848,29 @@ class Fold:
             target = stmts if stmts is not None else sink(node)
             if term.axis not in coordinates:
                 raise ValueError(f"lower: no extent for reduce axis {term.axis!r} — the kernel's axis table names it")
-            target.append(Loop(axis=coordinates[term.axis], body=Body(tuple(dict.fromkeys(inner)))))
+            target.append(_loop(coordinates[term.axis], Body(tuple(dict.fromkeys(inner)))))
             attach(term, "state", target, node, scope)
 
         def assemble(path: tuple[str, ...]) -> Body:
             body = list(nest[path])
             for name in opened[opened.index(path[-1]) + 1 :] if path else opened:
                 if (*path, name) in nest:
-                    body.append(Loop(axis=coordinates[name], body=assemble((*path, name))))
+                    body.append(_loop(coordinates[name], assemble((*path, name))))
             return Body(tuple(dict.fromkeys(body)))
 
         place(self, [], None)
         return assemble(())
+
+
+def _loop(axis: Axis, body: Body) -> Stmt:
+    """The iteration statement one coordinate renders as — strided when its axis strides.
+
+    A blocked stream's outer axis walks its parent in blocks, so the size lives on the axis and
+    never in the body's index arithmetic; ``StridedLoop`` is the statement that already says that.
+    """
+    if axis.step is None:
+        return Loop(axis=axis, body=body)
+    return StridedLoop(axis=axis, start=Literal(0, "int"), step=axis.step, body=body)
 
 
 @_rewrite_kind.register

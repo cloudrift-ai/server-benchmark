@@ -271,17 +271,19 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
   positions; it does not mint alternate nodes or edge identities. The derivations memoize on the Fold ROOT, so every
   `TileOp` over one term shares them; the `TileOp` properties are accessors, not a second cache.
 - `path.sites` is a reading of that same walk, adding only what the codec needs: the ROUTE that reaches each site,
-  `(kind departed, operand taken)` per hop. A STRUCTURAL key spells that route — `PLACE@map.1/twist.1/inner.2/map`,
-  `BLOCK@map.1/twist`, each departure as `kind.index`, the arrival's kind last — so it is unique by construction,
-  with no ordinal, no shortest-unique search and no axis name; a stale key fails at the first segment whose kind is
-  not what stands there. The codec owns spelling, resolution and ambiguity — not traversal. Both families address a
-  tree position because both decide before a classic problem exists.
-- An axis `Window` records which structural rewrite already consumed the stream it walks: `partition` for the one a
-  cross-CTA split produced, `block` for the outer trip axis and inner block axis a blocked stream splits into. Both
-  refuse a second rewrite of the same kind; they differ in what the geometry means, and a nested contraction reads
-  its parent fold's axis as the tile's n through exactly that difference — a partition slice reports its pre-split
-  parent (the fragment clamps were built against it) while a block reports its OWN extent, because the enclosing
-  fold walks one block at a time.
+  `(kind departed, operand taken)` per hop. A placement key spells that route —
+  `PLACE@map.1/twist.1/inner.2/map`, each departure as `kind.index`, the arrival's kind last — so it is unique by
+  construction, with no ordinal, no shortest-unique search and no axis name; a stale key fails at the first segment
+  whose kind is not what stands there. The codec owns spelling, resolution and ambiguity — not traversal.
+- An axis `Window` records which rewrite already reshaped the stream it walks: `partition` for the
+  one a cross-CTA split produced, `block` — naming the width variable — for the outer and inner axes
+  a blocked stream splits into, with `trip` marking the outer of the pair. Both refuse a second
+  rewrite of the same kind; they differ in what the geometry means, and a nested contraction reads
+  its parent fold's axis as the tile's n through exactly that difference — a partition slice reports
+  its pre-split parent (the fragment clamps were built against it) while a block reports its OWN
+  axis, because the enclosing fold walks one block at a time. The block WIDTH is not in the term at
+  all: the outer axis carries it as `Axis.step` and each binder as its extent, so `lower` renders
+  the outer as a `StridedLoop` and the σ that reads the absolute coordinate stays `k_o + k_i`.
 - `KernelSchedule`, `ProjectionSchedule` / `ReductionSchedule`, and `EdgeSchedule` contain choices only. They do not
   cache paths, classifications, shapes, placed geometry, resolved shared-memory sizes, or codec spellings.
 - `ClassicScheduleContext` derives local support after selecting a node and its incident edges. `extend` composes it

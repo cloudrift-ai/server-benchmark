@@ -23,8 +23,6 @@ Empty enumeration remains a skip rather than a guessed schedule.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.schedule.classic import ClassicScheduleCodec, ClassicScheduleContext
 from emmy.compiler.ir.schedule.classic_projection import (
@@ -48,49 +46,8 @@ from emmy.compiler.structural import digest
 PATTERN = [Pattern("root", TileOp)]
 
 
-def block_problems(tile: TileOp, ctx) -> list[TileOp]:
-    """One enumerable problem per candidate block form of this kernel.
-
-    Blocking splits a reduce axis into ``k_o × k_i`` and re-associates the fold over the two levels.
-    It does not change what the kernel computes, which is why it lives HERE rather than in a pass of
-    its own: the kernel the pipeline stamps, identifies, pools and prices is the unblocked one, and
-    each block form is another shape of the same problem to enumerate over — like a tile size, not
-    like a cut.
-
-    Only a TWISTED carrier is offered a block, because it is the only carrier a block gives
-    anything. A contraction's block is already spelled — ``bk`` says how many atom K-steps one inner
-    step consumes and the materializer chunks K by it — and a plain reduction's partition is
-    ``REDUCE``'s, with the cross-CTA split already factoring the axis. A twisted carrier's ⊕ is a
-    rescaling program, so no site inside it is bilinear at all; blocking separates the two monoids
-    and CREATES the site, and the row's ``TILE`` there spells the width, so no codec family is added.
-
-    The unblocked form leads, so a cold walk descends what the kernel already was.
-    """
-    from emmy.compiler.ir.schedule.classic_projection import block_widths  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._block import block_tree, blockable_streams, is_blocked  # noqa: PLC0415
-
-    if is_blocked(tile.axes):
-        return [tile]
-    streams = blockable_streams(tile.op, tile.axes)
-    rows: list[dict[int, int]] = [{}]
-    for node, axis in streams:
-        widths = block_widths(tile, ctx, node, axis)
-        rows = [{**row, **extra} for row in rows for extra in ({}, *({id(node): width} for width in widths))]
-    problems = [tile]
-    for row in rows:
-        if not row:
-            continue
-        op, axes = block_tree(tile.op, tile.axes, row)
-        problems.append(replace(tile, op=op, axes=axes))
-    return problems
-
-
-def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, identity: str | None = None) -> list[Fork]:
-    """Adapt the classic semantic enumeration to the pipeline's lazy search tree.
-
-    ``identity`` is the KERNEL's identity key when the problem is one block form of it — every form
-    computes the same thing, so they share one pool and one recorded identity, and only the row
-    tells them apart."""
+def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
+    """Adapt the classic semantic enumeration to the pipeline's lazy search tree."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
     try:
@@ -106,7 +63,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, identity: str | Non
     )
     codec = ClassicScheduleCodec(context)
     pool_id = digest(
-        identity if identity is not None else (tile.identity_key(with_io=True) or ""),
+        tile.identity_key(with_io=True) or "",
         ctx.structural_key(),
         tuple((axis.name, repr(axis.extent)) for axis in tile.place.free),
         codec.keys(),
@@ -151,10 +108,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
         f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
-    identity = tile.identity_key(with_io=True) or ""
-    options = [
-        fork for problem in block_problems(tile, ctx) for fork in classic_forks(problem, tile.name, tile.knobs, ctx, identity)
-    ]
+    options = classic_forks(tile, tile.name, tile.knobs, ctx)
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

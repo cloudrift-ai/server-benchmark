@@ -76,25 +76,31 @@ post-decomposition Python source file for known format names.
 
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below.
 
-BLOCKING is not a pass and not a decision of its own. `040_schedule` enumerates over one problem
-per block form of the kernel: a reduce axis split into `k_o × k_i` and the fold re-associated over
-the two levels. That does not change what the kernel computes, so the kernel the pipeline stamps,
-identifies, pools and prices is the unblocked one, and each form is another shape of the same
-problem — like a tile size, not like a cut.
+BLOCKING is part of the canonical form, not a pass and not a decision. `TileOp.__post_init__` runs
+it beside the term normalization: a reduce stream a block gives a bilinear site to is stored split
+into `k_o × k_i`, with the width left a SYMBOL — the outer axis walks the stream's own extent in
+strides (`Axis.step`) and each inner binder's extent is that symbol, so the σ that reads the
+absolute coordinate is plain `k_o + k_i` and the width appears nowhere in the term. That is what
+makes the rewrite parameter-free and idempotent (every installed axis carries a `Window` receipt),
+and what lets every block form of a kernel be the SAME kernel — one identity, one pool, one price.
 
-Only a TWISTED carrier is offered a block, because it is the only carrier a block gives anything.
-A contraction's block is already spelled: `bk` says how many atom K-steps one inner step consumes
-and the materializer chunks K by it, so re-associating the term would restate that field as a
-shape. A plain reduction's partition is `REDUCE`'s, and the cross-CTA split already factors its
-axis. A twisted carrier is different in kind — its ⊕ is a rescaling program, so `as_contraction`
-refuses at its first gate and NO site inside it is bilinear. Blocking separates the two monoids
-(the twisted ⊕ stays on the outer fold, the inner level runs the base monoid over a per-block
-contribution) and CREATES a site whose contribution is a product of two distinct cones, which reads
-as a contraction. That is FlashAttention-2's shape, derived rather than recognized: the per-step
-rescale coefficient is read out of the stored combine and the value it multiplies is the fold's own
-lift result, so no recipe is consulted and no operation family is matched. The width rides the
-`TILE` at the created site — it IS that tile's mma K-step, which `_blocked_kstep` holds it to — so
-blocking adds no codec family and no key to any row.
+Only a TWISTED carrier is blocked, because it is the only carrier a block gives anything. A
+contraction's block is already spelled: `bk` says how many atom K-steps one inner step consumes and
+the materializer chunks K by it, so re-associating the term would restate that field as a shape. A
+plain reduction's partition is `REDUCE`'s, and the cross-CTA split already factors its axis. A
+twisted carrier is different in kind — its ⊕ is a rescaling program, so `as_contraction` refuses at
+its first gate and NO site inside it is bilinear. Blocking separates the two monoids (the twisted ⊕
+stays on the outer fold, the inner level runs the base monoid over a per-block contribution) and
+CREATES a site whose contribution is a product of two distinct cones, which reads as a contraction.
+That is FlashAttention-2's shape, derived rather than recognized: the per-step rescale coefficient
+is read out of the stored combine and the value it multiplies is the fold's own lift result, so no
+recipe is consulted and no operation family is matched.
+
+The width is bound at materialization, from the `TILE` the row put at the created site: a blocked
+site's inner axis IS its K, so the block is exactly that tile's mma K-step. Blocking therefore adds
+no codec family, no key to any row and no option to the enumeration — `bk` ranges freely because it
+is what DEFINES the block, and a row that took the scalar tier everywhere leaves the stream in one
+trip, which is the unblocked kernel.
 
 The single `030_cut`
 pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically

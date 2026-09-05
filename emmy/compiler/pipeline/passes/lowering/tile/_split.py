@@ -43,6 +43,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile.block import sliced_edge as _sliced_edge
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
@@ -283,31 +284,6 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis, partition=True))
     sigma = Sigma({k_axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(b, "int")), Var(k_axis.name))})
     return ksplit, kslice, sigma
-
-
-def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | None = None):
-    """An operand edge σ-reindexed to absolute k for a split partition — the SAME rule on either
-    edge. A MATERIALIZED edge rewrites its gmem index; a COMPUTED cone rewrites its per-cell BODY
-    and every K-VARYING producer edge it composes (attention's per-cell score contraction — the
-    slice's own k coordinate reaches gmem through that node, so leaving it unreindexed makes every
-    partition recompute partition 0's scores). The cone's row-invariant prologue (the per-row
-    statistic the K seam reads off the node boundary) spans the whole row and stays FULL-ROW in
-    every partition, each recomputing it — the REDUNDANT-STATISTIC split. That redundancy is what
-    the split trades for parallelism; whether it pays on a given shape is evidence's decision."""
-    if isinstance(edge, Load):
-        return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
-
-    def images(name: str) -> tuple[str, ...]:
-        # A coordinate a term takes as a value rides a trailing param, so a σ-reindex re-spells it
-        # with the body. σ is not a rename: a split maps one coordinate onto an EXPRESSION over two
-        # (slice and partition), so a param's image is the free names of that expression, in order.
-        mapped = sigma.get(name)
-        return (name,) if mapped is None else tuple(dict.fromkeys(mapped.free_vars()))
-
-    ops = tuple(_sliced_edge(e, sigma, k_name, kslice, ksplit) if k_name in e.free_axes else e for e in edge.operands)
-    body = Body(tuple(s.substitute(sigma) for s in edge.lift.body))
-    params = tuple(dict.fromkeys(name for param in edge.lift.params for name in images(param)))
-    return replace(edge, operands=ops, lift=replace(edge.lift, params=params, body=body))
 
 
 def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, Fold]:

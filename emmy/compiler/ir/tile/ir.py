@@ -51,6 +51,7 @@ from emmy.compiler.ir.schedule.views import (
 )
 from emmy.compiler.ir.stmt import Body, Load, Loop, OutputSpec, Stmt, Write
 from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.tile.block import block_tree
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.path import Site, sites
 
@@ -355,6 +356,17 @@ class TileOp(Op):
             object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
         if self.schedule is not None and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
+        # BLOCKING is part of the canonical form, not a decision: a reduce stream a block gives a
+        # bilinear site to is stored split, with the width left a symbol on the two axes it
+        # installs. Parameter-free and idempotent (every installed axis carries the receipt), so it
+        # belongs here beside the term normalization rather than in a pass — and every block form
+        # of a kernel is then the same kernel, told apart only by the row that binds the width.
+        blocked = block_tree(normalized, self.axes)
+        if blocked is not None:
+            if self.schedule is not None:
+                raise ValueError("cannot block a TileOp after a schedule has been attached")
+            normalized, axes = blocked
+            object.__setattr__(self, "axes", axes)
         object.__setattr__(self, "op", normalized)
 
         # Only the kernel's SHARED output sweep — an axis every store rides — promotes: hoisting it replicates

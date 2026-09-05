@@ -1,62 +1,87 @@
-"""Blockify a reduce axis — the rewrite that hands the scheduler a block width to bind.
+"""Block a twisted carrier — the canonical form that gives its channels a semiring to live in.
 
 Blocking splits one reduce axis into ``k_o × k_i`` and re-associates the fold over the two levels.
-What each level runs is the only thing that differs between carriers:
+Only a TWISTED carrier is blocked, because it is the only carrier a block gives anything: a
+contraction's block is already spelled by ``bk`` and a plain reduction's partition by ``REDUCE``,
+so splitting either term would restate another family's decision as a shape.
 
-- a PLANAR fold — a plain reduction, and a contraction, which is a reduction whose lift is a
-  product — runs the SAME monoid at both levels. Associativity is the whole licence. The inner
-  level keeps the fold's own lift, so a contraction stays bilinear and its site keeps the
-  tensor-core tier; the outer level is a plain reduce over the trip count, which is what a
-  cross-CTA split partitions.
-- a TWISTED carrier's ⊕ is a rescaling program, never a commutative op with an identity, so
-  ``as_contraction`` refuses at its first gate and NO site inside one can be bilinear. Attention's
-  ``P·V`` is not missing from the tree; it is spelled as a coefficient of that ⊕. Blocking
-  SEPARATES the two monoids: the twisted ⊕ stays on the outer fold and the inner level runs the
-  base monoid over a per-block contribution, so the channel whose contribution is a product of two
-  distinct cones reads as a contraction. That is FlashAttention-2's shape, derived rather than
-  recognized — everything the rewrite needs is read out of the stored combine (``β``, the factor
-  the merge puts on the incoming side), and the value it multiplies is the fold's own lift result.
+A twisted fold is different in kind. Its ⊕ is a rescaling program, never a commutative op with an
+identity, so ``as_contraction`` refuses at its first gate and NO site inside one can ever be
+bilinear. Attention's ``P·V`` is not missing from the tree; it is spelled as a coefficient of that
+⊕, which no schedule can put on a tensor core. Blocking SEPARATES the two monoids: the twisted ⊕
+stays on the outer fold and the inner level runs the base monoid over a per-block contribution, so
+the channel whose contribution is a product of two distinct cones reads as a contraction. That is
+FlashAttention-2's shape, derived rather than recognized — everything the rewrite needs is read out
+of the stored combine (``β``, the factor the merge puts on the incoming side), and the value it
+multiplies is the fold's own lift result. No recipe is consulted and no operation family is matched;
+Welford is declined by the same reading, because its M2 is a square.
 
-Blocking does not change what the kernel computes, so it changes no kernel identity: it happens
-INSIDE the schedule walk (``040_schedule.block_problems``), once per candidate width, and the
-kernel the pipeline identifies and prices stays the unblocked one. Nor does it need a codec family
-of its own — a blocked contraction's inner axis IS its K, so the width is exactly the ``k<bk>`` half
-of that site's ``TILE`` and ``_blocked_kstep`` holds the two to each other. A plain reduction is not
-blocked at all: ``REDUCE`` already spells its partition, and a cross-CTA split already factors the
-axis.
+The WIDTH appears nowhere in the term. The outer axis walks the stream's own extent in strides
+(``Axis.step``) and each inner binder's extent is the width symbol, so the σ that reads the absolute
+coordinate is plain ``k_o + k_i``. That is what makes the rewrite parameter-free and idempotent —
+hence a NORMALIZATION, run from ``TileOp.__post_init__`` — and what lets every block form of a
+kernel be the same kernel. The width is bound at materialization, from the ``TILE`` at the site
+blocking created: a blocked site's inner axis IS its K, so the block is exactly that tile's mma
+K-step and no schedule family spells it twice.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 
 from emmy.compiler.dim import Dim, simplify_extent
-from emmy.compiler.ir.axis import Axis, Window
+from emmy.compiler.ir.axis import Axis, Window, block_width_var
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body
-from emmy.compiler.pipeline.passes.lowering.tile._split import _sliced_edge
+from emmy.compiler.ir.stmt import Assign, Body, Load
 
 
 def is_blocked(axes) -> bool:
     """Whether this kernel's axis table already carries a blocked stream (the re-firing receipt)."""
-    return any(axis.window is not None and axis.window.block for axis in axes)
+    return any(axis.window is not None and axis.window.block is not None for axis in axes)
 
 
 # ---- the split ------------------------------------------------------------------------------- #
 
 
-def _split_axis(axis: Axis, width: int) -> tuple[Axis, Expr]:
-    """``(the outer trip axis, the block width)`` for one reduce axis blocked at ``width``.
+def sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | None = None):
+    """An operand edge σ-reindexed to absolute k for a split partition — the SAME rule on either
+    edge. A MATERIALIZED edge rewrites its gmem index; a COMPUTED cone rewrites its per-cell BODY
+    and every K-VARYING producer edge it composes (attention's per-cell score contraction — the
+    slice's own k coordinate reaches gmem through that node, so leaving it unreindexed makes every
+    partition recompute partition 0's scores). The cone's row-invariant prologue (the per-row
+    statistic the K seam reads off the node boundary) spans the whole row and stays FULL-ROW in
+    every partition, each recomputing it — the REDUNDANT-STATISTIC split. That redundancy is what
+    the split trades for parallelism; whether it pays on a given shape is evidence's decision."""
+    if isinstance(edge, Load):
+        return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
 
-    The outer count is ``ceil(extent / width)``, composite in both unknowns, so one tree serves a
-    static extent and a symbolic one.
+    def images(name: str) -> tuple[str, ...]:
+        # A coordinate a term takes as a value rides a trailing param, so a σ-reindex re-spells it
+        # with the body. σ is not a rename: a split maps one coordinate onto an EXPRESSION over two
+        # (slice and partition), so a param's image is the free names of that expression, in order.
+        mapped = sigma.get(name)
+        return (name,) if mapped is None else tuple(dict.fromkeys(mapped.free_vars()))
+
+    ops = tuple(sliced_edge(e, sigma, k_name, kslice, ksplit) if k_name in e.free_axes else e for e in edge.operands)
+    body = Body(tuple(s.substitute(sigma) for s in edge.lift.body))
+    params = tuple(dict.fromkeys(name for param in edge.lift.params for name in images(param)))
+    return replace(edge, operands=ops, lift=replace(edge.lift, params=params, body=body))
+
+
+def _split_axis(axis: Axis) -> tuple[Axis, Expr]:
+    """``(the outer block-walking axis, the symbolic block width)`` for one blocked reduce axis.
+
+    The outer axis walks the SAME extent the stream always had, in strides of the width — so the
+    trip count is ``ceil(extent / blk)`` without anyone computing it, the absolute coordinate is
+    plain ``k_o + k_i``, and the width appears nowhere in the term. It lives on the two axes: as
+    this one's ``step`` and as the binder's extent. That is what makes blocking parameter-free, and
+    therefore a normalization rather than a decision.
     """
-    blk = Literal(width, "int")
-    extent = axis.extent.expr
-    trips = Dim(simplify_extent(BinaryExpr("/", BinaryExpr("+", extent, BinaryExpr("-", blk, Literal(1, "int"))), blk)))
-    outer = Axis(f"{axis.name}_o", trips, window=Window(parent=axis.source_axis or axis, block=True, trip=True))
+    blk = Var(block_width_var(axis.name))
+    outer = Axis(f"{axis.name}_o", axis.extent, window=Window(parent=axis.source_axis or axis, block=blk.name, trip=True), step=blk)
     return outer, blk
 
 
@@ -68,8 +93,8 @@ def _block_binder(axis: Axis, outer: Axis, blk: Expr, tag: str) -> tuple[Axis, S
     binder makes ``lower`` place them as one loop, and the weight then reads a block pivot that has
     not finished accumulating.
     """
-    inner = Axis(f"{axis.name}_{tag}", Dim(blk), window=Window(parent=axis.source_axis or axis, block=True))
-    sigma = Sigma({axis.name: BinaryExpr("+", BinaryExpr("*", Var(outer.name), blk), Var(inner.name))})
+    inner = Axis(f"{axis.name}_{tag}", Dim(blk), window=Window(parent=axis.source_axis or axis, block=blk.name))
+    sigma = Sigma({axis.name: BinaryExpr("+", Var(outer.name), Var(inner.name))})
     return inner, sigma
 
 
@@ -81,7 +106,7 @@ def _reindexed(fold: Fold, sigma: Sigma) -> tuple:
     one coordinate onto an EXPRESSION over several, so a param's image is that expression's free
     names rather than a rename.
     """
-    return tuple(_sliced_edge(edge, sigma, fold.axis) for edge in fold.operands)
+    return tuple(sliced_edge(edge, sigma, fold.axis) for edge in fold.operands)
 
 
 def _over_blocks(fold: Fold, outer: Axis, inner_folds: tuple[Fold, ...]) -> Fold:
@@ -99,40 +124,6 @@ def _over_blocks(fold: Fold, outer: Axis, inner_folds: tuple[Fold, ...]) -> Fold
         init=fold.init,
         combine=fold.combine,
     )
-
-
-# ---- the planar carrier: a reduction, and a contraction, which is one with a bilinear lift ---- #
-
-
-def block_planar(fold: Fold, axis: Axis, width: int) -> tuple[Fold, tuple[Axis, ...]] | None:
-    """A CONTRACTION re-derived over blocks under the same monoid, or ``None``.
-
-    The inner level keeps the fold's own lift and its own ⊕, so the site stays bilinear and takes a
-    tensor-core tile over a K of exactly one block; the outer level folds the per-block states
-    through that same ⊕. The block IS the fragment depth, so the row's ``TILE`` spells the width
-    and nothing else has to.
-
-    A PLAIN reduction is deliberately left alone. Its reduce axis is already partitioned by
-    ``REDUCE`` — ``g<n>`` across CTAs, ``coop``/``r<n>`` within one — and a cross-CTA split already
-    factors the axis structurally, so blocking it would restate a decision that family makes and
-    give the width no spelling of its own.
-    """
-    view = fold.as_reduction()
-    if view is None or view.ops is None:
-        return None  # twisted: :func:`block_twisted` owns it
-    if fold.as_contraction() is None:
-        return None  # a plain reduction: REDUCE already spells its partition
-    outer, blk = _split_axis(axis, width)
-    inner, sigma = _block_binder(axis, outer, blk, "i")
-    states = tuple(f"{state}__blk" for state in view.states)
-    body = Body(tuple(stmt.substitute(sigma) for stmt in fold.lift.body))
-    block = Fold(
-        operands=_reindexed(fold, sigma),
-        lift=Lambda.closing((inner.name, *fold.lift.params[1:]), body, fold.lift.results),
-        init=fold.init,
-        combine=Lambda.componentwise(view.ops, states),
-    )
-    return _over_blocks(fold, outer, (block,)), (outer, inner)
 
 
 # ---- the twisted carrier: two monoids, one per level ------------------------------------------ #
@@ -237,7 +228,7 @@ def _channel(fold: Fold, index: int, weight: Fold, beta: str, operands: tuple, i
     )
 
 
-def block_twisted(fold: Fold, axis: Axis, width: int) -> tuple[Fold, tuple[Axis, ...]] | None:
+def block_twisted(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | None:
     """The twisted ``fold`` re-derived over blocks, or ``None`` when it is not blockable.
 
     Returns the blocked fold and the axes the kernel must now hold: the outer trip count, and one
@@ -249,7 +240,7 @@ def block_twisted(fold: Fold, axis: Axis, width: int) -> tuple[Fold, tuple[Axis,
         return None
     pivot_op, _, betas = read
     view = fold.as_reduction()
-    outer, blk = _split_axis(axis, width)
+    outer, blk = _split_axis(axis)
     binders = [_block_binder(axis, outer, blk, tag) for tag in ("p", *(f"c{i}" for i in range(1, len(view.states))))]
 
     lift, states = fold.lift, view.states
@@ -304,43 +295,28 @@ def _blockable(fold: Fold, axis: Axis | None) -> bool:
     if axis is None or fold.combine is None or fold.observe is not None:
         return False
     window = axis.window
-    if window is not None and (window.block or window.partition):
+    if window is not None and (window.block is not None or window.partition):
         return False
     return axis.extent.is_static and axis.extent.as_static() > 1
 
 
-def block(fold: Fold, axis: Axis, width: int) -> tuple[Fold, tuple[Axis, ...]] | None:
-    """``fold`` blocked at ``width``, whichever carrier it is — or ``None``."""
-    return block_planar(fold, axis, width) or block_twisted(fold, axis, width)
+def block(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | None:
+    """``fold`` blocked, or ``None`` when blocking would give it nothing.
+
+    Only a TWISTED carrier is blocked. A contraction's block is already spelled — ``bk`` says how
+    many atom K-steps one inner step consumes and the materializer chunks K by it — and a plain
+    reduction's partition is ``REDUCE``'s, with the cross-CTA split already factoring the axis.
+    Splitting either term would restate another family's decision as a shape.
+    """
+    return block_twisted(fold, axis)
 
 
-def blockable_streams(root: Fold, axes: tuple) -> tuple[tuple[Fold, Axis], ...]:
-    """Every root-most reduce stream this tree can block, with the axis each one folds."""
-    table = {axis.name: axis for axis in axes}
-    found: list[tuple[Fold, Axis]] = []
-    seen: set[int] = set()
+def block_tree(root: Fold, axes: tuple) -> tuple[Fold, tuple[Axis, ...]] | None:
+    """Every root-most blockable stream of ``root``, blocked — or ``None`` when none is.
 
-    def descend(term: Fold) -> None:
-        if id(term) in seen:
-            return
-        seen.add(id(term))
-        axis = table.get(term.axis) if term.axis is not None else None
-        if _blockable(term, axis) and block(term, axis, axis.extent.as_static()) is not None:
-            found.append((term, axis))
-            return
-        for edge in term.operands:
-            descend(edge)
-
-    descend(root)
-    return tuple(found)
-
-
-def block_tree(root: Fold, axes: tuple, widths: dict[int, int]) -> tuple[Fold, tuple[Axis, ...]]:
-    """The tree with each stream in ``widths`` blocked at its width, and the axes that follow.
-
-    ``widths`` is keyed by the ``id`` of the pre-block fold, which is what
-    :func:`blockable_streams` hands back — a route would have to be re-resolved against a tree that
-    is changing underneath it.
+    Parameter-free and idempotent: the width never enters the term, and the ``Window`` every
+    installed axis carries is the receipt that stops a second split. That is what makes this a
+    NORMALIZATION rather than a decision, and why it can run from ``TileOp.__post_init__``.
     """
     table = {axis.name: axis for axis in axes}
     installed: list[Axis] = []
@@ -350,7 +326,7 @@ def block_tree(root: Fold, axes: tuple, widths: dict[int, int]) -> tuple[Fold, t
         if id(term) in done:
             return done[id(term)]
         axis = table.get(term.axis) if term.axis is not None else None
-        got = block(term, axis, widths[id(term)]) if id(term) in widths and axis is not None else None
+        got = block(term, axis) if _blockable(term, axis) else None
         if got is not None:
             out, fresh = got
             installed.extend(fresh)
@@ -361,5 +337,23 @@ def block_tree(root: Fold, axes: tuple, widths: dict[int, int]) -> tuple[Fold, t
         return out
 
     blocked = descend(root)
+    if not installed:
+        return None
     fresh = {axis.name for axis in installed}
     return blocked, (*(axis for axis in axes if axis.name not in fresh), *installed)
+
+
+def bind_widths(axes: tuple, widths: Mapping[str, int]) -> tuple[Axis, ...]:
+    """The axis table with each block width bound — the ONE place a block stops being a symbol.
+
+    Only the table moves, because only the table ever named the width: the outer axis's ``step``
+    and the binder's extent. The term is untouched, which is why every block form of a kernel is
+    the same kernel.
+    """
+    values = {name: Literal(width, "int") for name, width in widths.items()}
+
+    def bound(axis: Axis) -> Axis:
+        step = axis.step.substitute(values) if axis.step is not None else None
+        return replace(axis, extent=Dim(simplify_extent(axis.extent.expr.substitute(values))), step=step)
+
+    return tuple(bound(axis) for axis in axes)

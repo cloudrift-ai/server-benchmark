@@ -271,3 +271,25 @@ def record_bench_perf(db_path: Path | str, ctx: Context, compiled, bench) -> int
     finally:
         db.close()
     return written
+
+
+def record_bench_failure(db_path: Path | str, ctx: Context, compiled, exc, fail_us: float) -> list[str]:
+    """Persist a compiled graph's failed bench as ``bench_fail`` perf rows for the kernels the
+    failure blames — the kernel a watchdog named, or a one-kernel graph's only kernel — through the
+    tuner's own writer (:func:`~emmy.compiler.pipeline.search.policy.terminal_bench.persist_bench_failure`),
+    so the next compile's evidence pick disqualifies the arm that hung instead of electing it again.
+    A compile-budget overrun measured nothing and records nothing. Returns the blamed kernel names."""
+    from emmy.compiler.backend.cuda.program import compile_budget_overrun  # noqa: PLC0415
+    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.policy.terminal_bench import persist_bench_failure  # noqa: PLC0415
+
+    if compile_budget_overrun(exc):
+        return []
+    nodes = [compiled.nodes[nid] for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
+    db = SearchDB(Path(db_path))
+    try:
+        blamed = persist_bench_failure(db, ctx.structural_key(), "cuda", nodes, exc, fail_us)
+    finally:
+        db.close()
+    return [node.op.kernel_name for node in blamed]

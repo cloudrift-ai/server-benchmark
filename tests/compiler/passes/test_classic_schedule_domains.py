@@ -17,7 +17,7 @@ from emmy.compiler.ir.schedule.classic import (
 )
 from emmy.compiler.ir.schedule.classic_projection import project_classic
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.tile import Placement, TileOp
+from emmy.compiler.ir.tile import Placement, TileOp, blockify
 from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -25,6 +25,10 @@ from tests.compiler.helpers import enumerate_classic_reference
 from tests.compiler.terms import contraction, projection
 
 classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
+
+
+def _blockified(tile: TileOp) -> TileOp:
+    return dc_replace(tile, blocks=blockify(tile))
 
 
 def _signature(codec, assignment) -> tuple[tuple[str, str], ...]:
@@ -64,7 +68,7 @@ def _pointwise() -> TileOp:
     the cell, as the lift leaves it for a root nothing reduces over."""
     n = Axis("n", 8)
     root = projection((), (Load(name="x", input="x", index=(Var("n"),)), Assign("y", "add", ("x", "x"))), ("y",))
-    return TileOp(op=root, place=Placement(free=(n,)), axes=(n,))
+    return _blockified(TileOp(op=root, place=Placement(free=(n,)), axes=(n,)))
 
 
 def _row_sum(k: Axis, n: Axis) -> TileOp:
@@ -72,14 +76,14 @@ def _row_sum(k: Axis, n: Axis) -> TileOp:
     root = fold_from_loop(
         Loop(axis=k, body=Body((Load(name="xv", input="x", index=(Var("k"),)), Accum(name="acc", value="xv", op="add", axes=("k",)))))
     )
-    return TileOp(op=root, place=Placement(free=(n,)), axes=(n, k))
+    return _blockified(TileOp(op=root, place=Placement(free=(n,)), axes=(n, k)))
 
 
 def _matmul(m: Axis, n: Axis, k: Axis, a=None, **fields) -> TileOp:
     """``acc[m, n] = Σ_k a[m, k] · b[k, n]`` — one contraction site; ``a`` may be a computed edge."""
     a = a if a is not None else Load(name="a_e", input="a", index=(Var("m"), Var("k")))
     root = contraction(k, a, (Load(name="b_e", input="b", index=(Var("k"), Var("n"))), "acc"))
-    return TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k), **fields)
+    return _blockified(TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k), **fields))
 
 
 def test_production_enumeration_is_the_compatible_independent_product() -> None:
@@ -195,12 +199,14 @@ def test_multi_channel_contraction_domain_contains_per_cell_and_warp_compute_fil
         (Load(name="b0_e", input="b0", index=(Var("k"), Var("n"))), "acc0"),
         (Load(name="b1_e", input="b1", index=(Var("k"), Var("n"))), "acc1"),
     )
-    tile = TileOp(
-        op=root,
-        place=Placement(free=(m, n)),
-        axes=(m, n, k),
-        inputs={name: Tensor(name, (16, 16), "f16") for name in ("a", "b0", "b1")},
-        outputs={"out": Tensor("out", (16, 16), "f16")},
+    tile = _blockified(
+        TileOp(
+            op=root,
+            place=Placement(free=(m, n)),
+            axes=(m, n, k),
+            inputs={name: Tensor(name, (16, 16), "f16") for name in ("a", "b0", "b1")},
+            outputs={"out": Tensor("out", (16, 16), "f16")},
+        )
     )
     target = Context.from_target((12, 0))
     domains = project_classic(tile, target)

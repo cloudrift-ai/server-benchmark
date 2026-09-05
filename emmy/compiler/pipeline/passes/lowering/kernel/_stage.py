@@ -66,6 +66,7 @@ from emmy.compiler.ir.kernel.ir import (
     swizzle_base,
 )
 from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, Stmt, StridedLoop, Write
+from emmy.compiler.ir.tile.block import BoundBlockAxis
 
 
 def _mul(a: Expr, b: Expr) -> Expr:
@@ -935,9 +936,7 @@ def _producer_band_kloop(
     transport: TmaTransport,
     drain: Callable[[Expr], list[Stmt]],
     ring: int,
-    bk_elems: int,
-    n_chunks: int,
-    k_extent: int,
+    block: BoundBlockAxis,
     aux_threads: int,
     block_threads: int,
     k_end: Expr | None = None,
@@ -974,9 +973,11 @@ def _producer_band_kloop(
     inits += tuple(MbarrierInit(mbar=_EMPTY_MBAR, count=1, slot=_lit(s)) for s in range(ring))
     pre: list[Stmt] = [Cond(cond=BinaryExpr("==", tid, _lit(0)), body=inits), Sync()]
 
-    k0, K = "_ks", k_extent
+    bk_elems, n_chunks, K = block.width, block.chunks, block.extent
+    assert isinstance(n_chunks, int) and isinstance(K, int)
+    k0 = block.axis.name
     i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))
-    kaxis = Axis(name=k0, extent=K)
+    kaxis = block.axis
     setmaxnreg = _CONSUMER_REGS * block_threads + _PRODUCER_REGS * aux_threads <= _SM_REGFILE
 
     # Producer: prefetch chunk ``c = i + ring - 1`` into slot ``c % ring`` (k0 clamped to the last
@@ -1056,10 +1057,7 @@ def pipelined_kloop(
     *,
     operands: tuple[tuple[object, int], ...],
     build_segments: Callable[[tuple[Expr, ...]], list[tuple[list[Stmt], frozenset[str]]]],
-    bk_elems: int,
-    n_chunks: int | Dim,
-    k_extent: int | Dim,
-    k0: str = "_ks",
+    block: BoundBlockAxis,
     k_end: Expr | None = None,
     k_first: Expr | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
@@ -1101,6 +1099,8 @@ def pipelined_kloop(
     could otherwise prime past a static extent). A symbolic ``k_extent`` (a ``Dim``) allocates the
     full ``depth`` ring and clamps every fill — ring prefetch and kill-point refill alike — against
     the runtime chunk count. Returns ``(slab_decls, [prologue…, outer_loop])``."""
+    bk_elems, n_chunks, k_extent = block.width, block.chunks, block.extent
+    k0 = block.axis.name
     symbolic = isinstance(k_extent, Dim)
     k_pos: Expr = BinaryExpr("-", Var(k0), k_first) if k_first is not None else Var(k0)
     i_expr = BinaryExpr("/", k_pos, _lit(bk_elems))  # chunk index of the current step (stream-relative)
@@ -1213,7 +1213,7 @@ def pipelined_kloop(
                     body += g.transport.commit()
 
     outer = StridedLoop(
-        axis=Axis(name=k0, extent=k_extent),
+        axis=block.axis,
         start=k_first if k_first is not None else _lit(0),
         step=_lit(bk_elems),
         body=Body(tuple(body)),
@@ -1228,12 +1228,9 @@ def staged_kloop(
     transport,
     drain: Callable[[Expr], list[Stmt]],
     depth: int,
-    bk_elems: int,
-    n_chunks: int | Dim,
-    k_extent: int | Dim,
+    block: BoundBlockAxis,
     workers=None,
     block_threads: int | None = None,
-    k0: str = "_ks",
     k_end: Expr | None = None,
     k_first: Expr | None = None,
     lead: LeadSegment | None = None,
@@ -1255,9 +1252,6 @@ def staged_kloop(
     across producer / compute warp bands instead (:func:`_producer_band_kloop`) — TMA transport only (the
     scheduler's legality gate), ``block_threads`` naming the compute band.
 
-    ``k0`` names the chunk loop variable (default ``"_ks"``) — a drain whose body references the
-    chunk base by name passes its own axis name.
-
     ``k_end`` (an ``Expr`` over in-scope grid vars, CTA-uniform, ``≤ k_extent``) stops the chunk
     loop early. Chunks past it fold the carrier
     identity exactly, so skipping them is bit-identical; the prefetch clamp re-pins onto the last
@@ -1273,6 +1267,7 @@ def staged_kloop(
     # the transport absorb any over-primed tail chunk (TMA zero-fills its box; cp.async clamp-reads
     # the last valid key rows) — the drain masks those keys to the fold identity, so it stays
     # bit-identical to gmem-direct. Static callers pass plain ``int``s.
+    bk_elems, n_chunks, k_extent = block.width, block.chunks, block.extent
     if workers is not None:
         symbolic = isinstance(k_extent, Dim)
         assert lead is None, "the producer band drives one operand group — a nested producer has no band placement"
@@ -1286,9 +1281,7 @@ def staged_kloop(
             transport=transport,
             drain=drain,
             ring=min(depth, n_chunks) if n_chunks >= 2 else 1,
-            bk_elems=bk_elems,
-            n_chunks=n_chunks,
-            k_extent=k_extent,
+            block=block,
             aux_threads=32 * workers.producer_warps,
             block_threads=block_threads,
             k_end=k_end,
@@ -1306,10 +1299,7 @@ def staged_kloop(
     return pipelined_kloop(
         operands=groups,
         build_segments=segments,
-        bk_elems=bk_elems,
-        n_chunks=n_chunks,
-        k_extent=k_extent,
-        k0=k0,
+        block=block,
         k_end=k_end,
         k_first=k_first,
     )

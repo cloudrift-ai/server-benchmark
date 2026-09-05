@@ -21,7 +21,7 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Tile
 from emmy.compiler.ir.stmt import Assign, Body, Load, Stmt, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink
-from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
+from emmy.compiler.pipeline.passes.lowering.kernel._tiling import grid_tile
 from tests.compiler.terms import contraction, projection
 
 _M, _N, _K = Axis("m", 8), Axis("n", 8), Axis("k", 4)
@@ -55,7 +55,6 @@ def _tile(a, b):
     state, reduce_region = reduce_codegen(c, plan, k_axis=_K, axes=(_M, _N, _K))
     epilogue = Body((Write(output="out", index=(Var("m"), Var("n")), value=c.combine.results[0]),))
     return grid_tile(
-        unit_tile(register_tile(atomize(plan.atom.shape[:2]), mn), mn),
         mn=mn,
         block_threads=plan.launch_threads,
         lanes=plan.atom.lanes,

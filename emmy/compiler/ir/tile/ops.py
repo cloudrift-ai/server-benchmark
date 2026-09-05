@@ -33,6 +33,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select,
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
+from emmy.compiler.ir.tile.block import bind_site
 
 
 def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, object]:
@@ -191,7 +192,6 @@ class Sched:
         self.place = place
         self._sites = None
         self._site_by_id = None
-        self._mn_by_id = {}
 
     def _all_sites(self):
         if self._sites is None:
@@ -267,6 +267,21 @@ class Sched:
             return None
         return self.materialization.tiles.get(self.tile.node_id(node))
 
+    def block_of(self, node):
+        """The node's block domain with widths supplied by its existing schedule choices."""
+        if self.schedule is None or self.materialization is None:
+            return None
+        site = self.tile.node_id(node)
+        stages = {stage for edge, stage in self.materialization.stages.items() if edge[0] == site}
+        if len(stages) > 1:
+            raise ValueError("current kernel lowering requires one resolved transport across a node's operand edges")
+        return bind_site(
+            self.tile.blocks_of(node),
+            self.schedule.nodes[site],
+            self.materialization.tiles.get(site),
+            next(iter(stages), None),
+        )
+
     def placed(self, node, plan):
         """``plan`` bound to the ``(m, n)`` output axes a ``TILE`` slice at ``node``'s site tiles —
         the same one rule :meth:`tile_of` reads through, offered to a caller holding a CANDIDATE
@@ -274,76 +289,8 @@ class Sched:
         placed geometry). Already-placed and unplaceable plans pass through."""
         if plan is None or self.place is None or isinstance(plan, PlacedTile):
             return plan
-        mn = self._mn_for(node)
-        return plan.at(*mn) if mn is not None else plan
-
-    def _mn_for(self, node):
-        """The cached ``(m, n)`` output axes for ``node``. Placement is a site fact: candidate
-        plans change tile sizes, never which output axes they tile."""
-        key = id(node)
-        if key not in self._mn_by_id:
-            self._mn_by_id[key] = self._derive_mn(node)
-        return self._mn_by_id[key]
-
-    def _derive_mn(self, node):
-        """The ``(m, n)`` output axes a ``TILE`` slice at ``node``'s site tiles, or ``None`` when
-        the placement cannot supply them (an unmapped / rank-<2 grid — the caller's untiled path).
-
-        THREE site shapes, one rule each — the geometry the retired ``Contraction`` node used to
-        carry as stamped fields, now read off the tree instead:
-
-        - a ROOT contraction, including one directly under a zero-axis projection that groups
-          several kernel outputs, tiles the kernel grid's trailing pair (``Placement.root_mn``,
-          the same reading the scheduler binds through at option assembly);
-        - a derived unit-axis contraction inherits its parent Fold's reduction domain, so its
-          result tiles the placement's trailing free pair;
-        - any other nested contraction takes the free m axis and its nearest ENCLOSING fold's axis as n —
-          read through a slice partial's window PARENT, so the view carries the pre-slice geometry
-          the fragment clamps were built against. A BLOCK window is the exception, and the reason
-          blocking exists: the enclosing fold walks one block at a time, so the block's OWN extent
-          is the n the fragment is sized against, not the stream it was carved from.
-        """
-        free = tuple(self.place.free)
-        site = self.site_of(node)
-        ancestors = tuple(candidate for candidate in self._all_sites() if site.under(candidate))
-
-        def orient(mn):
-            # The pair is each side's own free axis, the first operand's leading — the placement
-            # binds both, and a sibling output's sweep promoted beside them (the fused q/k/v
-            # projections, N 64 beside N 32) never stands in for either. With several own axes a
-            # side the trailing one is the role and the rest ride the grid; a side without one
-            # (the unit-row matvec) leaves the trailing pair to the placement.
-            view = node.as_contraction()
-            if mn is None or view is None:
-                return mn
-            order = {axis.name: (position, axis) for position, axis in enumerate((*self.place.free, *self.place.grid))}
-            left = max((order[name] for name in view.left_axes if name in order), default=None)
-            right = max((order[name] for name in view.right_axes if name in order), default=None)
-            if left is not None and right is not None:
-                return (left[1], right[1])
-            first, second = mn
-            return (second, first) if second.name == view.left and first.name != view.left else mn
-
-        if all(getattr(candidate.node, "axis", None) is None for candidate in ancestors):
-            return orient(self.place.root_mn)
-        if len(free) < 2:
-            return None
-        # The nearest ENCLOSING fold, through any zero-axis projection between them — a projection
-        # binds no coordinate, so it cannot be the one the result is evaluated over. A blocked
-        # carrier's weight cone reaches its score through exactly one such level.
-        parent = next(
-            (
-                found
-                for depth in range(len(site.hops) - 1, -1, -1)
-                if (found := next((s for s in self._all_sites() if s.hops == site.hops[:depth]), None)) is not None
-                and getattr(found.node, "axis", None) is not None
-            ),
-            None,
-        )
-        ax = self.axis_of(parent.node.axis) if parent is not None else None
-        if ax is None:
-            return None
-        return orient((free[-2], ax.window.parent if ax.window is not None and not ax.window.block else ax))
+        block = self.tile.blocks_of(node)
+        return plan.at(*(part.axis for part in block.output)) if block.output else plan
 
 
 def sched_of(tile) -> Sched:
@@ -367,6 +314,7 @@ def scheduled(
     materialization=None,
     workers=None,
     axes: tuple = (),
+    blocks: tuple = (),
 ):
     """Build a scheduled ``TileOp`` from one accepted semantic assignment.
 
@@ -389,6 +337,7 @@ def scheduled(
         knobs=knobs,
         output_specs=tuple(output_specs),
         axes=axes,
+        blocks=blocks,
         schedule=schedule,
         materialization=materialization,
     )

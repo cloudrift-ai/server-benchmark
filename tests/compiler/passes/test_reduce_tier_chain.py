@@ -21,7 +21,7 @@ from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
 )
 from emmy.compiler.ir.stmt import Assign, Cond, Load, Loop, StridedLoop, Write
-from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile import TileOp, blockify
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -35,6 +35,7 @@ def _stamped(root: Fold, plans: dict, axes: tuple = (_K,)) -> TileOp:
     classic assignment. The kernel ``WORK`` derives from the widest cooperative plan, because the
     assignment's own validation requires the inventory to realize the node choices."""
     tile = TileOp(op=root, place=_PLACE, axes=(_M, *axes))
+    tile = replace(tile, blocks=blockify(tile))
     by_site = {tile.node_id(node): plan for node, plan in plans.items()}
     nodes = {
         site: ProjectionSchedule(Tile()) if tile.views[site].axis is None else ReductionSchedule(Tile(), by_site.get(site, Reduce()))
@@ -204,6 +205,7 @@ def test_the_walk_offers_and_the_binder_realizes_two_partitioned_members(monkeyp
         monkeypatch.delenv(var, raising=False)
     _, _, root = _two_member_root()
     tile = TileOp(op=root, place=_PLACE, axes=(_M, _K, _J), name="k_two_member_probe", knobs={})
+    tile = replace(tile, blocks=blockify(tile))
 
     leaves = list(iter_leaves(classic_forks(tile, tile.name, {}, Context.from_target((12, 0)))))
     keys = sorted({key for leaf in leaves for key in leaf.knobs if key.split("@", 1)[0] == "REDUCE"})

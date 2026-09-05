@@ -17,6 +17,8 @@ them — never from the term; (e) a λ that is not closed says what it captures.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda
@@ -30,7 +32,7 @@ from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
 )
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, TileOp
+from emmy.compiler.ir.tile import OutputSpec, TileOp, blockify
 from emmy.compiler.ir.tile._dump import pretty
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from tests.compiler.terms import contraction, projection
@@ -99,6 +101,25 @@ def test_contraction_dump_shows_the_k_axis_and_every_channel() -> None:
     # The binding labels connect the edges above to their positional lift params, A first.
     assert "lift: λ(k, a_e, acc_g_b, acc_u_b) -> (acc_g__v, acc_u__v)" in text
     assert "└─ combine: λ(acc_g, acc_u, acc_g__o, acc_u__o) -> (acc_g, acc_u)" in text
+
+
+def test_blockified_matmul_dump_exposes_its_symbolic_domains() -> None:
+    """Blockification declares M, N and K before a schedule supplies their widths."""
+    m, n, k = Axis("m", 128), Axis("n", 96), Axis("k", 64)
+    fold = contraction(
+        k,
+        Load(name="a", input="A", index=(Var("m"), Var("k"))),
+        (Load(name="b", input="B", index=(Var("k"), Var("n"))), "acc"),
+    )
+    bare = TileOp(op=fold, name="k_matmul", place=Placement(free=(m, n)), axes=(m, n, k))
+    tile = replace(bare, blocks=blockify(bare))
+
+    assert "\n".join(tile.pretty_body().splitlines()[:6]) == """    place  free=(m, n)  unmapped
+    blocks
+    ├─ b0.m: m → grid × unit × register × atom
+    ├─ b0.n: n → grid × unit × register × atom
+    └─ b0.k: k → grid × block × register × tile × atom × serial
+    Fold[k in 0..64] contraction"""
 
 
 def test_projection_dump_shows_the_binder_and_its_operands() -> None:
@@ -248,7 +269,8 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
     bare = TileOp(op=fold, name="k_stat", axes=(K_STAT,))
     assert "REDUCE=" not in bare.pretty_body()
 
-    context = ClassicScheduleContext(bare)
+    source = replace(bare, blocks=blockify(bare))
+    context = ClassicScheduleContext(source)
     nodes = {
         site: ProjectionSchedule(Tile()) if view.axis is None else ReductionSchedule(Tile(), Reduce.of(reg=4))
         for site, view in enumerate(context.tile_op.views)
@@ -262,6 +284,7 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
         op=fold,
         name="k_stat",
         axes=(K_STAT,),
+        blocks=source.blocks,
         schedule=classic,
         materialization=ClassicMaterialization({}, {}),
     )
